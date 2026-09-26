@@ -69,3 +69,42 @@ client = httpx.Client(timeout=timeout)
 
 response = client.get('http://example.com/')
 ```
+
+## Bounding the total request duration
+
+The connect, read, write, and pool timeouts each apply to a single network
+operation. A request that involves redirects, authentication retries, or a
+response that keeps trickling in small chunks of data can therefore keep
+going indefinitely without ever triggering one of those timeouts.
+
+The optional `total` budget bounds the duration of the entire request, from
+the moment it is sent until the response is closed. Queueing, connecting,
+authentication retries, redirects, and streaming the response body all share
+the same remaining budget, measured against a monotonic clock...
+
+```python
+# Each operation may take up to 10s, but the entire request,
+# including any redirects and reading the response body,
+# must complete within 30s.
+timeout = httpx.Timeout(10.0, total=30.0)
+client = httpx.Client(timeout=timeout)
+
+response = client.get('http://example.com/')
+```
+
+If the budget is exhausted a `TotalTimeout` exception is raised, which is
+distinct from `ReadTimeout` and the other per-operation timeouts, and the
+underlying connection is released. The budget also applies when streaming
+responses, so a response that keeps sending small chunks of data cannot
+extend it...
+
+```python
+timeout = httpx.Timeout(10.0, total=30.0)
+with httpx.Client(timeout=timeout) as client:
+    with client.stream("GET", "http://example.com/") as response:
+        for chunk in response.iter_bytes():
+            ...  # A `TotalTimeout` is raised here if the budget runs out.
+```
+
+The `total` budget defaults to `None`, which disables it and leaves the
+existing timeout behavior unchanged.

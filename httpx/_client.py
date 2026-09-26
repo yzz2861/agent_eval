@@ -23,7 +23,9 @@ from ._decoders import SUPPORTED_DECODERS
 from ._exceptions import (
     InvalidURL,
     RemoteProtocolError,
+    TimeoutException,
     TooManyRedirects,
+    TotalTimeout,
     request_context,
 )
 from ._models import Cookies, Headers, Request, Response
@@ -122,6 +124,51 @@ ACCEPT_ENCODING = ", ".join(
 )
 
 
+def _monotonic() -> float:
+    # Isolated into a helper so that tests are able to
+    # substitute a controllable clock.
+    return time.monotonic()
+
+
+class _RequestDeadline:
+    """
+    A single monotonic deadline shared across an entire `send()` call.
+
+    Queueing, connecting, authentication retries, redirects, and streaming
+    the response body all draw down the same remaining budget, rather than
+    each stage restarting the clock.
+    """
+
+    def __init__(
+        self, total: float, clock: typing.Callable[[], float] | None = None
+    ) -> None:
+        self._clock = _monotonic if clock is None else clock
+        self._deadline = self._clock() + total
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self._deadline - self._clock())
+
+    @property
+    def expired(self) -> bool:
+        return self.remaining <= 0.0
+
+    def raise_if_expired(self) -> None:
+        if self.expired:
+            raise TotalTimeout("Total timeout budget exceeded.")
+
+    def clamp_timeouts(
+        self, timeouts: dict[str, float | None]
+    ) -> dict[str, float | None]:
+        # Cap each per-operation timeout at the remaining budget, so that
+        # the connect/read/write/pool phases cannot outlive the deadline.
+        remaining = self.remaining
+        return {
+            name: remaining if value is None else min(value, remaining)
+            for name, value in timeouts.items()
+        }
+
+
 class ClientState(enum.Enum):
     # UNOPENED:
     #   The client has been instantiated, but has not been used to send a request,
@@ -143,15 +190,39 @@ class BoundSyncStream(SyncByteStream):
     """
 
     def __init__(
-        self, stream: SyncByteStream, response: Response, start: float
+        self,
+        stream: SyncByteStream,
+        response: Response,
+        start: float,
+        deadline: _RequestDeadline | None = None,
     ) -> None:
         self._stream = stream
         self._response = response
         self._start = start
+        self._deadline = deadline
 
     def __iter__(self) -> typing.Iterator[bytes]:
-        for chunk in self._stream:
-            yield chunk
+        deadline = self._deadline
+        if deadline is None:
+            yield from self._stream
+            return
+
+        try:
+            for chunk in self._stream:
+                # A steady trickle of small chunks must not extend the
+                # overall budget for the request.
+                deadline.raise_if_expired()
+                yield chunk
+        except TotalTimeout:
+            self.close()
+            raise
+        except TimeoutException as exc:
+            # If a per-operation timeout fired because the budget had
+            # already run out, surface that as a `TotalTimeout` instead.
+            if deadline.expired:
+                self.close()
+                raise TotalTimeout("Total timeout budget exceeded.") from exc
+            raise
 
     def close(self) -> None:
         elapsed = time.perf_counter() - self._start
@@ -166,15 +237,40 @@ class BoundAsyncStream(AsyncByteStream):
     """
 
     def __init__(
-        self, stream: AsyncByteStream, response: Response, start: float
+        self,
+        stream: AsyncByteStream,
+        response: Response,
+        start: float,
+        deadline: _RequestDeadline | None = None,
     ) -> None:
         self._stream = stream
         self._response = response
         self._start = start
+        self._deadline = deadline
 
     async def __aiter__(self) -> typing.AsyncIterator[bytes]:
-        async for chunk in self._stream:
-            yield chunk
+        deadline = self._deadline
+        if deadline is None:
+            async for chunk in self._stream:
+                yield chunk
+            return
+
+        try:
+            async for chunk in self._stream:
+                # A steady trickle of small chunks must not extend the
+                # overall budget for the request.
+                deadline.raise_if_expired()
+                yield chunk
+        except TotalTimeout:
+            await self.aclose()
+            raise
+        except TimeoutException as exc:
+            # If a per-operation timeout fired because the budget had
+            # already run out, surface that as a `TotalTimeout` instead.
+            if deadline.expired:
+                await self.aclose()
+                raise TotalTimeout("Total timeout budget exceeded.") from exc
+            raise
 
     async def aclose(self) -> None:
         elapsed = time.perf_counter() - self._start
@@ -375,6 +471,8 @@ class BaseClient:
                 else Timeout(timeout)
             )
             extensions = dict(**extensions, timeout=timeout.as_dict())
+            if timeout.total is not None:
+                extensions["total_timeout"] = timeout.total
         return Request(
             method,
             url,
@@ -589,6 +687,12 @@ class BaseClient:
                 else Timeout(self.timeout)
             )
             request.extensions = dict(**request.extensions, timeout=timeout.as_dict())
+            if timeout.total is not None:
+                request.extensions["total_timeout"] = timeout.total
+
+    def _request_deadline(self, request: Request) -> _RequestDeadline | None:
+        total = request.extensions.get("total_timeout")
+        return None if total is None else _RequestDeadline(total)
 
 
 class Client(BaseClient):
@@ -911,11 +1015,14 @@ class Client(BaseClient):
 
         auth = self._build_request_auth(request, auth)
 
+        deadline = self._request_deadline(request)
+
         response = self._send_handling_auth(
             request,
             auth=auth,
             follow_redirects=follow_redirects,
             history=[],
+            deadline=deadline,
         )
         try:
             if not stream:
@@ -933,6 +1040,7 @@ class Client(BaseClient):
         auth: Auth,
         follow_redirects: bool,
         history: list[Response],
+        deadline: _RequestDeadline | None,
     ) -> Response:
         auth_flow = auth.sync_auth_flow(request)
         try:
@@ -943,6 +1051,7 @@ class Client(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    deadline=deadline,
                 )
                 try:
                     try:
@@ -966,6 +1075,7 @@ class Client(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        deadline: _RequestDeadline | None,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -976,7 +1086,7 @@ class Client(BaseClient):
             for hook in self._event_hooks["request"]:
                 hook(request)
 
-            response = self._send_single_request(request)
+            response = self._send_single_request(request, deadline=deadline)
             try:
                 for hook in self._event_hooks["response"]:
                     hook(response)
@@ -998,7 +1108,9 @@ class Client(BaseClient):
                 response.close()
                 raise exc
 
-    def _send_single_request(self, request: Request) -> Response:
+    def _send_single_request(
+        self, request: Request, deadline: _RequestDeadline | None = None
+    ) -> Response:
         """
         Sends a single request, without handling any redirections.
         """
@@ -1010,14 +1122,30 @@ class Client(BaseClient):
                 "Attempted to send an async request with a sync Client instance."
             )
 
-        with request_context(request=request):
-            response = transport.handle_request(request)
+        if deadline is not None:
+            # The remaining budget is shared across every stage of the
+            # request, rather than being restarted at each stage.
+            with request_context(request=request):
+                deadline.raise_if_expired()
+            if "timeout" in request.extensions:
+                clamped = deadline.clamp_timeouts(request.extensions["timeout"])
+                request.extensions = {**request.extensions, "timeout": clamped}
+
+        try:
+            with request_context(request=request):
+                response = transport.handle_request(request)
+        except TimeoutException as exc:
+            if deadline is not None and deadline.expired:
+                raise TotalTimeout(
+                    "Total timeout budget exceeded.", request=request
+                ) from exc
+            raise
 
         assert isinstance(response.stream, SyncByteStream)
 
         response.request = request
         response.stream = BoundSyncStream(
-            response.stream, response=response, start=start
+            response.stream, response=response, start=start, deadline=deadline
         )
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
@@ -1626,11 +1754,14 @@ class AsyncClient(BaseClient):
 
         auth = self._build_request_auth(request, auth)
 
+        deadline = self._request_deadline(request)
+
         response = await self._send_handling_auth(
             request,
             auth=auth,
             follow_redirects=follow_redirects,
             history=[],
+            deadline=deadline,
         )
         try:
             if not stream:
@@ -1648,6 +1779,7 @@ class AsyncClient(BaseClient):
         auth: Auth,
         follow_redirects: bool,
         history: list[Response],
+        deadline: _RequestDeadline | None,
     ) -> Response:
         auth_flow = auth.async_auth_flow(request)
         try:
@@ -1658,6 +1790,7 @@ class AsyncClient(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    deadline=deadline,
                 )
                 try:
                     try:
@@ -1681,6 +1814,7 @@ class AsyncClient(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        deadline: _RequestDeadline | None,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -1691,7 +1825,7 @@ class AsyncClient(BaseClient):
             for hook in self._event_hooks["request"]:
                 await hook(request)
 
-            response = await self._send_single_request(request)
+            response = await self._send_single_request(request, deadline=deadline)
             try:
                 for hook in self._event_hooks["response"]:
                     await hook(response)
@@ -1714,7 +1848,9 @@ class AsyncClient(BaseClient):
                 await response.aclose()
                 raise exc
 
-    async def _send_single_request(self, request: Request) -> Response:
+    async def _send_single_request(
+        self, request: Request, deadline: _RequestDeadline | None = None
+    ) -> Response:
         """
         Sends a single request, without handling any redirections.
         """
@@ -1726,13 +1862,29 @@ class AsyncClient(BaseClient):
                 "Attempted to send a sync request with an AsyncClient instance."
             )
 
-        with request_context(request=request):
-            response = await transport.handle_async_request(request)
+        if deadline is not None:
+            # The remaining budget is shared across every stage of the
+            # request, rather than being restarted at each stage.
+            with request_context(request=request):
+                deadline.raise_if_expired()
+            if "timeout" in request.extensions:
+                clamped = deadline.clamp_timeouts(request.extensions["timeout"])
+                request.extensions = {**request.extensions, "timeout": clamped}
+
+        try:
+            with request_context(request=request):
+                response = await transport.handle_async_request(request)
+        except TimeoutException as exc:
+            if deadline is not None and deadline.expired:
+                raise TotalTimeout(
+                    "Total timeout budget exceeded.", request=request
+                ) from exc
+            raise
 
         assert isinstance(response.stream, AsyncByteStream)
         response.request = request
         response.stream = BoundAsyncStream(
-            response.stream, response=response, start=start
+            response.stream, response=response, start=start, deadline=deadline
         )
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding

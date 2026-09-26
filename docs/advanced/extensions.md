@@ -138,6 +138,24 @@ response = client.get(
 
 This extension is how the `httpx` timeouts are implemented, ensuring that the timeout values are associated with the request instance and passed throughout the stack. You shouldn't typically be working with this extension directly, but use the higher level `timeout` API instead.
 
+### `"total_timeout"`
+
+An optional `float` budget in seconds, bounding the duration of the entire request.
+
+For example:
+
+```python
+# Allow at most 30 seconds for the entire request, including any
+# redirects, authentication retries, and reading the response body.
+client = httpx.Client()
+response = client.get(
+    "https://www.example.com",
+    extensions={"total_timeout": 30.0}
+)
+```
+
+This extension is how the `total=...` budget of `httpx.Timeout` is implemented. You shouldn't typically be working with this extension directly, but use the higher level `timeout` API instead.
+
 ### `"target"`
 
 The target that is used as [the HTTP target instead of the URL path](https://datatracker.ietf.org/doc/html/rfc2616#section-5.1.2).

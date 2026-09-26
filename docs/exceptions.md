@@ -12,6 +12,7 @@ For an overview of how to work with HTTPX exceptions, see [Exceptions (Quickstar
             * TimeoutException
                 * ConnectTimeout
                 * ReadTimeout
+                * TotalTimeout
                 * WriteTimeout
                 * PoolTimeout
             * NetworkError
@@ -55,6 +56,9 @@ For an overview of how to work with HTTPX exceptions, see [Exceptions (Quickstar
     :docstring:
 
 ::: httpx.ReadTimeout
+    :docstring:
+
+::: httpx.TotalTimeout
     :docstring:
 
 ::: httpx.WriteTimeout

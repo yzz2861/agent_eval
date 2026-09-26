@@ -7,6 +7,7 @@ Our exception hierarchy:
       - TimeoutException
         · ConnectTimeout
         · ReadTimeout
+        · TotalTimeout
         · WriteTimeout
         · PoolTimeout
       - NetworkError
@@ -63,6 +64,7 @@ __all__ = [
     "StreamConsumed",
     "StreamError",
     "TimeoutException",
+    "TotalTimeout",
     "TooManyRedirects",
     "TransportError",
     "UnsupportedProtocol",
@@ -146,6 +148,16 @@ class ConnectTimeout(TimeoutException):
 class ReadTimeout(TimeoutException):
     """
     Timed out while receiving data from the host.
+    """
+
+
+class TotalTimeout(TimeoutException):
+    """
+    The total time budget for the request was exceeded.
+
+    This is distinct from `ReadTimeout` and the other per-operation
+    timeouts. It is raised when a `total=...` budget, covering the whole
+    request from `send()` through to the response being closed, is exhausted.
     """
 
 
