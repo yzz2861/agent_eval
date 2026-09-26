@@ -372,6 +372,7 @@ class Mount(BaseRoute):
         *,
         middleware: Sequence[Middleware] | None = None,
         max_body_size: int | None = None,
+        compose_lifespan: bool = False,
     ) -> None:
         assert path == "" or path.startswith("/"), "Routed paths must start with '/'"
         assert app is not None or routes is not None, "Either 'app=...', or 'routes=' must be specified"
@@ -387,6 +388,11 @@ class Mount(BaseRoute):
         if max_body_size is not None:
             self.app = RequestBodyLimitMiddleware(self.app, max_body_size=max_body_size)
         self.name = name
+        self.compose_lifespan = compose_lifespan
+        # When 'compose_lifespan' is enabled and the mounted application's
+        # lifespan has run, this holds the state produced by that lifespan,
+        # which is then exposed to requests routed through this mount.
+        self._lifespan_state: dict[str, Any] | None = None
         self.path_regex, self.path_format, self.param_convertors = compile_path(self.path + "/{path:path}")
 
     @property
@@ -454,6 +460,11 @@ class Mount(BaseRoute):
         raise NoMatchFound(name, path_params)
 
     async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self._lifespan_state is not None:
+            # The mounted application opted into lifespan composition, so its
+            # requests see the state produced by its own lifespan instead of
+            # the parent's, keeping each application's state in its own scope.
+            scope["state"] = self._lifespan_state
         await self.app(scope, receive, send)
 
     def __eq__(self, other: Any) -> bool:
@@ -576,6 +587,110 @@ class _DefaultLifespan:
         return self
 
 
+def _lifespan_target(app: ASGIApp) -> tuple[Router, Any] | None:
+    """
+    Return the '(router, app)' pair providing the lifespan of a mounted
+    application, or 'None' if the mounted application does not expose a
+    Starlette lifespan, e.g. a plain ASGI callable.
+    """
+    if isinstance(app, Router):
+        return app, app
+    router = getattr(app, "router", None)
+    if isinstance(router, Router):
+        return router, app
+    return None
+
+
+class _ComposedLifespanUnit:
+    """A single application within a composed lifespan tree."""
+
+    def __init__(self, router: Router, app: Any) -> None:
+        self.router = router
+        self.app = app
+        self.state: dict[str, Any] = {}
+        self.mounts: list[Mount] = []
+
+
+def _build_lifespan_plan(router: Router) -> list[_ComposedLifespanUnit]:
+    """
+    Collect the mounted applications that opted into lifespan composition, in
+    the order their lifespans should run.
+
+    Each application appears at most once, no matter how many mounts point to
+    it. Raises 'RuntimeError' if the mounts form a cycle.
+    """
+    units: list[_ComposedLifespanUnit] = []
+    units_by_router: dict[int, _ComposedLifespanUnit] = {}
+    visiting: set[int] = {id(router)}
+
+    def visit(current: Router, trail: list[str]) -> None:
+        for route in current.routes:
+            if not isinstance(route, Mount) or not route.compose_lifespan:
+                continue
+            target = _lifespan_target(route._base_app)
+            if target is None:
+                # A plain ASGI callable: there is no lifespan to compose.
+                continue
+            child_router, child_app = target
+            description = f"Mount(path={route.path!r})"
+            if id(child_router) in visiting:
+                cycle = " -> ".join([*trail, description])
+                raise RuntimeError(f"Cyclic lifespan composition detected: {cycle}")
+            unit = units_by_router.get(id(child_router))
+            if unit is None:
+                unit = _ComposedLifespanUnit(child_router, child_app)
+                units_by_router[id(child_router)] = unit
+                units.append(unit)
+                visiting.add(id(child_router))
+                try:
+                    visit(child_router, [*trail, description])
+                finally:
+                    visiting.discard(id(child_router))
+            unit.mounts.append(route)
+
+    visit(router, ["<root>"])
+    return units
+
+
+class _ComposedLifespan:
+    """
+    Async context manager entering the lifespans of mounted applications in
+    declaration order, and exiting them in reverse order.
+
+    If a lifespan fails to start, every lifespan that was already entered is
+    exited before the exception propagates.
+    """
+
+    def __init__(self, units: Sequence[_ComposedLifespanUnit]) -> None:
+        self._units = units
+        self._stack = contextlib.AsyncExitStack()
+
+    async def __aenter__(self) -> _ComposedLifespan:
+        try:
+            for unit in self._units:
+                maybe_state = await self._stack.enter_async_context(unit.router.lifespan_context(unit.app))
+                if maybe_state is not None:
+                    unit.state.update(maybe_state)
+                for mount in unit.mounts:
+                    mount._lifespan_state = unit.state
+        except BaseException:
+            await self._stack.aclose()
+            self._reset_mounts()
+            raise
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> bool | None:
+        try:
+            return await self._stack.__aexit__(*exc_info)
+        finally:
+            self._reset_mounts()
+
+    def _reset_mounts(self) -> None:
+        for unit in self._units:
+            for mount in unit.mounts:
+                mount._lifespan_state = None
+
+
 class Router:
     def __init__(
         self,
@@ -651,11 +766,18 @@ class Router:
         app: Any = scope.get("app")
         await receive()
         try:
-            async with self.lifespan_context(app) as maybe_state:
+            # Collect the mounted applications that opted into lifespan
+            # composition before starting anything, so that cyclic mounts
+            # are reported before any lifespan runs.
+            plan = _build_lifespan_plan(self)
+            async with contextlib.AsyncExitStack() as stack:
+                maybe_state = await stack.enter_async_context(self.lifespan_context(app))
                 if maybe_state is not None:
                     if "state" not in scope:
                         raise RuntimeError('The server does not support "state" in the lifespan scope.')
                     scope["state"].update(maybe_state)
+                if plan:
+                    await stack.enter_async_context(_ComposedLifespan(plan))
                 await send({"type": "lifespan.startup.complete"})
                 started = True
                 await receive()

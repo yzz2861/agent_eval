@@ -156,3 +156,53 @@ def test_homepage():
 
     # And the lifespan's teardown is run when exiting the block.
 ```
+
+## Composing lifespans of mounted applications
+
+By default, only the outermost application's lifespan runs: the lifespan of an
+application mounted with `Mount` is never called, so a mounted application that
+builds connections or other resources in its lifespan is not actually ready when
+the parent application has started. Passing `compose_lifespan=True` to a `Mount`
+opts the mounted application into lifespan composition, letting the outermost
+application start up and shut down the whole mount tree.
+
+```python
+import contextlib
+
+from starlette.applications import Starlette
+from starlette.routing import Mount, Route
+
+
+@contextlib.asynccontextmanager
+async def admin_lifespan(app):
+    async with create_admin_resources() as resources:
+        yield {"admin_resources": resources}
+
+
+admin_app = Starlette(routes=[...], lifespan=admin_lifespan)
+
+app = Starlette(
+    routes=[
+        Route("/", homepage),
+        Mount("/admin", app=admin_app, compose_lifespan=True),
+    ],
+    lifespan=lifespan,
+)
+```
+
+Composition follows a predictable set of rules:
+
+- The parent application's lifespan starts first, then the mounted applications
+  in declaration order. Shutdown runs in the exact reverse order.
+- If a mounted application fails to start, everything that was already started
+  is shut down again before the error propagates.
+- Mounting the same application instance multiple times runs its lifespan only
+  once.
+- Cyclic mounts are reported with a `RuntimeError` before any lifespan runs.
+- Plain ASGI callables can still be mounted with `compose_lifespan=True`; they
+  simply have no lifespan to run.
+
+Each application's lifespan `state` stays in its own scope. Requests routed
+through a composed mount see the state yielded by that application's lifespan,
+so a key like `"db"` produced by a mounted application never overwrites the
+parent's or a sibling application's connection.
