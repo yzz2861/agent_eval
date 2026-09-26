@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import re
 import sys
 import time
@@ -713,6 +714,185 @@ async def test_streaming_response_runs_background_on_websocket_scope() -> None:
         "websocket.http.response.body",
         "websocket.http.response.body",
     ]
+
+
+def test_streaming_response_trailers(test_client_factory: TestClientFactory) -> None:
+    digest = hashlib.sha256()
+
+    async def content() -> AsyncIterator[bytes]:
+        for chunk in (b"hello", b", ", b"world"):
+            digest.update(chunk)
+            yield chunk
+
+    def trailers() -> dict[str, str]:
+        return {"x-digest": digest.hexdigest()}
+
+    app = StreamingResponse(content(), trailers=trailers)
+    client = test_client_factory(app)
+    response = client.get("/", headers={"te": "trailers"})
+    assert response.content == b"hello, world"
+    assert response.extensions["http.response.trailers"] == [
+        (b"x-digest", hashlib.sha256(b"hello, world").hexdigest().encode())
+    ]
+
+
+def test_streaming_response_trailers_async_provider_with_duplicates(
+    test_client_factory: TestClientFactory,
+) -> None:
+    async def trailers() -> list[tuple[str, str]]:
+        return [("x-item", "1"), ("x-item", "2"), ("x-total", "2")]
+
+    app = StreamingResponse(iter([b"data"]), trailers=trailers)
+    client = test_client_factory(app)
+    response = client.get("/", headers={"te": "trailers"})
+    assert response.content == b"data"
+    assert response.extensions["http.response.trailers"] == [
+        (b"x-item", b"1"),
+        (b"x-item", b"2"),
+        (b"x-total", b"2"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_evaluated_after_body() -> None:
+    events: list[str] = []
+
+    async def content() -> AsyncIterator[bytes]:
+        yield b"chunk"
+
+    def trailers() -> dict[str, str]:
+        events.append("trailers-evaluated")
+        return {"x-done": "yes"}
+
+    def background() -> None:
+        events.append("background")
+
+    async def send(message: Message) -> None:
+        events.append(message["type"])
+
+    async def receive() -> Message:  # pragma: no cover
+        raise NotImplementedError
+
+    response = StreamingResponse(content(), trailers=trailers, background=BackgroundTask(background))
+    scope: Scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "extensions": {"http.response.trailers": {}}}
+    await response(scope, receive, send)
+
+    assert events == [
+        "http.response.start",
+        "http.response.body",
+        "http.response.body",
+        "trailers-evaluated",
+        "http.response.trailers",
+        "background",
+    ]
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_missing_extension() -> None:
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)  # pragma: no cover
+
+    async def receive() -> Message:  # pragma: no cover
+        raise NotImplementedError
+
+    response = StreamingResponse(iter([b"data"]), trailers=lambda: {"x-digest": "abc"})
+    with pytest.raises(RuntimeError, match="http.response.trailers"):
+        await response({"type": "http"}, receive, send)
+    assert sent == []
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_body_failure() -> None:
+    sent: list[Message] = []
+    trailers_called = False
+
+    async def content() -> AsyncIterator[bytes]:
+        yield b"chunk"
+        raise ValueError("body failed")
+
+    def trailers() -> dict[str, str]:
+        nonlocal trailers_called
+        trailers_called = True
+        return {"x-digest": "abc"}  # pragma: no cover
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def receive() -> Message:  # pragma: no cover
+        raise NotImplementedError
+
+    response = StreamingResponse(content(), trailers=trailers)
+    scope: Scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "extensions": {"http.response.trailers": {}}}
+    with pytest.raises(ValueError, match="body failed"):
+        await response(scope, receive, send)
+
+    assert not trailers_called
+    assert [message["type"] for message in sent] == ["http.response.start", "http.response.body"]
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_provider_failure() -> None:
+    sent: list[Message] = []
+    background_called = False
+
+    async def content() -> AsyncIterator[bytes]:
+        yield b"chunk"
+
+    def trailers() -> dict[str, str]:
+        raise ValueError("trailers failed")
+
+    def background() -> None:
+        nonlocal background_called
+        background_called = True  # pragma: no cover
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def receive() -> Message:  # pragma: no cover
+        raise NotImplementedError
+
+    response = StreamingResponse(content(), trailers=trailers, background=BackgroundTask(background))
+    scope: Scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "extensions": {"http.response.trailers": {}}}
+    with pytest.raises(ValueError, match="trailers failed"):
+        await response(scope, receive, send)
+
+    assert not background_called
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+        "http.response.body",
+    ]
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_client_disconnect() -> None:
+    trailers_called = False
+
+    async def content() -> AsyncIterator[bytes]:
+        yield b"chunk"
+
+    def trailers() -> dict[str, str]:
+        nonlocal trailers_called
+        trailers_called = True
+        return {"x-digest": "abc"}  # pragma: no cover
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            raise OSError
+
+    async def receive() -> Message:  # pragma: no cover
+        raise NotImplementedError
+
+    stream = content()
+    response = StreamingResponse(stream, trailers=trailers)
+    scope: Scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "extensions": {"http.response.trailers": {}}}
+    with pytest.raises(ClientDisconnect):
+        await response(scope, receive, send)
+
+    assert not trailers_called
+    await stream.aclose()
 
 
 README = """\

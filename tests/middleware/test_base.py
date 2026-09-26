@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Generator
 from contextlib import AsyncExitStack
@@ -1364,5 +1365,85 @@ async def test_background_task_runs_after_response_sent_with_middleware() -> Non
         "http.response.start",
         "http.response.body",
         "http.response.body",
+        "background-done",
+    ]
+
+
+def test_trailers_pass_through_base_http_middleware(test_client_factory: TestClientFactory) -> None:
+    digest = hashlib.sha256(b"hello, world").hexdigest()
+
+    async def content() -> AsyncIterator[bytes]:
+        yield b"hello, "
+        yield b"world"
+
+    async def endpoint(request: Request) -> StreamingResponse:
+        return StreamingResponse(content(), trailers=lambda: {"x-digest": digest})
+
+    async def passthrough(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", endpoint)],
+        middleware=[Middleware(BaseHTTPMiddleware, dispatch=passthrough)],
+    )
+    client = test_client_factory(app)
+    response = client.get("/", headers={"te": "trailers"})
+    assert response.content == b"hello, world"
+    assert response.extensions["http.response.trailers"] == [(b"x-digest", digest.encode())]
+
+
+@pytest.mark.anyio
+async def test_trailers_and_background_task_run_in_order_with_middleware() -> None:
+    events: list[str] = []
+
+    async def bg() -> None:
+        events.append("background-done")
+
+    async def content() -> AsyncIterator[bytes]:
+        yield b"chunk"
+
+    async def endpoint(request: Request) -> StreamingResponse:
+        return StreamingResponse(
+            content(),
+            trailers=lambda: {"x-digest": "abc"},
+            background=BackgroundTask(bg),
+        )
+
+    async def passthrough(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", endpoint)],
+        middleware=[Middleware(BaseHTTPMiddleware, dispatch=passthrough)],
+    )
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [],
+        "query_string": b"",
+        "root_path": "",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("testclient", 1),
+        "http_version": "1.1",
+        "asgi": {"spec_version": "2.4"},
+        "extensions": {"http.response.trailers": {}},
+    }
+
+    async def receive() -> Message:  # pragma: no cover
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        events.append(message["type"])
+
+    await app(scope, receive, send)
+
+    assert events == [
+        "http.response.start",
+        "http.response.body",
+        "http.response.body",
+        "http.response.trailers",
         "background-done",
     ]

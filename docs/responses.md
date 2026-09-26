@@ -177,6 +177,42 @@ async def app(scope, receive, send):
 
 Have in mind that <a href="https://docs.python.org/3/glossary.html#term-file-like-object" target="_blank">file-like</a> objects (like those created by `open()`) are normal iterators. So, you can return them directly in a `StreamingResponse`.
 
+#### HTTP trailers
+
+Some metadata, such as a checksum of the streamed content, can only be computed once the
+last chunk has been produced. `StreamingResponse` accepts a `trailers` callable that is
+evaluated after the body has been fully sent, and its result is sent using the ASGI
+`http.response.trailers` extension. The callable may be a regular function or a coroutine
+function, and it may return either a mapping or an iterable of `(name, value)` pairs, which
+allows sending the same trailer field more than once. The response start message declares
+`trailers: True` up front, so the server knows trailing fields will follow. If the server
+does not support the `http.response.trailers` extension, a `RuntimeError` is raised before
+any response headers are sent.
+
+```python
+import hashlib
+
+from starlette.responses import StreamingResponse
+
+
+async def app(scope, receive, send):
+    digest = hashlib.sha256()
+
+    async def content():
+        for chunk in (b'hello', b', ', b'world'):
+            digest.update(chunk)
+            yield chunk
+
+    def trailers():
+        return {'x-digest': digest.hexdigest()}
+
+    response = StreamingResponse(content(), trailers=trailers)
+    await response(scope, receive, send)
+```
+
+Trailers also propagate through `BaseHTTPMiddleware`, and any background task runs only
+after the trailers have been sent.
+
 ### FileResponse
 
 Asynchronously streams a file as the response.

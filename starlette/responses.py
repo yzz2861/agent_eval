@@ -219,6 +219,8 @@ Content = str | bytes | memoryview
 SyncContentStream = Iterable[Content]
 AsyncContentStream = AsyncIterable[Content]
 ContentStream = AsyncContentStream | SyncContentStream
+Trailers = Mapping[str, str] | Iterable[tuple[str, str]]
+TrailersProvider = Callable[[], Trailers | Awaitable[Trailers]]
 
 
 class StreamingResponse(Response):
@@ -231,6 +233,7 @@ class StreamingResponse(Response):
         headers: Mapping[str, str] | None = None,
         media_type: str | None = None,
         background: BackgroundTask | None = None,
+        trailers: TrailersProvider | None = None,
     ) -> None:
         if isinstance(content, AsyncIterable):
             self.body_iterator = content
@@ -239,6 +242,7 @@ class StreamingResponse(Response):
         self.status_code = status_code
         self.media_type = self.media_type if media_type is None else media_type
         self.background = background
+        self.trailers = trailers
         self.init_headers(headers)
 
     async def listen_for_disconnect(self, receive: Receive) -> None:
@@ -248,13 +252,31 @@ class StreamingResponse(Response):
                 break
 
     async def stream_response(self, send: Send) -> None:
-        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+        start_message: Message = {
+            "type": "http.response.start",
+            "status": self.status_code,
+            "headers": self.raw_headers,
+        }
+        if self.trailers is not None:
+            start_message["trailers"] = True
+        await send(start_message)
         async for chunk in self.body_iterator:
             if not isinstance(chunk, bytes | memoryview):
                 chunk = chunk.encode(self.charset)
             await send({"type": "http.response.body", "body": chunk, "more_body": True})
 
         await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+        if self.trailers is not None:
+            await send({"type": "http.response.trailers", "headers": await self._evaluate_trailers()})
+
+    async def _evaluate_trailers(self) -> list[tuple[bytes, bytes]]:
+        assert self.trailers is not None
+        trailers = self.trailers()
+        if isinstance(trailers, Awaitable):
+            trailers = await trailers
+        items = trailers.items() if isinstance(trailers, Mapping) else trailers
+        return [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in items]
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "websocket":
@@ -263,6 +285,12 @@ class StreamingResponse(Response):
             if self.background is not None:
                 await self.background()
             return
+
+        if self.trailers is not None and "http.response.trailers" not in scope.get("extensions", {}):
+            raise RuntimeError(
+                "StreamingResponse was given a 'trailers' provider, but the server "
+                "does not support the 'http.response.trailers' ASGI extension."
+            )
 
         spec_version = tuple(map(int, scope.get("asgi", {}).get("spec_version", "2.0").split(".")))
 
