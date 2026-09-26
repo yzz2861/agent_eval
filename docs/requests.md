@@ -113,20 +113,34 @@ state with `disconnected = await request.is_disconnected()`.
 
 Request files are normally sent as multipart form data (`multipart/form-data`).
 
-Signature: `request.form(max_files=1000, max_fields=1000, max_part_size=1024*1024)`
+Signature: `request.form(max_files=1000, max_fields=1000, max_part_size=1024*1024, max_file_size=None, max_total_size=None)`
 
 You can configure the maximum number of fields or files with `max_files` and
 `max_fields`. The `max_part_size` parameter limits the size of each non-file
 field; uploaded files are spooled to temporary storage and are not limited by
-`max_part_size`:
+`max_part_size`.
+
+The `max_file_size` parameter limits the content size of each individual
+uploaded file, and `max_total_size` limits the cumulative content size of the
+whole form — uploaded files and plain fields combined. Both budgets are
+counted in bytes as they are actually received while parsing, regardless of
+the `Content-Length` header, and they do not include multipart boundaries or
+part headers. Content exactly equal to the limit is accepted; the next byte is
+rejected. For `application/x-www-form-urlencoded` requests, `max_total_size`
+applies to the field names and values. When a budget is exceeded, parsing
+stops immediately, every temporary file created for the request is closed,
+and a `413 Content Too Large` error is raised:
 
 ```python
-async with request.form(max_files=1000, max_fields=1000, max_part_size=1024*1024):
+async with request.form(max_files=1000, max_fields=1000, max_part_size=1024*1024, max_file_size=1024*1024, max_total_size=10*1024*1024):
     ...
 ```
 
 !!! info
     These limits are for security reasons, allowing an unlimited number of fields or files could lead to a denial of service attack by consuming a lot of CPU and memory parsing too many empty fields.
+
+!!! note
+    `max_file_size` and `max_total_size` are actual limits that reject the request, unlike `MultiPartParser.spool_max_size`, which only controls when an individual upload rolls over from memory to a temporary file on disk and never rejects a request.
 
 To limit the complete request body, including uploaded files and multipart
 encoding overhead, configure `max_body_size` on the application, router, mount,

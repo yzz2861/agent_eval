@@ -10,6 +10,7 @@ from tempfile import SpooledTemporaryFile
 from typing import Any, ClassVar
 from unittest import mock
 
+import anyio
 import pytest
 
 from starlette.applications import Starlette
@@ -1075,3 +1076,296 @@ def test_multipart_closes_tempfile_on_oserror(
         client.post("/", content=content, headers=headers)
 
     assert close_called
+
+
+def make_app_max_sizes(max_file_size: int | None = None, max_total_size: int | None = None) -> ASGIApp:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive)
+        data = await request.form(max_file_size=max_file_size, max_total_size=max_total_size)
+        output: dict[str, Any] = {}
+        for key, value in data.items():
+            if isinstance(value, UploadFile):
+                content = await value.read()
+                output[key] = {
+                    "filename": value.filename,
+                    "size": value.size,
+                    "content": content.decode(),
+                    "content_type": value.content_type,
+                }
+            else:
+                output[key] = value
+        await request.close()
+        response = JSONResponse(output)
+        await response(scope, receive, send)
+
+    return app
+
+
+@pytest.mark.parametrize(
+    "app,expectation",
+    [
+        (make_app_max_sizes(max_file_size=10), pytest.raises(MultiPartException)),
+        (
+            Starlette(routes=[Mount("/", app=make_app_max_sizes(max_file_size=10))]),
+            does_not_raise(),
+        ),
+    ],
+)
+def test_multipart_max_file_size_exceeded(
+    app: ASGIApp,
+    expectation: AbstractContextManager[Exception],
+    test_client_factory: TestClientFactory,
+) -> None:
+    client = test_client_factory(app)
+    body = (
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="a.txt"\r\n\r\n'
+        b"12345678901\r\n"  # 11 bytes of file content
+        b"--boundary--\r\n"
+    )
+    with expectation:
+        response = client.post("/", content=body, headers={"Content-Type": "multipart/form-data; boundary=boundary"})
+        assert response.status_code == 413
+        assert response.text == "File exceeded maximum size of 10 bytes."
+
+
+def test_multipart_max_file_size_exact_limit_allowed(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(Starlette(routes=[Mount("/", app=make_app_max_sizes(max_file_size=10))]))
+    body = (
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="a.txt"\r\n\r\n'
+        b"1234567890\r\n"  # exactly 10 bytes of file content
+        b"--boundary--\r\n"
+    )
+    response = client.post("/", content=body, headers={"Content-Type": "multipart/form-data; boundary=boundary"})
+    assert response.status_code == 200
+    assert response.json()["file"]["content"] == "1234567890"
+
+
+@pytest.mark.parametrize(
+    "app,expectation",
+    [
+        (make_app_max_sizes(max_total_size=10), pytest.raises(MultiPartException)),
+        (
+            Starlette(routes=[Mount("/", app=make_app_max_sizes(max_total_size=10))]),
+            does_not_raise(),
+        ),
+    ],
+)
+def test_multipart_max_total_size_exceeded_by_multiple_files(
+    app: ASGIApp,
+    expectation: AbstractContextManager[Exception],
+    test_client_factory: TestClientFactory,
+) -> None:
+    # Each file is small enough on its own, but their combined content exceeds the budget.
+    client = test_client_factory(app)
+    body = (
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file1"; filename="a.txt"\r\n\r\n'
+        b"123456\r\n"
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file2"; filename="b.txt"\r\n\r\n'
+        b"12345\r\n"
+        b"--boundary--\r\n"
+    )
+    with expectation:
+        response = client.post("/", content=body, headers={"Content-Type": "multipart/form-data; boundary=boundary"})
+        assert response.status_code == 413
+        assert response.text == "Form exceeded maximum total size of 10 bytes."
+
+
+def test_multipart_max_total_size_exact_limit_allowed(test_client_factory: TestClientFactory) -> None:
+    # The raw body is much larger than the budget, but boundaries and headers are not counted:
+    # only the 5 + 5 content bytes of the two files count towards the limit.
+    client = test_client_factory(Starlette(routes=[Mount("/", app=make_app_max_sizes(max_total_size=10))]))
+    body = (
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file1"; filename="a.txt"\r\n\r\n'
+        b"12345\r\n"
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file2"; filename="b.txt"\r\n\r\n'
+        b"12345\r\n"
+        b"--boundary--\r\n"
+    )
+    assert len(body) > 10
+    response = client.post("/", content=body, headers={"Content-Type": "multipart/form-data; boundary=boundary"})
+    assert response.status_code == 200
+    assert response.json()["file1"]["content"] == "12345"
+    assert response.json()["file2"]["content"] == "12345"
+
+
+def test_multipart_max_total_size_includes_plain_fields(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(Starlette(routes=[Mount("/", app=make_app_max_sizes(max_total_size=10))]))
+    body = (
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="field"\r\n\r\n'
+        b"12345\r\n"
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="a.txt"\r\n\r\n'
+        b"123456\r\n"
+        b"--boundary--\r\n"
+    )
+    response = client.post("/", content=body, headers={"Content-Type": "multipart/form-data; boundary=boundary"})
+    assert response.status_code == 413
+    assert response.text == "Form exceeded maximum total size of 10 bytes."
+
+
+def test_multipart_size_limit_exception_has_413_status_code(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(make_app_max_sizes(max_total_size=5))
+    body = (
+        b'--boundary\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\n\r\n123456\r\n--boundary--\r\n'
+    )
+    with pytest.raises(MultiPartException) as exc_info:
+        client.post("/", content=body, headers={"Content-Type": "multipart/form-data; boundary=boundary"})
+    assert exc_info.value.status_code == 413
+
+
+@pytest.mark.anyio
+async def test_multipart_max_total_size_with_single_byte_chunks() -> None:
+    # Chunks split at arbitrary positions (including in the middle of boundaries)
+    # must not affect the byte accounting.
+    body = b'--boundary\r\nContent-Disposition: form-data; name="field"\r\n\r\n12345\r\n--boundary--\r\n'
+
+    async def byte_stream() -> AsyncGenerator[bytes, None]:
+        for byte in body:
+            yield bytes([byte])
+
+    headers = Headers({"Content-Type": "multipart/form-data; boundary=boundary"})
+
+    parser = MultiPartParser(headers, byte_stream(), max_total_size=5)
+    form = await parser.parse()
+    assert form["field"] == "12345"
+
+    stream = byte_stream()
+    parser = MultiPartParser(headers, stream, max_total_size=4)
+    with pytest.raises(MultiPartException, match="Form exceeded maximum total size of 4 bytes."):
+        await parser.parse()
+    await stream.aclose()
+
+
+@pytest.mark.anyio
+async def test_multipart_limits_stop_parsing_within_a_single_chunk() -> None:
+    async def single_chunk(body: bytes) -> AsyncGenerator[bytes, None]:
+        yield body
+
+    headers = Headers({"Content-Type": "multipart/form-data; boundary=boundary"})
+    body = (
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file1"; filename="a.txt"\r\n\r\n'
+        b"12345\r\n"
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file2"; filename="b.txt"\r\n\r\n'
+        b"12345\r\n"
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file3"; filename="c.txt"\r\n\r\n'
+        b"12345\r\n"
+        b"--boundary--\r\n"
+    )
+    stream = single_chunk(body)
+    parser = MultiPartParser(headers, stream, max_total_size=9)
+    with pytest.raises(MultiPartException, match="Form exceeded maximum total size of 9 bytes."):
+        await parser.parse()
+    # Parsing stopped as soon as the budget was exceeded: the third file was never reached.
+    assert parser._current_files == 2
+    await stream.aclose()
+
+
+@pytest.mark.anyio
+async def test_multipart_limit_closes_all_tempfiles() -> None:
+    # All temporary files created during the upload must be closed when a limit is
+    # exceeded, including files that were already fully received.
+    tempfiles: list[SpooledTemporaryFile[bytes]] = []
+
+    def make_tempfile(*args: Any, **kwargs: Any) -> SpooledTemporaryFile[bytes]:
+        tempfile = SpooledTemporaryFile[bytes](*args, **kwargs)
+        tempfiles.append(tempfile)
+        return tempfile
+
+    body = (
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file1"; filename="a.txt"\r\n\r\n'
+        b"12345\r\n"
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="file2"; filename="b.txt"\r\n\r\n'
+        b"123456\r\n"
+        b"--boundary--\r\n"
+    )
+
+    async def stream() -> AsyncGenerator[bytes, None]:
+        for index in range(0, len(body), 7):
+            yield body[index : index + 7]
+
+    body_stream = stream()
+    parser = MultiPartParser(
+        Headers({"Content-Type": "multipart/form-data; boundary=boundary"}),
+        body_stream,
+        max_file_size=5,
+    )
+    with mock.patch("starlette.formparsers.SpooledTemporaryFile", side_effect=make_tempfile):
+        with pytest.raises(MultiPartException, match="File exceeded maximum size of 5 bytes."):
+            await parser.parse()
+    await body_stream.aclose()
+    assert len(tempfiles) == 2
+    assert all(tempfile.closed for tempfile in tempfiles)
+
+
+@pytest.mark.anyio
+async def test_multipart_limit_stops_consuming_stream() -> None:
+    stream_finished = False
+
+    async def stream() -> AsyncGenerator[bytes, None]:
+        nonlocal stream_finished
+        yield (b'--boundary\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\n\r\n')
+        yield b"123456\r\n"
+        yield b"--boundary--\r\n"
+        stream_finished = True
+
+    body_stream = stream()
+    parser = MultiPartParser(
+        Headers({"Content-Type": "multipart/form-data; boundary=boundary"}),
+        body_stream,
+        max_file_size=5,
+    )
+    with pytest.raises(MultiPartException, match="File exceeded maximum size of 5 bytes."):
+        await parser.parse()
+    await body_stream.aclose()
+    assert not stream_finished
+
+
+@pytest.mark.anyio
+async def test_multipart_closes_tempfiles_on_cancellation() -> None:
+    chunk_processed = anyio.Event()
+
+    async def stream() -> AsyncGenerator[bytes, None]:
+        yield (
+            b"--boundary\r\n"
+            b'Content-Disposition: form-data; name="file"; filename="example.txt"\r\n'
+            b"Content-Type: text/plain\r\n\r\n"
+            b"content"
+        )
+        chunk_processed.set()
+        await anyio.sleep_forever()
+        yield b""  # pragma: no cover
+
+    parser = MultiPartParser(
+        Headers({"Content-Type": "multipart/form-data; boundary=boundary"}),
+        stream(),
+    )
+    tempfile = SpooledTemporaryFile[bytes]()
+
+    with mock.patch("starlette.formparsers.SpooledTemporaryFile", return_value=tempfile):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(parser.parse)
+            await chunk_processed.wait()
+            task_group.cancel_scope.cancel()
+
+    assert tempfile.closed
+
+
+def test_urlencoded_max_total_size(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(Starlette(routes=[Mount("/", app=make_app_max_sizes(max_total_size=10))]))
+    response = client.post("/", data={"field": "12345"})  # 5 name bytes + 5 value bytes
+    assert response.status_code == 200
+    response = client.post("/", data={"field": "123456"})
+    assert response.status_code == 413
+    assert response.text == "Form exceeded maximum total size of 10 bytes."
