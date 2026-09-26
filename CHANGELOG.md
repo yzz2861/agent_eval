@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * Expose `FunctionAuth` from the public API. (#3699)
+* Support custom content decoders, registered per-client with the `decoders` argument or `client.register_decoder()`, and overridable per-request with the `"decoders"` extension. Registered encodings are included in the default `Accept-Encoding` header, and `httpx.ContentDecoder` is exposed from the public API.
 
 ## 0.28.1 (6th December, 2024)
 

@@ -15,11 +15,13 @@ from ._decoders import (
     SUPPORTED_DECODERS,
     ByteChunker,
     ContentDecoder,
+    DecoderErrorWrapper,
     IdentityDecoder,
     LineDecoder,
     MultiDecoder,
     TextChunker,
     TextDecoder,
+    decoder_registry_context,
 )
 from ._exceptions import (
     CookieConflict,
@@ -545,6 +547,15 @@ class Response:
 
         self.default_encoding = default_encoding
 
+        # The registry of content decoders available when decoding this
+        # response. Clients set this to a snapshot of their registered
+        # decoders when the response is received. When unset, responses
+        # created while a client is handling a request use that client's
+        # registry, and any other responses use the default supported set.
+        self._decoder_registry: (
+            typing.Mapping[str, typing.Callable[[], ContentDecoder]] | None
+        ) = None
+
         if stream is None:
             headers, stream = encode_response(content, text, html, json)
             self._prepare(headers)
@@ -702,13 +713,26 @@ class Response:
         content, depending on the Content-Encoding used in the response.
         """
         if not hasattr(self, "_decoder"):
+            # The decoder registry is snapshotted onto the response by the
+            # client when the response is received, so that any decoders
+            # registered on the client afterwards cannot affect responses
+            # that are already in flight. Responses created while a client
+            # is handling a request pick up that client's registry from the
+            # context. Responses instantiated directly fall back to the
+            # default set of supported decoders.
+            registry = getattr(self, "_decoder_registry", None)
+            if registry is None:
+                registry = decoder_registry_context.get()
+            if registry is None:
+                registry = SUPPORTED_DECODERS
+
             decoders: list[ContentDecoder] = []
             values = self.headers.get_list("content-encoding", split_commas=True)
             for value in values:
                 value = value.strip().lower()
                 try:
-                    decoder_cls = SUPPORTED_DECODERS[value]
-                    decoders.append(decoder_cls())
+                    decoder_factory = registry[value]
+                    decoders.append(DecoderErrorWrapper(decoder_factory()))
                 except KeyError:
                     continue
 
@@ -863,7 +887,14 @@ class Response:
         return {
             name: value
             for name, value in self.__dict__.items()
-            if name not in ["extensions", "stream", "is_closed", "_decoder"]
+            if name
+            not in [
+                "extensions",
+                "stream",
+                "is_closed",
+                "_decoder",
+                "_decoder_registry",
+            ]
         }
 
     def __setstate__(self, state: dict[str, typing.Any]) -> None:

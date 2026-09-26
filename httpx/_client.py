@@ -19,7 +19,7 @@ from ._config import (
     Proxy,
     Timeout,
 )
-from ._decoders import SUPPORTED_DECODERS
+from ._decoders import SUPPORTED_DECODERS, ContentDecoder, decoder_registry_context
 from ._exceptions import (
     InvalidURL,
     RemoteProtocolError,
@@ -200,10 +200,23 @@ class BaseClient:
         base_url: URL | str = "",
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        decoders: typing.Mapping[str, typing.Callable[[], ContentDecoder]]
+        | None = None,
     ) -> None:
         event_hooks = {} if event_hooks is None else event_hooks
 
         self._base_url = self._enforce_trailing_slash(URL(base_url))
+
+        # The client's registry of content decoders, mapping encoding names
+        # such as "gzip" to decoder factories. It starts out as a copy of the
+        # globally supported decoders, so that registrations on one client
+        # never affect any other client, or the module-level defaults.
+        self._decoders: dict[str, typing.Callable[[], ContentDecoder]] = dict(
+            SUPPORTED_DECODERS
+        )
+        if decoders is not None:
+            for encoding, decoder in decoders.items():
+                self._decoders[encoding.strip().lower()] = decoder
 
         self._auth = self._build_auth(auth)
         self._params = QueryParams(params)
@@ -307,13 +320,62 @@ class BaseClient:
         client_headers = Headers(
             {
                 b"Accept": b"*/*",
-                b"Accept-Encoding": ACCEPT_ENCODING.encode("ascii"),
+                b"Accept-Encoding": self._default_accept_encoding().encode("ascii"),
                 b"Connection": b"keep-alive",
                 b"User-Agent": USER_AGENT.encode("ascii"),
             }
         )
         client_headers.update(headers)
         self._headers = client_headers
+
+    def _default_accept_encoding(self) -> str:
+        """
+        The default "Accept-Encoding" header value, determined by the
+        set of content decoders registered on the client.
+        """
+        return ", ".join(
+            [encoding for encoding in self._decoders if encoding != "identity"]
+        )
+
+    def register_decoder(
+        self, encoding: str, decoder: typing.Callable[[], ContentDecoder]
+    ) -> None:
+        """
+        Register a custom content decoder for an encoding, such as
+        client.register_decoder("x-custom", CustomDecoder).
+
+        The decoder may be any factory returning an instance that implements
+        the ContentDecoder interface of incremental decode(data) and flush()
+        methods. Registering a decoder also updates the default
+        "Accept-Encoding" header sent by the client, unless the header has
+        been explicitly overridden.
+
+        Registrations are scoped to this client instance. They do not affect
+        other clients, and they do not affect any responses that have
+        already been received by this client.
+        """
+        encoding = encoding.strip().lower()
+        accept_encoding = self._default_accept_encoding()
+        self._decoders[encoding] = decoder
+        if self._headers.get("accept-encoding") == accept_encoding:
+            # The "Accept-Encoding" header has not been explicitly overridden,
+            # so update it to include the newly registered encoding.
+            self._headers["Accept-Encoding"] = self._default_accept_encoding()
+
+    def _decoder_registry_for_request(
+        self, request: Request
+    ) -> dict[str, typing.Callable[[], ContentDecoder]]:
+        """
+        Return a snapshot of the decoder registry to use for a request,
+        with any request-level "decoders" extension applied on top of the
+        client-level registrations.
+        """
+        registry = dict(self._decoders)
+        overrides = request.extensions.get("decoders")
+        if overrides:
+            for encoding, decoder in overrides.items():
+                registry[encoding.strip().lower()] = decoder
+        return registry
 
     @property
     def cookies(self) -> Cookies:
@@ -658,6 +720,8 @@ class Client(BaseClient):
         base_url: URL | str = "",
         transport: BaseTransport | None = None,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        decoders: typing.Mapping[str, typing.Callable[[], ContentDecoder]]
+        | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -671,6 +735,7 @@ class Client(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            decoders=decoders,
         )
 
         if http2:
@@ -1010,8 +1075,13 @@ class Client(BaseClient):
                 "Attempted to send an async request with a sync Client instance."
             )
 
-        with request_context(request=request):
-            response = transport.handle_request(request)
+        decoder_registry = self._decoder_registry_for_request(request)
+        registry_token = decoder_registry_context.set(decoder_registry)
+        try:
+            with request_context(request=request):
+                response = transport.handle_request(request)
+        finally:
+            decoder_registry_context.reset(registry_token)
 
         assert isinstance(response.stream, SyncByteStream)
 
@@ -1021,6 +1091,7 @@ class Client(BaseClient):
         )
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
+        response._decoder_registry = decoder_registry
 
         logger.info(
             'HTTP Request: %s %s "%s %d %s"',
@@ -1372,6 +1443,8 @@ class AsyncClient(BaseClient):
         transport: AsyncBaseTransport | None = None,
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        decoders: typing.Mapping[str, typing.Callable[[], ContentDecoder]]
+        | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -1385,6 +1458,7 @@ class AsyncClient(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            decoders=decoders,
         )
 
         if http2:
@@ -1726,8 +1800,13 @@ class AsyncClient(BaseClient):
                 "Attempted to send a sync request with an AsyncClient instance."
             )
 
-        with request_context(request=request):
-            response = await transport.handle_async_request(request)
+        decoder_registry = self._decoder_registry_for_request(request)
+        registry_token = decoder_registry_context.set(decoder_registry)
+        try:
+            with request_context(request=request):
+                response = await transport.handle_async_request(request)
+        finally:
+            decoder_registry_context.reset(registry_token)
 
         assert isinstance(response.stream, AsyncByteStream)
         response.request = request
@@ -1736,6 +1815,7 @@ class AsyncClient(BaseClient):
         )
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
+        response._decoder_registry = decoder_registry
 
         logger.info(
             'HTTP Request: %s %s "%s %d %s"',

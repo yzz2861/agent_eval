@@ -143,6 +143,46 @@ For a list of all available client parameters, see the [`Client`](../api.md#clie
 
 ---
 
+## Custom content decoders
+
+HTTPX handles the `gzip`, `deflate`, `br` and `zstd` content encodings out of the box. If a server uses a custom `Content-Encoding`, you can register your own incremental decoder on the client:
+
+```python
+class ReverseDecoder(httpx.ContentDecoder):
+    def __init__(self) -> None:
+        self._buffer = b""
+
+    def decode(self, data: bytes) -> bytes:
+        self._buffer += data
+        return b""
+
+    def flush(self) -> bytes:
+        data, self._buffer = self._buffer[::-1], b""
+        return data
+
+
+client = httpx.Client(decoders={"x-reverse": ReverseDecoder})
+# ...or register a decoder on an existing client:
+client.register_decoder("x-reverse", ReverseDecoder)
+```
+
+Decoders are factories for instances implementing the `httpx.ContentDecoder` interface of incremental `decode(data)` and `flush()` methods. Any remaining buffered content should be emitted by `flush()`, and will still pass through any outer decoders when multiple encodings are stacked.
+
+Some things to be aware of:
+
+* Registered encodings are automatically included in the client's default `Accept-Encoding` header, unless the header has been set explicitly.
+* Registrations are scoped to each client instance. They don't affect other clients, the module-level defaults, or any responses that have already been received.
+* A request-level `"decoders"` extension can be used to override or add registrations for a single request:
+
+```python
+response = client.get(url, extensions={"decoders": {"x-reverse": ReverseDecoder}})
+```
+
+* Responses declaring an encoding that has not been registered are passed through undecoded, matching the default behaviour for unknown encodings.
+* Exceptions raised by a custom decoder are re-raised as `httpx.DecodingError`, with the original exception preserved as the cause.
+
+---
+
 ## Request instances
 
 For maximum control on what gets sent over the wire, HTTPX supports building explicit [`Request`](../api.md#request) instances:

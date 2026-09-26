@@ -7,6 +7,7 @@ See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding
 from __future__ import annotations
 
 import codecs
+import contextvars
 import io
 import typing
 import zlib
@@ -39,6 +40,16 @@ class ContentDecoder:
 
     def flush(self) -> bytes:
         raise NotImplementedError()  # pragma: no cover
+
+
+# Clients set this context variable while a request is being handled, so
+# that any Response instances created by the transport decode content
+# using the decoders registered on the client, including responses that
+# decode their content eagerly on instantiation. Responses created outside
+# of a client context fall back to SUPPORTED_DECODERS.
+decoder_registry_context: contextvars.ContextVar[
+    typing.Mapping[str, typing.Callable[[], ContentDecoder]] | None
+] = contextvars.ContextVar("httpx_decoder_registry", default=None)
 
 
 class IdentityDecoder(ContentDecoder):
@@ -223,6 +234,37 @@ class MultiDecoder(ContentDecoder):
         for child in self.children:
             data = child.decode(data) + child.flush()
         return data
+
+
+class DecoderErrorWrapper(ContentDecoder):
+    """
+    Wrap a decoder, ensuring that any exception raised while decoding
+    is surfaced as httpx's DecodingError, with the original exception
+    preserved as the cause.
+
+    This is primarily useful for user-registered custom decoders, which
+    may raise arbitrary exceptions. Decoders that already raise
+    DecodingError are passed through unchanged.
+    """
+
+    def __init__(self, decoder: ContentDecoder) -> None:
+        self._decoder = decoder
+
+    def decode(self, data: bytes) -> bytes:
+        try:
+            return self._decoder.decode(data)
+        except DecodingError:
+            raise
+        except Exception as exc:
+            raise DecodingError(str(exc)) from exc
+
+    def flush(self) -> bytes:
+        try:
+            return self._decoder.flush()
+        except DecodingError:
+            raise
+        except Exception as exc:
+            raise DecodingError(str(exc)) from exc
 
 
 class ByteChunker:
