@@ -109,10 +109,19 @@ h11_max_incomplete_size    N/A                           The max HTTP/1.1 reques
 h11_pass_raw_headers       N/A                           Pass the raw headers from h11 to the            ``False``
                                                          Request object, which preserves header
                                                          casing.
+h2_max_concurrent_pushes   N/A                           Maximum number of in-flight HTTP/2              100
+                                                         server pushes per connection. Pushes
+                                                         beyond this wait for capacity and are
+                                                         rejected if the client disables push,
+                                                         resets the parent stream, or reduces
+                                                         its concurrent stream limit.
 h2_max_concurrent_streams  N/A                           Maximum number of HTTP/2 concurrent             100
                                                          streams.
 h2_max_header_list_size    N/A                           Maximum number of HTTP/2 headers.               65536
 h2_max_inbound_frame_size  N/A                           Maximum size of a HTTP/2 frame.                 16KiB
+h2_max_pushes_per_stream   N/A                           Maximum number of HTTP/2 server pushes          10
+                                                         per parent request. Repeated pushes of
+                                                         an already pushed target are skipped.
 include_date_header        N/A                           Include the                                     ``True``
                                                          ``Date: Tue, 15 Nov 1994 08:12:31 GMT``
                                                          header.

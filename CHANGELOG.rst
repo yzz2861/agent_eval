@@ -1,3 +1,11 @@
+Unreleased
+----------
+
+* Limit HTTP/2 server push via the ``h2_max_concurrent_pushes`` and
+  ``h2_max_pushes_per_stream`` configs, deduplicate push targets per
+  connection, and reject waiting pushes when the client disables push,
+  resets the parent stream, or reduces the concurrent stream limit.
+
 0.18.0 2025-11-08
 -----------------
 
