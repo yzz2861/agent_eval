@@ -121,6 +121,12 @@ class H2Protocol:
         self.has_data = self.context.event_class()
         self.priority = priority.PriorityTree()
         self.stream_buffers: dict[int, StreamBuffer] = {}
+        # Server push bookkeeping, push streams are identified by the
+        # (scheme, authority, path) target and tracked per parent
+        # stream and per connection.
+        self._pushed_targets: set[tuple[bytes, bytes, bytes]] = set()
+        self._push_streams: dict[int, int] = {}  # push stream id -> parent stream id
+        self._parent_push_counts: dict[int, int] = {}  # parent stream id -> open pushes
 
     @property
     def idle(self) -> bool:
@@ -271,6 +277,7 @@ class H2Protocol:
                     pass
             elif isinstance(event, h2.events.StreamReset):
                 await self._close_stream(event.stream_id)
+                await self._cancel_pushes(event.stream_id)
                 await self._window_updated(event.stream_id)
             elif isinstance(event, h2.events.WindowUpdated):
                 await self._window_updated(event.stream_id)
@@ -279,6 +286,10 @@ class H2Protocol:
             elif isinstance(event, h2.events.RemoteSettingsChanged):
                 if h2.settings.SettingCodes.INITIAL_WINDOW_SIZE in event.changed_settings:
                     await self._window_updated(None)
+                if h2.settings.SettingCodes.ENABLE_PUSH in event.changed_settings:
+                    setting = event.changed_settings[h2.settings.SettingCodes.ENABLE_PUSH]
+                    if setting.new_value == 0:
+                        await self._cancel_pushes()
             elif isinstance(event, h2.events.ConnectionTerminated):
                 await self.send(Closed())
         await self._flush()
@@ -372,6 +383,22 @@ class H2Protocol:
     async def _create_server_push(
         self, stream_id: int, path: bytes, headers: list[tuple[bytes, bytes]]
     ) -> None:
+        scheme = b""
+        authority = b""
+        for name, value in headers:
+            if name == b":scheme":
+                scheme = value
+            elif name == b":authority":
+                authority = value
+        target = (scheme, authority, path)
+
+        reason = self._push_rejection_reason(stream_id, target)
+        if reason is not None:
+            await self.config.log.info(
+                "Push of %s skipped on stream %d: %s", path, stream_id, reason
+            )
+            return
+
         push_stream_id = self.connection.get_next_available_stream_id()
         request_headers = [(b":method", b"GET"), (b":path", path)]
         request_headers.extend(headers)
@@ -388,12 +415,61 @@ class H2Protocol:
             # push on a push promises request.
             pass
         else:
+            self._pushed_targets.add(target)
+            self._push_streams[push_stream_id] = stream_id
+            self._parent_push_counts[stream_id] = self._parent_push_counts.get(stream_id, 0) + 1
             event = h2.events.RequestReceived(stream_id=push_stream_id, headers=request_headers)
             await self._create_stream(event)
             await self.streams[event.stream_id].handle(EndBody(stream_id=event.stream_id))
             self.keep_alive_requests += 1
 
+    def _push_rejection_reason(
+        self, stream_id: int, target: tuple[bytes, bytes, bytes]
+    ) -> str | None:
+        if stream_id not in self.streams:
+            return "parent stream is closed"
+        elif not self.connection.remote_settings.enable_push:
+            return "client has disabled server push (ENABLE_PUSH=0)"
+        elif target in self._pushed_targets:
+            return "target already pushed on this connection"
+        elif len(self._push_streams) >= self.config.h2_max_concurrent_pushes:
+            return "connection push limit reached (h2_max_concurrent_pushes)"
+        elif self._parent_push_counts.get(stream_id, 0) >= self.config.h2_max_pushes_per_request:
+            return "parent stream push limit reached (h2_max_pushes_per_request)"
+        elif len(self._push_streams) + 1 > self.connection.remote_settings.max_concurrent_streams:
+            return "client max concurrent streams reached"
+        else:
+            return None
+
+    async def _cancel_pushes(self, parent_stream_id: int | None = None) -> None:
+        # Cancel any in flight pushes, either those promised on the
+        # (reset) parent stream or all of them if no parent is given.
+        push_stream_ids = [
+            push_stream_id
+            for push_stream_id, parent_id in self._push_streams.items()
+            if parent_stream_id is None or parent_id == parent_stream_id
+        ]
+        for push_stream_id in push_stream_ids:
+            try:
+                self.connection.reset_stream(push_stream_id)
+            except (h2.exceptions.StreamClosedError, h2.exceptions.ProtocolError):
+                pass
+            await self._close_stream(push_stream_id)
+        if push_stream_ids:
+            await self._flush()
+            await self.config.log.info(
+                "Cancelled pushes on streams %s as the client is unable to receive them",
+                push_stream_ids,
+            )
+
     async def _close_stream(self, stream_id: int) -> None:
+        if stream_id in self._push_streams:
+            parent_id = self._push_streams.pop(stream_id)
+            count = self._parent_push_counts.get(parent_id, 0) - 1
+            if count > 0:
+                self._parent_push_counts[parent_id] = count
+            else:
+                self._parent_push_counts.pop(parent_id, None)
         if stream_id in self.streams:
             stream = self.streams.pop(stream_id)
             await stream.handle(StreamClosed(stream_id=stream_id))

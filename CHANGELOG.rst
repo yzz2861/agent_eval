@@ -1,3 +1,11 @@
+Unreleased
+----------
+
+* Limit HTTP/2 server pushes per connection (``h2_max_concurrent_pushes``)
+  and per request (``h2_max_pushes_per_request``), skip duplicate push
+  targets, and cancel pushes when the client disables push or resets the
+  parent stream.
+
 0.18.0 2025-11-08
 -----------------
 
