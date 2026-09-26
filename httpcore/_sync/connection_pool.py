@@ -120,6 +120,11 @@ class ConnectionPool(RequestInterface):
         self._connections: list[ConnectionInterface] = []
         self._requests: list[PoolRequest] = []
 
+        # Connections that were established under a previous SSL context,
+        # and are being drained. They are no longer assigned any new requests,
+        # and are closed once they become idle.
+        self._draining_connections: list[ConnectionInterface] = []
+
         # We only mutate the state of the connection pool within an 'optional_thread_lock'
         # context. This holds a threading lock unless we're running in async mode,
         # in which case it is a no-op.
@@ -194,7 +199,39 @@ class ConnectionPool(RequestInterface):
         ]
         ```
         """
-        return list(self._connections)
+        return list(self._connections) + list(self._draining_connections)
+
+    def update_ssl_context(self, ssl_context: ssl.SSLContext | None) -> None:
+        """
+        Switch the SSL context that the connection pool uses for new connections.
+
+        This starts a new connection generation. Any connections established
+        with the previous SSL context are retired:
+
+        * Idle connections are closed immediately.
+        * Active connections are drained, continuing to service their existing
+          requests, and are closed once they become idle. HTTP/2 connections
+          do not accept any new streams once retired.
+        * Queued requests that have not yet been assigned a connection are
+          migrated to the new generation, and will use connections established
+          with the new SSL context.
+
+        Note that this only manages the connection pool lifecycle. Loading
+        certificates from disk and building the new `ssl.SSLContext` is the
+        responsibility of the caller.
+        """
+        with self._optional_thread_lock:
+            self._ssl_context = ssl_context
+            closing_connections = []
+            for connection in self._connections:
+                if connection.is_closed():
+                    pass
+                elif connection.is_idle():
+                    closing_connections.append(connection)
+                else:
+                    self._draining_connections.append(connection)
+            self._connections = []
+        self._close_connections(closing_connections)
 
     def handle_request(self, request: Request) -> Response:
         """
@@ -298,6 +335,15 @@ class ConnectionPool(RequestInterface):
                 self._connections.remove(connection)
                 closing_connections.append(connection)
 
+        # Retired connections from a previous SSL context generation are
+        # closed once they have drained and are no longer servicing requests.
+        for connection in list(self._draining_connections):
+            if connection.is_closed():
+                self._draining_connections.remove(connection)
+            elif connection.is_idle():
+                self._draining_connections.remove(connection)
+                closing_connections.append(connection)
+
         # Assign queued requests to connections.
         queued_requests = [request for request in self._requests if request.is_queued()]
         for pool_request in queued_requests:
@@ -348,8 +394,11 @@ class ConnectionPool(RequestInterface):
         # Explicitly close the connection pool.
         # Clears all existing requests and connections.
         with self._optional_thread_lock:
-            closing_connections = list(self._connections)
+            closing_connections = list(self._connections) + list(
+                self._draining_connections
+            )
             self._connections = []
+            self._draining_connections = []
         self._close_connections(closing_connections)
 
     def __enter__(self) -> ConnectionPool:
@@ -369,6 +418,8 @@ class ConnectionPool(RequestInterface):
             request_is_queued = [request.is_queued() for request in self._requests]
             connection_is_idle = [
                 connection.is_idle() for connection in self._connections
+            ] + [
+                connection.is_idle() for connection in self._draining_connections
             ]
 
             num_active_requests = request_is_queued.count(False)

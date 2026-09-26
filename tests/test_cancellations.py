@@ -4,8 +4,14 @@ import anyio
 import hpack
 import hyperframe
 import pytest
+import trio
 
 import httpcore
+from tests.tls_server import (
+    AsyncSocketPairBackend,
+    TLSServer,
+    client_ssl_context,
+)
 
 
 class SlowWriteStream(httpcore.AsyncNetworkStream):
@@ -205,6 +211,40 @@ async def test_h2_timeout_during_request():
 
         assert not conn.is_closed()
         assert conn.is_idle()
+
+
+@pytest.mark.trio
+async def test_connection_pool_update_ssl_context_with_cancellation():
+    """
+    Cancelling an in-flight request at around the same time as the
+    connection pool switches SSL context should leave the pool in a
+    consistent state, and must not allow connections from the previous
+    generation to be re-used.
+    """
+    with TLSServer() as server:
+        context_a = client_ssl_context("client-a")
+        context_b = client_ssl_context("client-b")
+        async with httpcore.AsyncConnectionPool(
+            ssl_context=context_a, network_backend=AsyncSocketPairBackend(server)
+        ) as pool:
+
+            async def cancelled_request():
+                with trio.move_on_after(0.5):
+                    await pool.request("GET", f"{server.url}/slow")
+
+            async with trio.open_nursery() as nursery:
+                nursery.start_soon(cancelled_request)
+                while not server.slow_requested.is_set():
+                    await trio.sleep(0.01)
+                await pool.update_ssl_context(context_b)
+
+            # The cancelled request has been cleaned up, and the retired
+            # connection was not re-lent.
+            assert pool.connections == []
+            response = await pool.request("GET", server.url)
+            assert response.status == 200
+
+        assert server.client_cert_cns == ["httpcore-client-a", "httpcore-client-b"]
 
 
 @pytest.mark.xfail

@@ -10,6 +10,7 @@ childen, because we don't need that for our use-case.
 """
 
 import threading
+import time
 from types import TracebackType
 from typing import Any, Callable, List, Optional, Type
 
@@ -28,14 +29,17 @@ class Nursery:
         traceback: Optional[TracebackType] = None,
     ) -> None:
         for thread in self._threads:
-            thread.start()
-        for thread in self._threads:
             thread.join()
 
     def start_soon(self, func: Callable[..., object], *args: Any) -> None:
         thread = threading.Thread(target=func, args=args)
+        thread.start()
         self._threads.append(thread)
 
 
 def open_nursery() -> Nursery:
     return Nursery()
+
+
+def sleep(seconds: float) -> None:
+    time.sleep(seconds)
