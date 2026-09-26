@@ -113,7 +113,7 @@ state with `disconnected = await request.is_disconnected()`.
 
 Request files are normally sent as multipart form data (`multipart/form-data`).
 
-Signature: `request.form(max_files=1000, max_fields=1000, max_part_size=1024*1024)`
+Signature: `request.form(max_files=1000, max_fields=1000, max_part_size=1024*1024, max_file_size=None, max_total_size=None)`
 
 You can configure the maximum number of fields or files with `max_files` and
 `max_fields`. The `max_part_size` parameter limits the size of each non-file
@@ -124,6 +124,33 @@ field; uploaded files are spooled to temporary storage and are not limited by
 async with request.form(max_files=1000, max_fields=1000, max_part_size=1024*1024):
     ...
 ```
+
+Uploaded files can additionally be constrained with two byte budgets. The
+`max_file_size` parameter limits the content size of each individual uploaded
+file, while `max_total_size` limits the cumulative size of all part contents
+in the form — uploaded files and regular fields combined. Both budgets are
+counted in bytes as they are actually received during parsing, so the
+`Content-Length` header is never trusted, and multipart boundaries and part
+headers are not counted towards `max_total_size`. A part that is exactly at
+the limit is accepted; a single byte more rejects the request:
+
+```python
+async with request.form(max_file_size=1024*1024, max_total_size=10*1024*1024):
+    ...
+```
+
+When either budget is exceeded, parsing stops immediately, the remainder of
+the upload stream is not consumed, and every temporary file created during
+parsing — including files that already completed — is closed. Inside an
+application the error surfaces as an HTTP `413 Content Too Large` response;
+without an application context it is raised as
+`starlette.formparsers.FormLimitExceeded`.
+
+Both budgets default to `None` (unlimited), preserving the previous behavior.
+They are also unrelated to `MultiPartParser.spool_max_size` (1MB): the spool
+threshold only controls when an uploaded file rolls over from memory to a
+temporary file on disk. Files larger than the threshold are still accepted —
+the threshold never rejects a request.
 
 !!! info
     These limits are for security reasons, allowing an unlimited number of fields or files could lead to a denial of service attack by consuming a lot of CPU and memory parsing too many empty fields.

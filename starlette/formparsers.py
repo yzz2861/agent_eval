@@ -57,6 +57,15 @@ class MultiPartException(Exception):
         self.message = message
 
 
+class FormLimitExceeded(MultiPartException):
+    """Raised when a configured form size budget is exceeded.
+
+    Unlike other `MultiPartException` errors (which map to HTTP 400), this
+    maps to HTTP 413 (Content Too Large) when raised through `Request.form()`
+    inside an application.
+    """
+
+
 class FormParser:
     def __init__(
         self,
@@ -65,15 +74,23 @@ class FormParser:
         *,
         max_fields: int | float = 1000,
         max_part_size: int = 1024 * 1024,  # 1MB
+        max_total_size: int | None = None,
     ) -> None:
         assert multipart is not None, "The `python-multipart` library must be installed to use form parsing."
         self.headers = headers
         self.stream = stream
         self.max_fields = max_fields
         self.max_part_size = max_part_size
+        self.max_total_size = max_total_size
         self.messages: list[tuple[FormMessage, bytes]] = []
         self._current_field_size = 0
         self._current_fields = 0
+        self._total_size = 0
+
+    def _track_total_size(self, size: int) -> None:
+        self._total_size += size
+        if self.max_total_size is not None and self._total_size > self.max_total_size:
+            raise FormLimitExceeded(f"Form exceeded maximum total size of {self.max_total_size} bytes.")
 
     def on_field_start(self) -> None:
         self._current_field_size = 0
@@ -81,6 +98,7 @@ class FormParser:
         self.messages.append(message)
 
     def on_field_name(self, data: bytes, start: int, end: int) -> None:
+        self._track_total_size(end - start)
         self._current_field_size += end - start
         if self._current_field_size > self.max_part_size:
             raise MultiPartException(f"Field exceeded maximum size of {int(self.max_part_size / 1024)}KB.")
@@ -88,6 +106,7 @@ class FormParser:
         self.messages.append(message)
 
     def on_field_data(self, data: bytes, start: int, end: int) -> None:
+        self._track_total_size(end - start)
         self._current_field_size += end - start
         if self._current_field_size > self.max_part_size:
             raise MultiPartException(f"Field exceeded maximum size of {int(self.max_part_size / 1024)}KB.")
@@ -160,15 +179,21 @@ class MultiPartParser:
         max_files: int | float = 1000,
         max_fields: int | float = 1000,
         max_part_size: int = 1024 * 1024,  # 1MB
+        max_file_size: int | None = None,
+        max_total_size: int | None = None,
     ) -> None:
         assert multipart is not None, "The `python-multipart` library must be installed to use form parsing."
         self.headers = headers
         self.stream = stream
         self.max_files = max_files
         self.max_fields = max_fields
+        self.max_file_size = max_file_size
+        self.max_total_size = max_total_size
         self.items: list[tuple[str, str | UploadFile]] = []
         self._current_files = 0
         self._current_fields = 0
+        self._current_file_size = 0
+        self._total_size = 0
         self._current_partial_header_name: bytes = b""
         self._current_partial_header_value: bytes = b""
         self._current_part = MultipartPart()
@@ -180,14 +205,21 @@ class MultiPartParser:
 
     def on_part_begin(self) -> None:
         self._current_part = MultipartPart()
+        self._current_file_size = 0
 
     def on_part_data(self, data: bytes, start: int, end: int) -> None:
         message_bytes = data[start:end]
+        self._total_size += len(message_bytes)
+        if self.max_total_size is not None and self._total_size > self.max_total_size:
+            raise FormLimitExceeded(f"Form exceeded maximum total size of {self.max_total_size} bytes.")
         if self._current_part.file is None:
             if len(self._current_part.data) + len(message_bytes) > self.max_part_size:
                 raise MultiPartException(f"Part exceeded maximum size of {int(self.max_part_size / 1024)}KB.")
             self._current_part.data.extend(message_bytes)
         else:
+            self._current_file_size += len(message_bytes)
+            if self.max_file_size is not None and self._current_file_size > self.max_file_size:
+                raise FormLimitExceeded(f"File exceeded maximum size of {self.max_file_size} bytes.")
             self._file_parts_to_write.append((self._current_part, message_bytes))
 
     def on_part_end(self) -> None:

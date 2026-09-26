@@ -2,6 +2,16 @@
 toc_depth: 2
 ---
 
+## Unreleased
+
+#### Added
+
+* Add `max_file_size` and `max_total_size` parameters to `Request.form()`, `MultiPartParser`, and
+  `FormParser` (`max_total_size` only) to limit the size of each uploaded file and the cumulative
+  size of all form part contents. The budgets are counted in bytes as received during parsing, and
+  exceeding them stops parsing, closes any temporary files, and raises HTTP 413 in an application
+  context via the new `starlette.formparsers.FormLimitExceeded` exception.
+
 ## 1.7.0 (September 23, 2026)
 
 This release adds experimental OpenTelemetry tracing and requires AnyIO 4.
