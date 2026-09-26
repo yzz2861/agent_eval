@@ -23,7 +23,9 @@ from ._decoders import SUPPORTED_DECODERS
 from ._exceptions import (
     InvalidURL,
     RemoteProtocolError,
+    TimeoutException,
     TooManyRedirects,
+    TotalTimeout,
     request_context,
 )
 from ._models import Cookies, Headers, Request, Response
@@ -122,6 +124,30 @@ ACCEPT_ENCODING = ", ".join(
 )
 
 
+def _monotonic() -> float:
+    # Wrapped in a module-level function so that tests can swap in a
+    # controllable clock.
+    return time.monotonic()
+
+
+class TotalRequestBudget:
+    """
+    Tracks a single total time budget, shared across the whole lifecycle
+    of a request: queueing, connecting, authentication retries, redirects,
+    and streaming the response body.
+    """
+
+    def __init__(self, timeout: float) -> None:
+        self._deadline = _monotonic() + timeout
+
+    def remaining(self) -> float:
+        return self._deadline - _monotonic()
+
+    def raise_if_exceeded(self) -> None:
+        if self.remaining() <= 0.0:
+            raise TotalTimeout("Exceeded the total request time budget.")
+
+
 class ClientState(enum.Enum):
     # UNOPENED:
     #   The client has been instantiated, but has not been used to send a request,
@@ -143,15 +169,37 @@ class BoundSyncStream(SyncByteStream):
     """
 
     def __init__(
-        self, stream: SyncByteStream, response: Response, start: float
+        self,
+        stream: SyncByteStream,
+        response: Response,
+        start: float,
+        budget: TotalRequestBudget | None = None,
     ) -> None:
         self._stream = stream
         self._response = response
         self._start = start
+        self._budget = budget
 
     def __iter__(self) -> typing.Iterator[bytes]:
-        for chunk in self._stream:
+        iterator = iter(self._stream)
+        while True:
+            self._check_budget()
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                break
+            self._check_budget()
             yield chunk
+
+    def _check_budget(self) -> None:
+        if self._budget is None:
+            return
+        try:
+            self._budget.raise_if_exceeded()
+        except TotalTimeout:
+            # Ensure the connection is released once the budget is exhausted.
+            self.close()
+            raise
 
     def close(self) -> None:
         elapsed = time.perf_counter() - self._start
@@ -166,15 +214,37 @@ class BoundAsyncStream(AsyncByteStream):
     """
 
     def __init__(
-        self, stream: AsyncByteStream, response: Response, start: float
+        self,
+        stream: AsyncByteStream,
+        response: Response,
+        start: float,
+        budget: TotalRequestBudget | None = None,
     ) -> None:
         self._stream = stream
         self._response = response
         self._start = start
+        self._budget = budget
 
     async def __aiter__(self) -> typing.AsyncIterator[bytes]:
-        async for chunk in self._stream:
+        iterator = self._stream.__aiter__()
+        while True:
+            await self._check_budget()
+            try:
+                chunk = await iterator.__anext__()
+            except StopAsyncIteration:
+                break
+            await self._check_budget()
             yield chunk
+
+    async def _check_budget(self) -> None:
+        if self._budget is None:
+            return
+        try:
+            self._budget.raise_if_exceeded()
+        except TotalTimeout:
+            # Ensure the connection is released once the budget is exhausted.
+            await self.aclose()
+            raise
 
     async def aclose(self) -> None:
         elapsed = time.perf_counter() - self._start
@@ -590,6 +660,22 @@ class BaseClient:
             )
             request.extensions = dict(**request.extensions, timeout=timeout.as_dict())
 
+    def _get_total_budget(self, request: Request) -> TotalRequestBudget | None:
+        total = request.extensions.get("timeout", {}).get("total")
+        return None if total is None else TotalRequestBudget(total)
+
+    def _clamp_timeout_to_budget(
+        self, request: Request, budget: TotalRequestBudget
+    ) -> None:
+        # Queueing, connecting, reading and writing all share the same
+        # remaining budget, rather than restarting the clock on each phase.
+        timeout = dict(request.extensions.get("timeout", {}))
+        remaining = budget.remaining()
+        for key in ("connect", "read", "write", "pool"):
+            value = timeout.get(key)
+            timeout[key] = remaining if value is None else min(value, remaining)
+        request.extensions = {**request.extensions, "timeout": timeout}
+
 
 class Client(BaseClient):
     """
@@ -916,6 +1002,7 @@ class Client(BaseClient):
             auth=auth,
             follow_redirects=follow_redirects,
             history=[],
+            budget=self._get_total_budget(request),
         )
         try:
             if not stream:
@@ -933,6 +1020,7 @@ class Client(BaseClient):
         auth: Auth,
         follow_redirects: bool,
         history: list[Response],
+        budget: TotalRequestBudget | None,
     ) -> Response:
         auth_flow = auth.sync_auth_flow(request)
         try:
@@ -943,6 +1031,7 @@ class Client(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    budget=budget,
                 )
                 try:
                     try:
@@ -966,6 +1055,7 @@ class Client(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        budget: TotalRequestBudget | None,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -976,7 +1066,7 @@ class Client(BaseClient):
             for hook in self._event_hooks["request"]:
                 hook(request)
 
-            response = self._send_single_request(request)
+            response = self._send_single_request(request, budget)
             try:
                 for hook in self._event_hooks["response"]:
                     hook(response)
@@ -998,7 +1088,9 @@ class Client(BaseClient):
                 response.close()
                 raise exc
 
-    def _send_single_request(self, request: Request) -> Response:
+    def _send_single_request(
+        self, request: Request, budget: TotalRequestBudget | None
+    ) -> Response:
         """
         Sends a single request, without handling any redirections.
         """
@@ -1010,14 +1102,26 @@ class Client(BaseClient):
                 "Attempted to send an async request with a sync Client instance."
             )
 
-        with request_context(request=request):
-            response = transport.handle_request(request)
+        if budget is not None:
+            with request_context(request=request):
+                budget.raise_if_exceeded()
+            self._clamp_timeout_to_budget(request, budget)
+
+        try:
+            with request_context(request=request):
+                response = transport.handle_request(request)
+        except TimeoutException as exc:
+            if budget is not None and budget.remaining() <= 0.0:
+                raise TotalTimeout(
+                    "Exceeded the total request time budget.", request=request
+                ) from exc
+            raise
 
         assert isinstance(response.stream, SyncByteStream)
 
         response.request = request
         response.stream = BoundSyncStream(
-            response.stream, response=response, start=start
+            response.stream, response=response, start=start, budget=budget
         )
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
@@ -1631,6 +1735,7 @@ class AsyncClient(BaseClient):
             auth=auth,
             follow_redirects=follow_redirects,
             history=[],
+            budget=self._get_total_budget(request),
         )
         try:
             if not stream:
@@ -1648,6 +1753,7 @@ class AsyncClient(BaseClient):
         auth: Auth,
         follow_redirects: bool,
         history: list[Response],
+        budget: TotalRequestBudget | None,
     ) -> Response:
         auth_flow = auth.async_auth_flow(request)
         try:
@@ -1658,6 +1764,7 @@ class AsyncClient(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    budget=budget,
                 )
                 try:
                     try:
@@ -1681,6 +1788,7 @@ class AsyncClient(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        budget: TotalRequestBudget | None,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -1691,7 +1799,7 @@ class AsyncClient(BaseClient):
             for hook in self._event_hooks["request"]:
                 await hook(request)
 
-            response = await self._send_single_request(request)
+            response = await self._send_single_request(request, budget)
             try:
                 for hook in self._event_hooks["response"]:
                     await hook(response)
@@ -1714,7 +1822,9 @@ class AsyncClient(BaseClient):
                 await response.aclose()
                 raise exc
 
-    async def _send_single_request(self, request: Request) -> Response:
+    async def _send_single_request(
+        self, request: Request, budget: TotalRequestBudget | None
+    ) -> Response:
         """
         Sends a single request, without handling any redirections.
         """
@@ -1726,13 +1836,25 @@ class AsyncClient(BaseClient):
                 "Attempted to send a sync request with an AsyncClient instance."
             )
 
-        with request_context(request=request):
-            response = await transport.handle_async_request(request)
+        if budget is not None:
+            with request_context(request=request):
+                budget.raise_if_exceeded()
+            self._clamp_timeout_to_budget(request, budget)
+
+        try:
+            with request_context(request=request):
+                response = await transport.handle_async_request(request)
+        except TimeoutException as exc:
+            if budget is not None and budget.remaining() <= 0.0:
+                raise TotalTimeout(
+                    "Exceeded the total request time budget.", request=request
+                ) from exc
+            raise
 
         assert isinstance(response.stream, AsyncByteStream)
         response.request = request
         response.stream = BoundAsyncStream(
-            response.stream, response=response, start=start
+            response.stream, response=response, start=start, budget=budget
         )
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding

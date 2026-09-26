@@ -69,3 +69,28 @@ client = httpx.Client(timeout=timeout)
 
 response = client.get('http://example.com/')
 ```
+
+## Total request time budget
+
+The four timeouts above are all per-operation timeouts. A request that
+continually receives small chunks of data, or that goes through several
+redirects, may keep each individual operation within its timeout while the
+overall request takes an unbounded amount of time.
+
+The optional **total** timeout provides a single time budget that covers the
+entire request lifecycle, from the moment the request is sent until the
+response is closed. Queueing for a connection, connecting, authentication
+retries, and any redirects all share the same remaining budget, and a
+streaming response remains subject to the budget even after the response
+headers have been received. Once the budget is exhausted a `TotalTimeout`
+exception is raised, and the connection is released.
+
+```python
+# Allow up to 5s for each individual network operation,
+# but no more than 60s for the request as a whole.
+timeout = httpx.Timeout(5.0, total=60.0)
+client = httpx.Client(timeout=timeout)
+```
+
+The **total** timeout defaults to `None`, which disables the budget and
+leaves the per-operation timeouts behaving exactly as before.

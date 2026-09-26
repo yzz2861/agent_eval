@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * Expose `FunctionAuth` from the public API. (#3699)
+* Add an optional `total` timeout on `httpx.Timeout`, providing a single time
+  budget covering the entire request lifecycle, including connection pooling,
+  redirects, authentication retries, and streaming responses. Exceeding the
+  budget raises `httpx.TotalTimeout`.
 
 ## 0.28.1 (6th December, 2024)
 

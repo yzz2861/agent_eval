@@ -161,6 +161,30 @@ def test_timeout_repr():
     assert repr(timeout) == "Timeout(connect=None, read=5.0, write=None, pool=None)"
 
 
+def test_timeout_total():
+    timeout = httpx.Timeout(5.0, total=60.0)
+    assert timeout.total == 60.0
+    assert timeout.as_dict() == {
+        "connect": 5.0,
+        "read": 5.0,
+        "write": 5.0,
+        "pool": 5.0,
+        "total": 60.0,
+    }
+    assert repr(timeout) == (
+        "Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0, total=60.0)"
+    )
+
+    # The total budget is opt-in, and is not set from the default.
+    assert httpx.Timeout(5.0).total is None
+    assert httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0).total is None
+
+    # The total budget is preserved when copying a `Timeout` instance.
+    assert httpx.Timeout(timeout) == timeout
+    assert httpx.Timeout(timeout).total == 60.0
+    assert timeout != httpx.Timeout(5.0)
+
+
 def test_proxy_from_url():
     proxy = httpx.Proxy("https://example.com")
 
