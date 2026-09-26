@@ -493,6 +493,68 @@ class Response:
             await self.stream.aclose()
 
 
+class Trailers:
+    """
+    The trailers for an HTTP response, included as the `"trailers"` extension
+    on HTTP/2 responses.
+
+    Trailers are only determined once the response body has been read to
+    completion. The `is_complete` and `headers` properties allow
+    distinguishing between "the trailers have not arrived yet", "the response
+    completed without any trailers", and "the response was closed or reset
+    before completing".
+    """
+
+    def __init__(self) -> None:
+        self._headers: list[tuple[bytes, bytes]] | None = None
+        self._is_complete = False
+
+    @property
+    def is_complete(self) -> bool:
+        """
+        `True` once the response has reached a final state, either by the
+        response stream ending, or by it being closed or reset before
+        completing.
+        """
+        return self._is_complete
+
+    @property
+    def headers(self) -> list[tuple[bytes, bytes]] | None:
+        """
+        The trailer fields as a list of `(name, value)` byte tuples,
+        preserving any duplicate names and their original ordering.
+
+        This is `None` if the response body has not yet been read to
+        completion, or if the response was closed or reset before completing.
+        Once the response stream has been fully consumed this is a list,
+        which is empty if the response did not include any trailers.
+        """
+        return self._headers
+
+    # These methods are used by the connection implementation to update
+    # the state of the trailers as the response progresses.
+
+    def _set_headers(self, headers: list[tuple[bytes, bytes]]) -> None:
+        self._headers = headers
+
+    def _set_complete(self) -> None:
+        if self._headers is None:
+            self._headers = []
+        self._is_complete = True
+
+    def _set_terminated(self) -> None:
+        self._is_complete = True
+
+    def __repr__(self) -> str:
+        if not self._is_complete:
+            state = "PENDING"
+        elif self._headers is None:
+            state = "TERMINATED"
+        else:
+            state = "COMPLETE"
+        return f"<{self.__class__.__name__} [{state}]>"
+
+
 class Proxy:
     def __init__(
         self,

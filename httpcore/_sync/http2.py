@@ -18,7 +18,7 @@ from .._exceptions import (
     LocalProtocolError,
     RemoteProtocolError,
 )
-from .._models import Origin, Request, Response
+from .._models import Origin, Request, Response, Trailers
 from .._synchronization import Lock, Semaphore, ShieldCancellation
 from .._trace import Trace
 from .interfaces import ConnectionInterface
@@ -70,10 +70,14 @@ class HTTP2Connection(ConnectionInterface):
             list[
                 h2.events.ResponseReceived
                 | h2.events.DataReceived
+                | h2.events.TrailersReceived
                 | h2.events.StreamEnded
                 | h2.events.StreamReset,
             ],
         ] = {}
+
+        # Mapping from stream ID to the response trailers.
+        self._trailers: dict[int, Trailers] = {}
 
         # Connection terminated events are stored as state since
         # we need to handle them for all streams.
@@ -133,6 +137,7 @@ class HTTP2Connection(ConnectionInterface):
         try:
             stream_id = self._h2_state.get_next_available_stream_id()
             self._events[stream_id] = []
+            self._trailers[stream_id] = Trailers()
         except h2.exceptions.NoAvailableStreamIDError:  # pragma: nocover
             self._used_all_stream_ids = True
             self._request_count -= 1
@@ -160,6 +165,7 @@ class HTTP2Connection(ConnectionInterface):
                     "http_version": b"HTTP/2",
                     "network_stream": self._network_stream,
                     "stream_id": stream_id,
+                    "trailers": self._trailers[stream_id],
                 },
             )
         except BaseException as exc:  # noqa: PIE786
@@ -321,12 +327,21 @@ class HTTP2Connection(ConnectionInterface):
                 self._h2_state.acknowledge_received_data(amount, stream_id)
                 self._write_outgoing_data(request)
                 yield event.data
+            elif isinstance(event, h2.events.TrailersReceived):
+                assert event.headers is not None
+                self._trailers[stream_id]._set_headers(list(event.headers))
             elif isinstance(event, h2.events.StreamEnded):
+                self._trailers[stream_id]._set_complete()
                 break
 
     def _receive_stream_event(
         self, request: Request, stream_id: int
-    ) -> h2.events.ResponseReceived | h2.events.DataReceived | h2.events.StreamEnded:
+    ) -> (
+        h2.events.ResponseReceived
+        | h2.events.DataReceived
+        | h2.events.TrailersReceived
+        | h2.events.StreamEnded
+    ):
         """
         Return the next available event for a given stream ID.
 
@@ -336,6 +351,7 @@ class HTTP2Connection(ConnectionInterface):
             self._receive_events(request, stream_id)
         event = self._events[stream_id].pop(0)
         if isinstance(event, h2.events.StreamReset):
+            self._trailers[stream_id]._set_terminated()
             raise RemoteProtocolError(event)
         return event
 
@@ -375,6 +391,7 @@ class HTTP2Connection(ConnectionInterface):
                         (
                             h2.events.ResponseReceived,
                             h2.events.DataReceived,
+                            h2.events.TrailersReceived,
                             h2.events.StreamEnded,
                             h2.events.StreamReset,
                         ),
@@ -409,6 +426,8 @@ class HTTP2Connection(ConnectionInterface):
     def _response_closed(self, stream_id: int) -> None:
         self._max_streams_semaphore.release()
         del self._events[stream_id]
+        trailers = self._trailers.pop(stream_id)
+        trailers._set_terminated()
         with self._state_lock:
             if self._connection_terminated and not self._events:
                 self.close()

@@ -187,3 +187,34 @@ async def test_response_async_streaming():
     with pytest.raises(RuntimeError):
         async for chunk in response.aiter_stream():
             pass  # pragma: nocover
+
+
+# Trailers
+
+
+def test_trailers():
+    trailers = httpcore.Trailers()
+    assert not trailers.is_complete
+    assert trailers.headers is None
+    assert repr(trailers) == "<Trailers [PENDING]>"
+
+    trailers._set_headers([(b"x-checksum", b"abc123")])
+    trailers._set_complete()
+    assert trailers.is_complete
+    assert trailers.headers == [(b"x-checksum", b"abc123")]
+    assert repr(trailers) == "<Trailers [COMPLETE]>"
+
+
+def test_trailers_complete_without_headers():
+    trailers = httpcore.Trailers()
+    trailers._set_complete()
+    assert trailers.is_complete
+    assert trailers.headers == []
+
+
+def test_trailers_terminated():
+    trailers = httpcore.Trailers()
+    trailers._set_terminated()
+    assert trailers.is_complete
+    assert trailers.headers is None
+    assert repr(trailers) == "<Trailers [TERMINATED]>"

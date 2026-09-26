@@ -210,6 +210,23 @@ When no key is included, a default based on the status code may be used.
 
 When HTTP/2 is being used the `"stream_id"` response extension can be accessed to determine the ID of the data stream that the response was sent on.
 
+### `"trailers"`
+
+When HTTP/2 is being used the `"trailers"` response extension provides access to any trailing HEADERS that the server sends after the response body, as an `httpcore.Trailers` instance.
+
+Trailers are only determined once the response body has been read to completion. The `Trailers` class allows distinguishing between "the trailers have not arrived yet", "the response completed without any trailers", and "the response was closed or reset before completing":
+
+* `trailers.is_complete` - `True` once the response has reached a final state, either by the response stream ending, or by it being closed or reset before completing.
+* `trailers.headers` - The trailer fields as a list of `(name, value)` byte tuples, preserving any duplicate names and their original ordering. This is `None` while the response body is still being read, or if the response was closed or reset before completing. Once the response stream has been fully consumed this is a list, which is empty if the response did not include any trailers.
+
+```python
+with httpcore.stream("GET", "https://www.example.com") as r:
+    trailers = r.extensions["trailers"]
+    r.read()  # Read the response body to completion.
+    if trailers.headers is not None:
+        print(trailers.headers)
+```
+
 ### `"network_stream"`
 
 The `"network_stream"` extension allows developers to handle HTTP `CONNECT` and `Upgrade` requests, by providing an API that steps outside the standard request/response model, and can directly read or write to the network.

@@ -380,3 +380,216 @@ def test_http2_remote_max_streams_update():
                         conn._h2_state.local_settings.max_concurrent_streams,
                     )
                 i += 1
+
+
+
+def test_http2_response_trailers():
+    """
+    HTTP/2 trailing HEADERS are exposed through the response extensions,
+    preserving duplicate field names and their original ordering.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = httpcore.MockStream(
+        [
+            hyperframe.frame.SettingsFrame().serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=1,
+                data=hpack.Encoder().encode(
+                    [
+                        (b":status", b"200"),
+                        (b"content-type", b"plain/text"),
+                    ]
+                ),
+                flags=["END_HEADERS"],
+            ).serialize(),
+            hyperframe.frame.DataFrame(stream_id=1, data=b"Hello, world!").serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=1,
+                data=hpack.Encoder().encode(
+                    [
+                        (b"x-checksum", b"abc123"),
+                        (b"x-multi", b"first"),
+                        (b"x-multi", b"second"),
+                    ]
+                ),
+                flags=["END_HEADERS", "END_STREAM"],
+            ).serialize(),
+        ]
+    )
+    with httpcore.HTTP2Connection(origin=origin, stream=stream) as conn:
+        with conn.stream("GET", "https://example.com/") as response:
+            trailers = response.extensions["trailers"]
+            assert isinstance(trailers, httpcore.Trailers)
+
+            # The trailers are not yet known while the response body
+            # is still being read.
+            assert not trailers.is_complete
+            assert trailers.headers is None
+            assert repr(trailers) == "<Trailers [PENDING]>"
+
+            response.read()
+
+            assert trailers.is_complete
+            assert trailers.headers == [
+                (b"x-checksum", b"abc123"),
+                (b"x-multi", b"first"),
+                (b"x-multi", b"second"),
+            ]
+            assert repr(trailers) == "<Trailers [COMPLETE]>"
+
+        # Closing the response once it has completed does not
+        # discard the trailers.
+        assert trailers.is_complete
+        assert trailers.headers == [
+            (b"x-checksum", b"abc123"),
+            (b"x-multi", b"first"),
+            (b"x-multi", b"second"),
+        ]
+
+
+
+def test_http2_response_without_trailers():
+    """
+    A response that completes without any trailing HEADERS is distinguishable
+    from a response where the trailers have not yet arrived.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = httpcore.MockStream(
+        [
+            hyperframe.frame.SettingsFrame().serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=1,
+                data=hpack.Encoder().encode(
+                    [
+                        (b":status", b"200"),
+                        (b"content-type", b"plain/text"),
+                    ]
+                ),
+                flags=["END_HEADERS"],
+            ).serialize(),
+            hyperframe.frame.DataFrame(
+                stream_id=1, data=b"Hello, world!", flags=["END_STREAM"]
+            ).serialize(),
+        ]
+    )
+    with httpcore.HTTP2Connection(origin=origin, stream=stream) as conn:
+        with conn.stream("GET", "https://example.com/") as response:
+            trailers = response.extensions["trailers"]
+            assert not trailers.is_complete
+            assert trailers.headers is None
+
+            response.read()
+
+            assert trailers.is_complete
+            assert trailers.headers == []
+
+
+
+def test_http2_response_trailers_on_early_close():
+    """
+    Closing a response before it has completed puts the trailers into
+    a final state, rather than leaving them pending.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = httpcore.MockStream(
+        [
+            hyperframe.frame.SettingsFrame().serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=1,
+                data=hpack.Encoder().encode(
+                    [
+                        (b":status", b"200"),
+                        (b"content-type", b"plain/text"),
+                    ]
+                ),
+                flags=["END_HEADERS"],
+            ).serialize(),
+            hyperframe.frame.DataFrame(stream_id=1, data=b"Hello, world!").serialize(),
+        ]
+    )
+    with httpcore.HTTP2Connection(origin=origin, stream=stream) as conn:
+        with conn.stream("GET", "https://example.com/") as response:
+            trailers = response.extensions["trailers"]
+            assert not trailers.is_complete
+            assert trailers.headers is None
+
+        assert trailers.is_complete
+        assert trailers.headers is None
+        assert repr(trailers) == "<Trailers [TERMINATED]>"
+
+
+
+def test_http2_response_trailers_interleaved_streams_and_reset():
+    """
+    With DATA and trailing HEADERS frames interleaved across multiple streams,
+    each response only exposes the trailers belonging to its own stream.
+    A stream that is reset midway has its trailers terminated, without
+    affecting the other streams on the connection.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = httpcore.MockStream(
+        [
+            hyperframe.frame.SettingsFrame(
+                settings={hyperframe.frame.SettingsFrame.MAX_CONCURRENT_STREAMS: 100}
+            ).serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=1,
+                data=hpack.Encoder().encode([(b":status", b"200")]),
+                flags=["END_HEADERS"],
+            ).serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=3,
+                data=hpack.Encoder().encode([(b":status", b"200")]),
+                flags=["END_HEADERS"],
+            ).serialize(),
+            # DATA and trailing HEADERS for streams 1 and 3 are interleaved...
+            hyperframe.frame.DataFrame(stream_id=1, data=b"Hello, ").serialize(),
+            hyperframe.frame.DataFrame(stream_id=3, data=b"Goodbye, ").serialize(),
+            hyperframe.frame.DataFrame(stream_id=1, data=b"world!").serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=1,
+                data=hpack.Encoder().encode([(b"x-checksum", b"checksum-1")]),
+                flags=["END_HEADERS", "END_STREAM"],
+            ).serialize(),
+            hyperframe.frame.DataFrame(stream_id=3, data=b"cruel world").serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=3,
+                data=hpack.Encoder().encode([(b"x-checksum", b"checksum-3")]),
+                flags=["END_HEADERS", "END_STREAM"],
+            ).serialize(),
+            # ...while stream 5 is reset partway through.
+            hyperframe.frame.HeadersFrame(
+                stream_id=5,
+                data=hpack.Encoder().encode([(b":status", b"200")]),
+                flags=["END_HEADERS"],
+            ).serialize(),
+            hyperframe.frame.DataFrame(stream_id=5, data=b"Par").serialize(),
+            hyperframe.frame.RstStreamFrame(stream_id=5, error_code=8).serialize(),
+        ]
+    )
+    with httpcore.HTTP2Connection(origin=origin, stream=stream) as conn:
+        with conn.stream("GET", "https://example.com/1") as response_1:
+            with conn.stream("GET", "https://example.com/2") as response_2:
+                with conn.stream("GET", "https://example.com/3") as response_3:
+                    trailers_1 = response_1.extensions["trailers"]
+                    trailers_2 = response_2.extensions["trailers"]
+                    trailers_3 = response_3.extensions["trailers"]
+
+                    assert response_1.read() == b"Hello, world!"
+                    assert response_2.read() == b"Goodbye, cruel world"
+                    with pytest.raises(httpcore.RemoteProtocolError):
+                        response_3.read()
+
+                    # Each response only includes the trailers for its own stream.
+                    assert trailers_1.is_complete
+                    assert trailers_1.headers == [(b"x-checksum", b"checksum-1")]
+                    assert trailers_2.is_complete
+                    assert trailers_2.headers == [(b"x-checksum", b"checksum-3")]
+
+                    # The reset stream has its trailers terminated.
+                    assert trailers_3.is_complete
+                    assert trailers_3.headers is None
+
+        # The connection remains reusable, and is returned to an idle state.
+        assert conn.is_available()
+        assert conn.is_idle()
