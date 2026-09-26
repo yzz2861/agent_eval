@@ -4,11 +4,13 @@ import json
 import sys
 from collections.abc import AsyncGenerator, Iterator, Mapping
 from http import cookies as http_cookies
+from tempfile import SpooledTemporaryFile
 from typing import TYPE_CHECKING, Any, Generic, NoReturn, cast
 
 import anyio
 
 from starlette._utils import AwaitableOrContextManager, AwaitableOrContextManagerWrapper
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import URL, Address, FormData, Headers, QueryParams, State
 from starlette.exceptions import HTTPException
 from starlette.formparsers import FormParser, MultiPartException, MultiPartParser
@@ -211,6 +213,101 @@ async def empty_send(message: Message) -> NoReturn:
     raise RuntimeError("Send channel has not been made available")
 
 
+BODY_REPLAY_CACHE_SCOPE_KEY = "starlette.body_replay_cache"
+
+
+class BodyReplayLimitExceeded(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=413, detail="Content Too Large")
+
+
+class RequestBodyCache:
+    """
+    An opt-in, per-request cache of the raw request body that allows the body
+    to be consumed more than once.
+
+    The first pass through `stream()` reads the body from the network exactly
+    once, teeing the raw bytes into a spooled temporary file. Bodies up to
+    `spool_threshold` bytes stay in memory; larger bodies roll over to a
+    temporary file on disk. Subsequent passes replay the cached bytes in
+    `replay_chunk_size` chunks, so file-backed bodies are never loaded back
+    into memory as a whole.
+
+    `max_cache_size` is a hard limit on the total number of cached bytes. Once
+    it is exceeded no further messages are received from the network and
+    `BodyReplayLimitExceeded` is raised.
+
+    The cache is bound to a single request. Call `close()` when the request is
+    done - on success, client disconnect, or error - to release the temporary
+    file.
+    """
+
+    def __init__(
+        self,
+        receive: Receive,
+        *,
+        spool_threshold: int = 1024 * 1024,
+        max_cache_size: int | None = None,
+        replay_chunk_size: int = 64 * 1024,
+        temp_dir: str | None = None,
+    ) -> None:
+        self._receive = receive
+        self._spool = SpooledTemporaryFile(max_size=spool_threshold, mode="w+b", dir=temp_dir)
+        self._max_cache_size = max_cache_size
+        self._replay_chunk_size = replay_chunk_size
+        self._cached_size = 0
+        self._consumed = False
+        self._closed = False
+
+    @property
+    def cached_size(self) -> int:
+        return self._cached_size
+
+    @property
+    def rolled_to_disk(self) -> bool:
+        return bool(getattr(self._spool, "_rolled", False))
+
+    async def stream(self) -> AsyncGenerator[bytes, None]:
+        if self._closed:
+            raise RuntimeError("Request body cache is closed")
+        if not self._consumed:
+            # First pass: read the body from the network exactly once, teeing
+            # the raw bytes into the spool as they arrive.
+            while True:
+                message = await self._receive()
+                if message["type"] == "http.request":
+                    chunk = message.get("body", b"")
+                    if not message.get("more_body", False):
+                        self._consumed = True
+                    if chunk:
+                        self._cached_size += len(chunk)
+                        if self._max_cache_size is not None and self._cached_size > self._max_cache_size:
+                            # Stop receiving from the network and report the error.
+                            raise BodyReplayLimitExceeded()
+                        await run_in_threadpool(self._spool.write, chunk)
+                        yield chunk
+                    if self._consumed:
+                        break
+                elif message["type"] == "http.disconnect":  # pragma: no branch
+                    raise ClientDisconnect()
+            yield b""
+        else:
+            # Replay: stream the cached bytes back in chunks, so a file-backed
+            # body is never loaded back into memory as a whole.
+            await run_in_threadpool(self._spool.seek, 0)
+            while True:
+                chunk = await run_in_threadpool(self._spool.read, self._replay_chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+            yield b""
+
+    async def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            await run_in_threadpool(self._spool.close)
+
+
 class Request(HTTPConnection[StateT]):
     _form: FormData | None
 
@@ -235,6 +332,17 @@ class Request(HTTPConnection[StateT]):
         if hasattr(self, "_body"):
             yield self._body
             yield b""
+            return
+        body_cache = cast(RequestBodyCache | None, self.scope.get(BODY_REPLAY_CACHE_SCOPE_KEY))
+        if body_cache is not None:
+            # Body replay is enabled. The cache reads the body from the network
+            # exactly once and replays the cached bytes on subsequent passes.
+            try:
+                async for chunk in body_cache.stream():
+                    yield chunk
+            except ClientDisconnect:
+                self._is_disconnected = True
+                raise
             return
         if self._stream_consumed:
             raise RuntimeError("Stream consumed")

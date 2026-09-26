@@ -333,6 +333,44 @@ it when possible, and always counts the body bytes received from the ASGI server
 This also supports requests without `Content-Length` and prevents an understated
 header from bypassing the limit.
 
+## BodyReplayMiddleware
+
+Caches the raw request body so that it can be consumed more than once. This is
+useful when a middleware needs to read the body before the endpoint - for
+example, a signature verification middleware that calls `request.body()` while
+the endpoint still needs to call `request.stream()` or `request.form()`.
+
+```python
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.bodyreplay import BodyReplayMiddleware
+
+
+routes = ...
+
+middleware = [
+    Middleware(BodyReplayMiddleware, spool_threshold=1024 * 1024, max_cache_size=10 * 1024 * 1024)
+]
+
+app = Starlette(routes=routes, middleware=middleware)
+```
+
+The following arguments are supported:
+
+* `spool_threshold` - Bodies up to this many bytes are cached in memory. Larger bodies are spooled to a temporary file on disk. Defaults to `1024 * 1024`.
+* `max_cache_size` - A hard limit on the total cached body size in bytes. Once exceeded, the middleware stops receiving from the network and responds with `413 Content Too Large`. Defaults to `None` (no limit).
+* `replay_chunk_size` - The chunk size used when replaying a cached body. File-backed bodies are replayed in chunks and are never loaded back into memory as a whole. Defaults to `64 * 1024`.
+* `temp_dir` - The directory used for temporary files. Defaults to the platform's temporary directory.
+
+The body is read from the network exactly once; subsequent passes replay the
+cached raw bytes, possibly with different chunk boundaries. The cache is
+private to the request and its temporary file is released when the request
+finishes, when the client disconnects, or when an exception is raised.
+
+Body replay only applies to bodies consumed through the `Request` API
+(`stream()`, `body()`, `json()`, `form()`). Without this middleware the
+existing stream consumption rules apply.
+
 ## GZipMiddleware
 
 Handles GZip responses for any request that includes `"gzip"` in the `Accept-Encoding` header.
