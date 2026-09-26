@@ -113,6 +113,32 @@ finally:
     http.close()
 ```
 
+## Updating the SSL context
+
+Services that rotate TLS client certificates can switch the SSL context used
+by the pool without closing it, so that requests that are already in-flight
+are able to complete:
+
+```python
+http = httpcore.ConnectionPool(ssl_context=initial_context)
+...
+# Subsequent requests will use connections established with the new context.
+http.update_ssl_context(updated_context)
+```
+
+Updating the SSL context starts a new connection generation within the pool:
+
+* Any idle connections are closed immediately.
+* Any active connections are retired. They remain open until any in-flight
+  requests on them have completed, but are not assigned any new requests.
+  HTTP/2 connections do not accept any new streams.
+* Queued requests that have not yet started are assigned to connections in
+  the new generation.
+
+Note that `update_ssl_context()` only manages the connection pool lifecycle.
+Loading certificates from disk and building the `ssl.SSLContext` instance is
+the responsibility of the caller.
+
 ## Thread and task safety
 
 Connection pools are designed to be thread-safe. Similarly, when using `httpcore` in an async context connection pools are task-safe.

@@ -120,6 +120,11 @@ class AsyncConnectionPool(AsyncRequestInterface):
         self._connections: list[AsyncConnectionInterface] = []
         self._requests: list[AsyncPoolRequest] = []
 
+        # Connections from a previous TLS generation that are still draining.
+        # These connections are no longer eligible to acquire new requests,
+        # and are closed once any in-flight requests on them have completed.
+        self._retired_connections: set[AsyncConnectionInterface] = set()
+
         # We only mutate the state of the connection pool within an 'optional_thread_lock'
         # context. This holds a threading lock unless we're running in async mode,
         # in which case it is a no-op.
@@ -195,6 +200,45 @@ class AsyncConnectionPool(AsyncRequestInterface):
         ```
         """
         return list(self._connections)
+
+    async def update_ssl_context(self, ssl_context: ssl.SSLContext | None) -> None:
+        """
+        Update the SSL context that the pool uses, starting a new
+        connection generation.
+
+        This is useful when TLS client certificates are rotated, and
+        subsequent requests need to be made using an updated SSL context,
+        without abruptly closing connections that are currently in use.
+
+        * Any idle connections are closed immediately.
+        * Any active connections are retired. They remain open until any
+          in-flight requests on them have completed, but are not assigned
+          any new requests. HTTP/2 connections do not accept new streams.
+        * Queued requests that have not yet started are assigned to
+          connections in the new generation.
+
+        Note that this method only manages the connection pool lifecycle.
+        Loading certificates from disk and building the SSL context
+        instance is the responsibility of the caller.
+        """
+        with self._optional_thread_lock:
+            self._ssl_context = ssl_context
+
+            closing_connections = []
+            for connection in list(self._connections):
+                if connection.is_idle():
+                    # log: "closing idle connection on ssl context update"
+                    self._connections.remove(connection)
+                    closing_connections.append(connection)
+                else:
+                    # log: "retiring active connection on ssl context update"
+                    self._retired_connections.add(connection)
+
+            # Re-assign any queued requests, which may now be able to
+            # create connections in the new generation.
+            closing_connections.extend(self._assign_requests_to_connections())
+
+        await self._close_connections(closing_connections)
 
     async def handle_async_request(self, request: Request) -> Response:
         """
@@ -285,9 +329,16 @@ class AsyncConnectionPool(AsyncRequestInterface):
             if connection.is_closed():
                 # log: "removing closed connection"
                 self._connections.remove(connection)
+                self._retired_connections.discard(connection)
             elif connection.has_expired():
                 # log: "closing expired connection"
                 self._connections.remove(connection)
+                self._retired_connections.discard(connection)
+                closing_connections.append(connection)
+            elif connection in self._retired_connections and connection.is_idle():
+                # log: "closing drained connection"
+                self._connections.remove(connection)
+                self._retired_connections.discard(connection)
                 closing_connections.append(connection)
             elif (
                 connection.is_idle()
@@ -305,7 +356,9 @@ class AsyncConnectionPool(AsyncRequestInterface):
             available_connections = [
                 connection
                 for connection in self._connections
-                if connection.can_handle_request(origin) and connection.is_available()
+                if connection not in self._retired_connections
+                and connection.can_handle_request(origin)
+                and connection.is_available()
             ]
             idle_connections = [
                 connection for connection in self._connections if connection.is_idle()
@@ -350,6 +403,7 @@ class AsyncConnectionPool(AsyncRequestInterface):
         with self._optional_thread_lock:
             closing_connections = list(self._connections)
             self._connections = []
+            self._retired_connections = set()
         await self._close_connections(closing_connections)
 
     async def __aenter__(self) -> AsyncConnectionPool:

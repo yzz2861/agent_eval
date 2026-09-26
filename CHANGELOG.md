@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+- Add `ConnectionPool.update_ssl_context()` and `AsyncConnectionPool.update_ssl_context()`, allowing the pool SSL context to be switched without disrupting in-flight requests.
 - Fix `max_keepalive_connections` not being properly handled. (#1000)
 
 ## Version 1.0.9 (April 24th, 2025)

@@ -1,3 +1,4 @@
+import ssl
 import typing
 
 import anyio
@@ -205,6 +206,49 @@ async def test_h2_timeout_during_request():
 
         assert not conn.is_closed()
         assert conn.is_idle()
+
+
+@pytest.mark.anyio
+async def test_update_ssl_context_with_cancelled_queued_request():
+    """
+    Cancelling a queued request around an SSL context update should leave
+    the pool in a consistent state, and must not cause connections from
+    the previous generation to acquire new requests.
+    """
+    network_backend = httpcore.AsyncMockBackend(
+        [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Type: plain/text\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+    )
+
+    async with httpcore.AsyncConnectionPool(
+        network_backend=network_backend, max_connections=1
+    ) as pool:
+        async with pool.stream("GET", "https://example.com/") as response:
+            await pool.update_ssl_context(ssl.create_default_context())
+
+            # This request is queued, since the pool is at its connection
+            # limit and the retired connection cannot acquire new requests.
+            # It is cancelled while still queued.
+            with anyio.move_on_after(0.01):
+                await pool.request("GET", "https://example.com/")
+
+            await response.aread()
+            assert response.content == b"Hello, world!"
+
+        # The retired connection has drained. A subsequent request uses a
+        # new connection in the new generation.
+        async with pool.stream("GET", "https://example.com/") as response:
+            info = [repr(c) for c in pool.connections]
+            assert info == [
+                "<AsyncHTTPConnection ['https://example.com:443', HTTP/1.1, ACTIVE, Request Count: 1]>"
+            ]
+            await response.aread()
+            assert response.content == b"Hello, world!"
 
 
 @pytest.mark.xfail
