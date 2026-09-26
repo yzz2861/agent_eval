@@ -205,6 +205,74 @@ async def test_connection_pool_with_http2():
 
 
 @pytest.mark.anyio
+async def test_connection_pool_with_http2_trailers():
+    """
+    HTTP/2 trailer fields are exposed through the connection pool, and
+    receiving trailers does not prevent the connection from being
+    returned to the pool.
+    """
+    network_backend = httpcore.AsyncMockBackend(
+        buffer=[
+            hyperframe.frame.SettingsFrame().serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=1,
+                data=hpack.Encoder().encode(
+                    [
+                        (b":status", b"200"),
+                        (b"content-type", b"plain/text"),
+                    ]
+                ),
+                flags=["END_HEADERS"],
+            ).serialize(),
+            hyperframe.frame.DataFrame(stream_id=1, data=b"Hello, world!").serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=1,
+                data=hpack.Encoder().encode([(b"x-checksum", b"abc123")]),
+                flags=["END_HEADERS", "END_STREAM"],
+            ).serialize(),
+            hyperframe.frame.HeadersFrame(
+                stream_id=3,
+                data=hpack.Encoder().encode(
+                    [
+                        (b":status", b"200"),
+                        (b"content-type", b"plain/text"),
+                    ]
+                ),
+                flags=["END_HEADERS"],
+            ).serialize(),
+            hyperframe.frame.DataFrame(
+                stream_id=3, data=b"Hello, world!", flags=["END_STREAM"]
+            ).serialize(),
+        ],
+        http2=True,
+    )
+
+    async with httpcore.AsyncConnectionPool(
+        network_backend=network_backend,
+    ) as pool:
+        response = await pool.request("GET", "https://example.com/")
+        assert response.status == 200
+        assert response.content == b"Hello, world!"
+        assert response.extensions["trailers"]() == [(b"x-checksum", b"abc123")]
+
+        info = [repr(c) for c in pool.connections]
+        assert info == [
+            "<AsyncHTTPConnection ['https://example.com:443', HTTP/2, IDLE, Request Count: 1]>"
+        ]
+
+        # The connection is returned to the pool, and can be reused.
+        response = await pool.request("GET", "https://example.com/")
+        assert response.status == 200
+        assert response.content == b"Hello, world!"
+        assert response.extensions["trailers"]() == []
+
+        info = [repr(c) for c in pool.connections]
+        assert info == [
+            "<AsyncHTTPConnection ['https://example.com:443', HTTP/2, IDLE, Request Count: 2]>"
+        ]
+
+
+@pytest.mark.anyio
 async def test_connection_pool_with_http2_goaway():
     """
     Test a connection pool with HTTP/2 requests, that cleanly disconnects

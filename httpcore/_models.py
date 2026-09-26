@@ -493,6 +493,69 @@ class Response:
             await self.stream.aclose()
 
 
+class ResponseTrailers:
+    """
+    The trailers of an HTTP response, made available as the
+    `"trailers"` response extension.
+
+    Instances are callable, returning the trailer fields as a list of
+    `(name, value)` byte pairs, preserving any duplicate field names
+    and the original byte-level ordering.
+
+    The `.state` attribute indicates the current status of the trailers...
+
+    * `"pending"` - The response body has not yet been fully consumed.
+      Trailer fields may still be arriving, and are not yet available.
+    * `"complete"` - The response body has been fully consumed. The trailer
+      fields are available, and may be an empty list if the response did
+      not include any trailers.
+    * `"terminated"` - The response was closed early, or the underlying
+      stream was reset. No trailer fields can ever arrive.
+
+    Calling an instance while in the `"pending"` or `"terminated"` states
+    raises a `RuntimeError`, rather than returning an empty list that would
+    be indistinguishable from a completed response with no trailers.
+    """
+
+    def __init__(self) -> None:
+        self._headers: list[tuple[bytes, bytes]] = []
+        self._state = "pending"
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def __call__(self) -> list[tuple[bytes, bytes]]:
+        if self._state == "pending":
+            raise RuntimeError(
+                "Response trailers are not yet available. "
+                "The response body must be fully read before "
+                "trailers can be accessed."
+            )
+        elif self._state == "terminated":
+            raise RuntimeError(
+                "Response trailers are unavailable. "
+                "The response was closed before the stream completed."
+            )
+        return list(self._headers)
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} [{self._state}]>"
+
+    # Used by the connection implementations to update the trailers state...
+
+    def _receive_headers(self, headers: list[tuple[bytes, bytes]]) -> None:
+        self._headers.extend(headers)
+
+    def _mark_complete(self) -> None:
+        if self._state == "pending":
+            self._state = "complete"
+
+    def _mark_terminated(self) -> None:
+        if self._state == "pending":
+            self._state = "terminated"
+
+
 class Proxy:
     def __init__(
         self,

@@ -18,7 +18,7 @@ from .._exceptions import (
     LocalProtocolError,
     RemoteProtocolError,
 )
-from .._models import Origin, Request, Response
+from .._models import Origin, Request, Response, ResponseTrailers
 from .._synchronization import AsyncLock, AsyncSemaphore, AsyncShieldCancellation
 from .._trace import Trace
 from .interfaces import AsyncConnectionInterface
@@ -70,10 +70,16 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
             list[
                 h2.events.ResponseReceived
                 | h2.events.DataReceived
+                | h2.events.TrailersReceived
                 | h2.events.StreamEnded
                 | h2.events.StreamReset,
             ],
         ] = {}
+
+        # Mapping from stream ID to response trailers.
+        # Each stream gets its own instance, so that trailers are
+        # always isolated to the response they arrived on.
+        self._trailers: dict[int, ResponseTrailers] = {}
 
         # Connection terminated events are stored as state since
         # we need to handle them for all streams.
@@ -133,6 +139,7 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
         try:
             stream_id = self._h2_state.get_next_available_stream_id()
             self._events[stream_id] = []
+            self._trailers[stream_id] = ResponseTrailers()
         except h2.exceptions.NoAvailableStreamIDError:  # pragma: nocover
             self._used_all_stream_ids = True
             self._request_count -= 1
@@ -160,6 +167,7 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
                     "http_version": b"HTTP/2",
                     "network_stream": self._network_stream,
                     "stream_id": stream_id,
+                    "trailers": self._trailers[stream_id],
                 },
             )
         except BaseException as exc:  # noqa: PIE786
@@ -321,12 +329,21 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
                 self._h2_state.acknowledge_received_data(amount, stream_id)
                 await self._write_outgoing_data(request)
                 yield event.data
+            elif isinstance(event, h2.events.TrailersReceived):
+                assert event.headers is not None
+                self._trailers[stream_id]._receive_headers(event.headers)
             elif isinstance(event, h2.events.StreamEnded):
+                self._trailers[stream_id]._mark_complete()
                 break
 
     async def _receive_stream_event(
         self, request: Request, stream_id: int
-    ) -> h2.events.ResponseReceived | h2.events.DataReceived | h2.events.StreamEnded:
+    ) -> (
+        h2.events.ResponseReceived
+        | h2.events.DataReceived
+        | h2.events.TrailersReceived
+        | h2.events.StreamEnded
+    ):
         """
         Return the next available event for a given stream ID.
 
@@ -375,6 +392,7 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
                         (
                             h2.events.ResponseReceived,
                             h2.events.DataReceived,
+                            h2.events.TrailersReceived,
                             h2.events.StreamEnded,
                             h2.events.StreamReset,
                         ),
@@ -409,6 +427,12 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
     async def _response_closed(self, stream_id: int) -> None:
         await self._max_streams_semaphore.release()
         del self._events[stream_id]
+        trailers = self._trailers.pop(stream_id, None)
+        if trailers is not None:
+            # If the response is closed before the stream has completed,
+            # then the trailers move into a terminal state, rather than
+            # remaining indefinitely pending.
+            trailers._mark_terminated()
         async with self._state_lock:
             if self._connection_terminated and not self._events:
                 await self.aclose()

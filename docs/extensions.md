@@ -210,6 +210,44 @@ When no key is included, a default based on the status code may be used.
 
 When HTTP/2 is being used the `"stream_id"` response extension can be accessed to determine the ID of the data stream that the response was sent on.
 
+### `"trailers"`
+
+When HTTP/2 is being used the `"trailers"` response extension provides access to any trailer fields that the server includes in trailing HEADERS frames, sent after the response body.
+
+The extension is an instance of `httpcore.ResponseTrailers`, which is callable, returning the trailer fields as a list of `(name, value)` byte pairs. Any duplicate field names and the original byte-level ordering are preserved.
+
+Because trailers only arrive once the response body has been fully consumed, the extension tracks the state of the trailers through its `.state` attribute...
+
+* `"pending"` - The response body has not yet been fully consumed. Trailer fields may still be arriving, and are not yet available.
+* `"complete"` - The response body has been fully consumed. The trailer fields are available, and calling the instance returns them, as an empty list if the response did not include any trailers.
+* `"terminated"` - The response was closed early, or the underlying stream was reset. No trailer fields can ever arrive.
+
+Calling the instance while in the `"pending"` or `"terminated"` states raises a `RuntimeError`, rather than returning an empty list that would be indistinguishable from a completed response with no trailers.
+
+For example:
+
+```python
+with httpcore.stream("GET", "https://www.example.com/") as response:
+    content = response.read()
+
+    trailers = response.extensions["trailers"]
+    if trailers.state == "complete":
+        for name, value in trailers():
+            print(name, value)
+```
+
+The same convention applies when using the asynchronous API, since the trailer fields are already buffered once the response body has been fully consumed...
+
+```python
+async with client.stream("GET", "https://www.example.com/") as response:
+    content = await response.aread()
+
+    trailers = response.extensions["trailers"]
+    if trailers.state == "complete":
+        for name, value in trailers():
+            print(name, value)
+```
+
 ### `"network_stream"`
 
 The `"network_stream"` extension allows developers to handle HTTP `CONNECT` and `Upgrade` requests, by providing an API that steps outside the standard request/response model, and can directly read or write to the network.
