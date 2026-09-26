@@ -91,6 +91,7 @@ __all__ = [
     "TimeoutException",
     "TooManyRedirects",
     "TransportError",
+    "UnrewindableBodyError",
     "UnsupportedProtocol",
     "URL",
     "USE_CLIENT_DEFAULT",

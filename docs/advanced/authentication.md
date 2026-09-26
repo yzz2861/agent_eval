@@ -40,6 +40,19 @@ HTTP digest authentication is a challenge-response authentication scheme. Unlike
 [<Response [401 UNAUTHORIZED]>]
 ```
 
+Digest authentication supports the `auth` and `auth-int` quality-of-protection
+modes, as well as legacy challenges that do not include a `qop` directive.
+If the server offers both `auth` and `auth-int`, then `auth` is used. The
+`auth-int` mode is selected when it is the only option offered by the server,
+and includes a hash of the actual request entity body in the digest.
+
+Authenticating requires the request to be sent again once the server
+challenge is known. Request bodies given as bytes or text are replayable,
+and are resent as-is. Request bodies given as non-replayable streams, such
+as generators, cannot be resent, and raise `httpx.UnrewindableBodyError`
+rather than silently sending an empty body. Pass the content as bytes if
+you need to send a streaming-style body with digest authentication.
+
 ## NetRC authentication
 
 HTTPX can be configured to use [a `.netrc` config file](https://everything.curl.dev/usingcurl/netrc) for authentication.

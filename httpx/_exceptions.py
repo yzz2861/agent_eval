@@ -65,6 +65,7 @@ __all__ = [
     "TimeoutException",
     "TooManyRedirects",
     "TransportError",
+    "UnrewindableBodyError",
     "UnsupportedProtocol",
     "WriteError",
     "WriteTimeout",
@@ -322,6 +323,24 @@ class StreamConsumed(StreamError):
             "content more than once."
         )
         super().__init__(message)
+
+
+class UnrewindableBodyError(StreamConsumed):
+    """
+    The request body is a non-replayable stream, but the request needs
+    to be sent more than once, for example as part of a digest
+    authentication flow.
+    """
+
+    def __init__(self) -> None:
+        message = (
+            "Cannot resend the request body, because the request content "
+            "is a non-replayable stream. This can occur with digest "
+            "authentication, which requires the request to be sent again "
+            "after an initial 401 response. Pass the request content as "
+            "bytes, or read the stream into memory before sending."
+        )
+        StreamError.__init__(self, message)
 
 
 class StreamClosed(StreamError):

@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * Expose `FunctionAuth` from the public API. (#3699)
+* Add support for `qop=auth-int` in digest authentication, hashing the actual request entity body. When a server offers both `auth` and `auth-int`, `auth` is selected. Requests with a non-replayable streaming body can no longer be silently resent with an empty body during digest authentication, and now raise `httpx.UnrewindableBodyError`.
 
 ## 0.28.1 (6th December, 2024)
 

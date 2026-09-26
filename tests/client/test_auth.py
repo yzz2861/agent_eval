@@ -84,6 +84,109 @@ class DigestApp:
         return httpx.Response(401, headers=headers)
 
 
+class DigestAuthIntApp:
+    """
+    A mock digest authentication server that independently verifies the
+    client's 'Authorization' header, including the nonce, the nonce count,
+    the digest algorithm, and the actual request entity bytes when
+    qop='auth-int' is used.
+    """
+
+    _ALGORITHM_TO_HASH_FUNCTION = {
+        "MD5": hashlib.md5,
+        "MD5-SESS": hashlib.md5,
+        "SHA": hashlib.sha1,
+        "SHA-SESS": hashlib.sha1,
+        "SHA-256": hashlib.sha256,
+        "SHA-256-SESS": hashlib.sha256,
+        "SHA-512": hashlib.sha512,
+        "SHA-512-SESS": hashlib.sha512,
+    }
+
+    def __init__(
+        self,
+        username: str = "user",
+        password: str = "password123",
+        algorithm: str = "SHA-256",
+        qop: str = "auth-int",
+    ) -> None:
+        self.username = username
+        self.password = password
+        self.algorithm = algorithm
+        self.qop = qop
+        self.realm = "httpx@example.org"
+        self.nonce = hashlib.sha256(os.urandom(8)).hexdigest()
+        self._last_nonce_count = 0
+        self.seen_qop: typing.Optional[str] = None
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        auth_header = request.headers.get("Authorization")
+        if auth_header is None or not self._verify(request, auth_header):
+            return self._challenge()
+        return httpx.Response(200, json={"auth": auth_header})
+
+    def _challenge(self) -> httpx.Response:
+        challenge = (
+            f'Digest realm="{self.realm}", qop="{self.qop}", '
+            f'nonce="{self.nonce}", opaque="opaque", algorithm={self.algorithm}'
+        )
+        return httpx.Response(401, headers={"www-authenticate": challenge})
+
+    def _verify(self, request: httpx.Request, auth_header: str) -> bool:
+        scheme, _, fields = auth_header.partition(" ")
+        if scheme.lower() != "digest":
+            return False
+        data = parse_keqv_list(fields.split(", "))
+
+        hash_func = self._ALGORITHM_TO_HASH_FUNCTION[self.algorithm]
+
+        def H(value: bytes) -> str:
+            return hash_func(value).hexdigest()
+
+        if data.get("username") != self.username:
+            return False
+        if data.get("realm") != self.realm:
+            return False
+        if data.get("algorithm", "MD5") != self.algorithm:
+            return False
+
+        # The client must echo the server nonce, and the nonce count
+        # must strictly increase across requests.
+        if data.get("nonce") != self.nonce:
+            return False
+        nonce_count = int(data.get("nc", "0"), 16)
+        if nonce_count <= self._last_nonce_count:
+            return False
+        self._last_nonce_count = nonce_count
+
+        qop = data.get("qop")
+        self.seen_qop = qop
+        if qop is not None and ("nc" not in data or "cnonce" not in data):
+            return False
+
+        HA1 = H(f"{self.username}:{self.realm}:{self.password}".encode())
+        if self.algorithm.lower().endswith("-sess"):
+            HA1 = H(f"{HA1}:{self.nonce}:{data['cnonce']}".encode())
+
+        uri = request.url.raw_path.decode()
+        if qop == "auth-int":
+            # The digest must cover the actual request entity bytes.
+            entity_hash = H(request.content)
+            A2 = f"{request.method}:{uri}:{entity_hash}"
+        else:
+            A2 = f"{request.method}:{uri}"
+        HA2 = H(A2.encode())
+
+        if qop is None:
+            expected = H(f"{HA1}:{self.nonce}:{HA2}".encode())
+        else:
+            expected = H(
+                f"{HA1}:{self.nonce}:{data['nc']}:{data['cnonce']}:{qop}:{HA2}".encode()
+            )
+
+        return bool(data.get("response")) and data["response"] == expected
+
+
 class RepeatAuth(httpx.Auth):
     """
     A mock authentication scheme that requires clients to send
@@ -502,14 +605,151 @@ async def test_digest_auth_qop_including_spaces_and_auth_returns_auth(qop: str) 
 
 
 @pytest.mark.anyio
-async def test_digest_auth_qop_auth_int_not_implemented() -> None:
+async def test_digest_auth_qop_auth_int() -> None:
     url = "https://example.org/"
     auth = httpx.DigestAuth(username="user", password="password123")
-    app = DigestApp(qop="auth-int")
+    app = DigestAuthIntApp(qop="auth-int")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(app)) as client:
-        with pytest.raises(NotImplementedError):
-            await client.get(url, auth=auth)
+        response = await client.get(url, auth=auth)
+
+    assert response.status_code == 200
+    assert len(response.history) == 1
+    assert app.seen_qop == "auth-int"
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    [
+        "MD5",
+        "MD5-SESS",
+        "SHA",
+        "SHA-SESS",
+        "SHA-256",
+        "SHA-256-SESS",
+        "SHA-512",
+        "SHA-512-SESS",
+    ],
+)
+@pytest.mark.anyio
+async def test_digest_auth_int_with_bytes_body(algorithm: str) -> None:
+    url = "https://example.org/"
+    auth = httpx.DigestAuth(username="user", password="password123")
+    app = DigestAuthIntApp(algorithm=algorithm)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(app)) as client:
+        response = await client.post(url, content=b"Hello, world!", auth=auth)
+
+    assert response.status_code == 200
+    assert len(response.history) == 1
+    assert app.seen_qop == "auth-int"
+
+
+def test_sync_digest_auth_int_with_bytes_body() -> None:
+    url = "https://example.org/"
+    auth = httpx.DigestAuth(username="user", password="password123")
+    app = DigestAuthIntApp()
+
+    with httpx.Client(transport=httpx.MockTransport(app)) as client:
+        response = client.post(url, content=b"Hello, world!", auth=auth)
+
+    assert response.status_code == 200
+    assert len(response.history) == 1
+    assert app.seen_qop == "auth-int"
+
+
+@pytest.mark.anyio
+async def test_digest_auth_int_with_empty_body() -> None:
+    url = "https://example.org/"
+    auth = httpx.DigestAuth(username="user", password="password123")
+    app = DigestAuthIntApp()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(app)) as client:
+        response = await client.get(url, auth=auth)
+
+    assert response.status_code == 200
+    assert len(response.history) == 1
+    assert app.seen_qop == "auth-int"
+
+
+@pytest.mark.anyio
+async def test_digest_auth_int_prefers_auth_when_server_offers_both() -> None:
+    # If the server offers both 'auth' and 'auth-int', then 'auth' is used.
+    url = "https://example.org/"
+    auth = httpx.DigestAuth(username="user", password="password123")
+    app = DigestAuthIntApp(qop="auth,auth-int")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(app)) as client:
+        response = await client.post(url, content=b"Hello, world!", auth=auth)
+
+    assert response.status_code == 200
+    assert len(response.history) == 1
+    assert app.seen_qop == "auth"
+
+
+@pytest.mark.anyio
+async def test_digest_auth_int_nonce_count_increments() -> None:
+    # The mock server rejects any nonce count that does not strictly
+    # increase across requests.
+    url = "https://example.org/"
+    auth = httpx.DigestAuth(username="user", password="password123")
+    app = DigestAuthIntApp()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(app)) as client:
+        response_1 = await client.post(url, content=b"request one", auth=auth)
+        response_2 = await client.post(url, content=b"request two", auth=auth)
+
+    assert response_1.status_code == 200
+    assert response_2.status_code == 200
+    assert len(response_1.history) == 1
+    assert len(response_2.history) == 0
+
+
+@pytest.mark.anyio
+async def test_digest_auth_int_incorrect_password() -> None:
+    url = "https://example.org/"
+    auth = httpx.DigestAuth(username="user", password="wrong-password")
+    app = DigestAuthIntApp(password="password123")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(app)) as client:
+        response = await client.post(url, content=b"Hello, world!", auth=auth)
+
+    assert response.status_code == 401
+    assert len(response.history) == 1
+
+
+class SyncConsumeBodyTransport(httpx.MockTransport):
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        assert isinstance(request.stream, httpx.SyncByteStream)
+        [_ for _ in request.stream]
+        return self.handler(request)
+
+
+def test_sync_digest_auth_int_unavailable_streaming_body() -> None:
+    url = "https://example.org/"
+    auth = httpx.DigestAuth(username="user", password="password123")
+    app = DigestAuthIntApp()
+
+    def streaming_body() -> typing.Iterator[bytes]:
+        yield b"Example request body"  # pragma: no cover
+
+    with httpx.Client(transport=SyncConsumeBodyTransport(app)) as client:
+        with pytest.raises(httpx.UnrewindableBodyError):
+            client.post(url, content=streaming_body(), auth=auth)
+
+
+@pytest.mark.anyio
+async def test_digest_auth_int_unavailable_streaming_body() -> None:
+    url = "https://example.org/"
+    auth = httpx.DigestAuth(username="user", password="password123")
+    app = DigestAuthIntApp()
+
+    async def streaming_body() -> typing.AsyncIterator[bytes]:
+        yield b"Example request body"  # pragma: no cover
+
+    async with httpx.AsyncClient(transport=ConsumeBodyTransport(app)) as client:
+        with pytest.raises(httpx.UnrewindableBodyError):
+            await client.post(url, content=streaming_body(), auth=auth)
 
 
 @pytest.mark.anyio

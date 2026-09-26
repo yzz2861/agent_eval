@@ -8,7 +8,8 @@ import typing
 from base64 import b64encode
 from urllib.request import parse_http_list
 
-from ._exceptions import ProtocolError
+from ._content import ByteStream
+from ._exceptions import ProtocolError, RequestNotRead, UnrewindableBodyError
 from ._models import Cookies, Request, Response
 from ._utils import to_bytes, to_str, unquote
 
@@ -173,6 +174,27 @@ class NetRCAuth(Auth):
 
 
 class DigestAuth(Auth):
+    """
+    HTTP digest authentication, as described in RFC 7616.
+
+    The 'qop' (quality of protection) offered by the server is handled
+    using the following stable selection rule:
+
+    * If the server offers both 'auth' and 'auth-int', then 'auth' is
+      used. This matches the behaviour described in the RFC 7616 examples.
+    * If the server only offers 'auth-int', then 'auth-int' is used.
+      The digest then covers a hash of the actual request entity body.
+    * If no 'qop' is offered, then the legacy RFC 2069 behaviour is used.
+
+    Note that digest authentication requires the request to be sent again
+    once the server challenge is known. Request bodies given as bytes or
+    text are replayable, and are resent as-is. Request bodies given as
+    non-replayable streams (such as generators) cannot be resent, and
+    result in an 'UnrewindableBodyError' being raised, rather than
+    silently sending an empty body. Streams are never read into memory
+    in order to work around this.
+    """
+
     _ALGORITHM_TO_HASH_FUNCTION: dict[str, typing.Callable[[bytes], _Hash]] = {
         "MD5": hashlib.md5,
         "MD5-SESS": hashlib.md5,
@@ -213,6 +235,13 @@ class DigestAuth(Auth):
 
         self._last_challenge = self._parse_challenge(request, response, auth_header)
         self._nonce_count = 1
+
+        if not _is_replayable_body(request):
+            # The initial anonymous request has already consumed the
+            # request body stream, so we cannot resend the request with
+            # authentication. Raise a dedicated error rather than
+            # silently sending an empty body.
+            raise UnrewindableBodyError()
 
         request.headers["Authorization"] = self._build_auth_header(
             request, self._last_challenge
@@ -260,11 +289,18 @@ class DigestAuth(Auth):
         def digest(data: bytes) -> bytes:
             return hash_func(data).hexdigest().encode()
 
+        qop = self._resolve_qop(challenge.qop, request=request)
+
         A1 = b":".join((self._username, challenge.realm, self._password))
 
         path = request.url.raw_path
-        A2 = b":".join((request.method.encode(), path))
-        # TODO: implement auth-int
+        if qop == b"auth-int":
+            # RFC 7616, section 3.4.3: 'A2' includes a hash of the
+            # request entity body.
+            entity_hash = digest(self._get_entity_body(request))
+            A2 = b":".join((request.method.encode(), path, entity_hash))
+        else:
+            A2 = b":".join((request.method.encode(), path))
         HA2 = digest(A2)
 
         nc_value = b"%08x" % self._nonce_count
@@ -275,7 +311,6 @@ class DigestAuth(Auth):
         if challenge.algorithm.lower().endswith("-sess"):
             HA1 = digest(b":".join((HA1, challenge.nonce, cnonce)))
 
-        qop = self._resolve_qop(challenge.qop, request=request)
         if qop is None:
             # Following RFC 2069
             digest_data = [HA1, challenge.nonce, HA2]
@@ -294,11 +329,31 @@ class DigestAuth(Auth):
         if challenge.opaque:
             format_args["opaque"] = challenge.opaque
         if qop:
-            format_args["qop"] = b"auth"
+            format_args["qop"] = qop
             format_args["nc"] = nc_value
             format_args["cnonce"] = cnonce
 
         return "Digest " + self._get_header_value(format_args)
+
+    def _get_entity_body(self, request: Request) -> bytes:
+        """
+        Return the request entity body bytes, as required to compute
+        the 'auth-int' entity hash.
+
+        Raises 'UnrewindableBodyError' if the body is a non-replayable
+        stream, since the entity hash cannot be computed without
+        consuming the stream.
+        """
+        try:
+            return request.content
+        except RequestNotRead:
+            pass
+
+        if isinstance(request.stream, ByteStream):
+            # The body is held in memory, so it can safely be read.
+            return request.read()
+
+        raise UnrewindableBodyError()
 
     def _get_client_nonce(self, nonce_count: int, nonce: bytes) -> bytes:
         s = str(nonce_count).encode()
@@ -331,13 +386,28 @@ class DigestAuth(Auth):
             return None
         qops = re.split(b", ?", qop)
         if b"auth" in qops:
+            # If the server offers both 'auth' and 'auth-int', then
+            # 'auth' is used. See the class docstring for the selection rule.
             return b"auth"
 
-        if qops == [b"auth-int"]:
-            raise NotImplementedError("Digest auth-int support is not yet implemented")
+        if b"auth-int" in qops:
+            return b"auth-int"
 
         message = f'Unexpected qop value "{qop!r}" in digest auth'
         raise ProtocolError(message, request=request)
+
+
+def _is_replayable_body(request: Request) -> bool:
+    """
+    Return True if the request body can be sent more than once.
+
+    Bodies that have been loaded into memory are replayable. Streams
+    such as generators are not, and must not be silently resent as
+    an empty body.
+    """
+    if hasattr(request, "_content"):
+        return True
+    return isinstance(request.stream, ByteStream)
 
 
 class _DigestAuthChallenge(typing.NamedTuple):
