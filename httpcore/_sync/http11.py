@@ -13,6 +13,7 @@ from .._backends.base import NetworkStream
 from .._exceptions import (
     ConnectionNotAvailable,
     LocalProtocolError,
+    ReadTimeout,
     RemoteProtocolError,
     WriteError,
     map_exceptions,
@@ -31,6 +32,11 @@ H11SendEvent = typing.Union[
     h11.Data,
     h11.EndOfMessage,
 ]
+
+# The default amount of time to wait for a "100 Continue" response
+# before sending the request body anyway, when a request includes
+# an "Expect: 100-continue" header.
+DEFAULT_EXPECT_100_CONTINUE_TIMEOUT = 1.0
 
 
 class HTTPConnectionState(enum.IntEnum):
@@ -79,13 +85,23 @@ class HTTP11Connection(ConnectionInterface):
 
         try:
             kwargs = {"request": request}
+            response_event: h11.Response | h11.InformationalResponse | None = None
             try:
                 with Trace(
                     "send_request_headers", logger, request, kwargs
                 ) as trace:
                     self._send_request_headers(**kwargs)
-                with Trace("send_request_body", logger, request, kwargs) as trace:
-                    self._send_request_body(**kwargs)
+                if self._expects_100_continue(request):
+                    with Trace(
+                        "expect_100_continue", logger, request, kwargs
+                    ) as trace:
+                        response_event = self._wait_for_100_continue(**kwargs)
+                        trace.return_value = response_event
+                if response_event is None:
+                    with Trace(
+                        "send_request_body", logger, request, kwargs
+                    ) as trace:
+                        self._send_request_body(**kwargs)
             except WriteError:
                 # If we get a write error while we're writing the request,
                 # then we supress this error and move on to attempting to
@@ -103,7 +119,7 @@ class HTTP11Connection(ConnectionInterface):
                     reason_phrase,
                     headers,
                     trailing_data,
-                ) = self._receive_response_headers(**kwargs)
+                ) = self._receive_response_headers(request, response_event)
                 trace.return_value = (
                     http_version,
                     status,
@@ -165,16 +181,100 @@ class HTTP11Connection(ConnectionInterface):
         if bytes_to_send is not None:
             self._network_stream.write(bytes_to_send, timeout=timeout)
 
+    # Supporting "Expect: 100-continue"...
+
+    def _expects_100_continue(self, request: Request) -> bool:
+        """
+        Determine if a request should use the "Expect: 100-continue"
+        handshake, sending the request headers first and then waiting
+        for a "100 Continue" response before sending the request body.
+        """
+        expects_100_continue = any(
+            name.lower() == b"expect" and value.lower() == b"100-continue"
+            for name, value in request.headers
+        )
+        if not expects_100_continue:
+            return False
+        # If the request body is known to be empty, then there is no
+        # point in waiting, and the body is sent immediately as usual.
+        return not any(
+            name.lower() == b"content-length" and value.strip() == b"0"
+            for name, value in request.headers
+        )
+
+    def _wait_for_100_continue(
+        self, request: Request
+    ) -> h11.Response | h11.InformationalResponse | None:
+        """
+        Wait for a "100 Continue" informational response before sending
+        the request body.
+
+        Returns `None` if the request body should be sent, either because a
+        "100 Continue" response was received, or because the wait timed out.
+        Returns the response event if a final response was received instead,
+        in which case the request body must not be sent.
+        """
+        timeouts = request.extensions.get("timeout", {})
+        read_timeout = timeouts.get("read", None)
+        expect_timeout = request.extensions.get(
+            "expect_100_continue_timeout", DEFAULT_EXPECT_100_CONTINUE_TIMEOUT
+        )
+        deadline = (
+            None if expect_timeout is None else time.monotonic() + expect_timeout
+        )
+
+        while True:
+            timeout = read_timeout
+            remaining: float | None = None
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # The "100 Continue" wait has expired.
+                    # Send the request body anyway.
+                    return None
+                timeout = (
+                    remaining if read_timeout is None else min(remaining, read_timeout)
+                )
+            try:
+                event = self._receive_event(timeout=timeout)
+            except ReadTimeout:
+                if read_timeout is not None and (
+                    remaining is None or read_timeout <= remaining
+                ):
+                    # The regular read timeout fired, rather than the
+                    # "100 Continue" wait expiring.
+                    raise
+                # The "100 Continue" wait has expired.
+                # Send the request body anyway.
+                return None
+
+            if isinstance(event, h11.InformationalResponse):
+                if event.status_code == 100:
+                    # The server has given the go-ahead to send the request body.
+                    return None
+                if event.status_code != 101:
+                    # Other informational responses, such as "103 Early Hints",
+                    # do not authorize sending the request body. Keep waiting.
+                    continue
+            # A final response or a "101 Switching Protocols" response.
+            # The request body must not be sent.
+            assert isinstance(event, (h11.Response, h11.InformationalResponse))
+            return event
+
     # Receiving the response...
 
     def _receive_response_headers(
-        self, request: Request
+        self,
+        request: Request,
+        first_event: h11.Response | h11.InformationalResponse | None = None,
     ) -> tuple[bytes, int, bytes, list[tuple[bytes, bytes]], bytes]:
         timeouts = request.extensions.get("timeout", {})
         timeout = timeouts.get("read", None)
 
+        event = first_event
         while True:
-            event = self._receive_event(timeout=timeout)
+            if event is None:
+                event = self._receive_event(timeout=timeout)
             if isinstance(event, h11.Response):
                 break
             if (
@@ -182,6 +282,7 @@ class HTTP11Connection(ConnectionInterface):
                 and event.status_code == 101
             ):
                 break
+            event = None
 
         http_version = b"HTTP/" + event.http_version
 
