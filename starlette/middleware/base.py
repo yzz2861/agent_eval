@@ -108,6 +108,7 @@ class BaseHTTPMiddleware:
         response_sent = anyio.Event()
         app_exc: Exception | None = None
         exception_already_raised = False
+        trailers_expected = False
 
         async def call_next(request: Request) -> Response:
             async def receive_or_disconnect() -> Message:
@@ -130,14 +131,25 @@ class BaseHTTPMiddleware:
                 return message
 
             async def send_no_error(message: Message) -> None:
+                nonlocal trailers_expected
+
                 try:
                     await send_stream.send(message)
                 except anyio.BrokenResourceError:
                     # recv_stream has been closed, i.e. response_sent has been set.
                     return
 
-                if message["type"] == "http.response.pathsend" or (
-                    message["type"] == "http.response.body" and not message.get("more_body", False)
+                if message["type"] == "http.response.start":
+                    trailers_expected = message.get("trailers", False)
+
+                if (
+                    message["type"] == "http.response.pathsend"
+                    or (
+                        message["type"] == "http.response.body"
+                        and not message.get("more_body", False)
+                        and not trailers_expected
+                    )
+                    or (message["type"] == "http.response.trailers" and not message.get("more_trailers", False))
                 ):
                     await response_sent.wait()
 
@@ -180,14 +192,24 @@ class BaseHTTPMiddleware:
                     if message["type"] == "http.response.pathsend":
                         yield message
                         break
+                    if message["type"] == "http.response.trailers":
+                        yield message
+                        if not message.get("more_trailers", False):
+                            break
+                        continue
                     assert message["type"] == "http.response.body", f"Unexpected message: {message}"
                     body = message.get("body", b"")
                     if body:
                         yield body
-                    if not message.get("more_body", False):
+                    if not message.get("more_body", False) and not trailers_expected:
                         break
 
-            response = _StreamingResponse(status_code=message["status"], content=body_stream(), info=info)
+            response = _StreamingResponse(
+                status_code=message["status"],
+                content=body_stream(),
+                info=info,
+                trailers=message.get("trailers", False),
+            )
             response.raw_headers = message["headers"]
             return response
 
@@ -213,29 +235,35 @@ class _StreamingResponse(Response):
         headers: Mapping[str, str] | None = None,
         media_type: str | None = None,
         info: Mapping[str, Any] | None = None,
+        trailers: bool = False,
     ) -> None:
         self.info = info
         self.body_iterator = content
         self.status_code = status_code
         self.media_type = media_type
+        self.trailers = trailers
         self.init_headers(headers)
         self.background = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if self.info is not None:
             await send({"type": "http.response.debug", "info": self.info})
-        await send(
-            {
-                "type": "http.response.start",
-                "status": self.status_code,
-                "headers": self.raw_headers,
-            }
-        )
+        start_message: Message = {
+            "type": "http.response.start",
+            "status": self.status_code,
+            "headers": self.raw_headers,
+        }
+        if self.trailers:
+            start_message["trailers"] = True
+        await send(start_message)
 
         should_close_body = True
         async for chunk in self.body_iterator:
             if isinstance(chunk, dict):
                 # We got an ASGI message which is not response body (eg: pathsend)
+                if chunk["type"] == "http.response.trailers" and should_close_body:
+                    # The body must be completed before trailers are sent.
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
                 should_close_body = False
                 await send(chunk)
                 continue

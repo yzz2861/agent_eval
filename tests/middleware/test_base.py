@@ -120,6 +120,25 @@ def test_custom_middleware(test_client_factory: TestClientFactory) -> None:
         assert text == "Hello, world!"
 
 
+def test_trailers_passthrough_middleware(test_client_factory: TestClientFactory) -> None:
+    async def stream() -> AsyncGenerator[bytes, None]:
+        yield b"hello, "
+        yield b"world"
+
+    def trailers() -> list[tuple[str, str]]:
+        return [("digest", "abc123")]
+
+    def homepage(request: Request) -> StreamingResponse:
+        return StreamingResponse(stream(), trailers=trailers)
+
+    app = Starlette(routes=[Route("/", endpoint=homepage)], middleware=[Middleware(CustomMiddleware)])
+    client = test_client_factory(app)
+    response = client.get("/")
+    assert response.content == b"hello, world"
+    assert response.headers["Custom-Header"] == "Example"
+    assert response.extensions["http.response.trailers"] == [(b"digest", b"abc123")]
+
+
 def test_state_data_across_multiple_middlewares(
     test_client_factory: TestClientFactory,
 ) -> None:

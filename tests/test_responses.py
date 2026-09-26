@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import re
 import sys
 import time
@@ -712,6 +713,220 @@ async def test_streaming_response_runs_background_on_websocket_scope() -> None:
         "websocket.http.response.start",
         "websocket.http.response.body",
         "websocket.http.response.body",
+    ]
+
+
+def test_streaming_response_trailers(test_client_factory: TestClientFactory) -> None:
+    digest = hashlib.sha256()
+
+    async def stream() -> AsyncIterator[bytes]:
+        for chunk in (b"hello, ", b"world"):
+            digest.update(chunk)
+            yield chunk
+
+    def trailers() -> list[tuple[str, str]]:
+        return [("digest", digest.hexdigest())]
+
+    app = StreamingResponse(stream(), media_type="text/plain", trailers=trailers)
+    client = test_client_factory(app)
+    response = client.get("/")
+    assert response.content == b"hello, world"
+    expected = hashlib.sha256(b"hello, world").hexdigest().encode("latin-1")
+    assert response.extensions["http.response.trailers"] == [(b"digest", expected)]
+
+
+def test_streaming_response_trailers_async_provider_with_duplicates(
+    test_client_factory: TestClientFactory,
+) -> None:
+    async def stream() -> AsyncIterator[bytes]:
+        yield b"chunk"
+
+    async def trailers() -> list[tuple[str, str]]:
+        return [("x-checksum", "abc"), ("x-checksum", "def")]
+
+    app = StreamingResponse(stream(), trailers=trailers)
+    client = test_client_factory(app)
+    response = client.get("/")
+    assert response.content == b"chunk"
+    assert response.extensions["http.response.trailers"] == [(b"x-checksum", b"abc"), (b"x-checksum", b"def")]
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_message_order() -> None:
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        raise NotImplementedError
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def stream() -> AsyncIterator[bytes]:
+        yield b"chunk-1"
+        yield b"chunk-2"
+
+    def trailers() -> dict[str, str]:
+        # The provider is only evaluated once the body has been fully sent.
+        assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
+        return {"digest": "abc"}
+
+    response = StreamingResponse(stream(), trailers=trailers)
+    scope: Scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "extensions": {"http.response.trailers": {}}}
+    await response(scope, receive, send)
+
+    assert sent[0] == {"type": "http.response.start", "status": 200, "headers": [], "trailers": True}
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+        "http.response.body",
+        "http.response.body",
+        "http.response.trailers",
+    ]
+    assert sent[-1] == {
+        "type": "http.response.trailers",
+        "headers": [(b"digest", b"abc")],
+        "more_trailers": False,
+    }
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_without_server_support() -> None:
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        raise NotImplementedError  # pragma: no cover
+
+    async def send(message: Message) -> None:
+        sent.append(message)  # pragma: no cover
+
+    response = StreamingResponse(iter([b"chunk"]), trailers=lambda: {"digest": "abc"})
+    with pytest.raises(RuntimeError, match="does not support the 'http.response.trailers' extension"):
+        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+    assert sent == []
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_body_failure() -> None:
+    sent: list[Message] = []
+    provider_called = False
+
+    async def receive() -> Message:
+        raise NotImplementedError
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def stream() -> AsyncIterator[bytes]:
+        yield b"chunk"
+        raise ValueError("stream failed")
+
+    def trailers() -> dict[str, str]:
+        nonlocal provider_called
+        provider_called = True
+        return {"digest": "abc"}  # pragma: no cover
+
+    response = StreamingResponse(stream(), trailers=trailers)
+    scope: Scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "extensions": {"http.response.trailers": {}}}
+    with pytest.raises(ValueError, match="stream failed"):
+        await response(scope, receive, send)
+
+    assert not provider_called
+    # The response is not completed cleanly: no final body message and no trailers.
+    assert [message["type"] for message in sent] == ["http.response.start", "http.response.body"]
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_provider_failure() -> None:
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        raise NotImplementedError
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def stream() -> AsyncIterator[bytes]:
+        yield b"chunk"
+
+    def trailers() -> dict[str, str]:
+        raise ValueError("trailers failed")
+
+    response = StreamingResponse(stream(), trailers=trailers)
+    scope: Scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "extensions": {"http.response.trailers": {}}}
+    with pytest.raises(ValueError, match="trailers failed"):
+        await response(scope, receive, send)
+
+    # The trailers message is never sent, so the response is not completed cleanly.
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+        "http.response.body",
+    ]
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_on_client_disconnect() -> None:
+    provider_called = False
+    streamed = False
+
+    async def receive() -> Message:
+        raise NotImplementedError
+
+    async def send(message: Message) -> None:
+        nonlocal streamed
+        if message["type"] == "http.response.body":
+            if not streamed:
+                streamed = True
+            else:
+                raise OSError
+
+    async def stream() -> AsyncGenerator[bytes, None]:
+        while True:
+            await anyio.sleep(0)
+            yield b"chunk"
+
+    def trailers() -> dict[str, str]:
+        nonlocal provider_called
+        provider_called = True
+        return {"digest": "abc"}  # pragma: no cover
+
+    content = stream()
+    response = StreamingResponse(content, trailers=trailers)
+    scope: Scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "extensions": {"http.response.trailers": {}}}
+    with pytest.raises(ClientDisconnect):
+        await response(scope, receive, send)
+    assert not provider_called
+    await content.aclose()
+
+
+@pytest.mark.anyio
+async def test_streaming_response_trailers_background_runs_after_response_complete() -> None:
+    events: list[str] = []
+
+    async def receive() -> Message:
+        raise NotImplementedError
+
+    async def send(message: Message) -> None:
+        events.append(message["type"])
+
+    async def stream() -> AsyncIterator[bytes]:
+        yield b"chunk"
+
+    def run_background() -> None:
+        events.append("background")
+
+    response = StreamingResponse(
+        stream(), trailers=lambda: {"digest": "abc"}, background=BackgroundTask(run_background)
+    )
+    scope: Scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "extensions": {"http.response.trailers": {}}}
+    await response(scope, receive, send)
+
+    assert events == [
+        "http.response.start",
+        "http.response.body",
+        "http.response.body",
+        "http.response.trailers",
+        "background",
     ]
 
 

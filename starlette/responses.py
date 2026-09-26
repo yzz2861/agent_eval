@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import http.cookies
+import inspect
 import json
 import os
 import stat
@@ -219,6 +220,8 @@ Content = str | bytes | memoryview
 SyncContentStream = Iterable[Content]
 AsyncContentStream = AsyncIterable[Content]
 ContentStream = AsyncContentStream | SyncContentStream
+TrailerFields = Mapping[str, str] | Iterable[tuple[str, str]]
+TrailersProvider = Callable[[], TrailerFields | Awaitable[TrailerFields]]
 
 
 class StreamingResponse(Response):
@@ -231,6 +234,7 @@ class StreamingResponse(Response):
         headers: Mapping[str, str] | None = None,
         media_type: str | None = None,
         background: BackgroundTask | None = None,
+        trailers: TrailersProvider | None = None,
     ) -> None:
         if isinstance(content, AsyncIterable):
             self.body_iterator = content
@@ -239,6 +243,7 @@ class StreamingResponse(Response):
         self.status_code = status_code
         self.media_type = self.media_type if media_type is None else media_type
         self.background = background
+        self.trailers = trailers
         self.init_headers(headers)
 
     async def listen_for_disconnect(self, receive: Receive) -> None:
@@ -247,14 +252,31 @@ class StreamingResponse(Response):
             if message["type"] == "http.disconnect":
                 break
 
-    async def stream_response(self, send: Send) -> None:
-        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+    async def stream_response(self, send: Send, *, trailers: bool = False) -> None:
+        start_message: Message = {
+            "type": "http.response.start",
+            "status": self.status_code,
+            "headers": self.raw_headers,
+        }
+        if trailers:
+            start_message["trailers"] = True
+        await send(start_message)
         async for chunk in self.body_iterator:
             if not isinstance(chunk, bytes | memoryview):
                 chunk = chunk.encode(self.charset)
             await send({"type": "http.response.body", "body": chunk, "more_body": True})
 
         await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+        if trailers:
+            assert self.trailers is not None
+            fields = self.trailers()
+            if inspect.isawaitable(fields):
+                fields = await fields
+            if isinstance(fields, Mapping):
+                fields = fields.items()
+            trailer_headers = [(key.encode("latin-1"), value.encode("latin-1")) for key, value in fields]
+            await send({"type": "http.response.trailers", "headers": trailer_headers, "more_trailers": False})
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "websocket":
@@ -264,11 +286,18 @@ class StreamingResponse(Response):
                 await self.background()
             return
 
+        send_trailers = self.trailers is not None
+        if send_trailers and "http.response.trailers" not in scope.get("extensions", {}):
+            raise RuntimeError(
+                "StreamingResponse was given a 'trailers' provider, but the server does not "
+                "support the 'http.response.trailers' extension."
+            )
+
         spec_version = tuple(map(int, scope.get("asgi", {}).get("spec_version", "2.0").split(".")))
 
         if spec_version >= (2, 4):
             try:
-                await self.stream_response(send)
+                await self.stream_response(send, trailers=send_trailers)
             except OSError:
                 raise ClientDisconnect()
         else:
@@ -278,7 +307,7 @@ class StreamingResponse(Response):
                     await func()
                     task_group.cancel_scope.cancel()
 
-                task_group.start_soon(wrap, partial(self.stream_response, send))
+                task_group.start_soon(wrap, partial(self.stream_response, send, trailers=send_trailers))
                 await wrap(partial(self.listen_for_disconnect, receive))
 
         if self.background is not None:
