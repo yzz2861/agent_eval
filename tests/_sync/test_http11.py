@@ -3,6 +3,41 @@ import pytest
 import httpcore
 
 
+class RecordingStream(httpcore.MockStream):
+    """
+    A mock stream that records the order of `read()` and `write()` calls,
+    so that tests can assert exactly when the request body was sent.
+
+    The `script` is a list of `bytes` returned by successive `read()` calls.
+    An exception instance may be included in the script, in which case the
+    corresponding `read()` raises it.
+    """
+
+    def __init__(self, script):
+        super().__init__([])
+        self._script = list(script)
+        self.record = []
+
+    def read(self, max_bytes, timeout=None):
+        self.record.append(("read", timeout))
+        item = self._script.pop(0) if self._script else b""
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def write(self, buffer, timeout=None):
+        self.record.append(("write", bytes(buffer)))
+
+    def writes(self):
+        return [data for event, data in self.record if event == "write"]
+
+    def reads(self):
+        return [timeout for event, timeout in self.record if event == "read"]
+
+    def event_order(self):
+        return [event for event, _ in self.record]
+
+
 
 def test_http11_connection():
     origin = httpcore.Origin(b"https", b"example.com", 443)
@@ -378,3 +413,340 @@ def test_http11_header_sub_100kb():
         response = conn.request("GET", "https://example.com/")
         assert response.status == 200
         assert response.content == b""
+
+
+
+def test_http11_expect_100_continue():
+    """
+    An `Expect: 100-continue` request sends the headers first, then waits
+    for a `100 Continue` informational response before sending the body.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = RecordingStream(
+        [
+            b"HTTP/1.1 100 Continue\r\n",
+            b"\r\n",
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+    )
+    with httpcore.HTTP11Connection(
+        origin=origin, stream=stream, keepalive_expiry=5.0
+    ) as conn:
+        response = conn.request(
+            "POST",
+            "https://example.com/",
+            headers={"Expect": "100-continue", "Content-Length": "5"},
+            content=b"Hello",
+        )
+        assert response.status == 200
+        assert response.content == b"Hello, world!"
+        assert conn.is_idle()
+
+    # The request headers are sent, then the server is read, and only
+    # afterwards is the request body sent.
+    writes = stream.writes()
+    assert writes[0].startswith(b"POST / HTTP/1.1\r\n")
+    assert b"expect: 100-continue" in writes[0].lower()
+    assert writes[1] == b"Hello"
+    assert stream.event_order()[:2] == ["write", "read"]
+
+
+
+def test_http11_expect_100_continue_final_response():
+    """
+    If the server responds to an `Expect: 100-continue` request with a final
+    response, such as a `401 Unauthorized`, then the request body is never
+    sent, and the response is returned as-is.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = RecordingStream(
+        [
+            b"HTTP/1.1 401 Unauthorized\r\n",
+            b"Content-Length: 4\r\n",
+            b"\r\n",
+            b"Nope",
+        ]
+    )
+
+    body_was_read = False
+
+    def body():
+        nonlocal body_was_read
+        body_was_read = True
+        yield b"Hello"
+
+    with httpcore.HTTP11Connection(origin=origin, stream=stream) as conn:
+        response = conn.request(
+            "POST",
+            "https://example.com/",
+            headers={"Expect": "100-continue", "Content-Length": "5"},
+            content=body(),
+        )
+        assert response.status == 401
+        assert response.content == b"Nope"
+        # The connection cannot be reused, since the request body
+        # was never sent.
+        assert conn.is_closed()
+
+    # The request body iterator was never consumed...
+    assert not body_was_read
+    # ...and only the request headers were written to the stream.
+    writes = stream.writes()
+    assert len(writes) == 1
+    assert writes[0].startswith(b"POST / HTTP/1.1\r\n")
+
+
+
+def test_http11_expect_100_continue_timeout():
+    """
+    If no `100 Continue` response arrives within the configured wait time,
+    then the request body is sent anyway. The regular read timeout still
+    applies to any reads outside of the `100 Continue` wait.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = RecordingStream(
+        [
+            httpcore.ReadTimeout(),
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+    )
+    with httpcore.HTTP11Connection(
+        origin=origin, stream=stream, keepalive_expiry=5.0
+    ) as conn:
+        response = conn.request(
+            "POST",
+            "https://example.com/",
+            headers={"Expect": "100-continue", "Content-Length": "5"},
+            content=b"Hello",
+            extensions={
+                "timeout": {"read": 5.0},
+                "expect_100_continue_timeout": 0.5,
+            },
+        )
+        assert response.status == 200
+        assert response.content == b"Hello, world!"
+
+    # The request body was sent once the wait had expired.
+    writes = stream.writes()
+    assert writes[1] == b"Hello"
+    assert stream.event_order()[:3] == ["write", "read", "write"]
+    # The `100 Continue` wait used the configured timeout...
+    read_timeouts = stream.reads()
+    assert 0.0 < read_timeouts[0] <= 0.5
+    # ...while subsequent reads used the regular read timeout.
+    assert read_timeouts[1] == 5.0
+
+
+
+def test_http11_expect_100_continue_informational_responses():
+    """
+    Informational responses other than `100 Continue`, such as
+    `103 Early Hints`, do not green-light sending the request body.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = RecordingStream(
+        [
+            b"HTTP/1.1 103 Early Hints\r\n",
+            b"Link: </style.css>; rel=preload; as=style\r\n",
+            b"\r\n",
+            b"HTTP/1.1 100 Continue\r\n",
+            b"\r\n",
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+    )
+    with httpcore.HTTP11Connection(
+        origin=origin, stream=stream, keepalive_expiry=5.0
+    ) as conn:
+        response = conn.request(
+            "POST",
+            "https://example.com/",
+            headers={"Expect": "100-continue", "Content-Length": "5"},
+            content=b"Hello",
+        )
+        assert response.status == 200
+        assert response.content == b"Hello, world!"
+
+    # The request body was only sent once the `100 Continue` arrived,
+    # after both informational responses had been read.
+    writes = stream.writes()
+    assert writes[1] == b"Hello"
+    assert stream.event_order()[:4] == ["write", "read", "read", "read"]
+
+
+
+def test_http11_expect_100_continue_informational_then_final_response():
+    """
+    A final response following other informational responses still means
+    that the request body must not be sent.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = RecordingStream(
+        [
+            b"HTTP/1.1 103 Early Hints\r\n",
+            b"Link: </style.css>; rel=preload; as=style\r\n",
+            b"\r\n",
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+    )
+
+    body_was_read = False
+
+    def body():
+        nonlocal body_was_read
+        body_was_read = True
+        yield b"Hello"
+
+    with httpcore.HTTP11Connection(origin=origin, stream=stream) as conn:
+        response = conn.request(
+            "POST",
+            "https://example.com/",
+            headers={"Expect": "100-continue", "Content-Length": "5"},
+            content=body(),
+        )
+        assert response.status == 200
+        assert response.content == b"Hello, world!"
+
+    assert not body_was_read
+    assert len(stream.writes()) == 1
+
+
+
+def test_http11_expect_100_continue_empty_body():
+    """
+    An `Expect: 100-continue` request with an empty body still performs
+    the handshake, then sends the terminating chunk once accepted.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = RecordingStream(
+        [
+            b"HTTP/1.1 100 Continue\r\n",
+            b"\r\n",
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+    )
+    with httpcore.HTTP11Connection(
+        origin=origin, stream=stream, keepalive_expiry=5.0
+    ) as conn:
+        response = conn.request(
+            "POST",
+            "https://example.com/",
+            headers={"Expect": "100-continue", "Content-Length": "0"},
+        )
+        assert response.status == 200
+        assert response.content == b"Hello, world!"
+        assert conn.is_idle()
+
+    # The headers are sent, the `100 Continue` is read, and then the
+    # request is terminated without any request body being sent.
+    assert stream.event_order()[:2] == ["write", "read"]
+    assert stream.writes()[1:] == [b"", b""]
+
+
+
+def test_http11_expect_100_continue_server_disconnect():
+    """
+    If the server disconnects during the `100 Continue` wait, then a
+    `RemoteProtocolError` is raised, and the request body is never sent.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = RecordingStream([b""])
+
+    body_was_read = False
+
+    def body():
+        nonlocal body_was_read
+        body_was_read = True
+        yield b"Hello"
+
+    with httpcore.HTTP11Connection(origin=origin, stream=stream) as conn:
+        with pytest.raises(httpcore.RemoteProtocolError):
+            conn.request(
+                "POST",
+                "https://example.com/",
+                headers={"Expect": "100-continue", "Content-Length": "5"},
+                content=body(),
+            )
+        assert conn.is_closed()
+
+    assert not body_was_read
+    assert len(stream.writes()) == 1
+
+
+
+def test_http11_expect_100_continue_body_failure():
+    """
+    If sending the request body fails partway through, after a
+    `100 Continue` was received, then the exception propagates and
+    the connection is closed.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = RecordingStream(
+        [
+            b"HTTP/1.1 100 Continue\r\n",
+            b"\r\n",
+        ]
+    )
+
+    def body():
+        yield b"Hello"
+        raise RuntimeError("Sending the request body was cancelled.")
+
+    with httpcore.HTTP11Connection(origin=origin, stream=stream) as conn:
+        with pytest.raises(RuntimeError):
+            conn.request(
+                "POST",
+                "https://example.com/",
+                headers={"Expect": "100-continue", "Content-Length": "10"},
+                content=body(),
+            )
+        assert conn.is_closed()
+
+
+
+def test_http11_request_without_expect_100_continue():
+    """
+    Requests without an `Expect: 100-continue` header are unaffected.
+    The request body is sent immediately, without waiting for the server.
+    """
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = RecordingStream(
+        [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+    )
+    with httpcore.HTTP11Connection(
+        origin=origin, stream=stream, keepalive_expiry=5.0
+    ) as conn:
+        response = conn.request(
+            "POST",
+            "https://example.com/",
+            headers={"Content-Length": "5"},
+            content=b"Hello",
+        )
+        assert response.status == 200
+        assert response.content == b"Hello, world!"
+        assert conn.is_idle()
+
+    # The request, including the body, is sent before any read occurs.
+    events = stream.event_order()
+    first_read = events.index("read")
+    assert set(events[:first_read]) == {"write"}
+    assert stream.writes()[1] == b"Hello"

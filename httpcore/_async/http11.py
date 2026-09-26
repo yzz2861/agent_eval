@@ -13,6 +13,7 @@ from .._backends.base import AsyncNetworkStream
 from .._exceptions import (
     ConnectionNotAvailable,
     LocalProtocolError,
+    ReadTimeout,
     RemoteProtocolError,
     WriteError,
     map_exceptions,
@@ -32,6 +33,12 @@ H11SendEvent = typing.Union[
     h11.EndOfMessage,
 ]
 
+# The response header information, as returned once the final
+# response headers have been received.
+ResponseHeaders = typing.Tuple[
+    bytes, int, bytes, typing.List[typing.Tuple[bytes, bytes]], bytes
+]
+
 
 class HTTPConnectionState(enum.IntEnum):
     NEW = 0
@@ -43,6 +50,7 @@ class HTTPConnectionState(enum.IntEnum):
 class AsyncHTTP11Connection(AsyncConnectionInterface):
     READ_NUM_BYTES = 64 * 1024
     MAX_INCOMPLETE_EVENT_SIZE = 100 * 1024
+    EXPECT_100_CONTINUE_TIMEOUT = 1.0
 
     def __init__(
         self,
@@ -79,13 +87,24 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
 
         try:
             kwargs = {"request": request}
+            early_response_headers: ResponseHeaders | None = None
             try:
                 async with Trace(
                     "send_request_headers", logger, request, kwargs
                 ) as trace:
                     await self._send_request_headers(**kwargs)
-                async with Trace("send_request_body", logger, request, kwargs) as trace:
-                    await self._send_request_body(**kwargs)
+                if self._expects_100_continue(request):
+                    async with Trace(
+                        "wait_for_100_continue", logger, request, kwargs
+                    ) as trace:
+                        early_response_headers = await self._wait_for_100_continue(
+                            **kwargs
+                        )
+                if early_response_headers is None:
+                    async with Trace(
+                        "send_request_body", logger, request, kwargs
+                    ) as trace:
+                        await self._send_request_body(**kwargs)
             except WriteError:
                 # If we get a write error while we're writing the request,
                 # then we supress this error and move on to attempting to
@@ -97,13 +116,17 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
             async with Trace(
                 "receive_response_headers", logger, request, kwargs
             ) as trace:
+                if early_response_headers is None:
+                    early_response_headers = await self._receive_response_headers(
+                        **kwargs
+                    )
                 (
                     http_version,
                     status,
                     reason_phrase,
                     headers,
                     trailing_data,
-                ) = await self._receive_response_headers(**kwargs)
+                ) = early_response_headers
                 trace.return_value = (
                     http_version,
                     status,
@@ -165,11 +188,77 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
         if bytes_to_send is not None:
             await self._network_stream.write(bytes_to_send, timeout=timeout)
 
+    # The `Expect: 100-continue` handshake...
+
+    def _expects_100_continue(self, request: Request) -> bool:
+        """
+        Check if the request includes an `Expect: 100-continue` header,
+        indicating that the client should wait for a `100 Continue`
+        informational response before sending the request body.
+        """
+        for name, value in request.headers:
+            if name.lower() == b"expect":
+                return value.lower() == b"100-continue"
+        return False
+
+    async def _wait_for_100_continue(self, request: Request) -> ResponseHeaders | None:
+        """
+        Wait for the server to either accept or reject a request that
+        included an `Expect: 100-continue` header.
+
+        Returns `None` if the request body should be sent, either because a
+        `100 Continue` response was received, or because the wait timed out.
+        Returns the response headers if the server sent a final response
+        instead, in which case the request body must not be sent.
+        """
+        timeouts = request.extensions.get("timeout", {})
+        read_timeout = timeouts.get("read", None)
+        wait_timeout = request.extensions.get(
+            "expect_100_continue_timeout", self.EXPECT_100_CONTINUE_TIMEOUT
+        )
+        deadline = None if wait_timeout is None else time.monotonic() + wait_timeout
+
+        while True:
+            # Each read is bounded by both the regular read timeout and by
+            # the remaining `100 Continue` wait time, so that neither is
+            # disabled by the other.
+            timeout = read_timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # The `100 Continue` wait has expired.
+                    # Send the request body anyway.
+                    return None
+                timeout = (
+                    remaining if read_timeout is None else min(read_timeout, remaining)
+                )
+
+            try:
+                event = await self._receive_event(timeout=timeout)
+            except ReadTimeout:
+                # The `100 Continue` wait has expired.
+                # Send the request body anyway.
+                return None
+
+            if isinstance(event, h11.Response) or (
+                isinstance(event, h11.InformationalResponse)
+                and event.status_code == 101
+            ):
+                # The server sent a final response without first sending
+                # `100 Continue`. The request body must not be sent.
+                return self._response_headers_from_event(event)
+            if (
+                isinstance(event, h11.InformationalResponse)
+                and event.status_code == 100
+            ):
+                # The server has accepted the request. Send the body.
+                return None
+            # Any other informational response, such as `103 Early Hints`,
+            # does not green-light sending the request body. Keep waiting.
+
     # Receiving the response...
 
-    async def _receive_response_headers(
-        self, request: Request
-    ) -> tuple[bytes, int, bytes, list[tuple[bytes, bytes]], bytes]:
+    async def _receive_response_headers(self, request: Request) -> ResponseHeaders:
         timeouts = request.extensions.get("timeout", {})
         timeout = timeouts.get("read", None)
 
@@ -183,6 +272,11 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
             ):
                 break
 
+        return self._response_headers_from_event(event)
+
+    def _response_headers_from_event(
+        self, event: h11.Response | h11.InformationalResponse
+    ) -> ResponseHeaders:
         http_version = b"HTTP/" + event.http_version
 
         # h11 version 0.11+ supports a `raw_items` interface to get the

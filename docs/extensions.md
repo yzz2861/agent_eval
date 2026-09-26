@@ -86,6 +86,41 @@ r = httpcore.request(
 )
 ```
 
+### `"expect_100_continue_timeout"`
+
+An `Optional[float]` value, defaulting to `1.0`.
+
+On HTTP/1.1 connections, requests including an `Expect: 100-continue` header
+send the request headers first, and then wait for the server to either accept
+or reject the request before sending the request body:
+
+* If the server responds with a `100 Continue` informational response, then
+  the request body is sent.
+* If the server responds with a final response, such as `401 Unauthorized`,
+  then that response is returned as-is, and the request body is never sent.
+  The connection is closed once the response is complete, since it cannot
+  be reused without the request body having been sent.
+* If no response arrives within the `"expect_100_continue_timeout"` wait,
+  then the request body is sent anyway. The regular `"read"` timeout is
+  unaffected, and still applies to any reads outside of this wait.
+
+Other informational responses, such as `103 Early Hints`, do not
+green-light sending the request body.
+
+For example:
+
+```python
+# Wait up to 5 seconds for a `100 Continue` response before sending
+# the request body anyway.
+r = httpcore.request(
+    "POST",
+    "https://www.example.com",
+    headers={"Expect": "100-continue"},
+    content=b"...",
+    extensions={"expect_100_continue_timeout": 5.0}
+)
+```
+
 ### `"trace"`
 
 The trace extension allows a callback handler to be installed to monitor the internal
