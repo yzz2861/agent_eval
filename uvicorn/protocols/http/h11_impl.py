@@ -70,6 +70,8 @@ class H11Protocol(asyncio.Protocol):
         # Timeouts
         self.timeout_keep_alive_task: asyncio.TimerHandle | None = None
         self.timeout_keep_alive = config.timeout_keep_alive
+        self.timeout_headers_task: asyncio.TimerHandle | None = None
+        self.timeout_headers = config.timeout_headers
 
         # Shared server state
         self.server_state = server_state
@@ -106,6 +108,7 @@ class H11Protocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         self.connections.discard(self)
+        self._unset_headers_timeout_if_required()
 
         if self.logger.level <= TRACE_LOG_LEVEL:
             prefix = "%s:%d - " % self.client if self.client else ""
@@ -136,6 +139,22 @@ class H11Protocol(asyncio.Protocol):
         if self.timeout_keep_alive_task is not None:
             self.timeout_keep_alive_task.cancel()
             self.timeout_keep_alive_task = None
+
+    def _unset_headers_timeout_if_required(self) -> None:
+        if self.timeout_headers_task is not None:
+            self.timeout_headers_task.cancel()
+            self.timeout_headers_task = None
+
+    def _set_headers_timeout_if_required(self) -> None:
+        # Arm the request headers timeout when the first bytes of a new
+        # request arrive. It is not reset by subsequent data, and it is
+        # cancelled as soon as the complete headers have been parsed.
+        if (
+            self.timeout_headers is not None
+            and self.timeout_headers_task is None
+            and (self.cycle is None or self.cycle.response_complete)
+        ):
+            self.timeout_headers_task = self.loop.call_later(self.timeout_headers, self.timeout_headers_handler)
 
     def _get_upgrade(self) -> bytes | None:
         connection = []
@@ -171,6 +190,7 @@ class H11Protocol(asyncio.Protocol):
 
     def data_received(self, data: bytes) -> None:
         self._unset_keepalive_if_required()
+        self._set_headers_timeout_if_required()
 
         self.conn.receive_data(data)
         self.handle_events()
@@ -180,6 +200,7 @@ class H11Protocol(asyncio.Protocol):
             try:
                 event = self.conn.next_event()
             except h11.RemoteProtocolError:
+                self._unset_headers_timeout_if_required()
                 msg = "Invalid HTTP request received."
                 self.logger.warning(msg)
                 self.send_400_response(msg)
@@ -199,6 +220,8 @@ class H11Protocol(asyncio.Protocol):
             elif isinstance(event, h11.Request):
                 # Pipelined HTTP requests and WebSocket upgrades may be processed after the keep-alive timer is armed.
                 self._unset_keepalive_if_required()
+                # The complete request headers have been received.
+                self._unset_headers_timeout_if_required()
 
                 self.headers = [(key.lower(), value) for key, value in event.headers]
                 raw_path, _, query_string = event.target.partition(b"?")
@@ -297,12 +320,15 @@ class H11Protocol(asyncio.Protocol):
         self.transport.set_protocol(protocol)
 
     def send_400_response(self, msg: str) -> None:
-        reason = STATUS_PHRASES[400]
+        self._send_error_response(400, msg)
+
+    def _send_error_response(self, status_code: int, msg: str) -> None:
+        reason = STATUS_PHRASES[status_code]
         headers: list[tuple[bytes, bytes]] = [
             (b"content-type", b"text/plain; charset=utf-8"),
             (b"connection", b"close"),
         ]
-        event = h11.Response(status_code=400, headers=headers, reason=reason)
+        event = h11.Response(status_code=status_code, headers=headers, reason=reason)
         output = self.conn.send(event)
         self.transport.write(output)
 
@@ -365,6 +391,16 @@ class H11Protocol(asyncio.Protocol):
             event = h11.ConnectionClosed()
             self.conn.send(event)
             self.transport.close()
+
+    def timeout_headers_handler(self) -> None:
+        """
+        Called if the complete request headers are not received within
+        'timeout_headers' seconds of the first byte of the request.
+        """
+        if not self.transport.is_closing():
+            msg = "Request headers timeout."
+            self.logger.warning(msg)
+            self._send_error_response(408, msg)
 
 
 class RequestResponseCycle:

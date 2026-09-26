@@ -77,6 +77,8 @@ class HttpToolsProtocol(asyncio.Protocol):
         # Timeouts
         self.timeout_keep_alive_task: TimerHandle | None = None
         self.timeout_keep_alive = config.timeout_keep_alive
+        self.timeout_headers_task: TimerHandle | None = None
+        self.timeout_headers = config.timeout_headers
 
         # Global state
         self.server_state = server_state
@@ -115,6 +117,7 @@ class HttpToolsProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         self.connections.discard(self)
+        self._unset_headers_timeout_if_required()
 
         if self.logger.level <= TRACE_LOG_LEVEL:
             prefix = "%s:%d - " % self.client if self.client else ""
@@ -139,6 +142,22 @@ class HttpToolsProtocol(asyncio.Protocol):
         if self.timeout_keep_alive_task is not None:
             self.timeout_keep_alive_task.cancel()
             self.timeout_keep_alive_task = None
+
+    def _unset_headers_timeout_if_required(self) -> None:
+        if self.timeout_headers_task is not None:
+            self.timeout_headers_task.cancel()
+            self.timeout_headers_task = None
+
+    def _set_headers_timeout_if_required(self) -> None:
+        # Arm the request headers timeout when the first bytes of a new
+        # request arrive. It is not reset by subsequent data, and it is
+        # cancelled as soon as the complete headers have been parsed.
+        if (
+            self.timeout_headers is not None
+            and self.timeout_headers_task is None
+            and (self.cycle is None or self.cycle.response_complete)
+        ):
+            self.timeout_headers_task = self.loop.call_later(self.timeout_headers, self.timeout_headers_handler)
 
     def _get_upgrade(self) -> bytes | None:
         connection = []
@@ -169,15 +188,18 @@ class HttpToolsProtocol(asyncio.Protocol):
 
     def data_received(self, data: bytes) -> None:
         self._unset_keepalive_if_required()
+        self._set_headers_timeout_if_required()
 
         try:
             self.parser.feed_data(data)
         except httptools.HttpParserError:
+            self._unset_headers_timeout_if_required()
             msg = "Invalid HTTP request received."
             self.logger.warning(msg)
             self.send_400_response(msg)
             return
         except httptools.HttpParserUpgrade:
+            self._unset_headers_timeout_if_required()
             if self._should_upgrade():
                 self.handle_websocket_upgrade()
             else:
@@ -204,7 +226,10 @@ class HttpToolsProtocol(asyncio.Protocol):
         self.transport.set_protocol(protocol)
 
     def send_400_response(self, msg: str) -> None:
-        content = [STATUS_LINE[400]]
+        self._send_error_response(400, msg)
+
+    def _send_error_response(self, status_code: int, msg: str) -> None:
+        content = [STATUS_LINE[status_code]]
         for name, value in self.server_state.default_headers:
             content.extend([name, b": ", value, b"\r\n"])  # pragma: full coverage
         content.extend(
@@ -246,6 +271,9 @@ class HttpToolsProtocol(asyncio.Protocol):
         self.headers.append((name, value))
 
     def on_headers_complete(self) -> None:
+        # The complete request headers have been received.
+        self._unset_headers_timeout_if_required()
+
         http_version = self.parser.get_http_version()
         method = self.parser.get_method()
         self.scope["method"] = method.decode("ascii")
@@ -374,6 +402,16 @@ class HttpToolsProtocol(asyncio.Protocol):
         """
         if not self.transport.is_closing():
             self.transport.close()
+
+    def timeout_headers_handler(self) -> None:
+        """
+        Called if the complete request headers are not received within
+        'timeout_headers' seconds of the first byte of the request.
+        """
+        if not self.transport.is_closing():
+            msg = "Request headers timeout."
+            self.logger.warning(msg)
+            self._send_error_response(408, msg)
 
 
 class RequestResponseCycle:

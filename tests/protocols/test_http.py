@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import socket
 import threading
@@ -426,6 +427,43 @@ async def test_keepalive_timeout(http_protocol_cls: type[HTTPProtocol]):
     assert not protocol.transport.is_closing()
     protocol.loop.run_later(with_delay=5)
     assert protocol.transport.is_closing()
+
+
+async def test_headers_timeout(http_protocol_cls: type[HTTPProtocol]):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, http_protocol_cls, timeout_headers=2)
+    protocol.data_received(b"GET / HTTP/1.1\r\nHost:")
+    assert not protocol.transport.is_closing()
+
+    # Receiving more partial headers must not reset the deadline.
+    timer_handle = protocol.timeout_headers_task
+    assert timer_handle is not None
+    protocol.data_received(b" example.org")
+    assert protocol.timeout_headers_task is timer_handle
+
+    protocol.loop.run_later(with_delay=1)
+    assert not protocol.transport.is_closing()
+    protocol.loop.run_later(with_delay=2)
+    assert protocol.transport.is_closing()
+    assert b"HTTP/1.1 408" in protocol.transport.buffer
+    assert b"connection: close" in protocol.transport.buffer.lower()
+    # No ASGI task was created for the incomplete request.
+    assert not protocol.loop._tasks
+
+
+async def test_headers_timeout_cancelled_once_headers_complete(http_protocol_cls: type[HTTPProtocol]):
+    app = Response(b"", status_code=204)
+
+    protocol = get_connected_protocol(app, http_protocol_cls, timeout_headers=2)
+    protocol.data_received(b"GET / HTTP/1.1\r\nHost:")
+    assert protocol.timeout_headers_task is not None
+    protocol.data_received(b" example.org\r\n\r\n")
+    assert protocol.timeout_headers_task is None
+    await protocol.loop.run_one()
+    assert b"HTTP/1.1 204 No Content" in protocol.transport.buffer
+    protocol.loop.run_later(with_delay=2)
+    assert not protocol.transport.is_closing()
 
 
 async def test_keepalive_timeout_with_pipelined_requests(http_protocol_cls: type[HTTPProtocol]):
@@ -1018,6 +1056,173 @@ def test_fragmentation(unused_tcp_port: int):
     assert bad_response != response[: len(bad_response)]
     server.should_exit = True
     t.join()
+
+
+HEADERS_TIMEOUT = 0.5
+
+
+@contextlib.contextmanager
+def running_server(config: Config):
+    server = Server(config=config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        while not server.started:
+            time.sleep(0.01)
+        yield server
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def open_connection(port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect(("127.0.0.1", port))
+    sock.settimeout(5)
+    return sock
+
+
+def read_response(sock: socket.socket) -> bytes:
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(4096)
+        assert chunk, "connection closed before response headers"
+        data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    content_length = 0
+    for line in head.split(b"\r\n"):
+        if line.lower().startswith(b"content-length:"):
+            content_length = int(line.split(b":")[1].strip())
+    while len(body) < content_length:
+        chunk = sock.recv(4096)
+        assert chunk, "connection closed before response body"
+        body += chunk
+    return head + b"\r\n\r\n" + body
+
+
+def read_until_close(sock: socket.socket) -> bytes:
+    chunks = []
+    while True:
+        chunk = sock.recv(4096)
+        assert chunk or chunks, "connection closed without any response"
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def trickle(sock: socket.socket, data: bytes, delay: float = 0.1) -> None:
+    try:
+        for index in range(len(data)):
+            sock.sendall(data[index : index + 1])
+            time.sleep(delay)
+    except OSError:
+        # The server closed the connection while we were still sending.
+        pass
+
+
+@pytest.mark.parametrize("http_impl", ["h11", "httptools"])
+def test_headers_timeout_trickled_headers(http_impl: str, unused_tcp_port: int):
+    app_calls = []
+    response = Response("Hello, world", media_type="text/plain")
+
+    async def app(scope, receive, send):
+        app_calls.append(1)
+        await response(scope, receive, send)
+
+    config = Config(app=app, http=http_impl, port=unused_tcp_port, timeout_headers=HEADERS_TIMEOUT)
+    with running_server(config):
+        sock = open_connection(unused_tcp_port)
+        # Trickle the headers one byte at a time. Every gap is smaller than
+        # the timeout, but the total time exceeds it: partial data must not
+        # reset the deadline, so the timeout still fires.
+        trickle(sock, SIMPLE_GET_REQUEST[:20])
+        data = read_until_close(sock)
+        sock.close()
+
+    assert b"HTTP/1.1 408" in data
+    assert b"connection: close" in data.lower()
+    # No ASGI task was created for the incomplete request.
+    assert app_calls == []
+
+
+@pytest.mark.parametrize("http_impl", ["h11", "httptools"])
+def test_headers_completed_within_deadline(http_impl: str, unused_tcp_port: int):
+    app = Response("Hello, world", media_type="text/plain")
+
+    config = Config(app=app, http=http_impl, port=unused_tcp_port, timeout_headers=HEADERS_TIMEOUT)
+    with running_server(config):
+        sock = open_connection(unused_tcp_port)
+        # Fragmented headers completing well before the deadline are fine.
+        third = len(SIMPLE_GET_REQUEST) // 3
+        sock.sendall(SIMPLE_GET_REQUEST[:third])
+        time.sleep(0.1)
+        sock.sendall(SIMPLE_GET_REQUEST[third : 2 * third])
+        time.sleep(0.1)
+        sock.sendall(SIMPLE_GET_REQUEST[2 * third :])
+        assert b"HTTP/1.1 200 OK" in read_response(sock)
+
+        # The next request on the same connection gets its own fresh deadline.
+        sock.sendall(SIMPLE_GET_REQUEST[:third])
+        time.sleep(0.1)
+        sock.sendall(SIMPLE_GET_REQUEST[third:])
+        assert b"HTTP/1.1 200 OK" in read_response(sock)
+        sock.close()
+
+
+@pytest.mark.parametrize("http_impl", ["h11", "httptools"])
+def test_headers_timeout_on_second_request(http_impl: str, unused_tcp_port: int):
+    app = Response("Hello, world", media_type="text/plain")
+
+    config = Config(app=app, http=http_impl, port=unused_tcp_port, timeout_headers=HEADERS_TIMEOUT)
+    with running_server(config):
+        sock = open_connection(unused_tcp_port)
+        sock.sendall(SIMPLE_GET_REQUEST)
+        assert b"HTTP/1.1 200 OK" in read_response(sock)
+
+        # The second request on the same connection gets a new deadline,
+        # counted from its own first byte.
+        trickle(sock, SIMPLE_GET_REQUEST[:20])
+        data = read_until_close(sock)
+        sock.close()
+
+    assert b"HTTP/1.1 408" in data
+
+
+@pytest.mark.parametrize("http_impl", ["h11", "httptools"])
+def test_headers_timeout_slow_body_not_killed(http_impl: str, unused_tcp_port: int):
+    async def app(scope, receive, send):
+        while True:
+            message = await receive()
+            if message["type"] != "http.request" or not message.get("more_body"):
+                break
+        await Response("Hello, world", media_type="text/plain")(scope, receive, send)
+
+    config = Config(app=app, http=http_impl, port=unused_tcp_port, timeout_headers=HEADERS_TIMEOUT)
+    with running_server(config):
+        sock = open_connection(unused_tcp_port)
+        # The deadline only covers the headers. A slow body upload taking
+        # longer than the timeout must not be killed once the complete
+        # headers have been received.
+        sock.sendall(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8\r\n\r\n")
+        trickle(sock, b"x" * 8, delay=0.15)
+        assert b"HTTP/1.1 200 OK" in read_response(sock)
+        sock.close()
+
+
+@pytest.mark.parametrize("http_impl", ["h11", "httptools"])
+def test_headers_timeout_disabled_by_default(http_impl: str, unused_tcp_port: int):
+    app = Response("Hello, world", media_type="text/plain")
+
+    config = Config(app=app, http=http_impl, port=unused_tcp_port)
+    with running_server(config):
+        sock = open_connection(unused_tcp_port)
+        half = len(SIMPLE_GET_REQUEST) // 2
+        sock.sendall(SIMPLE_GET_REQUEST[:half])
+        time.sleep(0.4)
+        sock.sendall(SIMPLE_GET_REQUEST[half:])
+        assert b"HTTP/1.1 200 OK" in read_response(sock)
+        sock.close()
 
 
 async def test_huge_headers_h11protocol_failure():

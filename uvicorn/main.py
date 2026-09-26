@@ -295,6 +295,14 @@ def print_version(ctx: click.Context, param: click.Parameter, value: bool) -> No
     show_default=True,
 )
 @click.option(
+    "--timeout-headers",
+    type=float,
+    default=None,
+    help="Maximum number of seconds to wait for the complete request headers, counted from the first byte of the"
+    " request. The connection is closed with a 408 response if the headers are not received in time."
+    " Disabled by default.",
+)
+@click.option(
     "--timeout-graceful-shutdown",
     type=int,
     default=None,
@@ -429,6 +437,7 @@ def main(
     limit_max_requests: int,
     limit_max_requests_jitter: int,
     timeout_keep_alive: int,
+    timeout_headers: float | None,
     timeout_graceful_shutdown: int | None,
     timeout_worker_healthcheck: int,
     ssl_keyfile: str,
@@ -482,6 +491,7 @@ def main(
         limit_max_requests=limit_max_requests,
         limit_max_requests_jitter=limit_max_requests_jitter,
         timeout_keep_alive=timeout_keep_alive,
+        timeout_headers=timeout_headers,
         timeout_graceful_shutdown=timeout_graceful_shutdown,
         timeout_worker_healthcheck=timeout_worker_healthcheck,
         ssl_keyfile=ssl_keyfile,
@@ -538,6 +548,7 @@ def run(
     limit_max_requests: int | None = None,
     limit_max_requests_jitter: int = 0,
     timeout_keep_alive: int = 5,
+    timeout_headers: float | None = None,
     timeout_graceful_shutdown: int | None = None,
     timeout_worker_healthcheck: int = 5,
     ssl_keyfile: str | os.PathLike[str] | None = None,
@@ -595,6 +606,7 @@ def run(
         limit_max_requests=limit_max_requests,
         limit_max_requests_jitter=limit_max_requests_jitter,
         timeout_keep_alive=timeout_keep_alive,
+        timeout_headers=timeout_headers,
         timeout_graceful_shutdown=timeout_graceful_shutdown,
         timeout_worker_healthcheck=timeout_worker_healthcheck,
         ssl_keyfile=ssl_keyfile,
