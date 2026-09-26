@@ -232,6 +232,7 @@ class Config:
         limit_max_requests_jitter: int = 0,
         backlog: int = 2048,
         timeout_keep_alive: int = 5,
+        timeout_request_headers: float | None = None,
         timeout_notify: int = 30,
         timeout_graceful_shutdown: int | None = None,
         timeout_worker_healthcheck: int = 5,
@@ -281,6 +282,7 @@ class Config:
         self.limit_max_requests_jitter = limit_max_requests_jitter
         self.backlog = backlog
         self.timeout_keep_alive = timeout_keep_alive
+        self.timeout_request_headers = timeout_request_headers
         self.timeout_notify = timeout_notify
         self.timeout_graceful_shutdown = timeout_graceful_shutdown
         self.timeout_worker_healthcheck = timeout_worker_healthcheck

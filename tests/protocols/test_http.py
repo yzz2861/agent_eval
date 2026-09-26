@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import socket
 import threading
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 import pytest
 
 from tests.response import Response
+from tests.utils import run_server
 from uvicorn import Server
 from uvicorn._types import ASGIApplication, ASGIReceiveCallable, ASGIReceiveEvent, ASGISendCallable, Scope
 from uvicorn.config import WS_PROTOCOLS, Config
@@ -257,6 +259,7 @@ class MockProtocol(asyncio.Protocol):
     loop: MockLoop
     transport: MockTransport
     timeout_keep_alive_task: asyncio.TimerHandle | None
+    timeout_request_headers_task: asyncio.TimerHandle | None
     ws_protocol_class: type[WSProtocol] | None
     scope: Scope
 
@@ -1250,3 +1253,322 @@ async def test_header_upgrade_is_websocket_depend_not_installed(
     assert msg in caplog.text
     assert b"HTTP/1.1 200 OK" in protocol.transport.buffer
     assert b"Hello, world" in protocol.transport.buffer
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("uvicorn.protocols.http.h11_impl:H11Protocol", id="h11"),
+        pytest.param(
+            "uvicorn.protocols.http.httptools_impl:HttpToolsProtocol",
+            marks=pytest.mark.skipif(
+                not importlib.util.find_spec("httptools"),
+                reason="httptools not installed.",
+            ),
+            id="httptools",
+        ),
+    ]
+)
+def headers_timeout_protocol_cls(request: pytest.FixtureRequest) -> type[HTTPProtocol]:
+    from uvicorn.importer import import_from_string
+
+    return import_from_string(request.param)
+
+
+async def test_request_headers_timeout_armed_on_first_byte(
+    headers_timeout_protocol_cls: type[HTTPProtocol],
+):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, headers_timeout_protocol_cls, timeout_request_headers=10)
+    protocol.data_received(b"G")
+    assert protocol.timeout_request_headers_task is not None
+
+    # Trailing bytes must not reset the timer.
+    task = protocol.timeout_request_headers_task
+    protocol.data_received(b"E")
+    assert protocol.timeout_request_headers_task is task
+
+    # Completing the request headers cancels the timer.
+    protocol.data_received(b"T / HTTP/1.1\r\nHost: example.org\r\n\r\n")
+    assert protocol.timeout_request_headers_task is None
+    await protocol.loop.run_one()
+    assert b"HTTP/1.1 200 OK" in protocol.transport.buffer
+
+
+async def test_request_headers_timeout_response(
+    headers_timeout_protocol_cls: type[HTTPProtocol],
+):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, headers_timeout_protocol_cls, timeout_request_headers=10)
+    protocol.data_received(b"GET / HTTP/1.1\r\nHost:")
+    assert protocol.timeout_request_headers_task is not None
+
+    protocol.loop.run_later(10)
+    assert protocol.timeout_request_headers_task is None
+    assert b"HTTP/1.1 408 Request Timeout" in protocol.transport.buffer
+    assert b"connection: close" in protocol.transport.buffer.lower()
+    assert protocol.transport.closed
+    # No ASGI task should have been created.
+    assert protocol.loop._tasks == []
+
+
+async def test_request_headers_timeout_not_triggered_on_closed_transport(
+    headers_timeout_protocol_cls: type[HTTPProtocol],
+):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, headers_timeout_protocol_cls, timeout_request_headers=10)
+    protocol.data_received(b"G")
+    protocol.transport.close()
+    protocol.loop.run_later(10)
+    assert protocol.transport.buffer == b""
+
+
+async def test_request_headers_timeout_cancelled_on_connection_lost(
+    headers_timeout_protocol_cls: type[HTTPProtocol],
+):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, headers_timeout_protocol_cls, timeout_request_headers=10)
+    protocol.data_received(b"G")
+    assert protocol.timeout_request_headers_task is not None
+    protocol.connection_lost(None)
+    assert protocol.timeout_request_headers_task is None
+
+
+async def test_request_headers_timeout_cancelled_on_invalid_request(
+    headers_timeout_protocol_cls: type[HTTPProtocol],
+):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, headers_timeout_protocol_cls, timeout_request_headers=10)
+    protocol.data_received(b"G")
+    assert protocol.timeout_request_headers_task is not None
+    protocol.data_received(b"invalid\r\n\r\n")
+    assert protocol.timeout_request_headers_task is None
+    assert b"HTTP/1.1 400 Bad Request" in protocol.transport.buffer
+
+
+async def test_request_headers_timeout_not_applied_to_request_body(
+    headers_timeout_protocol_cls: type[HTTPProtocol],
+):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, headers_timeout_protocol_cls, timeout_request_headers=10)
+    protocol.data_received(START_POST_REQUEST)
+    assert protocol.timeout_request_headers_task is None
+
+    # Slowly uploaded request bodies are not covered by the headers timeout.
+    protocol.data_received(FINISH_POST_REQUEST)
+    assert protocol.timeout_request_headers_task is None
+    await protocol.loop.run_one()
+    assert b"HTTP/1.1 200 OK" in protocol.transport.buffer
+
+
+async def test_request_headers_timeout_new_request_new_deadline(
+    headers_timeout_protocol_cls: type[HTTPProtocol],
+):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, headers_timeout_protocol_cls, timeout_request_headers=10)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+    assert b"HTTP/1.1 200 OK" in protocol.transport.buffer
+    assert protocol.timeout_request_headers_task is None
+
+    # The next request on the same connection gets its own fresh deadline.
+    protocol.data_received(b"G")
+    assert protocol.timeout_request_headers_task is not None
+
+
+HEADERS_TIMEOUT = 0.3
+
+
+def read_http_response(sock: socket.socket) -> bytes:
+    sock.settimeout(5.0)
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return data
+        data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    if b"connection: close" in head.lower():
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            body += chunk
+    else:
+        length = 0
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                length = int(line.split(b":", 1)[1])
+        while len(body) < length:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            body += chunk
+    return head + b"\r\n\r\n" + body
+
+
+async def test_request_headers_timeout_trickled_bytes_real_socket(
+    headers_timeout_protocol_cls: type[HTTPProtocol], unused_tcp_port: int
+):
+    app_calls = []
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
+        app_calls.append(scope)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"Hello, world"})
+
+    config = Config(
+        app=app,
+        http=headers_timeout_protocol_cls,
+        lifespan="off",
+        port=unused_tcp_port,
+        timeout_request_headers=HEADERS_TIMEOUT,
+    )
+    async with run_server(config):
+
+        def client() -> bytes:
+            sock = socket.create_connection(("127.0.0.1", unused_tcp_port))
+            try:
+                # Each gap is well below the timeout, but the cumulative time
+                # exceeds it: trailing bytes must not reset the deadline.
+                request = b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n"
+                for i in range(len(request)):
+                    try:
+                        sock.sendall(request[i : i + 1])
+                    except OSError:
+                        break
+                    time.sleep(0.05)
+                return read_http_response(sock)
+            finally:
+                sock.close()
+
+        response = await asyncio.to_thread(client)
+
+    assert response.startswith(b"HTTP/1.1 408 Request Timeout")
+    assert app_calls == []
+
+
+async def test_request_headers_fragmented_within_deadline_real_socket(
+    headers_timeout_protocol_cls: type[HTTPProtocol], unused_tcp_port: int
+):
+    app = Response("Hello, world", media_type="text/plain")
+    config = Config(
+        app=app,
+        http=headers_timeout_protocol_cls,
+        lifespan="off",
+        port=unused_tcp_port,
+        timeout_request_headers=HEADERS_TIMEOUT,
+    )
+    async with run_server(config):
+
+        def client() -> tuple[bytes, bytes]:
+            sock = socket.create_connection(("127.0.0.1", unused_tcp_port))
+            try:
+                # Fragmented headers completing just before the deadline.
+                first = b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n"
+                for fragment in (first[:5], first[5:20], first[20:]):
+                    sock.sendall(fragment)
+                    time.sleep(0.1)
+                first_response = read_http_response(sock)
+
+                # The second request on the same connection gets a fresh deadline.
+                second = b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n"
+                for fragment in (second[:10], second[10:]):
+                    sock.sendall(fragment)
+                    time.sleep(0.1)
+                second_response = read_http_response(sock)
+                return first_response, second_response
+            finally:
+                sock.close()
+
+        first_response, second_response = await asyncio.to_thread(client)
+
+    assert first_response.startswith(b"HTTP/1.1 200 OK")
+    assert second_response.startswith(b"HTTP/1.1 200 OK")
+
+
+async def test_request_headers_timeout_second_request_real_socket(
+    headers_timeout_protocol_cls: type[HTTPProtocol], unused_tcp_port: int
+):
+    app = Response("Hello, world", media_type="text/plain")
+    config = Config(
+        app=app,
+        http=headers_timeout_protocol_cls,
+        lifespan="off",
+        port=unused_tcp_port,
+        timeout_request_headers=HEADERS_TIMEOUT,
+    )
+    async with run_server(config):
+
+        def client() -> tuple[bytes, bytes]:
+            sock = socket.create_connection(("127.0.0.1", unused_tcp_port))
+            try:
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n")
+                first_response = read_http_response(sock)
+
+                # Trickle the second request past its own fresh deadline.
+                second = b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n"
+                for i in range(len(second)):
+                    try:
+                        sock.sendall(second[i : i + 1])
+                    except OSError:
+                        break
+                    time.sleep(0.05)
+                second_response = read_http_response(sock)
+                return first_response, second_response
+            finally:
+                sock.close()
+
+        first_response, second_response = await asyncio.to_thread(client)
+
+    assert first_response.startswith(b"HTTP/1.1 200 OK")
+    assert second_response.startswith(b"HTTP/1.1 408 Request Timeout")
+
+
+async def test_request_headers_timeout_slow_body_real_socket(
+    headers_timeout_protocol_cls: type[HTTPProtocol], unused_tcp_port: int
+):
+    received = bytearray()
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            received.extend(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"Hello, world"})
+
+    config = Config(
+        app=app,
+        http=headers_timeout_protocol_cls,
+        lifespan="off",
+        port=unused_tcp_port,
+        timeout_request_headers=HEADERS_TIMEOUT,
+    )
+    async with run_server(config):
+
+        def client() -> bytes:
+            sock = socket.create_connection(("127.0.0.1", unused_tcp_port))
+            try:
+                sock.sendall(b"POST / HTTP/1.1\r\nHost: example.org\r\nContent-Length: 5\r\n\r\n")
+                # The headers deadline must not kill a slow body upload.
+                for i in range(5):
+                    sock.sendall(b"x")
+                    time.sleep(HEADERS_TIMEOUT / 2)
+                return read_http_response(sock)
+            finally:
+                sock.close()
+
+        response = await asyncio.to_thread(client)
+
+    assert response.startswith(b"HTTP/1.1 200 OK")
+    assert bytes(received) == b"xxxxx"
