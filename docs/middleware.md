@@ -333,6 +333,54 @@ it when possible, and always counts the body bytes received from the ASGI server
 This also supports requests without `Content-Length` and prevents an understated
 header from bypassing the limit.
 
+## BodyReplayMiddleware
+
+Allows the request body to be consumed more than once. Normally the body can
+only be read a single time: a middleware that reads the whole body, for example
+to verify a request signature, leaves an exhausted stream for the endpoint.
+With this middleware installed, the body is recorded as it is consumed and any
+later consumer, such as an endpoint calling `request.stream()` or
+`request.form()`, is served a replay of the cached bytes.
+
+```python
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.body_replay import BodyReplayMiddleware
+
+
+routes = ...
+
+middleware = [
+    Middleware(BodyReplayMiddleware, memory_threshold=1024 * 1024)
+]
+
+app = Starlette(routes=routes, middleware=middleware)
+```
+
+The following arguments are supported:
+
+* `memory_threshold` - Bodies up to this many bytes are cached in memory. Larger
+bodies are rolled over to an unnamed temporary file. Defaults to `1024 * 1024` (1 MiB).
+* `max_cache_size` - Hard limit on the total cached body size in bytes. Once the
+body grows beyond it, receiving stops and
+`starlette.middleware.body_replay.BodyReplayCacheExceeded` is raised. Defaults to
+`64 * 1024 * 1024` (64 MiB).
+* `temp_dir` - Directory used for the temporary files. Defaults to the system
+default temporary directory.
+* `replay_chunk_size` - Maximum size in bytes of each chunk produced when
+replaying the cached body. Defaults to `64 * 1024` (64 KiB).
+
+The cache is private to the request being handled and is released as soon as
+the application returns or raises, including client disconnects and exceptions
+raised by signature verification. Replays of bodies that were rolled over to
+disk are streamed back in chunks of at most `replay_chunk_size` bytes, so a
+large cached body is never loaded back into memory as a whole.
+
+The middleware records exactly what the ASGI server sends, so replays deliver
+the same raw bytes without touching the network a second time. To reject
+oversized requests with a `413` response before they are cached, combine this
+middleware with `RequestBodyLimitMiddleware`.
+
 ## GZipMiddleware
 
 Handles GZip responses for any request that includes `"gzip"` in the `Accept-Encoding` header.

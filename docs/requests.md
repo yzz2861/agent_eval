@@ -105,6 +105,10 @@ If you access `.stream()` then the byte chunks are provided without storing
 the entire body to memory. Any subsequent calls to `.body()`, `.form()`, or `.json()`
 will raise an error.
 
+If a middleware needs to read the body first, for example to verify a request
+signature, and the endpoint still needs to consume it afterwards, install
+`BodyReplayMiddleware` so that the body can be replayed to later consumers.
+
 In some cases such as long-polling, or streaming responses you might need to
 determine if the client has dropped the connection. You can determine this
 state with `disconnected = await request.is_disconnected()`.
