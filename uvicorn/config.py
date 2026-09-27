@@ -226,6 +226,7 @@ class Config:
         server_header: bool = True,
         date_header: bool = True,
         forwarded_allow_ips: list[str] | str | None = None,
+        forwarded_headers: bool = False,
         root_path: str = "",
         limit_concurrency: int | None = None,
         limit_max_requests: int | None = None,
@@ -275,6 +276,7 @@ class Config:
         self.proxy_headers = proxy_headers
         self.server_header = server_header
         self.date_header = date_header
+        self.forwarded_headers = forwarded_headers
         self.root_path = root_path
         self.limit_concurrency = limit_concurrency
         self.limit_max_requests = limit_max_requests
@@ -541,7 +543,11 @@ class Config:
         if logger.getEffectiveLevel() <= TRACE_LOG_LEVEL:
             self.loaded_app = MessageLoggerMiddleware(self.loaded_app)
         if self.proxy_headers:
-            self.loaded_app = ProxyHeadersMiddleware(self.loaded_app, trusted_hosts=self.forwarded_allow_ips)
+            self.loaded_app = ProxyHeadersMiddleware(
+                self.loaded_app,
+                trusted_hosts=self.forwarded_allow_ips,
+                forwarded_headers=self.forwarded_headers,
+            )
 
         self.loaded = True
 

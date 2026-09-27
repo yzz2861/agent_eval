@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 X_FORWARDED_FOR = "X-Forwarded-For"
 X_FORWARDED_PROTO = "X-Forwarded-Proto"
+FORWARDED = "Forwarded"
 
 
 async def default_app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
@@ -43,15 +44,17 @@ async def default_app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISend
 def make_httpx2_client(
     trusted_hosts: str | list[str],
     client: tuple[str, int] = ("127.0.0.1", 123),
+    forwarded_headers: bool = False,
 ) -> httpx2.AsyncClient:
     """Create async client for use in test cases.
 
     Args:
         trusted_hosts: trusted_hosts for proxy middleware
         client: transport client to use
+        forwarded_headers: enable RFC 7239 Forwarded header support
     """
 
-    app = ProxyHeadersMiddleware(default_app, trusted_hosts)
+    app = ProxyHeadersMiddleware(default_app, trusted_hosts, forwarded_headers=forwarded_headers)
     transport = httpx2.ASGITransport(app=app, client=client)  # type: ignore
     return httpx2.AsyncClient(transport=transport, base_url="http://testserver")
 
@@ -646,3 +649,205 @@ async def test_proxy_headers_haproxy_behind_alb() -> None:
     await middleware(scope, _noop_receive, _noop_send)
     assert captured["client"] == ("1.2.3.4", 0)
     assert captured["scheme"] == "https"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("trusted_hosts", "expected"),
+    [
+        # always trust
+        ("*", "https://1.2.3.4:0"),
+        # trusted proxy
+        ("127.0.0.1", "https://1.2.3.4:0"),
+        # request from untrusted proxy: the Forwarded header is ignored entirely
+        ("192.168.0.1", "http://127.0.0.1:123"),
+        ("192.168.0.0/16", "http://127.0.0.1:123"),
+    ],
+)
+async def test_forwarded_headers_trusted_hosts(trusted_hosts: str | list[str], expected: str) -> None:
+    async with make_httpx2_client(trusted_hosts, forwarded_headers=True) as client:
+        response = await client.get("/", headers={FORWARDED: "for=1.2.3.4;proto=https"})
+    assert response.status_code == 200
+    assert response.text == expected
+
+
+@pytest.mark.anyio
+async def test_forwarded_headers_disabled_by_default() -> None:
+    # Forwarded headers are opt-in; without `forwarded_headers` they are ignored.
+    async with make_httpx2_client("*") as client:
+        response = await client.get("/", headers={FORWARDED: "for=1.2.3.4;proto=https"})
+    assert response.status_code == 200
+    assert response.text == "http://127.0.0.1:123"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("forwarded", "trusted_hosts", "expected"),
+    [
+        # all proxies are trusted: the client is the leftmost element
+        (
+            "for=1.2.3.4;proto=https, for=10.0.2.1, for=192.168.0.2",
+            ["127.0.0.1", "10.0.2.1", "192.168.0.2"],
+            "https://1.2.3.4:0",
+        ),
+        # the first untrusted element from the direct peer becomes the client,
+        # and the scheme comes from that same element
+        (
+            "for=1.2.3.4;proto=https, for=10.0.2.1;proto=http, for=192.168.0.2",
+            ["127.0.0.1", "192.168.0.2"],
+            "http://10.0.2.1:0",
+        ),
+        # a forged prefix added by the client before the trusted proxy chain
+        # never determines the exposed client or scheme
+        (
+            "for=9.9.9.9;proto=https, for=203.0.113.7;proto=http",
+            "127.0.0.1",
+            "http://203.0.113.7:0",
+        ),
+        # parameter names and the proto value are case-insensitive
+        ('For="[2001:db8::1]:443";Proto=HTTPS', "*", "https://[2001:db8::1]:443"),
+    ],
+)
+async def test_forwarded_headers_proxy_chain(forwarded: str, trusted_hosts: str | list[str], expected: str) -> None:
+    async with make_httpx2_client(trusted_hosts, forwarded_headers=True) as client:
+        response = await client.get("/", headers={FORWARDED: forwarded})
+    assert response.status_code == 200
+    assert response.text == expected
+
+
+@pytest.mark.anyio
+async def test_forwarded_headers_multiple_header_fields() -> None:
+    # Multiple Forwarded header fields are combined into a single chain.
+    async with make_httpx2_client("127.0.0.1", forwarded_headers=True) as client:
+        headers = httpx2.Headers(
+            [
+                (FORWARDED, "for=1.2.3.4"),
+                (FORWARDED, "for=10.0.0.1;proto=https"),
+            ]
+        )
+        response = await client.get("/", headers=headers)
+    assert response.status_code == 200
+    assert response.text == "https://10.0.0.1:0"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("forwarded", "expected"),
+    [
+        # IPv4 with port
+        ("for=192.0.2.43:4711;proto=https", "https://192.0.2.43:4711"),
+        # quoted bracketed IPv6 with port
+        ('for="[2001:db8:cafe::17]:4711";proto=https', "https://[2001:db8:cafe::17]:4711"),
+        # quoted bracketed IPv6 without port
+        ('for="[2001:db8::1]";proto=https', "https://[2001:db8::1]:0"),
+        # quoted IPv4
+        ('for="192.0.2.43";proto=https', "https://192.0.2.43:0"),
+        # quoted proto value
+        ('for=192.0.2.43;proto="https"', "https://192.0.2.43:0"),
+        # escapes, commas and semicolons inside quoted-strings do not split pairs
+        ('by="proxy\\"a;b,c";for=192.0.2.43;proto=https', "https://192.0.2.43:0"),
+        # unknown parameters are ignored
+        ("for=192.0.2.43;by=203.0.113.60;host=example.com;proto=https", "https://192.0.2.43:0"),
+    ],
+)
+async def test_forwarded_headers_value_shapes(forwarded: str, expected: str) -> None:
+    async with make_httpx2_client("*", forwarded_headers=True) as client:
+        response = await client.get("/", headers={FORWARDED: forwarded})
+    assert response.status_code == 200
+    assert response.text == expected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("forwarded", "expected"),
+    [
+        # unknown and obfuscated identifiers are never exposed as the client,
+        # but a proto attested by a trusted proxy is still applied
+        ("for=unknown;proto=https", "https://127.0.0.1:123"),
+        ("for=_hidden;proto=https", "https://127.0.0.1:123"),
+        # an unknown identifier in the chain terminates the walk
+        ("for=1.2.3.4, for=unknown", "http://127.0.0.1:123"),
+        ("for=1.2.3.4, for=_obfuscated, for=10.0.0.1", "http://127.0.0.1:123"),
+        # invalid values cannot be smuggled in as client addresses
+        ("for=", "http://127.0.0.1:123"),
+        ("for=not-an-ip", "http://127.0.0.1:123"),
+        ("for=1.2.3.4:notaport", "http://127.0.0.1:123"),
+        ("for=[2001:db8::1]extra", "http://127.0.0.1:123"),
+        ("garbage", "http://127.0.0.1:123"),
+        ("", "http://127.0.0.1:123"),
+        (", ,", "http://127.0.0.1:123"),
+    ],
+)
+async def test_forwarded_headers_invalid_identifiers(forwarded: str, expected: str) -> None:
+    async with make_httpx2_client("127.0.0.1, 10.0.0.0/8", forwarded_headers=True) as client:
+        response = await client.get("/", headers={FORWARDED: forwarded})
+    assert response.status_code == 200
+    assert response.text == expected
+
+
+@pytest.mark.anyio
+async def test_forwarded_headers_take_precedence_over_x_forwarded() -> None:
+    # When both header families are present, Forwarded wins and the two
+    # chains are never merged into a single identity.
+    async with make_httpx2_client("127.0.0.1", forwarded_headers=True) as client:
+        headers = {
+            FORWARDED: "for=1.2.3.4;proto=https",
+            X_FORWARDED_FOR: "9.9.9.9",
+            X_FORWARDED_PROTO: "http",
+        }
+        response = await client.get("/", headers=headers)
+    assert response.status_code == 200
+    assert response.text == "https://1.2.3.4:0"
+
+
+@pytest.mark.anyio
+async def test_forwarded_headers_fall_back_to_x_forwarded() -> None:
+    # Without a Forwarded header, X-Forwarded-* headers are still applied.
+    async with make_httpx2_client("127.0.0.1", forwarded_headers=True) as client:
+        headers = {X_FORWARDED_FOR: "1.2.3.4", X_FORWARDED_PROTO: "https"}
+        response = await client.get("/", headers=headers)
+    assert response.status_code == 200
+    assert response.text == "https://1.2.3.4:0"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("forwarded_proto", "expected"),
+    [
+        ("http", "ws://1.2.3.4:0"),
+        ("https", "wss://1.2.3.4:0"),
+        ("ws", "ws://1.2.3.4:0"),
+        ("wss", "wss://1.2.3.4:0"),
+    ],
+)
+async def test_forwarded_headers_websocket(
+    forwarded_proto: str,
+    expected: str,
+    ws_protocol_cls: type[WSProtocol | WebSocketsSansIOProtocol],
+    http_protocol_cls: type[H11Protocol | HttpToolsProtocol],
+    unused_tcp_port: int,
+) -> None:
+    async def websocket_app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
+        assert scope["type"] == "websocket"
+        scheme = scope["scheme"]
+        assert scope["client"] is not None
+        host, port = scope["client"]
+        await send({"type": "websocket.accept"})
+        await send({"type": "websocket.send", "text": f"{scheme}://{host}:{port}"})
+        await send({"type": "websocket.close"})
+
+    app_with_middleware = ProxyHeadersMiddleware(websocket_app, trusted_hosts="*", forwarded_headers=True)
+    config = Config(
+        app=app_with_middleware,
+        ws=ws_protocol_cls,
+        http=http_protocol_cls,
+        lifespan="off",
+        port=unused_tcp_port,
+    )
+
+    async with run_server(config):
+        url = f"ws://127.0.0.1:{unused_tcp_port}"
+        headers = {FORWARDED: f"for=1.2.3.4;proto={forwarded_proto}"}
+        async with connect(url, additional_headers=headers) as websocket:
+            data = await websocket.recv()
+            assert data == expected

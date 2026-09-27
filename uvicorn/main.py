@@ -256,6 +256,14 @@ def print_version(ctx: click.Context, param: click.Parameter, value: bool) -> No
     "The literal '*' means trust everything.",
 )
 @click.option(
+    "--forwarded-headers/--no-forwarded-headers",
+    is_flag=True,
+    default=False,
+    help="Enable/Disable the RFC 7239 Forwarded header to populate url scheme "
+    "and remote address info. When present it takes precedence over "
+    "X-Forwarded-Proto and X-Forwarded-For.",
+)
+@click.option(
     "--root-path",
     type=str,
     default="",
@@ -423,6 +431,7 @@ def main(
     server_header: bool,
     date_header: bool,
     forwarded_allow_ips: str,
+    forwarded_headers: bool,
     root_path: str,
     limit_concurrency: int,
     backlog: int,
@@ -476,6 +485,7 @@ def main(
         server_header=server_header,
         date_header=date_header,
         forwarded_allow_ips=forwarded_allow_ips,
+        forwarded_headers=forwarded_headers,
         root_path=root_path,
         limit_concurrency=limit_concurrency,
         backlog=backlog,
@@ -532,6 +542,7 @@ def run(
     server_header: bool = True,
     date_header: bool = True,
     forwarded_allow_ips: list[str] | str | None = None,
+    forwarded_headers: bool = False,
     root_path: str = "",
     limit_concurrency: int | None = None,
     backlog: int = 2048,
@@ -589,6 +600,7 @@ def run(
         server_header=server_header,
         date_header=date_header,
         forwarded_allow_ips=forwarded_allow_ips,
+        forwarded_headers=forwarded_headers,
         root_path=root_path,
         limit_concurrency=limit_concurrency,
         backlog=backlog,

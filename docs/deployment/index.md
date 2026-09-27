@@ -260,6 +260,7 @@ Uvicorn currently supports the following headers:
 
 - `X-Forwarded-For` ([MDN Reference](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-For))
 - `X-Forwarded-Proto`([MDN Reference](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-Proto))
+- `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) - disabled by default, enable with `--forwarded-headers`
 
 Uvicorn can use these headers to correctly set the client and protocol in the request.
 However as anyone can set these headers you must configure which "clients" you will trust to have set them correctly.
@@ -271,6 +272,10 @@ or Literals (e.g. `/path/to/socket.sock`). When running from CLI these are confi
     Incorrectly trusting other clients can lead to malicious actors spoofing their apparent client address to your application.
 
 A proxy chain may send a header once per hop rather than as a single comma-separated value. Repeated `X-Forwarded-For` fields are combined in order (as the equivalent comma-separated list, [RFC 9110, 5.3](https://www.rfc-editor.org/rfc/rfc9110#section-5.3)), while for `X-Forwarded-Proto` the last field is used.
+
+When `Forwarded` support is enabled and a request carries both `Forwarded` and `X-Forwarded-*` headers, the `Forwarded` header takes precedence and the `X-Forwarded-*` headers are ignored for that request - the two header families are never combined into a single proxy chain. If no `Forwarded` header is present, the `X-Forwarded-*` headers are used as usual.
+
+For the `Forwarded` header, multiple fields and comma-separated elements form a single chain of `forwarded-element`s, which is walked from the directly connecting peer towards the client: the first `for=` identifier that is not in `forwarded-allow-ips` becomes the client, and the `proto=` parameter of that same element sets the scheme. Elements sent by the client before the first trusted proxy are never reached, so a forged `Forwarded` prefix cannot influence the result. `for=unknown` and obfuscated identifiers (`_...`) are not valid addresses: they terminate the walk and are never exposed as the client.
 
 For more information, check [`ProxyHeadersMiddleware`](https://github.com/Kludex/uvicorn/blob/main/uvicorn/middleware/proxy_headers.py).
 

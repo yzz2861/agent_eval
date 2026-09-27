@@ -205,6 +205,15 @@ def test_proxy_headers() -> None:
     assert isinstance(config.loaded_app, ProxyHeadersMiddleware)
 
 
+def test_forwarded_headers() -> None:
+    config = Config(app=asgi_app, forwarded_headers=True)
+    config.load()
+
+    assert config.forwarded_headers is True
+    assert isinstance(config.loaded_app, ProxyHeadersMiddleware)
+    assert config.loaded_app.forwarded_headers is True
+
+
 def test_app_unimportable_module() -> None:
     config = Config(app="no.such:app")
     with pytest.raises(ImportError):
