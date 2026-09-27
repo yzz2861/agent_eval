@@ -6,6 +6,10 @@ APScheduler, see the :doc:`migration section <migration>`.
 
 **UNRELEASED**
 
+- Added the ``ExclusionCalendarTrigger`` class which wraps another trigger and
+  skips fire times falling on configured excluded dates or within excluded
+  time-of-day ranges (evaluated in a configurable time zone), for example to avoid
+  running tasks on holidays or during maintenance windows
 - **BREAKING** Switched the MongoDB data store to use the asynchronous API in
   ``pymongo`` and bumped the minimum ``pymongo`` version to v4.13.0
 - Bumped up the CBOR serializer's ``cbor2`` dependency to v6.0+

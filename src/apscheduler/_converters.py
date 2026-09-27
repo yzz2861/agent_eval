@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date, datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -40,6 +40,14 @@ def as_date(value: date | str) -> date:
         return date.fromisoformat(value)
 
     return value
+
+
+def as_time(value: time | str) -> time:
+    if isinstance(value, str):
+        value = time.fromisoformat(value)
+
+    # Exclusion windows are matched against naive wall clock times
+    return value.replace(tzinfo=None)
 
 
 def as_timezone(value: tzinfo | str) -> tzinfo:

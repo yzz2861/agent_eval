@@ -382,6 +382,60 @@ number of built-in trigger classes:
   use when you want to run the task on calendar-based intervals, at a specific time of
   day
 
+Excluding dates and time ranges
+-------------------------------
+
+To prevent a schedule from running on specific dates (such as holidays) or inside
+recurring time-of-day windows (such as maintenance windows), wrap its trigger in an
+:class:`~triggers.exclusion.ExclusionCalendarTrigger`::
+
+    from datetime import date, datetime, time
+    from zoneinfo import ZoneInfo
+
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.exclusion import ExclusionCalendarTrigger
+
+    timezone = ZoneInfo("Europe/Berlin")
+    trigger = ExclusionCalendarTrigger(
+        CronTrigger(
+            hour="2,4", minute=30,
+            start_time=datetime(2024, 10, 25), timezone=timezone,
+        ),
+        excluded_dates=[date(2024, 10, 27)],
+        excluded_time_ranges=[(time(1), time(3))],
+        timezone=timezone,
+    )
+
+The exclusion rules are always evaluated against the local wall clock time in the
+given ``timezone``, not in UTC. A time range where the start is later than the end
+crosses midnight, so ``(time(22), time(2))`` excludes 22:00 through 01:59 every
+night. The end of a range is exclusive.
+
+The example above combines a nightly maintenance window (01:00\N{en dash}03:00 local
+time) with a full-day maintenance on 2024-10-27, the day of the backward daylight
+saving shift in Europe/Berlin. Its actual run times would be:
+
+* 2024-10-25 04:30:00+02:00
+* 2024-10-26 04:30:00+02:00
+* 2024-10-28 04:30:00+01:00
+* 2024-10-29 04:30:00+01:00
+* \N{horizontal ellipsis}
+
+Every 02:30 run is skipped because it falls inside the nightly window, and nothing
+runs on 2024-10-27 at all. Notably, 02:30 occurs *twice* on 2024-10-27 (once in each
+fold of the repeated hour), and both occurrences would be excluded, since the window
+is matched against the local wall clock time. Likewise, on a forward daylight saving
+shift (2025-03-30 in Europe/Berlin, where 02:30 does not exist), rules covering the
+nonexistent times simply never match anything on that date.
+
+When a run time is excluded, the wrapped trigger is asked for its *next* run time
+instead of shifting the excluded one to the end of the window. This guarantees that
+only run times genuinely produced by the wrapped trigger are ever returned, so no
+extra runs are created. If the wrapped trigger runs out of run times, ``None`` is
+returned as usual. If, however, ``max_iterations`` (1000 by default) consecutive run
+times are excluded, :class:`~apscheduler.MaxIterationsReached` is raised, which lets
+you tell a long exclusion stretch apart from an exhausted trigger.
+
 Combining multiple triggers
 ---------------------------
 
