@@ -11,6 +11,7 @@ from ...format_error import format_error
 from ...types import (
     ContextValue,
     ErrorFormatter,
+    GraphQLIncrementalResult,
     GraphQLResult,
     OnComplete,
     OnConnect,
@@ -155,7 +156,7 @@ class GraphQLHttpHandlerBase(GraphQLHandlerBase):
         # or query was already parsed
         context_value: Any | None = None,
         query_document: DocumentNode | None = None,
-    ) -> GraphQLResult:
+    ) -> GraphQLResult | GraphQLIncrementalResult:
         """Abstract method for GraphQL query execution."""
 
 

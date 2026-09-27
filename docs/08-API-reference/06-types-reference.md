@@ -143,6 +143,20 @@ It receives two arguments:
 - - - - -
 
 
+## `Executor`
+
+```python
+Executor = Callable[..., ExecutionResult | IncrementalExecutionResult | Awaitable[ExecutionResult | IncrementalExecutionResult]]
+```
+
+Type for custom query executors.
+
+Custom executor is a callable that takes the same arguments as `graphql.execute` and returns either an `ExecutionResult` or an `IncrementalExecutionResult` (or an awaitable of either).
+
+
+- - - - -
+
+
 ## `Extension`
 
 ```python
@@ -321,6 +335,79 @@ It's a tuple of two elements:
 `bool`: `True` when query was executed successfully (without any errors), `False` otherwise.
 
 `dict`: JSON-serializable query result.
+
+
+- - - - -
+
+
+## `GraphQLIncrementalResult`
+
+```python
+GraphQLIncrementalResult = tuple[bool, dict, AsyncIterator[dict]]
+```
+
+Result type for `graphql` function when custom executor returns an incremental execution result.
+
+It's a tuple of three elements:
+
+`bool`: `True` when initial result was executed successfully (without any errors), `False` otherwise.
+
+`dict`: JSON-serializable initial result.
+
+`AsyncIterator`: an async iterator of JSON-serializable incremental patches.
+
+
+- - - - -
+
+
+## `IncrementalExecutionResult`
+
+```python
+@dataclass
+class IncrementalExecutionResult:
+    initial_result: ExecutionResult
+    subsequent_results: AsyncIterator[IncrementalPatch]
+```
+
+Result of an incremental GraphQL execution.
+
+Returned by custom executors to signal that the query result is delivered incrementally: an initial result followed by a stream of patches.
+
+### Attributes
+
+`initial_result`: an `ExecutionResult` with the initial result.
+
+`subsequent_results`: an async iterator of `IncrementalPatch` instances with subsequent patches.
+
+
+- - - - -
+
+
+## `IncrementalPatch`
+
+```python
+@dataclass
+class IncrementalPatch:
+    data: Any = None
+    path: list[str | int] | None = None
+    label: str | None = None
+    errors: list[GraphQLError] | None = None
+    has_next: bool = False
+```
+
+A single incremental delivery patch produced by a custom executor.
+
+### Attributes
+
+`data`: a JSON-serializable data for this patch.
+
+`path`: a path to the position in the initial result this patch applies to.
+
+`label`: a label of the deferred or streamed fragment this patch applies to.
+
+`errors`: a list of `GraphQLError` instances that occurred while producing this patch.
+
+`has_next`: a `bool` marking if more patches follow this one. Last patch should set it to `False`.
 
 
 - - - - -

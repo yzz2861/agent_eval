@@ -32,8 +32,12 @@ from .logger import log_error
 from .types import (
     BaseProxyRootValue,
     ErrorFormatter,
+    Executor,
     ExtensionList,
+    GraphQLIncrementalResult,
     GraphQLResult,
+    IncrementalExecutionResult,
+    IncrementalPatch,
     MiddlewareList,
     QueryParser,
     QueryValidator,
@@ -63,8 +67,9 @@ async def graphql(
     middleware_manager_class: type[MiddlewareManager] | None = None,
     extensions: ExtensionList | None = None,
     execution_context_class: type[ExecutionContext] | None = None,
+    executor: Executor | None = None,
     **kwargs,
-) -> GraphQLResult:
+) -> GraphQLResult | GraphQLIncrementalResult:
     """Execute GraphQL query asynchronously.
 
     Returns a tuple with two items:
@@ -129,6 +134,11 @@ async def graphql(
     `execution_context_class`: `ExecutionContext` class to use by query
     executor.
 
+    `executor`: a custom `Executor` callable to use instead of
+    `graphql.execute` to execute the query. May return either an
+    `ExecutionResult` or an `IncrementalExecutionResult` with initial result
+    and async iterator of subsequent patches.
+
     `**kwargs`: any kwargs not used by `graphql` are passed to
     `graphql.graphql`.
     """
@@ -188,19 +198,22 @@ async def graphql(
                 result_update = root_value
                 root_value = root_value.root_value
 
-            exec_result = execute(
-                schema,
-                document,
-                root_value=root_value,
-                context_value=context_value,
-                variable_values=variables,
-                operation_name=operation_name,
-                execution_context_class=execution_context_class,
-                middleware=extension_manager.as_middleware_manager(
+            execute_kwargs = {
+                "root_value": root_value,
+                "context_value": context_value,
+                "variable_values": variables,
+                "operation_name": operation_name,
+                "execution_context_class": execution_context_class,
+                "middleware": extension_manager.as_middleware_manager(
                     middleware, middleware_manager_class
                 ),
                 **kwargs,
-            )
+            }
+
+            if executor is not None:
+                exec_result = executor(schema, document, **execute_kwargs)
+            else:
+                exec_result = execute(schema, document, **execute_kwargs)
 
             if isawaitable(exec_result):
                 exec_result = await exec_result
@@ -217,6 +230,15 @@ async def graphql(
                 return result_update.update_result(error_result)
 
             return error_result
+
+        if isinstance(exec_result, IncrementalExecutionResult):
+            return handle_incremental_result(
+                exec_result,
+                logger=logger,
+                error_formatter=error_formatter,
+                debug=debug,
+                extension_manager=extension_manager,
+            )
 
         result = handle_query_result(
             exec_result,
@@ -568,6 +590,91 @@ def handle_query_result(
             extension_manager.has_errors(result.errors)
         add_extensions_to_response(extension_manager, response)
     return result.data is not None, response
+
+
+def handle_incremental_result(
+    result: IncrementalExecutionResult,
+    *,
+    logger,
+    error_formatter,
+    debug,
+    extension_manager=None,
+) -> GraphQLIncrementalResult:
+    success, initial_payload = handle_query_result(
+        result.initial_result,
+        logger=logger,
+        error_formatter=error_formatter,
+        debug=debug,
+        extension_manager=extension_manager,
+    )
+    initial_payload["hasNext"] = True
+
+    return (
+        success,
+        initial_payload,
+        FormattedIncrementalPatches(
+            result.subsequent_results,
+            logger=logger,
+            error_formatter=error_formatter,
+            debug=debug,
+        ),
+    )
+
+
+class FormattedIncrementalPatches:
+    """Async iterator formatting incremental patches into JSON-serializable
+    dicts.
+
+    Closes the underlying patches stream when its `aclose` method is called,
+    also if the iteration has never started.
+    """
+
+    def __init__(self, subsequent_results, *, logger, error_formatter, debug):
+        self._subsequent_results = subsequent_results
+        self._iterator = subsequent_results.__aiter__()
+        self._logger = logger
+        self._error_formatter = error_formatter
+        self._debug = debug
+
+    def __aiter__(self) -> "FormattedIncrementalPatches":
+        return self
+
+    async def __anext__(self) -> dict:
+        patch = await self._iterator.__anext__()
+        return format_incremental_patch(
+            patch,
+            logger=self._logger,
+            error_formatter=self._error_formatter,
+            debug=self._debug,
+        )
+
+    async def aclose(self) -> None:
+        """Closes the underlying patches stream, if it's closable."""
+        aclose = getattr(self._subsequent_results, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
+def format_incremental_patch(
+    patch: IncrementalPatch,
+    *,
+    logger,
+    error_formatter,
+    debug,
+) -> dict:
+    payload: dict[str, Any] = {}
+    if patch.data is not None:
+        payload["data"] = patch.data
+    if patch.path is not None:
+        payload["path"] = patch.path
+    if patch.label is not None:
+        payload["label"] = patch.label
+    if patch.errors:
+        for error in patch.errors:
+            log_error(error, logger)
+        payload["errors"] = [error_formatter(error, debug) for error in patch.errors]
+    payload["hasNext"] = patch.has_next
+    return payload
 
 
 def handle_graphql_errors(

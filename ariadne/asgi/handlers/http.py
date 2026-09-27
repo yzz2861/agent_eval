@@ -21,12 +21,15 @@ from ...file_uploads import combine_multipart_data
 from ...graphql import graphql
 from ...types import (
     ContextValue,
+    Executor,
     ExtensionList,
     Extensions,
+    GraphQLIncrementalResult,
     GraphQLResult,
     MiddlewareList,
     Middlewares,
 )
+from ..incremental import IncrementalDeliveryResponse, accepts_incremental_delivery
 from .base import GraphQLHttpHandlerBase
 
 if TYPE_CHECKING:
@@ -46,6 +49,7 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         middleware: Middlewares | None = None,
         middleware_manager_class: type[MiddlewareManager] | None = None,
         subscription_handlers: list[SubscriptionHandler] | None = None,
+        executor: Executor | None = None,
     ) -> None:
         """Initializes the HTTP handler.
 
@@ -67,12 +71,19 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         `subscription_handlers`: a list of `SubscriptionHandler` instances to
         handle GraphQL subscriptions. Handlers are tried in order; the first
         handler whose `supports()` method returns `True` handles the request.
+
+        `executor`: a custom `Executor` callable to use instead of
+        `graphql.execute` to execute queries. May return either an
+        `ExecutionResult` or an `IncrementalExecutionResult` with initial
+        result and async iterator of subsequent patches. Incremental results
+        are streamed to clients accepting `multipart/mixed` responses.
         """
         super().__init__()
 
         self.extensions = extensions
         self.middleware = middleware
         self.middleware_manager_class = middleware_manager_class or MiddlewareManager
+        self.executor = executor
         self.subscription_handlers: list[SubscriptionHandler] = (
             subscription_handlers or []
         )
@@ -220,7 +231,11 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
                         error_formatter=self.error_formatter,
                     )
 
-        success, result = await self.execute_graphql_query(request, data)
+        query_result = await self.execute_graphql_query(request, data)
+        if len(query_result) == 3:
+            return await self.create_incremental_response(request, query_result)
+
+        success, result = query_result
         return await self.create_json_response(request, result, success)
 
     async def extract_data_from_request(self, request: Request) -> Any:
@@ -339,7 +354,7 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         *,
         context_value: Any = None,
         query_document: DocumentNode | None = None,
-    ) -> GraphQLResult:
+    ) -> GraphQLResult | GraphQLIncrementalResult:
         """Executes GraphQL query from `request` and returns `GraphQLResult`.
 
         Creates GraphQL `ContextValue`, initializes extensions and middlewares,
@@ -390,6 +405,7 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
             middleware=middleware,
             middleware_manager_class=self.middleware_manager_class,
             execution_context_class=self.execution_context_class,
+            executor=self.executor,
         )
 
     async def get_extensions_for_request(
@@ -433,6 +449,43 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         if middleware:
             return cast(MiddlewareList, middleware)
         return None
+
+    async def create_incremental_response(
+        self,
+        request: Request,
+        result: GraphQLIncrementalResult,
+    ) -> Response:
+        """Creates response for an incremental GraphQL query result.
+
+        If the request's `Accept` header allows `multipart/mixed` responses,
+        returns an `IncrementalDeliveryResponse` streaming the initial result
+        and subsequent patches as multipart parts. Otherwise closes the
+        patches stream without consuming it and returns a `406 Not Acceptable`
+        response.
+
+        # Required arguments
+
+        `request`: the `Request` instance from Starlette or FastAPI.
+
+        `result`: a `GraphQLIncrementalResult` tuple with the initial result
+        and async iterator of subsequent patches.
+        """
+        _, initial_result, subsequent_results = result
+
+        if not accepts_incremental_delivery(request):
+            aclose = getattr(subsequent_results, "aclose", None)
+            if aclose is not None:
+                await aclose()
+            return PlainTextResponse(
+                "Incremental delivery requires the client to accept "
+                "multipart/mixed responses.",
+                status_code=HTTPStatus.NOT_ACCEPTABLE,
+            )
+
+        return IncrementalDeliveryResponse(
+            initial_result=initial_result,
+            subsequent_results=subsequent_results,
+        )
 
     async def create_json_response(
         self,

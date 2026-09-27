@@ -30,6 +30,7 @@ def __init__(
     middleware: Middlewares | None = None,
     middleware_manager_class: type[MiddlewareManager] | None = None,
     subscription_handlers: list[SubscriptionHandler] | None = None,
+    executor: Executor | None = None,
 ) -> None:
     ...
 ```
@@ -56,6 +57,14 @@ if [`extensions`](types-reference#extensions) or `middleware` options are set.
 handle GraphQL subscriptions over HTTP. Handlers are tried in order; the
 first handler whose `supports()` method returns `True` handles the
 request. Defaults to no handlers.
+
+`executor`: a custom [`Executor`](types-reference#executor) callable to use
+instead of `graphql.execute` to execute queries. May return either an
+`ExecutionResult` or an [`IncrementalExecutionResult`](types-reference#incrementalexecutionresult)
+with initial result and async iterator of subsequent patches. Incremental
+results are streamed as `multipart/mixed` responses to clients sending
+`Accept: multipart/mixed` header; other clients receive a
+`406 Not Acceptable` response instead. Defaults to `graphql.execute`.
 
 
 ### Methods

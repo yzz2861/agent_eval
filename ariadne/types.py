@@ -1,5 +1,7 @@
 from collections.abc import (
     AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
     Callable,
     Collection,
     Generator,
@@ -26,8 +28,12 @@ from starlette.websockets import WebSocket
 
 __all__ = [
     "ExecutionResult",
+    "Executor",
     "Resolver",
     "GraphQLResult",
+    "GraphQLIncrementalResult",
+    "IncrementalExecutionResult",
+    "IncrementalPatch",
     "SubscriptionResult",
     "Subscriber",
     "ErrorFormatter",
@@ -98,6 +104,81 @@ It's a tuple of two elements:
 subscription's results. Depends if query was success or not.
 """
 SubscriptionResult = tuple[bool, list[dict] | AsyncGenerator[ExecutionResult, None]]
+
+"""Result type for `graphql` function when custom executor returns an
+incremental execution result.
+
+It's a tuple of three elements:
+
+`bool`: `True` when initial result was executed successfully (without any
+errors), `False` otherwise.
+
+`dict`: JSON-serializable initial result.
+
+`AsyncIterator`: an async iterator of JSON-serializable incremental
+patches.
+"""
+GraphQLIncrementalResult = tuple[bool, dict, AsyncIterator[dict]]
+
+"""Type for custom query executors.
+
+Custom executor is a callable that takes the same arguments as
+`graphql.execute` and returns either an `ExecutionResult` or an
+`IncrementalExecutionResult` (or an awaitable of either).
+"""
+Executor = Callable[
+    ...,
+    "ExecutionResult | IncrementalExecutionResult"
+    " | Awaitable[ExecutionResult | IncrementalExecutionResult]",
+]
+
+
+@dataclass
+class IncrementalPatch:
+    """A single incremental delivery patch produced by a custom executor.
+
+    # Optional attributes
+
+    `data`: a JSON-serializable data for this patch.
+
+    `path`: a path to the position in the initial result this patch
+    applies to.
+
+    `label`: a label of the deferred or streamed fragment this patch
+    applies to.
+
+    `errors`: a list of `GraphQLError` instances that occurred while
+    producing this patch.
+
+    `has_next`: a `bool` marking if more patches follow this one. Last
+    patch should set it to `False`.
+    """
+
+    data: Any = None
+    path: list[str | int] | None = None
+    label: str | None = None
+    errors: list[GraphQLError] | None = None
+    has_next: bool = False
+
+
+@dataclass
+class IncrementalExecutionResult:
+    """Result of an incremental GraphQL execution.
+
+        Returned by custom executors to signal that the query result is delivered
+        incrementally: an initial result followed by a stream of patches.
+
+        # Required attributes
+
+    `initial_result`: an `ExecutionResult` with the initial result.
+
+    `subsequent_results`: an async iterator of `IncrementalPatch`
+        instances with subsequent patches.
+    """
+
+    initial_result: ExecutionResult
+    subsequent_results: AsyncIterator[IncrementalPatch]
+
 
 """Type for subscription source functions.
 

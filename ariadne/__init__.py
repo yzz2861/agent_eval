@@ -30,7 +30,13 @@ from .subscription_handlers import (
     SubscriptionHandler,
 )
 from .subscriptions import SubscriptionType
-from .types import Extension, SchemaBindable
+from .types import (
+    Executor,
+    Extension,
+    IncrementalExecutionResult,
+    IncrementalPatch,
+    SchemaBindable,
+)
 from .unions import UnionType
 from .utils import (
     convert_camel_case_to_snake,
@@ -41,8 +47,11 @@ from .utils import (
 
 __all__ = [
     "EnumType",
+    "Executor",
     "Extension",
     "ExtensionManager",
+    "IncrementalExecutionResult",
+    "IncrementalPatch",
     "InputType",
     "InterfaceType",
     "MutationType",
