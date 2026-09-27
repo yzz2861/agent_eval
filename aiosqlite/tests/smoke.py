@@ -9,7 +9,7 @@ from sqlite3 import OperationalError
 from tempfile import TemporaryDirectory
 from threading import Thread
 from unittest import IsolatedAsyncioTestCase, SkipTest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import aiosqlite
 from .helpers import setup_logger
@@ -425,6 +425,105 @@ class SmokeTest(IsolatedAsyncioTestCase):
                     "COMMIT;",
                 ],
             )
+
+    async def test_iterdump_small_buffer(self):
+        async with aiosqlite.connect(":memory:", dump_queue_size=1) as db:
+            await db.execute("create table foo (i integer, k charvar(250))")
+            await db.executemany(
+                "insert into foo values (?, ?)", [(1, "hello"), (2, "world")]
+            )
+
+            lines = [line async for line in db.iterdump()]
+            self.assertEqual(
+                lines,
+                [
+                    "BEGIN TRANSACTION;",
+                    "CREATE TABLE foo (i integer, k charvar(250));",
+                    "INSERT INTO \"foo\" VALUES(1,'hello');",
+                    "INSERT INTO \"foo\" VALUES(2,'world');",
+                    "COMMIT;",
+                ],
+            )
+
+    async def test_iterdump_early_exit_unblocks_connection(self):
+        async with aiosqlite.connect(":memory:", dump_queue_size=2) as db:
+            await db.execute("create table foo (i integer)")
+            await db.executemany(
+                "insert into foo values (?)", [(i,) for i in range(1000)]
+            )
+
+            async def read_a_few_lines():
+                lines = []
+                iterator = db.iterdump()
+                async for line in iterator:
+                    lines.append(line)
+                    if len(lines) >= 5:
+                        break
+                await iterator.aclose()
+                return lines
+
+            lines = await asyncio.wait_for(read_a_few_lines(), timeout=5)
+            self.assertEqual(len(lines), 5)
+
+            # the worker thread must be free for later queries
+            async with db.execute("select count(*) from foo") as cursor:
+                row = await asyncio.wait_for(cursor.fetchone(), timeout=5)
+                self.assertEqual(row, (1000,))
+        # closing the connection on context exit must not hang either
+
+    async def test_iterdump_abandoned_then_close(self):
+        db = await aiosqlite.connect(":memory:", dump_queue_size=1)
+        await db.execute("create table foo (i integer)")
+        await db.executemany(
+            "insert into foo values (?)", [(i,) for i in range(1000)]
+        )
+
+        lines = []
+        async for line in db.iterdump():
+            lines.append(line)
+            if len(lines) >= 3:
+                break
+        self.assertEqual(len(lines), 3)
+
+        # the abandoned generator is finalized by the event loop, which must
+        # unblock the worker thread so the connection can close
+        await asyncio.wait_for(db.close(), timeout=5)
+
+    async def test_iterdump_cancelled_consumer(self):
+        async with aiosqlite.connect(":memory:", dump_queue_size=1) as db:
+            await db.execute("create table foo (i integer)")
+            await db.executemany(
+                "insert into foo values (?)", [(i,) for i in range(1000)]
+            )
+
+            async def consume():
+                async for line in db.iterdump():
+                    await asyncio.sleep(0.01)
+
+            task = asyncio.ensure_future(consume())
+            # let the producer fill the buffer and block on the full queue
+            await asyncio.sleep(0.1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+
+            async with db.execute("select count(*) from foo") as cursor:
+                row = await asyncio.wait_for(cursor.fetchone(), timeout=5)
+                self.assertEqual(row, (1000,))
+
+    async def test_iterdump_exception_propagates(self):
+        error = RuntimeError("boom")
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("create table foo (i integer)")
+
+            with patch.object(
+                aiosqlite.Connection, "_conn", new_callable=PropertyMock
+            ) as mock_conn:
+                mock_conn.return_value.iterdump.side_effect = error
+                with self.assertRaises(RuntimeError) as cm:
+                    async for line in db.iterdump():
+                        pass
+            self.assertIs(cm.exception, error)
 
     async def test_cursor_on_closed_connection(self):
         db = await aiosqlite.connect(self.db)

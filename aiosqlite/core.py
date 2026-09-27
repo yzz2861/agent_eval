@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Generator, Iterable
 from functools import partial
 from pathlib import Path
 from queue import Empty, Queue, SimpleQueue
-from threading import Thread
+from threading import Event, Thread
 from typing import Any, Callable, Literal, Optional, Union
 from warnings import warn
 
@@ -81,12 +81,14 @@ class Connection:
         connector: Callable[[], sqlite3.Connection],
         iter_chunk_size: int,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        dump_queue_size: int = 0,
     ) -> None:
         self._running = True
         self._connection: Optional[sqlite3.Connection] = None
         self._connector = connector
         self._tx: _TxQueue = SimpleQueue()
         self._iter_chunk_size = iter_chunk_size
+        self._dump_queue_size = dump_queue_size
         self._thread = Thread(target=_connection_worker_thread, args=(self._tx,))
 
         if loop is not None:
@@ -375,41 +377,81 @@ class Connection:
         """
         Return an async iterator to dump the database in SQL text format.
 
+        The worker thread buffers at most ``dump_queue_size`` lines ahead of
+        the consumer (unlimited when zero), so a slow consumer slows the dump
+        down instead of piling SQL text up in memory.
+
         Example::
 
             async for line in db.iterdump():
                 ...
 
         """
-        dump_queue: Queue = Queue()
+        dump_queue: Queue = Queue(maxsize=self._dump_queue_size)
+        loop = asyncio.get_running_loop()
+        data_ready = asyncio.Event()
+        cancelled = Event()
+
+        def notify() -> None:
+            try:
+                loop.call_soon_threadsafe(data_ready.set)
+            except RuntimeError:
+                # event loop already closed, nobody left to notify
+                pass
 
         def dumper():
             try:
                 for line in self._conn.iterdump():
-                    dump_queue.put_nowait(line)
-                dump_queue.put_nowait(None)
+                    if cancelled.is_set():
+                        return
+                    dump_queue.put(line)
+                    notify()
+                dump_queue.put(None)
 
-            except Exception:
+            except Exception as e:
                 LOG.exception("exception while dumping db")
-                dump_queue.put_nowait(None)
-                raise
+                # deliver the failure to the consumer, in order, rather than
+                # silently looking like a normal end of dump
+                dump_queue.put(e)
+
+            finally:
+                notify()
 
         fut = self._execute(dumper)
         task = asyncio.ensure_future(fut)
+        # wake the consumer if the dump task itself fails to start or finish
+        task.add_done_callback(lambda _: notify())
 
-        while True:
-            try:
-                line: Optional[str] = dump_queue.get_nowait()
+        try:
+            while True:
+                try:
+                    line: Optional[str] = dump_queue.get_nowait()
+                except Empty:
+                    if task.done() and dump_queue.empty():
+                        LOG.warning("iterdump completed unexpectedly")
+                        break
+                    data_ready.clear()
+                    try:
+                        line = dump_queue.get_nowait()
+                    except Empty:
+                        await data_ready.wait()
+                        continue
+
                 if line is None:
                     break
+                if isinstance(line, Exception):
+                    raise line
                 yield line
-
-            except Empty:
-                if task.done():
-                    LOG.warning("iterdump completed unexpectedly")
+        finally:
+            # If the consumer goes away (early break, aclose(), cancellation,
+            # or the connection closing), unblock a producer stuck on a full
+            # queue so the worker thread can run later queries or close().
+            cancelled.set()
+            while not task.done():
+                try:
+                    dump_queue.get_nowait()
+                except Empty:
                     break
-
-                await asyncio.sleep(0.01)
 
         await task
 
@@ -444,10 +486,20 @@ def connect(
     database: Union[str, Path],
     *,
     iter_chunk_size=64,
+    dump_queue_size=0,
     loop: Optional[asyncio.AbstractEventLoop] = None,
     **kwargs: Any,
 ) -> Connection:
-    """Create and return a connection proxy to the sqlite database."""
+    """
+    Create and return a connection proxy to the sqlite database.
+
+    :param iter_chunk_size: Number of rows fetched per step when iterating
+                            over cursors.
+    :param dump_queue_size: Maximum number of SQL lines that ``iterdump()``
+                            buffers ahead of the consumer. Zero (the default)
+                            means unlimited. A positive value applies
+                            backpressure so the dump follows the consumer.
+    """
 
     if loop is not None:
         warn(
@@ -465,4 +517,4 @@ def connect(
 
         return sqlite3.connect(loc, **kwargs)
 
-    return Connection(connector, iter_chunk_size)
+    return Connection(connector, iter_chunk_size, dump_queue_size=dump_queue_size)
