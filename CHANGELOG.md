@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * Expose `FunctionAuth` from the public API. (#3699)
+* Add `cookie_namespace` support on `Client` and `AsyncClient` requests, allowing multiple isolated cookie containers to share a single client and its connection pool. Namespaces can be inspected and cleared with `client.cookie_namespaces`, `client.cookies_for(...)` and `client.clear_cookies(...)`.
 
 ## 0.28.1 (6th December, 2024)
 

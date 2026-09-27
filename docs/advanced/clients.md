@@ -125,6 +125,30 @@ b'alice:ecila123'
 
 If you need finer-grained control on the merging of client-level and request-level parameters, see [Request instances](#request-instances).
 
+## Cookie namespaces
+
+A single `Client` is often shared between multiple tenants in order to reuse its connection pool, but cookies typically must not leak from one tenant to another. The `cookie_namespace` argument selects an isolated cookie container for a request, without requiring a separate `Client` per tenant:
+
+```python
+with httpx.Client() as client:
+    # Each namespace has its own cookie container. Cookies that are set
+    # by the server are stored in, and later sent from, that container only.
+    client.get("https://example.org/login", cookie_namespace="tenant-a")
+    client.get("https://example.org/login", cookie_namespace="tenant-b")
+```
+
+Cookies with the same name, domain and path can exist in different namespaces at the same time, and expiring or deleting a cookie only affects the namespace of the request that triggered it. Redirects and authentication retries keep using the namespace of the original request. When explicit request-level `cookies` are given, they are merged after the namespace cookies and take priority over them.
+
+Omitting `cookie_namespace` preserves the default behaviour of using `client.cookies`.
+
+Namespaces can be inspected and cleared directly on the client:
+
+```python
+client.cookie_namespaces  # The namespaces that currently exist.
+client.cookies_for("tenant-a")  # The Cookies container for a namespace.
+client.clear_cookies("tenant-a")  # Clear a single namespace.
+```
+
 ## Other Client-only configuration options
 
 Additionally, `Client` accepts some configuration options that aren't available at the request level.
