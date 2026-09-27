@@ -80,3 +80,38 @@ as discussed in :ref:`streaming_response`:
 
 .. note:: These decorators must be used within an existing context, hence
           the background task is defined as a nested function.
+
+Snapshotting the request context
+--------------------------------
+
+If a task that outlives the request, for example a delayed audit task,
+only needs a small amount of request data, copying the whole request
+context keeps the request and its mutable state alive for too long.
+Instead :func:`~quart.ctx.snapshot_request_context` creates a read-only
+snapshot of chosen request attributes and ``g`` fields, deep copied
+at the moment of the call,
+
+.. code-block:: python
+
+    @app.route('/')
+    async def index():
+        snapshot = snapshot_request_context(
+            request_fields=["method", "path"], g_fields=["user_id"]
+        )
+
+        async def audit():
+            async with snapshot:
+                app.logger.info(
+                    "%s %s by %s", request.method, request.path, g.user_id
+                )
+
+        asyncio.ensure_future(audit())
+        ...
+
+The snapshot never includes the request body, uploaded files, or the
+session, and entering it does not run the request's teardown functions.
+As it holds no reference to the original request, the request's resources
+are released when the request finishes, regardless of the snapshot's
+lifetime. A field whose value cannot be safely copied raises
+:class:`~quart.ctx.SnapshotCopyError` naming the field when the snapshot
+is created.

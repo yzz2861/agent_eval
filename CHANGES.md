@@ -1,3 +1,11 @@
+## Version 0.24.0
+
+Unreleased
+
+- Add `snapshot_request_context`, which creates a read-only snapshot of
+  chosen request and `g` fields for use after the request has finished,
+  for example in delayed audit tasks.
+
 ## Version 0.23.1
 
 Released 2026-08-29
