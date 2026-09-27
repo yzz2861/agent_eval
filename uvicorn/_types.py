@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import types
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
@@ -278,3 +279,21 @@ class ASGI2Protocol(Protocol):
 ASGI2Application = type[ASGI2Protocol]
 ASGI3Application = Callable[[Scope, ASGIReceiveCallable, ASGISendCallable], Awaitable[None]]
 ASGIApplication = ASGI2Application | ASGI3Application
+
+
+# Request completion event, emitted exactly once per HTTP request/response cycle.
+RequestCompletionOutcome = Literal["completed", "client_disconnect", "app_exception", "cancelled"]
+
+
+@dataclasses.dataclass(frozen=True)
+class RequestCompletionEvent:
+    # The HTTP scope of the request.
+    scope: HTTPScope
+    # How the request/response cycle ended.
+    outcome: RequestCompletionOutcome
+    # The status code actually sent to the client, or None if response headers were never sent.
+    status_code: int | None
+    # Number of response body bytes actually committed to the transport.
+    body_bytes_sent: int
+    # Elapsed time of the request/response cycle in seconds, measured with a monotonic clock.
+    duration: float

@@ -5,6 +5,7 @@ import contextvars
 import http
 import logging
 import sys
+import time
 from collections.abc import Callable
 from typing import Any, Literal
 from urllib.parse import unquote
@@ -20,6 +21,8 @@ from uvicorn._types import (
     HTTPResponseBodyEvent,
     HTTPResponseStartEvent,
     HTTPScope,
+    RequestCompletionEvent,
+    RequestCompletionOutcome,
 )
 from uvicorn.config import Config
 from uvicorn.logging import TRACE_LOG_LEVEL
@@ -245,6 +248,7 @@ class H11Protocol(asyncio.Protocol):
                     default_headers=self.server_state.default_headers,
                     message_event=asyncio.Event(),
                     on_response=self.on_response_complete,
+                    on_request_complete=self.config.on_request_complete,
                 )
                 if self.config.reset_contextvars:
                     # Opt-in workaround for https://github.com/python/cpython/issues/140947:
@@ -380,6 +384,7 @@ class RequestResponseCycle:
         default_headers: list[tuple[bytes, bytes]],
         message_event: asyncio.Event,
         on_response: Callable[..., None],
+        on_request_complete: Callable[[RequestCompletionEvent], None] | None = None,
     ) -> None:
         self.scope = scope
         self.conn = conn
@@ -391,6 +396,7 @@ class RequestResponseCycle:
         self.default_headers = default_headers
         self.message_event = message_event
         self.on_response = on_response
+        self.on_request_complete = on_request_complete
 
         # Connection state
         self.disconnected = False
@@ -405,34 +411,74 @@ class RequestResponseCycle:
         self.response_started = False
         self.response_complete = False
 
+        # Request completion event state
+        self.started_at = time.monotonic()
+        self.status_code: int | None = None
+        self.body_bytes_sent = 0
+        self.completion_event_sent = False
+
     # ASGI exception wrapper
     async def run_asgi(self, app: ASGI3Application) -> None:
+        exc: BaseException | None = None
+        app_error = False
         try:
             result = await app(  # type: ignore[func-returns-value]
                 self.scope, self.receive, self.send
             )
-        except BaseException as exc:
+        except BaseException as err:
+            exc = err
             msg = "Exception in ASGI application\n"
-            self.logger.error(msg, exc_info=exc)
+            self.logger.error(msg, exc_info=err)
             if not self.response_started:
                 await self.send_500_response()
             else:
                 self.transport.close()
         else:
             if result is not None:
+                app_error = True
                 msg = "ASGI callable should return None, but returned '%s'."
                 self.logger.error(msg, result)
                 self.transport.close()
             elif not self.response_started and not self.disconnected:
+                app_error = True
                 msg = "ASGI callable returned without starting response."
                 self.logger.error(msg)
                 await self.send_500_response()
             elif not self.response_complete and not self.disconnected:
+                app_error = True
                 msg = "ASGI callable returned without completing response."
                 self.logger.error(msg)
                 self.transport.close()
         finally:
             self.on_response = lambda: None
+            self._emit_completion_event(exc, app_error)
+
+    def _emit_completion_event(self, exc: BaseException | None, app_error: bool) -> None:
+        if self.on_request_complete is None or self.completion_event_sent:
+            return
+        self.completion_event_sent = True
+
+        outcome: RequestCompletionOutcome
+        if isinstance(exc, asyncio.CancelledError):
+            outcome = "cancelled"
+        elif exc is not None or app_error:
+            outcome = "app_exception"
+        elif self.disconnected and not self.response_complete:
+            outcome = "client_disconnect"
+        else:
+            outcome = "completed"
+
+        event = RequestCompletionEvent(
+            scope=self.scope,
+            outcome=outcome,
+            status_code=self.status_code,
+            body_bytes_sent=self.body_bytes_sent,
+            duration=time.monotonic() - self.started_at,
+        )
+        try:
+            self.on_request_complete(event)
+        except Exception:
+            self.logger.exception("Error in 'on_request_complete' callback.")
 
     async def send_500_response(self) -> None:
         response_start_event: HTTPResponseStartEvent = {
@@ -488,6 +534,7 @@ class RequestResponseCycle:
             response = h11.Response(status_code=status, headers=headers, reason=reason)
             output = self.conn.send(event=response)
             self.transport.write(output)
+            self.status_code = status
 
         elif not self.response_complete:
             # Sending response body
@@ -501,6 +548,7 @@ class RequestResponseCycle:
             data = b"" if self.scope["method"] == "HEAD" else body
             output = self.conn.send(event=h11.Data(data=data))
             self.transport.write(output)
+            self.body_bytes_sent += len(data)
 
             # Handle response completion
             if not more_body:

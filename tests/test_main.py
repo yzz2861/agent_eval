@@ -176,7 +176,7 @@ def test_run_match_config_params() -> None:
     config_params = {
         key: repr(value)
         for key, value in inspect.signature(Config.__init__).parameters.items()
-        if key not in ("self", "timeout_notify", "callback_notify")
+        if key not in ("self", "timeout_notify", "callback_notify", "on_request_complete")
     }
     run_params = {
         key: repr(value) for key, value in inspect.signature(run).parameters.items() if key not in ("app_dir",)

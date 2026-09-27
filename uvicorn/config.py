@@ -16,7 +16,7 @@ from typing import IO, Any, Literal
 
 from uvicorn._ansi import style
 from uvicorn._compat import iscoroutinefunction
-from uvicorn._types import ASGIApplication
+from uvicorn._types import ASGIApplication, RequestCompletionEvent
 from uvicorn.importer import ImportFromStringError, import_from_string
 from uvicorn.logging import TRACE_LOG_LEVEL
 from uvicorn.middleware.asgi2 import ASGI2Middleware
@@ -248,6 +248,7 @@ class Config:
         factory: bool = False,
         h11_max_incomplete_event_size: int | None = None,
         reset_contextvars: bool = False,
+        on_request_complete: Callable[[RequestCompletionEvent], None] | None = None,
     ):
         self.app = app
         self.host = host
@@ -298,6 +299,7 @@ class Config:
         self.factory = factory
         self.h11_max_incomplete_event_size = h11_max_incomplete_event_size
         self.reset_contextvars = reset_contextvars
+        self.on_request_complete = on_request_complete
 
         self.loaded = False
         self.configure_logging()
