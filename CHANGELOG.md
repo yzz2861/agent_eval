@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * Expose `FunctionAuth` from the public API. (#3699)
+* Add per-request cookie namespaces via `cookie_namespace`, with `client.cookies_for()`, `client.clear_cookies()` and `client.cookie_namespaces` for isolated cookie containers on a shared client.
 
 ## 0.28.1 (6th December, 2024)
 

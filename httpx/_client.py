@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import enum
 import logging
+import threading
 import time
 import typing
 import warnings
@@ -209,6 +210,8 @@ class BaseClient:
         self._params = QueryParams(params)
         self.headers = Headers(headers)
         self._cookies = Cookies(cookies)
+        self._cookie_namespaces: dict[str, Cookies] = {}
+        self._cookie_namespaces_lock = threading.Lock()
         self._timeout = Timeout(timeout)
         self.follow_redirects = follow_redirects
         self.max_redirects = max_redirects
@@ -327,6 +330,63 @@ class BaseClient:
         self._cookies = Cookies(cookies)
 
     @property
+    def cookie_namespaces(self) -> list[str]:
+        """
+        The names of all cookie namespaces currently known to the client.
+        """
+        with self._cookie_namespaces_lock:
+            return list(self._cookie_namespaces)
+
+    def cookies_for(self, namespace: str | None = None) -> Cookies:
+        """
+        Return the cookie container for the given namespace.
+
+        Each namespace is an isolated `Cookies` instance: cookies with the
+        same name, domain and path may exist independently in different
+        namespaces, and expiry or deletion in one namespace does not affect
+        any other. Namespaces are created lazily on first use.
+
+        The default `None` namespace returns the client-level cookies,
+        preserving the standard cookie behaviour.
+        """
+        if namespace is None:
+            return self._cookies
+        with self._cookie_namespaces_lock:
+            if namespace not in self._cookie_namespaces:
+                self._cookie_namespaces[namespace] = Cookies()
+            return self._cookie_namespaces[namespace]
+
+    def clear_cookies(self, namespace: str | None = None) -> None:
+        """
+        Clear all cookies from the given namespace, leaving other
+        namespaces untouched. The default `None` namespace clears
+        the client-level cookies.
+        """
+        self.cookies_for(namespace).clear()
+
+    def _cookies_for_request(self, request: Request) -> Cookies:
+        """
+        Return the cookie container that applies to the given request,
+        based on the 'cookie_namespace' request extension.
+        """
+        namespace = request.extensions.get("cookie_namespace")
+        return self.cookies_for(namespace)
+
+    @staticmethod
+    def _propagate_cookie_namespace(request: Request, next_request: Request) -> None:
+        """
+        Auth flows may build a fresh request instance when retrying.
+        Carry the cookie namespace over, so that the retry keeps using
+        the cookie container of the original request.
+        """
+        namespace = request.extensions.get("cookie_namespace")
+        if (
+            namespace is not None
+            and "cookie_namespace" not in next_request.extensions
+        ):
+            next_request.extensions["cookie_namespace"] = namespace
+
+    @property
     def params(self) -> QueryParams:
         """
         Query parameters to include in the URL when sending requests.
@@ -349,6 +409,7 @@ class BaseClient:
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         extensions: RequestExtensions | None = None,
     ) -> Request:
@@ -358,6 +419,8 @@ class BaseClient:
         * The `params`, `headers` and `cookies` arguments
         are merged with any values set on the client.
         * The `url` argument is merged with any `base_url` set on the client.
+        * The `cookie_namespace` argument selects an isolated cookie
+        container on the client, used instead of the client-level cookies.
 
         See also: [Request instances][0]
 
@@ -365,9 +428,11 @@ class BaseClient:
         """
         url = self._merge_url(url)
         headers = self._merge_headers(headers)
-        cookies = self._merge_cookies(cookies)
+        cookies = self._merge_cookies(cookies, namespace=cookie_namespace)
         params = self._merge_queryparams(params)
         extensions = {} if extensions is None else extensions
+        if cookie_namespace is not None:
+            extensions = dict(extensions, cookie_namespace=cookie_namespace)
         if "timeout" not in extensions:
             timeout = (
                 self.timeout
@@ -410,13 +475,18 @@ class BaseClient:
             return self.base_url.copy_with(raw_path=merge_raw_path)
         return merge_url
 
-    def _merge_cookies(self, cookies: CookieTypes | None = None) -> CookieTypes | None:
+    def _merge_cookies(
+        self, cookies: CookieTypes | None = None, *, namespace: str | None = None
+    ) -> CookieTypes | None:
         """
-        Merge a cookies argument together with any cookies on the client,
-        to create the cookies used for the outgoing request.
+        Merge a cookies argument together with the cookies stored in the
+        given namespace, to create the cookies used for the outgoing request.
+
+        The namespace cookies are applied first, and any explicit per-request
+        cookies are merged on top, taking precedence on conflicts.
         """
-        if cookies or self.cookies:
-            merged_cookies = Cookies(self.cookies)
+        if cookies or self.cookies_for(namespace):
+            merged_cookies = Cookies(self.cookies_for(namespace))
             merged_cookies.update(cookies)
             return merged_cookies
         return cookies
@@ -481,7 +551,7 @@ class BaseClient:
         url = self._redirect_url(request, response)
         headers = self._redirect_headers(request, url, method)
         stream = self._redirect_stream(request, method)
-        cookies = Cookies(self.cookies)
+        cookies = Cookies(self._cookies_for_request(request))
         return Request(
             method=method,
             url=url,
@@ -780,6 +850,7 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -819,6 +890,7 @@ class Client(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             timeout=timeout,
             extensions=extensions,
         )
@@ -837,6 +909,7 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -862,6 +935,7 @@ class Client(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             timeout=timeout,
             extensions=extensions,
         )
@@ -952,6 +1026,7 @@ class Client(BaseClient):
 
                     response.history = list(history)
                     response.read()
+                    self._propagate_cookie_namespace(request, next_request)
                     request = next_request
                     history.append(response)
 
@@ -1019,7 +1094,7 @@ class Client(BaseClient):
         response.stream = BoundSyncStream(
             response.stream, response=response, start=start
         )
-        self.cookies.extract_cookies(response)
+        self._cookies_for_request(request).extract_cookies(response)
         response.default_encoding = self._default_encoding
 
         logger.info(
@@ -1040,6 +1115,7 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1056,6 +1132,7 @@ class Client(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1069,6 +1146,7 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1085,6 +1163,7 @@ class Client(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1098,6 +1177,7 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1114,6 +1194,7 @@ class Client(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1131,6 +1212,7 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1151,6 +1233,7 @@ class Client(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1168,6 +1251,7 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1188,6 +1272,7 @@ class Client(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1205,6 +1290,7 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1225,6 +1311,7 @@ class Client(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1238,6 +1325,7 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1254,6 +1342,7 @@ class Client(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1494,6 +1583,7 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1534,6 +1624,7 @@ class AsyncClient(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             timeout=timeout,
             extensions=extensions,
         )
@@ -1552,6 +1643,7 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1577,6 +1669,7 @@ class AsyncClient(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             timeout=timeout,
             extensions=extensions,
         )
@@ -1667,6 +1760,7 @@ class AsyncClient(BaseClient):
 
                     response.history = list(history)
                     await response.aread()
+                    self._propagate_cookie_namespace(request, next_request)
                     request = next_request
                     history.append(response)
 
@@ -1734,7 +1828,7 @@ class AsyncClient(BaseClient):
         response.stream = BoundAsyncStream(
             response.stream, response=response, start=start
         )
-        self.cookies.extract_cookies(response)
+        self._cookies_for_request(request).extract_cookies(response)
         response.default_encoding = self._default_encoding
 
         logger.info(
@@ -1755,6 +1849,7 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault | None = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1771,6 +1866,7 @@ class AsyncClient(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1784,6 +1880,7 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1800,6 +1897,7 @@ class AsyncClient(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1813,6 +1911,7 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1829,6 +1928,7 @@ class AsyncClient(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1846,6 +1946,7 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1866,6 +1967,7 @@ class AsyncClient(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1883,6 +1985,7 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1903,6 +2006,7 @@ class AsyncClient(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1920,6 +2024,7 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1940,6 +2045,7 @@ class AsyncClient(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
@@ -1953,6 +2059,7 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
+        cookie_namespace: str | None = None,
         auth: AuthTypes | UseClientDefault = USE_CLIENT_DEFAULT,
         follow_redirects: bool | UseClientDefault = USE_CLIENT_DEFAULT,
         timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
@@ -1969,6 +2076,7 @@ class AsyncClient(BaseClient):
             params=params,
             headers=headers,
             cookies=cookies,
+            cookie_namespace=cookie_namespace,
             auth=auth,
             follow_redirects=follow_redirects,
             timeout=timeout,
