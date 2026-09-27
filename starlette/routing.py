@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import inspect
 import re
@@ -531,6 +532,90 @@ class Host(BaseRoute):
         return f"{class_name}(host={self.host!r}, name={name!r}, app={self.app!r})"
 
 
+@dataclasses.dataclass
+class RouteTrace:
+    """
+    A single step recorded while resolving a scope against a router.
+
+    Steps are recorded in the order the routes were tried. When a "Mount" or
+    "Host" wraps a nested "Router", the steps taken inside that router are
+    available under "children".
+    """
+
+    route: BaseRoute
+    match: Match
+    detail: str
+    children: list[RouteTrace] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class RouteResolution:
+    """
+    The outcome of resolving a scope against a router, as returned by
+    "Router.resolve()".
+
+    "status" is one of:
+
+    * "full" - A route was selected and its handler would run.
+    * "partial" - A route matched the path but not the method. The router
+      would respond with "405 Method Not Allowed".
+    * "redirect" - No route matched, but a trailing-slash redirect would
+      be issued. The target is available as "redirect_url".
+    * "not_found" - Nothing matched. The router would respond with "404
+      Not Found" (or close the WebSocket).
+
+    "route" is the innermost selected route, "path_params" are the
+    accumulated path parameters, and "scope" is the child scope the selected
+    route would have been called with, including any "root_path" rewriting
+    performed by nested mounts. "opaque" is "True" when the selected route is
+    a "Mount" or "Host" wrapping a custom ASGI application that cannot be
+    expanded further, in which case the resolution stops at that route.
+    """
+
+    status: str
+    route: BaseRoute | None
+    path_params: dict[str, Any]
+    scope: Scope
+    redirect_url: str | None
+    opaque: bool
+    trace: list[RouteTrace]
+
+    @property
+    def matched(self) -> bool:
+        return self.status in ("full", "partial")
+
+
+def _nested_router(route: BaseRoute) -> Router | None:
+    """
+    Return the "Router" a "Mount" or "Host" delegates to, if any.
+
+    Any other ASGI application is opaque to routing diagnostics.
+    """
+    app: ASGIApp | None = None
+    if isinstance(route, Mount):
+        app = route._base_app
+    elif isinstance(route, Host):
+        app = route.app
+    if isinstance(app, Router):
+        return app
+    return None
+
+
+def _match_detail(route: BaseRoute, match: Match, scope: Scope) -> str:
+    if match == Match.FULL:
+        return "full match"
+    if match == Match.PARTIAL:
+        methods = sorted(getattr(route, "methods", None) or [])
+        return f"path matched, but method {scope['method']!r} is not one of {methods} (would respond 405)"
+    if isinstance(route, Route) and scope["type"] != "http":
+        return f"scope type {scope['type']!r} not handled"
+    if isinstance(route, WebSocketRoute) and scope["type"] != "websocket":
+        return f"scope type {scope['type']!r} not handled"
+    if isinstance(route, Host):
+        return "host did not match"
+    return "path did not match"
+
+
 _T = TypeVar("_T")
 
 
@@ -641,6 +726,111 @@ class Router:
             except NoMatchFound:
                 pass
         raise NoMatchFound(name, path_params)
+
+    def resolve(self, scope: Scope) -> RouteResolution:
+        """
+        Resolve a scope against the routes, without running anything.
+
+        This mirrors the matching logic of the router exactly, including
+        "PARTIAL" matches being superseded by later "FULL" matches, path
+        rewriting by nested "Mount" and "Host" routes, "root_path" handling,
+        and WebSocket routes. No middleware, endpoint, or lifespan is run,
+        and the given scope is left unmodified.
+
+        Matching stops with "opaque" set when a "Mount" or "Host" delegates
+        to a custom ASGI application that cannot be expanded further.
+        """
+        if scope["type"] not in ("http", "websocket"):
+            raise ValueError(f"Cannot resolve scope of type {scope['type']!r}")
+        trace: list[RouteTrace] = []
+        return self._resolve(dict(scope), trace)
+
+    def _resolve(self, scope: Scope, trace: list[RouteTrace]) -> RouteResolution:
+        partial: BaseRoute | None = None
+        partial_scope: Scope = {}
+
+        for route in self.routes:
+            # Determine if any route matches the incoming scope, mirroring
+            # the selection the router would make, but without handling it.
+            match, child_scope = route.matches(scope)
+            step = RouteTrace(route=route, match=match, detail=_match_detail(route, match, scope))
+            trace.append(step)
+            if match == Match.FULL:
+                matched_scope = dict(scope)
+                matched_scope["route"] = route
+                matched_scope.update(child_scope)
+                nested = _nested_router(route)
+                if nested is not None:
+                    step.detail = "full match; expanding nested router"
+                    if isinstance(route, Mount) and route.app is not route._base_app:
+                        step.detail += " (middleware not run by diagnostics)"
+                    resolution = nested._resolve(matched_scope, step.children)
+                    resolution.trace = trace
+                    return resolution
+                opaque = isinstance(route, (Mount, Host))
+                if opaque:
+                    step.detail = "full match; inner ASGI application cannot be expanded further"
+                return RouteResolution(
+                    status="full",
+                    route=route,
+                    path_params=matched_scope.get("path_params", {}),
+                    scope=matched_scope,
+                    redirect_url=None,
+                    opaque=opaque,
+                    trace=trace,
+                )
+            elif match == Match.PARTIAL and partial is None:
+                partial = route
+                partial_scope = child_scope
+
+        if partial is not None:
+            # Handle partial matches. These are cases where an endpoint is
+            # able to handle the request, but is not a preferred option.
+            # We use this in particular to deal with "405 Method Not Allowed".
+            matched_scope = dict(scope)
+            matched_scope["route"] = partial
+            matched_scope.update(partial_scope)
+            return RouteResolution(
+                status="partial",
+                route=partial,
+                path_params=matched_scope.get("path_params", {}),
+                scope=matched_scope,
+                redirect_url=None,
+                opaque=False,
+                trace=trace,
+            )
+
+        route_path = get_route_path(scope)
+        if scope["type"] == "http" and self.redirect_slashes and route_path != "/":
+            redirect_scope = dict(scope)
+            if route_path.endswith("/"):
+                redirect_scope["path"] = redirect_scope["path"].rstrip("/")
+            else:
+                redirect_scope["path"] = redirect_scope["path"] + "/"
+
+            for route in self.routes:
+                match, child_scope = route.matches(redirect_scope)
+                if match != Match.NONE:
+                    redirect_url = str(URL(scope=redirect_scope))
+                    return RouteResolution(
+                        status="redirect",
+                        route=None,
+                        path_params=scope.get("path_params", {}),
+                        scope=scope,
+                        redirect_url=redirect_url,
+                        opaque=False,
+                        trace=trace,
+                    )
+
+        return RouteResolution(
+            status="not_found",
+            route=None,
+            path_params=scope.get("path_params", {}),
+            scope=scope,
+            redirect_url=None,
+            opaque=False,
+            trace=trace,
+        )
 
     async def lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
         """

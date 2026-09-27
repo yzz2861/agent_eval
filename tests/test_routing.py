@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import functools
 import json
 import uuid
@@ -15,7 +16,7 @@ from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
-from starlette.routing import Host, Mount, NoMatchFound, Route, Router, WebSocketRoute
+from starlette.routing import Host, Match, Mount, NoMatchFound, Route, Router, WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -1238,3 +1239,229 @@ def test_paths_with_root_path(test_client_factory: TestClientFactory) -> None:
         "path": "/root/root-queue/path",
         "root_path": "/root",
     }
+
+
+def resolve_echo(request: Request) -> JSONResponse:
+    route = request.scope["route"]
+    return JSONResponse(
+        {
+            "route": route.name,
+            "path_params": request.path_params,
+            "root_path": request.scope.get("root_path", ""),
+        }
+    )
+
+
+async def resolve_ws_echo(websocket: WebSocket) -> None:
+    await websocket.accept()
+    route = websocket.scope["route"]
+    await websocket.send_json({"route": route.name, "path_params": websocket.path_params})
+    await websocket.close()
+
+
+async def opaque_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
+    response = PlainTextResponse("opaque")
+    await response(scope, receive, send)
+
+
+def resolve_routes() -> list[Route | WebSocketRoute | Mount | Host]:
+    inner = Router(
+        routes=[
+            Route("/items/{item_id:int}", resolve_echo, methods=["GET"], name="item-get"),
+            Route("/items/{item_id:int}", resolve_echo, methods=["POST"], name="item-post"),
+            WebSocketRoute("/ws/{room}", resolve_ws_echo, name="ws-room"),
+        ]
+    )
+    api_v1 = Router(routes=[Mount("/v1", app=inner)])
+    tenant = Router(routes=[Mount("/api", app=api_v1)])
+    return [
+        Host("{sub}.example.org", app=tenant, name="tenant"),
+        Mount("/static", app=opaque_asgi_app),
+        Route("/health", resolve_echo, name="health"),
+    ]
+
+
+def resolve_scope(path: str, method: str = "GET", host: str = "acme.example.org", type: str = "http") -> Scope:
+    scope: Scope = {
+        "type": type,
+        "path": path,
+        "headers": [(b"host", host.encode())],
+        "query_string": b"",
+        "scheme": "ws" if type == "websocket" else "http",
+        "server": ("testserver", 80),
+    }
+    if type == "http":
+        scope["method"] = method
+    return scope
+
+
+def test_resolve_nested_mounts_and_host() -> None:
+    router = Router(routes=resolve_routes())
+    resolution = router.resolve(resolve_scope("/api/v1/items/42"))
+    assert resolution.status == "full"
+    assert resolution.matched
+    assert not resolution.opaque
+    assert resolution.route is not None
+    assert resolution.route.name == "item-get"
+    assert resolution.path_params == {"sub": "acme", "item_id": 42}
+    # Nested mounts rewrite root_path as matching descends.
+    assert resolution.scope["root_path"] == "/api/v1"
+    # The trace records the ordered matching process, descending into
+    # the Host and each nested Mount.
+    assert [step.route for step in resolution.trace] == [router.routes[0]]
+    host_step = resolution.trace[0]
+    assert host_step.match == Match.FULL
+    (mount_api_step,) = host_step.children
+    (mount_v1_step,) = mount_api_step.children
+    assert isinstance(mount_api_step.route, Mount)
+    assert mount_api_step.route.path == "/api"
+    assert isinstance(mount_v1_step.route, Mount)
+    assert mount_v1_step.route.path == "/v1"
+    assert [step.match for step in mount_v1_step.children] == [Match.FULL]
+
+
+def test_resolve_partial_is_superseded_by_full() -> None:
+    router = Router(routes=resolve_routes())
+    resolution = router.resolve(resolve_scope("/api/v1/items/42", method="POST"))
+    assert resolution.status == "full"
+    assert resolution.route is not None
+    assert resolution.route.name == "item-post"
+    leaf_steps = resolution.trace[0].children[0].children[0].children
+    # The first route only matches partially (wrong method), and is
+    # superseded by the later full match.
+    assert [step.match for step in leaf_steps] == [Match.PARTIAL, Match.FULL]
+    assert "405" in leaf_steps[0].detail
+
+
+def test_resolve_partial_only() -> None:
+    router = Router(routes=resolve_routes())
+    resolution = router.resolve(resolve_scope("/api/v1/items/42", method="DELETE"))
+    assert resolution.status == "partial"
+    assert resolution.matched
+    assert resolution.route is not None
+    assert resolution.route.name == "item-get"
+    assert resolution.path_params == {"sub": "acme", "item_id": 42}
+
+
+def test_resolve_trailing_slash_redirect() -> None:
+    router = Router(routes=resolve_routes())
+    resolution = router.resolve(resolve_scope("/api/v1/items/42/"))
+    assert resolution.status == "redirect"
+    assert resolution.redirect_url == "http://acme.example.org/api/v1/items/42"
+
+    resolution = router.resolve(resolve_scope("/health/", host="testserver"))
+    assert resolution.status == "redirect"
+    assert resolution.redirect_url == "http://testserver/health"
+
+
+def test_resolve_opaque_asgi_app() -> None:
+    router = Router(routes=resolve_routes())
+    resolution = router.resolve(resolve_scope("/static/app.js", host="testserver"))
+    assert resolution.status == "full"
+    assert resolution.opaque
+    assert isinstance(resolution.route, Mount)
+    assert resolution.route.path == "/static"
+    assert "cannot be expanded" in resolution.trace[1].detail
+
+
+def test_resolve_websocket_route() -> None:
+    router = Router(routes=resolve_routes())
+    resolution = router.resolve(resolve_scope("/api/v1/ws/lobby", type="websocket"))
+    assert resolution.status == "full"
+    assert resolution.route is not None
+    assert resolution.route.name == "ws-room"
+    assert resolution.path_params == {"sub": "acme", "room": "lobby"}
+
+
+def test_resolve_not_found() -> None:
+    router = Router(routes=resolve_routes())
+    resolution = router.resolve(resolve_scope("/nope"))
+    assert resolution.status == "not_found"
+    assert not resolution.matched
+    assert resolution.route is None
+
+    # A host mismatch means the whole Host subtree is skipped.
+    resolution = router.resolve(resolve_scope("/api/v1/items/42", host="other.org"))
+    assert resolution.status == "not_found"
+    host_step = resolution.trace[0]
+    assert isinstance(host_step.route, Host)
+    assert host_step.match == Match.NONE
+    assert host_step.detail == "host did not match"
+
+
+def test_resolve_does_not_mutate_scope() -> None:
+    router = Router(routes=resolve_routes())
+    scope = resolve_scope("/api/v1/items/42")
+    original = copy.deepcopy(scope)
+    router.resolve(scope)
+    assert scope == original
+
+
+def test_resolve_rejects_lifespan_scope() -> None:
+    router = Router(routes=resolve_routes())
+    with pytest.raises(ValueError, match="Cannot resolve scope of type 'lifespan'"):
+        router.resolve({"type": "lifespan"})
+
+
+def test_resolve_agrees_with_real_dispatch(test_client_factory: TestClientFactory) -> None:
+    router = Router(routes=resolve_routes())
+    app = Starlette(routes=resolve_routes())
+    client = test_client_factory(app, base_url="http://acme.example.org")
+
+    # Full match through Host -> Mount -> Mount, with path params and
+    # root_path rewriting agreeing between diagnostics and dispatch.
+    resolution = router.resolve(resolve_scope("/api/v1/items/42"))
+    response = client.get("/api/v1/items/42")
+    assert response.status_code == 200
+    assert resolution.status == "full"
+    assert resolution.route is not None
+    assert response.json() == {
+        "route": resolution.route.name,
+        "path_params": resolution.path_params,
+        "root_path": resolution.scope["root_path"],
+    }
+
+    # A partial match superseded by a later full match.
+    resolution = router.resolve(resolve_scope("/api/v1/items/42", method="POST"))
+    response = client.post("/api/v1/items/42")
+    assert response.status_code == 200
+    assert resolution.status == "full"
+    assert resolution.route is not None
+    assert response.json()["route"] == resolution.route.name == "item-post"
+
+    # A partial match with no full match responds 405.
+    resolution = router.resolve(resolve_scope("/api/v1/items/42", method="DELETE"))
+    response = client.delete("/api/v1/items/42")
+    assert resolution.status == "partial"
+    assert response.status_code == 405
+
+    # Trailing-slash redirect, including the redirect target.
+    resolution = router.resolve(resolve_scope("/api/v1/items/42/"))
+    response = client.get("/api/v1/items/42/", follow_redirects=False)
+    assert resolution.status == "redirect"
+    assert response.status_code == 307
+    assert response.headers["location"] == resolution.redirect_url
+
+    # An opaque ASGI app: diagnostics stop at the Mount, dispatch runs it.
+    # A host that does not match the Host route lets the request fall
+    # through to the Mount.
+    resolution = router.resolve(resolve_scope("/static/app.js", host="testserver"))
+    response = client.get("/static/app.js", headers={"host": "testserver"})
+    assert resolution.status == "full"
+    assert resolution.opaque
+    assert response.status_code == 200
+    assert response.text == "opaque"
+
+    # No match at all responds 404.
+    resolution = router.resolve(resolve_scope("/nope"))
+    response = client.get("/nope")
+    assert resolution.status == "not_found"
+    assert response.status_code == 404
+
+    # WebSocket routes resolve and dispatch identically.
+    resolution = router.resolve(resolve_scope("/api/v1/ws/lobby", type="websocket"))
+    with client.websocket_connect("/api/v1/ws/lobby", headers={"host": "acme.example.org"}) as websocket:
+        message = websocket.receive_json()
+    assert resolution.status == "full"
+    assert resolution.route is not None
+    assert message == {"route": resolution.route.name, "path_params": resolution.path_params}

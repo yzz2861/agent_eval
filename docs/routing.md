@@ -293,6 +293,70 @@ app = Router(routes=[
 ])
 ```
 
+## Diagnosing route resolution
+
+When a request unexpectedly responds with "404 Not Found" or "405 Method Not
+Allowed", it can be hard to tell whether an outer `Mount` matched first, or
+whether the host, a path convertor, or the HTTP method was wrong. The
+`Router.resolve()` method answers this without running anything: it performs
+the exact same matching the router would do for a request, but never runs
+middleware, endpoints, or lifespan handlers, and never modifies the scope you
+pass in.
+
+The resolution mirrors real dispatch precisely, including `PARTIAL` matches
+being superseded by later `FULL` matches, path rewriting by nested `Mount`
+and `Host` routes, `root_path` handling, and WebSocket routes. When a `Mount`
+or `Host` delegates to a custom ASGI application that cannot be expanded, the
+resolution stops at that route and marks it as `opaque`, rather than guessing
+how the application routes internally.
+
+```python
+router = Router(routes=[
+    Host("{sub}.example.org", app=Router(routes=[
+        Mount("/api", app=Router(routes=[
+            Mount("/v1", routes=[
+                Route("/items/{item_id:int}", item, methods=["GET"]),
+                WebSocketRoute("/ws/{room}", ws_endpoint),
+            ]),
+        ])),
+    ])),
+    Mount("/static", app=some_other_asgi_app),
+])
+
+scope = {
+    "type": "http",
+    "method": "GET",
+    "path": "/api/v1/items/42",
+    "headers": [(b"host", b"acme.example.org")],
+    "query_string": b"",
+    "scheme": "http",
+    "server": ("example.org", 80),
+}
+resolution = router.resolve(scope)
+
+assert resolution.status == "full"       # One of "full", "partial", "redirect", "not_found".
+assert resolution.route.name == "item"   # The innermost selected route.
+assert resolution.path_params == {"sub": "acme", "item_id": 42}
+assert resolution.scope["root_path"] == "/api/v1"  # Path rewriting by the nested mounts.
+```
+
+The `trace` attribute records every route that was tried, in order, with the
+match result and a human-readable explanation. Steps taken inside a nested
+router are nested under the `children` of the `Mount` or `Host` step that
+led there, so you can see exactly where matching stopped.
+
+```python
+for step in resolution.trace:
+    print(step.route, step.match, step.detail)
+```
+
+A `status` of `"partial"` means the path matched but the method did not, so
+the router would respond "405 Method Not Allowed". A status of `"redirect"`
+means no route matched but a trailing-slash redirect would be issued, with
+the target available as `resolution.redirect_url`. When `resolution.opaque`
+is true, the selected route is a `Mount` or `Host` wrapping a custom ASGI
+application, and the resolution deliberately stops there.
+
 ## Request body size limits
 
 Use a non-negative `max_body_size` to limit the total number of request body
