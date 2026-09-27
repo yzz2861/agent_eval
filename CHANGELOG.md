@@ -6,4 +6,5 @@ For released versions, see the [Releases](https://github.com/mirumee/ariadne/rel
 
 ## Unreleased
 
+- Added `executor` option to `GraphQLHTTPHandler` allowing custom executors that return either `ExecutionResult` (regular JSON response) or `IncrementalExecutionResults` (streamed as `multipart/mixed` response when the client accepts it). Added `Executor`, `IncrementalExecutionResults` and `IncrementalPatch` types.
 

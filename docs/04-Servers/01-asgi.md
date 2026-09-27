@@ -119,3 +119,55 @@ Your `GraphQL` will now use the `CustomGraphQLHTTPHandler` strategy that we've j
 > **Note**: the `GraphQLHTTPHandler` class implements many other methods that can be customized through inheritance.
 >
 > See the [API reference](../API-reference/asgi-handlers-reference#graphqlhttphandler) for a completed list.
+
+
+## Custom executors and incremental delivery
+
+`GraphQLHTTPHandler` accepts an optional `executor` callable that replaces the default query execution logic. The executor is called with the `schema`, `data`, `context_value` and `root_value` keyword arguments and can be either synchronous or asynchronous:
+
+```python
+from graphql import ExecutionResult
+
+from ariadne.asgi import GraphQL
+from ariadne.asgi.handlers import GraphQLHTTPHandler
+
+
+def executor(schema, data, context_value, root_value):
+    ...  # custom query execution logic
+    return ExecutionResult(data={"hello": "world"})
+
+
+app = GraphQL(
+    schema,
+    http_handler=GraphQLHTTPHandler(executor=executor),
+)
+```
+
+If the executor returns an `ExecutionResult`, Ariadne sends it to the client as a regular JSON response.
+
+The executor can also return an `IncrementalExecutionResults` instance to stream incremental delivery results (for example for `@defer` or `@stream` support):
+
+```python
+from graphql import ExecutionResult
+
+from ariadne.types import IncrementalExecutionResults, IncrementalPatch
+
+
+async def executor(schema, data, context_value, root_value):
+    async def patches():
+        yield IncrementalPatch(
+            data={"name": "Alice"},
+            path=["user", "friends", 0],
+            label="friendsDefer",
+            has_next=False,
+        )
+
+    return IncrementalExecutionResults(
+        initial_result=ExecutionResult(data={"user": {"name": "Ann"}}),
+        subsequent_results=patches(),
+    )
+```
+
+When the client sends an `Accept` header containing `multipart/mixed`, the initial result and subsequent patches are streamed as parts of a `multipart/mixed` response. Each part is a JSON payload preserving the result's errors, the patch's `path` and `label`, and the `hasNext` marker indicating if more patches follow.
+
+If the client doesn't accept `multipart/mixed`, the incremental results are rejected with a `406 Not Acceptable` response and the patch source is closed without being consumed. The patch source is also closed when the response finishes or the client disconnects.

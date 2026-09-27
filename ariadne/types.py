@@ -1,5 +1,7 @@
 from collections.abc import (
     AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
     Callable,
     Collection,
     Generator,
@@ -26,6 +28,9 @@ from starlette.websockets import WebSocket
 
 __all__ = [
     "ExecutionResult",
+    "Executor",
+    "IncrementalExecutionResults",
+    "IncrementalPatch",
     "Resolver",
     "GraphQLResult",
     "SubscriptionResult",
@@ -98,6 +103,89 @@ It's a tuple of two elements:
 subscription's results. Depends if query was success or not.
 """
 SubscriptionResult = tuple[bool, list[dict] | AsyncGenerator[ExecutionResult, None]]
+
+
+@dataclass
+class IncrementalPatch:
+    """A single incremental delivery patch produced by an executor.
+
+    Represents one subsequent result in an incremental execution stream
+    (for example a deferred fragment or streamed list items).
+
+    # Attributes
+
+    `data`: a JSON-serializable payload of this patch.
+
+    `path`: a list of path segments (`str` and `int`) pointing at the
+    position in the initial result this patch applies to.
+
+    `label`: an optional `str` label of the `@defer` or `@stream`
+    directive that produced this patch.
+
+    `errors`: an optional list of `GraphQLError` instances encountered
+    while producing this patch.
+
+    `extensions`: an optional `dict` with custom extensions.
+
+    `has_next`: a `bool` indicating whether more patches follow. The final
+    patch in the stream should set it to `False`.
+    """
+
+    data: Any = None
+    path: list[str | int] | None = None
+    label: str | None = None
+    errors: list[GraphQLError] | None = None
+    extensions: dict[str, Any] | None = None
+    has_next: bool = False
+
+
+@dataclass
+class IncrementalExecutionResults:
+    """Result of an incremental GraphQL execution.
+
+    Returned by custom executors instead of a plain `ExecutionResult` when
+    the query uses incremental delivery (for example `@defer` or `@stream`
+    directives).
+
+    # Attributes
+
+    `initial_result`: an `ExecutionResult` with the initial (non-deferred)
+    part of the response.
+
+    `subsequent_results`: an async iterator of `IncrementalPatch` objects
+    delivered to the client after the initial result. If it has an `aclose`
+    method, the server calls it once the response is finished, closed, or
+    the client disconnects.
+    """
+
+    initial_result: ExecutionResult
+    subsequent_results: AsyncIterator[IncrementalPatch]
+
+
+"""Type for custom executors used by the ASGI HTTP handler.
+
+An executor is a callable (sync or async) that is called with the following
+keyword arguments:
+
+`schema`: a `GraphQLSchema` to execute the query against.
+
+`data`: a `dict` with the GraphQL request payload (`query`, `operationName`,
+`variables`).
+
+`context_value`: a context value for this request.
+
+`root_value`: a root value for this request.
+
+It should return either an `ExecutionResult` (handled as a regular JSON
+response) or an `IncrementalExecutionResults` instance (streamed to the
+client as a `multipart/mixed` response when the client accepts it).
+"""
+Executor = Callable[
+    ...,
+    ExecutionResult
+    | IncrementalExecutionResults
+    | Awaitable[ExecutionResult | IncrementalExecutionResults],
+]
 
 """Type for subscription source functions.
 

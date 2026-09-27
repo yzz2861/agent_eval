@@ -29,6 +29,7 @@ def __init__(
     extensions: Extensions | None = None,
     middleware: Middlewares | None = None,
     middleware_manager_class: type[MiddlewareManager] | None = None,
+    executor: Executor | None = None,
     subscription_handlers: list[SubscriptionHandler] | None = None,
 ) -> None:
     ...
@@ -51,6 +52,12 @@ middlewares.
 use for combining provided middlewares into single wrapper for resolvers
 by the server. Defaults to `graphql.MiddlewareManager`. Is only used
 if [`extensions`](types-reference#extensions) or `middleware` options are set.
+
+`executor`: an optional custom `Executor` callable used to execute
+queries instead of the default `graphql` function. It can return
+either an `ExecutionResult` (sent as a regular JSON response) or
+an `IncrementalExecutionResults` (streamed as a `multipart/mixed`
+response when the client accepts it). Defaults to none.
 
 `subscription_handlers`: a list of `SubscriptionHandler` instances to
 handle GraphQL subscriptions over HTTP. Handlers are tried in order; the

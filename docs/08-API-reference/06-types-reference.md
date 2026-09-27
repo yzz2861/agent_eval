@@ -143,6 +143,36 @@ It receives two arguments:
 - - - - -
 
 
+
+## `Executor`
+
+```python
+Executor = Callable[
+    ...,
+    ExecutionResult
+    | IncrementalExecutionResults
+    | Awaitable[ExecutionResult | IncrementalExecutionResults],
+]
+```
+
+Type for custom executors used by the ASGI HTTP handler.
+
+An executor is a callable (sync or async) that is called with the following keyword arguments:
+
+`schema`: a `GraphQLSchema` to execute the query against.
+
+`data`: a `dict` with the GraphQL request payload (`query`, `operationName`, `variables`).
+
+`context_value`: a context value for this request.
+
+`root_value`: a root value for this request.
+
+It should return either an `ExecutionResult` (handled as a regular JSON response) or an `IncrementalExecutionResults` instance (streamed to the client as a `multipart/mixed` response when the client accepts it).
+
+
+- - - - -
+
+
 ## `Extension`
 
 ```python
@@ -321,6 +351,54 @@ It's a tuple of two elements:
 `bool`: `True` when query was executed successfully (without any errors), `False` otherwise.
 
 `dict`: JSON-serializable query result.
+
+
+- - - - -
+
+
+## `IncrementalExecutionResults`
+
+```python
+@dataclass
+class IncrementalExecutionResults:
+    ...
+```
+
+Result of an incremental GraphQL execution.
+
+Returned by custom executors instead of a plain `ExecutionResult` when the query uses incremental delivery (for example `@defer` or `@stream` directives).
+
+
+### Attributes
+
+- `initial_result: ExecutionResult`: an `ExecutionResult` with the initial (non-deferred) part of the response.
+- `subsequent_results: AsyncIterator[IncrementalPatch]`: an async iterator of `IncrementalPatch` objects delivered to the client after the initial result. If it has an `aclose` method, the server calls it once the response is finished, closed, or the client disconnects.
+
+
+- - - - -
+
+
+## `IncrementalPatch`
+
+```python
+@dataclass
+class IncrementalPatch:
+    ...
+```
+
+A single incremental delivery patch produced by an executor.
+
+Represents one subsequent result in an incremental execution stream (for example a deferred fragment or streamed list items).
+
+
+### Attributes
+
+- `data: Any = None`: a JSON-serializable payload of this patch.
+- `path: list[str | int] | None = None`: a list of path segments (`str` and `int`) pointing at the position in the initial result this patch applies to.
+- `label: str | None = None`: an optional `str` label of the `@defer` or `@stream` directive that produced this patch.
+- `errors: list[GraphQLError] | None = None`: an optional list of `GraphQLError` instances encountered while producing this patch.
+- `extensions: dict[str, Any] | None = None`: an optional `dict` with custom extensions.
+- `has_next: bool = False`: a `bool` indicating whether more patches follow. The final patch in the stream should set it to `False`.
 
 
 - - - - -

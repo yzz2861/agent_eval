@@ -5,7 +5,7 @@ from http import HTTPStatus
 from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, cast
 
-from graphql import DocumentNode, MiddlewareManager
+from graphql import DocumentNode, ExecutionResult, MiddlewareManager
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
@@ -21,11 +21,18 @@ from ...file_uploads import combine_multipart_data
 from ...graphql import graphql
 from ...types import (
     ContextValue,
+    Executor,
     ExtensionList,
     Extensions,
     GraphQLResult,
+    IncrementalExecutionResults,
     MiddlewareList,
     Middlewares,
+)
+from ..incremental import (
+    IncrementalMultipartResponse,
+    client_accepts_incremental_delivery,
+    close_incremental_results,
 )
 from .base import GraphQLHttpHandlerBase
 
@@ -45,6 +52,7 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         extensions: Extensions | None = None,
         middleware: Middlewares | None = None,
         middleware_manager_class: type[MiddlewareManager] | None = None,
+        executor: Executor | None = None,
         subscription_handlers: list[SubscriptionHandler] | None = None,
     ) -> None:
         """Initializes the HTTP handler.
@@ -64,6 +72,12 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         by the server. Defaults to `graphql.MiddlewareManager`. Is only used
         if `extensions` or `middleware` options are set.
 
+        `executor`: an optional custom `Executor` callable used to execute
+        queries instead of the default `graphql` function. It can return
+        either an `ExecutionResult` (sent as a regular JSON response) or
+        an `IncrementalExecutionResults` (streamed as a `multipart/mixed`
+        response when the client accepts it). Defaults to none.
+
         `subscription_handlers`: a list of `SubscriptionHandler` instances to
         handle GraphQL subscriptions. Handlers are tried in order; the first
         handler whose `supports()` method returns `True` handles the request.
@@ -73,6 +87,7 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         self.extensions = extensions
         self.middleware = middleware
         self.middleware_manager_class = middleware_manager_class or MiddlewareManager
+        self.executor = executor
         self.subscription_handlers: list[SubscriptionHandler] = (
             subscription_handlers or []
         )
@@ -219,6 +234,9 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
                         logger=self.logger,
                         error_formatter=self.error_formatter,
                     )
+
+        if self.executor is not None:
+            return await self.execute_with_custom_executor(request, data)
 
         success, result = await self.execute_graphql_query(request, data)
         return await self.create_json_response(request, result, success)
@@ -390,6 +408,73 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
             middleware=middleware,
             middleware_manager_class=self.middleware_manager_class,
             execution_context_class=self.execution_context_class,
+        )
+
+    async def execute_with_custom_executor(
+        self, request: Request, data: Any
+    ) -> Response:
+        """Executes GraphQL query using the custom `executor` callable.
+
+        The executor is called with the `schema`, `data`, `context_value` and
+        `root_value` keyword arguments. If it returns an `ExecutionResult`,
+        a regular JSON response is returned. If it returns
+        `IncrementalExecutionResults`, the results are streamed to the client
+        as a `multipart/mixed` response, but only if the client accepts this
+        content type. Otherwise the patch source is closed and a `406` error
+        response is returned instead.
+
+        # Required arguments
+
+        `request`: the `Request` instance from Starlette or FastAPI.
+
+        `data`: a GraphQL data.
+        """
+        if self.schema is None:
+            raise TypeError("schema is not set, call configure method to initialize it")
+        if self.executor is None:
+            raise TypeError("executor is not set")
+
+        context_value = await self.get_context_for_request(request, data)
+
+        result = self.executor(
+            schema=self.schema,
+            data=data,
+            context_value=context_value,
+            root_value=self.root_value,
+        )
+        if isawaitable(result):
+            result = await result
+
+        if isinstance(result, ExecutionResult):
+            success = not result.errors
+            payload: dict[str, Any] = {"data": result.data}
+            if result.errors:
+                payload["errors"] = [
+                    self.error_formatter(error, self.debug) for error in result.errors
+                ]
+            if result.extensions:
+                payload["extensions"] = result.extensions
+            return await self.create_json_response(request, payload, success)
+
+        if isinstance(result, IncrementalExecutionResults):
+            if not client_accepts_incremental_delivery(
+                request.headers.get("accept", "")
+            ):
+                await close_incremental_results(result)
+                return PlainTextResponse(
+                    "Incremental delivery requires the client to accept "
+                    "multipart/mixed responses",
+                    status_code=HTTPStatus.NOT_ACCEPTABLE,
+                )
+            return IncrementalMultipartResponse(
+                result,
+                error_formatter=self.error_formatter,
+                debug=self.debug,
+            )
+
+        raise TypeError(
+            "Custom executor must return ExecutionResult or "
+            f"IncrementalExecutionResults, got {type(result).__name__}"
         )
 
     async def get_extensions_for_request(
