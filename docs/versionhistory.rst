@@ -5,6 +5,11 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 **UNRELEASED**
 
+ Added support for limiting memory object streams by the total weight of the
+  buffered items, via the new ``max_buffer_weight`` and ``item_weight`` arguments
+  of ``create_memory_object_stream()``, along with the new
+  ``current_buffer_weight`` and ``max_buffer_weight`` fields of
+  ``MemoryObjectStreamStatistics``
 - Fixed ``sleep()`` treating a negative delay (including ``-inf``) inconsistently
   across backends (asyncio returned immediately; Trio raised ``ValueError``) by
   raising ``ValueError`` on all backends

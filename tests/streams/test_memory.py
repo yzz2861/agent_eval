@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import math
 import sys
 from typing import TYPE_CHECKING, NoReturn
 
@@ -524,3 +525,324 @@ async def test_memory_object_item_receiver_repr() -> None:
     receiver.item = "test_item"
     receiver_repr = repr(receiver)
     assert "item='test_item'" in receiver_repr
+
+
+def test_negative_max_buffer_weight() -> None:
+    pytest.raises(
+        ValueError, create_memory_object_stream, 1, None, max_buffer_weight=-1
+    ).match("max_buffer_weight cannot be negative")
+
+
+def test_nan_max_buffer_weight() -> None:
+    pytest.raises(
+        ValueError,
+        create_memory_object_stream,
+        1,
+        None,
+        max_buffer_weight=math.nan,
+    ).match("max_buffer_weight cannot be NaN")
+
+
+async def test_weight_budget_send_nowait() -> None:
+    send, receive = create_memory_object_stream[str](
+        10, max_buffer_weight=10, item_weight=len
+    )
+    send.send_nowait("hello")  # weight 5
+    send.send_nowait("hi")  # weight 2, total 7
+    with pytest.raises(WouldBlock):
+        send.send_nowait("four")  # 7 + 4 would exceed the budget of 10
+
+    # The item count limit still applies when the weight budget would allow more
+    send2, receive2 = create_memory_object_stream[str](
+        1, max_buffer_weight=100, item_weight=len
+    )
+    send2.send_nowait("a")
+    with pytest.raises(WouldBlock):
+        send2.send_nowait("b")
+
+    assert receive.receive_nowait() == "hello"
+    assert receive.receive_nowait() == "hi"
+    assert receive2.receive_nowait() == "a"
+    send.close()
+    receive.close()
+    send2.close()
+    receive2.close()
+
+
+async def test_send_unblocked_after_weight_freed() -> None:
+    send, receive = create_memory_object_stream[str](
+        10, max_buffer_weight=5, item_weight=len
+    )
+    send.send_nowait("aaaa")  # weight 4
+    async with create_task_group() as tg:
+        tg.start_soon(send.send, "bb")  # weight 2, 4 + 2 > 5 so it waits
+        await wait_all_tasks_blocked()
+        assert send.statistics().tasks_waiting_send == 1
+        assert receive.receive_nowait() == "aaaa"
+
+    assert receive.receive_nowait() == "bb"
+    send.close()
+    receive.close()
+
+
+async def test_overweight_item_rejected() -> None:
+    send, receive = create_memory_object_stream[str](
+        10, max_buffer_weight=5, item_weight=len
+    )
+    with pytest.raises(ValueError, match="exceeds the stream's maximum buffer weight"):
+        send.send_nowait("xxxxxx")
+
+    # The async send() must reject the item immediately instead of waiting forever
+    with pytest.raises(ValueError, match="exceeds the stream's maximum buffer weight"):
+        await send.send("xxxxxx")
+
+    # Even a waiting receiver cannot accept an overweight item
+    send2, receive2 = create_memory_object_stream[str](
+        0, max_buffer_weight=5, item_weight=len
+    )
+    async with create_task_group() as tg:
+        tg.start_soon(receive2.receive)
+        await wait_all_tasks_blocked()
+        with pytest.raises(ValueError, match="exceeds"):
+            send2.send_nowait("xxxxxx")
+
+        tg.cancel_scope.cancel()
+
+    send.close()
+    receive.close()
+    send2.close()
+    receive2.close()
+
+
+async def test_invalid_item_weight() -> None:
+    send, receive = create_memory_object_stream[str](
+        1, max_buffer_weight=5, item_weight=lambda item: -1
+    )
+    with pytest.raises(ValueError, match="item weight cannot be negative"):
+        send.send_nowait("x")
+
+    send2, receive2 = create_memory_object_stream[str](
+        1, max_buffer_weight=5, item_weight=lambda item: math.nan
+    )
+    with pytest.raises(ValueError, match="item weight cannot be NaN"):
+        send2.send_nowait("x")
+
+    send.close()
+    receive.close()
+    send2.close()
+    receive2.close()
+
+
+async def test_item_weight_computed_once() -> None:
+    calls = 0
+
+    def item_weight(item: list[int]) -> float:
+        nonlocal calls
+        calls += 1
+        return len(item)
+
+    send, receive = create_memory_object_stream[list[int]](
+        3, max_buffer_weight=10, item_weight=item_weight
+    )
+    item = [1, 2, 3]
+    send.send_nowait(item)
+    await send.send([4, 5])
+    assert calls == 2
+
+    # Mutating the item afterwards must not change the accounted weight
+    item.append(4)
+    assert send.statistics().current_buffer_weight == 5
+    assert receive.receive_nowait() is item
+    assert send.statistics().current_buffer_weight == 2
+    assert receive.receive_nowait() == [4, 5]
+    assert send.statistics().current_buffer_weight == 0
+    send.close()
+    receive.close()
+
+
+async def test_weight_budget_shared_with_clones() -> None:
+    send1, receive = create_memory_object_stream[str](
+        10, max_buffer_weight=5, item_weight=len
+    )
+    send2 = send1.clone()
+    send1.send_nowait("aaa")  # weight 3
+    send2.send_nowait("bb")  # weight 2, total 5
+    with pytest.raises(WouldBlock):
+        send1.send_nowait("c")
+
+    with pytest.raises(WouldBlock):
+        send2.send_nowait("c")
+
+    assert receive.receive_nowait() == "aaa"
+    send2.send_nowait("c")  # fits now that weight was freed
+    assert receive.receive_nowait() == "bb"
+    assert receive.receive_nowait() == "c"
+    send1.close()
+    send2.close()
+    receive.close()
+
+
+async def test_cancel_send_weighted() -> None:
+    """Cancelling a waiting send must not leak any of the weight budget."""
+    send, receive = create_memory_object_stream[str](
+        10, max_buffer_weight=3, item_weight=len
+    )
+    send.send_nowait("aa")  # weight 2
+    async with create_task_group() as tg:
+        tg.start_soon(send.send, "bb")  # 2 + 2 > 3 so it waits
+        await wait_all_tasks_blocked()
+        tg.cancel_scope.cancel()
+
+    statistics = send.statistics()
+    assert statistics.current_buffer_weight == 2
+    assert statistics.tasks_waiting_send == 0
+    assert receive.receive_nowait() == "aa"
+    with pytest.raises(WouldBlock):
+        receive.receive_nowait()
+
+    send.close()
+    receive.close()
+
+
+async def test_close_receive_while_sending_weighted() -> None:
+    """Closing the receive end while a send waits must not leak the weight budget."""
+    send, receive = create_memory_object_stream[str](
+        10, max_buffer_weight=3, item_weight=len
+    )
+    send.send_nowait("aa")  # weight 2
+    with pytest.raises(ExceptionGroup) as exc:
+        async with create_task_group() as tg:
+            tg.start_soon(send.send, "bbb")  # 2 + 3 > 3 so it waits
+            await wait_all_tasks_blocked()
+            await receive.aclose()
+
+    assert len(exc.value.exceptions) == 1
+    assert isinstance(exc.value.exceptions[0], BrokenResourceError)
+    assert send.statistics().current_buffer_weight == 2
+    assert send.statistics().tasks_waiting_send == 0
+    send.close()
+
+
+async def test_zero_buffer_weight_budget() -> None:
+    """Direct hand-off to a receiver must work with a zero-sized buffer."""
+    send, receive = create_memory_object_stream[str](
+        0, max_buffer_weight=5, item_weight=len
+    )
+    async with create_task_group() as tg:
+        tg.start_soon(send.send, "hello")
+        await wait_all_tasks_blocked()
+        assert receive.receive_nowait() == "hello"
+
+    assert send.statistics().current_buffer_weight == 0
+
+    # Direct delivery to a waiting receiver is not weighed against the budget
+    async with create_task_group() as tg:
+        tg.start_soon(receive.receive)
+        await wait_all_tasks_blocked()
+        send.send_nowait("hello")
+
+    assert send.statistics().current_buffer_weight == 0
+    send.close()
+    receive.close()
+
+
+async def test_item_weight_function_raises() -> None:
+    def item_weight(item: str) -> float:
+        if item == "bad":
+            raise RuntimeError("cannot weigh the item")
+
+        return len(item)
+
+    send, receive = create_memory_object_stream[str](
+        10, max_buffer_weight=10, item_weight=item_weight
+    )
+    send.send_nowait("ok")
+    with pytest.raises(RuntimeError, match="cannot weigh the item"):
+        send.send_nowait("bad")
+
+    with pytest.raises(RuntimeError, match="cannot weigh the item"):
+        await send.send("bad")
+
+    # Nothing was queued and no weight was leaked, so the stream still works
+    statistics = send.statistics()
+    assert statistics.current_buffer_used == 1
+    assert statistics.current_buffer_weight == 2
+    send.send_nowait("fine")
+    assert receive.receive_nowait() == "ok"
+    assert receive.receive_nowait() == "fine"
+    send.close()
+    receive.close()
+
+
+async def test_weight_statistics() -> None:
+    send, receive = create_memory_object_stream[str](
+        10, max_buffer_weight=10, item_weight=len
+    )
+    statistics = send.statistics()
+    assert statistics.max_buffer_weight == 10
+    assert statistics.current_buffer_weight == 0
+
+    send.send_nowait("hello")
+    assert send.statistics().current_buffer_weight == 5
+    assert receive.statistics().current_buffer_weight == 5
+
+    async with create_task_group() as tg:
+        tg.start_soon(send.send, "......")  # weight 6, 5 + 6 > 10 so it waits
+        await wait_all_tasks_blocked()
+        statistics = send.statistics()
+        assert statistics.tasks_waiting_send == 1
+        assert statistics.current_buffer_weight == 5
+        assert receive.receive_nowait() == "hello"
+
+    assert send.statistics().current_buffer_weight == 6
+    assert receive.receive_nowait() == "......"
+    assert send.statistics().current_buffer_weight == 0
+    send.close()
+    receive.close()
+
+
+async def test_weight_statistics_defaults() -> None:
+    send, receive = create_memory_object_stream[str](2)
+    statistics = send.statistics()
+    assert statistics.max_buffer_weight == math.inf
+    assert statistics.current_buffer_weight == 0
+    send.send_nowait("x")
+    assert send.statistics().current_buffer_weight == 1
+    send.close()
+    receive.close()
+
+
+async def test_weight_fairness_fifo() -> None:
+    """
+    Test that a big item waiting for buffer capacity is never overtaken by smaller
+    items sent later, even when the smaller items would fit (strict FIFO).
+
+    """
+    send, receive = create_memory_object_stream[str](
+        10, max_buffer_weight=10, item_weight=len
+    )
+    send.send_nowait("aaaa")  # weight 4
+    send.send_nowait("bbbbbb")  # weight 6, total 10
+    async with create_task_group() as tg:
+        # Start the sends one at a time so that they queue up in this exact order
+        for item in ("BIGBIG", "s1", "s2"):  # weights 6, 2 and 2
+            tg.start_soon(send.send, item)
+            await wait_all_tasks_blocked()
+
+        assert send.statistics().tasks_waiting_send == 3
+
+        # Freeing 4 units of weight is not enough for BIGBIG, and the smaller
+        # items queued behind it must not overtake it
+        assert receive.receive_nowait() == "aaaa"
+        statistics = send.statistics()
+        assert statistics.current_buffer_weight == 6
+        assert statistics.tasks_waiting_send == 3
+
+        # Once enough weight is freed, the waiting items are admitted in FIFO order
+        assert receive.receive_nowait() == "bbbbbb"
+        assert receive.receive_nowait() == "BIGBIG"
+        assert receive.receive_nowait() == "s1"
+        assert receive.receive_nowait() == "s2"
+
+    send.close()
+    receive.close()

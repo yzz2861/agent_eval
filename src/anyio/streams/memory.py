@@ -6,8 +6,10 @@ __all__ = (
     "MemoryObjectStreamStatistics",
 )
 
+import math
 import warnings
 from collections import OrderedDict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Generic, NamedTuple, TypeVar
@@ -38,6 +40,11 @@ class MemoryObjectStreamStatistics(NamedTuple):
     tasks_waiting_send: int
     #: number of tasks blocked on :meth:`MemoryObjectReceiveStream.receive`
     tasks_waiting_receive: int
+    #: total weight of the items stored in the buffer
+    current_buffer_weight: float = 0
+    #: maximum total weight of items that can be stored on this stream (or
+    #: :data:`math.inf`)
+    max_buffer_weight: float = math.inf
 
 
 @dataclass(eq=False)
@@ -55,13 +62,16 @@ class _MemoryObjectItemReceiver(Generic[T_Item]):
 @dataclass(eq=False)
 class _MemoryObjectStreamState(Generic[T_Item]):
     max_buffer_size: float = field()
-    buffer: deque[T_Item] = field(init=False, default_factory=deque)
+    max_buffer_weight: float = field(default=math.inf)
+    item_weight: Callable[[T_Item], float] | None = field(default=None)
+    buffer: deque[tuple[T_Item, float]] = field(init=False, default_factory=deque)
+    buffer_weight: float = field(init=False, default=0)
     open_send_channels: int = field(init=False, default=0)
     open_receive_channels: int = field(init=False, default=0)
     waiting_receivers: OrderedDict[Event, _MemoryObjectItemReceiver[T_Item]] = field(
         init=False, default_factory=OrderedDict
     )
-    waiting_senders: OrderedDict[Event, T_Item] = field(
+    waiting_senders: OrderedDict[Event, tuple[T_Item, float]] = field(
         init=False, default_factory=OrderedDict
     )
 
@@ -73,7 +83,29 @@ class _MemoryObjectStreamState(Generic[T_Item]):
             self.open_receive_channels,
             len(self.waiting_senders),
             len(self.waiting_receivers),
+            self.buffer_weight,
+            self.max_buffer_weight,
         )
+
+    def admit_waiting_senders(self) -> None:
+        """
+        Move items from waiting senders to the buffer, as long as they fit.
+
+        Items are admitted in the order their send operations started, and admission
+        stops at the first item that does not fit, so a queued item is never
+        overtaken by a later one.
+        """
+        while self.waiting_senders:
+            send_event, (item, weight) = next(iter(self.waiting_senders.items()))
+            if len(self.buffer) >= self.max_buffer_size:
+                break
+            if self.buffer_weight + weight > self.max_buffer_weight:
+                break
+
+            del self.waiting_senders[send_event]
+            self.buffer.append((item, weight))
+            self.buffer_weight += weight
+            send_event.set()
 
 
 @dataclass(eq=False)
@@ -99,15 +131,20 @@ class MemoryObjectReceiveStream(ObjectReceiveStream[T_co], Generic[T_co]):
         if self._closed:
             raise ClosedResourceError
 
-        if self._state.waiting_senders:
-            # Get the item from the next sender
-            send_event, item = self._state.waiting_senders.popitem(last=False)
-            self._state.buffer.append(item)
-            send_event.set()
-
         if self._state.buffer:
-            return self._state.buffer.popleft()
-        elif not self._state.open_send_channels:
+            item, weight = self._state.buffer.popleft()
+            self._state.buffer_weight -= weight
+            self._state.admit_waiting_senders()
+            return item
+
+        if self._state.waiting_senders:
+            # The buffer is empty, so the item from the next waiting sender can be
+            # handed directly to this receiver without being stored in the buffer
+            send_event, (item, _) = self._state.waiting_senders.popitem(last=False)
+            send_event.set()
+            return item
+
+        if not self._state.open_send_channels:
             raise EndOfStream
 
         raise WouldBlock
@@ -213,6 +250,8 @@ class MemoryObjectSendStream(ObjectSendStream[T_contra], Generic[T_contra]):
             receiving end
         :raises ~anyio.WouldBlock: if the buffer is full and there are no tasks waiting
             to receive
+        :raises ValueError: if the item's weight exceeds the stream's maximum buffer
+            weight
 
         """
         if self._closed:
@@ -220,6 +259,35 @@ class MemoryObjectSendStream(ObjectSendStream[T_contra], Generic[T_contra]):
         if not self._state.open_receive_channels:
             raise BrokenResourceError
 
+        self._deliver_or_buffer(item, self._compute_weight(item))
+
+    def _compute_weight(self, item: T_contra) -> float:
+        """
+        Compute the weight of an item and validate it against the stream limits.
+
+        This is called exactly once per send operation, before the item is queued,
+        so later mutations of the item cannot affect the weight already accounted
+        for.
+
+        :raises ValueError: if the weight is negative, NaN, or exceeds the maximum
+            buffer weight of the stream
+
+        """
+        item_weight = self._state.item_weight
+        weight: float = item_weight(item) if item_weight is not None else 1
+        if math.isnan(weight):
+            raise ValueError("item weight cannot be NaN")
+        if weight < 0:
+            raise ValueError("item weight cannot be negative")
+        if weight > self._state.max_buffer_weight:
+            raise ValueError(
+                f"the item's weight ({weight}) exceeds the stream's maximum buffer "
+                f"weight ({self._state.max_buffer_weight})"
+            )
+
+        return weight
+
+    def _deliver_or_buffer(self, item: T_contra, weight: float) -> None:
         while self._state.waiting_receivers:
             receive_event, receiver = self._state.waiting_receivers.popitem(last=False)
             if not receiver.task_info.has_pending_cancellation():
@@ -227,8 +295,17 @@ class MemoryObjectSendStream(ObjectSendStream[T_contra], Generic[T_contra]):
                 receive_event.set()
                 return
 
-        if len(self._state.buffer) < self._state.max_buffer_size:
-            self._state.buffer.append(item)
+        if self._state.waiting_senders:
+            # Queued items are never allowed to overtake items whose senders are
+            # already waiting, even if they would fit in the buffer (strict FIFO)
+            raise WouldBlock
+
+        if (
+            len(self._state.buffer) < self._state.max_buffer_size
+            and self._state.buffer_weight + weight <= self._state.max_buffer_weight
+        ):
+            self._state.buffer.append((item, weight))
+            self._state.buffer_weight += weight
         else:
             raise WouldBlock
 
@@ -239,19 +316,32 @@ class MemoryObjectSendStream(ObjectSendStream[T_contra], Generic[T_contra]):
         If the buffer is full, this method blocks until there is again room in the
         buffer or the item can be sent directly to a receiver.
 
+        Items are delivered in the order their send operations started: an item
+        waiting for buffer capacity is never overtaken by an item sent later, even
+        if the later item would fit within the buffer limits.
+
         :param item: the item to send
         :raises ~anyio.ClosedResourceError: if this send stream has been closed
         :raises ~anyio.BrokenResourceError: if the stream has been closed from the
             receiving end
+        :raises ValueError: if the item's weight exceeds the stream's maximum buffer
+            weight
 
         """
         await checkpoint()
+        if self._closed:
+            raise ClosedResourceError
+        if not self._state.open_receive_channels:
+            raise BrokenResourceError
+
+        # The weight is computed only once, before the item is queued
+        weight = self._compute_weight(item)
         try:
-            self.send_nowait(item)
+            self._deliver_or_buffer(item, weight)
         except WouldBlock:
             # Wait until there's someone on the receiving end
             send_event = Event()
-            self._state.waiting_senders[send_event] = item
+            self._state.waiting_senders[send_event] = (item, weight)
             try:
                 await send_event.wait()
             except BaseException:

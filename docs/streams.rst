@@ -39,6 +39,19 @@ the buffer size to a value of your choosing when creating the stream. It is also
 possible to have an unbounded buffer by passing :data:`math.inf` as the buffer size but
 this is not recommended.
 
+In addition to limiting the number of buffered items, you can limit their total
+"weight" by passing the ``max_buffer_weight`` and ``item_weight`` arguments to
+:func:`~create_memory_object_stream`. This is useful when the items vary greatly in
+size (for example, small events mixed with large batches) and you want to bound the
+memory footprint of the buffer rather than the item count. The weight of each item is
+computed by the ``item_weight`` callable exactly once, when the item is sent, so
+mutating the item afterwards does not affect the accounted weight. Both limits are
+enforced independently: sending blocks when either one is exceeded. An item whose
+weight alone exceeds ``max_buffer_weight`` is rejected immediately with a
+:class:`ValueError` instead of blocking forever. Items are always delivered in the
+order their send operations started – an item waiting for buffer capacity is never
+overtaken by an item sent later, even if the later item would fit in the buffer.
+
 Memory object streams can be cloned by calling the ``clone()`` method. Each clone can be
 closed separately, but each end of the stream is only considered closed once all of its
 clones have been closed. For example, if you have two clones of the receive stream, the
