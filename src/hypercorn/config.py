@@ -30,6 +30,7 @@ else:
     import tomli as tomllib
 
 from .logging import Logger
+from .sni import CertificateGroup
 
 BYTES = 1
 OCTETS = 1
@@ -61,6 +62,8 @@ class Config:
     _quic_addresses: list[tuple] = []
     _log: Logger | None = None
     _root_path: str = ""
+
+    certificate_group: CertificateGroup | None = None
 
     access_log_format = '%(h)s %(l)s %(l)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
     accesslog: logging.Logger | str | None = None
@@ -99,6 +102,8 @@ class Config:
     pid_path: str | None = None
     server_names: list[str] = []
     shutdown_timeout = 60 * SECONDS
+    sni_certificates: dict[str, Any] = {}
+    sni_default: str = "certificate"
     ssl_handshake_timeout = 60 * SECONDS
     startup_timeout = 60 * SECONDS
     statsd_host: str | None = None
@@ -168,21 +173,36 @@ class Config:
         self._root_path = value.rstrip("/")
 
     def create_ssl_context(self) -> SSLContext | None:
+        self.certificate_group = None
         if not self.ssl_enabled:
             return None
 
-        context = create_default_context(Purpose.CLIENT_AUTH)
-        context.set_ciphers(self.ciphers)
-        context.minimum_version = TLSVersion.TLSv1_2  # RFC 7540 Section 9.2: MUST be TLS >=1.2
-        context.options = OP_NO_COMPRESSION  # RFC 7540 Section 9.2.1: MUST disable compression
-        context.set_alpn_protocols(self.alpn_protocols)
-
+        context = self._create_base_context()
         if self.certfile is not None and self.keyfile is not None:
             context.load_cert_chain(
                 certfile=self.certfile,
                 keyfile=self.keyfile,
                 password=self.keyfile_password,
             )
+
+        if self.sni_certificates:
+            self.certificate_group = CertificateGroup(
+                self.sni_certificates,
+                default=self.sni_default,
+                context_factory=self._create_base_context,
+                has_default_certificate=self.certfile is not None
+                and self.keyfile is not None,
+            )
+            self.certificate_group.attach(context)
+
+        return context
+
+    def _create_base_context(self) -> SSLContext:
+        context = create_default_context(Purpose.CLIENT_AUTH)
+        context.set_ciphers(self.ciphers)
+        context.minimum_version = TLSVersion.TLSv1_2  # RFC 7540 Section 9.2: MUST be TLS >=1.2
+        context.options = OP_NO_COMPRESSION  # RFC 7540 Section 9.2.1: MUST disable compression
+        context.set_alpn_protocols(self.alpn_protocols)
 
         if self.ca_certs is not None:
             context.load_verify_locations(self.ca_certs)
@@ -195,7 +215,9 @@ class Config:
 
     @property
     def ssl_enabled(self) -> bool:
-        return self.certfile is not None and self.keyfile is not None
+        return (self.certfile is not None and self.keyfile is not None) or bool(
+            self.sni_certificates
+        )
 
     def create_sockets(self) -> Sockets:
         if self.ssl_enabled:

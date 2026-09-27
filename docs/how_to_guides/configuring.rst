@@ -153,6 +153,10 @@ server_names               ``--server-name``             The hostnames that can 
                                                          with 404s.
 shutdown_timeout           N/A                           Timeout when waiting for Lifespan               60s
                                                          shutdowns to complete.
+sni_certificates           N/A                           Mapping of domain names to certificates         {}
+                                                         selected via SNI, see :ref:`sni_certificates`.
+sni_default                N/A                           Policy for unknown or missing SNI, either       certificate
+                                                         ``certificate`` or ``reject``.
 ssl_handshake_timeout      N/A                           Timeout when waiting for SSL handshakes to      60s
                                                          complete.
 startup_timeout            N/A                           Timeout when waiting for Lifespan               60s
@@ -179,3 +183,47 @@ workers                    ``-w``, ``--workers``         The number of workers t
 wsgi_max_body_size         N/A                           The maximum size of a body that will be         16MiB
                                                          accepted in WSGI mode.
 ========================== ============================= =============================================== ========================
+
+.. _sni_certificates:
+
+SNI certificates
+----------------
+
+Multiple domains can share a single TLS bind by configuring
+``sni_certificates`` with a mapping of domain names to certificates.
+Each domain maps to either a ``(certfile, keyfile)`` tuple or a
+dictionary with ``certfile``, ``keyfile``, and optional
+``password`` keys, for example
+
+.. code-block:: python
+
+    config.certfile = "default.crt"
+    config.keyfile = "default.key"
+    config.sni_certificates = {
+        "example.com": ("example.crt", "example.key"),
+        "*.example.org": {"certfile": "example-org.crt", "keyfile": "example-org.key"},
+    }
+
+Exact domain names take precedence over single-level wildcards (a
+``*.example.org`` entry matches ``www.example.org`` but not
+``example.org`` nor ``a.b.example.org``). Connections with an
+unknown or missing server name follow the ``sni_default`` policy:
+``certificate`` serves the certificate configured via
+``certfile``/``keyfile``, whilst ``reject`` aborts the
+handshake. Certificate selection never alters the configured ALPN
+protocols or client certificate verification.
+
+The whole group can be reloaded programmatically, for example when the
+certificates are renewed,
+
+.. code-block:: python
+
+    config.create_ssl_context()  # or a running server
+    config.certificate_group.reload(
+        {"example.com": ("renewed.crt", "renewed.key")},
+    )
+
+Reloading is atomic: if any certificate, key, or domain rule in the
+new group is invalid the reload raises and the previous group keeps
+serving. New handshakes use the reloaded group, whilst established
+connections are unaffected.

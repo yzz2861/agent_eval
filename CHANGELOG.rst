@@ -1,3 +1,10 @@
+Unreleased
+----------
+
+* Add SNI based certificate selection via the sni_certificates and
+  sni_default configs, with an atomic programmatic reload of the whole
+  certificate group.
+
 0.18.0 2025-11-08
 -----------------
 
