@@ -8,11 +8,12 @@ Core implementation of aiosqlite proxies
 import asyncio
 import logging
 import sqlite3
+from collections import deque
 from collections.abc import AsyncIterator, Generator, Iterable
 from functools import partial
 from pathlib import Path
-from queue import Empty, Queue, SimpleQueue
-from threading import Thread
+from queue import SimpleQueue
+from threading import Condition, Thread
 from typing import Any, Callable, Literal, Optional, Union
 from warnings import warn
 
@@ -43,6 +44,88 @@ def set_exception(fut: asyncio.Future, e: BaseException) -> None:
 
 _STOP_RUNNING_SENTINEL = object()
 _TxQueue = SimpleQueue[tuple[Optional[asyncio.Future], Callable[[], Any]]]
+
+
+class _DumpBuffer:
+    def __init__(self, max_size: int, loop: asyncio.AbstractEventLoop) -> None:
+        self._max_size = max_size
+        self._loop = loop
+        self._condition = Condition()
+        self._items: deque[Optional[str]] = deque()
+        self._waiters: deque[asyncio.Future] = deque()
+        self._closed = False
+        self._error: Optional[BaseException] = None
+
+    def put(self, item: Optional[str]) -> bool:
+        with self._condition:
+            while (
+                self._max_size > 0
+                and len(self._items) >= self._max_size
+                and not self._closed
+            ):
+                self._condition.wait()
+
+            if self._closed:
+                return False
+
+            self._items.append(item)
+            if self._waiters:
+                waiter = self._waiters.popleft()
+                self._schedule(set_result, waiter, None)
+
+            return True
+
+    async def get(self) -> Optional[str]:
+        with self._condition:
+            item = self._get_locked()
+            if item is not _PENDING:
+                return item
+
+            waiter = self._loop.create_future()
+            self._waiters.append(waiter)
+
+        await waiter
+
+        with self._condition:
+            item = self._get_locked()
+            if item is not _PENDING:
+                return item
+
+        raise AssertionError("unreachable")
+
+    def _get_locked(self) -> Any:
+        if self._items:
+            item = self._items.popleft()
+            self._condition.notify_all()
+            return item
+
+        if self._closed:
+            assert self._error is not None
+            raise self._error
+
+        return _PENDING
+
+    def close(self, error: Optional[BaseException] = None) -> None:
+        with self._condition:
+            if not self._closed:
+                self._closed = True
+                self._error = error or ValueError("Connection closed")
+                self._condition.notify_all()
+
+            while self._waiters:
+                waiter = self._waiters.popleft()
+                if not waiter.done():
+                    assert self._error is not None
+                    self._schedule(set_exception, waiter, self._error)
+
+    def _schedule(self, callback: Callable[..., None], *args: Any) -> None:
+        try:
+            self._loop.call_soon_threadsafe(callback, *args)
+        except RuntimeError:
+            pass
+
+
+_PENDING = object()
 
 
 def _connection_worker_thread(tx: _TxQueue):
@@ -87,6 +170,7 @@ class Connection:
         self._connector = connector
         self._tx: _TxQueue = SimpleQueue()
         self._iter_chunk_size = iter_chunk_size
+        self._dump_buffers: set[_DumpBuffer] = set()
         self._thread = Thread(target=_connection_worker_thread, args=(self._tx,))
 
         if loop is not None:
@@ -116,6 +200,9 @@ class Connection:
     def stop(self) -> Optional[asyncio.Future]:
         """Stop the background thread. Prefer `async with` or `await close()`"""
         self._running = False
+
+        for dump_buffer in tuple(self._dump_buffers):
+            dump_buffer.close()
 
         def close_and_stop():
             if self._connection is not None:
@@ -201,6 +288,9 @@ class Connection:
 
         if self._connection is None:
             return
+
+        for dump_buffer in tuple(self._dump_buffers):
+            dump_buffer.close()
 
         try:
             await self._execute(self._conn.close)
@@ -371,9 +461,12 @@ class Connection:
         """
         await self._execute(self._conn.set_authorizer, authorizer_callback)
 
-    async def iterdump(self) -> AsyncIterator[str]:
+    async def iterdump(self, *, buffer_size: int = 0) -> AsyncIterator[str]:
         """
         Return an async iterator to dump the database in SQL text format.
+
+        ``buffer_size`` limits the number of SQL lines buffered ahead of the
+        consumer. ``0`` (the default) uses an unlimited buffer.
 
         Example::
 
@@ -381,37 +474,47 @@ class Connection:
                 ...
 
         """
-        dump_queue: Queue = Queue()
+        if not isinstance(buffer_size, int) or buffer_size < 0:
+            raise ValueError("buffer_size must be a non-negative integer")
+
+        loop = asyncio.get_event_loop()
+        dump_buffer = _DumpBuffer(buffer_size, loop)
+        self._dump_buffers.add(dump_buffer)
+        consumer_task = asyncio.current_task()
+
+        def cancel_consumer(task: asyncio.Task) -> None:
+            if task.cancelled():
+                dump_buffer.close(asyncio.CancelledError())
+
+        if consumer_task is not None:
+            consumer_task.add_done_callback(cancel_consumer)
 
         def dumper():
             try:
                 for line in self._conn.iterdump():
-                    dump_queue.put_nowait(line)
-                dump_queue.put_nowait(None)
+                    if not dump_buffer.put(line):
+                        return
+                dump_buffer.put(None)
 
-            except Exception:
-                LOG.exception("exception while dumping db")
-                dump_queue.put_nowait(None)
+            except BaseException as error:
+                dump_buffer.close(error)
                 raise
 
-        fut = self._execute(dumper)
-        task = asyncio.ensure_future(fut)
+        future = self._execute(dumper)
+        task = asyncio.ensure_future(future)
 
-        while True:
-            try:
-                line: Optional[str] = dump_queue.get_nowait()
+        try:
+            while True:
+                line = await dump_buffer.get()
                 if line is None:
                     break
                 yield line
-
-            except Empty:
-                if task.done():
-                    LOG.warning("iterdump completed unexpectedly")
-                    break
-
-                await asyncio.sleep(0.01)
-
-        await task
+        finally:
+            dump_buffer.close()
+            self._dump_buffers.discard(dump_buffer)
+            if consumer_task is not None:
+                consumer_task.remove_done_callback(cancel_consumer)
+            await asyncio.shield(task)
 
     async def backup(
         self,

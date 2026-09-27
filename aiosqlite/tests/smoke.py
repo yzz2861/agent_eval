@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from sqlite3 import OperationalError
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Event, Thread
 from unittest import IsolatedAsyncioTestCase, SkipTest
 from unittest.mock import patch
 
@@ -425,6 +425,120 @@ class SmokeTest(IsolatedAsyncioTestCase):
                     "COMMIT;",
                 ],
             )
+
+    async def test_iterdump_bounded_buffer(self):
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("create table foo (id integer primary key)")
+            await db.executemany("insert into foo default values", [()] * 100)
+
+            expected = [line async for line in db.iterdump()]
+            lines = [line async for line in db.iterdump(buffer_size=1)]
+            self.assertEqual(lines, expected)
+
+    async def test_iterdump_invalid_buffer_size(self):
+        async with aiosqlite.connect(":memory:") as db:
+            with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                await db.iterdump(buffer_size=-1).__anext__()
+
+    async def test_iterdump_aclose_unblocks_thread(self):
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("create table foo (id integer primary key)")
+            await db.executemany("insert into foo default values", [()] * 1000)
+
+            iterator = db.iterdump(buffer_size=1).__aiter__()
+            for _ in range(3):
+                await iterator.__anext__()
+            await iterator.aclose()
+
+            async with db.execute("select count(*) from foo") as cursor:
+                self.assertEqual(await cursor.fetchone(), (1000,))
+
+    async def test_iterdump_cancel_unblocks_thread(self):
+        producer_ready = Event()
+
+        class CancellingDumpConnection(sqlite3.Connection):
+            def iterdump(self):
+                yield "first;"
+                yield "second;"
+                producer_ready.set()
+                yield "third;"
+                raise AssertionError("producer should be cancelled")
+
+        async with aiosqlite.connect(
+            ":memory:", factory=CancellingDumpConnection
+        ) as db:
+
+            async def consume():
+                async for line in db.iterdump(buffer_size=1):
+                    if line == "first;":
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, producer_ready.wait
+                        )
+
+            task = asyncio.ensure_future(consume())
+            await asyncio.get_event_loop().run_in_executor(
+                None, producer_ready.wait
+            )
+            task.cancel()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+            async with db.execute("select 1") as cursor:
+                self.assertEqual(await cursor.fetchone(), (1,))
+
+    async def test_iterdump_close_unblocks_thread(self):
+        producer_ready = Event()
+
+        class ClosingDumpConnection(sqlite3.Connection):
+            def iterdump(self):
+                yield "first;"
+                yield "second;"
+                producer_ready.set()
+                yield "third;"
+                raise AssertionError("producer should stop when closed")
+
+        db = await aiosqlite.connect(":memory:", factory=ClosingDumpConnection)
+
+        async def consume():
+            async for line in db.iterdump(buffer_size=1):
+                if line == "first;":
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, producer_ready.wait
+                    )
+
+        task = asyncio.ensure_future(consume())
+        await asyncio.get_event_loop().run_in_executor(
+            None, producer_ready.wait
+        )
+        await db.close()
+
+        with self.assertRaises(ValueError):
+            await task
+
+        self.assertFalse(db._thread.is_alive())
+        with self.assertRaises(ValueError):
+            await db.execute("select 1")
+
+    async def test_iterdump_exception_propagates(self):
+        error = RuntimeError("dump failed")
+
+        class BadConnection(sqlite3.Connection):
+            def iterdump(self):
+                yield "first;"
+                raise error
+
+        async with aiosqlite.connect(":memory:", factory=BadConnection) as db:
+            lines = []
+            with self.assertRaises(RuntimeError) as caught:
+                async for line in db.iterdump(buffer_size=1):
+                    lines.append(line)
+
+            self.assertIs(caught.exception, error)
+            self.assertEqual(lines, ["first;"])
+
+            async with db.execute("select 1") as cursor:
+                self.assertEqual(await cursor.fetchone(), (1,))
 
     async def test_cursor_on_closed_connection(self):
         db = await aiosqlite.connect(self.db)
