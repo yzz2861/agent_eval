@@ -469,6 +469,142 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
 
         return copied
 
+    def model_update(
+        self,
+        update: Mapping[str, Any],
+        *,
+        in_place: bool = False,
+        context: Any | None = None,
+    ) -> Self:
+        """!!! abstract "Usage Documentation"
+            [`model_update`](../concepts/models.md#model-update)
+
+        Apply several field updates atomically, validating the full candidate state.
+
+        Unlike [`model_copy(update=...)`][pydantic.BaseModel.model_copy] (which assigns values without
+        validation) and per-field assignment (which validates one field at a time and can leave the
+        model in a partially updated state), this method validates the model as a whole with all the
+        updates applied. This means cross-field validators (e.g. model validators) see the complete
+        candidate state, and either all of the updates are applied or none of them are.
+
+        If validation fails, a [`ValidationError`][pydantic_core.ValidationError] is raised and the
+        original instance is left completely untouched: its fields, extra data, private attributes
+        and [`model_fields_set`][pydantic.BaseModel.model_fields_set] are all preserved.
+
+        !!! note
+            The candidate state is built from the current field values and revalidated as input data.
+            Fields whose values cannot round-trip through validation (e.g. types relying on
+            [`BeforeValidator`][pydantic.BeforeValidator] to convert raw input) may not be usable
+            with this method.
+
+        Args:
+            update: A mapping of values to update. Keys may be field names or (validation) aliases.
+                Unknown keys are treated as extra data (and thus follow the model's
+                [`extra`][pydantic.ConfigDict.extra] configuration).
+            in_place: Whether to update the current instance in place. If `False` (the default),
+                a new validated model instance is returned and the current instance is left
+                unchanged. In-place updates are rejected for frozen models (and for updates
+                targeting frozen fields).
+            context: Additional context to pass to the validators, same as for
+                [`model_validate()`][pydantic.BaseModel.model_validate].
+
+        Raises:
+            ValidationError: If the candidate state could not be validated, or if an in-place
+                update was requested on a frozen model or frozen field.
+
+        Returns:
+            The updated model instance: a new instance by default, or the current instance
+            (updated in place) when `in_place=True`.
+        """
+        cls = self.__class__
+        fields = cls.__pydantic_fields__
+
+        # Resolve update keys (which may be field names or aliases) to field names:
+        resolved_update: dict[str, Any] = {}
+        for key, value in update.items():
+            resolved_update[cls._resolve_field_name(key)] = value
+
+        if in_place:
+            # Reject updates on frozen models/fields before doing any work:
+            for name, value in resolved_update.items():
+                _check_frozen(cls, name, value)
+
+        if cls.__pydantic_root_model__:
+            unknown_keys = set(resolved_update) - {'root'}
+            if unknown_keys:
+                raise ValueError(
+                    f'Unknown field(s) for root model {cls.__name__!r}: {sorted(unknown_keys)!r}. '
+                    "Only the 'root' field can be updated."
+                )
+            candidate_input: Any = resolved_update['root'] if 'root' in resolved_update else self.root
+        else:
+            # Build the candidate input from the current state, with the updates applied on top.
+            # Keys are field names, so validation is performed with both `by_name` and `by_alias`
+            # enabled (aliases are still honored for the provided updates):
+            candidate_input = {name: self.__dict__[name] for name in fields if name in self.__dict__}
+            if self.__pydantic_extra__:
+                candidate_input.update(self.__pydantic_extra__)
+            candidate_input.update(resolved_update)
+
+        # Validate the full candidate state. If this raises, `self` is left completely untouched:
+        candidate = cls.model_validate(candidate_input, context=context, by_alias=True, by_name=True)
+
+        # The fields explicitly set on the candidate are the ones set on the original instance
+        # plus the ones being updated (regardless of what was passed in the candidate input):
+        _object_setattr(candidate, '__pydantic_fields_set__', self.__pydantic_fields_set__ | resolved_update.keys())
+
+        # Private attributes are carried over from the original instance. Values explicitly
+        # changed on the candidate (e.g. by model validators) take precedence, while
+        # default-initialized values do not override the current state:
+        self_private = getattr(self, '__pydantic_private__', None)
+        candidate_private = getattr(candidate, '__pydantic_private__', None)
+        if self_private or candidate_private:
+            merged_private = {k: v for k, v in (self_private or {}).items() if v is not PydanticUndefined}
+            for name, value in (candidate_private or {}).items():
+                private_attr = cls.__private_attributes__.get(name)
+                if name in merged_private and private_attr is not None:
+                    default = private_attr.get_default(call_default_factory=True, validated_data=candidate.__dict__)
+                    try:
+                        unchanged = default is not PydanticUndefined and bool(value == default)
+                    except Exception:
+                        unchanged = False
+                    if unchanged:
+                        # Not explicitly modified on the candidate; keep the current value:
+                        continue
+                merged_private[name] = value
+            _object_setattr(candidate, '__pydantic_private__', merged_private)
+
+        if not in_place:
+            return candidate
+
+        # Validation succeeded, so the candidate state can be applied in one go. Replacing
+        # `__dict__` wholesale also drops any cached (computed) properties, which may no
+        # longer be valid:
+        _object_setattr(self, '__dict__', candidate.__dict__)
+        _object_setattr(self, '__pydantic_fields_set__', candidate.__pydantic_fields_set__)
+        _object_setattr(self, '__pydantic_extra__', getattr(candidate, '__pydantic_extra__', None))
+        _object_setattr(self, '__pydantic_private__', getattr(candidate, '__pydantic_private__', None))
+        return self
+
+    @classmethod
+    def _resolve_field_name(cls, key: str) -> str:
+        """Resolve a field name or (validation) alias to the actual field name.
+
+        Returns the key unchanged if it doesn't correspond to a known field.
+        """
+        fields = cls.__pydantic_fields__
+        if key in fields:
+            return key
+        for name, field in fields.items():
+            if field.alias == key:
+                return name
+            validation_alias = field.validation_alias
+            if isinstance(validation_alias, str) and validation_alias == key:
+                return name
+            if isinstance(validation_alias, AliasChoices) and key in validation_alias.choices:
+                return name
+        return key
+
     def model_dump(
         self,
         *,

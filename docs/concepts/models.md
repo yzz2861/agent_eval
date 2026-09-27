@@ -159,6 +159,8 @@ Model classes possess the following methods and attributes:
 * [`model_dump_json()`][pydantic.main.BaseModel.model_dump_json]: Returns a JSON string representation of [`model_dump()`][pydantic.main.BaseModel.model_dump]. See [Serialization](serialization.md#json-mode).
 * [`model_copy()`][pydantic.main.BaseModel.model_copy]: Returns a copy (by default, shallow copy) of the model. See
     [Model copy](#model-copy).
+* [`model_update()`][pydantic.main.BaseModel.model_update]: Applies several field updates atomically, validating the
+    full candidate state. See [Model update](#model-update).
 * [`model_json_schema()`][pydantic.main.BaseModel.model_json_schema]: Returns a jsonable dictionary representing the model's JSON Schema. See [JSON Schema](json_schema.md).
 * [`model_fields`][pydantic.main.BaseModel.model_fields]: A mapping between field names and their definitions ([`FieldInfo`][pydantic.fields.FieldInfo] instances).
 * [`model_computed_fields`][pydantic.main.BaseModel.model_computed_fields]: A mapping between computed field names and their definitions ([`ComputedFieldInfo`][pydantic.fields.ComputedFieldInfo] instances).
@@ -767,6 +769,70 @@ print(id(m.bar) == id(m.model_copy().bar))
 print(id(m.bar) == id(m.model_copy(deep=True).bar))
 #> False
 ```
+
+## Model update
+
+??? api "API Documentation"
+    [`pydantic.main.BaseModel.model_update`][pydantic.main.BaseModel.model_update]<br>
+
+The [`model_update()`][pydantic.BaseModel.model_update] method applies several field updates
+atomically: the updates are merged with the current state and the resulting candidate is
+validated as a whole, so cross-field validators (such as
+[model validators](./validators.md#model-validators)) see the complete candidate state.
+Either all of the updates are applied, or none of them are.
+
+This differs from [`model_copy(update=...)`][pydantic.BaseModel.model_copy], which assigns the
+updated values *without* validation, and from per-field assignment (with
+[`validate_assignment`][pydantic.ConfigDict.validate_assignment] enabled), which validates one
+field at a time and can leave the model in a partially updated state.
+
+```python
+from pydantic import BaseModel, ValidationError, model_validator
+
+
+class Range(BaseModel):
+    start: int
+    end: int
+
+    @model_validator(mode='after')
+    def check_order(self):
+        if self.start > self.end:
+            raise ValueError('start must not exceed end')
+        return self
+
+
+r = Range(start=1, end=5)
+
+# updating both fields at once satisfies the cross-field constraint:
+print(r.model_update({'start': 10, 'end': 20}))
+#> start=10 end=20
+
+try:
+    # ...while this would leave the model in an invalid state:
+    r.model_update({'start': 10})
+except ValidationError:
+    # the original instance is left completely untouched:
+    print(r)
+    #> start=1 end=5
+```
+
+By default, a new validated model instance is returned. With `in_place=True`, the current
+instance is updated instead (rejected for [frozen models](#frozen-models)):
+
+```python
+r.model_update({'start': 2}, in_place=True)
+print(r)
+#> start=2 end=5
+```
+
+Update keys may be field names or aliases, and validation
+[context](./validators.md#validation-context) can be passed with the `context` argument.
+On failure, the original instance's fields, extra data, private attributes and
+[`model_fields_set`][pydantic.BaseModel.model_fields_set] are all preserved.
+
+!!! note
+    The candidate state is built from the current field values and revalidated as input data.
+    Fields whose values cannot round-trip through validation may not be usable with this method.
 
 ## Generic models
 
