@@ -89,6 +89,12 @@ Using Uvicorn with watchfiles will enable the following options (which are other
 * `--no-access-log` - Disable access log only, without changing log level.
 * `--use-colors / --no-use-colors` - Enable / disable colorized formatting of the log records. If not set, colors will be auto-detected. This option is ignored if the `--log-config` CLI option is used.
 
+For structured request observability beyond the access log, pass a `request_completion_callback` to `Config` (not available as a CLI option).
+The callable is invoked exactly once per HTTP request with a `uvicorn._types.RequestCompletionEvent` holding the final `status_code` sent to the
+client (`None` if no response headers were sent), the `body_bytes_sent` actually committed to the transport, the request `duration` in seconds
+measured with a monotonic clock, and an `outcome` of `"completed"`, `"disconnected"`, `"error"`, or `"cancelled"`. Exceptions raised by the
+callback are logged and never affect the response.
+
 ## Implementation
 
 * `--loop <str>` - Set the event loop implementation. The uvloop implementation provides greater performance, but is not compatible with Windows or PyPy. The zuvloop implementation requires CPython 3.14 or newer and must be installed separately. **Options:** *'auto', 'asyncio', 'uvloop', 'zuvloop'.* **Default:** *'auto'*.

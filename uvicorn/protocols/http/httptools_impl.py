@@ -6,6 +6,7 @@ import http
 import logging
 import re
 import sys
+import time
 import urllib
 from asyncio.events import TimerHandle
 from collections import deque
@@ -20,6 +21,8 @@ from uvicorn._types import (
     ASGISendEvent,
     HTTPRequestEvent,
     HTTPScope,
+    RequestCompletionEvent,
+    RequestCompletionOutcome,
 )
 from uvicorn.config import Config
 from uvicorn.logging import TRACE_LOG_LEVEL
@@ -287,6 +290,7 @@ class HttpToolsProtocol(asyncio.Protocol):
             expect_100_continue=self.expect_100_continue,
             keep_alive=http_version != "1.0" and self.parser.should_keep_alive(),
             on_response=self.on_response_complete,
+            request_completion_callback=self.config.request_completion_callback,
         )
         if existing_cycle is None or existing_cycle.response_complete:
             # Standard case - start processing the request.
@@ -390,6 +394,7 @@ class RequestResponseCycle:
         expect_100_continue: bool,
         keep_alive: bool,
         on_response: Callable[..., None],
+        request_completion_callback: Callable[[RequestCompletionEvent], None] | None = None,
     ):
         self.scope = scope
         self.transport = transport
@@ -400,6 +405,7 @@ class RequestResponseCycle:
         self.default_headers = default_headers
         self.message_event = message_event
         self.on_response = on_response
+        self.request_completion_callback = request_completion_callback
 
         # Connection state
         self.disconnected = False
@@ -416,6 +422,13 @@ class RequestResponseCycle:
         self.chunked_encoding: bool | None = None
         self.expected_content_length = 0
 
+        # Request completion tracking
+        self.start_time = time.monotonic()
+        self.status_code: int | None = None
+        self.body_bytes_sent = 0
+        self.completion_outcome: RequestCompletionOutcome | None = None
+        self.completion_emitted = False
+
     # ASGI exception wrapper
     async def run_asgi(self, app: ASGI3Application) -> None:
         try:
@@ -423,6 +436,7 @@ class RequestResponseCycle:
                 self.scope, self.receive, self.send
             )
         except BaseException as exc:
+            self.completion_outcome = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
             msg = "Exception in ASGI application\n"
             self.logger.error(msg, exc_info=exc)
             if not self.response_started:
@@ -444,6 +458,25 @@ class RequestResponseCycle:
                 self.transport.close()
         finally:
             self.on_response = lambda: None
+            self._emit_request_completion()
+
+    def _emit_request_completion(self) -> None:
+        if self.request_completion_callback is None or self.completion_emitted:
+            return
+        self.completion_emitted = True
+        outcome = self.completion_outcome
+        if outcome is None:
+            outcome = "disconnected" if self.disconnected else "completed"
+        event = RequestCompletionEvent(
+            status_code=self.status_code,
+            body_bytes_sent=self.body_bytes_sent,
+            duration=time.monotonic() - self.start_time,
+            outcome=outcome,
+        )
+        try:
+            self.request_completion_callback(event)
+        except Exception:
+            self.logger.exception("Exception in request completion callback")
 
     async def send_500_response(self) -> None:
         await self.send(
@@ -522,6 +555,7 @@ class RequestResponseCycle:
 
             content.append(b"\r\n")
             self.transport.write(b"".join(content))
+            self.status_code = status_code
 
         elif not self.response_complete:
             # Sending response body
@@ -542,6 +576,7 @@ class RequestResponseCycle:
                 if not more_body:
                     content.append(b"0\r\n\r\n")
                 self.transport.write(b"".join(content))
+                self.body_bytes_sent += len(body)
             else:
                 num_bytes = len(body)
                 if num_bytes > self.expected_content_length:
@@ -549,6 +584,7 @@ class RequestResponseCycle:
                 else:
                     self.expected_content_length -= num_bytes
                 self.transport.write(body)
+                self.body_bytes_sent += num_bytes
 
             # Handle response completion
             if not more_body:

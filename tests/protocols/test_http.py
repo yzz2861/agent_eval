@@ -12,7 +12,14 @@ import pytest
 
 from tests.response import Response
 from uvicorn import Server
-from uvicorn._types import ASGIApplication, ASGIReceiveCallable, ASGIReceiveEvent, ASGISendCallable, Scope
+from uvicorn._types import (
+    ASGIApplication,
+    ASGIReceiveCallable,
+    ASGIReceiveEvent,
+    ASGISendCallable,
+    RequestCompletionEvent,
+    Scope,
+)
 from uvicorn.config import WS_PROTOCOLS, Config
 from uvicorn.lifespan.off import LifespanOff
 from uvicorn.lifespan.on import LifespanOn
@@ -699,6 +706,184 @@ async def test_early_disconnect(http_protocol_cls: type[HTTPProtocol]):
     protocol.connection_lost(None)
     await protocol.loop.run_one()
     assert got_disconnect_event
+
+
+async def test_request_completion_event_completed(http_protocol_cls: type[HTTPProtocol]):
+    events: list[RequestCompletionEvent] = []
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, http_protocol_cls, request_completion_callback=events.append)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.outcome == "completed"
+    assert event.status_code == 200
+    assert event.body_bytes_sent == len(b"Hello, world")
+    assert event.duration >= 0
+
+
+async def test_request_completion_event_per_request(http_protocol_cls: type[HTTPProtocol]):
+    events: list[RequestCompletionEvent] = []
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, http_protocol_cls, request_completion_callback=events.append)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+
+    assert len(events) == 2
+    assert all(event.outcome == "completed" for event in events)
+
+
+async def test_request_completion_event_head_request(http_protocol_cls: type[HTTPProtocol]):
+    events: list[RequestCompletionEvent] = []
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, http_protocol_cls, request_completion_callback=events.append)
+    protocol.data_received(SIMPLE_HEAD_REQUEST)
+    await protocol.loop.run_one()
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.outcome == "completed"
+    assert event.status_code == 200
+    assert event.body_bytes_sent == 0
+
+
+async def test_request_completion_event_no_body_status(http_protocol_cls: type[HTTPProtocol]):
+    events: list[RequestCompletionEvent] = []
+    app = Response(b"", status_code=204)
+
+    protocol = get_connected_protocol(app, http_protocol_cls, request_completion_callback=events.append)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.outcome == "completed"
+    assert event.status_code == 204
+    assert event.body_bytes_sent == 0
+
+
+async def test_request_completion_event_app_exception(http_protocol_cls: type[HTTPProtocol]):
+    events: list[RequestCompletionEvent] = []
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable):
+        raise RuntimeError("boom")
+
+    protocol = get_connected_protocol(app, http_protocol_cls, request_completion_callback=events.append)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.outcome == "error"
+    assert event.status_code == 500
+    assert event.body_bytes_sent == len(b"Internal Server Error")
+
+
+async def test_request_completion_event_exception_during_response(http_protocol_cls: type[HTTPProtocol]):
+    events: list[RequestCompletionEvent] = []
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/plain")]})
+        await send({"type": "http.response.body", "body": b"chunk-1", "more_body": True})
+        raise RuntimeError("boom")
+
+    protocol = get_connected_protocol(app, http_protocol_cls, request_completion_callback=events.append)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.outcome == "error"
+    assert event.status_code == 200
+    assert event.body_bytes_sent == len(b"chunk-1")
+
+
+async def test_request_completion_event_client_disconnect(http_protocol_cls: type[HTTPProtocol]):
+    events: list[RequestCompletionEvent] = []
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/plain")]})
+        await send({"type": "http.response.body", "body": b"chunk-1", "more_body": True})
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                break
+        # The client is gone, so these chunks are generated but never sent.
+        await send({"type": "http.response.body", "body": b"chunk-2", "more_body": True})
+        await send({"type": "http.response.body", "body": b"chunk-3"})
+
+    protocol = get_connected_protocol(app, http_protocol_cls, request_completion_callback=events.append)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    task = asyncio.ensure_future(protocol.loop.run_one())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    protocol.connection_lost(None)
+    await task
+
+    assert b"chunk-1" in protocol.transport.buffer
+    assert b"chunk-2" not in protocol.transport.buffer
+    assert len(events) == 1
+    event = events[0]
+    assert event.outcome == "disconnected"
+    assert event.status_code == 200
+    assert event.body_bytes_sent == len(b"chunk-1")
+
+
+async def test_request_completion_event_cancelled(http_protocol_cls: type[HTTPProtocol]):
+    events: list[RequestCompletionEvent] = []
+    app_started = asyncio.Event()
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable):
+        app_started.set()
+        await asyncio.Event().wait()
+
+    protocol = get_connected_protocol(app, http_protocol_cls, request_completion_callback=events.append)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    task = asyncio.ensure_future(protocol.loop.run_one())
+    await app_started.wait()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert len(events) == 1
+    assert events[0].outcome == "cancelled"
+
+
+async def test_request_completion_callback_exception(
+    http_protocol_cls: type[HTTPProtocol], caplog: pytest.LogCaptureFixture
+):
+    def callback(event: RequestCompletionEvent) -> None:
+        raise ValueError("callback boom")
+
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, http_protocol_cls, request_completion_callback=callback)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
+        await protocol.loop.run_one()
+
+    # The failing callback must not affect the response.
+    assert b"HTTP/1.1 200 OK" in protocol.transport.buffer
+    assert b"Hello, world" in protocol.transport.buffer
+    assert "Exception in request completion callback" in caplog.text
+
+
+async def test_request_completion_event_not_emitted_without_callback(http_protocol_cls: type[HTTPProtocol]):
+    app = Response("Hello, world", media_type="text/plain")
+
+    protocol = get_connected_protocol(app, http_protocol_cls)
+    protocol.data_received(SIMPLE_GET_REQUEST)
+    await protocol.loop.run_one()
+
+    assert b"Hello, world" in protocol.transport.buffer
 
 
 async def test_early_response(http_protocol_cls: type[HTTPProtocol]):

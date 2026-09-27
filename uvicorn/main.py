@@ -14,7 +14,7 @@ from typing import IO, Any, get_args
 import click
 
 import uvicorn
-from uvicorn._types import ASGIApplication
+from uvicorn._types import ASGIApplication, RequestCompletionEvent
 from uvicorn.config import (
     INTERFACES,
     LIFESPAN,
@@ -554,6 +554,7 @@ def run(
     factory: bool = False,
     h11_max_incomplete_event_size: int | None = None,
     reset_contextvars: bool = False,
+    request_completion_callback: Callable[[RequestCompletionEvent], None] | None = None,
 ) -> None:
     if app_dir is not None:
         sys.path.insert(0, app_dir)
@@ -610,6 +611,7 @@ def run(
         factory=factory,
         h11_max_incomplete_event_size=h11_max_incomplete_event_size,
         reset_contextvars=reset_contextvars,
+        request_completion_callback=request_completion_callback,
     )
     if config.reload or config.workers > 1:
         if not isinstance(app, str):

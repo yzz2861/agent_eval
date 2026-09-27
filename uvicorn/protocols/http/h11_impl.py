@@ -5,6 +5,7 @@ import contextvars
 import http
 import logging
 import sys
+import time
 from collections.abc import Callable
 from typing import Any, Literal
 from urllib.parse import unquote
@@ -20,6 +21,8 @@ from uvicorn._types import (
     HTTPResponseBodyEvent,
     HTTPResponseStartEvent,
     HTTPScope,
+    RequestCompletionEvent,
+    RequestCompletionOutcome,
 )
 from uvicorn.config import Config
 from uvicorn.logging import TRACE_LOG_LEVEL
@@ -245,6 +248,7 @@ class H11Protocol(asyncio.Protocol):
                     default_headers=self.server_state.default_headers,
                     message_event=asyncio.Event(),
                     on_response=self.on_response_complete,
+                    request_completion_callback=self.config.request_completion_callback,
                 )
                 if self.config.reset_contextvars:
                     # Opt-in workaround for https://github.com/python/cpython/issues/140947:
@@ -380,6 +384,7 @@ class RequestResponseCycle:
         default_headers: list[tuple[bytes, bytes]],
         message_event: asyncio.Event,
         on_response: Callable[..., None],
+        request_completion_callback: Callable[[RequestCompletionEvent], None] | None = None,
     ) -> None:
         self.scope = scope
         self.conn = conn
@@ -391,6 +396,7 @@ class RequestResponseCycle:
         self.default_headers = default_headers
         self.message_event = message_event
         self.on_response = on_response
+        self.request_completion_callback = request_completion_callback
 
         # Connection state
         self.disconnected = False
@@ -405,6 +411,13 @@ class RequestResponseCycle:
         self.response_started = False
         self.response_complete = False
 
+        # Request completion tracking
+        self.start_time = time.monotonic()
+        self.status_code: int | None = None
+        self.body_bytes_sent = 0
+        self.completion_outcome: RequestCompletionOutcome | None = None
+        self.completion_emitted = False
+
     # ASGI exception wrapper
     async def run_asgi(self, app: ASGI3Application) -> None:
         try:
@@ -412,6 +425,7 @@ class RequestResponseCycle:
                 self.scope, self.receive, self.send
             )
         except BaseException as exc:
+            self.completion_outcome = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
             msg = "Exception in ASGI application\n"
             self.logger.error(msg, exc_info=exc)
             if not self.response_started:
@@ -433,6 +447,25 @@ class RequestResponseCycle:
                 self.transport.close()
         finally:
             self.on_response = lambda: None
+            self._emit_request_completion()
+
+    def _emit_request_completion(self) -> None:
+        if self.request_completion_callback is None or self.completion_emitted:
+            return
+        self.completion_emitted = True
+        outcome = self.completion_outcome
+        if outcome is None:
+            outcome = "disconnected" if self.disconnected else "completed"
+        event = RequestCompletionEvent(
+            status_code=self.status_code,
+            body_bytes_sent=self.body_bytes_sent,
+            duration=time.monotonic() - self.start_time,
+            outcome=outcome,
+        )
+        try:
+            self.request_completion_callback(event)
+        except Exception:
+            self.logger.exception("Exception in request completion callback")
 
     async def send_500_response(self) -> None:
         response_start_event: HTTPResponseStartEvent = {
@@ -488,6 +521,7 @@ class RequestResponseCycle:
             response = h11.Response(status_code=status, headers=headers, reason=reason)
             output = self.conn.send(event=response)
             self.transport.write(output)
+            self.status_code = status
 
         elif not self.response_complete:
             # Sending response body
@@ -501,6 +535,7 @@ class RequestResponseCycle:
             data = b"" if self.scope["method"] == "HEAD" else body
             output = self.conn.send(event=h11.Data(data=data))
             self.transport.write(output)
+            self.body_bytes_sent += len(data)
 
             # Handle response completion
             if not more_body:
