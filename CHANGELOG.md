@@ -3,6 +3,14 @@ Changelog
 
 ## master
 
+* Add an optional quarantine for messages that cannot be deserialized
+  (corrupt data, unknown task names from older deployments). Enable by
+  passing `quarantine_limit=N` (memory and sqlite backends); the consumer
+  skips bad messages and keeps processing, while the raw payload and failure
+  reason are preserved. Inspect with `Huey.quarantined()` (metadata only,
+  never deserializes payloads) and re-enqueue after a fix with
+  `Huey.requeue_quarantined(id)`, which claims records atomically so
+  concurrent requeues succeed at most once.
 * Fix `RedisSemaphore` admitting more than `value` holders under contention.
   Acquisition now evicts, counts and adds in one Lua script, using the server
   clock, so a caller whose timestamp was sampled before a slower caller's can

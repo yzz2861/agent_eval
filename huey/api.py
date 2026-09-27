@@ -73,6 +73,9 @@ class Huey(object):
         storage backend when immediate-mode is enabled.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
+        Pass "quarantine_limit=N" (supported by the memory and sqlite
+        backends) to quarantine messages that fail deserialization, keeping
+        at most N records. Disabled by default.
 
     Example usage::
 
@@ -153,6 +156,12 @@ class Huey(object):
             Storage = RedisStorage
         else:
             Storage = self.storage_class
+        if kwargs.get('quarantine_limit') is not None and \
+                not Storage.supports_quarantine:
+            raise ConfigurationError(
+                'The %s storage backend does not support the quarantine. '
+                'Remove "quarantine_limit" or use a storage backend that '
+                'supports it (memory or sqlite).' % Storage.__name__)
         return Storage(self.name, **kwargs)
 
     @property
@@ -383,7 +392,70 @@ class Huey(object):
     def dequeue(self):
         data = self.storage.dequeue()
         if data is not None:
-            return self.deserialize_task(data)
+            try:
+                return self.deserialize_task(data)
+            except Exception as exc:
+                if self.storage.quarantine_limit is None:
+                    raise
+                self.quarantine_message(data, exc)
+
+    def quarantine_message(self, data, exc):
+        """
+        Move a raw message that could not be deserialized (corrupt data,
+        unknown task name, etc.) into the quarantine so it can be inspected
+        and re-enqueued later. Returns the quarantine record id.
+        """
+        error = '%s: %s' % (type(exc).__name__, exc)
+        quid = self.storage.quarantine(data, error, self._get_timestamp())
+        logger.error('Unable to deserialize message, quarantined as "%s": '
+                     '%s', quid, error)
+        return quid
+
+    def quarantine_size(self):
+        """
+        Return the number of quarantined messages.
+        """
+        return self.storage.quarantine_size()
+
+    def quarantined(self, limit=None):
+        """
+        List quarantine records, oldest first. Records contain metadata only
+        (id, source queue, timestamp, attempt count and error) -- the raw
+        message payload is not exposed and is never deserialized when
+        listing.
+        """
+        return self.storage.quarantine_items(limit)
+
+    def requeue_quarantined(self, quid):
+        """
+        Attempt to re-enqueue a quarantined message by its record id, e.g.
+        after deploying a fix for the failure cause. The record is claimed
+        atomically, so concurrent requeues of the same record can succeed at
+        most once. If the message still cannot be deserialized, the record
+        is kept and its attempt counter and error are updated.
+
+        :return: True if the message was re-enqueued, False otherwise.
+        """
+        data = self.storage.claim_quarantined(quid)
+        if data is None:
+            return False
+        try:
+            task = self.deserialize_task(data)
+        except Exception as exc:
+            error = '%s: %s' % (type(exc).__name__, exc)
+            self.storage.release_quarantined(quid, error)
+            logger.error('Requeue of quarantined message "%s" failed: %s',
+                         quid, error)
+            return False
+        self.storage.remove_quarantined(quid)
+        self.enqueue(task)
+        return True
+
+    def flush_quarantine(self):
+        """
+        Remove all quarantined messages.
+        """
+        return self.storage.flush_quarantine()
 
     def put(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data))

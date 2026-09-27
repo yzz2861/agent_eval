@@ -3079,3 +3079,175 @@ class TestCustomErrorMetadata(BaseTestCase):
 
         self.assertEqual(self.huey.result_count(), 0)
         self.assertEqual(len(self.huey), 0)
+
+
+class TestQuarantine(BaseTestCase):
+    def get_huey(self):
+        return MemoryHuey(utc=False, quarantine_limit=10)
+
+    def enqueue_raw(self, data):
+        self.huey.storage.enqueue(data)
+
+    def make_unknown_task_message(self):
+        @self.huey.task()
+        def task_ghost():
+            return 'ok'
+
+        data = self.huey.serialize_task(task_ghost.task_class())
+        task_ghost.unregister()
+        return data, task_ghost
+
+    def test_truncated_message_quarantined(self):
+        @self.huey.task()
+        def task_a(n):
+            return n + 1
+
+        task_a(1)
+        self.enqueue_raw(b'\x80\x05X\x05\x00')  # Truncated pickle.
+        task_a(2)
+        self.assertEqual(len(self.huey), 3)
+
+        # The corrupt message is quarantined and good messages before and
+        # after it are processed normally.
+        self.assertEqual(self.execute_next(), 2)
+        self.assertTrue(self.huey.dequeue() is None)
+        self.assertEqual(self.execute_next(), 3)
+        self.assertEqual(len(self.huey), 0)
+
+        self.assertEqual(self.huey.quarantine_size(), 1)
+        (record,) = self.huey.quarantined()
+        self.assertTrue(record.id)
+        self.assertEqual(record.queue, self.huey.name)
+        self.assertEqual(record.attempts, 0)
+        self.assertIn('UnpicklingError', record.error)
+        self.assertTrue(isinstance(record.timestamp, datetime.datetime))
+        # Listings expose metadata only, never the raw payload.
+        self.assertTrue(record.data is None)
+
+    def test_unknown_task_quarantined(self):
+        data, _ = self.make_unknown_task_message()
+        self.enqueue_raw(data)
+
+        self.assertTrue(self.huey.dequeue() is None)
+        (record,) = self.huey.quarantined()
+        self.assertIn('not found in TaskRegistry', record.error)
+
+    def test_business_exception_not_quarantined(self):
+        @self.huey.task()
+        def task_exc():
+            raise TestError('boom')
+
+        r = task_exc()
+        self.assertTrue(self.execute_next() is None)
+
+        # Normal task failures use the retry/result flow, not the quarantine.
+        self.assertEqual(self.huey.quarantine_size(), 0)
+        err = self.trap_exception(r)
+        self.assertEqual(err.metadata['error'], 'TestError(boom)')
+
+    def test_quarantine_disabled_by_default(self):
+        huey = MemoryHuey(utc=False)
+        huey.storage.enqueue(b'\xde\xad\xbe\xef')
+        # Without a quarantine_limit, deserialization errors propagate.
+        self.assertRaises(Exception, huey.dequeue)
+
+    def test_requeue_after_fix(self):
+        data, task_ghost = self.make_unknown_task_message()
+        self.enqueue_raw(data)
+        self.assertTrue(self.huey.dequeue() is None)
+
+        (record,) = self.huey.quarantined()
+        # The task is still unknown, so requeueing fails but the failure
+        # remains traceable via the attempt counter and error.
+        self.assertFalse(self.huey.requeue_quarantined(record.id))
+        self.assertEqual(self.huey.quarantine_size(), 1)
+        (record,) = self.huey.quarantined()
+        self.assertEqual(record.attempts, 1)
+        self.assertIn('not found in TaskRegistry', record.error)
+
+        # "Fix" the deployment by registering the task again, then requeue.
+        self.huey._registry.register(task_ghost.task_class)
+        self.assertTrue(self.huey.requeue_quarantined(record.id))
+        self.assertEqual(self.huey.quarantine_size(), 0)
+        self.assertEqual(len(self.huey), 1)
+        self.assertEqual(self.execute_next(), 'ok')
+
+    def test_requeue_unclaimable_record(self):
+        data, _ = self.make_unknown_task_message()
+        self.enqueue_raw(data)
+        self.huey.dequeue()
+        (record,) = self.huey.quarantined()
+
+        self.assertFalse(self.huey.requeue_quarantined('missing-id'))
+
+        # A record claimed by a concurrent requeue cannot be requeued again.
+        self.assertTrue(self.huey.storage.claim_quarantined(record.id)
+                        is not None)
+        self.assertFalse(self.huey.requeue_quarantined(record.id))
+        self.assertEqual(self.huey.quarantine_size(), 1)
+        self.assertEqual(len(self.huey), 0)
+
+    def test_requeue_corrupt_message_keeps_record(self):
+        self.enqueue_raw(b'\xde\xad\xbe\xef')
+        self.huey.dequeue()
+        (record,) = self.huey.quarantined()
+
+        # The message is still corrupt, so the requeue fails and the record
+        # is retained with an incremented attempt counter.
+        self.assertFalse(self.huey.requeue_quarantined(record.id))
+        self.assertEqual(self.huey.quarantine_size(), 1)
+        (record,) = self.huey.quarantined()
+        self.assertEqual(record.attempts, 1)
+        self.assertIn('UnpicklingError', record.error)
+
+    def test_interleaved_messages(self):
+        @self.huey.task()
+        def task_ok(n):
+            return n
+
+        unknown, _ = self.make_unknown_task_message()
+
+        task_ok(1)
+        self.enqueue_raw(b'\x80\x05X\x05\x00')  # Truncated pickle.
+        task_ok(2)
+        self.enqueue_raw(unknown)
+        task_ok(3)
+
+        self.assertEqual(self.execute_next(), 1)
+        self.assertTrue(self.huey.dequeue() is None)
+        self.assertEqual(self.execute_next(), 2)
+        self.assertTrue(self.huey.dequeue() is None)
+        self.assertEqual(self.execute_next(), 3)
+        self.assertEqual(len(self.huey), 0)
+
+        # Both bad messages were quarantined, preserving their raw content.
+        records = self.huey.quarantined()
+        self.assertEqual(len(records), 2)
+        self.assertIn('UnpicklingError', records[0].error)
+        self.assertIn('not found in TaskRegistry', records[1].error)
+
+    def test_quarantine_retention_limit(self):
+        huey = MemoryHuey(utc=False, quarantine_limit=2)
+        for i in range(4):
+            huey.storage.enqueue(b'bad-%d' % i)
+            self.assertTrue(huey.dequeue() is None)
+
+        # Only the most recent records are retained.
+        self.assertEqual(huey.quarantine_size(), 2)
+
+    def test_flush_quarantine(self):
+        self.enqueue_raw(b'\xde\xad')
+        self.huey.dequeue()
+        self.assertEqual(self.huey.quarantine_size(), 1)
+        self.huey.flush_quarantine()
+        self.assertEqual(self.huey.quarantine_size(), 0)
+        self.assertEqual(self.huey.quarantined(), [])
+
+    def test_quarantine_unsupported_storage(self):
+        from huey.storage import FileStorage
+
+        class FileHuey(MemoryHuey):
+            storage_class = FileStorage
+
+        self.assertRaises(ConfigurationError, FileHuey, 'test',
+                          quarantine_limit=5)

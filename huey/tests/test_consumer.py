@@ -9,6 +9,7 @@ import time
 import unittest
 
 from huey import SqliteHuey
+from huey.api import MemoryHuey
 from huey.api import crontab
 from huey.consumer import Consumer
 from huey.consumer import Scheduler
@@ -170,6 +171,54 @@ class TestConsumerIntegration(BaseTestCase):
         # Subsequent iterations do not re-fire for the stalled period.
         scheduler.loop(datetime.datetime(2000, 1, 1, 0, 0))
         self.assertEqual(len(self.huey), 1)
+
+
+class TestConsumerQuarantine(BaseTestCase):
+    consumer_class = TestConsumer
+
+    def get_huey(self):
+        return MemoryHuey(utc=False, quarantine_limit=10)
+
+    def test_bad_messages_do_not_stop_worker(self):
+        @self.huey.task()
+        def task_a(n):
+            return n + 1
+
+        # Build a message for a task that will be unknown to the consumer.
+        @self.huey.task()
+        def task_gone():
+            pass
+
+        unknown = self.huey.serialize_task(task_gone.task_class())
+        task_gone.unregister()
+
+        # Interleave good tasks with a truncated message and a message for
+        # an unknown task.
+        r1 = task_a(1)
+        self.huey.storage.enqueue(b'\x80\x05X\x05\x00')  # Truncated.
+        r2 = task_a(2)
+        self.huey.storage.enqueue(unknown)
+        r3 = task_a(3)
+
+        consumer = self.consumer(workers=1)
+        worker, _ = consumer.worker_threads[0]
+        for _ in range(5):
+            worker.loop()
+
+        # The good tasks were executed and the bad ones quarantined.
+        self.assertEqual(r1.get(), 2)
+        self.assertEqual(r2.get(), 3)
+        self.assertEqual(r3.get(), 4)
+        self.assertEqual(len(self.huey), 0)
+
+        records = self.huey.quarantined()
+        self.assertEqual(len(records), 2)
+        self.assertIn('UnpicklingError', records[0].error)
+        self.assertIn('not found in TaskRegistry', records[1].error)
+        for record in records:
+            self.assertEqual(record.queue, self.huey.name)
+            self.assertEqual(record.attempts, 0)
+            self.assertTrue(record.data is None)
 
 
 class TestConsumerConfig(BaseTestCase):

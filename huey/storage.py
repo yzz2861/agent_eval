@@ -1,5 +1,7 @@
+from collections import namedtuple
 from functools import cached_property
 import contextlib
+import datetime
 import hashlib
 import heapq
 import itertools
@@ -13,6 +15,7 @@ except ImportError:
 import struct
 import threading
 import time
+import uuid
 
 try:
     import cysqlite
@@ -37,15 +40,27 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+# Metadata for a message that could not be deserialized or otherwise enter
+# the normal execution flow. The raw message payload is preserved in "data"
+# but is *never* deserialized by the quarantine itself. Listings return
+# records with "data" set to None so that inspecting the quarantine cannot
+# trigger deserialization of dangerous content.
+QuarantineRecord = namedtuple('QuarantineRecord', (
+    'id', 'queue', 'timestamp', 'attempts', 'error', 'data'))
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    supports_quarantine = False
+    quarantine_limit = None  # Max quarantine records retained (None=disabled).
 
-    def __init__(self, name='huey', **storage_kwargs):
+    def __init__(self, name='huey', quarantine_limit=None, **storage_kwargs):
         self.name = name
+        self.quarantine_limit = quarantine_limit
 
     def close(self):
         """
@@ -295,6 +310,85 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    def _require_quarantine(self):
+        if self.quarantine_limit is None:
+            raise ConfigurationError(
+                'Quarantine is not enabled for this storage. Pass '
+                '"quarantine_limit" when initializing Huey to enable the '
+                'quarantine with a bounded retention policy.')
+
+    def quarantine(self, data, error, timestamp=None):
+        """
+        Store a raw message that could not enter the normal execution flow,
+        along with the reason it failed. Oldest records are evicted so that
+        no more than "quarantine_limit" records are retained.
+
+        :param bytes data: Raw message data (stored as-is, never
+            deserialized).
+        :param str error: Description of why the message was quarantined.
+        :param datetime ts: Time the message was quarantined.
+        :return: Stable identifier for the new quarantine record.
+        """
+        raise NotImplementedError
+
+    def quarantine_size(self):
+        """
+        :return: The number of quarantined messages.
+        """
+        raise NotImplementedError
+
+    def quarantine_items(self, limit=None):
+        """
+        Non-destructively list quarantine records. Records are returned as
+        metadata only ("data" is None) so that listing cannot trigger
+        deserialization of the raw message payloads.
+
+        :param int limit: Restrict the number of records returned.
+        :return: List of QuarantineRecord, oldest first.
+        """
+        raise NotImplementedError
+
+    def claim_quarantined(self, quid):
+        """
+        Atomically claim a quarantine record for re-enqueueing. At most one
+        concurrent caller can hold the claim for a given record.
+
+        :param str quid: Quarantine record identifier.
+        :return: The raw message data, or None if the record does not exist
+                 or is already claimed.
+        """
+        raise NotImplementedError
+
+    def release_quarantined(self, quid, error=None):
+        """
+        Release a previously-claimed quarantine record, incrementing its
+        attempt counter and (optionally) updating the recorded error. Used
+        when a re-enqueue attempt fails so the failure remains traceable.
+
+        :param str quid: Quarantine record identifier.
+        :param str error: Updated error description.
+        :return: Boolean indicating the record still exists.
+        """
+        raise NotImplementedError
+
+    def remove_quarantined(self, quid):
+        """
+        Permanently remove a quarantine record, e.g. after its message was
+        successfully re-enqueued.
+
+        :param str quid: Quarantine record identifier.
+        :return: Boolean indicating a record was removed.
+        """
+        raise NotImplementedError
+
+    def flush_quarantine(self):
+        """
+        Remove all quarantine records.
+
+        :return: No return value.
+        """
+        raise NotImplementedError
+
     def flush_all(self):
         """
         Remove all persistent or semi-persistent data.
@@ -305,6 +399,8 @@ class BaseStorage(object):
         self.flush_schedule()
         self.flush_results()
         self.flush_counters()
+        if self.supports_quarantine:
+            self.flush_quarantine()
 
 
 class BlackHoleStorage(BaseStorage):
@@ -329,9 +425,18 @@ class BlackHoleStorage(BaseStorage):
     def result_items(self): return {}
     def flush_results(self): pass
     def flush_counters(self): pass
+    def quarantine(self, data, error, timestamp=None): pass
+    def quarantine_size(self): return 0
+    def quarantine_items(self, limit=None): return []
+    def claim_quarantined(self, quid): pass
+    def release_quarantined(self, quid, error=None): return False
+    def remove_quarantined(self, quid): return False
+    def flush_quarantine(self): pass
 
 
 class MemoryStorage(BaseStorage):
+    supports_quarantine = True
+
     def __init__(self, *args, **kwargs):
         super(MemoryStorage, self).__init__(*args, **kwargs)
         self._c = 0  # Counter to ensure FIFO behavior for queue.
@@ -340,6 +445,8 @@ class MemoryStorage(BaseStorage):
         self._expires = {}
         self._schedule = []
         self._counters = {}
+        self._quarantine = {}
+        self._quarantine_claimed = set()
         self._lock = threading.RLock()
 
     def enqueue(self, data, priority=None):
@@ -449,6 +556,63 @@ class MemoryStorage(BaseStorage):
 
     def flush_counters(self):
         self._counters = {}
+
+    def quarantine(self, data, error, timestamp=None):
+        self._require_quarantine()
+        if timestamp is None:
+            timestamp = datetime.datetime.now()
+        record = QuarantineRecord(
+            uuid.uuid4().hex, self.name, timestamp, 0, error, data)
+        with self._lock:
+            self._quarantine[record.id] = record
+            # Evict the oldest records to enforce the retention limit.
+            while len(self._quarantine) > self.quarantine_limit:
+                oldest = next(iter(self._quarantine))
+                del self._quarantine[oldest]
+                self._quarantine_claimed.discard(oldest)
+        return record.id
+
+    def quarantine_size(self):
+        return len(self._quarantine)
+
+    def quarantine_items(self, limit=None):
+        with self._lock:
+            # Metadata-only listing: the raw payload is never exposed (and
+            # therefore never deserialized) when listing records.
+            records = [record._replace(data=None)
+                       for record in self._quarantine.values()]
+        if limit:
+            records = records[:limit]
+        return records
+
+    def claim_quarantined(self, quid):
+        with self._lock:
+            record = self._quarantine.get(quid)
+            if record is None or quid in self._quarantine_claimed:
+                return None
+            self._quarantine_claimed.add(quid)
+            return record.data
+
+    def release_quarantined(self, quid, error=None):
+        with self._lock:
+            self._quarantine_claimed.discard(quid)
+            record = self._quarantine.get(quid)
+            if record is None:
+                return False
+            self._quarantine[quid] = record._replace(
+                attempts=record.attempts + 1,
+                error=record.error if error is None else error)
+            return True
+
+    def remove_quarantined(self, quid):
+        with self._lock:
+            self._quarantine_claimed.discard(quid)
+            return self._quarantine.pop(quid, None) is not None
+
+    def flush_quarantine(self):
+        with self._lock:
+            self._quarantine = {}
+            self._quarantine_claimed = set()
 
 
 # A custom lua script to pass to redis that will read tasks from the schedule
@@ -883,6 +1047,7 @@ class BaseSqlStorage(BaseStorage):
 
 class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
+    supports_quarantine = True
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     sqlite_version_info = getattr(sqlite3, 'sqlite_version_info', None)
     table_kv = ('create table if not exists kv ('
@@ -903,12 +1068,19 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    table_quarantine = ('create table if not exists quarantine ('
+                        'quid text not null, queue text not null, '
+                        'data blob not null, error text not null, '
+                        'timestamp real not null, '
+                        'attempts integer not null default 0, '
+                        'claimed integer not null default 0, '
+                        'primary key(queue, quid))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_quarantine]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, quarantine_limit=None, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
@@ -931,7 +1103,9 @@ class SqliteStorage(BaseSqlStorage):
 
         self.to_blob = memoryview
 
-        super(SqliteStorage, self).__init__(name, create_tables=create_tables)
+        super(SqliteStorage, self).__init__(
+            name, create_tables=create_tables,
+            quarantine_limit=quarantine_limit)
 
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
@@ -1115,6 +1289,81 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_counters(self):
         self.sql('delete from counter where queue=?', (self.name,), True)
+
+    def quarantine(self, data, error, timestamp=None):
+        self._require_quarantine()
+        quid = uuid.uuid4().hex
+        if timestamp is None:
+            timestamp = datetime.datetime.now()
+        with self.db(commit=True) as curs:
+            curs.execute(
+                'insert into quarantine (quid, queue, data, error, timestamp)'
+                ' values (?, ?, ?, ?, ?)',
+                (quid, self.name, self.to_blob(data), error,
+                 timestamp.timestamp()))
+            # Evict the oldest records to enforce the retention limit.
+            curs.execute(
+                'delete from quarantine where queue = ? and quid not in ('
+                'select quid from quarantine where queue = ? '
+                'order by timestamp desc, rowid desc limit ?)',
+                (self.name, self.name, self.quarantine_limit))
+        return quid
+
+    def quarantine_size(self):
+        return self.sql('select count(*) from quarantine where queue = ?',
+                        (self.name,), results=True)[0][0]
+
+    def quarantine_items(self, limit=None):
+        sql = ('select quid, queue, timestamp, attempts, error from '
+               'quarantine where queue = ? order by timestamp, rowid')
+        params = (self.name,)
+        if limit is not None:
+            sql += ' limit ?'
+            params = (self.name, limit)
+
+        # Metadata-only listing: the raw payload is never exposed (and
+        # therefore never deserialized) when listing records.
+        return [QuarantineRecord(
+                    quid, queue, datetime.datetime.fromtimestamp(ts),
+                    attempts, error, None)
+                for quid, queue, ts, attempts, error in
+                self.sql(sql, params, results=True)]
+
+    def claim_quarantined(self, quid):
+        with self.db(commit=True) as curs:
+            curs.execute('update quarantine set claimed = 1 where queue = ? '
+                         'and quid = ? and claimed = 0', (self.name, quid))
+            if curs.rowcount != 1:
+                return None
+            curs.execute('select data from quarantine where queue = ? and '
+                         'quid = ?', (self.name, quid))
+            row = curs.fetchone()
+            if row is not None:
+                return row[0]
+
+    def release_quarantined(self, quid, error=None):
+        if error is not None:
+            sql = ('update quarantine set claimed = 0, '
+                   'attempts = attempts + 1, error = ? '
+                   'where queue = ? and quid = ?')
+            params = (error, self.name, quid)
+        else:
+            sql = ('update quarantine set claimed = 0, '
+                   'attempts = attempts + 1 where queue = ? and quid = ?')
+            params = (self.name, quid)
+        with self.db(commit=True) as curs:
+            curs.execute(sql, params)
+            return curs.rowcount == 1
+
+    def remove_quarantined(self, quid):
+        with self.db(commit=True) as curs:
+            curs.execute('delete from quarantine where queue = ? and '
+                         'quid = ?', (self.name, quid))
+            return curs.rowcount == 1
+
+    def flush_quarantine(self):
+        self.sql('delete from quarantine where queue = ?', (self.name,),
+                 commit=True)
 
 
 class CySqliteStorage(SqliteStorage):

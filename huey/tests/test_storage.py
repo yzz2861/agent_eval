@@ -819,3 +819,129 @@ class TestValkeyGlideStorage(StorageTests, BaseTestCase):
 
     def get_huey(self):
         return ValkeyGlideHuey(utc=False)
+
+
+class QuarantineStorageTests(object):
+    def setUp(self):
+        super(QuarantineStorageTests, self).setUp()
+        self.s = self.huey.storage
+
+    def get_plain_storage(self):
+        # Return a storage instance without the quarantine enabled.
+        raise NotImplementedError
+
+    def test_quarantine_record_metadata(self):
+        ts = datetime.datetime(2026, 1, 2, 3, 4, 5)
+        quid = self.s.quarantine(b'bad-data', 'ValueError: nope', ts)
+        self.assertTrue(quid)
+        self.assertEqual(self.s.quarantine_size(), 1)
+
+        (record,) = self.s.quarantine_items()
+        self.assertEqual(record.id, quid)
+        self.assertEqual(record.queue, self.s.name)
+        self.assertEqual(record.attempts, 0)
+        self.assertEqual(record.error, 'ValueError: nope')
+        # The raw payload is not exposed (and never deserialized) by
+        # listings, only metadata is returned.
+        self.assertTrue(record.data is None)
+        self.assertEqual(record.timestamp.timestamp(), ts.timestamp())
+
+        # A limit returns the oldest records first.
+        self.s.quarantine(b'bad-2', 'err-2')
+        self.assertEqual([r.error for r in self.s.quarantine_items(1)],
+                         ['ValueError: nope'])
+
+    def test_quarantine_disabled(self):
+        storage = self.get_plain_storage()
+        try:
+            self.assertRaises(ConfigurationError, storage.quarantine,
+                              b'x', 'err')
+        finally:
+            storage.close()
+
+    def test_quarantine_retention_limit(self):
+        # Test huey instances are created with quarantine_limit=3.
+        for i in range(5):
+            self.s.quarantine(b'data-%d' % i, 'err-%d' % i)
+
+        self.assertEqual(self.s.quarantine_size(), 3)
+        # The oldest records were evicted.
+        self.assertEqual([r.error for r in self.s.quarantine_items()],
+                         ['err-2', 'err-3', 'err-4'])
+
+    def test_claim_release_remove(self):
+        quid = self.s.quarantine(b'data', 'err')
+
+        # Claiming is atomic: a second claim returns nothing.
+        self.assertEqual(self.s.claim_quarantined(quid), b'data')
+        self.assertTrue(self.s.claim_quarantined(quid) is None)
+
+        # Releasing updates the attempt counter and error.
+        self.assertTrue(self.s.release_quarantined(quid, 'err-2'))
+        (record,) = self.s.quarantine_items()
+        self.assertEqual(record.attempts, 1)
+        self.assertEqual(record.error, 'err-2')
+
+        # The record can be claimed again after being released.
+        self.assertEqual(self.s.claim_quarantined(quid), b'data')
+        self.assertTrue(self.s.remove_quarantined(quid))
+        self.assertFalse(self.s.remove_quarantined(quid))
+        self.assertEqual(self.s.quarantine_size(), 0)
+        self.assertTrue(self.s.claim_quarantined(quid) is None)
+        self.assertFalse(self.s.release_quarantined(quid))
+
+    def test_claim_concurrent(self):
+        quid = self.s.quarantine(b'data', 'err')
+        nthreads = 8
+        barrier = threading.Barrier(nthreads)
+        winners = []
+
+        def run():
+            barrier.wait()
+            if self.s.claim_quarantined(quid) is not None:
+                winners.append(quid)
+
+        threads = [threading.Thread(target=run) for _ in range(nthreads)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+        # Exactly one thread was able to claim the record.
+        self.assertEqual(winners, [quid])
+
+    def test_flush_quarantine(self):
+        self.s.quarantine(b'd1', 'e1')
+        self.s.quarantine(b'd2', 'e2')
+        self.assertEqual(self.s.quarantine_size(), 2)
+        self.s.flush_quarantine()
+        self.assertEqual(self.s.quarantine_size(), 0)
+
+        self.s.quarantine(b'd3', 'e3')
+        self.s.flush_all()
+        self.assertEqual(self.s.quarantine_size(), 0)
+
+
+class TestMemoryQuarantine(QuarantineStorageTests, BaseTestCase):
+    def get_huey(self):
+        return MemoryHuey(utc=False, quarantine_limit=3)
+
+    def get_plain_storage(self):
+        from huey.storage import MemoryStorage
+        return MemoryStorage('plain')
+
+
+class TestSqliteQuarantine(QuarantineStorageTests, BaseTestCase):
+    db_file = 'huey_quarantine.db'
+
+    def get_huey(self):
+        return SqliteHuey(filename=self.db_file, timeout=3, utc=False,
+                          quarantine_limit=3)
+
+    def get_plain_storage(self):
+        from huey.storage import SqliteStorage
+        return SqliteStorage('plain', filename=self.db_file)
+
+    def tearDown(self):
+        super(TestSqliteQuarantine, self).tearDown()
+        self.huey.storage.close()
+        if os.path.exists(self.db_file):
+            os.unlink(self.db_file)

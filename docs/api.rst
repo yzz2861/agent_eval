@@ -248,6 +248,10 @@ Huey object
         storage backend whenever immediate-mode is enabled.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
+        Pass ``quarantine_limit=N`` (supported by the memory and sqlite
+        backends) to enable the quarantine, which preserves up to ``N``
+        messages that could not be deserialized. See
+        :py:meth:`~Huey.quarantined`.
 
     Huey executes tasks by exposing function decorators that cause the function
     call to be enqueued for execution by the consumer.
@@ -1137,6 +1141,37 @@ Huey object
 
         Remove all data from the queue, schedule, and result store. This is
         a destructive operation. Primarily useful for testing.
+
+    .. py:method:: quarantined(limit=None)
+
+        :param int limit: optionally limit the number of records returned.
+        :returns: a list of quarantine records, oldest first.
+
+        List messages that could not be deserialized (e.g. corrupt data or
+        an unknown task name) and were moved to the quarantine. Requires the
+        ``quarantine_limit`` storage option. Records contain metadata
+        only (stable id, source queue, timestamp, attempt count and error);
+        the raw message payload is never exposed or deserialized when
+        listing.
+
+    .. py:method:: quarantine_size()
+
+        :returns: the number of quarantined messages.
+
+    .. py:method:: requeue_quarantined(quid)
+
+        :param str quid: the id of the quarantine record to re-enqueue.
+        :returns: ``True`` if the message was re-enqueued, ``False`` otherwise.
+
+        Attempt to re-enqueue a quarantined message, e.g. after deploying a
+        fix for the failure cause. The record is claimed atomically, so
+        concurrent requeues of the same record can succeed at most once. If
+        the message still cannot be deserialized, the record is kept and its
+        attempt counter and error are updated.
+
+    .. py:method:: flush_quarantine()
+
+        Remove all quarantined messages.
 
     .. py:method:: __len__()
 
