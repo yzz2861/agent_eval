@@ -582,6 +582,107 @@ def get_fields_from_routes(
     return flat_models
 
 
+def _filter_routes_for_audience(
+    routes: Sequence[BaseRoute | routing.RouteContext], audience: str
+) -> list[routing.RouteContext]:
+    return [
+        route_context
+        for route_context in routing.iter_route_contexts(routes)
+        if routing._route_visible_to_audience(route_context, audience)
+    ]
+
+
+def _parse_component_ref(ref: Any) -> tuple[str, str] | None:
+    if not isinstance(ref, str) or not ref.startswith("#/components/"):
+        return None
+    parts = ref[len("#/components/") :].split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    return parts[0], parts[1]
+
+
+def _prune_unreferenced_components(output: dict[str, Any]) -> None:
+    components = output.get("components")
+    if not isinstance(components, dict):
+        return
+    referenced: set[tuple[str, str]] = set()
+    security_scheme_names: set[str] = set()
+    visited_node_ids: set[int] = set()
+    agenda: list[Any] = [
+        output.get("paths"),
+        output.get("webhooks"),
+        output.get("security"),
+    ]
+    while agenda:
+        node = agenda.pop()
+        if isinstance(node, list):
+            node_id = id(node)
+            if node_id in visited_node_ids:
+                continue
+            visited_node_ids.add(node_id)
+            agenda.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        node_id = id(node)
+        if node_id in visited_node_ids:
+            continue
+        visited_node_ids.add(node_id)
+        for key, value in node.items():
+            component_ref: tuple[str, str] | None = None
+            if key == "$ref":
+                component_ref = _parse_component_ref(value)
+            elif key == "mapping" and isinstance(value, dict):
+                for mapping_value in value.values():
+                    mapping_ref = _parse_component_ref(mapping_value)
+                    if mapping_ref is not None and mapping_ref not in referenced:
+                        referenced.add(mapping_ref)
+                        section = components.get(mapping_ref[0])
+                        if isinstance(section, dict):
+                            agenda.append(section.get(mapping_ref[1]))
+            elif key == "security" and isinstance(value, list):
+                for requirement in value:
+                    if not isinstance(requirement, dict):
+                        continue
+                    for scheme_name in requirement:
+                        if scheme_name in security_scheme_names:
+                            continue
+                        security_scheme_names.add(scheme_name)
+                        security_schemes = components.get("securitySchemes")
+                        if isinstance(security_schemes, dict):
+                            agenda.append(security_schemes.get(scheme_name))
+            if component_ref is not None and component_ref not in referenced:
+                referenced.add(component_ref)
+                section = components.get(component_ref[0])
+                if isinstance(section, dict):
+                    agenda.append(section.get(component_ref[1]))
+            if key not in ("$ref", "mapping", "security"):
+                agenda.append(value)
+            elif key == "mapping" and isinstance(value, dict):
+                agenda.extend(value.values())
+    for section_name, section in list(components.items()):
+        if not isinstance(section, dict):
+            continue
+        if section_name == "securitySchemes":
+            kept = {
+                name: component
+                for name, component in section.items()
+                if name in security_scheme_names
+            }
+        else:
+            kept = {
+                name: component
+                for name, component in section.items()
+                if (section_name, name) in referenced
+            }
+        if kept:
+            components[section_name] = kept
+        else:
+            del components[section_name]
+    if not components:
+        del output["components"]
+
+
 def get_openapi(
     *,
     title: str,
@@ -598,6 +699,7 @@ def get_openapi(
     license_info: dict[str, str | Any] | None = None,
     separate_input_output_schemas: bool = True,
     external_docs: dict[str, Any] | None = None,
+    audience: str | None = None,
 ) -> dict[str, Any]:
     info: dict[str, Any] = {"title": title, "version": version}
     if summary:
@@ -617,6 +719,9 @@ def get_openapi(
     paths: dict[str, dict[str, Any]] = {}
     webhook_paths: dict[str, dict[str, Any]] = {}
     operation_ids: set[str] = set()
+    if audience is not None:
+        routes = _filter_routes_for_audience(routes, audience)
+        webhooks = _filter_routes_for_audience(webhooks or [], audience)
     all_fields = get_fields_from_routes(list(routes) + list(webhooks or []))
     flat_models = get_flat_models_from_fields(all_fields, known_models=set())
     model_name_map = get_model_name_map(flat_models)
@@ -676,4 +781,6 @@ def get_openapi(
         output["tags"] = tags
     if external_docs:
         output["externalDocs"] = external_docs
+    if audience is not None:
+        _prune_unreferenced_components(output)
     return jsonable_encoder(OpenAPI(**output), by_alias=True, exclude_none=True)  # type: ignore[no-any-return]

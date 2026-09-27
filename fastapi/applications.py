@@ -1,5 +1,5 @@
 import os
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Collection, Coroutine, Sequence
 from enum import Enum
 from typing import Annotated, Any, Literal, TypeVar
 
@@ -923,6 +923,8 @@ class FastAPI(Starlette):
         ] = "3.1.0"
         self.openapi_schema: dict[str, Any] | None = None
         self._openapi_routes_version: int | None = None
+        self.openapi_audience_schemas: dict[str, dict[str, Any]] = {}
+        self._openapi_audience_routes_version: int | None = None
         if self.openapi_url:
             assert self.title, "A title must be provided for OpenAPI, e.g.: 'My API'"
             assert self.version, "A version must be provided for OpenAPI, e.g.: '2.1.0'"
@@ -1102,6 +1104,47 @@ class FastAPI(Starlette):
             self._openapi_routes_version = routes_version
         return self.openapi_schema
 
+    def openapi_for_audience(self, audience: str) -> dict[str, Any]:
+        """
+        Generate the OpenAPI schema of the application for a specific audience.
+
+        Only the *path operations* (and webhooks) that declare the audience with
+        `audiences` (or that don't declare any audience at all) are included,
+        along with the components (schemas, security schemes, etc.) actually
+        referenced by those operations.
+
+        The result of each audience is cached independently, so several audience
+        schemas can be cached at the same time in the same process. To invalidate
+        the caches, clear the `app.openapi_audience_schemas` dict.
+
+        This doesn't modify `app.openapi()`, the routes'
+        `include_in_schema` attributes, nor the actual availability of the
+        *path operations*.
+        """
+        routes_version = self.router._get_routes_version()
+        if self._openapi_audience_routes_version != routes_version:
+            self.openapi_audience_schemas.clear()
+            self._openapi_audience_routes_version = routes_version
+        if audience not in self.openapi_audience_schemas:
+            self.openapi_audience_schemas[audience] = get_openapi(
+                title=self.title,
+                version=self.version,
+                openapi_version=self.openapi_version,
+                summary=self.summary,
+                description=self.description,
+                terms_of_service=self.terms_of_service,
+                contact=self.contact,
+                license_info=self.license_info,
+                routes=self.routes,
+                webhooks=self.webhooks.routes,
+                tags=self.openapi_tags,
+                servers=self.servers,
+                separate_input_output_schemas=self.separate_input_output_schemas,
+                external_docs=self.openapi_external_docs,
+                audience=audience,
+            )
+        return self.openapi_audience_schemas[audience]
+
     def setup(self) -> None:
         if self.openapi_url:
 
@@ -1185,6 +1228,7 @@ class FastAPI(Starlette):
         response_model_exclude_defaults: bool = False,
         response_model_exclude_none: bool = False,
         include_in_schema: bool = True,
+        audiences: Collection[str] | None = None,
         response_class: type[Response] | DefaultPlaceholder = Default(JSONResponse),
         name: str | None = None,
         openapi_extra: dict[str, Any] | None = None,
@@ -1213,6 +1257,7 @@ class FastAPI(Starlette):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             openapi_extra=openapi_extra,
@@ -1320,6 +1365,7 @@ class FastAPI(Starlette):
         response_model_exclude_defaults: bool = False,
         response_model_exclude_none: bool = False,
         include_in_schema: bool = True,
+        audiences: Collection[str] | None = None,
         response_class: type[Response] = Default(JSONResponse),
         name: str | None = None,
         openapi_extra: dict[str, Any] | None = None,
@@ -1349,6 +1395,7 @@ class FastAPI(Starlette):
                 response_model_exclude_defaults=response_model_exclude_defaults,
                 response_model_exclude_none=response_model_exclude_none,
                 include_in_schema=include_in_schema,
+                audiences=audiences,
                 response_class=response_class,
                 name=name,
                 openapi_extra=openapi_extra,
@@ -1552,6 +1599,24 @@ class FastAPI(Starlette):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Collection[str] | None,
+            Doc(
+                """
+                Declared audiences for the *path operations* of the included
+                router, used to generate audience-specific OpenAPI schemas.
+
+                It applies to the *path operations* in the included router that
+                don't declare their own `audiences` (neither in the *path
+                operation* itself nor in the included router).
+
+                This doesn't affect the generated default OpenAPI schema (e.g.
+                visible at `/docs`) nor the actual availability of the *path
+                operations*, it only affects the OpenAPI schemas generated per
+                audience, e.g. with `app.openapi_for_audience()`.
+                """
+            ),
+        ] = None,
         default_response_class: Annotated[
             type[Response],
             Doc(
@@ -1638,6 +1703,7 @@ class FastAPI(Starlette):
             responses=responses,
             deprecated=deprecated,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             default_response_class=default_response_class,
             callbacks=callbacks,
             generate_unique_id_function=generate_unique_id_function,
@@ -1910,6 +1976,25 @@ class FastAPI(Starlette):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Collection[str] | None,
+            Doc(
+                """
+                Declared audiences for this *path operation*, used to generate
+                audience-specific OpenAPI schemas.
+
+                The *path operation* is only included in the OpenAPI schema
+                generated for an audience (e.g. with `app.openapi_for_audience()`)
+                if the audience is declared here, in the router, or in the
+                `include_router()` call. If not declared anywhere, the *path
+                operation* is included in the schemas of all audiences.
+
+                This doesn't affect the generated default OpenAPI schema (e.g.
+                visible at `/docs`) nor the actual availability of the *path
+                operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -2009,6 +2094,7 @@ class FastAPI(Starlette):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -2283,6 +2369,25 @@ class FastAPI(Starlette):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Collection[str] | None,
+            Doc(
+                """
+                Declared audiences for this *path operation*, used to generate
+                audience-specific OpenAPI schemas.
+
+                The *path operation* is only included in the OpenAPI schema
+                generated for an audience (e.g. with `app.openapi_for_audience()`)
+                if the audience is declared here, in the router, or in the
+                `include_router()` call. If not declared anywhere, the *path
+                operation* is included in the schemas of all audiences.
+
+                This doesn't affect the generated default OpenAPI schema (e.g.
+                visible at `/docs`) nor the actual availability of the *path
+                operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -2387,6 +2492,7 @@ class FastAPI(Starlette):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -2661,6 +2767,25 @@ class FastAPI(Starlette):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Collection[str] | None,
+            Doc(
+                """
+                Declared audiences for this *path operation*, used to generate
+                audience-specific OpenAPI schemas.
+
+                The *path operation* is only included in the OpenAPI schema
+                generated for an audience (e.g. with `app.openapi_for_audience()`)
+                if the audience is declared here, in the router, or in the
+                `include_router()` call. If not declared anywhere, the *path
+                operation* is included in the schemas of all audiences.
+
+                This doesn't affect the generated default OpenAPI schema (e.g.
+                visible at `/docs`) nor the actual availability of the *path
+                operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -2765,6 +2890,7 @@ class FastAPI(Starlette):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -3039,6 +3165,25 @@ class FastAPI(Starlette):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Collection[str] | None,
+            Doc(
+                """
+                Declared audiences for this *path operation*, used to generate
+                audience-specific OpenAPI schemas.
+
+                The *path operation* is only included in the OpenAPI schema
+                generated for an audience (e.g. with `app.openapi_for_audience()`)
+                if the audience is declared here, in the router, or in the
+                `include_router()` call. If not declared anywhere, the *path
+                operation* is included in the schemas of all audiences.
+
+                This doesn't affect the generated default OpenAPI schema (e.g.
+                visible at `/docs`) nor the actual availability of the *path
+                operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -3138,6 +3283,7 @@ class FastAPI(Starlette):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -3412,6 +3558,25 @@ class FastAPI(Starlette):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Collection[str] | None,
+            Doc(
+                """
+                Declared audiences for this *path operation*, used to generate
+                audience-specific OpenAPI schemas.
+
+                The *path operation* is only included in the OpenAPI schema
+                generated for an audience (e.g. with `app.openapi_for_audience()`)
+                if the audience is declared here, in the router, or in the
+                `include_router()` call. If not declared anywhere, the *path
+                operation* is included in the schemas of all audiences.
+
+                This doesn't affect the generated default OpenAPI schema (e.g.
+                visible at `/docs`) nor the actual availability of the *path
+                operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -3511,6 +3676,7 @@ class FastAPI(Starlette):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -3785,6 +3951,25 @@ class FastAPI(Starlette):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Collection[str] | None,
+            Doc(
+                """
+                Declared audiences for this *path operation*, used to generate
+                audience-specific OpenAPI schemas.
+
+                The *path operation* is only included in the OpenAPI schema
+                generated for an audience (e.g. with `app.openapi_for_audience()`)
+                if the audience is declared here, in the router, or in the
+                `include_router()` call. If not declared anywhere, the *path
+                operation* is included in the schemas of all audiences.
+
+                This doesn't affect the generated default OpenAPI schema (e.g.
+                visible at `/docs`) nor the actual availability of the *path
+                operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -3884,6 +4069,7 @@ class FastAPI(Starlette):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -4158,6 +4344,25 @@ class FastAPI(Starlette):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Collection[str] | None,
+            Doc(
+                """
+                Declared audiences for this *path operation*, used to generate
+                audience-specific OpenAPI schemas.
+
+                The *path operation* is only included in the OpenAPI schema
+                generated for an audience (e.g. with `app.openapi_for_audience()`)
+                if the audience is declared here, in the router, or in the
+                `include_router()` call. If not declared anywhere, the *path
+                operation* is included in the schemas of all audiences.
+
+                This doesn't affect the generated default OpenAPI schema (e.g.
+                visible at `/docs`) nor the actual availability of the *path
+                operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -4262,6 +4467,7 @@ class FastAPI(Starlette):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -4536,6 +4742,25 @@ class FastAPI(Starlette):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Collection[str] | None,
+            Doc(
+                """
+                Declared audiences for this *path operation*, used to generate
+                audience-specific OpenAPI schemas.
+
+                The *path operation* is only included in the OpenAPI schema
+                generated for an audience (e.g. with `app.openapi_for_audience()`)
+                if the audience is declared here, in the router, or in the
+                `include_router()` call. If not declared anywhere, the *path
+                operation* is included in the schemas of all audiences.
+
+                This doesn't affect the generated default OpenAPI schema (e.g.
+                visible at `/docs`) nor the actual availability of the *path
+                operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -4635,6 +4860,7 @@ class FastAPI(Starlette):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
