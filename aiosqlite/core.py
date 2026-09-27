@@ -6,13 +6,14 @@ Core implementation of aiosqlite proxies
 """
 
 import asyncio
+import inspect
 import logging
 import sqlite3
 from collections.abc import AsyncIterator, Generator, Iterable
 from functools import partial
 from pathlib import Path
 from queue import Empty, Queue, SimpleQueue
-from threading import Thread
+from threading import Event, Thread
 from typing import Any, Callable, Literal, Optional, Union
 from warnings import warn
 
@@ -43,6 +44,21 @@ def set_exception(fut: asyncio.Future, e: BaseException) -> None:
 
 _STOP_RUNNING_SENTINEL = object()
 _TxQueue = SimpleQueue[tuple[Optional[asyncio.Future], Callable[[], Any]]]
+
+
+class _BackupAborted(Exception):
+    """Internal exception raised in the worker thread to abort a backup."""
+
+
+class _BackupAborter:
+    """Internal shared state used to abort an in-progress backup operation."""
+
+    __slots__ = ("event", "finished", "reason")
+
+    def __init__(self) -> None:
+        self.event = Event()
+        self.finished = Event()
+        self.reason: Optional[BaseException] = None
 
 
 def _connection_worker_thread(tx: _TxQueue):
@@ -86,6 +102,7 @@ class Connection:
         self._connection: Optional[sqlite3.Connection] = None
         self._connector = connector
         self._tx: _TxQueue = SimpleQueue()
+        self._backup_aborters: set[_BackupAborter] = set()
         self._iter_chunk_size = iter_chunk_size
         self._thread = Thread(target=_connection_worker_thread, args=(self._tx,))
 
@@ -116,6 +133,7 @@ class Connection:
     def stop(self) -> Optional[asyncio.Future]:
         """Stop the background thread. Prefer `async with` or `await close()`"""
         self._running = False
+        self._abort_backups(ValueError("Connection closed"))
 
         def close_and_stop():
             if self._connection is not None:
@@ -130,6 +148,14 @@ class Connection:
 
         self._tx.put_nowait((future, close_and_stop))
         return future
+
+    def _abort_backups(self, reason: BaseException) -> list[_BackupAborter]:
+        """Signal all in-progress backups involving this connection to abort."""
+        aborters = list(self._backup_aborters)
+        for aborter in aborters:
+            aborter.reason = reason
+            aborter.event.set()
+        return aborters
 
     @property
     def _conn(self) -> sqlite3.Connection:
@@ -201,6 +227,12 @@ class Connection:
 
         if self._connection is None:
             return
+
+        # Abort in-progress backups involving this connection, and wait for
+        # them to unwind before closing the underlying sqlite3 connection.
+        for aborter in self._abort_backups(ValueError("Connection closed")):
+            while not aborter.finished.is_set():
+                await asyncio.sleep(0.001)
 
         try:
             await self._execute(self._conn.close)
@@ -418,7 +450,7 @@ class Connection:
         target: Union["Connection", sqlite3.Connection],
         *,
         pages: int = 0,
-        progress: Optional[Callable[[int, int, int], None]] = None,
+        progress: Optional[Callable[[int, int, int], Any]] = None,
         name: str = "main",
         sleep: float = 0.250,
     ) -> None:
@@ -426,18 +458,93 @@ class Connection:
         Make a backup of the current database to the target database.
 
         Takes either a standard sqlite3 or aiosqlite Connection object as the target.
+
+        If ``progress`` is given, it is called after each step of the backup with
+        ``(status, remaining, total)``. It may be a plain callable or an async
+        callable; async callables are awaited on the caller's event loop, in
+        order, and the backup blocks until each notification has been processed,
+        so slow callbacks apply backpressure instead of piling up notifications.
+        Progress callbacks must not execute queries on the connections involved
+        in the backup.
+
+        The backup can be aborted by cancelling the coroutine (eg, via
+        ``asyncio.Task.cancel()``), by raising an exception from the progress
+        callback, or by closing either connection; in each case the original
+        failure reason is propagated to the caller.
+
+        If this method raises for any reason, the contents of the target
+        database are undefined and it may be left partially written; the target
+        database is only guaranteed to be a complete, consistent copy of the
+        source once this method has returned successfully.
         """
         if isinstance(target, Connection):
-            target = target._conn
+            target_aiosqlite: Optional[Connection] = target
+            target_conn = target._conn
+        else:
+            target_aiosqlite = None
+            target_conn = target
 
-        await self._execute(
-            self._conn.backup,
-            target,
-            pages=pages,
-            progress=progress,
-            name=name,
-            sleep=sleep,
-        )
+        if not self._running or not self._connection:
+            raise ValueError("Connection closed")
+
+        loop = asyncio.get_running_loop()
+        aborter = _BackupAborter()
+
+        async def deliver(status: int, remaining: int, total: int) -> None:
+            result = progress(status, remaining, total)
+            if inspect.isawaitable(result):
+                await result
+
+        def trampoline(status: int, remaining: int, total: int) -> None:
+            if aborter.event.is_set():
+                raise _BackupAborted
+            if progress is not None:
+                # Block the worker thread until the caller's event loop has
+                # processed this notification. This guarantees notifications
+                # are delivered in order, provides backpressure for slow
+                # callbacks, and propagates callback exceptions to abort.
+                asyncio.run_coroutine_threadsafe(
+                    deliver(status, remaining, total), loop
+                ).result()
+
+        def do_backup() -> None:
+            self._conn.backup(
+                target_conn,
+                pages=pages,
+                progress=trampoline,
+                name=name,
+                sleep=sleep,
+            )
+
+        self._backup_aborters.add(aborter)
+        if target_aiosqlite is not None:
+            target_aiosqlite._backup_aborters.add(aborter)
+
+        future = loop.create_future()
+        future.add_done_callback(lambda _: aborter.finished.set())
+        self._tx.put_nowait((future, do_backup))
+
+        try:
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                # Ask the worker thread to abort the backup, then wait for it
+                # to unwind so the connections are no longer in use before
+                # propagating the cancellation.
+                aborter.event.set()
+                try:
+                    await asyncio.shield(future)
+                except BaseException:  # noqa B036
+                    pass
+                raise
+            except _BackupAborted:
+                if aborter.reason is not None:
+                    raise aborter.reason
+                raise
+        finally:
+            self._backup_aborters.discard(aborter)
+            if target_aiosqlite is not None:
+                target_aiosqlite._backup_aborters.discard(aborter)
 
 
 def connect(

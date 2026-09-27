@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from sqlite3 import OperationalError
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import get_ident, Thread
 from unittest import IsolatedAsyncioTestCase, SkipTest
 from unittest.mock import patch
 
@@ -510,6 +510,183 @@ class SmokeTest(IsolatedAsyncioTestCase):
                 cursor = db2.execute("select * from foo")
                 rows = cursor.fetchall()
                 self.assertEqual(rows, [(1, "hello"), (2, "world")])
+
+    async def test_backup_file_async_progress(self):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        src = Path(td.name) / "src.db"
+        dst = Path(td.name) / "dst.db"
+        loop_thread = get_ident()
+        calls = []
+
+        async def progress(status, remaining, total):
+            calls.append((status, remaining, total, get_ident()))
+            await asyncio.sleep(0)
+
+        async with aiosqlite.connect(src) as db1, aiosqlite.connect(dst) as db2:
+            await db1.execute("create table foo (i integer, k text)")
+            await db1.executemany(
+                "insert into foo values (?, ?)",
+                [(i, "x" * 200) for i in range(500)],
+            )
+            await db1.commit()
+
+            await db1.backup(db2, pages=1, progress=progress)
+
+            async with db2.execute("select count(*), sum(i) from foo") as cursor:
+                row = await cursor.fetchone()
+                self.assertEqual(row, (500, sum(range(500))))
+
+        # progress notifications were delivered, in order, on the caller's loop
+        self.assertTrue(calls)
+        self.assertTrue(all(call[3] == loop_thread for call in calls))
+        remainings = [call[1] for call in calls]
+        self.assertEqual(remainings, sorted(remainings, reverse=True))
+        self.assertEqual(remainings[-1], 0)
+        self.assertEqual(len({call[2] for call in calls}), 1)
+
+    async def test_backup_file_cancel_mid_progress(self):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        src = Path(td.name) / "src.db"
+        dst = Path(td.name) / "dst.db"
+        started = asyncio.Event()
+        calls = []
+
+        async def progress(status, remaining, total):
+            calls.append(remaining)
+            started.set()
+            await asyncio.sleep(0.001)
+
+        async with aiosqlite.connect(src) as db1, aiosqlite.connect(dst) as db2:
+            await db1.execute("create table foo (i integer, k text)")
+            await db1.executemany(
+                "insert into foo values (?, ?)",
+                [(i, "x" * 400) for i in range(1000)],
+            )
+            await db1.commit()
+
+            task = asyncio.ensure_future(db1.backup(db2, pages=1, progress=progress))
+            await asyncio.wait_for(started.wait(), 5)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+            self.assertTrue(calls)
+
+            # the source database is unharmed and still usable
+            async with db1.execute("select count(*) from foo") as cursor:
+                row = await cursor.fetchone()
+                self.assertEqual(row[0], 1000)
+
+            # the target connection is still usable; the aborted backup did
+            # not report success while leaving an unreadable database
+            async with db2.execute("pragma integrity_check") as cursor:
+                row = await cursor.fetchone()
+                self.assertEqual(row[0], "ok")
+
+    async def test_backup_file_reverse_direction_concurrently(self):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        path_a = Path(td.name) / "a.db"
+        path_b = Path(td.name) / "b.db"
+
+        async with aiosqlite.connect(path_a) as db_a, aiosqlite.connect(
+            path_b
+        ) as db_b:
+            await db_a.execute("create table a (i integer, k text)")
+            await db_a.executemany(
+                "insert into a values (?, ?)", [(i, "a" * 200) for i in range(1000)]
+            )
+            await db_b.execute("create table b (i integer, k text)")
+            await db_b.executemany(
+                "insert into b values (?, ?)", [(i, "b" * 200) for i in range(1000)]
+            )
+            await db_a.commit()
+            await db_b.commit()
+
+            # backing up in opposite directions at the same time must not
+            # deadlock the two connections' worker threads
+            await asyncio.wait_for(
+                asyncio.gather(
+                    db_a.backup(db_b, pages=1, sleep=0.01),
+                    db_b.backup(db_a, pages=1, sleep=0.01),
+                ),
+                30,
+            )
+
+            # both databases must remain readable and consistent
+            for db in (db_a, db_b):
+                async with db.execute("pragma integrity_check") as cursor:
+                    row = await cursor.fetchone()
+                    self.assertEqual(row[0], "ok")
+                async with db.execute("select count(*) from sqlite_master") as cursor:
+                    row = await cursor.fetchone()
+                    self.assertEqual(row[0], 1)
+
+    async def test_backup_file_progress_exception(self):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        src = Path(td.name) / "src.db"
+        dst = Path(td.name) / "dst.db"
+
+        async def progress(status, remaining, total):
+            raise RuntimeError("boom")
+
+        async with aiosqlite.connect(src) as db1, aiosqlite.connect(dst) as db2:
+            await db1.execute("create table foo (i integer, k text)")
+            await db1.executemany(
+                "insert into foo values (?, ?)",
+                [(i, "x" * 400) for i in range(1000)],
+            )
+            await db1.commit()
+
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                await db1.backup(db2, pages=1, progress=progress)
+
+            # the source database is unharmed and still usable
+            async with db1.execute("select count(*) from foo") as cursor:
+                row = await cursor.fetchone()
+                self.assertEqual(row[0], 1000)
+
+    async def test_backup_file_aborted_by_target_close(self):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        src = Path(td.name) / "src.db"
+        dst = Path(td.name) / "dst.db"
+        started = asyncio.Event()
+
+        async def progress(status, remaining, total):
+            started.set()
+            await asyncio.sleep(0.001)
+
+        db1 = await aiosqlite.connect(src)
+        db2 = await aiosqlite.connect(dst)
+        try:
+            await db1.execute("create table foo (i integer, k text)")
+            await db1.executemany(
+                "insert into foo values (?, ?)",
+                [(i, "x" * 400) for i in range(1000)],
+            )
+            await db1.commit()
+
+            task = asyncio.ensure_future(db1.backup(db2, pages=1, progress=progress))
+            await asyncio.wait_for(started.wait(), 5)
+
+            # closing the target connection aborts the in-progress backup
+            await asyncio.wait_for(db2.close(), 5)
+            db2 = None
+            with self.assertRaisesRegex(ValueError, "Connection closed"):
+                await task
+
+            # the source database is unharmed and still usable
+            async with db1.execute("select count(*) from foo") as cursor:
+                row = await cursor.fetchone()
+                self.assertEqual(row[0], 1000)
+        finally:
+            await db1.close()
+            if db2 is not None:
+                await db2.close()
 
     async def test_emits_warning_when_left_open(self):
         db = await aiosqlite.connect(":memory:")
