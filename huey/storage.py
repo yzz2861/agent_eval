@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import heapq
 import itertools
+import logging
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ except ImportError:
 import struct
 import threading
 import time
+from uuid import uuid4
 
 try:
     import cysqlite
@@ -37,12 +39,39 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+logger = logging.getLogger('huey.storage')
+
+
+class Lease(object):
+    """
+    Handle for a queue message that was dequeued in lease mode.
+
+    The message remains in the queue until it is acknowledged via
+    Storage.ack(). While the lease is held it is renewed periodically, so
+    the message is not visible to other consumers. If the consumer stops
+    renewing (e.g. it crashed), the lease expires and the message can be
+    claimed again by another consumer. The token uniquely identifies a
+    particular claim, so a late ack() from a previous owner cannot delete
+    a message that has since been re-claimed by someone else.
+    """
+    __slots__ = ('task_id', 'token', 'data')
+
+    def __init__(self, task_id, token, data):
+        self.task_id = task_id
+        self.token = token
+        self.data = data
+
+    def __repr__(self):
+        return '<Lease: task_id=%s token=%s>' % (self.task_id, self.token)
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    lease_mode = False  # Does dequeue() return a Lease instead of deleting?
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -905,16 +934,39 @@ class SqliteStorage(BaseSqlStorage):
                      'primary key(queue, key))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
            table_counter, drop_index_task]
+    # Columns added to the task table when lease_mode is enabled. They are
+    # kept out of the table_task DDL so existing databases are unchanged
+    # unless lease_mode is explicitly turned on (see ensure_lease_schema()).
+    lease_columns = (
+        ('lease_token', 'text'),
+        ('lease_expires', 'real'),
+    )
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, lease_mode=False, lease_ttl=60.0,
+                 **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
         self._journal_mode = journal_mode
         self._timeout = timeout  # Busy timeout in seconds, default is 5.
         self._conn_kwargs = kwargs
+
+        # Lease mode provides at-least-once delivery: dequeue() claims a
+        # message with a time-limited lease instead of deleting it, and the
+        # consumer acks the message only after the execution outcome has
+        # been fully handled. Leases are renewed in the background while
+        # held; an expired lease can be claimed by another consumer.
+        if lease_mode and lease_ttl <= 0:
+            raise ValueError('lease_ttl must be a positive number of '
+                             'seconds')
+        self.lease_mode = lease_mode
+        self.lease_ttl = lease_ttl
+        self._leases = {}  # token -> task_id, leases held by this process.
+        self._lease_lock = threading.Lock()
+        self._lease_stop = threading.Event()
+        self._lease_thread = None
 
         # By default Sqlite may reuse rowids when rows are removed. This means
         # that SqliteHuey may not strictly be a FIFO. If strict FIFO ordering
@@ -933,6 +985,29 @@ class SqliteStorage(BaseSqlStorage):
 
         super(SqliteStorage, self).__init__(name, create_tables=create_tables)
 
+        if lease_mode and create_tables:
+            self.ensure_lease_schema()
+
+    def ensure_lease_schema(self):
+        """
+        Add the columns used by lease mode to the task table. This runs
+        automatically when lease_mode is enabled, and can be called
+        explicitly to migrate an existing database in-place. The migration
+        is additive and idempotent; rows already in the queue are preserved
+        and remain dequeueable in both modes.
+        """
+        cols = [row[1] for row in
+                self.sql('pragma table_info(task)', results=True)]
+        with self.db(commit=True, close=True) as curs:
+            for column, column_type in self.lease_columns:
+                if column not in cols:
+                    curs.execute('alter table task add column %s %s'
+                                 % (column, column_type))
+
+    def close(self):
+        self._lease_stop.set()
+        return super(SqliteStorage, self).close()
+
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
                                check_same_thread=False,
@@ -950,6 +1025,9 @@ class SqliteStorage(BaseSqlStorage):
                  (self.name, self.to_blob(data), priority or 0), commit=True)
 
     def dequeue(self):
+        if self.lease_mode:
+            return self._dequeue_lease()
+
         # Quick check without the full exclusive lock.
         if not self.sql('select 1 from task where queue = ? limit 1',
                         (self.name,), results=True):
@@ -964,6 +1042,92 @@ class SqliteStorage(BaseSqlStorage):
                 curs.execute('delete from task where id = ?', (tid,))
                 if curs.rowcount == 1:
                     return data
+
+    def _dequeue_lease(self):
+        # Claim the first available message by stamping it with a unique
+        # lease token and expiry. The row is not deleted; it becomes
+        # invisible to other consumers until the lease expires.
+        now = time.time()
+        token = uuid4().hex
+        expires = now + self.lease_ttl
+        with self.db(commit=True) as curs:
+            curs.execute('select id, data from task where queue = ? and '
+                         '(lease_expires is null or lease_expires < ?) '
+                         'order by priority desc, id limit 1',
+                         (self.name, now))
+            result = curs.fetchone()
+            if result is None:
+                return None
+            task_id, data = result
+            curs.execute('update task set lease_token = ?, lease_expires = ? '
+                         'where id = ? and (lease_expires is null or '
+                         'lease_expires < ?)',
+                         (token, expires, task_id, now))
+            if curs.rowcount != 1:
+                return None  # Lost the race to another consumer.
+
+        lease = Lease(task_id, token, data)
+        self._track_lease(lease)
+        return lease
+
+    def ack(self, lease):
+        """
+        Acknowledge a leased message, removing it from the queue.
+
+        The delete only succeeds if the lease token still matches the row,
+        so a late ack from a previous owner cannot delete a message that
+        expired and was re-claimed by another consumer.
+
+        :return: True if the message was removed, False otherwise.
+        """
+        self._untrack_lease(lease)
+        with self.db(commit=True) as curs:
+            curs.execute('delete from task where id = ? and lease_token = ?',
+                         (lease.task_id, lease.token))
+            return curs.rowcount == 1
+
+    def release_lease(self, lease):
+        """
+        Stop renewing a lease without removing the message. The message
+        becomes available to other consumers once the lease expires.
+        """
+        self._untrack_lease(lease)
+
+    def _track_lease(self, lease):
+        with self._lease_lock:
+            self._leases[lease.token] = lease.task_id
+            if self._lease_thread is None or \
+                    not self._lease_thread.is_alive():
+                self._lease_stop.clear()
+                self._lease_thread = threading.Thread(
+                    target=self._renew_lease_loop,
+                    name='huey-lease-renew')
+                self._lease_thread.daemon = True
+                self._lease_thread.start()
+
+    def _untrack_lease(self, lease):
+        with self._lease_lock:
+            self._leases.pop(lease.token, None)
+
+    def _renew_lease_loop(self):
+        # Periodically extend the expiry of every lease held by this
+        # process, so a long-running task is not re-claimed while it is
+        # still being executed.
+        interval = max(self.lease_ttl / 2.0, 0.05)
+        while not self._lease_stop.wait(interval):
+            with self._lease_lock:
+                leases = list(self._leases.items())
+            if not leases:
+                continue
+            expires = time.time() + self.lease_ttl
+            try:
+                with self.db(commit=True) as curs:
+                    for token, task_id in leases:
+                        curs.execute('update task set lease_expires = ? '
+                                     'where id = ? and lease_token = ?',
+                                     (expires, task_id, token))
+            except Exception:
+                logger.exception('error renewing task leases')
 
     def queue_size(self):
         return self.sql('select count(id) from task where queue=?',

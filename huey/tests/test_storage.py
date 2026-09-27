@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import itertools
+import multiprocessing
 import os
 import random
 import shutil
@@ -34,6 +35,7 @@ from huey.api import SqliteHuey
 from huey.api import chord
 from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
+from huey.storage import Lease
 from huey.storage import FileStorage
 from huey.tests.base import BaseTestCase
 from huey.tests.base import CI
@@ -613,6 +615,348 @@ class TestSqliteStorage(StorageTests, BaseTestCase):
                                    ('index', 'task'))
         self.assertEqual([r[0] for r in curs.fetchall()],
                          ['task_queue_priority_id'])
+
+
+def _lease_crash_worker(db_file, ttl):
+    # Child-process helper: claim a message and then simulate a hard crash
+    # (no ack, no cleanup, no further lease renewals).
+    huey = SqliteHuey(filename=db_file, lease_mode=True, lease_ttl=ttl,
+                      timeout=3, utc=False)
+    lease = huey.storage.dequeue()
+    assert lease is not None
+    os._exit(0)
+
+
+def _lease_late_acker(db_file, ttl, hold_time, claimed):
+    # Child-process helper: claim a message, stop renewing the lease
+    # (simulating a stalled executor), then send a very late ack after the
+    # lease has expired and the message was re-claimed by someone else.
+    huey = SqliteHuey(filename=db_file, lease_mode=True, lease_ttl=ttl,
+                      timeout=3, utc=False)
+    lease = huey.storage.dequeue()
+    assert lease is not None
+    huey.storage.release_lease(lease)  # Stop renewing, lease will expire.
+    claimed.set()
+    time.sleep(hold_time)
+    huey.storage.ack(lease)  # Late ack, must not delete re-claimed message.
+    huey.storage.close()
+
+
+class TestSqliteLeaseStorage(BaseTestCase):
+    db_file = 'huey_lease_test.db'
+    lease_ttl = 60.0
+
+    def get_huey(self):
+        return SqliteHuey(filename=self.db_file, timeout=3, utc=False,
+                          lease_mode=True, lease_ttl=self.lease_ttl)
+
+    def setUp(self):
+        super(TestSqliteLeaseStorage, self).setUp()
+        self.s = self.huey.storage
+
+    def tearDown(self):
+        super(TestSqliteLeaseStorage, self).tearDown()
+        self.s.close()
+        for suffix in ('', '-wal', '-shm'):
+            if os.path.exists(self.db_file + suffix):
+                os.unlink(self.db_file + suffix)
+
+    def get_storage(self, **kwargs):
+        # A second connection to the same database file, equivalent to a
+        # consumer running in another process.
+        kwargs.setdefault('lease_mode', True)
+        kwargs.setdefault('lease_ttl', self.lease_ttl)
+        return SqliteHuey(filename=self.db_file, timeout=3, utc=False,
+                          **kwargs).storage
+
+    def lease_expires(self, task_id):
+        res = self.s.sql('select lease_expires from task where id = ?',
+                         (task_id,), results=True)
+        return res[0][0]
+
+    def test_dequeue_lease_and_ack(self):
+        self.s.enqueue(b'msg')
+        lease = self.s.dequeue()
+        self.assertTrue(isinstance(lease, Lease))
+        self.assertEqual(bytes(lease.data), b'msg')
+
+        # The message stays in the queue until it is acked, and is not
+        # visible to other consumers while the lease is held.
+        self.assertEqual(self.s.queue_size(), 1)
+        self.assertTrue(self.s.dequeue() is None)
+
+        self.assertTrue(self.s.ack(lease))
+        self.assertEqual(self.s.queue_size(), 0)
+        self.assertTrue(self.s.dequeue() is None)
+
+    def test_dequeue_lease_priority(self):
+        self.s.enqueue(b'a1')
+        self.s.enqueue(b'a2', priority=5)
+        self.s.enqueue(b'a3', priority=3)
+        self.assertEqual(bytes(self.s.dequeue().data), b'a2')
+        self.assertEqual(bytes(self.s.dequeue().data), b'a3')
+        self.assertEqual(bytes(self.s.dequeue().data), b'a1')
+
+    def test_expired_lease_reclaimed(self):
+        short = self.get_storage(lease_ttl=0.2)
+        try:
+            self.s.enqueue(b'msg')
+            lease1 = short.dequeue()
+            short.release_lease(lease1)  # Stop renewing, simulate stall.
+
+            # While the lease is valid, nobody else can claim the message.
+            self.assertTrue(self.s.dequeue() is None)
+
+            # After expiry another consumer claims it with a new token.
+            time.sleep(0.3)
+            lease2 = self.s.dequeue()
+            self.assertTrue(lease2 is not None)
+            self.assertEqual(lease2.task_id, lease1.task_id)
+            self.assertNotEqual(lease2.token, lease1.token)
+            self.assertEqual(bytes(lease2.data), b'msg')
+        finally:
+            short.close()
+
+    def test_late_ack_cannot_delete_reclaimed(self):
+        short = self.get_storage(lease_ttl=0.2)
+        try:
+            self.s.enqueue(b'msg')
+            lease1 = short.dequeue()
+            short.release_lease(lease1)
+            time.sleep(0.3)
+
+            lease2 = self.s.dequeue()
+            self.assertTrue(lease2 is not None)
+
+            # The old owner's late ack does not match the new lease token,
+            # so the re-claimed message is left alone.
+            self.assertFalse(short.ack(lease1))
+            self.assertEqual(self.s.queue_size(), 1)
+
+            self.assertTrue(self.s.ack(lease2))
+            self.assertEqual(self.s.queue_size(), 0)
+        finally:
+            short.close()
+
+    def test_lease_renewal(self):
+        short = self.get_storage(lease_ttl=0.4)
+        try:
+            self.s.enqueue(b'msg')
+            lease = short.dequeue()
+            expires_1 = self.lease_expires(lease.task_id)
+            time.sleep(0.7)  # Renewal runs every lease_ttl / 2.
+            expires_2 = self.lease_expires(lease.task_id)
+            self.assertTrue(expires_2 > expires_1)
+
+            # Still leased, so another consumer cannot claim it.
+            self.assertTrue(self.s.dequeue() is None)
+            self.assertTrue(short.ack(lease))
+            self.assertEqual(self.s.queue_size(), 0)
+        finally:
+            short.close()
+
+    def test_migrate_existing_database(self):
+        db_file = 'huey_lease_migrate_test.db'
+        legacy = SqliteHuey(filename=db_file, timeout=3, utc=False)
+        legacy.storage.enqueue(b'old')
+        cols = [r[1] for r in legacy.storage.sql(
+            'pragma table_info(task)', results=True)]
+        self.assertTrue('lease_token' not in cols)
+        legacy.storage.close()
+
+        # Enabling lease_mode migrates the existing database in-place.
+        migrated = SqliteHuey(filename=db_file, timeout=3, utc=False,
+                              lease_mode=True)
+        try:
+            cols = [r[1] for r in migrated.storage.sql(
+                'pragma table_info(task)', results=True)]
+            self.assertTrue('lease_token' in cols)
+            self.assertTrue('lease_expires' in cols)
+
+            # Rows enqueued before the migration are still dequeueable.
+            lease = migrated.storage.dequeue()
+            self.assertEqual(bytes(lease.data), b'old')
+            self.assertTrue(migrated.storage.ack(lease))
+            self.assertEqual(migrated.storage.queue_size(), 0)
+        finally:
+            migrated.storage.close()
+            for suffix in ('', '-wal', '-shm'):
+                if os.path.exists(db_file + suffix):
+                    os.unlink(db_file + suffix)
+
+    def test_explicit_migration_lease_mode_off(self):
+        # The migration can also be run explicitly without enabling
+        # lease mode; dequeue keeps the old delete-on-read behavior.
+        db_file = 'huey_lease_migrate2_test.db'
+        huey = SqliteHuey(filename=db_file, timeout=3, utc=False)
+        try:
+            huey.storage.ensure_lease_schema()
+            cols = [r[1] for r in huey.storage.sql(
+                'pragma table_info(task)', results=True)]
+            self.assertTrue('lease_token' in cols)
+            huey.storage.enqueue(b'msg')
+            self.assertEqual(huey.storage.dequeue(), b'msg')
+            self.assertEqual(huey.storage.queue_size(), 0)
+        finally:
+            huey.storage.close()
+            for suffix in ('', '-wal', '-shm'):
+                if os.path.exists(db_file + suffix):
+                    os.unlink(db_file + suffix)
+
+    def test_execute_success_acks(self):
+        @self.huey.task()
+        def task_a(n):
+            return n + 1
+
+        r = task_a(1)
+        self.assertEqual(self.execute_next(), 2)
+        self.assertEqual(len(self.huey), 0)
+        self.assertEqual(r.get(), 2)
+
+    def test_execute_failure_acks(self):
+        @self.huey.task()
+        def task_a():
+            raise Exception('nope')
+
+        r = task_a()
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 0)
+        self.assertEqual(self.huey.result_count(), 1)
+
+    def test_retry_requeues_and_acks(self):
+        @self.huey.task(retries=1)
+        def task_a():
+            raise Exception('nope')
+
+        r = task_a()
+        self.assertTrue(self.execute_next() is None)
+
+        # The original message was acked and a fresh, unleased message was
+        # enqueued for the retry.
+        self.assertEqual(len(self.huey), 1)
+        row = self.s.sql('select lease_token, lease_expires from task',
+                         results=True)[0]
+        self.assertEqual(row, (None, None))
+
+        # The retry fails permanently and its message is acked as well.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 0)
+        self.assertEqual(self.huey.result_count(), 1)
+
+    def test_revoked_task_acked(self):
+        @self.huey.task()
+        def task_a():
+            return 1
+
+        r = task_a()
+        r.revoke()
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 0)
+
+    def test_scheduled_task_moved_and_acked(self):
+        @self.huey.task()
+        def task_a():
+            return 1
+
+        r = task_a.schedule(delay=60)
+        self.assertTrue(self.execute_next() is None)
+
+        # Moving the task to the schedule acks the queue message.
+        self.assertEqual(len(self.huey), 0)
+        self.assertEqual(self.huey.scheduled_count(), 1)
+
+    def test_unacked_task_redelivered(self):
+        @self.huey.task()
+        def task_a(n):
+            return n + 1
+
+        r = task_a(1)
+        task = self.huey.dequeue()
+        self.assertTrue(task is not None)
+
+        # Simulate a worker that claimed the task and then died: no ack,
+        # no renewal, and the lease eventually expires.
+        self.huey.storage.release_lease(task._lease)
+        self.s.sql('update task set lease_expires = 0', commit=True)
+
+        task2 = self.huey.dequeue()
+        self.assertEqual(task2.id, task.id)
+        self.assertEqual(self.huey.execute(task2), 2)
+        self.assertEqual(len(self.huey), 0)
+
+    def test_interrupted_task_not_acked(self):
+        @self.huey.task()
+        def task_a():
+            raise KeyboardInterrupt
+
+        task_a()
+        task = self.huey.dequeue()
+        self.assertTrue(self.huey.execute(task) is None)
+
+        # The interrupted task was not acked; its lease was released, so
+        # the message is redelivered once the lease expires.
+        self.assertEqual(len(self.huey), 1)
+        self.s.sql('update task set lease_expires = 0', commit=True)
+        task2 = self.huey.dequeue()
+        self.assertEqual(task2.id, task.id)
+
+    def test_two_process_crash_and_reclaim(self):
+        # Reproduce a worker crashing after claiming a message: a child
+        # process dequeues and hard-exits, and the message becomes
+        # available again once its lease expires.
+        try:
+            ctx = multiprocessing.get_context('fork')
+        except ValueError:
+            raise unittest.SkipTest('fork start method not available')
+
+        self.s.enqueue(b'msg')
+        p = ctx.Process(target=_lease_crash_worker,
+                        args=(self.db_file, 0.2))
+        p.start()
+        p.join(10)
+        self.assertEqual(p.exitcode, 0)
+
+        # The crashed worker's lease is still valid, so the message is
+        # not visible yet.
+        self.assertTrue(self.s.dequeue() is None)
+
+        time.sleep(0.3)  # Wait out the lease.
+        lease = self.s.dequeue()
+        self.assertTrue(lease is not None)
+        self.assertEqual(bytes(lease.data), b'msg')
+        self.assertTrue(self.s.ack(lease))
+        self.assertEqual(self.s.queue_size(), 0)
+
+    def test_two_process_late_ack(self):
+        # Reproduce a stale executor's late ack: a child process claims a
+        # message, stalls past the lease expiry, and its late ack must not
+        # delete the message after this process re-claimed it.
+        try:
+            ctx = multiprocessing.get_context('fork')
+        except ValueError:
+            raise unittest.SkipTest('fork start method not available')
+
+        claimed = ctx.Event()
+        self.s.enqueue(b'msg')
+        p = ctx.Process(target=_lease_late_acker,
+                        args=(self.db_file, 0.2, 1.0, claimed))
+        p.start()
+        try:
+            self.assertTrue(claimed.wait(10))
+            time.sleep(0.4)  # Child's lease (ttl=0.2) has expired.
+            lease = self.s.dequeue()
+            self.assertTrue(lease is not None)
+            p.join(10)
+            self.assertEqual(p.exitcode, 0)
+
+            # The child's late ack did not delete our re-claimed message.
+            self.assertEqual(self.s.queue_size(), 1)
+            self.assertTrue(self.s.ack(lease))
+            self.assertEqual(self.s.queue_size(), 0)
+        finally:
+            if p.is_alive():
+                p.terminate()
+                p.join()
 
 
 @unittest.skipIf(cysqlite is None, 'requires cysqlite')

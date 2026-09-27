@@ -3,6 +3,17 @@ Changelog
 
 ## master
 
+* Add optional lease-based delivery to `SqliteHuey` / `SqliteStorage`
+  (`lease_mode=True`, `lease_ttl`). Dequeueing claims a message with a
+  time-limited lease instead of deleting it; the message is acked and
+  removed only after the execution outcome (success, stored error, retry
+  requeue, revocation, rescheduling) has been fully handled. Leases are
+  renewed in the background while held, expired leases can be re-claimed
+  by other consumers, and a unique token per claim prevents a late ack
+  from a previous owner deleting a re-claimed message. This provides
+  at-least-once delivery (not exactly-once). Existing databases are
+  migrated in-place when the mode is enabled, or explicitly via
+  `SqliteStorage.ensure_lease_schema()`. Default behavior is unchanged.
 * Fix `RedisSemaphore` admitting more than `value` holders under contention.
   Acquisition now evicts, counts and adds in one Lua script, using the server
   clock, so a caller whose timestamp was sampled before a slower caller's can

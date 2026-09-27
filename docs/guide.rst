@@ -1780,6 +1780,32 @@ weaknesses of each storage layer.
     operational complexity of running a separate server process like Redis is
     undesirable.
 
+    By default a message is deleted as soon as a worker dequeues it, so a
+    worker that crashes mid-execution takes the task with it. Passing
+    ``lease_mode=True`` switches to lease-based delivery: dequeueing claims
+    the message with a time-limited lease (``lease_ttl`` seconds, default
+    60) instead of deleting it, and the message is only removed once the
+    outcome of the execution -- success, a stored error, a retry requeue,
+    revocation, or being moved to the schedule -- has been fully handled.
+    While a consumer holds a lease it is renewed automatically in the
+    background; if the consumer dies, the lease expires and another
+    consumer can claim the message. Each claim carries a unique token, so
+    a late acknowledgement from a previous owner can never delete a
+    message that has since been re-claimed.
+
+    .. note::
+        Lease mode provides *at-least-once* delivery, not exactly-once.
+        A task's external side-effects cannot be rolled back, so when a
+        consumer crashes after running a task but before recording the
+        outcome, the task will be executed again. Task functions should
+        be idempotent.
+
+    Enabling ``lease_mode`` on an existing database migrates it in-place
+    with an additive, idempotent ``ALTER TABLE`` (queued tasks are
+    preserved); the migration can also be run explicitly via
+    :py:meth:`SqliteStorage.ensure_lease_schema`. With ``lease_mode``
+    left at its default of ``False``, behavior is unchanged.
+
 :py:class:`CySqliteHuey`
     Same storage layout and characteristics as :py:class:`SqliteHuey`, but
     driven by `cysqlite <https://cysqlite.readthedocs.io/>`_ rather than the

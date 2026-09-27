@@ -130,8 +130,28 @@ Huey types
         corruption in the event of sudden power loss. By default will use the
         SQLite library's ``synchronous`` setting (typically ``1``, which
         provides a good balance between durability and performance).
+    :param bool lease_mode: claim messages with a time-limited lease on
+        dequeue instead of deleting them immediately, removing them only
+        after the execution outcome has been fully handled. Defaults to
+        ``False`` (the historical delete-on-dequeue behavior).
+    :param float lease_ttl: seconds a claimed message's lease remains valid
+        before it may be re-claimed by another consumer. Leases are renewed
+        automatically while the consumer is alive. Defaults to 60.
 
     SqliteHuey fully supports task priorities.
+
+    When ``lease_mode`` is enabled, delivery becomes *at-least-once*: if a
+    consumer crashes after claiming a task, the lease expires and the task
+    is delivered again. Because a task's side-effects cannot be rolled
+    back, a task may legitimately be executed more than once (for example
+    when a crash occurs after the task ran but before its result was
+    recorded), so task functions should be idempotent. Exactly-once
+    execution is **not** guaranteed.
+
+    Enabling ``lease_mode`` on an existing database migrates it in-place
+    (an additive, idempotent ``ALTER TABLE``); queued tasks are preserved.
+    The migration can also be run explicitly without enabling the mode via
+    :py:meth:`SqliteStorage.ensure_lease_schema`.
 
     .. seealso:: :py:class:`SqliteStorage`
 
@@ -2371,7 +2391,7 @@ Huey comes with several built-in storage implementations:
     automatically cleaned-up.
 
 
-.. py:class:: SqliteStorage(name='huey', filename='huey.db', cache_mb=8, fsync=None, journal_mode='wal', timeout=5, strict_fifo=False, create_tables=True, **kwargs)
+.. py:class:: SqliteStorage(name='huey', filename='huey.db', cache_mb=8, fsync=None, journal_mode='wal', timeout=5, strict_fifo=False, create_tables=True, lease_mode=False, lease_ttl=60.0, **kwargs)
 
     :param str name: namespace for storage.
     :param str filename: sqlite database filename.
@@ -2390,8 +2410,40 @@ Huey comes with several built-in storage implementations:
         cause tasks to be run in a different order than the order in which they
         were enqueued.
     :param bool create_tables: create tables if they do not exist.
+    :param bool lease_mode: claim messages with a time-limited lease on
+        dequeue instead of deleting them immediately. The message is only
+        removed once the consumer acknowledges that the execution outcome
+        (success, stored error, retry requeue, revocation or rescheduling)
+        has been fully handled. Leases are renewed automatically in the
+        background while held; if the consumer dies, the lease expires and
+        the message can be claimed by another consumer. This provides
+        *at-least-once* delivery -- a task may be executed more than once,
+        so task functions should be idempotent. Defaults to ``False``,
+        which preserves the historical delete-on-dequeue behavior.
+    :param float lease_ttl: seconds a claimed message's lease remains
+        valid before it may be re-claimed. Defaults to 60.
     :param kwargs: Additional keyword arguments passed to the ``sqlite3``
         connection constructor.
+
+    .. py:method:: ensure_lease_schema()
+
+        Add the columns used by lease mode to the task table. Runs
+        automatically when ``lease_mode`` is enabled; may be called
+        explicitly to migrate an existing database in-place. Additive and
+        idempotent.
+
+    .. py:method:: ack(lease)
+
+        Acknowledge a leased message, removing it from the queue. The
+        delete only succeeds when the lease token still matches the row,
+        so a late ack from a previous owner cannot delete a message that
+        expired and was re-claimed by another consumer. Returns ``True``
+        if the message was removed.
+
+    .. py:method:: release_lease(lease)
+
+        Stop renewing a lease without removing the message. The message
+        becomes available to other consumers once the lease expires.
 
 
 .. py:class:: CySqliteStorage(name='huey', filename='huey.db', pragmas=None, timeout=5, strict_fifo=False, create_tables=True, **kwargs)
@@ -2485,4 +2537,3 @@ Huey comes with several built-in storage implementations:
 
 .. autoclass:: huey.storage.BaseStorage
    :members:
-
