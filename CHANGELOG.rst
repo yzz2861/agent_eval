@@ -1,3 +1,10 @@
+Unreleased
+----------
+
+* Support streaming the request body to WSGI apps, with wsgi.input
+  only pulling data from the client as the app reads it. This allows
+  WSGI apps to reject requests before the upload completes.
+
 0.18.0 2025-11-08
 -----------------
 

@@ -29,9 +29,13 @@ which can then be passed to other middleware served by hypercorn,
 Limiting the request body size
 ------------------------------
 
-As the request body is stored in memory before being processed it is
-important to limit the max size. This is configured by the
-``wsgi_max_body_size`` configuration attribute.
+The request body is streamed to the app via ``wsgi.input``, with data
+only requested from the client as the app reads it. This means an app
+can inspect the start of the body and reject the request without
+waiting for the upload to complete. It also means the body is only
+buffered in memory as the app reads it, so it is important to limit
+the max size. This is configured by the ``wsgi_max_body_size``
+configuration attribute.
 
 When using middleware the ``AsyncioWSGIMiddleware`` and
 ``TrioWSGIMiddleware`` have a default max size that can be configured,
