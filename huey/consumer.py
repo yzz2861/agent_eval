@@ -30,6 +30,39 @@ class ConsumerStopped(Exception): pass
 class WorkerRecycle(Exception): pass
 
 
+class LeaseRenewal(threading.Thread):
+    """
+    Background thread that periodically renews the lease of the message the
+    worker is currently executing, so that it is not re-claimed by another
+    worker while still running. Only used when the storage layer's lease
+    mode is enabled.
+    """
+    def __init__(self, storage):
+        super(LeaseRenewal, self).__init__(name='lease-renewal')
+        self.daemon = True
+        self.storage = storage
+        # Renew well before the lease can expire.
+        self.interval = max(storage.lease_ttl / 3.0, 0.1)
+        self._lease = None
+        self._stopped = threading.Event()
+
+    def set_lease(self, lease):
+        self._lease = lease
+
+    def run(self):
+        logger = logging.getLogger('huey.consumer.LeaseRenewal')
+        while not self._stopped.wait(self.interval):
+            lease = self._lease
+            if lease is not None:
+                try:
+                    self.storage.renew_lease(lease)
+                except Exception:
+                    logger.exception('Error renewing task lease.')
+
+    def stop(self):
+        self._stopped.set()
+
+
 class BaseProcess(object):
     process_name = 'BaseProcess'
 
@@ -95,9 +128,14 @@ class Worker(BaseProcess):
         self.backoff = backoff
         self.max_tasks = max_tasks
         self.task_count = 0
+        self._lease_renewal = None
         super(Worker, self).__init__(huey, stop_flag)
 
     def initialize(self):
+        if self.huey.storage.lease_support:
+            self._lease_renewal = LeaseRenewal(self.huey.storage)
+            self._lease_renewal.start()
+
         for name, startup_hook in self.huey._startup.items():
             self._logger.debug('calling startup hook "%s"', name)
             try:
@@ -106,6 +144,10 @@ class Worker(BaseProcess):
                 self._logger.exception('startup hook "%s" failed', name)
 
     def shutdown(self):
+        if self._lease_renewal is not None:
+            self._lease_renewal.stop()
+            self._lease_renewal = None
+
         for name, shutdown_hook in self.huey._shutdown.items():
             self._logger.debug('calling shutdown hook "%s"', name)
             try:
@@ -123,12 +165,17 @@ class Worker(BaseProcess):
         else:
             if task is not None:
                 self.delay = self.default_delay
+                if self._lease_renewal is not None:
+                    self._lease_renewal.set_lease(
+                        getattr(task, '_lease', None))
                 try:
                     self.huey.execute(task, now)
                 except Exception:
                     self._logger.exception('Unhandled error during execution '
                                            'of task %s.', task.id)
                 finally:
+                    if self._lease_renewal is not None:
+                        self._lease_renewal.set_lease(None)
                     self.task_count += 1
                     if self.max_tasks and self.task_count >= self.max_tasks:
                         self._logger.info('Worker reached max tasks (%d), '

@@ -1780,6 +1780,9 @@ weaknesses of each storage layer.
     operational complexity of running a separate server process like Redis is
     undesirable.
 
+    An optional :ref:`lease mode <sqlite_leases>` provides at-least-once
+    delivery, so tasks are not lost when a worker crashes after dequeuing.
+
 :py:class:`CySqliteHuey`
     Same storage layout and characteristics as :py:class:`SqliteHuey`, but
     driven by `cysqlite <https://cysqlite.readthedocs.io/>`_ rather than the
@@ -1814,6 +1817,67 @@ weaknesses of each storage layer.
 
 :py:class:`BlackHoleHuey`
     All storage methods are no-ops.
+
+.. _sqlite_leases:
+
+Sqlite lease mode
+----------------
+
+By default, :py:class:`SqliteHuey` removes a message from the queue as soon
+as a worker dequeues it. If that worker crashes before finishing, the task
+is lost. Setting ``use_leases=True`` enables an optional lease-based
+delivery mode:
+
+.. code-block:: python
+
+    from huey import SqliteHuey
+
+    huey = SqliteHuey('my-app', filename='huey.db',
+                      use_leases=True, lease_ttl=60)
+
+With lease mode enabled, dequeuing *claims* a message with an expiring lease
+(``lease_ttl`` seconds, default 60) instead of deleting it. While a task
+executes, the worker renews its lease in the background. The message is only
+removed once the outcome of the execution has been fully handled:
+
+* on success, after the result has been stored and any ``on_complete``
+  chain or chord has been enqueued,
+* on failure, after the error has been recorded and any retry has been
+  re-enqueued (or moved to the schedule when a retry delay is used),
+* when a task is revoked, cancelled or expired, after it has been dropped,
+* when a task is not yet ready to run, after it has been moved to the
+  schedule.
+
+If the worker crashes or is killed, the lease is no longer renewed and
+expires, at which point another worker can claim the message and execute it
+again. Claims are tied to a unique lease token, so a late acknowledgement
+from the previous (crashed or stalled) owner cannot delete a message that
+has since been re-claimed by another worker. Tasks that are interrupted
+(e.g. by a non-graceful shutdown) are deliberately not acknowledged, so they
+are redelivered once their lease expires.
+
+.. note::
+    Lease mode provides **at-least-once** delivery, not exactly-once. A task
+    may be executed more than once - for example when a worker crashes after
+    performing its work but before acknowledging, or when an acknowledgement
+    itself fails. Huey cannot make the side-effects of your task functions
+    (sending email, charging a card, writing to an API) exactly-once, so
+    tasks should be idempotent or use their own deduplication when
+    duplicates would be harmful.
+
+Lease mode is off by default and the previous delete-on-dequeue behavior is
+unchanged when it is not enabled. New databases created with
+``use_leases=True`` get the required columns automatically. An existing
+database must be migrated explicitly, once:
+
+.. code-block:: python
+
+    huey = SqliteHuey('my-app', filename='huey.db')  # lease mode off.
+    huey.storage.migrate_leases()  # Add lease_token / lease_expires columns.
+
+After migrating, instantiate Huey with ``use_leases=True``. Attempting to
+enable lease mode on an unmigrated database raises a
+:py:class:`ConfigurationError` with instructions.
 
 
 Tips and tricks

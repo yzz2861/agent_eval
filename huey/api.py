@@ -381,9 +381,36 @@ class Huey(object):
         return ResultGroup(pipeline)
 
     def dequeue(self):
+        if self.storage.lease_support:
+            res = self.storage.dequeue_lease()
+            if res is None:
+                return
+            data, lease = res
+            task = self.deserialize_task(data)
+            task._lease = lease
+            return task
+
         data = self.storage.dequeue()
         if data is not None:
             return self.deserialize_task(data)
+
+    def _ack_task(self, task):
+        # When the storage claims messages with an expiring lease, the
+        # message is only removed once the outcome of the execution (result,
+        # error, retry, reschedule, revocation, etc) has been fully handled.
+        # The ack is tied to the lease token, so a stale ack from a previous
+        # owner cannot delete a message that has since been re-claimed by
+        # another worker. If the ack fails, the message is left in place and
+        # will be redelivered after its lease expires (at-least-once).
+        lease = getattr(task, '_lease', None)
+        if lease is not None:
+            task._lease = None
+            try:
+                self.storage.ack_lease(lease)
+            except Exception:
+                logger.exception('Error acking %s, message will be '
+                                 'redelivered after its lease expires.',
+                                 task.id)
 
     def put(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data))
@@ -427,14 +454,17 @@ class Huey(object):
 
         if not self.ready_to_run(task, timestamp):
             self.add_schedule(task)
+            self._ack_task(task)  # Message safely moved to the schedule.
         elif self.is_revoked(task, timestamp, False):
             logger.warning('Task %s was revoked, not executing', task)
             self._emit(S.SIGNAL_REVOKED, task)
             self._abort_chord_member(task, SKIPPED)
+            self._ack_task(task)  # Revoked: drop the message.
         elif task.expires_resolved and task.expires_resolved < timestamp:
             logger.info('Task %s expired, not executing.', task)
             self._emit(S.SIGNAL_EXPIRED, task)
             self._abort_chord_member(task, SKIPPED)
+            self._ack_task(task)  # Expired: drop the message.
         else:
             logger.info('Executing %s', task)
             self._emit(S.SIGNAL_EXECUTING, task)
@@ -447,6 +477,7 @@ class Huey(object):
             except CancelExecution:
                 self._emit(S.SIGNAL_CANCELED, task)
                 self._abort_chord_member(task, SKIPPED)
+                self._ack_task(task)  # Cancelled by pre-execute hook: drop.
                 return
 
         start = time.monotonic()
@@ -508,6 +539,8 @@ class Huey(object):
         except KeyboardInterrupt:
             logger.warning('Received exit signal, %s did not finish.', task.id)
             self._emit(S.SIGNAL_INTERRUPTED, task)
+            # The message is deliberately *not* acked: when lease mode is in
+            # use it will be redelivered after the lease expires.
             return
         except Exception as exc:
             logger.exception('Unhandled exception in task %s.', task.id)
@@ -567,6 +600,11 @@ class Huey(object):
         if exception is not None and task.retries:
             self._emit(S.SIGNAL_RETRYING, task)
             self._requeue_task(task, self._get_timestamp(), retry_eta)
+
+        # The outcome of the execution (result, error, retry, etc) has been
+        # fully handled, so the message can be removed when lease mode is in
+        # use.
+        self._ack_task(task)
 
         return task_value
 

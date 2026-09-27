@@ -130,6 +130,13 @@ Huey types
         corruption in the event of sudden power loss. By default will use the
         SQLite library's ``synchronous`` setting (typically ``1``, which
         provides a good balance between durability and performance).
+    :param bool use_leases: enable lease-based delivery, so messages are
+        claimed with an expiring lease and only removed once the outcome of
+        the execution has been handled (at-least-once delivery). Existing
+        databases must be migrated once with
+        :py:meth:`SqliteStorage.migrate_leases`. See :ref:`sqlite_leases`.
+    :param float lease_ttl: seconds a claimed message's lease remains
+        valid, defaults to 60.
 
     SqliteHuey fully supports task priorities.
 
@@ -2371,7 +2378,7 @@ Huey comes with several built-in storage implementations:
     automatically cleaned-up.
 
 
-.. py:class:: SqliteStorage(name='huey', filename='huey.db', cache_mb=8, fsync=None, journal_mode='wal', timeout=5, strict_fifo=False, create_tables=True, **kwargs)
+.. py:class:: SqliteStorage(name='huey', filename='huey.db', cache_mb=8, fsync=None, journal_mode='wal', timeout=5, strict_fifo=False, create_tables=True, use_leases=False, lease_ttl=60, **kwargs)
 
     :param str name: namespace for storage.
     :param str filename: sqlite database filename.
@@ -2392,6 +2399,23 @@ Huey comes with several built-in storage implementations:
     :param bool create_tables: create tables if they do not exist.
     :param kwargs: Additional keyword arguments passed to the ``sqlite3``
         connection constructor.
+    :param bool use_leases: claim messages with an expiring lease instead of
+        deleting them on dequeue, providing at-least-once delivery. The
+        message is removed only after the consumer acknowledges that the
+        outcome of the execution has been handled. Requires the
+        ``lease_token`` and ``lease_expires`` columns on the task table -
+        run :py:meth:`SqliteStorage.migrate_leases` to add them to an
+        existing database. See :ref:`sqlite_leases`.
+    :param float lease_ttl: number of seconds a claimed message's lease
+        remains valid before it can be re-claimed by another consumer.
+        Defaults to 60. Only used when ``use_leases`` is enabled.
+
+    .. py:method:: migrate_leases()
+
+        Add the ``lease_token`` and ``lease_expires`` columns required for
+        lease mode to an existing database. Safe to run multiple times.
+        Existing tasks are unaffected and will be claimed with a lease when
+        dequeued.
 
 
 .. py:class:: CySqliteStorage(name='huey', filename='huey.db', pragmas=None, timeout=5, strict_fifo=False, create_tables=True, **kwargs)
@@ -2485,4 +2509,3 @@ Huey comes with several built-in storage implementations:
 
 .. autoclass:: huey.storage.BaseStorage
    :members:
-

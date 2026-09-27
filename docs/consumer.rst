@@ -292,6 +292,12 @@ tasks will be lost. To be alerted when this occurs, you can use Huey's
 :ref:`signals` (specifically ``signals.SIGNAL_INTERRUPTED``). The consumer
 will emit this for tasks that are interrupted during execution.
 
+An exception is :py:class:`SqliteHuey` with :ref:`lease mode
+<sqlite_leases>` enabled, which provides at-least-once delivery: messages
+are claimed with an expiring lease and only removed after the outcome of
+the execution has been handled, so interrupted or crashed workers' tasks
+are redelivered.
+
 .. _consumer-deployments:
 
 Deployments

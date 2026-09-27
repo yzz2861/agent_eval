@@ -11,6 +11,7 @@ import unittest
 from huey import SqliteHuey
 from huey.api import crontab
 from huey.consumer import Consumer
+from huey.consumer import LeaseRenewal
 from huey.consumer import Scheduler
 from huey.consumer import WORKER_TO_ENVIRONMENT
 from huey.consumer_options import ConsumerConfig
@@ -170,6 +171,71 @@ class TestConsumerIntegration(BaseTestCase):
         # Subsequent iterations do not re-fire for the stalled period.
         scheduler.loop(datetime.datetime(2000, 1, 1, 0, 0))
         self.assertEqual(len(self.huey), 1)
+
+
+class TestConsumerLeases(BaseTestCase):
+    consumer_class = TestConsumer
+    filename = 'huey_lease_consumer.db'
+
+    def get_huey(self):
+        return SqliteHuey('lease-consumer', filename=self.filename,
+                          use_leases=True, lease_ttl=0.5, utc=False)
+
+    def tearDown(self):
+        self.huey.storage.close()
+        super(TestConsumerLeases, self).tearDown()
+        for suffix in ('', '-wal', '-shm'):
+            if os.path.exists(self.filename + suffix):
+                os.unlink(self.filename + suffix)
+
+    def test_lease_renewal_thread(self):
+        storage = self.huey.storage
+        storage.enqueue(b'x')
+        _, lease = storage.dequeue_lease()
+
+        renewal = LeaseRenewal(storage)
+        renewal.set_lease(lease)
+        renewal.start()
+        try:
+            # Beyond the 0.5s lease TTL: the renewal thread keeps the lease
+            # from expiring, so the message cannot be re-claimed.
+            time.sleep(0.8)
+            self.assertTrue(storage.dequeue_lease() is None)
+        finally:
+            renewal.stop()
+            renewal.join(timeout=5)
+
+        # Once renewal stops the lease expires and the message is claimable.
+        time.sleep(0.7)
+        data, lease2 = storage.dequeue_lease()
+        self.assertEqual(data, b'x')
+        self.assertTrue(storage.ack_lease(lease2))
+
+    def test_consumer_renews_and_acks(self):
+        started = threading.Event()
+
+        @self.huey.task()
+        def task_a():
+            started.set()
+            time.sleep(1.2)  # Longer than the 0.5s lease TTL.
+            return 1
+
+        with self.consumer_context(workers=1):
+            r = task_a()
+            self.assertTrue(started.wait(5))
+            time.sleep(0.8)  # Beyond the lease TTL.
+
+            # The worker's lease renewal keeps the message claimed.
+            self.assertTrue(self.huey.dequeue() is None)
+
+            self.assertEqual(r.get(blocking=True, timeout=5), 1)
+
+            # On completion the message is acked (removed from the queue).
+            for _ in range(20):
+                if self.huey.pending_count() == 0:
+                    break
+                time.sleep(0.1)
+            self.assertEqual(self.huey.pending_count(), 0)
 
 
 class TestConsumerConfig(BaseTestCase):
