@@ -94,8 +94,8 @@ class StreamClosedError(IOError):
 class UnsatisfiableReadError(Exception):
     """Exception raised when a read cannot be satisfied.
 
-    Raised by ``read_until`` and ``read_until_regex`` with a ``max_bytes``
-    argument.
+    Raised by ``read_until``, ``read_until_any``, and ``read_until_regex``
+    with a ``max_bytes`` argument.
     """
 
     pass
@@ -103,6 +103,95 @@ class UnsatisfiableReadError(Exception):
 
 class StreamBufferFullError(Exception):
     """Exception raised by `IOStream` methods when the buffer is full."""
+
+
+class _DelimiterMatcher:
+    """Incremental matcher for a fixed set of delimiters.
+
+    Implements the Aho-Corasick automaton so that each buffered byte is
+    examined exactly once: ``feed`` consumes only newly arrived bytes and
+    the automaton state is preserved between calls, so old data is never
+    rescanned.  Used by `BaseIOStream.read_until_any`.
+    """
+
+    def __init__(self, delimiters: tuple[bytes, ...]) -> None:
+        # _goto[state][byte] is the transition function of the automaton,
+        # _fail[state] the failure link, _depth[state] the length of the
+        # string leading to state, and _out[state] the (index, length)
+        # pairs of delimiters ending at state (including those reachable
+        # via failure links).
+        self._goto: list[dict[int, int]] = [{}]
+        self._fail: list[int] = [0]
+        self._depth: list[int] = [0]
+        self._out: list[list[tuple[int, int]]] = [[]]
+        for index, delimiter in enumerate(delimiters):
+            state = 0
+            for byte in delimiter:
+                nxt = self._goto[state].get(byte)
+                if nxt is None:
+                    nxt = len(self._goto)
+                    self._goto[state][byte] = nxt
+                    self._goto.append({})
+                    self._fail.append(0)
+                    self._depth.append(self._depth[state] + 1)
+                    self._out.append([])
+                state = nxt
+            self._out[state].append((index, len(delimiter)))
+        queue: collections.deque[int] = collections.deque(self._goto[0].values())
+        while queue:
+            state = queue.popleft()
+            for byte, nxt in self._goto[state].items():
+                queue.append(nxt)
+                fail = self._fail[state]
+                while fail and byte not in self._goto[fail]:
+                    fail = self._fail[fail]
+                self._fail[nxt] = self._goto[fail].get(byte, 0)
+                self._out[nxt] += self._out[self._fail[nxt]]
+        self._state = 0
+        # Number of bytes fed so far.
+        self.pos = 0
+
+    def feed(
+        self, data: bytes | bytearray | memoryview, start: int, stop: int
+    ) -> list[tuple[int, int, int]]:
+        """Feed ``data[start:stop]`` and return the new complete matches.
+
+        Returns a list of ``(start_pos, delimiter_index, delimiter_length)``
+        tuples, where ``start_pos`` is the absolute position (counting all
+        bytes fed so far) at which the match begins.
+        """
+        matches = []
+        state = self._state
+        pos = self.pos
+        for i in range(start, stop):
+            byte = data[i]
+            while state and byte not in self._goto[state]:
+                state = self._fail[state]
+            state = self._goto[state].get(byte, 0)
+            pos += 1
+            for index, length in self._out[state]:
+                matches.append((pos - length, index, length))
+        self._state = state
+        self.pos = pos
+        return matches
+
+    def live_partial_length(self) -> int:
+        """Length of the longest suffix of the fed input that is a proper
+        prefix of some delimiter (0 if there is none).
+
+        A non-zero value means a delimiter may still match, starting
+        ``live_partial_length()`` bytes before the end of the fed input,
+        if more data arrives.
+        """
+        result = 0
+        state = self._state
+        while state:
+            # A state has outgoing transitions exactly when its string is
+            # a proper prefix of some delimiter.
+            if self._goto[state]:
+                result = max(result, self._depth[state])
+            state = self._fail[state]
+        return result
 
 
 class _StreamBuffer:
@@ -252,6 +341,12 @@ class BaseIOStream:
         self._read_delimiter: bytes | None = None
         self._read_regex: Pattern | None = None
         self._read_max_bytes: int | None = None
+        self._read_delimiters: tuple[bytes, ...] | None = None
+        self._read_any_matcher: _DelimiterMatcher | None = None
+        self._read_any_scan_pos = 0
+        self._read_any_best: tuple[int, int] | None = None
+        self._read_any_result: int | None = None
+        self._read_any_eof = False
         self._read_bytes: int | None = None
         self._read_partial = False
         self._read_until_close = False
@@ -375,6 +470,68 @@ class BaseIOStream:
         """
         future = self._start_read()
         self._read_delimiter = delimiter
+        self._read_max_bytes = max_bytes
+        try:
+            self._try_inline_read()
+        except UnsatisfiableReadError as e:
+            # Handle this the same way as in _handle_events.
+            gen_log.info("Unsatisfiable read, closing connection: %s" % e)
+            self.close(exc_info=e)
+            return future
+        except:
+            future.add_done_callback(lambda f: f.exception())
+            raise
+        return future
+
+    def read_until_any(
+        self, delimiters: collections.abc.Sequence[bytes], max_bytes: int | None = None
+    ) -> Awaitable[tuple[bytes, int]]:
+        """Asynchronously read until any of the given delimiters is found.
+
+        Returns a `.Future` whose result is a ``(data, index)`` tuple:
+        ``data`` is everything read up to and including the matched
+        delimiter, and ``index`` is the position of the matched delimiter
+        in ``delimiters``.  Bytes past the end of the matched delimiter
+        remain in the stream's buffer and are returned by subsequent
+        reads, so a single packet may carry the end of one message and
+        the beginning of the next.
+
+        If several delimiters match, the match beginning at the earliest
+        position wins; ties between matches at the same position are
+        broken in favor of the longest delimiter.  When a shorter delimiter is
+        a prefix of a longer one, the read waits until enough data has
+        arrived to decide between them (a stream close resolves the
+        ambiguity in favor of the shorter delimiter, since the longer
+        one can no longer be completed).
+
+        If ``max_bytes`` is not None, the connection will be closed if
+        the winning match would end more than ``max_bytes`` bytes into
+        the buffered data.
+
+        If the stream is closed before a complete match is read, the
+        `.Future` resolves with `StreamClosedError`; any partial data
+        (including a partial delimiter) remains buffered and may be
+        retrieved with a subsequent read.  Cancelling the returned
+        `.Future` does not cancel the underlying read: if a match
+        completes after cancellation, the matched bytes are still
+        consumed from the buffer and discarded.
+
+        .. versionadded:: 6.6
+        """
+        delimiters = tuple(bytes(d) for d in delimiters)
+        if not delimiters or any(not d for d in delimiters):
+            raise ValueError(
+                "delimiters must be a non-empty sequence of non-empty bytes"
+            )
+        future = self._start_read()
+        self._read_delimiters = delimiters
+        self._read_any_matcher = _DelimiterMatcher(delimiters)
+        self._read_any_scan_pos = 0
+        self._read_any_best = None
+        self._read_any_result = None
+        # On an already-closed stream no more data can arrive, so partial
+        # matches can no longer block a complete one.
+        self._read_any_eof = self.closed()
         self._read_max_bytes = max_bytes
         try:
             self._try_inline_read()
@@ -593,6 +750,10 @@ class BaseIOStream:
                 # it were complete.
             elif self._read_future is not None:
                 # resolve reads that are pending and ready to complete
+                if self._read_delimiters is not None:
+                    # No more data will arrive, so a partial delimiter
+                    # match can no longer grow to hide a complete one.
+                    self._read_any_eof = True
                 try:
                     pos = self._find_read_pos()
                 except UnsatisfiableReadError:
@@ -816,9 +977,13 @@ class BaseIOStream:
             self._after_user_read_buffer = None
             self._read_buffer_size = len(self._read_buffer)
             self._user_read_buffer = False
-            result: int | bytes = size
+            result: int | bytes | tuple[bytes, int] = size
         else:
             result = self._consume(size)
+        if self._read_any_result is not None:
+            # A read_until_any read also reports which delimiter matched.
+            result = (result, self._read_any_result)
+            self._read_any_result = None
         if self._read_future is not None:
             future = self._read_future
             self._read_future = None
@@ -903,6 +1068,8 @@ class BaseIOStream:
         as returned by _find_read_pos.
         """
         self._read_bytes = self._read_delimiter = self._read_regex = None
+        self._read_delimiters = None
+        self._read_any_matcher = None
         self._read_partial = False
         self._finish_read(pos)
 
@@ -943,9 +1110,58 @@ class BaseIOStream:
                     self._check_max_bytes(self._read_regex, loc)
                     return loc
                 self._check_max_bytes(self._read_regex, self._read_buffer_size)
+        elif self._read_delimiters is not None:
+            return self._find_read_pos_any()
         return None
 
-    def _check_max_bytes(self, delimiter: bytes | Pattern, size: int) -> None:
+    def _find_read_pos_any(self) -> int | None:
+        """Attempts to find a read_until_any match in the read buffer.
+
+        Only bytes buffered since the previous call are examined.  If a
+        complete match is ready to be reported, stores the delimiter
+        index in ``_read_any_result`` and returns the number of bytes to
+        consume; otherwise returns None.
+        """
+        matcher = self._read_any_matcher
+        delimiters = self._read_delimiters
+        assert matcher is not None and delimiters is not None
+        if self._read_any_scan_pos < self._read_buffer_size:
+            for start, index, length in matcher.feed(
+                self._read_buffer, self._read_any_scan_pos, self._read_buffer_size
+            ):
+                best = self._read_any_best
+                if (
+                    best is None
+                    or start < best[0]
+                    or (start == best[0] and length > len(delimiters[best[1]]))
+                ):
+                    self._read_any_best = (start, index)
+            self._read_any_scan_pos = self._read_buffer_size
+        best = self._read_any_best
+        if best is None:
+            # No complete match yet; any future match must end beyond
+            # the current buffer, so fail if it is already too large.
+            self._check_max_bytes(delimiters, self._read_buffer_size)
+            return None
+        start, index = best
+        end = start + len(delimiters[index])
+        # The final result can only grow past this match, so the read is
+        # already known to be unsatisfiable if this match is too large.
+        self._check_max_bytes(delimiters[index], end)
+        if (
+            not self._read_any_eof
+            and start >= self._read_any_scan_pos - matcher.live_partial_length()
+        ):
+            # A longer delimiter may still match at an earlier or equal
+            # start position once more data arrives, so the winner
+            # cannot be decided yet.
+            return None
+        self._read_any_result = index
+        return end
+
+    def _check_max_bytes(
+        self, delimiter: bytes | Pattern | tuple[bytes, ...], size: int
+    ) -> None:
         if self._read_max_bytes is not None and size > self._read_max_bytes:
             raise UnsatisfiableReadError(
                 "delimiter %r not found within %d bytes"

@@ -507,6 +507,225 @@ class TestReadWriteMixin(AsyncTestCase):
             rs.close()
 
     @gen_test
+    def test_read_until_any(self):
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            # One packet carries both the delimiter of the first message
+            # and the body of the next one; the extra bytes must remain
+            # available to later reads.
+            ws.write(b"hello;next")
+            data, index = yield rs.read_until_any([b"\n", b";"])
+            self.assertEqual(data, b"hello;")
+            self.assertEqual(index, 1)
+            data = yield rs.read_bytes(4)
+            self.assertEqual(data, b"next")
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_read_until_any_earliest_start_wins(self):
+        # A match that starts earlier wins even if another delimiter
+        # would be completed first by a naive left-to-right scan.
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            ws.write(b"xbcd")
+            data, index = yield rs.read_until_any([b"xbcd", b"bc"])
+            self.assertEqual(data, b"xbcd")
+            self.assertEqual(index, 0)
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_read_until_any_longest_at_same_start(self):
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            ws.write(b"abc!")
+            data, index = yield rs.read_until_any([b"ab", b"abc"])
+            self.assertEqual(data, b"abc")
+            self.assertEqual(index, 1)
+            data = yield rs.read_bytes(1)
+            self.assertEqual(data, b"!")
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    async def test_read_until_any_prefix_ambiguity(self):
+        # When a short delimiter is a prefix of a longer one, the read
+        # waits until enough data has arrived to decide between them.
+        async with self.iostream_pair() as (rs, ws):
+            fut = asyncio.ensure_future(rs.read_until_any([b"ab", b"abc"]))
+            await ws.write(b"ab")
+            await gen.sleep(0.1)
+            self.assertFalse(fut.done())
+            await ws.write(b"c")
+            data, index = await fut
+            self.assertEqual((data, index), (b"abc", 1))
+
+            fut = asyncio.ensure_future(rs.read_until_any([b"ab", b"abc"]))
+            await ws.write(b"ab")
+            await gen.sleep(0.1)
+            self.assertFalse(fut.done())
+            await ws.write(b"x")
+            data, index = await fut
+            self.assertEqual((data, index), (b"ab", 0))
+
+    @gen_test
+    async def test_read_until_any_split_across_packets(self):
+        # A delimiter (and the ambiguity between delimiters) may be
+        # split across an arbitrary number of packets.
+        async with self.iostream_pair() as (rs, ws):
+            fut = asyncio.ensure_future(rs.read_until_any([b"\r\n\r\n", b"\n\n"]))
+            await ws.write(b"head\r")
+            await gen.sleep(0.1)
+            self.assertFalse(fut.done())
+            await ws.write(b"\n\r")
+            await gen.sleep(0.1)
+            self.assertFalse(fut.done())
+            await ws.write(b"\nrest")
+            data, index = await fut
+            self.assertEqual((data, index), (b"head\r\n\r\n", 0))
+            data = await rs.read_bytes(4)
+            self.assertEqual(data, b"rest")
+
+    @gen_test
+    def test_read_until_any_max_bytes(self):
+        rs, ws = yield self.make_iostream_pair()
+        closed = Event()
+        rs.set_close_callback(closed.set)
+        try:
+            # Extra room under the limit.  The trailing byte is needed
+            # to disambiguate the short delimiter from the longer one.
+            fut = rs.read_until_any([b"def", b"deff"], max_bytes=50)
+            ws.write(b"abcdef!")
+            data, index = yield fut
+            self.assertEqual((data, index), (b"abcdef", 0))
+            data = yield rs.read_bytes(1)
+            self.assertEqual(data, b"!")
+
+            # Just enough space
+            fut = rs.read_until_any([b"def"], max_bytes=6)
+            ws.write(b"abcdef")
+            data, index = yield fut
+            self.assertEqual((data, index), (b"abcdef", 0))
+
+            # Not enough space, but we don't know it until all we can do
+            # is log a warning and close the connection.
+            with ExpectLog(gen_log, "Unsatisfiable read", level=logging.INFO):
+                fut = rs.read_until_any([b"def"], max_bytes=5)
+                ws.write(b"123456")
+                yield closed.wait()
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_read_until_any_max_bytes_inline(self):
+        rs, ws = yield self.make_iostream_pair()
+        closed = Event()
+        rs.set_close_callback(closed.set)
+        try:
+            # Similar to the error case in the previous test, but the
+            # ws writes first so the over-limit condition is detected
+            # inline.  For consistency with the out-of-line case, we do
+            # not raise the error synchronously.
+            ws.write(b"123456")
+            with ExpectLog(gen_log, "Unsatisfiable read", level=logging.INFO):
+                with self.assertRaises(StreamClosedError):
+                    yield rs.read_until_any([b"def"], max_bytes=5)
+            yield closed.wait()
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    async def test_read_until_any_eof_resolves_ambiguity(self):
+        # At EOF a partial match can never complete, so a complete match
+        # that was waiting on a longer potential delimiter is returned.
+        async with self.iostream_pair() as (rs, ws):
+            fut = asyncio.ensure_future(rs.read_until_any([b"ab", b"abc"]))
+            await ws.write(b"ab")
+            await gen.sleep(0.1)
+            self.assertFalse(fut.done())
+            ws.close()
+            data, index = await fut
+            self.assertEqual((data, index), (b"ab", 0))
+
+    @gen_test
+    async def test_read_until_any_eof_no_match(self):
+        # EOF without a complete match fails the read with
+        # StreamClosedError; the buffered bytes remain available to
+        # subsequent reads.
+        async with self.iostream_pair() as (rs, ws):
+            fut = asyncio.ensure_future(rs.read_until_any([b"done", b"quit"]))
+            await ws.write(b"partial")
+            ws.close()
+            with self.assertRaises(StreamClosedError):
+                await fut
+            data = await rs.read_bytes(7)
+            self.assertEqual(data, b"partial")
+
+    @gen_test
+    async def test_read_until_any_cancel(self):
+        # Cancelling the future does not cancel the underlying read:
+        # when a match later completes, the matched bytes are still
+        # consumed from the buffer and discarded (as with read_until).
+        async with self.iostream_pair() as (rs, ws):
+            fut = asyncio.ensure_future(rs.read_until_any([b"\n", b";"]))
+            await gen.sleep(0.1)
+            fut.cancel()
+            await ws.write(b"abc\nrest")
+            await gen.sleep(0.1)
+            self.assertTrue(fut.cancelled())
+            data = await rs.read_bytes(4)
+            self.assertEqual(data, b"rest")
+
+    @gen_test
+    def test_read_until_any_invalid_delimiters(self):
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            with self.assertRaises(ValueError):
+                rs.read_until_any([])
+            with self.assertRaises(ValueError):
+                rs.read_until_any([b""])
+            with self.assertRaises(ValueError):
+                rs.read_until_any([b"ok", b""])
+            # The failed validations did not disturb the read state.
+            ws.write(b"x\n")
+            data, index = yield rs.read_until_any([b"\n"])
+            self.assertEqual((data, index), (b"x\n", 0))
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_large_read_until_any(self):
+        # read_until_any examines each buffered byte only once, so a
+        # large read completes without a quadratic rescan.
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            # This test fails on pypy with ssl.  I think it's because
+            # pypy's gc defeats moves objects, breaking the
+            # "frozen write buffer" assumption.
+            if (
+                isinstance(rs, SSLIOStream)
+                and platform.python_implementation() == "PyPy"
+            ):
+                raise unittest.SkipTest("pypy gc causes problems with openssl")
+            NUM_KB = 1024
+            for i in range(NUM_KB):
+                ws.write(b"A" * 1024)
+            ws.write(b"\r\n")
+            data, index = yield rs.read_until_any([b"\r\n", b"\n"])
+            self.assertEqual(len(data), NUM_KB * 1024 + 2)
+            self.assertEqual(index, 0)
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
     def test_read_until_regex_max_bytes(self):
         rs, ws = yield self.make_iostream_pair()
         closed = Event()
