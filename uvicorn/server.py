@@ -62,6 +62,7 @@ class ServerState:
         self.connections: set[Protocols] = set()
         self.tasks: set[asyncio.Task[None]] = set()
         self.default_headers: list[tuple[bytes, bytes]] = []
+        self.draining = False
 
 
 class Server:
@@ -73,8 +74,12 @@ class Server:
         self.should_exit = False
         self.force_exit = False
         self.last_notified = 0.0
+        self.draining = False
+        self.drained = False
 
         self._captured_signals: list[int] = []
+        self._drain_task: asyncio.Task[None] | None = None
+        self._lifespan_shutdown_complete = False
 
     @functools.cached_property
     def limit_max_requests(self) -> int | None:
@@ -308,7 +313,85 @@ class Server:
 
         # Send the lifespan shutdown event, and wait for application shutdown.
         if not self.force_exit:
-            await self.lifespan.shutdown()
+            await self._shutdown_lifespan()
+
+    async def drain(self, timeout: float | None = None) -> None:
+        """
+        Drain the server, without exiting the main loop.
+
+        Once draining, the server stops accepting new work:
+
+        * New requests, including further requests on existing keep-alive
+          connections, are rejected with a 503 response and the connection
+          is closed.
+        * WebSocket handshakes are rejected. Established WebSocket
+          connections are closed with a 1012 (service restart) close code.
+        * In-flight responses, including streaming responses, run to
+          completion.
+
+        Draining waits for in-flight work to complete, up to ``timeout``
+        seconds (defaulting to ``config.timeout_graceful_shutdown``), after
+        which any remaining tasks are cancelled. The lifespan shutdown event
+        is then sent to the application, at most once. The caller remains
+        responsible for exiting the server, for example by setting
+        'server.should_exit = True'.
+
+        This method is idempotent: repeated calls await the same cleanup
+        flow rather than starting a new one.
+        """
+        if self._drain_task is None:
+            self._drain_task = asyncio.ensure_future(self._drain(timeout))
+        await asyncio.shield(self._drain_task)
+
+    async def _drain(self, timeout: float | None) -> None:
+        if timeout is None:
+            timeout = self.config.timeout_graceful_shutdown
+
+        logger.info("Draining server, waiting for in-flight requests to complete")
+        self.draining = True
+        self.server_state.draining = True
+
+        # Notify all existing connections. WebSocket connections are closed
+        # with a 1012 close code. HTTP connections finish any in-flight
+        # response, and reject further requests while draining.
+        for connection in list(self.server_state.connections):
+            connection.drain()
+
+        try:
+            await asyncio.wait_for(self._wait_drained(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.error(
+                "Cancel %s running task(s), drain timeout exceeded",
+                len(self.server_state.tasks),
+            )
+            for task in self.server_state.tasks:
+                task.cancel(msg="Task cancelled, drain timeout exceeded")
+
+        if not self.force_exit:
+            await self._shutdown_lifespan()
+
+        self.drained = True
+        logger.info("Server drain complete")
+
+    async def _wait_drained(self) -> None:
+        # Wait for in-flight tasks (request/response cycles and WebSocket
+        # handlers) to complete. Idle keep-alive connections are left alone:
+        # any further request on them is rejected while draining.
+        if self.server_state.tasks and not self.force_exit:
+            msg = "Waiting for background tasks to complete. (CTRL+C to force quit)"
+            logger.info(msg)
+            while self.server_state.tasks and not self.force_exit:
+                await asyncio.sleep(0.1)
+
+    async def _shutdown_lifespan(self) -> None:
+        # The lifespan shutdown event is sent at most once, even if both
+        # drain() and shutdown() run.
+        if self._lifespan_shutdown_complete:
+            return
+        self._lifespan_shutdown_complete = True
+        lifespan = getattr(self, "lifespan", None)
+        if lifespan is not None:
+            await lifespan.shutdown()
 
     async def _wait_tasks_to_complete(self) -> None:
         # Wait for existing connections to finish sending responses.

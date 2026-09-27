@@ -220,12 +220,17 @@ class H11Protocol(asyncio.Protocol):
                     "headers": self.headers,
                     "state": self.app_state.copy(),
                 }
-                if self._should_upgrade():
+                if self._should_upgrade() and not self.server_state.draining:
                     self.handle_websocket_upgrade(event)
                     return
 
+                if self.server_state.draining:
+                    # Reject new requests while the server is draining. The
+                    # 503 response includes 'connection: close', so the
+                    # connection is closed once the response is sent.
+                    app = service_unavailable
                 # Handle 503 responses when 'limit_concurrency' is exceeded.
-                if self.limit_concurrency is not None and (
+                elif self.limit_concurrency is not None and (
                     len(self.connections) >= self.limit_concurrency or len(self.tasks) >= self.limit_concurrency
                 ):
                     app = service_unavailable
@@ -343,6 +348,14 @@ class H11Protocol(asyncio.Protocol):
             self.transport.close()
         else:
             self.cycle.keep_alive = False
+
+    def drain(self) -> None:
+        """
+        Called by the server to commence draining.
+
+        Any in-flight response is left to complete. New requests on this
+        connection are rejected with a 503 response in 'handle_events'.
+        """
 
     def pause_writing(self) -> None:
         """

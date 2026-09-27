@@ -116,6 +116,31 @@ Uvicorn handles process shutdown gracefully, ensuring that connections are prope
 
 ---
 
+## Draining
+
+During a rolling deployment there is usually a gap between the load balancer stopping to route new requests to an instance, and the instance actually exiting. To cover this gap, the programmatic `Server` interface supports entering a *drain* state, where the server stops accepting new work and waits for in-flight work to complete, while the caller remains responsible for deciding when to exit:
+
+```python
+server = Server(config)
+serve_task = asyncio.create_task(server.serve())
+...
+await server.drain()  # Stop accepting new work, and wait for in-flight requests.
+server.should_exit = True  # The caller decides when to exit.
+await serve_task
+```
+
+Once draining:
+
+* In-flight responses, including streaming responses, run to completion.
+* New requests are rejected with a `503` response and the connection is closed. This includes requests on newly opened connections, and the next request on existing keep-alive connections.
+* WebSocket handshakes are rejected. Established WebSocket connections are closed with a `1012` (service restart) close code.
+* After `timeout` seconds (defaulting to `timeout_graceful_shutdown`), any remaining tasks are cancelled.
+* The lifespan shutdown event is sent to the application exactly once, even if the server is shut down afterwards.
+
+The drain state is observable through `server.draining` and `server.drained`. Calling `drain()` repeatedly is safe: all calls await the same cleanup flow rather than starting a new one.
+
+---
+
 ## HTTP Pipelining
 
 HTTP/1.1 provides support for sending multiple requests on a single connection, before having received each corresponding response. Servers are required to support HTTP pipelining, but it is now generally accepted to lead to implementation issues. It is not enabled on browsers, and may not necessarily be enabled on any proxies that the HTTP request passes through.

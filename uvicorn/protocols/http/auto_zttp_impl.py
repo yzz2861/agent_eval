@@ -65,6 +65,12 @@ class AutoZttpProtocol(asyncio.Protocol):
     def shutdown(self) -> None:
         self.transport.close()
 
+    def drain(self) -> None:
+        """
+        Called by the server to commence draining.
+        """
+        self.shutdown()
+
     def data_received(self, data: bytes) -> None:
         self.buffer += data
         if len(self.buffer) < len(HTTP2_PREFACE) and HTTP2_PREFACE.startswith(self.buffer):

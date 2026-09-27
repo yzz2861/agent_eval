@@ -296,6 +296,12 @@ class ZttpProtocol(asyncio.Protocol):
         else:
             self.cycle.keep_alive = False
 
+    def drain(self) -> None:
+        """
+        Called by the server to commence draining.
+        """
+        self.shutdown()
+
     def pause_writing(self) -> None:
         """
         Called by the transport when the write buffer exceeds the high water mark.

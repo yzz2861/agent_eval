@@ -157,6 +157,13 @@ class WebSocketProtocol(WebSocketServerProtocol):
             self.send_500_response()
         self.transport.close()
 
+    def drain(self) -> None:
+        """
+        Called by the server to commence draining. Established WebSocket
+        connections are closed with a 1012 (service restart) close code.
+        """
+        self.shutdown()
+
     def on_task_complete(self, task: asyncio.Task[None]) -> None:
         self.tasks.discard(task)
 

@@ -191,6 +191,13 @@ class WebSocketsSansIOProtocol(asyncio.Protocol):
             self.send_500_response()
         self.transport.close()
 
+    def drain(self) -> None:
+        """
+        Called by the server to commence draining. Established WebSocket
+        connections are closed with a 1012 (service restart) close code.
+        """
+        self.shutdown()
+
     def data_received(self, data: bytes) -> None:
         self.conn.receive_data(data)
         if self.conn.parser_exc is not None:  # pragma: no cover

@@ -178,7 +178,11 @@ class HttpToolsProtocol(asyncio.Protocol):
             self.send_400_response(msg)
             return
         except httptools.HttpParserUpgrade:
-            if self._should_upgrade():
+            if self.server_state.draining:
+                # The upgrade request is rejected with a 503 response by the
+                # regular drain path in 'on_headers_complete'.
+                pass
+            elif self._should_upgrade():
                 self.handle_websocket_upgrade()
             else:
                 self._unsupported_upgrade_warning()
@@ -251,7 +255,7 @@ class HttpToolsProtocol(asyncio.Protocol):
         self.scope["method"] = method.decode("ascii")
         if http_version != "1.1":
             self.scope["http_version"] = http_version
-        if self.parser.should_upgrade() and self._should_upgrade():
+        if self.parser.should_upgrade() and self._should_upgrade() and not self.server_state.draining:
             return
         parsed_url = httptools.parse_url(self.url)
         raw_path = parsed_url.path
@@ -264,8 +268,13 @@ class HttpToolsProtocol(asyncio.Protocol):
         self.scope["raw_path"] = full_raw_path
         self.scope["query_string"] = parsed_url.query or b""
 
+        if self.server_state.draining:
+            # Reject new requests while the server is draining. The
+            # 503 response includes 'connection: close', so the
+            # connection is closed once the response is sent.
+            app = service_unavailable
         # Handle 503 responses when 'limit_concurrency' is exceeded.
-        if self.limit_concurrency is not None and (
+        elif self.limit_concurrency is not None and (
             len(self.connections) >= self.limit_concurrency or len(self.tasks) >= self.limit_concurrency
         ):
             app = service_unavailable
@@ -354,6 +363,14 @@ class HttpToolsProtocol(asyncio.Protocol):
             self.transport.close()
         else:
             self.cycle.keep_alive = False
+
+    def drain(self) -> None:
+        """
+        Called by the server to commence draining.
+
+        Any in-flight response is left to complete. New requests on this
+        connection are rejected with a 503 response in 'on_headers_complete'.
+        """
 
     def pause_writing(self) -> None:
         """
