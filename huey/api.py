@@ -62,6 +62,11 @@ class Huey(object):
         any ``on_error`` handler. When ``False``, the error is withheld until
         the task's retries are exhausted. Defaults to ``True`` for backwards
         compatibility.
+    :param bool dead_letters: quarantine messages that cannot enter the normal
+        execution flow (e.g. corrupt data or unknown task names) into a
+        dead-letter store, preserving the raw message and the failure reason
+        for later inspection and requeueing. Requires a storage backend with
+        dead-letter support (memory and sqlite). Defaults to ``False``.
     :param bool utc: use UTC internally by converting from local time.
     :param bool immediate: useful for debugging; causes tasks to be executed
         synchronously in the application.
@@ -94,12 +99,14 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, dead_letters=False,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
         self.store_none = store_none
         self.store_intermediate_errors = store_intermediate_errors
+        self.store_dead_letters = dead_letters
         self.utc = utc
         self._immediate = immediate
         self.immediate_use_memory = immediate_use_memory
@@ -112,6 +119,11 @@ class Huey(object):
         if storage_class is not None:
             self.storage_class = storage_class
         self.storage = self.create_storage()
+
+        if dead_letters and not self.storage.supports_dead_letters:
+            raise ConfigurationError(
+                'dead-letter queue was enabled, but %s does not support '
+                'dead-letter storage.' % type(self.storage).__name__)
 
         # Allow overriding the default TaskWrapper implementation.
         self.task_wrapper_class = self.get_task_wrapper_class()
@@ -381,9 +393,30 @@ class Huey(object):
         return ResultGroup(pipeline)
 
     def dequeue(self):
-        data = self.storage.dequeue()
-        if data is not None:
-            return self.deserialize_task(data)
+        while True:
+            data = self.storage.dequeue()
+            if data is None:
+                return None
+            try:
+                return self.deserialize_task(data)
+            except Exception as exc:
+                if not self.store_dead_letters:
+                    raise
+                self.quarantine(data, exc)
+
+    def quarantine(self, data, exc):
+        """
+        Move a raw message that could not enter the normal execution flow
+        into the dead-letter store, preserving the raw data and the reason.
+        """
+        error = '%s: %s' % (type(exc).__name__, exc)
+        logger.error('Quarantining message that could not be processed: %s',
+                     error)
+        try:
+            return self.storage.add_dead_letter(
+                data, error, self._get_timestamp())
+        except Exception:
+            logger.exception('Error storing dead-letter message.')
 
     def put(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data))
@@ -782,6 +815,68 @@ class Huey(object):
 
     def scheduled_count(self):
         return self.storage.schedule_size()
+
+    def _check_dead_letters_enabled(self):
+        if not self.store_dead_letters:
+            raise ConfigurationError(
+                'dead-letter queue is not enabled. Pass dead_letters=True '
+                'when initializing Huey to enable it.')
+
+    def dead_letters(self, limit=None):
+        """
+        List metadata for quarantined messages, newest first. The raw message
+        data is not included and is never deserialized.
+
+        :param int limit: Restrict the number of records returned.
+        :return: A list of DeadLetterMetadata named-tuples.
+        """
+        self._check_dead_letters_enabled()
+        return self.storage.dead_letters(limit)
+
+    def dead_letter_count(self):
+        """
+        Return the number of quarantined messages.
+        """
+        self._check_dead_letters_enabled()
+        return self.storage.dead_letter_size()
+
+    def get_dead_letter(self, record_id):
+        """
+        Fetch a single dead-letter record, including the raw (still
+        serialized) message data.
+
+        :param str record_id: Dead-letter record identifier.
+        :return: A DeadLetter or None if no matching record exists.
+        """
+        self._check_dead_letters_enabled()
+        return self.storage.get_dead_letter(record_id)
+
+    def requeue_dead_letter(self, record_id):
+        """
+        Re-enqueue the raw message for the given dead-letter record, e.g.
+        after deploying a fix for the underlying problem. The record is
+        atomically claimed, so concurrent requeues of the same record can
+        succeed at most once. If re-enqueueing fails, the record is restored
+        with the failure reason and the exception is re-raised.
+
+        :param str record_id: Dead-letter record identifier.
+        :return: True if the message was re-enqueued, False if no matching
+            record exists (e.g. it was already requeued).
+        """
+        self._check_dead_letters_enabled()
+        record = self.storage.claim_dead_letter(record_id)
+        if record is None:
+            return False
+        try:
+            self.storage.enqueue(record.data)
+        except Exception as exc:
+            logger.exception('Error requeueing dead-letter %s.', record_id)
+            self.storage.restore_dead_letter(record._replace(
+                timestamp=self._get_timestamp(),
+                error='requeue failed: %s' % exc))
+            raise
+        logger.info('Requeued dead-letter message %s.', record_id)
+        return True
 
     def all_results(self):
         return self.storage.result_items()

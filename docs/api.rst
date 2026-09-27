@@ -226,7 +226,7 @@ Huey types
 Huey object
 -----------
 
-.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, store_intermediate_errors=True, storage_kwargs)
+.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, store_intermediate_errors=True, dead_letters=False, storage_kwargs)
 
     :param str name: the name of the task queue, e.g. your application's name.
     :param bool results: whether to store task results.
@@ -246,6 +246,9 @@ Huey object
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend whenever immediate-mode is enabled.
+    :param bool dead_letters: quarantine messages that cannot enter the normal
+        execution flow (corrupt data or unknown task names) into a dead-letter
+        store. See :ref:`dead-letters`. Defaults to ``False``.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
 
@@ -1123,6 +1126,38 @@ Huey object
 
         :returns: the number of tasks currently in the schedule, without
             deserializing them.
+
+    .. py:method:: dead_letters(limit=None)
+
+        List metadata for quarantined messages, newest first. Requires
+        ``dead_letters=True``. The raw message data is not included and is
+        never deserialized. See :ref:`dead-letters`.
+
+        :param int limit: restrict the number of records returned.
+        :returns: a list of ``DeadLetterMetadata`` named-tuples.
+
+    .. py:method:: dead_letter_count()
+
+        :returns: the number of quarantined messages.
+
+    .. py:method:: get_dead_letter(record_id)
+
+        Fetch a single dead-letter record, including the raw (still
+        serialized) message data.
+
+        :param str record_id: dead-letter record identifier.
+        :returns: a ``DeadLetter`` or ``None`` if no matching record exists.
+
+    .. py:method:: requeue_dead_letter(record_id)
+
+        Re-enqueue the raw message for the given dead-letter record. The
+        record is atomically claimed, so concurrent requeues of the same
+        record succeed at most once. If re-enqueueing fails, the record is
+        restored with the failure reason and the exception is re-raised.
+
+        :param str record_id: dead-letter record identifier.
+        :returns: ``True`` if the message was re-enqueued, ``False`` if no
+            matching record exists (e.g. it was already requeued).
 
     .. py:method:: all_results()
 
@@ -2485,4 +2520,3 @@ Huey comes with several built-in storage implementations:
 
 .. autoclass:: huey.storage.BaseStorage
    :members:
-

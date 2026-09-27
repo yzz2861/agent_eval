@@ -3,6 +3,16 @@ Changelog
 
 ## master
 
+* Add an optional dead-letter queue (`Huey(..., dead_letters=True)`). Messages
+  that cannot enter the normal execution flow (corrupt/truncated data or
+  unknown task names) are quarantined with their raw content and failure
+  reason, and the consumer keeps processing subsequent messages. Records have
+  a stable id, timestamp, attempt count and source queue; listing never
+  deserializes the quarantined content. Retention is bounded via
+  `max_dead_letters`, and records can be explicitly requeued with
+  `Huey.requeue_dead_letter()` after deploying a fix (concurrent requeues of
+  one record succeed at most once, failed requeues remain tracked).
+  Implemented for the memory and sqlite storage backends.
 * Fix `RedisSemaphore` admitting more than `value` holders under contention.
   Acquisition now evicts, counts and adds in one Lua script, using the server
   clock, so a caller whose timestamp was sampled before a slower caller's can

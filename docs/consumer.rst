@@ -480,3 +480,62 @@ Signals
 The consumer will emit certain :ref:`signals` as it executes tasks. User code
 can register signal handlers to respond to these events. For more information,
 see the :ref:`signals` document.
+
+.. _dead-letters:
+
+Dead-letter queue
+-----------------
+
+Sometimes a message cannot even enter the normal execution flow: the data may
+be corrupt or truncated, or it may reference a task that no longer (or does
+not yet) exist in the registry, e.g. after an old deployment left messages
+behind. By default these messages are logged and discarded, which makes them
+hard to recover.
+
+Huey provides an optional dead-letter queue that quarantines such messages,
+preserving the raw message data along with the failure reason:
+
+.. code-block:: python
+
+    from huey import SqliteHuey
+
+    huey = SqliteHuey('my-app', dead_letters=True)
+
+When enabled, the consumer moves any message it cannot deserialize (or whose
+task is not registered) into the dead-letter store and continues processing
+subsequent messages. Tasks that raise exceptions while executing are *not*
+affected -- they continue through the normal retry/result flow.
+
+Each dead-letter record has a stable identifier, a timestamp, an attempt
+count, the name of the source queue, and the error that caused the message to
+be quarantined. Listing records never deserializes the quarantined content:
+
+.. code-block:: pycon
+
+    >>> for record in huey.dead_letters():
+    ...     print(record.id, record.timestamp, record.attempts,
+    ...           record.queue, record.error, record.size)
+
+The store is bounded (1000 records by default, oldest evicted first). To use
+a different limit, pass ``max_dead_letters`` as a storage keyword:
+
+.. code-block:: python
+
+    huey = SqliteHuey('my-app', dead_letters=True, max_dead_letters=100)
+
+After deploying a fix, individual records can be explicitly requeued. The
+raw message is re-enqueued as-is; if it fails again it is quarantined again
+with an incremented attempt count. Concurrent requeues of the same record
+succeed at most once, and a failed requeue leaves the record in place with
+the failure reason:
+
+.. code-block:: pycon
+
+    >>> huey.requeue_dead_letter(record.id)
+    True
+    >>> huey.requeue_dead_letter(record.id)  # Already requeued.
+    False
+
+The full record, including the raw (still serialized) message data, can be
+inspected with :py:meth:`Huey.get_dead_letter`. The dead-letter store is
+currently supported by the memory and sqlite storage backends.

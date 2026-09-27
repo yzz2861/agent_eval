@@ -1,5 +1,7 @@
+from collections import namedtuple
 from functools import cached_property
 import contextlib
+import datetime
 import hashlib
 import heapq
 import itertools
@@ -37,12 +39,37 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+DeadLetterMetadata = namedtuple('DeadLetterMetadata', (
+    'id', 'timestamp', 'attempts', 'queue', 'error', 'size'))
+
+
+class DeadLetter(namedtuple('_DeadLetter', (
+        'id', 'timestamp', 'attempts', 'queue', 'error', 'data'))):
+    """
+    Record of a raw message that could not enter the normal execution flow
+    (e.g. it could not be deserialized, or references an unknown task).
+
+    The raw message data is preserved in "data" as opaque bytes. Huey will
+    never attempt to deserialize it.
+    """
+    __slots__ = ()
+
+    @property
+    def size(self):
+        return len(self.data) if self.data is not None else 0
+
+    def metadata(self):
+        return DeadLetterMetadata(self.id, self.timestamp, self.attempts,
+                                  self.queue, self.error, self.size)
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    supports_dead_letters = False
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -305,6 +332,77 @@ class BaseStorage(object):
         self.flush_schedule()
         self.flush_results()
         self.flush_counters()
+        if self.supports_dead_letters:
+            self.flush_dead_letters()
+
+    def add_dead_letter(self, data, error, timestamp):
+        """
+        Store a raw message that could not enter the normal execution flow.
+
+        :param bytes data: Raw message data (never deserialized).
+        :param str error: Description of why the message was quarantined.
+        :param datetime timestamp: Time the message was quarantined.
+        :return: The stable identifier of the dead-letter record.
+        """
+        raise NotImplementedError
+
+    def dead_letters(self, limit=None):
+        """
+        List dead-letter record metadata, newest first. The raw message data
+        is not included, so listing never touches the quarantined content.
+
+        :param int limit: Restrict the number of records returned.
+        :return: A list of DeadLetterMetadata named-tuples.
+        """
+        raise NotImplementedError
+
+    def get_dead_letter(self, record_id):
+        """
+        Fetch a single dead-letter record, including the raw message data.
+
+        :param str record_id: Dead-letter record identifier.
+        :return: A DeadLetter or None if no matching record exists.
+        """
+        raise NotImplementedError
+
+    def claim_dead_letter(self, record_id):
+        """
+        Atomically mark a dead-letter record as claimed and return it. A
+        claimed record is hidden from listings, ensuring that concurrent
+        requeues of the same record succeed at most once. If the requeued
+        message fails again, the record becomes visible with an incremented
+        attempt count.
+
+        :param str record_id: Dead-letter record identifier.
+        :return: A DeadLetter or None if no matching record exists.
+        """
+        raise NotImplementedError
+
+    def restore_dead_letter(self, record):
+        """
+        Make a previously-claimed dead-letter record visible again, e.g.
+        when the attempt to requeue the message failed.
+
+        :param DeadLetter record: The record to restore.
+        :return: No return value.
+        """
+        raise NotImplementedError
+
+    def dead_letter_size(self):
+        """
+        Return the number of dead-letter records.
+
+        :return: Number of dead-letter records.
+        """
+        raise NotImplementedError
+
+    def flush_dead_letters(self):
+        """
+        Remove all dead-letter records.
+
+        :return: No return value.
+        """
+        raise NotImplementedError
 
 
 class BlackHoleStorage(BaseStorage):
@@ -332,7 +430,10 @@ class BlackHoleStorage(BaseStorage):
 
 
 class MemoryStorage(BaseStorage):
+    supports_dead_letters = True
+
     def __init__(self, *args, **kwargs):
+        self._max_dead_letters = kwargs.pop('max_dead_letters', 1000)
         super(MemoryStorage, self).__init__(*args, **kwargs)
         self._c = 0  # Counter to ensure FIFO behavior for queue.
         self._queue = []
@@ -340,6 +441,8 @@ class MemoryStorage(BaseStorage):
         self._expires = {}
         self._schedule = []
         self._counters = {}
+        self._dead_letters = {}
+        self._dead_letter_claims = set()
         self._lock = threading.RLock()
 
     def enqueue(self, data, priority=None):
@@ -449,6 +552,52 @@ class MemoryStorage(BaseStorage):
 
     def flush_counters(self):
         self._counters = {}
+
+    def add_dead_letter(self, data, error, timestamp):
+        data = bytes(data)
+        record_id = hashlib.sha256(data).hexdigest()
+        with self._lock:
+            existing = self._dead_letters.get(record_id)
+            attempts = existing.attempts + 1 if existing is not None else 1
+            self._dead_letters[record_id] = DeadLetter(
+                record_id, timestamp, attempts, self.name, error, data)
+            self._dead_letter_claims.discard(record_id)
+            while len(self._dead_letters) > self._max_dead_letters:
+                oldest_id = min(self._dead_letters,
+                                key=lambda i: self._dead_letters[i].timestamp)
+                del self._dead_letters[oldest_id]
+                self._dead_letter_claims.discard(oldest_id)
+        return record_id
+
+    def dead_letters(self, limit=None):
+        records = [record for record_id, record in self._dead_letters.items()
+                   if record_id not in self._dead_letter_claims]
+        records.sort(key=lambda record: record.timestamp, reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return [record.metadata() for record in records]
+
+    def get_dead_letter(self, record_id):
+        return self._dead_letters.get(record_id)
+
+    def claim_dead_letter(self, record_id):
+        with self._lock:
+            if record_id in self._dead_letters and \
+               record_id not in self._dead_letter_claims:
+                self._dead_letter_claims.add(record_id)
+                return self._dead_letters[record_id]
+
+    def restore_dead_letter(self, record):
+        with self._lock:
+            self._dead_letters[record.id] = record
+            self._dead_letter_claims.discard(record.id)
+
+    def dead_letter_size(self):
+        return len(self._dead_letters) - len(self._dead_letter_claims)
+
+    def flush_dead_letters(self):
+        self._dead_letters = {}
+        self._dead_letter_claims = set()
 
 
 # A custom lua script to pass to redis that will read tasks from the schedule
@@ -885,6 +1034,7 @@ class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     sqlite_version_info = getattr(sqlite3, 'sqlite_version_info', None)
+    supports_dead_letters = True
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')
@@ -903,18 +1053,26 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    table_deadletter = ('create table if not exists deadletter ('
+                        'queue text not null, id text not null, '
+                        'timestamp real not null, '
+                        'attempts integer not null default 1, '
+                        'error text not null, data blob not null, '
+                        'claimed integer not null default 0, '
+                        'primary key(queue, id))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_deadletter]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, max_dead_letters=1000, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
         self._journal_mode = journal_mode
         self._timeout = timeout  # Busy timeout in seconds, default is 5.
         self._conn_kwargs = kwargs
+        self._max_dead_letters = max_dead_letters
 
         # By default Sqlite may reuse rowids when rows are removed. This means
         # that SqliteHuey may not strictly be a FIFO. If strict FIFO ordering
@@ -1115,6 +1273,82 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_counters(self):
         self.sql('delete from counter where queue=?', (self.name,), True)
+
+    def add_dead_letter(self, data, error, timestamp):
+        data = bytes(data)
+        record_id = hashlib.sha256(data).hexdigest()
+        ts = timestamp.timestamp()
+        with self.db(commit=True) as curs:
+            curs.execute('update deadletter set timestamp=?, '
+                         'attempts=attempts+1, error=?, data=?, claimed=0 '
+                         'where queue=? and id=?',
+                         (ts, error, self.to_blob(data), self.name, record_id))
+            if curs.rowcount == 0:
+                curs.execute('insert into deadletter (queue, id, timestamp, '
+                             'attempts, error, data) values (?, ?, ?, 1, ?, '
+                             '?)', (self.name, record_id, ts, error,
+                                    self.to_blob(data)))
+            if self._max_dead_letters:
+                curs.execute('delete from deadletter where queue=? and rowid '
+                             'not in (select rowid from deadletter where '
+                             'queue=? order by timestamp desc, rowid desc '
+                             'limit ?)',
+                             (self.name, self.name, self._max_dead_letters))
+        return record_id
+
+    def dead_letters(self, limit=None):
+        sql = ('select id, timestamp, attempts, error, length(data) from '
+               'deadletter where queue=? and claimed=0 '
+               'order by timestamp desc, rowid desc')
+        params = (self.name,)
+        if limit is not None:
+            sql += ' limit ?'
+            params = (self.name, limit)
+        return [DeadLetterMetadata(
+                    record_id, datetime.datetime.fromtimestamp(ts), attempts,
+                    self.name, error, size)
+                for record_id, ts, attempts, error, size in
+                self.sql(sql, params, results=True)]
+
+    def _row_to_dead_letter(self, record_id, row):
+        ts, attempts, error, data = row
+        return DeadLetter(record_id, datetime.datetime.fromtimestamp(ts),
+                          attempts, self.name, error, bytes(data))
+
+    def get_dead_letter(self, record_id):
+        res = self.sql('select timestamp, attempts, error, data from '
+                       'deadletter where queue=? and id=?',
+                       (self.name, record_id), results=True)
+        if res:
+            return self._row_to_dead_letter(record_id, res[0])
+
+    def claim_dead_letter(self, record_id):
+        with self.db(commit=True) as curs:
+            curs.execute('update deadletter set claimed=1 where queue=? and '
+                         'id=? and claimed=0', (self.name, record_id))
+            if curs.rowcount != 1:
+                return None
+            curs.execute('select timestamp, attempts, error, data from '
+                         'deadletter where queue=? and id=?',
+                         (self.name, record_id))
+            row = curs.fetchone()
+        if row is not None:
+            return self._row_to_dead_letter(record_id, row)
+
+    def restore_dead_letter(self, record):
+        self.sql('insert or replace into deadletter (queue, id, timestamp, '
+                 'attempts, error, data, claimed) values (?, ?, ?, ?, ?, ?, '
+                 '0)',
+                 (self.name, record.id, record.timestamp.timestamp(),
+                  record.attempts, record.error, self.to_blob(record.data)),
+                 commit=True)
+
+    def dead_letter_size(self):
+        return self.sql('select count(id) from deadletter where queue=? and '
+                        'claimed=0', (self.name,), results=True)[0][0]
+
+    def flush_dead_letters(self):
+        self.sql('delete from deadletter where queue=?', (self.name,), True)
 
 
 class CySqliteStorage(SqliteStorage):
