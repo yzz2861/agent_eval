@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## Unreleased
 
 - Fix `max_keepalive_connections` not being properly handled. (#1000)
+- Add `stream_receive_budget` and `connection_receive_budget` arguments to the
+  HTTP/2 connections, bounding how much response body data may be buffered
+  per-stream and per-connection while waiting to be consumed.
 
 ## Version 1.0.9 (April 24th, 2025)
 

@@ -26,6 +26,13 @@ from .interfaces import AsyncConnectionInterface
 logger = logging.getLogger("httpcore.http2")
 
 
+# The default HTTP/2 flow control window size, as per RFC 7540.
+DEFAULT_FLOW_CONTROL_WINDOW_SIZE = 65535
+
+# The maximum permissible HTTP/2 flow control window size: 2**31 - 1.
+MAX_FLOW_CONTROL_WINDOW_SIZE = 2**31 - 1
+
+
 def has_body_headers(request: Request) -> bool:
     return any(
         k.lower() == b"content-length" or k.lower() == b"transfer-encoding"
@@ -48,10 +55,36 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
         origin: Origin,
         stream: AsyncNetworkStream,
         keepalive_expiry: float | None = None,
+        stream_receive_budget: int | None = None,
+        connection_receive_budget: int | None = None,
     ):
+        for name, budget in [
+            ("stream_receive_budget", stream_receive_budget),
+            ("connection_receive_budget", connection_receive_budget),
+        ]:
+            if budget is not None and budget <= 0:
+                raise ValueError(f"{name!r} must be a positive integer")
+
         self._origin = origin
         self._network_stream = stream
         self._keepalive_expiry: float | None = keepalive_expiry
+        # The receive budgets bound how much response body data may be
+        # buffered on a single stream, and across the entire connection,
+        # while waiting to be consumed by the caller. They are applied
+        # through the HTTP/2 flow control windows, so that a slow consumer
+        # on one stream cannot buffer unbounded amounts of data, without
+        # stalling the control frames of the other streams. A value of
+        # None preserves the historical default behaviour.
+        self._stream_receive_budget = (
+            None
+            if stream_receive_budget is None
+            else min(stream_receive_budget, MAX_FLOW_CONTROL_WINDOW_SIZE)
+        )
+        self._connection_receive_budget = (
+            None
+            if connection_receive_budget is None
+            else min(connection_receive_budget, MAX_FLOW_CONTROL_WINDOW_SIZE)
+        )
         self._h2_state = h2.connection.H2Connection(config=self.CONFIG)
         self._state = HTTPConnectionState.IDLE
         self._expire_at: float | None = None
@@ -166,7 +199,7 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
             with AsyncShieldCancellation():
                 kwargs = {"stream_id": stream_id}
                 async with Trace("response_closed", logger, request, kwargs):
-                    await self._response_closed(stream_id=stream_id)
+                    await self._response_closed(request=request, stream_id=stream_id)
 
             if isinstance(exc, h2.exceptions.ProtocolError):
                 # One case where h2 can raise a protocol error is when a
@@ -194,16 +227,28 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
         # Need to set these manually here instead of manipulating via
         # __setitem__() otherwise the H2Connection will emit SettingsUpdate
         # frames in addition to sending the undesired defaults.
+        initial_values = {
+            # Disable PUSH_PROMISE frames from the server since we don't do anything
+            # with them for now.  Maybe when we support caching?
+            h2.settings.SettingCodes.ENABLE_PUSH: 0,
+            # These two are taken from h2 for safe defaults
+            h2.settings.SettingCodes.MAX_CONCURRENT_STREAMS: 100,
+            h2.settings.SettingCodes.MAX_HEADER_LIST_SIZE: 65536,
+        }
+        if (
+            self._stream_receive_budget is not None
+            and self._stream_receive_budget < DEFAULT_FLOW_CONTROL_WINDOW_SIZE
+        ):
+            # If the per-stream receive budget is smaller than the default
+            # flow control window size, then we need to advertise a smaller
+            # initial window size, since flow control windows cannot be
+            # shrunk once the connection has been initiated.
+            initial_values[h2.settings.SettingCodes.INITIAL_WINDOW_SIZE] = (
+                self._stream_receive_budget
+            )
         self._h2_state.local_settings = h2.settings.Settings(
             client=True,
-            initial_values={
-                # Disable PUSH_PROMISE frames from the server since we don't do anything
-                # with them for now.  Maybe when we support caching?
-                h2.settings.SettingCodes.ENABLE_PUSH: 0,
-                # These two are taken from h2 for safe defaults
-                h2.settings.SettingCodes.MAX_CONCURRENT_STREAMS: 100,
-                h2.settings.SettingCodes.MAX_HEADER_LIST_SIZE: 65536,
-            },
+            initial_values=initial_values,
         )
 
         # Some websites (*cough* Yahoo *cough*) balk at this setting being
@@ -214,7 +259,16 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
         ]
 
         self._h2_state.initiate_connection()
-        self._h2_state.increment_flow_control_window(2**24)
+        if self._connection_receive_budget is None:
+            self._h2_state.increment_flow_control_window(2**24)
+        else:
+            # The connection-level flow control window always starts out at
+            # the default size, and can only be grown from there.
+            increment = (
+                self._connection_receive_budget - DEFAULT_FLOW_CONTROL_WINDOW_SIZE
+            )
+            if increment > 0:
+                self._h2_state.increment_flow_control_window(increment)
         await self._write_outgoing_data(request)
 
     # Sending the request...
@@ -247,7 +301,15 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
         ]
 
         self._h2_state.send_headers(stream_id, headers, end_stream=end_stream)
-        self._h2_state.increment_flow_control_window(2**24, stream_id=stream_id)
+        if self._stream_receive_budget is None:
+            self._h2_state.increment_flow_control_window(2**24, stream_id=stream_id)
+        else:
+            initial_window = self._h2_state.local_settings.initial_window_size
+            increment = self._stream_receive_budget - initial_window
+            if increment > 0:
+                self._h2_state.increment_flow_control_window(
+                    increment, stream_id=stream_id
+                )
         await self._write_outgoing_data(request)
 
     async def _send_request_body(self, request: Request, stream_id: int) -> None:
@@ -406,9 +468,28 @@ class AsyncHTTP2Connection(AsyncConnectionInterface):
                     await self._max_streams_semaphore.acquire()
                     self._max_streams -= 1
 
-    async def _response_closed(self, stream_id: int) -> None:
+    async def _response_closed(self, request: Request, stream_id: int) -> None:
         await self._max_streams_semaphore.release()
-        del self._events[stream_id]
+        events = self._events.pop(stream_id)
+
+        # If the response is being closed while response body data is still
+        # buffered, then that data was never acknowledged to the server.
+        # Return the connection-level flow control window it was holding, so
+        # that the receive budget is released for the remaining streams.
+        # The flow controlled length is used here, since that also accounts
+        # for any padding included in the data frames.
+        unacknowledged = sum(
+            event.flow_controlled_length
+            for event in events
+            if isinstance(event, h2.events.DataReceived)
+        )
+        connection_open = (
+            self._h2_state.state_machine.state != h2.connection.ConnectionState.CLOSED
+        )
+        if unacknowledged and connection_open and not self._connection_error:
+            self._h2_state.increment_flow_control_window(unacknowledged)
+            await self._write_outgoing_data(request)
+
         async with self._state_lock:
             if self._connection_terminated and not self._events:
                 await self.aclose()
@@ -589,4 +670,6 @@ class HTTP2ConnectionByteStream:
             self._closed = True
             kwargs = {"stream_id": self._stream_id}
             async with Trace("response_closed", logger, self._request, kwargs):
-                await self._connection._response_closed(stream_id=self._stream_id)
+                await self._connection._response_closed(
+                    request=self._request, stream_id=self._stream_id
+                )

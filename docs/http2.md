@@ -164,3 +164,38 @@ The following pseudo-header is used by HTTP/2 in the response:
 * `:status` - The response status code.
 
 In `httpcore` this *is represented by the `response.status` attribute, rather than being exposed as a psuedo-header*.
+
+## Flow control & receive budgets
+
+Because HTTP/2 multiplexes many streams onto a single connection, a response
+that is consumed slowly does not prevent the client from reading other
+responses off the network. By default the data for those responses is
+buffered in memory, bounded only by a generous per-stream and per-connection
+allowance.
+
+If you need to bound that buffering more tightly, the HTTP/2 connections
+support configurable receive budgets...
+
+```python
+import httpcore
+
+connection = httpcore.HTTP2Connection(
+    origin=httpcore.Origin(b"https", b"example.com", 443),
+    stream=stream,
+    # Allow at most 64KB of response body data to be buffered
+    # on any single stream, waiting to be consumed...
+    stream_receive_budget=64 * 1024,
+    # ...and at most 1MB across the connection as a whole.
+    connection_receive_budget=1024 * 1024,
+)
+```
+
+The budgets are applied through the HTTP/2 flow control windows, so a stream
+that is not being consumed simply stops being sent more data once its budget
+is reached, without blocking the control frames or data of the other streams
+on the connection. Budget that is held by a response is released again once
+the response is consumed, closed, or reset.
+
+Note that the connection-level flow control window cannot be shrunk below
+the protocol default of 65535 bytes, so a `connection_receive_budget` below
+that value is effectively equivalent to the default window size.
