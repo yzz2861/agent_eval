@@ -127,6 +127,7 @@ For some more complex cases you might need to customise the ASGI transport. This
 * Inspect 500 error responses rather than raise exceptions by setting `raise_app_exceptions=False`.
 * Mount the ASGI application at a subpath by setting `root_path`.
 * Use a given client address for requests by setting `client`.
+* Size the buffer used to pass the response body from the application to the client by setting `max_buffer_bytes`.
 
 For example:
 
@@ -139,6 +140,12 @@ async with httpx.AsyncClient(transport=transport, base_url="http://testserver") 
 ```
 
 See [the ASGI documentation](https://asgi.readthedocs.io/en/latest/specs/www.html#connection-scope) for more details on the `client` and `root_path` keys.
+
+Responses are streamed back to the client as the application produces them,
+so `client.stream()` can be used to consume responses incrementally, including
+responses that never complete, such as server-sent events. If the client is
+slow to consume the response body then the application blocks on `send()` once
+the buffer is full, applying backpressure.
 
 ### ASGI startup and shutdown
 
