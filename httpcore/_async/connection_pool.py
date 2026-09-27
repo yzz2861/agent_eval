@@ -50,6 +50,7 @@ class AsyncConnectionPool(AsyncRequestInterface):
         ssl_context: ssl.SSLContext | None = None,
         proxy: Proxy | None = None,
         max_connections: int | None = 10,
+        max_connections_per_origin: int | None = None,
         max_keepalive_connections: int | None = None,
         keepalive_expiry: float | None = None,
         http1: bool = True,
@@ -70,6 +71,8 @@ class AsyncConnectionPool(AsyncRequestInterface):
             max_connections: The maximum number of concurrent HTTP connections that
                 the pool should allow. Any attempt to send a request on a pool that
                 would exceed this amount will block until a connection is available.
+            max_connections_per_origin: The maximum number of concurrent HTTP
+                connections that the pool should allow to any single origin.
             max_keepalive_connections: The maximum number of idle HTTP connections
                 that will be maintained in the pool.
             keepalive_expiry: The duration in seconds that an idle HTTP connection
@@ -93,6 +96,11 @@ class AsyncConnectionPool(AsyncRequestInterface):
         self._proxy = proxy
         self._max_connections = (
             sys.maxsize if max_connections is None else max_connections
+        )
+        self._max_connections_per_origin = (
+            sys.maxsize
+            if max_connections_per_origin is None
+            else max_connections_per_origin
         )
         self._max_keepalive_connections = (
             sys.maxsize
@@ -119,6 +127,7 @@ class AsyncConnectionPool(AsyncRequestInterface):
         # and the set of connections that are servicing those requests.
         self._connections: list[AsyncConnectionInterface] = []
         self._requests: list[AsyncPoolRequest] = []
+        self._last_served_origin: Origin | None = None
 
         # We only mutate the state of the connection pool within an 'optional_thread_lock'
         # context. This holds a threading lock unless we're running in async mode,
@@ -242,6 +251,9 @@ class AsyncConnectionPool(AsyncRequestInterface):
                     #
                     # In this case we clear the connection and try again.
                     pool_request.clear_connection()
+                    with self._optional_thread_lock:
+                        closing = self._assign_requests_to_connections()
+                    await self._close_connections(closing)
                 else:
                     break  # pragma: nocover
 
@@ -298,6 +310,16 @@ class AsyncConnectionPool(AsyncRequestInterface):
                 self._connections.remove(connection)
                 closing_connections.append(connection)
 
+        if self._max_connections_per_origin == sys.maxsize:
+            self._assign_requests_to_connections_fifo(closing_connections)
+        else:
+            self._assign_requests_to_connections_per_origin(closing_connections)
+
+        return closing_connections
+
+    def _assign_requests_to_connections_fifo(
+        self, closing_connections: list[AsyncConnectionInterface]
+    ) -> None:
         # Assign queued requests to connections.
         queued_requests = [request for request in self._requests if request.is_queued()]
         for pool_request in queued_requests:
@@ -336,7 +358,112 @@ class AsyncConnectionPool(AsyncRequestInterface):
                 self._connections.append(connection)
                 pool_request.assign_to_connection(connection)
 
-        return closing_connections
+    def _assign_requests_to_connections_per_origin(
+        self, closing_connections: list[AsyncConnectionInterface]
+    ) -> None:
+        while True:
+            queued_requests = [
+                request for request in self._requests if request.is_queued()
+            ]
+            if not queued_requests:
+                self._last_served_origin = None
+                return
+
+            origins: list[Origin] = []
+            for request in queued_requests:
+                origin = request.request.url.origin
+                if origin not in origins:
+                    origins.append(origin)
+
+            start_index = 0
+            if self._last_served_origin in origins:
+                start_index = origins.index(self._last_served_origin) + 1
+                if start_index == len(origins):
+                    start_index = 0
+
+            ordered_origins = (
+                origins[start_index:] + origins[:start_index] if start_index else origins
+            )
+            made_progress = False
+            for origin in ordered_origins:
+                origin_requests = [
+                    request
+                    for request in queued_requests
+                    if request.request.url.origin == origin
+                ]
+                self._assign_to_available_connections(origin_requests)
+
+                origin_requests = [
+                    request for request in origin_requests if request.is_queued()
+                ]
+                if not origin_requests:
+                    continue
+
+                connection_to_close = self._get_connection_to_close_for_origin(origin)
+                if connection_to_close is None:
+                    continue
+
+                if connection_to_close is not False:
+                    self._connections.remove(connection_to_close)
+                    closing_connections.append(connection_to_close)
+
+                connection = self.create_connection(origin)
+                self._connections.append(connection)
+                origin_requests[0].assign_to_connection(connection)
+                self._assign_to_available_connections(origin_requests)
+                self._last_served_origin = origin
+                made_progress = True
+                break
+
+            if not made_progress:
+                return
+
+    def _assign_to_available_connections(
+        self, requests: list[AsyncPoolRequest]
+    ) -> None:
+        for pool_request in requests:
+            if not pool_request.is_queued():
+                continue
+            origin = pool_request.request.url.origin
+            available_connections = [
+                connection
+                for connection in self._connections
+                if connection.can_handle_request(origin) and connection.is_available()
+            ]
+            if available_connections:
+                pool_request.assign_to_connection(available_connections[0])
+
+    def _get_connection_to_close_for_origin(
+        self, origin: Origin
+    ) -> AsyncConnectionInterface | bool | None:
+        origin_connections = [
+            connection
+            for connection in self._connections
+            if connection.can_handle_request(origin)
+        ]
+        if len(origin_connections) >= self._max_connections_per_origin:
+            idle_connections = [
+                connection for connection in origin_connections if connection.is_idle()
+            ]
+            if not idle_connections:
+                return None
+            return idle_connections[0]
+
+        if len(self._connections) < self._max_connections:
+            return False
+
+        idle_connections = [
+            connection for connection in self._connections if connection.is_idle()
+        ]
+        if not idle_connections:
+            return None
+
+        same_origin_idle = [
+            connection
+            for connection in idle_connections
+            if connection.can_handle_request(origin)
+        ]
+        return same_origin_idle[0] if same_origin_idle else idle_connections[0]
 
     async def _close_connections(self, closing: list[AsyncConnectionInterface]) -> None:
         # Close connections which have been removed from the pool.

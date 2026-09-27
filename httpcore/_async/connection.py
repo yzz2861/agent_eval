@@ -8,7 +8,7 @@ import typing
 
 from .._backends.auto import AutoBackend
 from .._backends.base import SOCKET_OPTION, AsyncNetworkBackend, AsyncNetworkStream
-from .._exceptions import ConnectError, ConnectTimeout
+from .._exceptions import ConnectError, ConnectTimeout, ConnectionNotAvailable
 from .._models import Origin, Request, Response
 from .._ssl import default_ssl_context
 from .._synchronization import AsyncLock
@@ -74,6 +74,8 @@ class AsyncHTTPConnection(AsyncConnectionInterface):
 
         try:
             async with self._request_lock:
+                if self._connect_failed:
+                    raise ConnectionNotAvailable()
                 if self._connection is None:
                     stream = await self._connect(request)
 
