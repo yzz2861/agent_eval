@@ -295,6 +295,96 @@ app = Router(routes=[
 
 ## Request body size limits
 
+## Diagnosing route resolution
+
+When a request unexpectedly returns a 404 or 405, it can be hard to tell
+whether an outer `Mount` matched first, whether the `Host` header or a path
+convertor failed, or whether the HTTP method simply is not allowed. The
+`Router.resolve()` method answers these questions without running anything:
+it performs the same route matching as real dispatch, including partial
+match handling, nested `Mount`/`Host` path rewriting, `root_path` handling,
+WebSocket routes, and trailing-slash redirect detection, but it never runs
+middleware, endpoints, or lifespan handlers, and it never modifies the
+scope you pass in.
+
+```python
+resolution = app.router.resolve(scope)
+
+resolution.match         # Match.FULL, Match.PARTIAL (a 405), or Match.NONE (a 404)
+resolution.route         # The innermost route that dispatch would select
+resolution.endpoint      # The endpoint that would run
+resolution.path_params   # Path parameters, including ones from Mount and Host routes
+resolution.redirect_url  # Set if a trailing-slash redirect would be issued instead
+resolution.steps         # Every matching attempt, in order, across all nesting levels
+resolution.opaque_app    # Set if resolution stopped at a custom ASGI app
+```
+
+Each entry in `resolution.steps` records the route that was tried, the
+`Match` outcome, and the scope updates the route would have applied. Steps
+with `redirect_probe=True` were tried against the trailing-slash redirect
+candidate rather than the incoming path. Because `resolve()` follows the
+same matching loop as dispatch, a `PARTIAL` step (a path that matched but
+not the method) is reported even when a later `FULL` match wins, exactly
+like real dispatch.
+
+When resolution reaches a custom ASGI app that cannot be expanded, it stops
+there and reports the app via `resolution.opaque_app` rather than guessing
+how the app would route the request internally.
+
+The example below uses several levels of mounting, plus a host-based route,
+and inspects how a request would be resolved:
+
+```python
+from starlette.applications import Starlette
+from starlette.responses import PlainTextResponse
+from starlette.routing import Host, Mount, Route, Router
+
+
+async def document(request):
+    return PlainTextResponse(f"document {request.path_params}")
+
+
+app = Starlette(
+    routes=[
+        Mount(
+            "/api",
+            routes=[
+                Mount(
+                    "/v1",
+                    routes=[
+                        Route("/documents/{doc_id:int}", document),
+                    ],
+                ),
+            ],
+        ),
+        Host("{tenant}.example.org", app=Router(routes=[Route("/documents/{doc_id:int}", document)])),
+    ],
+)
+
+scope = {
+    "type": "http",
+    "method": "GET",
+    "path": "/api/v1/documents/42",
+    "root_path": "",
+    "query_string": b"",
+    "headers": [(b"host", b"testserver")],
+}
+
+resolution = app.router.resolve(scope)
+assert resolution.endpoint is document
+assert resolution.path_params == {"doc_id": 42}
+for step in resolution.steps:
+    print(step.route, step.match)
+# Mount(path='/api', ...) Match.FULL
+# Mount(path='/v1', ...) Match.FULL
+# Route(path='/documents/{doc_id:int}', ...) Match.FULL
+```
+
+Resolving a scope for `/api/v1/documents/42/` (note the trailing slash)
+would instead report `resolution.redirect_url`, since no route matches but
+trimming the slash would. Resolving a `DELETE` against the same path would
+report `Match.PARTIAL`, indicating a 405 rather than a 404.
+
 Use a non-negative `max_body_size` to limit the total number of request body
 bytes accepted by an application. The limit includes multipart file data and
 multipart encoding overhead. It defaults to `None`, which preserves the existing

@@ -9,6 +9,7 @@ import types
 import warnings
 from collections.abc import Awaitable, Callable, Collection, Generator, Sequence
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
+from dataclasses import dataclass, field
 from enum import Enum
 from re import Pattern
 from typing import Any, TypeVar
@@ -42,6 +43,58 @@ class Match(Enum):
     NONE = 0
     PARTIAL = 1
     FULL = 2
+
+
+@dataclass
+class ResolveStep:
+    """
+    A single route matching attempt, recorded by Router.resolve().
+
+    'route' is the route that was tried, 'match' is the outcome of
+    route.matches(scope), and 'child_scope' holds the scope updates the
+    route would have applied on a match (empty when 'match' is Match.NONE).
+    Steps with 'redirect_probe=True' were tried against a trailing-slash
+    redirect candidate rather than the incoming path.
+    """
+
+    route: BaseRoute
+    match: Match
+    child_scope: Scope
+    redirect_probe: bool = False
+
+
+@dataclass
+class RouteResolution:
+    """
+    The outcome of resolving a scope with Router.resolve().
+
+    'match' is the final outcome: Match.FULL if a route would handle the
+    request, Match.PARTIAL if a route matched the path but not the method
+    (a 405 Method Not Allowed), or Match.NONE if no route matched.
+
+    'route' and 'endpoint' identify the innermost selected route and the
+    endpoint that would run, and 'path_params' holds the accumulated path
+    parameters, including any contributed by Mount and Host routes.
+
+    'redirect_url' is set when no route matched but a trailing-slash
+    redirect would be issued instead.
+
+    'steps' lists every matching attempt in order, across all levels of
+    nested mounts and hosts.
+
+    'opaque_app' is set when resolution stopped at a custom ASGI app that
+    cannot be expanded further, in which case 'route' is the Mount or
+    Host that delegates to it and nothing is known about what it would
+    do with the request.
+    """
+
+    match: Match
+    route: BaseRoute | None
+    endpoint: Any
+    path_params: dict[str, Any]
+    redirect_url: str | None
+    steps: list[ResolveStep] = field(default_factory=list)
+    opaque_app: ASGIApp | None = None
 
 
 def request_response(
@@ -534,6 +587,113 @@ class Host(BaseRoute):
 _T = TypeVar("_T")
 
 
+def _resolve_matched(route: BaseRoute, match: Match, scope: Scope, steps: list[ResolveStep]) -> RouteResolution:
+    if match == Match.FULL and isinstance(route, (Mount, Host)):
+        inner_app = route._base_app if isinstance(route, Mount) else route.app
+        inner_router = inner_app if isinstance(inner_app, Router) else getattr(inner_app, "router", None)
+        if isinstance(inner_router, Router):
+            # Descend into the nested router, mirroring how dispatch would.
+            return _resolve_routes(
+                inner_router.routes, inner_router.redirect_slashes, inner_router.default, scope, steps
+            )
+        inner_routes = getattr(inner_app, "routes", None)
+        if inner_routes is not None:
+            # A router-like app exposing its routes. Expand it, assuming
+            # default redirect behavior since we cannot know better.
+            return _resolve_routes(inner_routes, True, None, scope, steps)
+        # A custom ASGI app we cannot see inside. Report it as opaque
+        # rather than guessing how it would route the request.
+        return RouteResolution(
+            match=Match.FULL,
+            route=route,
+            endpoint=scope.get("endpoint"),
+            path_params=dict(scope.get("path_params", {})),
+            redirect_url=None,
+            steps=steps,
+            opaque_app=inner_app,
+        )
+    return RouteResolution(
+        match=match,
+        route=route,
+        endpoint=scope.get("endpoint"),
+        path_params=dict(scope.get("path_params", {})),
+        redirect_url=None,
+        steps=steps,
+    )
+
+
+def _resolve_routes(
+    routes: list[BaseRoute],
+    redirect_slashes: bool,
+    default: ASGIApp | None,
+    scope: Scope,
+    steps: list[ResolveStep],
+) -> RouteResolution:
+    # Mirrors Router.app(), but only resolves, recording each matching
+    # attempt instead of running middleware, endpoints, or lifespan.
+    partial: BaseRoute | None = None
+    partial_scope: Scope = {}
+
+    for route in routes:
+        match, child_scope = route.matches(scope)
+        steps.append(ResolveStep(route=route, match=match, child_scope=child_scope))
+        if match == Match.FULL:
+            scope.update(child_scope)
+            return _resolve_matched(route, Match.FULL, scope, steps)
+        elif match == Match.PARTIAL and partial is None:
+            partial = route
+            partial_scope = child_scope
+
+    if partial is not None:
+        # Handle partial matches. These are cases where an endpoint is
+        # able to handle the request, but is not a preferred option.
+        # We use this in particular to deal with "405 Method Not Allowed".
+        scope.update(partial_scope)
+        return _resolve_matched(partial, Match.PARTIAL, scope, steps)
+
+    route_path = get_route_path(scope)
+    if scope["type"] == "http" and redirect_slashes and route_path != "/":
+        redirect_scope = dict(scope)
+        if route_path.endswith("/"):
+            redirect_scope["path"] = redirect_scope["path"].rstrip("/")
+        else:
+            redirect_scope["path"] = redirect_scope["path"] + "/"
+
+        for route in routes:
+            match, child_scope = route.matches(redirect_scope)
+            steps.append(ResolveStep(route=route, match=match, child_scope=child_scope, redirect_probe=True))
+            if match != Match.NONE:
+                redirect_url = URL(scope=redirect_scope)
+                return RouteResolution(
+                    match=Match.NONE,
+                    route=None,
+                    endpoint=None,
+                    path_params=dict(scope.get("path_params", {})),
+                    redirect_url=str(redirect_url),
+                    steps=steps,
+                )
+
+    if default is not None and getattr(default, "__func__", None) is not Router.not_found:
+        # A custom default ASGI app would run. We cannot see inside it.
+        return RouteResolution(
+            match=Match.NONE,
+            route=None,
+            endpoint=default,
+            path_params=dict(scope.get("path_params", {})),
+            redirect_url=None,
+            steps=steps,
+            opaque_app=default,
+        )
+    return RouteResolution(
+        match=Match.NONE,
+        route=None,
+        endpoint=None,
+        path_params=dict(scope.get("path_params", {})),
+        redirect_url=None,
+        steps=steps,
+    )
+
+
 class _AsyncLiftContextManager(AbstractAsyncContextManager[_T]):
     def __init__(self, cm: AbstractContextManager[_T]):
         self._cm = cm
@@ -641,6 +801,24 @@ class Router:
             except NoMatchFound:
                 pass
         raise NoMatchFound(name, path_params)
+
+    def resolve(self, scope: Scope) -> RouteResolution:
+        """
+        Resolve a request 'scope' against the routes, without running any
+        middleware, endpoints, or lifespan handlers, and without modifying
+        the given scope.
+
+        Returns a RouteResolution describing every matching attempt in
+        order, the route that dispatch would select, the accumulated path
+        parameters, and whether a trailing-slash redirect would be issued.
+        Resolution descends into nested Mount and Host routes, following
+        the same root_path and path_params rewriting as real dispatch.
+        Custom ASGI apps that cannot be expanded are reported via
+        RouteResolution.opaque_app.
+        """
+        if scope["type"] not in ("http", "websocket"):
+            raise ValueError(f"Cannot resolve scope of type {scope['type']!r}")
+        return _resolve_routes(self.routes, self.redirect_slashes, self.default, dict(scope), [])
 
     async def lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
         """

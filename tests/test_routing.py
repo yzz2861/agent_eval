@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import functools
 import json
 import uuid
@@ -15,7 +16,7 @@ from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
-from starlette.routing import Host, Mount, NoMatchFound, Route, Router, WebSocketRoute
+from starlette.routing import Host, Match, Mount, NoMatchFound, Route, Router, WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -1238,3 +1239,224 @@ def test_paths_with_root_path(test_client_factory: TestClientFactory) -> None:
         "path": "/root/root-queue/path",
         "root_path": "/root",
     }
+
+
+def resolve_named_endpoint(name: str) -> Callable[[Request], Response]:
+    def endpoint(request: Request) -> Response:
+        return PlainTextResponse(f"{name}|{request.path_params}")
+
+    endpoint.__name__ = name
+    return endpoint
+
+
+async def resolve_ws_endpoint(websocket: WebSocket) -> None:
+    await websocket.accept()
+    await websocket.send_text(f"resolve_ws_endpoint|{websocket.path_params}")
+    await websocket.close()
+
+
+async def opaque_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
+    response = PlainTextResponse("opaque")
+    await response(scope, receive, send)
+
+
+resolve_leaf_router = Router(routes=[Route("/leaf/{leaf_id:int}", resolve_named_endpoint("leaf"))])
+resolve_api_router = Router(
+    routes=[
+        Route("/users/{username}", resolve_named_endpoint("user")),
+        Route("/items/{item_id:int}", resolve_named_endpoint("item_get"), methods=["GET"]),
+        Route("/items/{item_id:int}", resolve_named_endpoint("item_post"), methods=["POST"]),
+        Mount("/deep", app=resolve_leaf_router),
+    ]
+)
+resolve_host_router = Router(routes=[Route("/documents/{doc_id:int}", resolve_named_endpoint("document"))])
+resolve_app = Starlette(
+    routes=[
+        Route("/", resolve_named_endpoint("home")),
+        Mount("/api", app=resolve_api_router),
+        Mount("/opaque", app=opaque_asgi_app),
+        Host("{subdomain}.example.org", app=resolve_host_router),
+        WebSocketRoute("/ws/{room}", resolve_ws_endpoint),
+    ]
+)
+
+
+def resolve_scope(path: str, method: str = "GET", host: str = "testserver", root_path: str = "") -> Scope:
+    return {
+        "type": "http",
+        "http_version": "1.1",
+        "asgi": {"version": "3.0"},
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": root_path,
+        "query_string": b"",
+        "headers": [(b"host", host.encode())],
+    }
+
+
+@pytest.mark.parametrize(
+    "method,path,host,expected_endpoint",
+    [
+        ("GET", "/", None, "home"),
+        ("GET", "/api/users/tom", None, "user"),
+        ("GET", "/api/items/3", None, "item_get"),
+        ("POST", "/api/items/3", None, "item_post"),
+        ("GET", "/api/deep/leaf/7", None, "leaf"),
+        ("GET", "/documents/5", "foo.example.org", "document"),
+    ],
+)
+def test_resolve_matches_dispatch(
+    test_client_factory: TestClientFactory, method: str, path: str, host: str | None, expected_endpoint: str
+) -> None:
+    client = test_client_factory(resolve_app, follow_redirects=False)
+    resolution = resolve_app.router.resolve(resolve_scope(path, method=method, host=host or "testserver"))
+
+    assert resolution.match == Match.FULL
+    assert resolution.opaque_app is None
+    assert resolution.redirect_url is None
+    assert resolution.endpoint.__name__ == expected_endpoint
+
+    response = client.request(method, path, headers={"host": host} if host else {})
+    assert response.status_code == 200
+    assert response.text == f"{expected_endpoint}|{resolution.path_params}"
+
+
+@pytest.mark.parametrize(
+    "method,path,host,expected_status",
+    [
+        ("DELETE", "/api/users/tom", None, 405),
+        ("PUT", "/api/items/3", None, 405),
+        ("GET", "/nowhere", None, 404),
+        ("GET", "/documents/5", None, 404),
+    ],
+)
+def test_resolve_matches_dispatch_failures(
+    test_client_factory: TestClientFactory, method: str, path: str, host: str | None, expected_status: int
+) -> None:
+    client = test_client_factory(resolve_app, follow_redirects=False)
+    resolution = resolve_app.router.resolve(resolve_scope(path, method=method, host=host or "testserver"))
+
+    assert resolution.redirect_url is None
+    assert resolution.match == (Match.PARTIAL if expected_status == 405 else Match.NONE)
+
+    response = client.request(method, path, headers={"host": host} if host else {})
+    assert response.status_code == expected_status
+
+
+def test_resolve_matches_dispatch_trailing_slash_redirect(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(resolve_app, follow_redirects=False)
+    resolution = resolve_app.router.resolve(resolve_scope("/api/deep/leaf/7/"))
+
+    assert resolution.match == Match.NONE
+    assert resolution.redirect_url == "http://testserver/api/deep/leaf/7"
+
+    response = client.get("/api/deep/leaf/7/")
+    assert response.status_code == 307
+    assert response.headers["location"] == resolution.redirect_url
+
+
+def test_resolve_matches_dispatch_websocket(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(resolve_app)
+    scope = resolve_scope("/ws/lobby")
+    scope["type"] = "websocket"
+    resolution = resolve_app.router.resolve(scope)
+
+    assert resolution.match == Match.FULL
+    assert isinstance(resolution.route, WebSocketRoute)
+    assert resolution.path_params == {"room": "lobby"}
+
+    with client.websocket_connect("/ws/lobby") as websocket:
+        assert websocket.receive_text() == f"resolve_ws_endpoint|{resolution.path_params}"
+
+
+def test_resolve_matches_dispatch_with_root_path(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(resolve_app, root_path="/prefix", follow_redirects=False)
+    resolution = resolve_app.router.resolve(resolve_scope("/prefix/api/users/tom", root_path="/prefix"))
+
+    assert resolution.match == Match.FULL
+    assert resolution.endpoint.__name__ == "user"
+    assert resolution.path_params == {"username": "tom"}
+
+    response = client.get("/prefix/api/users/tom")
+    assert response.status_code == 200
+    assert response.text == f"user|{resolution.path_params}"
+
+
+def test_resolve_records_ordered_steps() -> None:
+    # A partial match is recorded, then overridden by a later full match.
+    resolution = resolve_app.router.resolve(resolve_scope("/api/items/3", method="POST"))
+
+    assert resolution.match == Match.FULL
+    assert resolution.endpoint.__name__ == "item_post"
+    assert resolution.path_params == {"item_id": 3}
+    tried = [(step.route, step.match) for step in resolution.steps]
+    assert tried == [
+        (resolve_app.routes[0], Match.NONE),  # Route("/")
+        (resolve_app.routes[1], Match.FULL),  # Mount("/api")
+        (resolve_api_router.routes[0], Match.NONE),  # Route("/users/{username}")
+        (resolve_api_router.routes[1], Match.PARTIAL),  # GET-only Route("/items/{item_id:int}")
+        (resolve_api_router.routes[2], Match.FULL),  # POST Route("/items/{item_id:int}")
+    ]
+
+
+def test_resolve_records_redirect_probe_steps() -> None:
+    resolution = resolve_app.router.resolve(resolve_scope("/api/users/tom/"))
+
+    assert resolution.redirect_url == "http://testserver/api/users/tom"
+    probe_steps = [step for step in resolution.steps if step.redirect_probe]
+    assert [step.match for step in probe_steps] == [Match.FULL]
+    # The only non-probe step that matched is the Mount('/api') descent.
+    matched = [step for step in resolution.steps if not step.redirect_probe and step.match != Match.NONE]
+    assert [step.route for step in matched] == [resolve_app.routes[1]]
+
+
+def test_resolve_rewrites_path_params_through_mounts_and_hosts() -> None:
+    resolution = resolve_app.router.resolve(resolve_scope("/documents/5", host="foo.example.org"))
+
+    assert resolution.match == Match.FULL
+    assert resolution.path_params == {"subdomain": "foo", "doc_id": 5}
+    host_step = resolution.steps[-2]
+    assert host_step.route is resolve_app.routes[3]
+    assert host_step.child_scope["path_params"] == {"subdomain": "foo"}
+
+
+def test_resolve_marks_custom_asgi_app_opaque(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(resolve_app, follow_redirects=False)
+    resolution = resolve_app.router.resolve(resolve_scope("/opaque/anything"))
+
+    assert resolution.match == Match.FULL
+    assert resolution.route is resolve_app.routes[2]
+    assert resolution.opaque_app is opaque_asgi_app
+
+    response = client.get("/opaque/anything")
+    assert response.status_code == 200
+    assert response.text == "opaque"
+
+
+def test_resolve_marks_custom_default_app_opaque() -> None:
+    async def custom_default(scope: Scope, receive: Receive, send: Send) -> None:  # pragma: no cover
+        ...
+
+    router = Router(routes=[Route("/known", resolve_named_endpoint("known"))], default=custom_default)
+    resolution = router.resolve(resolve_scope("/unknown"))
+
+    assert resolution.match == Match.NONE
+    assert resolution.route is None
+    assert resolution.opaque_app is custom_default
+
+
+def test_resolve_does_not_modify_scope() -> None:
+    scope = resolve_scope("/api/deep/leaf/7")
+    snapshot = copy.deepcopy(scope)
+
+    resolution = resolve_app.router.resolve(scope)
+
+    assert resolution.match == Match.FULL
+    assert scope == snapshot
+
+
+def test_resolve_rejects_lifespan_scope() -> None:
+    with pytest.raises(ValueError, match="Cannot resolve scope"):
+        resolve_app.router.resolve({"type": "lifespan"})
