@@ -1,3 +1,10 @@
+0.19.0 Unreleased
+-----------------
+
+* Read the WSGI request body on demand, allowing WSGI apps to
+  respond (e.g. reject the request) before the full body has been
+  received.
+
 0.18.0 2025-11-08
 -----------------
 
