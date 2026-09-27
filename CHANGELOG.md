@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 * Expose `FunctionAuth` from the public API. (#3699)
 
+### Changed
+
+* `ASGITransport` now streams responses instead of buffering them: the response is returned once the application sends the status and headers, the body is consumed as it is produced with bounded-buffer backpressure, and closing the response or the transport shuts down the background application task.
+
 ## 0.28.1 (6th December, 2024)
 
 * Fix SSL case where `verify=False` together with client side certificates.

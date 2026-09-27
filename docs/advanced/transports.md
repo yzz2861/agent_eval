@@ -44,6 +44,8 @@ This is particularly useful for two main use-cases:
 * Using `httpx` as a client inside test cases.
 * Mocking out external services during tests or in dev or staging environments.
 
+Responses are streamed rather than buffered: the response is returned as soon as the application sends the status and headers, and the response body is consumed as the application produces it. If the client is slow to read, a bounded buffer applies backpressure to the application, so long-running responses such as server-sent events can be tested without waiting for the application to complete.
+
 ### Example
 
 Here's an example of integrating against a Flask application:
