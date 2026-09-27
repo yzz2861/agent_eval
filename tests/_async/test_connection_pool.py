@@ -1,4 +1,5 @@
 import logging
+import sys
 import typing
 
 import hpack
@@ -835,3 +836,207 @@ async def test_http11_upgrade_connection():
         "http11.response_closed.started",
         "http11.response_closed.complete",
     ]
+
+
+@pytest.mark.trio
+async def test_connection_pool_max_connections_per_origin():
+    """
+    When `max_connections_per_origin` is set, the number of connections
+    to any single origin may not exceed the given limit, even if the
+    overall `max_connections` limit would allow for more.
+    """
+    network_backend = httpcore.AsyncMockBackend(
+        [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Type: plain/text\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+        * 2
+    )
+
+    async def fetch(pool, domain, info_list, statuses):
+        async with pool.stream("GET", f"http://{domain}/") as response:
+            info = [repr(c) for c in pool.connections]
+            info_list.append(info)
+            await response.aread()
+        statuses.append(response.status)
+
+    async with httpcore.AsyncConnectionPool(
+        max_connections=10,
+        max_connections_per_origin=1,
+        network_backend=network_backend,
+    ) as pool:
+        info_list: typing.List[typing.List[str]] = []
+        statuses: typing.List[int] = []
+        async with concurrency.open_nursery() as nursery:
+            for domain in ["a.com", "a.com", "b.com", "b.com"]:
+                nursery.start_soon(fetch, pool, domain, info_list, statuses)
+
+        assert len(statuses) == 4
+        for info in info_list:
+            a_connections = [c for c in info if "http://a.com:80" in c]
+            b_connections = [c for c in info if "http://b.com:80" in c]
+            assert len(a_connections) <= 1
+            assert len(b_connections) <= 1
+
+
+class FakeConnection:
+    """
+    A stub connection, used to test the connection pool scheduling logic
+    without requiring any actual network I/O.
+    """
+
+    def __init__(self, origin: httpcore.Origin) -> None:
+        self._origin = origin
+        self._available = False
+        self._idle = False
+        self._closed = False
+
+    def can_handle_request(self, origin: httpcore.Origin) -> bool:
+        return origin == self._origin
+
+    def is_available(self) -> bool:
+        return self._available
+
+    def has_expired(self) -> bool:
+        return False
+
+    def is_idle(self) -> bool:
+        return self._idle
+
+    def is_closed(self) -> bool:
+        return self._closed
+
+    async def aclose(self) -> None:
+        self._closed = True
+
+
+def enqueue(pool, url):
+    pool_module = sys.modules[pool._assign_requests_to_connections.__module__]
+    pool_request = pool_module.AsyncPoolRequest(httpcore.Request("GET", url))
+    pool._requests.append(pool_request)
+    return pool_request
+
+
+@pytest.mark.trio
+async def test_connection_pool_per_origin_limit_and_reuse():
+    """
+    With `max_connections_per_origin` set, queued requests may not exceed
+    the per-origin connection limit, but should reuse existing connections
+    to the same origin once they become available.
+    """
+    pool = httpcore.AsyncConnectionPool(
+        max_connections=10, max_connections_per_origin=1
+    )
+    pool.create_connection = lambda origin: FakeConnection(origin)  # type: ignore
+
+    a1 = enqueue(pool, "http://a.com/")
+    a2 = enqueue(pool, "http://a.com/")
+    b1 = enqueue(pool, "http://b.com/")
+
+    pool._assign_requests_to_connections()
+
+    # The per-origin limit allows one connection each to a.com and b.com.
+    # The second request to a.com remains queued, even though the overall
+    # `max_connections` limit has not been reached.
+    assert not a1.is_queued()
+    assert not b1.is_queued()
+    assert a2.is_queued()
+    assert len(pool._connections) == 2
+
+    # Once the existing connection to a.com becomes available it is reused,
+    # rather than creating another connection.
+    a1_connection = a1.connection
+    a1_connection._available = True
+    pool._assign_requests_to_connections()
+
+    assert a2.connection is a1_connection
+    assert len(pool._connections) == 2
+
+
+@pytest.mark.trio
+async def test_connection_pool_per_origin_fairness():
+    """
+    With `max_connections_per_origin` set, queued requests are granted new
+    connections round-robin across origins, while requests for the same
+    origin remain first-in-first-out.
+    """
+    pool = httpcore.AsyncConnectionPool(max_connections=2, max_connections_per_origin=2)
+    pool.create_connection = lambda origin: FakeConnection(origin)  # type: ignore
+
+    a1 = enqueue(pool, "http://a.com/")
+    b1 = enqueue(pool, "http://b.com/")
+    a2 = enqueue(pool, "http://a.com/")
+    b2 = enqueue(pool, "http://b.com/")
+
+    pool._assign_requests_to_connections()
+    assert not a1.is_queued()
+    assert not b1.is_queued()
+    assert a2.is_queued()
+    assert b2.is_queued()
+
+    # Releasing connections one at a time hands the freed slots
+    # to the two origins alternately.
+    a1.connection._closed = True
+    pool._assign_requests_to_connections()
+    assert not a2.is_queued()
+    assert b2.is_queued()
+
+    b1.connection._closed = True
+    pool._assign_requests_to_connections()
+    assert not b2.is_queued()
+
+    # With both origins saturated again, a freed slot goes to the origin
+    # that was not most recently served, rather than to the request that
+    # happens to be at the head of the queue.
+    a3 = enqueue(pool, "http://a.com/")
+    a4 = enqueue(pool, "http://a.com/")
+    b3 = enqueue(pool, "http://b.com/")
+
+    a2.connection._closed = True
+    pool._assign_requests_to_connections()
+    assert not a3.is_queued()
+    assert a4.is_queued()
+    assert b3.is_queued()
+
+    b2.connection._closed = True
+    pool._assign_requests_to_connections()
+    assert a4.is_queued()
+    assert not b3.is_queued()
+
+    a3.connection._closed = True
+    pool._assign_requests_to_connections()
+    assert not a4.is_queued()
+
+
+@pytest.mark.trio
+async def test_connection_pool_per_origin_cancelled_request():
+    """
+    A queued request that is cancelled must not continue to occupy a
+    position in the queue, and must not prevent other origins from
+    acquiring connections.
+    """
+    pool = httpcore.AsyncConnectionPool(max_connections=1, max_connections_per_origin=1)
+    pool.create_connection = lambda origin: FakeConnection(origin)  # type: ignore
+
+    a1 = enqueue(pool, "http://a.com/")
+    a2 = enqueue(pool, "http://a.com/")
+
+    pool._assign_requests_to_connections()
+    assert not a1.is_queued()
+    assert a2.is_queued()
+
+    # Cancelling the queued request removes it from the queue.
+    pool._requests.remove(a2)
+
+    # Once the remaining connection is closed the slot is released,
+    # and a request to another origin can acquire a connection.
+    a1.connection._closed = True
+    pool._assign_requests_to_connections()
+    assert pool._connections == []
+
+    b1 = enqueue(pool, "http://b.com/")
+    pool._assign_requests_to_connections()
+    assert not b1.is_queued()

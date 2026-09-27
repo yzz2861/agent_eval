@@ -50,6 +50,7 @@ class AsyncConnectionPool(AsyncRequestInterface):
         ssl_context: ssl.SSLContext | None = None,
         proxy: Proxy | None = None,
         max_connections: int | None = 10,
+        max_connections_per_origin: int | None = None,
         max_keepalive_connections: int | None = None,
         keepalive_expiry: float | None = None,
         http1: bool = True,
@@ -70,6 +71,12 @@ class AsyncConnectionPool(AsyncRequestInterface):
             max_connections: The maximum number of concurrent HTTP connections that
                 the pool should allow. Any attempt to send a request on a pool that
                 would exceed this amount will block until a connection is available.
+            max_connections_per_origin: The maximum number of concurrent HTTP
+                connections that the pool should allow to any single origin.
+                Queued requests are granted new connections round-robin across
+                origins, so that a busy origin cannot starve the other origins
+                of connection slots. If not specified, no per-origin limit is
+                applied.
             max_keepalive_connections: The maximum number of idle HTTP connections
                 that will be maintained in the pool.
             keepalive_expiry: The duration in seconds that an idle HTTP connection
@@ -94,6 +101,7 @@ class AsyncConnectionPool(AsyncRequestInterface):
         self._max_connections = (
             sys.maxsize if max_connections is None else max_connections
         )
+        self._max_connections_per_origin = max_connections_per_origin
         self._max_keepalive_connections = (
             sys.maxsize
             if max_keepalive_connections is None
@@ -119,6 +127,9 @@ class AsyncConnectionPool(AsyncRequestInterface):
         # and the set of connections that are servicing those requests.
         self._connections: list[AsyncConnectionInterface] = []
         self._requests: list[AsyncPoolRequest] = []
+        # The origin that was most recently granted a new connection.
+        # Used to hand out new connections round-robin across origins.
+        self._last_served_origin: Origin | None = None
 
         # We only mutate the state of the connection pool within an 'optional_thread_lock'
         # context. This holds a threading lock unless we're running in async mode,
@@ -300,43 +311,123 @@ class AsyncConnectionPool(AsyncRequestInterface):
 
         # Assign queued requests to connections.
         queued_requests = [request for request in self._requests if request.is_queued()]
-        for pool_request in queued_requests:
-            origin = pool_request.request.url.origin
-            available_connections = [
-                connection
-                for connection in self._connections
-                if connection.can_handle_request(origin) and connection.is_available()
-            ]
-            idle_connections = [
-                connection for connection in self._connections if connection.is_idle()
-            ]
-
-            # There are three cases for how we may be able to handle the request:
-            #
-            # 1. There is an existing connection that can handle the request.
-            # 2. We can create a new connection to handle the request.
-            # 3. We can close an idle connection and then create a new connection
-            #    to handle the request.
-            if available_connections:
-                # log: "reusing existing connection"
-                connection = available_connections[0]
-                pool_request.assign_to_connection(connection)
-            elif len(self._connections) < self._max_connections:
-                # log: "creating new connection"
-                connection = self.create_connection(origin)
-                self._connections.append(connection)
-                pool_request.assign_to_connection(connection)
-            elif idle_connections:
-                # log: "closing idle connection"
-                connection = idle_connections[0]
-                self._connections.remove(connection)
-                closing_connections.append(connection)
-                # log: "creating new connection"
-                connection = self.create_connection(origin)
-                self._connections.append(connection)
-                pool_request.assign_to_connection(connection)
+        if self._max_connections_per_origin is None:
+            for pool_request in queued_requests:
+                self._assign_request_to_connection(pool_request, closing_connections)
+        else:
+            self._assign_queued_requests_fairly(
+                queued_requests,
+                closing_connections,
+                max_connections_per_origin=self._max_connections_per_origin,
+            )
 
         return closing_connections
+
+    def _assign_request_to_connection(
+        self,
+        pool_request: AsyncPoolRequest,
+        closing_connections: list[AsyncConnectionInterface],
+        allow_new_connection: bool = True,
+    ) -> bool:
+        # Attempt to assign a single queued request to a connection.
+        # Returns True if the request was assigned to a connection.
+        origin = pool_request.request.url.origin
+        available_connections = [
+            connection
+            for connection in self._connections
+            if connection.can_handle_request(origin) and connection.is_available()
+        ]
+        idle_connections = [
+            connection for connection in self._connections if connection.is_idle()
+        ]
+
+        # There are three cases for how we may be able to handle the request:
+        #
+        # 1. There is an existing connection that can handle the request.
+        # 2. We can create a new connection to handle the request.
+        # 3. We can close an idle connection and then create a new connection
+        #    to handle the request.
+        if available_connections:
+            # log: "reusing existing connection"
+            connection = available_connections[0]
+            pool_request.assign_to_connection(connection)
+            return True
+        elif allow_new_connection and len(self._connections) < self._max_connections:
+            # log: "creating new connection"
+            connection = self.create_connection(origin)
+            self._connections.append(connection)
+            pool_request.assign_to_connection(connection)
+            self._last_served_origin = origin
+            return True
+        elif allow_new_connection and idle_connections:
+            # log: "closing idle connection"
+            connection = idle_connections[0]
+            self._connections.remove(connection)
+            closing_connections.append(connection)
+            # log: "creating new connection"
+            connection = self.create_connection(origin)
+            self._connections.append(connection)
+            pool_request.assign_to_connection(connection)
+            self._last_served_origin = origin
+            return True
+        return False
+
+    def _assign_queued_requests_fairly(
+        self,
+        queued_requests: list[AsyncPoolRequest],
+        closing_connections: list[AsyncConnectionInterface],
+        max_connections_per_origin: int,
+    ) -> None:
+        # Assign queued requests to connections, limiting the number of
+        # connections to any single origin, and handing out new connections
+        # round-robin across origins. Requests for the same origin are
+        # always handled first-in-first-out.
+        #
+        # Group the queued requests by origin, preserving the
+        # first-in-first-out ordering within each origin.
+        queues: list[tuple[Origin, list[AsyncPoolRequest]]] = []
+        for pool_request in queued_requests:
+            origin = pool_request.request.url.origin
+            for existing_origin, origin_queue in queues:
+                if existing_origin == origin:
+                    origin_queue.append(pool_request)
+                    break
+            else:
+                queues.append((origin, [pool_request]))
+
+        # Rotate the origins, so that the origin most recently granted a new
+        # connection is considered last. This gives the other origins the
+        # first opportunity to acquire any newly available connection slots.
+        origins = [origin for origin, _ in queues]
+        if self._last_served_origin in origins:
+            index = origins.index(self._last_served_origin)
+            queues = queues[index + 1 :] + queues[: index + 1]
+
+        made_progress = True
+        while made_progress:
+            made_progress = False
+            for origin, origin_queue in queues:
+                if not origin_queue:
+                    continue
+                allow_new_connection = (
+                    self._connection_count_for_origin(origin)
+                    < max_connections_per_origin
+                )
+                if self._assign_request_to_connection(
+                    origin_queue[0],
+                    closing_connections,
+                    allow_new_connection=allow_new_connection,
+                ):
+                    origin_queue.pop(0)
+                    made_progress = True
+
+    def _connection_count_for_origin(self, origin: Origin) -> int:
+        # Return the number of connections in the pool to a given origin.
+        # Note that this counts physical connections, so that an HTTP/2
+        # connection only counts once, however many streams it is handling.
+        return sum(
+            connection.can_handle_request(origin) for connection in self._connections
+        )
 
     async def _close_connections(self, closing: list[AsyncConnectionInterface]) -> None:
         # Close connections which have been removed from the pool.
