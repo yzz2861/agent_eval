@@ -156,6 +156,23 @@ class RunFinishedError(RuntimeError):
         )
 
 
+class SubscriberOverflowError(BrokenResourceError):
+    """
+    Raised when a broadcast stream subscriber is disconnected because its buffer
+    overflowed (the ``"close"`` overflow policy).
+
+    Any items still left in the subscriber's buffer can be read before this
+    exception is raised.
+
+    .. versionadded:: 4.16
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The subscriber was disconnected because its buffer overflowed"
+        )
+
+
 class TaskFailed(Exception):
     """
     Raised when awaiting on, or attempting to access the return value of, a

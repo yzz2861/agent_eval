@@ -39,6 +39,9 @@ if TYPE_CHECKING or not install_lazy_importer():
     from ._core._exceptions import IncompleteRead as IncompleteRead
     from ._core._exceptions import NoEventLoopError as NoEventLoopError
     from ._core._exceptions import RunFinishedError as RunFinishedError
+    from ._core._exceptions import (
+        SubscriberOverflowError as SubscriberOverflowError,
+    )
     from ._core._exceptions import TaskCancelled as TaskCancelled
     from ._core._exceptions import TaskFailed as TaskFailed
     from ._core._exceptions import TaskNotFinished as TaskNotFinished
@@ -77,6 +80,9 @@ if TYPE_CHECKING or not install_lazy_importer():
     from ._core._sockets import wait_socket_readable as wait_socket_readable
     from ._core._sockets import wait_socket_writable as wait_socket_writable
     from ._core._sockets import wait_writable as wait_writable
+    from ._core._streams import (
+        create_broadcast_stream as create_broadcast_stream,
+    )
     from ._core._streams import (
         create_memory_object_stream as create_memory_object_stream,
     )
