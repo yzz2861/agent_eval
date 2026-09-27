@@ -159,6 +159,8 @@ Model classes possess the following methods and attributes:
 * [`model_dump_json()`][pydantic.main.BaseModel.model_dump_json]: Returns a JSON string representation of [`model_dump()`][pydantic.main.BaseModel.model_dump]. See [Serialization](serialization.md#json-mode).
 * [`model_copy()`][pydantic.main.BaseModel.model_copy]: Returns a copy (by default, shallow copy) of the model. See
     [Model copy](#model-copy).
+* [`model_update()`][pydantic.main.BaseModel.model_update]: Atomically applies validated updates to the model. See
+    [Atomic updates](#atomic-updates).
 * [`model_json_schema()`][pydantic.main.BaseModel.model_json_schema]: Returns a jsonable dictionary representing the model's JSON Schema. See [JSON Schema](json_schema.md).
 * [`model_fields`][pydantic.main.BaseModel.model_fields]: A mapping between field names and their definitions ([`FieldInfo`][pydantic.fields.FieldInfo] instances).
 * [`model_computed_fields`][pydantic.main.BaseModel.model_computed_fields]: A mapping between computed field names and their definitions ([`ComputedFieldInfo`][pydantic.fields.ComputedFieldInfo] instances).
@@ -766,6 +768,55 @@ print(id(m.bar) == id(m.model_copy().bar))
 # deep copy gives a new object reference for `bar`:
 print(id(m.bar) == id(m.model_copy(deep=True).bar))
 #> False
+```
+
+## Atomic updates
+
+??? api "API Documentation"
+    [`pydantic.main.BaseModel.model_update`][pydantic.main.BaseModel.model_update]<br>
+
+While [`model_copy(update=...)`][pydantic.BaseModel.model_copy] applies updates *without* validation, and
+attribute assignment validates one field at a time (letting cross-field validators observe intermediate
+states), the [`model_update()`][pydantic.BaseModel.model_update] method applies several field updates
+*atomically*: the updates are merged into the current state, the full candidate state is validated, and
+the changes are only committed if validation succeeds. If validation fails, the original instance is
+left completely untouched (fields, extra data, private attributes, and
+[`model_fields_set`][pydantic.BaseModel.model_fields_set] included).
+
+```python
+from pydantic import BaseModel, ValidationError, model_validator
+
+
+class DateRange(BaseModel):
+    start: int
+    end: int
+
+    @model_validator(mode='after')
+    def _check_order(self):
+        if self.start > self.end:
+            raise ValueError('start must not exceed end')
+        return self
+
+
+r = DateRange(start=1, end=5)
+
+# Both fields are updated and validated together, in one shot:
+r2 = r.model_update({'start': 10, 'end': 20})
+print(r2)
+#> start=10 end=20
+
+try:
+    r.model_update({'start': 10, 'end': 2})
+except ValidationError:
+    # `r` is left completely unchanged:
+    print(r)
+    #> start=1 end=5
+
+# With `inplace=True`, the current instance is updated in one shot
+# (not allowed on frozen models):
+r.model_update({'start': 2, 'end': 9}, inplace=True)
+print(r)
+#> start=2 end=9
 ```
 
 ## Generic models

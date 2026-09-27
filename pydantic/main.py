@@ -469,6 +469,130 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
 
         return copied
 
+    def model_update(
+        self,
+        update: Mapping[str, Any],
+        *,
+        inplace: bool = False,
+        context: Any | None = None,
+    ) -> Self:
+        """Atomically apply multiple field updates, validated against the full candidate state.
+
+        Unlike [`model_copy`][pydantic.BaseModel.model_copy] (which applies `update` values without
+        validation) and attribute assignment (which validates one field at a time, letting cross-field
+        validators observe intermediate states), `model_update` merges `update` into the current state,
+        validates the resulting candidate as a whole, and only then commits the changes. If validation
+        fails, a [`ValidationError`][pydantic_core.ValidationError] is raised and the original instance
+        is left completely untouched: its fields, extra data, private attributes and
+        [`model_fields_set`][pydantic.BaseModel.model_fields_set] are all preserved.
+
+        Args:
+            update: A mapping of values to update. Keys may be field names or (validation) aliases;
+                unknown keys are treated as extra data (and thus rejected unless the model allows extras).
+            inplace: If `True`, the current instance is updated in one shot (and returned) instead of
+                returning a new model. Not allowed on [frozen][pydantic.ConfigDict.frozen] models.
+            context: Additional context to pass to the validator, forwarded to
+                [`model_validate`][pydantic.BaseModel.model_validate].
+
+        Raises:
+            ValidationError: If the merged candidate state could not be validated, or if `inplace` is
+                `True` and the model is frozen.
+
+        Returns:
+            The updated model instance: a new instance by default, or `self` when `inplace=True`.
+        """
+        cls = type(self)
+
+        if inplace and cls.model_config.get('frozen'):
+            raise ValidationError.from_exception_data(
+                cls.__name__, [{'type': 'frozen_instance', 'loc': (), 'input': update}]
+            )
+
+        update = dict(update)
+
+        # Build the candidate input from the current state.
+        if cls.__pydantic_root_model__:
+            # Root models validate the root value directly, not a mapping of fields:
+            unknown_keys = set(update) - {'root'}
+            if unknown_keys:
+                raise ValidationError.from_exception_data(
+                    cls.__name__,
+                    [
+                        {'type': 'extra_forbidden', 'loc': (key,), 'input': update[key]}
+                        for key in sorted(unknown_keys)
+                    ],
+                )
+            candidate: Any = update['root'] if 'root' in update else self.__dict__['root']
+        else:
+            # Fields are keyed by their (validation) alias when validation by name is not allowed,
+            # so that aliases are preserved. Only actual fields are included, so cached values of
+            # computed/cached properties stored in `__dict__` are not carried over.
+            by_name = cls.model_config.get('validate_by_name', False) or cls.model_config.get(
+                'populate_by_name', False
+            )
+            candidate = {}
+            for name, field in cls.__pydantic_fields__.items():
+                if name in self.__dict__:
+                    key = name
+                    if not by_name:
+                        if isinstance(field.validation_alias, str):
+                            key = field.validation_alias
+                        elif field.alias is not None:
+                            key = field.alias
+                    candidate[key] = self.__dict__[name]
+            if self.__pydantic_extra__:
+                candidate.update(self.__pydantic_extra__)
+            candidate.update(update)
+
+        # Validate the full candidate state. Model validators (which may mutate the candidate
+        # instance) only ever see and affect this separate object; their effects are committed
+        # below, only if validation succeeds as a whole.
+        validated = cls.model_validate(candidate, context=context)
+
+        # The updated `fields_set` is the original one plus the updated fields (with aliases
+        # mapped back to field names). Unknown keys are tracked as-is, mirroring `model_copy`.
+        fields_set = set(self.__pydantic_fields_set__)
+        for key in update:
+            fields_set.add(cls._update_key_to_field_name(key))
+
+        if inplace:
+            # Commit the validated state in one shot. Replacing `__dict__` wholesale also drops
+            # any stale cached (computed) property values. Private attributes are not part of
+            # the validated state and are intentionally left as they are.
+            _object_setattr(self, '__dict__', validated.__dict__)
+            _object_setattr(self, '__pydantic_extra__', validated.__pydantic_extra__)
+            _object_setattr(self, '__pydantic_fields_set__', fields_set)
+            return self
+
+        _object_setattr(validated, '__pydantic_fields_set__', fields_set)
+        # Private attributes are not validated; carry them over from the current instance,
+        # mirroring `__copy__`:
+        if not hasattr(self, '__pydantic_private__') or self.__pydantic_private__ is None:
+            _object_setattr(validated, '__pydantic_private__', None)
+        else:
+            _object_setattr(
+                validated,
+                '__pydantic_private__',
+                {k: v for k, v in self.__pydantic_private__.items() if v is not PydanticUndefined},
+            )
+        return validated
+
+    @classmethod
+    def _update_key_to_field_name(cls, key: str) -> str:
+        """Maps an `update` key (field name or alias) to the corresponding field name."""
+        fields = cls.__pydantic_fields__
+        if key in fields:
+            return key
+        for name, field in fields.items():
+            if field.alias == key:
+                return name
+            validation_alias = field.validation_alias
+            if isinstance(validation_alias, str) and validation_alias == key:
+                return name
+            if isinstance(validation_alias, AliasChoices) and key in validation_alias.choices:
+                return name
+        return key
+
     def model_dump(
         self,
         *,
