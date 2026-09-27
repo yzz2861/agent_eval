@@ -196,6 +196,12 @@ Useful Functions and Classes
 
 .. autofunction:: url_for
 
+.. autofunction:: generate_signed_url
+
+.. autofunction:: verify_signed_url
+
+.. autofunction:: signed_url_required
+
 .. autofunction:: abort
 
 .. autofunction:: redirect

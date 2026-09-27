@@ -28,6 +28,10 @@ Unreleased
     it's disabled in config. Previously, only disabling worked. :issue:`5916`
 -   ``Flask.select_jinja_autoescape`` uses case-insensitive comparison instead
     of only lower case file extensions. :pr:`6012`
+-   Add ``generate_signed_url``, ``verify_signed_url``, and
+    ``signed_url_required`` to create and verify signed URLs that are bound
+    to an endpoint, HTTP method, purpose, and expiry, with support for key
+    rotation and optional host binding.
 -   Fix parsing IPv6 with port in ``run`` and the test client. :pr:`6096`
 -   Add ``app.query`` route decorator for the HTTP QUERY method.
 
