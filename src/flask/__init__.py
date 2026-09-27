@@ -31,6 +31,12 @@ from .signals import request_finished as request_finished
 from .signals import request_started as request_started
 from .signals import request_tearing_down as request_tearing_down
 from .signals import template_rendered as template_rendered
+from .signing import ExpiredSignedLink as ExpiredSignedLink
+from .signing import InvalidSignedLink as InvalidSignedLink
+from .signing import signed_url_for as signed_url_for
+from .signing import signed_url_required as signed_url_required
+from .signing import SignedLinkError as SignedLinkError
+from .signing import verify_signed_url as verify_signed_url
 from .templating import render_template as render_template
 from .templating import render_template_string as render_template_string
 from .templating import stream_template as stream_template

@@ -19,6 +19,12 @@ Unreleased
     teardown handlers instead. :issue:`5816`
 -   ``template_filter``, ``template_test``, and ``template_global`` decorators
     can be used without parentheses. :issue:`5729`
+-   Add ``signed_url_for``, ``verify_signed_url``, and
+    ``signed_url_required`` to generate and verify purpose- and
+    method-scoped signed URLs with optional expiration. Key rotation is
+    supported through ``SECRET_KEY_FALLBACKS``, and the
+    ``SIGNED_URL_INCLUDE_HOST`` config controls whether the host is part
+    of the signature.
 -   ``redirect`` returns a ``303`` status code by default instead of ``302``.
     This tells the client to always switch to ``GET``, rather than only
     switching ``POST`` to ``GET``. This preserves the current behavior of

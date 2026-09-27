@@ -232,6 +232,7 @@ class Flask(App):
             "TRAP_HTTP_EXCEPTIONS": False,
             "EXPLAIN_TEMPLATE_LOADING": False,
             "PREFERRED_URL_SCHEME": "http",
+            "SIGNED_URL_INCLUDE_HOST": False,
             "TEMPLATES_AUTO_RELOAD": None,
             "MAX_COOKIE_SIZE": 4093,
             "PROVIDE_AUTOMATIC_OPTIONS": True,
