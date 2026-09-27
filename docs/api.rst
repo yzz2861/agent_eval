@@ -70,6 +70,7 @@ Triggers
 .. autoclass:: apscheduler.triggers.combining.AndTrigger
 .. autoclass:: apscheduler.triggers.combining.OrTrigger
 .. autoclass:: apscheduler.triggers.cron.CronTrigger
+.. autoclass:: apscheduler.triggers.exclusion.ExclusionCalendarTrigger
 
 Events
 ------

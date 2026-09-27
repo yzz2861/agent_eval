@@ -437,6 +437,60 @@ If this trigger is created on 2022-06-07 at 09:00:00, its first run times would 
 
 Notably, 2022-08-07 is skipped because it falls on a Sunday.
 
+Excluding dates and times from a trigger
+----------------------------------------
+
+Sometimes a trigger produces the right rhythm, but certain dates or times of day are
+off limits, for example holidays or maintenance windows.
+:class:`~triggers.exclusion.ExclusionCalendarTrigger` wraps any other trigger and
+skips the fire times that fall within its exclusion calendar::
+
+    from datetime import date, time
+
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.exclusion import ExclusionCalendarTrigger
+
+    trigger = ExclusionCalendarTrigger(
+        trigger=CronTrigger(hour="*/6", timezone="Europe/Berlin"),
+        exclude_dates={date(2026, 3, 29)},
+        exclude_time_ranges=[(time(22, 0), time(6, 0))],
+        timezone="Europe/Berlin",
+    )
+
+The exclusion rules are always evaluated against the wall clock of the calendar's
+own time zone, which may differ from the time zone of the wrapped trigger. In the
+example above, the nightly maintenance window of 22:00 - 06:00 (a range crossing
+midnight) excludes the 00:00 run every day, and the whole of 2026-03-29 is excluded
+as a maintenance day. That Sunday is also the day of the forward daylight saving
+shift in Berlin, where 02:00 - 02:59 does not exist. If this trigger is created on
+2026-03-27, its first run times would be:
+
+* 2026-03-27 06:00:00+01:00
+* 2026-03-27 12:00:00+01:00
+* 2026-03-27 18:00:00+01:00
+* 2026-03-28 06:00:00+01:00
+* 2026-03-28 12:00:00+01:00
+* 2026-03-28 18:00:00+01:00
+* 2026-03-30 06:00:00+02:00
+* 2026-03-30 12:00:00+02:00
+* 2026-03-30 18:00:00+02:00
+
+Note how the UTC offset changes from +01:00 to +02:00 across the excluded day, and
+how no run is scheduled at the end of the maintenance window: excluded fire times
+are skipped, never moved, so the exclusion calendar cannot create extra runs.
+
+Because the rules are evaluated in local wall clock time, the daylight saving
+semantics are deterministic: wall clock times skipped by a forward shift never
+occur (and thus exclude nothing), while wall clock times repeated by a backward
+shift are excluded on *both* of their occurrences.
+
+If the wrapped trigger keeps producing excluded fire times for a long time, the
+search for the next valid fire time is bounded by ``max_search_iterations`` (1000
+by default), after which :class:`~apscheduler.MaxIterationsReached` is raised. A
+wrapped trigger that has simply run out of fire times, on the other hand, makes
+:meth:`~triggers.exclusion.ExclusionCalendarTrigger.next` return ``None`` as
+usual.
+
 Removing schedules
 ------------------
 
