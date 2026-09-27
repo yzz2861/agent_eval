@@ -136,6 +136,9 @@ Streams and stream wrappers
 
 .. autoclass:: anyio.streams.buffered.BufferedByteReceiveStream
 .. autoclass:: anyio.streams.buffered.BufferedByteStream
+.. autoclass:: anyio.streams.broadcast.BroadcastOverflowError
+.. autoclass:: anyio.streams.broadcast.BroadcastReceiveStream
+.. autoclass:: anyio.streams.broadcast.BroadcastStream
 .. autoclass:: anyio.streams.file.FileStreamAttribute
 .. autoclass:: anyio.streams.file.FileReadStream
 .. autoclass:: anyio.streams.file.FileWriteStream

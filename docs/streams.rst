@@ -131,6 +131,110 @@ stream as a context manager::
         with send_stream:
             send_stream.send_nowait('hello')
 
+.. _broadcast streams:
+
+Broadcast streams
+-----------------
+
+.. py:currentmodule:: anyio.streams.broadcast
+
+While clones of a memory object stream distribute items among consumers, a
+:class:`BroadcastStream` implements the publish-subscribe pattern: every item sent
+to it is delivered to *every* subscribed receive stream. Subscriptions are created
+with :meth:`BroadcastStream.subscribe`, which returns an independent
+:class:`BroadcastReceiveStream` with its own buffer. A subscriber only receives
+items whose delivery takes place after it subscribed; earlier items are not
+replayed.
+
+Each subscriber has its own buffer, sized via the ``max_buffer_size`` argument.
+What happens when a subscriber cannot keep up is controlled by the
+``on_overflow`` argument:
+
+* With ``"wait"`` (the default), :meth:`BroadcastStream.send` waits until every
+  subscriber has room in its buffer, so slow subscribers apply backpressure on the
+  publisher. Use this when no subscriber may miss an item, for example when
+  broadcasting state changes.
+* With ``"close"``, a subscriber whose buffer is full is dropped from the
+  broadcast instead. Its buffered items are discarded and its
+  :meth:`BroadcastReceiveStream.receive` raises :class:`BroadcastOverflowError`
+  (a subclass of :exc:`~anyio.BrokenResourceError`), while other subscribers are
+  unaffected. Use this for best-effort consumers, such as log taps, that must
+  never slow the publisher down.
+
+Delivery is atomic: an item is always delivered to either all or none of the
+current subscribers. If :meth:`BroadcastStream.send` returns normally, every
+subscriber received the item; if it is cancelled while waiting for buffer space,
+the item is guaranteed to not have been delivered to any subscriber. The remaining
+lifecycle rules are deterministic as well:
+
+* Closing a receive stream unsubscribes it: its buffered items are discarded and
+  it stops holding back sends.
+* Closing the broadcast stream lets subscribers drain their remaining buffered
+  items, after which they see the end of the stream. Sending or subscribing after
+  that raises :exc:`~anyio.ClosedResourceError`.
+* When the last subscriber unsubscribes, the broadcast stream stays usable and
+  sent items are simply discarded until a new subscriber arrives.
+* A subscriber that subscribes while a send is blocked waiting for buffer space
+  will also receive that item, since the delivery only takes place afterwards.
+
+The following example broadcasts state changes to consumers that must not miss
+any of them, so slow consumers hold the publisher back::
+
+    from anyio import create_task_group, run
+    from anyio.streams.broadcast import BroadcastReceiveStream, BroadcastStream
+
+
+    async def state_consumer(
+        name: str, receiver: BroadcastReceiveStream[str]
+    ) -> None:
+        async with receiver:
+            async for state in receiver:
+                print(f"consumer {name} received state {state!r}")
+
+
+    async def main() -> None:
+        async with create_task_group() as tg:
+            async with BroadcastStream[str](10) as stream:
+                for name in "A", "B":
+                    tg.start_soon(state_consumer, name, stream.subscribe())
+
+                for number in range(3):
+                    await stream.send(f"state {number}")
+
+
+    run(main)
+
+In contrast, this log consumer is only a best-effort tap: if it falls more than
+100 events behind, it is dropped from the broadcast instead of slowing the
+publisher down::
+
+    import sys
+
+    from anyio import create_task_group, run
+    from anyio.streams.broadcast import BroadcastOverflowError, BroadcastStream
+
+
+    async def log_consumer(stream: BroadcastStream[str]) -> None:
+        try:
+            async with stream.subscribe() as receiver:
+                async for event in receiver:
+                    print(f"LOG: {event}", file=sys.stderr)
+        except BroadcastOverflowError:
+            print("log consumer fell behind and was dropped", file=sys.stderr)
+
+
+    async def main() -> None:
+        async with create_task_group() as tg:
+            async with BroadcastStream[str](100, on_overflow="close") as stream:
+                tg.start_soon(log_consumer, stream)
+                for number in range(1000):
+                    await stream.send(f"event {number}")
+
+
+    run(main)
+
+.. py:currentmodule:: anyio
+
 Stapled streams
 ---------------
 

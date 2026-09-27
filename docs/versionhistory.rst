@@ -5,6 +5,10 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 **UNRELEASED**
 
+- Added the ``anyio.streams.broadcast.BroadcastStream`` class, a publish-subscribe
+  object stream where each subscriber receives every published item, with
+  configurable handling of lagging subscribers (unlike memory object stream
+  clones, which distribute items among receivers)
 - Fixed ``sleep()`` treating a negative delay (including ``-inf``) inconsistently
   across backends (asyncio returned immediately; Trio raised ``ValueError``) by
   raising ``ValueError`` on all backends
