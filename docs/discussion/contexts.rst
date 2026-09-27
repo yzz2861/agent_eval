@@ -80,3 +80,36 @@ as discussed in :ref:`streaming_response`:
 
 .. note:: These decorators must be used within an existing context, hence
           the background task is defined as a nested function.
+
+Snapshotting a request context
+-------------------------------
+
+The ``copy_current_request_context`` decorator shares the actual
+request, including its body, uploaded files and session, with the
+background task. This keeps all of those resources alive until the
+task finishes. If the task only needs a small amount of request
+data, for example an audit task that runs after the response has
+been sent, use :func:`~quart.ctx.snapshot_current_request_context`
+instead,
+
+.. code-block:: python
+
+    @app.route('/')
+    async def index():
+        snapshot = snapshot_current_request_context(
+            request_fields=('method', 'path'), g_fields=('user_id',)
+        )
+
+        async def audit():
+            async with snapshot:
+                log(request.method, request.path, g.user_id)
+
+        asyncio.ensure_future(audit())
+        ...
+
+The snapshot deep copies the chosen request and ``g`` fields at
+creation time and is read-only thereafter. It never carries the
+request body, uploaded files or the session, and entering it does
+not run any of the original request's teardown functions. It can be
+entered after the request has finished, in any task of the same
+app.

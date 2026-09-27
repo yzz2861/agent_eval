@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from collections.abc import Iterable
 from contextvars import Token
+from copy import deepcopy
 from functools import update_wrapper
 from types import TracebackType
 from typing import Any
@@ -405,6 +407,224 @@ def copy_current_websocket_context(func: Callable) -> Callable:
             return await ctx.app.ensure_async(func)(*args, **kwargs)
 
     return update_wrapper(wrapper, func)
+
+
+class _SnapshotState:
+    """A read-only attribute view over snapshotted data."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        object.__setattr__(self, "_data", data)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._data[name]
+        except KeyError:
+            raise AttributeError(
+                f"{type(self).__name__} has no attribute {name!r}"
+            ) from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(f"{type(self).__name__} is read-only")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"{type(self).__name__} is read-only")
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {self._data!r}>"
+
+
+class RequestSnapshot:
+    """A read-only snapshot of chosen request and ``g`` data.
+
+    Instances are created via :func:`snapshot_current_request_context`
+    and contain deep copies of the chosen data taken at creation
+    time. They do not reference the original request, its body, any
+    uploaded files, or the session, and hence do not keep them alive
+    nor trigger their teardown.
+
+    A snapshot can be entered after the request has finished, in any
+    task belonging to the same app, making the snapshotted data
+    available via the :data:`.request` and :data:`.g` proxies,
+
+    .. code-block:: python
+
+        async with snapshot:
+            method = request.method
+    """
+
+    def __init__(
+        self,
+        app: Quart,
+        request_data: dict[str, Any],
+        g_data: dict[str, Any],
+    ) -> None:
+        self.app = app
+        self.request = _SnapshotState(request_data)
+        self.g = _SnapshotState(g_data)
+        self._cv_token: Token[AppContext] | None = None
+
+    @property
+    def has_request(self) -> bool:
+        """True, snapshots always contain request data."""
+        return True
+
+    @property
+    def has_websocket(self) -> bool:
+        """False, snapshots never contain websocket data."""
+        return False
+
+    @property
+    def session(self) -> SessionMixin:
+        """Snapshots do not carry a session, raises :exc:`RuntimeError`."""
+        raise RuntimeError("A request snapshot does not include the session.")
+
+    @property
+    def websocket(self) -> Websocket:
+        """Snapshots do not carry a websocket, raises :exc:`RuntimeError`."""
+        raise RuntimeError("A request snapshot does not include a websocket.")
+
+    async def __aenter__(self) -> Self:
+        if self._cv_token is not None:
+            raise RuntimeError(f"This snapshot ({self!r}) is already active.")
+
+        self._cv_token = _cv_app.set(self)  # type: ignore[arg-type]
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        token, self._cv_token = self._cv_token, None
+        _cv_app.reset(token)  # type: ignore[arg-type]
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {id(self)} of {self.app.name}>"
+
+
+#: The request fields snapshotted unless otherwise specified.
+DEFAULT_SNAPSHOT_REQUEST_FIELDS = (
+    "method",
+    "scheme",
+    "root_path",
+    "path",
+    "query_string",
+    "http_version",
+    "remote_addr",
+    "headers",
+)
+
+#: Request fields that cannot be snapshotted as they carry the request
+#: body, uploaded files, or other live request state.
+_SNAPSHOT_FORBIDDEN_REQUEST_FIELDS = {
+    "body",
+    "close",
+    "data",
+    "files",
+    "form",
+    "get_data",
+    "get_json",
+    "json",
+    "scope",
+    "send_push_promise",
+    "stream",
+    "values",
+}
+
+
+def _snapshot_copy(field: str, value: Any) -> Any:
+    try:
+        return deepcopy(value)
+    except Exception as error:
+        raise ValueError(
+            f"Cannot snapshot field {field!r}, the value cannot be safely"
+            f" copied: {error}"
+        ) from error
+
+
+def snapshot_current_request_context(
+    request_fields: Iterable[str] = DEFAULT_SNAPSHOT_REQUEST_FIELDS,
+    g_fields: Iterable[str] = (),
+) -> RequestSnapshot:
+    """Snapshot chosen data from the current request context.
+
+    Unlike :func:`copy_current_request_context` this does not keep the
+    request itself, instead it deep copies the chosen ``request_fields``
+    and ``g_fields`` into a read-only :class:`RequestSnapshot` fixed at
+    creation time. This is useful for background tasks, such as
+    auditing, that need a small amount of request data after the
+    request has finished,
+
+    .. code-block:: python
+
+        @app.route("/")
+        async def index():
+            snapshot = snapshot_current_request_context(
+                request_fields=("method", "path"), g_fields=("user_id",)
+            )
+
+            async def audit() -> None:
+                async with snapshot:
+                    log(request.method, request.path, g.user_id)
+
+            asyncio.ensure_future(audit())
+            ...
+
+    The snapshot never includes the request body, uploaded files, or
+    the session, and entering or leaving it does not run any of the
+    original request's teardown functions.
+
+    :param request_fields: The request attributes to snapshot, defaults
+        to :data:`DEFAULT_SNAPSHOT_REQUEST_FIELDS`.
+    :param g_fields: The :data:`.g` attributes to snapshot.
+
+    .. versionadded:: 0.24
+    """
+    ctx = _cv_app.get(None)
+
+    if ctx is None or not ctx.has_request:
+        raise RuntimeError(
+            "'snapshot_current_request_context' can only be used when a"
+            " request context is active, such as in a view function."
+        )
+
+    request_data: dict[str, Any] = {}
+    for field in request_fields:
+        if field in _SNAPSHOT_FORBIDDEN_REQUEST_FIELDS:
+            raise ValueError(
+                f"Cannot snapshot request field {field!r}, it carries the"
+                " request body, uploaded files, or other live request state."
+            )
+
+        try:
+            value = getattr(ctx.request, field)
+        except AttributeError:
+            raise ValueError(
+                f"Cannot snapshot request field {field!r}, the request has"
+                " no such attribute."
+            ) from None
+
+        if callable(value):
+            raise ValueError(
+                f"Cannot snapshot request field {field!r}, methods are not"
+                " supported as they keep the original request alive."
+            )
+
+        request_data[field] = _snapshot_copy(f"request.{field}", value)
+
+    g_data: dict[str, Any] = {}
+    for field in g_fields:
+        try:
+            value = getattr(ctx.g, field)
+        except AttributeError:
+            raise ValueError(
+                f"Cannot snapshot g field {field!r}, it is not set."
+            ) from None
+
+        g_data[field] = _snapshot_copy(f"g.{field}", value)
+
+    return RequestSnapshot(ctx.app, request_data, g_data)
 
 
 def has_app_context() -> bool:

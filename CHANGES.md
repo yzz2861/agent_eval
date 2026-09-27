@@ -1,3 +1,10 @@
+## Unreleased
+
+- Add `snapshot_current_request_context` and `RequestSnapshot`, a
+  read-only snapshot of chosen request and `g` fields that can be
+  entered after the request has finished without keeping the
+  request, its body, uploaded files, or session alive.
+
 ## Version 0.23.1
 
 Released 2026-08-29
