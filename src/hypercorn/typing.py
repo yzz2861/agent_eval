@@ -84,6 +84,7 @@ class HTTPResponseStartEvent(TypedDict):
     status: int
     headers: Iterable[tuple[bytes, bytes]]
     trailers: NotRequired[bool]
+    priority: NotRequired[int]
 
 
 class HTTPResponseBodyEvent(TypedDict):

@@ -110,6 +110,9 @@ class HTTPStream:
             if event.http_version in EARLY_HINTS_VERSIONS:
                 self.scope["extensions"]["http.response.early_hint"] = {}
 
+            if event.http_version == "2" and self.config.h2_response_priority:
+                self.scope["extensions"]["http.response.priority"] = {}
+
             if valid_server_name(self.config, event):
                 self.app_put = await self.task_group.spawn_app(
                     self.app, self.config, self.scope, self.app_send
@@ -142,11 +145,15 @@ class HTTPStream:
             if message["type"] == "http.response.start" and self.state == ASGIHTTPState.REQUEST:
                 self.response = message
                 headers = build_and_validate_headers(self.response.get("headers", []))
+                priority = self.response.get("priority")
+                if priority is not None and not isinstance(priority, int):
+                    raise TypeError(f"{priority!r} should be an int")
                 await self.send(
                     Response(
                         stream_id=self.stream_id,
                         headers=headers,
                         status_code=int(self.response["status"]),
+                        priority=priority,
                     )
                 )
                 self.state = ASGIHTTPState.RESPONSE

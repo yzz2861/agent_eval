@@ -48,6 +48,7 @@ class EndData(Event):
 class Response(Event):
     headers: list[tuple[bytes, bytes]]
     status_code: int
+    priority: int | None = None
 
 
 @dataclass(frozen=True)

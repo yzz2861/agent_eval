@@ -1,3 +1,11 @@
+Unreleased
+----------
+
+* Add a ``http.response.priority`` ASGI extension allowing apps to
+  hint the HTTP/2 response DATA frame sending order, with aging to
+  prevent starvation. Can be disabled via the
+  ``h2_response_priority`` config.
+
 0.18.0 2025-11-08
 -----------------
 

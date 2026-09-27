@@ -103,8 +103,31 @@ async def test_handle_request_http_2(stream: HTTPStream) -> None:
             "http.response.trailers": {},
             "http.response.early_hint": {},
             "http.response.push": {},
+            "http.response.priority": {},
         },
         "state": ConnectionState({}),
+    }
+
+
+@pytest.mark.asyncio
+async def test_handle_request_http_2_response_priority_disabled(stream: HTTPStream) -> None:
+    stream.config.h2_response_priority = False
+    await stream.handle(
+        Request(
+            stream_id=1,
+            http_version="2",
+            headers=[],
+            raw_path=b"/?a=b",
+            method="GET",
+            state=ConnectionState({}),
+        )
+    )
+    stream.task_group.spawn_app.assert_called()  # type: ignore
+    scope = stream.task_group.spawn_app.call_args[0][2]  # type: ignore
+    assert scope["extensions"] == {
+        "http.response.trailers": {},
+        "http.response.early_hint": {},
+        "http.response.push": {},
     }
 
 
@@ -172,6 +195,50 @@ async def test_send_response(stream: HTTPStream) -> None:
         call(StreamClosed(stream_id=1)),
     ]
     stream.config._log.access.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_send_response_priority(stream: HTTPStream) -> None:
+    await stream.handle(
+        Request(
+            stream_id=1,
+            http_version="2",
+            headers=[],
+            raw_path=b"/?a=b",
+            method="GET",
+            state=ConnectionState({}),
+        )
+    )
+    await stream.app_send(
+        cast(
+            HTTPResponseStartEvent,
+            {"type": "http.response.start", "status": 200, "headers": [], "priority": 10},
+        )
+    )
+    assert stream.send.call_args_list == [  # type: ignore
+        call(Response(stream_id=1, headers=[], status_code=200, priority=10)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_response_invalid_priority(stream: HTTPStream) -> None:
+    await stream.handle(
+        Request(
+            stream_id=1,
+            http_version="2",
+            headers=[],
+            raw_path=b"/?a=b",
+            method="GET",
+            state=ConnectionState({}),
+        )
+    )
+    with pytest.raises(TypeError):
+        await stream.app_send(
+            cast(
+                HTTPResponseStartEvent,
+                {"type": "http.response.start", "status": 200, "headers": [], "priority": "high"},
+            )
+        )
 
 
 @pytest.mark.asyncio

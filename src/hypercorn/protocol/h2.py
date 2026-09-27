@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import h2
 import h2.connection
@@ -33,6 +34,82 @@ BUFFER_LOW_WATER = BUFFER_HIGH_WATER / 2
 
 class BufferCompleteError(Exception):
     pass
+
+
+class StreamScheduler:
+    """Chooses which stream may send DATA frames next.
+
+    This wraps the client-driven HTTP/2 priority tree and, when
+    ``response_priority`` is enabled, response priority hints provided
+    by the application via the ``http.response.priority`` extension.
+
+    Whilst any hint is active all ready streams are scheduled by their
+    effective priority (hint plus an aging boost), with streams that
+    did not declare a hint treated as priority 0. Every time a stream
+    is chosen the waiting streams' boosts increase, so a steady stream
+    of high priority responses cannot starve lower priority streams.
+    When no hints are declared the client priority tree is used
+    directly, preserving the original scheduling behaviour.
+    """
+
+    def __init__(self, response_priority: bool = False) -> None:
+        self._tree = priority.PriorityTree()
+        self._response_priority = response_priority
+        self._hints: dict[int, int] = {}
+        self._ready: set[int] = set()
+        self._waits: dict[int, int] = {}
+
+    def insert_stream(self, stream_id: int, **kwargs: Any) -> None:
+        self._tree.insert_stream(stream_id, **kwargs)
+
+    def reprioritize(self, stream_id: int, **kwargs: Any) -> None:
+        self._tree.reprioritize(stream_id, **kwargs)
+
+    def block(self, stream_id: int) -> None:
+        self._tree.block(stream_id)
+        self._ready.discard(stream_id)
+
+    def unblock(self, stream_id: int) -> None:
+        self._tree.unblock(stream_id)
+        self._ready.add(stream_id)
+
+    def remove_stream(self, stream_id: int) -> None:
+        try:
+            self._tree.remove_stream(stream_id)
+        except priority.MissingStreamError:
+            pass
+        self._discard(stream_id)
+
+    def set_hint(self, stream_id: int, hint: int) -> None:
+        if self._response_priority:
+            self._hints[stream_id] = hint
+
+    def next_stream(self) -> int | None:
+        if self._response_priority and self._hints:
+            if not self._ready:
+                return None
+            chosen = max(
+                self._ready,
+                key=lambda stream_id: (
+                    self._hints.get(stream_id, 0) + self._waits.get(stream_id, 0),
+                    -stream_id,
+                ),
+            )
+            for stream_id in self._ready:
+                if stream_id == chosen:
+                    self._waits[stream_id] = 0
+                else:
+                    self._waits[stream_id] = self._waits.get(stream_id, 0) + 1
+            return chosen
+        try:
+            return next(self._tree)
+        except priority.DeadlockError:
+            return None
+
+    def _discard(self, stream_id: int) -> None:
+        self._hints.pop(stream_id, None)
+        self._ready.discard(stream_id)
+        self._waits.pop(stream_id, None)
 
 
 class StreamBuffer:
@@ -119,7 +196,7 @@ class H2Protocol:
         self.streams: dict[int, HTTPStream | WSStream] = {}
         # The below are used by the sending task
         self.has_data = self.context.event_class()
-        self.priority = priority.PriorityTree()
+        self.scheduler = StreamScheduler(response_priority=config.h2_response_priority)
         self.stream_buffers: dict[int, StreamBuffer] = {}
 
     @property
@@ -145,9 +222,8 @@ class H2Protocol:
         # class. This allows it separately choose when to send,
         # crucially in what order.
         while not self.closed:
-            try:
-                stream_id = next(self.priority)
-            except priority.DeadlockError:
+            stream_id = self.scheduler.next_stream()
+            if stream_id is None:
                 await self.has_data.wait()
                 await self.has_data.clear()
             else:
@@ -165,19 +241,20 @@ class H2Protocol:
                 self.connection.send_data(stream_id, data)
                 await self._flush()
             else:
-                self.priority.block(stream_id)
+                self.scheduler.block(stream_id)
 
             if self.stream_buffers[stream_id].complete:
                 self.connection.end_stream(stream_id)
                 await self._flush()
                 del self.stream_buffers[stream_id]
-                self.priority.remove_stream(stream_id)
+                self.scheduler.remove_stream(stream_id)
         except (h2.exceptions.StreamClosedError, KeyError, h2.exceptions.ProtocolError):
             # Stream or connection has closed whilst waiting to send
             # data, not a problem - just force close it.
-            await self.stream_buffers[stream_id].close()
-            del self.stream_buffers[stream_id]
-            self.priority.remove_stream(stream_id)
+            buffer = self.stream_buffers.pop(stream_id, None)
+            if buffer is not None:
+                await buffer.close()
+            self.scheduler.remove_stream(stream_id)
 
     async def handle(self, event: Event) -> None:
         if isinstance(event, RawData):
@@ -198,6 +275,12 @@ class H2Protocol:
     async def stream_send(self, event: StreamEvent) -> None:
         try:
             if isinstance(event, (InformationalResponse, Response)):
+                if (
+                    isinstance(event, Response)
+                    and event.priority is not None
+                    and event.stream_id in self.streams
+                ):
+                    self.scheduler.set_hint(event.stream_id, event.priority)
                 self.connection.send_headers(
                     event.stream_id,
                     [(b":status", b"%d" % event.status_code)]
@@ -206,16 +289,16 @@ class H2Protocol:
                 )
                 await self._flush()
             elif isinstance(event, (Body, Data)):
-                self.priority.unblock(event.stream_id)
+                self.scheduler.unblock(event.stream_id)
                 await self.has_data.set()
                 await self.stream_buffers[event.stream_id].push(event.data)
             elif isinstance(event, (EndBody, EndData)):
                 self.stream_buffers[event.stream_id].set_complete()
-                self.priority.unblock(event.stream_id)
+                self.scheduler.unblock(event.stream_id)
                 await self.has_data.set()
                 await self.stream_buffers[event.stream_id].drain()
             elif isinstance(event, Trailers):
-                self.priority.unblock(event.stream_id)
+                self.scheduler.unblock(event.stream_id)
                 await self.has_data.set()
                 await self.stream_buffers[event.stream_id].drain()
                 self.connection.send_headers(event.stream_id, event.headers, end_stream=True)
@@ -292,14 +375,14 @@ class H2Protocol:
         if stream_id is None or stream_id == 0:
             # Unblock all streams
             for stream_id in list(self.stream_buffers.keys()):
-                self.priority.unblock(stream_id)
+                self.scheduler.unblock(stream_id)
         elif stream_id is not None and stream_id in self.stream_buffers:
-            self.priority.unblock(stream_id)
+            self.scheduler.unblock(stream_id)
         await self.has_data.set()
 
     async def _priority_updated(self, event: h2.events.PriorityUpdated) -> None:
         try:
-            self.priority.reprioritize(
+            self.scheduler.reprioritize(
                 stream_id=event.stream_id,
                 depends_on=event.depends_on or None,
                 weight=event.weight,
@@ -307,13 +390,13 @@ class H2Protocol:
             )
         except priority.MissingStreamError:
             # Received PRIORITY frame before HEADERS frame
-            self.priority.insert_stream(
+            self.scheduler.insert_stream(
                 stream_id=event.stream_id,
                 depends_on=event.depends_on or None,
                 weight=event.weight,
                 exclusive=event.exclusive,
             )
-            self.priority.block(event.stream_id)
+            self.scheduler.block(event.stream_id)
         await self.has_data.set()
 
     async def _create_stream(self, request: h2.events.RequestReceived) -> None:
@@ -349,12 +432,12 @@ class H2Protocol:
             )
         self.stream_buffers[request.stream_id] = StreamBuffer(self.context.event_class)
         try:
-            self.priority.insert_stream(request.stream_id)
+            self.scheduler.insert_stream(request.stream_id)
         except priority.DuplicateStreamError:
             # Received PRIORITY frame before HEADERS frame
             pass
         else:
-            self.priority.block(request.stream_id)
+            self.scheduler.block(request.stream_id)
 
         await self.streams[request.stream_id].handle(
             Request(
@@ -396,5 +479,9 @@ class H2Protocol:
     async def _close_stream(self, stream_id: int) -> None:
         if stream_id in self.streams:
             stream = self.streams.pop(stream_id)
+            self.scheduler.remove_stream(stream_id)
+            buffer = self.stream_buffers.pop(stream_id, None)
+            if buffer is not None:
+                await buffer.close()
             await stream.handle(StreamClosed(stream_id=stream_id))
             await self.has_data.set()

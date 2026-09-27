@@ -45,3 +45,39 @@ HTTP/2 features
 
 Hypercorn supports pipeling, flow control, server push, and
 prioritisation.
+
+Response prioritisation
+-----------------------
+
+Hypercorn advertises a ``http.response.priority`` extension over
+HTTP/2 (when ``h2_response_priority`` is enabled, as it is by
+default). This allows the app to include a ``priority`` integer in
+the ``http.response.start`` message,
+
+.. code-block:: python
+
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [...],
+            "priority": 10,
+        }
+    )
+
+The hint controls the order in which already queued DATA frames are
+sent on the connection: streams with a higher priority are sent
+before lower priority streams, which allows small important
+responses to overtake large downloads. Streams that do not declare a
+priority are treated as priority 0 whilst any hint is active.
+
+To prevent a steady stream of high priority responses starving lower
+priority streams, waiting streams gain an aging boost every time
+another stream is sent, so every stream is eventually served.
+Whenever no priorities are declared the original client-driven
+HTTP/2 priority tree scheduling is used unchanged. Flow control
+windows and frame sizes are always respected, and streams that
+cannot send do not occupy the scheduler.
+
+Set ``h2_response_priority`` to ``False`` to disable the extension
+and ignore any hints.
