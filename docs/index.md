@@ -164,6 +164,35 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+#### Draining the server
+
+For rolling deployments, `Server.drain()` lets you stop taking new work without
+exiting the process: the listeners are closed, in-flight responses finish, and
+the application lifespan keeps running until *you* decide to exit.
+
+```py title="main.py"
+async def main():
+    config = uvicorn.Config("main:app", port=5000, log_level="info")
+    server = uvicorn.Server(config)
+    serve_task = asyncio.create_task(server.serve())
+
+    # ... once the load balancer has removed this instance ...
+    await server.drain(timeout=30)  # refuse new work, finish in-flight requests
+    server.should_exit = True  # now shut down: runs the lifespan shutdown once
+    await serve_task
+```
+
+While draining:
+
+- New connections are refused, and new requests on existing keep-alive
+  connections are answered with `503 Service Unavailable` instead of reaching
+  the application. WebSocket handshakes are rejected the same way.
+- In-flight responses, including streaming ones, are completed. Established
+  WebSockets are closed with status code `1012` (service restart).
+- `server.draining` reports whether the server is draining. Repeated `drain()`
+  calls wait on the same operation, and `timeout` bounds the wait before
+  remaining tasks are cancelled (defaults to `--timeout-graceful-shutdown`).
+
 ### Running with Gunicorn
 
 !!! warning

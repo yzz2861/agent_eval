@@ -62,6 +62,7 @@ class ServerState:
         self.connections: set[Protocols] = set()
         self.tasks: set[asyncio.Task[None]] = set()
         self.default_headers: list[tuple[bytes, bytes]] = []
+        self.draining = False
 
 
 class Server:
@@ -75,6 +76,9 @@ class Server:
         self.last_notified = 0.0
 
         self._captured_signals: list[int] = []
+        self._drain_task: asyncio.Task[None] | None = None
+        self._lifespan_shutdown_complete = False
+        self.servers: list[asyncio.base_events.Server] = []
 
     @functools.cached_property
     def limit_max_requests(self) -> int | None:
@@ -84,6 +88,57 @@ class Server:
 
     def run(self, sockets: list[socket.socket] | None = None) -> None:
         return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+
+    @property
+    def draining(self) -> bool:
+        """Whether the server is draining: not accepting new connections or requests."""
+        return self.server_state.draining
+
+    async def drain(self, timeout: float | None = None) -> None:
+        """
+        Drain the server without exiting.
+
+        Stop accepting new connections, refuse new requests on existing
+        connections, and wait for in-flight responses to complete. The
+        lifespan shutdown is *not* triggered: the caller decides when to
+        exit, e.g. by setting `should_exit` afterwards.
+
+        Repeated calls are safe: they all wait on the same drain operation.
+        `timeout` bounds how long to wait for in-flight work, after which
+        remaining tasks are cancelled. Defaults to
+        `config.timeout_graceful_shutdown`.
+        """
+        if self._drain_task is None:
+            self._drain_task = asyncio.get_running_loop().create_task(self._drain(timeout))
+        await asyncio.shield(self._drain_task)
+
+    async def _drain(self, timeout: float | None) -> None:
+        logger.info("Draining server: refusing new connections and requests")
+        self.server_state.draining = True
+
+        # Stop accepting new connections.
+        for server in self.servers:
+            server.close()
+
+        # Ask existing connections to wrap up: idle connections are closed,
+        # in-flight responses are finished without keep-alive, and established
+        # WebSockets are closed with status code 1012 (service restart).
+        for connection in list(self.server_state.connections):
+            connection.shutdown()
+        await asyncio.sleep(0.1)
+
+        if timeout is None:
+            timeout = self.config.timeout_graceful_shutdown
+        try:
+            await asyncio.wait_for(self._wait_tasks_to_complete(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.error(
+                "Cancel %s running task(s), drain timeout exceeded",
+                len(self.server_state.tasks),
+            )
+            for t in self.server_state.tasks:
+                t.cancel(msg="Task cancelled, drain timeout exceeded")
+        logger.info("Server drained")
 
     async def serve(self, sockets: list[socket.socket] | None = None) -> None:
         with self.capture_signals():
@@ -146,7 +201,7 @@ class Server:
                 sock_data = sock.share(os.getpid())  # type: ignore[attr-defined]
                 return fromshare(sock_data)
 
-            self.servers: list[asyncio.base_events.Server] = []
+            self.servers = []
             for sock in sockets:
                 is_windows = platform.system() == "Windows"
                 if config.workers > 1 and is_windows:  # pragma: py-not-win32
@@ -307,7 +362,8 @@ class Server:
                 t.cancel(msg="Task cancelled, timeout graceful shutdown exceeded")
 
         # Send the lifespan shutdown event, and wait for application shutdown.
-        if not self.force_exit:
+        if not self.force_exit and not self._lifespan_shutdown_complete:
+            self._lifespan_shutdown_complete = True
             await self.lifespan.shutdown()
 
     async def _wait_tasks_to_complete(self) -> None:

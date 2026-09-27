@@ -104,6 +104,11 @@ class H11Protocol(asyncio.Protocol):
             prefix = "%s:%d - " % self.client if self.client else ""
             self.logger.log(TRACE_LOG_LEVEL, "%sHTTP connection made", prefix)
 
+        if self.server_state.draining:
+            # The server is draining, so this connection raced the listener
+            # closing. Reject it immediately.
+            self.transport.close()
+
     def connection_lost(self, exc: Exception | None) -> None:
         self.connections.discard(self)
 
@@ -220,12 +225,15 @@ class H11Protocol(asyncio.Protocol):
                     "headers": self.headers,
                     "state": self.app_state.copy(),
                 }
-                if self._should_upgrade():
+                if self.server_state.draining:
+                    # The server is draining. Refuse new requests, including
+                    # WebSocket handshakes, without running the application.
+                    app = service_unavailable
+                elif self._should_upgrade():
                     self.handle_websocket_upgrade(event)
                     return
-
                 # Handle 503 responses when 'limit_concurrency' is exceeded.
-                if self.limit_concurrency is not None and (
+                elif self.limit_concurrency is not None and (
                     len(self.connections) >= self.limit_concurrency or len(self.tasks) >= self.limit_concurrency
                 ):
                     app = service_unavailable
@@ -246,6 +254,9 @@ class H11Protocol(asyncio.Protocol):
                     message_event=asyncio.Event(),
                     on_response=self.on_response_complete,
                 )
+                if self.server_state.draining:
+                    # Close the connection once the 503 response is sent.
+                    self.cycle.keep_alive = False
                 if self.config.reset_contextvars:
                     # Opt-in workaround for https://github.com/python/cpython/issues/140947:
                     # asyncio can leak context vars between tasks. Hides context set in the

@@ -113,6 +113,11 @@ class HttpToolsProtocol(asyncio.Protocol):
             prefix = "%s:%d - " % self.client if self.client else ""
             self.logger.log(TRACE_LOG_LEVEL, "%sHTTP connection made", prefix)
 
+        if self.server_state.draining:
+            # The server is draining, so this connection raced the listener
+            # closing. Reject it immediately.
+            self.transport.close()
+
     def connection_lost(self, exc: Exception | None) -> None:
         self.connections.discard(self)
 
@@ -178,7 +183,11 @@ class HttpToolsProtocol(asyncio.Protocol):
             self.send_400_response(msg)
             return
         except httptools.HttpParserUpgrade:
-            if self._should_upgrade():
+            if self.server_state.draining:
+                # The server is draining. The upgrade is rejected with a 503
+                # response by 'on_headers_complete'.
+                pass
+            elif self._should_upgrade():
                 self.handle_websocket_upgrade()
             else:
                 self._unsupported_upgrade_warning()
@@ -251,7 +260,7 @@ class HttpToolsProtocol(asyncio.Protocol):
         self.scope["method"] = method.decode("ascii")
         if http_version != "1.1":
             self.scope["http_version"] = http_version
-        if self.parser.should_upgrade() and self._should_upgrade():
+        if self.parser.should_upgrade() and self._should_upgrade() and not self.server_state.draining:
             return
         parsed_url = httptools.parse_url(self.url)
         raw_path = parsed_url.path
@@ -264,8 +273,12 @@ class HttpToolsProtocol(asyncio.Protocol):
         self.scope["raw_path"] = full_raw_path
         self.scope["query_string"] = parsed_url.query or b""
 
+        if self.server_state.draining:
+            # The server is draining. Refuse new requests, including
+            # WebSocket handshakes, without running the application.
+            app = service_unavailable
         # Handle 503 responses when 'limit_concurrency' is exceeded.
-        if self.limit_concurrency is not None and (
+        elif self.limit_concurrency is not None and (
             len(self.connections) >= self.limit_concurrency or len(self.tasks) >= self.limit_concurrency
         ):
             app = service_unavailable
@@ -285,7 +298,7 @@ class HttpToolsProtocol(asyncio.Protocol):
             default_headers=self.server_state.default_headers,
             message_event=asyncio.Event(),
             expect_100_continue=self.expect_100_continue,
-            keep_alive=http_version != "1.0" and self.parser.should_keep_alive(),
+            keep_alive=http_version != "1.0" and self.parser.should_keep_alive() and not self.server_state.draining,
             on_response=self.on_response_complete,
         )
         if existing_cycle is None or existing_cycle.response_complete:
