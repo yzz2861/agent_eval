@@ -153,6 +153,13 @@ server_names               ``--server-name``             The hostnames that can 
                                                          with 404s.
 shutdown_timeout           N/A                           Timeout when waiting for Lifespan               60s
                                                          shutdowns to complete.
+sni_certificates           N/A                           Additional certificates to serve based on
+                                                          the SNI hostname, as a list of mappings with
+                                                          ``domains`` (exact or single level wildcards
+                                                          such as ``*.example.com``), ``certfile``,
+                                                          ``keyfile``, and optionally ``password``
+                                                          keys. Unknown or missing SNI uses the
+                                                          ``certfile``/``keyfile`` certificate.
 ssl_handshake_timeout      N/A                           Timeout when waiting for SSL handshakes to      60s
                                                          complete.
 startup_timeout            N/A                           Timeout when waiting for Lifespan               60s
@@ -179,3 +186,45 @@ workers                    ``-w``, ``--workers``         The number of workers t
 wsgi_max_body_size         N/A                           The maximum size of a body that will be         16MiB
                                                          accepted in WSGI mode.
 ========================== ============================= =============================================== ========================
+
+SNI certificates
+----------------
+
+Multiple certificates can be served from a single TLS bind by
+setting ``sni_certificates``. The certificate is then chosen by the
+SNI hostname sent by the client, with exact domains taking
+precedence over single level wildcards (e.g. ``*.example.com``), and
+unknown or missing SNI hostnames falling back to the
+``certfile``/``keyfile`` certificate. For example,
+
+.. code-block:: python
+
+     config = Config()
+     config.certfile = "default.crt"
+     config.keyfile = "default.key"
+     config.sni_certificates = [
+         {
+             "domains": ["example.com", "*.example.org"],
+             "certfile": "example.crt",
+             "keyfile": "example.key",
+         },
+     ]
+
+Selecting a certificate does not change the ALPN protocols or the
+client certificate verification policy, these remain as configured.
+
+The whole group of certificates can be reloaded programmatically,
+which is useful as certificates are renewed. The reload is atomic:
+if any certificate, key, or domain rule is invalid a
+:class:`hypercorn.sni.CertificateError` is raised and the previous
+group keeps serving. New handshakes use the new group whilst
+established connections are unaffected.
+
+.. code-block:: python
+
+     from hypercorn.sni import Certificate
+
+     config.certificate_store.reload(
+         Certificate("default.crt", "default.key"),
+         [("example.com", Certificate("example.crt", "example.key"))],
+     )

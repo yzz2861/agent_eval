@@ -1,3 +1,10 @@
+Unreleased
+----------
+
+* Add ``sni_certificates`` config to serve multiple certificates
+  selected by SNI hostname on a single TLS bind, with an atomically
+  reloadable ``certificate_store``.
+
 0.18.0 2025-11-08
 -----------------
 

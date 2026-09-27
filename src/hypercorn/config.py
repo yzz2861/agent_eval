@@ -30,6 +30,7 @@ else:
     import tomli as tomllib
 
 from .logging import Logger
+from .sni import Certificate, CertificateError, CertificateStore
 
 BYTES = 1
 OCTETS = 1
@@ -99,6 +100,7 @@ class Config:
     pid_path: str | None = None
     server_names: list[str] = []
     shutdown_timeout = 60 * SECONDS
+    sni_certificates: list = []
     ssl_handshake_timeout = 60 * SECONDS
     startup_timeout = 60 * SECONDS
     statsd_host: str | None = None
@@ -113,6 +115,8 @@ class Config:
     worker_class = "asyncio"
     workers = 1
     wsgi_max_body_size = 16 * 1024 * 1024 * BYTES
+
+    certificate_store: CertificateStore | None = None
 
     def set_cert_reqs(self, value: int) -> None:
         warnings.warn("Please use verify_mode instead", Warning)
@@ -171,27 +175,60 @@ class Config:
         if not self.ssl_enabled:
             return None
 
-        context = create_default_context(Purpose.CLIENT_AUTH)
-        context.set_ciphers(self.ciphers)
-        context.minimum_version = TLSVersion.TLSv1_2  # RFC 7540 Section 9.2: MUST be TLS >=1.2
-        context.options = OP_NO_COMPRESSION  # RFC 7540 Section 9.2.1: MUST disable compression
-        context.set_alpn_protocols(self.alpn_protocols)
+        def context_factory() -> SSLContext:
+            context = create_default_context(Purpose.CLIENT_AUTH)
+            context.set_ciphers(self.ciphers)
+            # RFC 7540 Section 9.2: MUST be TLS >=1.2
+            context.minimum_version = TLSVersion.TLSv1_2
+            # RFC 7540 Section 9.2.1: MUST disable compression
+            context.options = OP_NO_COMPRESSION
+            context.set_alpn_protocols(self.alpn_protocols)
 
-        if self.certfile is not None and self.keyfile is not None:
-            context.load_cert_chain(
+            if self.ca_certs is not None:
+                context.load_verify_locations(self.ca_certs)
+            if self.verify_mode is not None:
+                context.verify_mode = self.verify_mode
+            if self.verify_flags is not None:
+                context.verify_flags = self.verify_flags
+
+            return context
+
+        store = CertificateStore(context_factory)
+        store.reload(
+            Certificate(
                 certfile=self.certfile,
                 keyfile=self.keyfile,
                 password=self.keyfile_password,
-            )
+            ),
+            self._sni_certificate_pairs(),
+        )
+        store.context.sni_callback = store.sni_callback
+        self.certificate_store = store
+        return store.context
 
-        if self.ca_certs is not None:
-            context.load_verify_locations(self.ca_certs)
-        if self.verify_mode is not None:
-            context.verify_mode = self.verify_mode
-        if self.verify_flags is not None:
-            context.verify_flags = self.verify_flags
-
-        return context
+    def _sni_certificate_pairs(self) -> list[tuple[str, Certificate]]:
+        pairs: list[tuple[str, Certificate]] = []
+        for entry in self.sni_certificates:
+            if isinstance(entry, Mapping):
+                domains = entry.get("domains", [])
+                certfile = entry.get("certfile")
+                keyfile = entry.get("keyfile")
+                password = entry.get("password")
+            else:
+                domains = getattr(entry, "domains", [])
+                certfile = getattr(entry, "certfile", None)
+                keyfile = getattr(entry, "keyfile", None)
+                password = getattr(entry, "password", None)
+            if isinstance(domains, str):
+                domains = [domains]
+            if not domains:
+                raise CertificateError("SNI certificate entries require at least one domain")
+            if certfile is None:
+                raise CertificateError("SNI certificate entries require a certfile")
+            certificate = Certificate(certfile=certfile, keyfile=keyfile, password=password)
+            for domain in domains:
+                pairs.append((domain, certificate))
+        return pairs
 
     @property
     def ssl_enabled(self) -> bool:
