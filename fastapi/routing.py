@@ -17,6 +17,7 @@ from collections.abc import (
     Collection,
     Coroutine,
     Generator,
+    Iterable,
     Iterator,
     Mapping,
     Sequence,
@@ -956,6 +957,7 @@ class _APIRouteLike(Protocol):
     body_field: ModelField | None
     is_sse_stream: bool
     is_json_stream: bool
+    audiences: frozenset[str] | None
 
 
 def _populate_api_route_state(
@@ -982,6 +984,7 @@ def _populate_api_route_state(
     response_model_exclude_defaults: bool = False,
     response_model_exclude_none: bool = False,
     include_in_schema: bool = True,
+    audiences: Iterable[str] | None = None,
     response_class: type[Response] | DefaultPlaceholder = Default(JSONResponse),
     dependency_overrides_provider: Any | None = None,
     callbacks: list[BaseRoute] | None = None,
@@ -1006,6 +1009,7 @@ def _populate_api_route_state(
     route.response_model_exclude_defaults = response_model_exclude_defaults
     route.response_model_exclude_none = response_model_exclude_none
     route.include_in_schema = include_in_schema
+    route.audiences = frozenset(audiences) if audiences is not None else None
     route.response_class = response_class
     route.dependency_overrides_provider = dependency_overrides_provider
     route.callbacks = callbacks
@@ -1123,6 +1127,16 @@ def _populate_api_route_state(
         route.stream_item_field = None
 
 
+def _combine_audiences(
+    parent: Iterable[str] | None, child: Iterable[str] | None
+) -> frozenset[str] | None:
+    if parent is None:
+        return frozenset(child) if child is not None else None
+    if child is None:
+        return frozenset(parent)
+    return frozenset(parent) & frozenset(child)
+
+
 class APIRoute(routing.Route):
     stream_item_type: Any | None
     response_model: Any
@@ -1157,6 +1171,7 @@ class APIRoute(routing.Route):
     body_field: ModelField | None
     is_sse_stream: bool
     is_json_stream: bool
+    audiences: frozenset[str] | None
 
     def __init__(
         self,
@@ -1182,6 +1197,7 @@ class APIRoute(routing.Route):
         response_model_exclude_defaults: bool = False,
         response_model_exclude_none: bool = False,
         include_in_schema: bool = True,
+        audiences: Sequence[str] | None = None,
         response_class: type[Response] | DefaultPlaceholder = Default(JSONResponse),
         dependency_overrides_provider: Any | None = None,
         callbacks: list[BaseRoute] | None = None,
@@ -1213,6 +1229,7 @@ class APIRoute(routing.Route):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             dependency_overrides_provider=dependency_overrides_provider,
             callbacks=callbacks,
@@ -1294,6 +1311,7 @@ class _RouterIncludeContext:
     callbacks: list[BaseRoute] = field(default_factory=list)
     deprecated: bool | None = None
     include_in_schema: bool = True
+    audiences: frozenset[str] | None = None
     generate_unique_id_function: Callable[[APIRoute], str] | DefaultPlaceholder = field(
         default_factory=lambda: Default(generate_unique_id)
     )
@@ -1318,6 +1336,7 @@ class _RouterIncludeContext:
         callbacks: list[BaseRoute] | None = None,
         deprecated: bool | None = None,
         include_in_schema: bool = True,
+        audiences: Sequence[str] | None = None,
         generate_unique_id_function: Callable[[APIRoute], str]
         | DefaultPlaceholder = Default(generate_unique_id),
     ) -> "_RouterIncludeContext":
@@ -1333,6 +1352,7 @@ class _RouterIncludeContext:
             callbacks=[*parent_router.callbacks, *(callbacks or [])],
             deprecated=deprecated or parent_router.deprecated,
             include_in_schema=parent_router.include_in_schema and include_in_schema,
+            audiences=_combine_audiences(parent_router.audiences, audiences),
             generate_unique_id_function=get_value_or_default(
                 generate_unique_id_function, parent_router.generate_unique_id_function
             ),
@@ -1356,6 +1376,7 @@ class _RouterIncludeContext:
             deprecated=self.deprecated or child_context.deprecated,
             include_in_schema=self.include_in_schema
             and child_context.include_in_schema,
+            audiences=_combine_audiences(self.audiences, child_context.audiences),
             generate_unique_id_function=get_value_or_default(
                 child_context.generate_unique_id_function,
                 self.generate_unique_id_function,
@@ -1421,6 +1442,7 @@ class _EffectiveRouteContext:
     body_field: ModelField | None = None
     is_sse_stream: bool = False
     is_json_stream: bool = False
+    audiences: frozenset[str] | None = None
 
     @classmethod
     def from_api_route(
@@ -1454,6 +1476,7 @@ class _EffectiveRouteContext:
             response_model_exclude_none=route.response_model_exclude_none,
             include_in_schema=route.include_in_schema
             and include_context.include_in_schema,
+            audiences=_combine_audiences(include_context.audiences, route.audiences),
             response_class=get_value_or_default(
                 route.response_class,
                 include_context.included_router.default_response_class,
@@ -2478,6 +2501,23 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                the *path operations* in this router should appear in the OpenAPI
+                schema generated for that audience with
+                `app.openapi_for_audience()`.
+
+                If not set, the *path operations* appear in the schema of every
+                audience.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operations*.
+                """
+            ),
+        ] = None,
         generate_unique_id_function: Annotated[
             Callable[[APIRoute], str],
             Doc(
@@ -2556,6 +2596,7 @@ class APIRouter(routing.Router):
         self.dependencies = list(dependencies or [])
         self.deprecated = deprecated
         self.include_in_schema = include_in_schema
+        self.audiences = frozenset(audiences) if audiences is not None else None
         self.responses = responses or {}
         self.callbacks = callbacks or []
         self.dependency_overrides_provider = dependency_overrides_provider
@@ -2909,6 +2950,7 @@ class APIRouter(routing.Router):
         response_model_exclude_defaults: bool = False,
         response_model_exclude_none: bool = False,
         include_in_schema: bool = True,
+        audiences: Sequence[str] | None = None,
         response_class: type[Response] | DefaultPlaceholder = Default(JSONResponse),
         name: str | None = None,
         route_class_override: type[APIRoute] | None = None,
@@ -2936,6 +2978,7 @@ class APIRouter(routing.Router):
         current_generate_unique_id = get_value_or_default(
             generate_unique_id_function, self.generate_unique_id_function
         )
+        current_audiences = _combine_audiences(self.audiences, audiences)
         route = route_class(
             self.prefix + path,
             endpoint=endpoint,
@@ -2957,6 +3000,7 @@ class APIRouter(routing.Router):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema and self.include_in_schema,
+            audiences=current_audiences,
             response_class=current_response_class,
             name=name,
             dependency_overrides_provider=self.dependency_overrides_provider,
@@ -2992,6 +3036,7 @@ class APIRouter(routing.Router):
         response_model_exclude_defaults: bool = False,
         response_model_exclude_none: bool = False,
         include_in_schema: bool = True,
+        audiences: Sequence[str] | None = None,
         response_class: type[Response] = Default(JSONResponse),
         name: str | None = None,
         callbacks: list[BaseRoute] | None = None,
@@ -3022,6 +3067,7 @@ class APIRouter(routing.Router):
                 response_model_exclude_defaults=response_model_exclude_defaults,
                 response_model_exclude_none=response_model_exclude_none,
                 include_in_schema=include_in_schema,
+                audiences=audiences,
                 response_class=response_class,
                 name=name,
                 callbacks=callbacks,
@@ -3226,6 +3272,25 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                the *path operations* of the included router should appear in the
+                OpenAPI schema generated for that audience with
+                `app.openapi_for_audience()`.
+
+                It will be combined (intersected) with the audiences declared by
+                the included router and its *path operations*. If not set, the
+                audiences of the included router and its *path operations* are
+                used as is.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operations*.
+                """
+            ),
+        ] = None,
         generate_unique_id_function: Annotated[
             Callable[[APIRoute], str],
             Doc(
@@ -3304,6 +3369,7 @@ class APIRouter(routing.Router):
             callbacks=callbacks,
             deprecated=deprecated,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             generate_unique_id_function=generate_unique_id_function,
         )
         self.routes.append(
@@ -3586,6 +3652,22 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                this *path operation* should appear in the OpenAPI schema
+                generated for that audience with `app.openapi_for_audience()`.
+
+                If not set, the *path operation* appears in the schema of every
+                audience.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -3689,6 +3771,7 @@ class APIRouter(routing.Router):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -3963,6 +4046,22 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                this *path operation* should appear in the OpenAPI schema
+                generated for that audience with `app.openapi_for_audience()`.
+
+                If not set, the *path operation* appears in the schema of every
+                audience.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -4071,6 +4170,7 @@ class APIRouter(routing.Router):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -4345,6 +4445,22 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                this *path operation* should appear in the OpenAPI schema
+                generated for that audience with `app.openapi_for_audience()`.
+
+                If not set, the *path operation* appears in the schema of every
+                audience.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -4453,6 +4569,7 @@ class APIRouter(routing.Router):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -4727,6 +4844,22 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                this *path operation* should appear in the OpenAPI schema
+                generated for that audience with `app.openapi_for_audience()`.
+
+                If not set, the *path operation* appears in the schema of every
+                audience.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -4830,6 +4963,7 @@ class APIRouter(routing.Router):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -5104,6 +5238,22 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                this *path operation* should appear in the OpenAPI schema
+                generated for that audience with `app.openapi_for_audience()`.
+
+                If not set, the *path operation* appears in the schema of every
+                audience.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -5207,6 +5357,7 @@ class APIRouter(routing.Router):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -5481,6 +5632,22 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                this *path operation* should appear in the OpenAPI schema
+                generated for that audience with `app.openapi_for_audience()`.
+
+                If not set, the *path operation* appears in the schema of every
+                audience.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -5589,6 +5756,7 @@ class APIRouter(routing.Router):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -5863,6 +6031,22 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                this *path operation* should appear in the OpenAPI schema
+                generated for that audience with `app.openapi_for_audience()`.
+
+                If not set, the *path operation* appears in the schema of every
+                audience.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -5971,6 +6155,7 @@ class APIRouter(routing.Router):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,
@@ -6245,6 +6430,22 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = True,
+        audiences: Annotated[
+            Sequence[str] | None,
+            Doc(
+                """
+                Declare the audiences (e.g. `"public"`, `"internal"`) for which
+                this *path operation* should appear in the OpenAPI schema
+                generated for that audience with `app.openapi_for_audience()`.
+
+                If not set, the *path operation* appears in the schema of every
+                audience.
+
+                This doesn't affect the default OpenAPI schema (e.g. visible at
+                `/docs`) nor the actual availability of the *path operation*.
+                """
+            ),
+        ] = None,
         response_class: Annotated[
             type[Response],
             Doc(
@@ -6353,6 +6554,7 @@ class APIRouter(routing.Router):
             response_model_exclude_defaults=response_model_exclude_defaults,
             response_model_exclude_none=response_model_exclude_none,
             include_in_schema=include_in_schema,
+            audiences=audiences,
             response_class=response_class,
             name=name,
             callbacks=callbacks,

@@ -2,7 +2,7 @@ import copy
 import http.client
 import inspect
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -677,3 +677,98 @@ def get_openapi(
     if external_docs:
         output["externalDocs"] = external_docs
     return jsonable_encoder(OpenAPI(**output), by_alias=True, exclude_none=True)  # type: ignore[no-any-return]
+
+
+_COMPONENT_REF_PREFIX = "#/components/"
+
+
+def _unescape_json_pointer(value: str) -> str:
+    return value.replace("~1", "/").replace("~0", "~")
+
+
+def _parse_component_ref(ref: Any) -> tuple[str, str] | None:
+    if not isinstance(ref, str) or not ref.startswith(_COMPONENT_REF_PREFIX):
+        return None
+    parts = ref[len(_COMPONENT_REF_PREFIX) :].split("/")
+    if len(parts) != 2:
+        return None
+    return _unescape_json_pointer(parts[0]), _unescape_json_pointer(parts[1])
+
+
+def _iter_component_refs(node: Any) -> Iterator[tuple[str, str]]:
+    # Yield the (component group, name) pairs referenced by a piece of an
+    # OpenAPI document, through $refs, security requirements and
+    # discriminator mappings.
+    if isinstance(node, dict):
+        parsed_ref = _parse_component_ref(node.get("$ref"))
+        if parsed_ref is not None:
+            yield parsed_ref
+        security = node.get("security")
+        if isinstance(security, list):
+            for requirement in security:
+                if isinstance(requirement, dict):
+                    for scheme_name in requirement:
+                        yield "securitySchemes", scheme_name
+        discriminator = node.get("discriminator")
+        if isinstance(discriminator, dict):
+            mapping = discriminator.get("mapping")
+            if isinstance(mapping, dict):
+                for mapping_ref in mapping.values():
+                    parsed_mapping_ref = _parse_component_ref(mapping_ref)
+                    if parsed_mapping_ref is not None:
+                        yield parsed_mapping_ref
+        for value in node.values():
+            yield from _iter_component_refs(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_component_refs(item)
+
+
+def prune_openapi_components(schema: dict[str, Any]) -> dict[str, Any]:
+    # Return a copy of an OpenAPI schema keeping only the components that are
+    # actually referenced from its operations (in paths and webhooks,
+    # including callbacks) or from other reachable components.
+    #
+    # References are followed transitively, so shared models and circular
+    # references are kept, while components only referenced by operations that
+    # are not part of the schema (e.g. routes hidden for a specific audience)
+    # are removed, including their names.
+    components = schema.get("components")
+    if not isinstance(components, dict):
+        return schema
+    reachable: set[tuple[str, str]] = set()
+    pending = [
+        *_iter_component_refs(schema.get("paths") or {}),
+        *_iter_component_refs(schema.get("webhooks") or {}),
+        *_iter_component_refs({"security": schema.get("security") or []}),
+    ]
+    while pending:
+        group, name = pending.pop()
+        if (group, name) in reachable:
+            continue
+        reachable.add((group, name))
+        group_components = components.get(group)
+        if not isinstance(group_components, dict):
+            continue
+        component = group_components.get(name)
+        if component is None:
+            continue
+        pending.extend(_iter_component_refs(component))
+    pruned_components: dict[str, Any] = {}
+    for group, group_components in components.items():
+        if not isinstance(group_components, dict):
+            pruned_components[group] = group_components
+            continue
+        kept_components = {
+            name: component
+            for name, component in group_components.items()
+            if (group, name) in reachable
+        }
+        if kept_components:
+            pruned_components[group] = kept_components
+    pruned_schema = dict(schema)
+    if pruned_components:
+        pruned_schema["components"] = pruned_components
+    else:
+        pruned_schema.pop("components", None)
+    return pruned_schema
