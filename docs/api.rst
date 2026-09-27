@@ -226,7 +226,7 @@ Huey types
 Huey object
 -----------
 
-.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, store_intermediate_errors=True, storage_kwargs)
+.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, store_intermediate_errors=True, context_vars=None, storage_kwargs)
 
     :param str name: the name of the task queue, e.g. your application's name.
     :param bool results: whether to store task results.
@@ -246,6 +246,9 @@ Huey object
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend whenever immediate-mode is enabled.
+    :param context_vars: an optional list of :py:class:~contextvars.ContextVar
+        objects whose values are captured when a task is enqueued and restored
+        while the worker executes the task. See :ref:context-variables.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
 
@@ -353,6 +356,44 @@ Huey object
             consumer.start()
             # ... later ...
             consumer.stop(graceful=True)
+
+    .. py:method:: register_context(*variables)
+
+        :param variables: one or more :py:class:~contextvars.ContextVar
+            objects.
+
+        Register context variables for propagation. When a task is enqueued,
+        the current values of the registered variables are captured into a
+        snapshot that is serialized along with the task. The worker executes
+        the task (and its pre/post-execute hooks) in a fresh context
+        containing exactly the snapshot values, then restores its own context
+        afterwards. See :ref:context-variables.
+
+        .. code-block:: python
+
+            import contextvars
+            from huey import RedisHuey
+
+            trace_id = contextvars.ContextVar('trace_id')
+
+            huey = RedisHuey('my-app')
+            huey.register_context(trace_id)
+
+    .. py:method:: unregister_context(name)
+
+        :param name: the name of the variable (or the
+            :py:class:~contextvars.ContextVar itself) to stop propagating.
+        :returns: whether a variable was actually removed.
+
+    .. py:method:: capture_context()
+
+        :returns: a {name: value} dict of the currently-set registered
+            context variables.
+
+        Capture the current values of the registered context variables. This
+        is the same snapshot Huey stores on a task when it is enqueued, and
+        can be used to build an explicit override for
+        :py:meth:TaskWrapper.s or :py:meth:TaskWrapper.schedule.
 
     .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
 
@@ -1169,7 +1210,7 @@ Huey object
         directly. The :py:meth:`Huey.task` and :py:meth:`Huey.periodic_task`
         decorators will create the appropriate TaskWrapper automatically.
 
-    .. py:method:: schedule(args=None, kwargs=None, eta=None, delay=None, priority=None, retries=None, retry_delay=None, retry_backoff=None, expires=None, timeout=None, id=None)
+    .. py:method:: schedule(args=None, kwargs=None, eta=None, delay=None, priority=None, retries=None, retry_delay=None, retry_backoff=None, expires=None, timeout=None, id=None, context_snapshot=None)
 
         :param tuple args: arguments for decorated function.
         :param dict kwargs: keyword arguments for decorated function.
@@ -1194,6 +1235,9 @@ Huey object
             cooperative timeout checking. See :ref:`cooperative-timeout` for
             example.
         :param id: assign the given ``id`` to the Task being scheduled.
+        :param dict context_snapshot: explicit context variable snapshot to
+            store on the task, overriding the values that would be captured
+            at enqueue-time. See :ref:`context-variables`.
         :returns: a :py:class:`Result` handle for the task.
 
         Use the ``schedule`` method to schedule the execution of the queue task
@@ -1282,6 +1326,9 @@ Huey object
             ``gevent.Timeout``. When using with threads it is necessary to use
             cooperative timeout checking. See :ref:`cooperative-timeout` for
             example.
+        :param dict context_snapshot: explicit context variable snapshot to
+            store on the task, overriding the values that would be captured
+            at enqueue-time. See :ref:`context-variables`.
         :returns: a :py:class:`Task` instance representing the execution of the
             task function with the given arguments.
 
@@ -1294,7 +1341,8 @@ Huey object
             The following keyword argument names are reserved and will be
             intercepted by Huey rather than passed to your task function:
             ``id``, ``eta``, ``delay``, ``retries``, ``retry_delay``,
-            ``retry_backoff``, ``priority``, ``expires``, and ``timeout``. If your task function has a parameter
+            ``retry_backoff``, ``priority``, ``expires``, ``timeout`` and
+            ``context_snapshot``. If your task function has a parameter
             with one of these names, rename the parameter or pass the value
             positionally.
 
@@ -2485,4 +2533,3 @@ Huey comes with several built-in storage implementations:
 
 .. autoclass:: huey.storage.BaseStorage
    :members:
-

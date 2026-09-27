@@ -16,6 +16,7 @@ from functools import wraps
 from huey import signals as S
 from huey.constants import EmptyData
 from huey.consumer import Consumer
+from huey.context import ContextRegistry
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
 from huey.exceptions import RateLimitExceeded
@@ -71,6 +72,10 @@ class Huey(object):
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend when immediate-mode is enabled.
+    :param context_vars: an optional list of :class:~contextvars.ContextVar
+        objects whose values should be captured when a task is enqueued and
+        restored while the worker executes the task. See
+        :meth:Huey.register_context.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
 
@@ -94,7 +99,8 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, context_vars=None,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -125,10 +131,50 @@ class Huey(object):
         self._signal = S.Signal()
         self._tasks_in_flight = set()
         self._timeout_handler = None  # This is consumer-specific.
+        self._context_registry = ContextRegistry(context_vars)
 
     def set_timeout_handler(self, handler=None):
         # Context-manager using appropriate primivites/signals for worker type.
         self._timeout_handler = handler
+
+    def register_context(self, *variables):
+        """
+        Register one or more :class:~contextvars.ContextVar objects for
+        propagation. When a task is enqueued, the current values of the
+        registered variables are captured into a snapshot that is serialized
+        along with the task. The worker restores the snapshot while executing
+        the task and its pre/post-execute hooks, then restores its own
+        context afterwards.
+        """
+        self._context_registry.register(*variables)
+
+    def unregister_context(self, name):
+        return self._context_registry.unregister(name)
+
+    def capture_context(self):
+        """
+        Return a {name: value} snapshot of the currently-set registered
+        context variables. Useful for explicitly overriding the snapshot a
+        task will be enqueued with, e.g. task.s(context_snapshot={...}).
+        """
+        return self._context_registry.capture()
+
+    def _capture_task_context(self, task):
+        # The snapshot is captured once, when the task is first enqueued.
+        # Retries and scheduled tasks re-use the snapshot captured at
+        # enqueue-time, and an explicitly-assigned snapshot is left as-is.
+        if task.context_snapshot is not None or not self._context_registry:
+            return
+
+        snapshot = self._context_registry.capture()
+        for name, value in snapshot.items():
+            try:
+                self.serializer.serialize(value)
+            except Exception:
+                raise ConfigurationError(
+                    'Unable to serialize value of context variable "%s": '
+                    '%r. Context values must be serializable.' % (name, value))
+        task.context_snapshot = snapshot
 
     def get_task_wrapper_class(self):
         return TaskWrapper
@@ -310,6 +356,11 @@ class Huey(object):
         elif isinstance(task, chord):
             return self._enqueue_chord(task)
 
+        # Capture the current context variable values into the task, unless
+        # the task already carries a snapshot (retry, scheduled task, or an
+        # explicit override provided by the caller).
+        self._capture_task_context(task)
+
         # Resolve the expiration time when the task is enqueued.
         if task.expires:
             task.resolve_expires(self.utc)
@@ -438,6 +489,13 @@ class Huey(object):
         else:
             logger.info('Executing %s', task)
             self._emit(S.SIGNAL_EXECUTING, task)
+            if task.context_snapshot is not None and self._context_registry:
+                # Run the task (and its hooks, and any child tasks it
+                # enqueues) in a fresh context containing exactly the
+                # snapshot values. The worker's own context is untouched, so
+                # nothing leaks into the next task run on this thread.
+                ctx = self._context_registry.restore(task.context_snapshot)
+                return ctx.run(self._execute, task, timestamp)
             return self._execute(task, timestamp)
 
     def _execute(self, task, timestamp):
@@ -847,7 +905,8 @@ class Task(object):
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 context_snapshot=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -866,6 +925,7 @@ class Task(object):
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
         self._deadline = None
+        self.context_snapshot = context_snapshot
 
         self.on_complete = on_complete
         self.on_error = on_error
@@ -1046,7 +1106,8 @@ class TaskWrapper(object):
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
-                 retry_backoff=None, expires=None, timeout=None, id=None):
+                 retry_backoff=None, expires=None, timeout=None, id=None,
+                 context_snapshot=None):
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
@@ -1072,7 +1133,8 @@ class TaskWrapper(object):
             retry_backoff=retry_backoff,
             priority=priority,
             expires=expires,
-            timeout=timeout)
+            timeout=timeout,
+            context_snapshot=context_snapshot)
         return self.huey.enqueue(task)
 
     def _apply(self, it):
@@ -1105,7 +1167,9 @@ class TaskWrapper(object):
                                retry_backoff=kwargs.pop('retry_backoff', None),
                                priority=kwargs.pop('priority', None),
                                expires=kwargs.pop('expires', None),
-                               timeout=kwargs.pop('timeout', None))
+                               timeout=kwargs.pop('timeout', None),
+                               context_snapshot=kwargs.pop(
+                                   'context_snapshot', None))
 
 
 class TaskLock(object):

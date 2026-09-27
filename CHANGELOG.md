@@ -3,6 +3,13 @@ Changelog
 
 ## master
 
+* Add opt-in `contextvars` propagation. Register `ContextVar` objects via
+  `Huey(context_vars=[...])` or `huey.register_context(...)` and their
+  values are captured into a snapshot when a task is enqueued, serialized
+  with the task, and restored while the worker executes the task and its
+  pre/post-execute hooks. The worker's own context is restored afterwards,
+  retries re-use the original snapshot, and child tasks capture the values
+  current when they are enqueued (overridable via `context_snapshot=`).
 * Fix `RedisSemaphore` admitting more than `value` holders under contention.
   Acquisition now evicts, counts and adds in one Lua script, using the server
   clock, so a caller whose timestamp was sampled before a slower caller's can

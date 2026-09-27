@@ -937,6 +937,82 @@ For budget-aware scheduling you can use the more granular ``time_remaining``:
 
            service.process_single_account(account)
 
+.. _context-variables:
+
+Context variables
+-----------------
+
+When a web request (or any other producer) enqueues a task, the task runs
+later in a consumer, typically on a different thread or in another process.
+Values stored in :py:class:`~contextvars.ContextVar` objects -- a request
+trace id, the current locale, and so on -- do not automatically follow the
+task. Huey can propagate an explicit set of context variables for you.
+
+Register the variables whose values should travel with tasks, either when
+creating the Huey instance or afterwards:
+
+.. code-block:: python
+
+    import contextvars
+    from huey import RedisHuey
+
+    trace_id = contextvars.ContextVar('trace_id')
+    locale = contextvars.ContextVar('locale', default='en')
+
+    huey = RedisHuey('my-app', context_vars=[trace_id, locale])
+
+    # Equivalently:
+    # huey.register_context(trace_id, locale)
+
+Only registered variables are captured. When a task is enqueued, Huey stores
+the current values of the registered variables on the task as a *snapshot*,
+which is serialized along with the task message. The worker executes the
+task -- including its :py:meth:`~Huey.pre_execute` and
+:py:meth:`~Huey.post_execute` hooks, and any child tasks it enqueues --
+inside a fresh context containing exactly the snapshot values. When the task
+finishes, fails, or is requeued for a retry, the worker's own context is
+restored, so values never leak into the next task run on the same thread.
+
+The snapshot semantics are:
+
+* The values in effect **at enqueue-time** are used, so a delayed or
+  scheduled task runs with the values from when it was enqueued, rather than
+  the values in effect when it eventually executes.
+* A retried task re-uses the snapshot captured when it was first enqueued.
+* A task enqueued from *within* another task captures the values current at
+  that point (the restored snapshot, plus any changes the parent made).
+  Children in a task pipeline therefore inherit the parent task's context.
+* To override the captured values explicitly, pass ``context_snapshot`` to
+  :py:meth:`~TaskWrapper.s` or :py:meth:`~TaskWrapper.schedule`, or assign to
+  the task's ``context_snapshot`` attribute before enqueueing it.
+
+.. code-block:: python
+
+    @huey.task()
+    def child():
+        logger.info('child trace=%s', trace_id.get())
+
+    @huey.task()
+    def parent():
+        trace_id.set('inner-value')
+        child()  # Runs with trace_id='inner-value'.
+
+        # Explicit override:
+        huey.enqueue(child.s(context_snapshot={'trace_id': 'fixed'}))
+
+Edge-cases have well-defined behavior:
+
+* A registered variable that has no value when the task is enqueued is
+  absent from the snapshot, and will be unset (falling back to its default,
+  or raising ``LookupError``) when the task runs -- even if the worker
+  thread happens to hold a stale value from an earlier task.
+* Snapshot values must be serializable. If a value cannot be serialized,
+  enqueueing raises ``ConfigurationError`` naming the offending variable.
+* Snapshot entries are matched to variables by name. Entries for variables
+  that are not registered on the consumer (for example, when different
+  deployments register different sets) are ignored, and registered
+  variables missing from the snapshot are treated as unset.
+
 Locking tasks
 -------------
 
