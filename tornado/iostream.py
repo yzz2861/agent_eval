@@ -250,6 +250,9 @@ class BaseIOStream:
         self._total_write_index = 0
         self._total_write_done_index = 0
         self._read_delimiter: bytes | None = None
+        self._read_delimiters: tuple[bytes, ...] | None = None
+        self._read_until_any_index: int | None = None
+        self._read_until_any_scan_pos = 0
         self._read_regex: Pattern | None = None
         self._read_max_bytes: int | None = None
         self._read_bytes: int | None = None
@@ -375,6 +378,62 @@ class BaseIOStream:
         """
         future = self._start_read()
         self._read_delimiter = delimiter
+        self._read_max_bytes = max_bytes
+        try:
+            self._try_inline_read()
+        except UnsatisfiableReadError as e:
+            # Handle this the same way as in _handle_events.
+            gen_log.info("Unsatisfiable read, closing connection: %s" % e)
+            self.close(exc_info=e)
+            return future
+        except:
+            future.add_done_callback(lambda f: f.exception())
+            raise
+        return future
+
+    def read_until_any(
+        self, delimiters: list[bytes] | tuple[bytes, ...], max_bytes: int | None = None
+    ) -> "Awaitable[tuple[bytes, int]]":
+        """Asynchronously read until any of the given delimiters is found.
+
+        The result is a tuple ``(data, index)``: ``data`` includes all
+        the data read up to and including the matched delimiter, and
+        ``index`` identifies which entry of ``delimiters`` matched.
+        Bytes past the end of the matched delimiter are left in the
+        read buffer and remain available to subsequent reads.
+
+        If several delimiters match, the match that starts earliest in
+        the stream wins; if several matches start at the same position,
+        the longest delimiter wins. When one delimiter is a prefix of
+        another, the read waits until enough data has arrived to decide
+        between them; if the stream closes first, the shorter delimiter
+        wins.
+
+        If ``max_bytes`` is not None, the connection will be closed
+        if the data to be returned would exceed ``max_bytes`` bytes.
+
+        If the stream is closed before a delimiter is found, the
+        returned `.Future` fails with `StreamClosedError` and the
+        buffered data is left in the read buffer (where it may still be
+        retrieved with e.g. ``read_bytes(partial=True)``).
+
+        Cancelling the returned `.Future` has the same semantics as
+        cancelling any other read on this stream: the read may still
+        complete internally, consuming the matched bytes from the
+        buffer, and a new read must not be started until the previous
+        one has resolved.
+
+        .. versionadded:: 6.6
+        """
+        if not delimiters:
+            raise ValueError("delimiters must not be empty")
+        for delimiter in delimiters:
+            if not delimiter:
+                raise ValueError("delimiters must not contain empty entries")
+        future = self._start_read()
+        self._read_delimiters = tuple(delimiters)
+        self._read_until_any_index = None
+        self._read_until_any_scan_pos = 0
         self._read_max_bytes = max_bytes
         try:
             self._try_inline_read()
@@ -594,7 +653,9 @@ class BaseIOStream:
             elif self._read_future is not None:
                 # resolve reads that are pending and ready to complete
                 try:
-                    pos = self._find_read_pos()
+                    # No more data will arrive, so pending reads must be
+                    # resolved with what is already in the buffer.
+                    pos = self._find_read_pos(final=True)
                 except UnsatisfiableReadError:
                     pass
                 else:
@@ -810,7 +871,7 @@ class BaseIOStream:
         self._read_future = Future()
         return self._read_future
 
-    def _finish_read(self, size: int) -> None:
+    def _finish_read(self, size: int, read_until_any_index: int | None = None) -> None:
         if self._user_read_buffer:
             self._read_buffer = self._after_user_read_buffer or bytearray()
             self._after_user_read_buffer = None
@@ -819,10 +880,13 @@ class BaseIOStream:
             result: int | bytes = size
         else:
             result = self._consume(size)
+        final_result: int | bytes | tuple[bytes, int] = result
+        if read_until_any_index is not None:
+            final_result = (typing.cast(bytes, result), read_until_any_index)
         if self._read_future is not None:
             future = self._read_future
             self._read_future = None
-            future_set_result_unless_cancelled(future, result)
+            future_set_result_unless_cancelled(future, final_result)
         self._maybe_add_error_listener()
 
     def _try_inline_read(self) -> None:
@@ -904,15 +968,24 @@ class BaseIOStream:
         """
         self._read_bytes = self._read_delimiter = self._read_regex = None
         self._read_partial = False
-        self._finish_read(pos)
+        read_until_any_index = None
+        if self._read_delimiters is not None:
+            read_until_any_index = self._read_until_any_index
+            self._read_delimiters = None
+            self._read_until_any_index = None
+            self._read_until_any_scan_pos = 0
+        self._finish_read(pos, read_until_any_index)
 
-    def _find_read_pos(self) -> int | None:
+    def _find_read_pos(self, final: bool = False) -> int | None:
         """Attempts to find a position in the read buffer that satisfies
         the currently-pending read.
 
         Returns a position in the buffer if the current read can be satisfied,
         or None if it cannot.
         """
+        # A closed stream will not receive more data, so reads that are
+        # waiting for disambiguation must be resolved with what we have.
+        final = final or self.closed()
         if self._read_bytes is not None and (
             self._read_buffer_size >= self._read_bytes
             or (self._read_partial and self._read_buffer_size > 0)
@@ -943,9 +1016,79 @@ class BaseIOStream:
                     self._check_max_bytes(self._read_regex, loc)
                     return loc
                 self._check_max_bytes(self._read_regex, self._read_buffer_size)
+        elif self._read_delimiters is not None:
+            if self._read_buffer:
+                result = self._find_read_until_any_pos(final)
+                if result is not None:
+                    pos, index = result
+                    self._read_until_any_index = index
+                    return pos
         return None
 
-    def _check_max_bytes(self, delimiter: bytes | Pattern, size: int) -> None:
+    def _find_read_until_any_pos(self, final: bool) -> tuple[int, int] | None:
+        """Scans the read buffer for the current ``_read_delimiters``.
+
+        Returns ``(end_position, delimiter_index)`` if the read can be
+        satisfied, or None if more data is needed. ``final`` indicates
+        that no more data will arrive, so ambiguous matches must be
+        resolved with the current buffer contents.
+        """
+        delimiters = self._read_delimiters
+        assert delimiters is not None
+        buf = self._read_buffer
+        size = self._read_buffer_size
+        max_len = max(len(d) for d in delimiters)
+        # Positions before _read_until_any_scan_pos were already ruled
+        # out by previous calls: a match that completes with newly
+        # arrived data cannot start before the tail of the buffer as it
+        # was last scanned. This avoids rescanning the whole buffer
+        # every time new data arrives.
+        start = self._read_until_any_scan_pos
+        best_start = -1
+        best_index = -1
+        best_len = 0
+        for index, delimiter in enumerate(delimiters):
+            loc = buf.find(delimiter, start)
+            if loc == -1:
+                continue
+            if (
+                best_start == -1
+                or loc < best_start
+                or (loc == best_start and len(delimiter) > best_len)
+            ):
+                best_start = loc
+                best_index = index
+                best_len = len(delimiter)
+        if best_start == -1:
+            # No complete match anywhere in the buffer. A match that
+            # completes with future data cannot start more than
+            # max_len - 1 bytes before the current end of the buffer.
+            self._read_until_any_scan_pos = max(0, size - max_len + 1)
+            self._check_max_bytes(delimiters, size)
+            return None
+        # The returned data ends at best_start + best_len; any match
+        # that could still supersede this one ends even later.
+        self._check_max_bytes(delimiters, best_start + best_len)
+        if not final:
+            # A complete match at best_start may still lose to a longer
+            # delimiter starting at the same position, or to any
+            # delimiter whose partial match starts before best_start
+            # and extends past the end of the buffer. If such an
+            # undecided partial match exists, wait for more data.
+            for delimiter in delimiters:
+                delimiter_len = len(delimiter)
+                lo = max(0, size - delimiter_len + 1)
+                hi = min(best_start, size - 1)
+                for pos in range(lo, hi + 1):
+                    if pos == best_start and delimiter_len <= best_len:
+                        continue
+                    if buf[pos:] == delimiter[: size - pos]:
+                        return None
+        return (best_start + best_len, best_index)
+
+    def _check_max_bytes(
+        self, delimiter: bytes | Pattern | tuple[bytes, ...], size: int
+    ) -> None:
         if self._read_max_bytes is not None and size > self._read_max_bytes:
             raise UnsatisfiableReadError(
                 "delimiter %r not found within %d bytes"

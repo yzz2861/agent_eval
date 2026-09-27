@@ -507,6 +507,150 @@ class TestReadWriteMixin(AsyncTestCase):
             rs.close()
 
     @gen_test
+    def test_read_until_any(self):
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            # The earliest match wins, and the result reports which
+            # delimiter matched. Bytes past the delimiter stay buffered.
+            fut = rs.read_until_any([b"zzz", b"\n"])
+            ws.write(b"a\nzzz")
+            data, index = yield fut
+            self.assertEqual(data, b"a\n")
+            self.assertEqual(index, 1)
+            data = yield rs.read_bytes(3)
+            self.assertEqual(data, b"zzz")
+
+            # At the same start position the longest delimiter wins.
+            fut = rs.read_until_any([b"\r\n", b"\r\n\r\n"])
+            ws.write(b"a\r\n\r\nb")
+            data, index = yield fut
+            self.assertEqual(data, b"a\r\n\r\n")
+            self.assertEqual(index, 1)
+            data = yield rs.read_bytes(1)
+            self.assertEqual(data, b"b")
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_read_until_any_split_delimiter(self):
+        rs, ws = yield self.make_iostream_pair(read_chunk_size=256)
+        try:
+            # A delimiter split across packets is still found.
+            fut = rs.read_until_any([b"<end>", b"\n"])
+            ws.write(b"abc<e")
+            yield gen.sleep(0.01)
+            self.assertFalse(fut.done())
+            ws.write(b"nd>rest")
+            data, index = yield fut
+            self.assertEqual(data, b"abc<end>")
+            self.assertEqual(index, 0)
+            data = yield rs.read_bytes(4)
+            self.assertEqual(data, b"rest")
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_read_until_any_prefix_waits(self):
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            # "ab" is a prefix of "abc", so the read must wait until
+            # the next byte decides between them.
+            fut = rs.read_until_any([b"ab", b"abc"])
+            ws.write(b"ab")
+            yield gen.sleep(0.01)
+            self.assertFalse(fut.done())
+            ws.write(b"c")
+            data, index = yield fut
+            self.assertEqual(data, b"abc")
+            self.assertEqual(index, 1)
+
+            # A byte that rules out the longer delimiter resolves the
+            # read in favor of the shorter one, and is itself left in
+            # the buffer.
+            fut = rs.read_until_any([b"ab", b"abc"])
+            ws.write(b"abx")
+            data, index = yield fut
+            self.assertEqual(data, b"ab")
+            self.assertEqual(index, 0)
+            data = yield rs.read_bytes(1)
+            self.assertEqual(data, b"x")
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_read_until_any_prefix_resolved_at_eof(self):
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            # At EOF the shorter delimiter wins by default, since the
+            # longer one can no longer be completed.
+            fut = rs.read_until_any([b"ab", b"abc"])
+            ws.write(b"ab")
+            ws.close()
+            data, index = yield fut
+            self.assertEqual(data, b"ab")
+            self.assertEqual(index, 0)
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_read_until_any_unsatisfied_after_close(self):
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            # With no complete match, closing the stream fails the read
+            # with StreamClosedError; the buffered bytes are left in the
+            # read buffer.
+            fut = rs.read_until_any([b"done", b"quit"])
+            ws.write(b"partial")
+            ws.close()
+            with self.assertRaises(StreamClosedError):
+                yield fut
+            data = yield rs.read_bytes(7, partial=True)
+            self.assertEqual(data, b"partial")
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_read_until_any_max_bytes(self):
+        rs, ws = yield self.make_iostream_pair()
+        closed = Event()
+        rs.set_close_callback(closed.set)
+        try:
+            # max_bytes counts the data to be returned, so a match
+            # ending within the limit succeeds.
+            fut = rs.read_until_any([b"def", b"xyz"], max_bytes=6)
+            ws.write(b"abcdef")
+            data, index = yield fut
+            self.assertEqual(data, b"abcdef")
+            self.assertEqual(index, 0)
+
+            # A match that would end past the limit closes the
+            # connection with UnsatisfiableReadError.
+            with ExpectLog(gen_log, "Unsatisfiable read", level=logging.INFO):
+                rs.read_until_any([b"def", b"xyz"], max_bytes=5)
+                ws.write(b"abcdef")
+                yield closed.wait()
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
+    def test_read_until_any_invalid_delimiters(self):
+        rs, ws = yield self.make_iostream_pair()
+        try:
+            with self.assertRaises(ValueError):
+                rs.read_until_any([])
+            with self.assertRaises(ValueError):
+                rs.read_until_any([b"ab", b""])
+        finally:
+            ws.close()
+            rs.close()
+
+    @gen_test
     def test_read_until_regex_max_bytes(self):
         rs, ws = yield self.make_iostream_pair()
         closed = Event()
