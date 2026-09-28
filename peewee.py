@@ -73,6 +73,7 @@ __version__ = '4.5.1'
 __all__ = [
     'AnyField',
     'AsIs',
+    'asof_join',
     'AutoField',
     'BareField',
     'BigAutoField',
@@ -1131,6 +1132,116 @@ class Join(BaseTable):
         if self._on is not None:
             ctx.literal(' ON ').sql(self._on)
         return ctx
+
+
+def _asof_normalize_groups(group):
+    pairs = []
+    if not group:
+        return pairs
+    for item in group:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            pairs.append((item[0], item[1]))
+        else:
+            raise ValueError('asof_join() group keys must be (right_field, '
+                             'left_field) pairs, got: %r' % (item,))
+    return pairs
+
+
+def asof_join(left_time, right_time, group=None, direction='backward',
+              allow_equal=True, tolerance=None, tiebreaker=None):
+    """
+    Build a composable ON-expression implementing an ASOF (nearest-in-time)
+    join. For each row of the left (driving) table, the expression matches
+    at most one row of the right table: the row sharing the given group
+    key(s) whose timestamp is the nearest one that is not later
+    ('backward') or not earlier ('forward') than the left row's timestamp.
+
+    Use it with a LEFT OUTER JOIN so that left rows without a matching
+    right row are preserved (with NULLs for the right-side columns)::
+
+        on = asof_join(Trade.ts, Quote.ts,
+                       group=[(Quote.symbol, Trade.symbol)],
+                       tolerance=60,
+                       tiebreaker=Quote.id)
+        query = (Trade
+                 .select(Trade, Quote)
+                 .join(Quote, JOIN.LEFT_OUTER, on=on)
+                 .order_by(Trade.ts))
+
+    Because the result is an ordinary predicate, the query remains fully
+    composable: additional filters, ordering and column selection can be
+    applied freely, and all values are passed as bound parameters.
+
+    :param left_time: field/expression giving the left row's timestamp.
+    :param right_time: field on the right model (or model alias) giving
+        the right row's timestamp.
+    :param group: optional list of (right_field, left_field) pairs that
+        must be equal for rows to be considered part of the same group.
+    :param direction: 'backward' (default) matches the nearest right row
+        at or before the left timestamp; 'forward' matches the nearest
+        right row at or after it.
+    :param allow_equal: whether rows with exactly equal timestamps match
+        (default True). When False the comparison is strict.
+    :param tolerance: optional maximum time difference; right rows farther
+        than this from the left timestamp are not matched. The value is
+        subtracted from (backward) or added to (forward) left_time, so
+        use numeric timestamps or pass an expression.
+    :param tiebreaker: required field on the right model used to pick a
+        stable winner when multiple right rows share the nearest
+        timestamp; the row with the greatest tiebreaker value is chosen.
+        This must be specified explicitly so ties are deterministic.
+    """
+    if tiebreaker is None:
+        raise ValueError('asof_join() requires an explicit tiebreaker field '
+                         'on the right table so that rows with equal '
+                         'timestamps resolve deterministically.')
+    if direction not in ('backward', 'forward'):
+        raise ValueError('asof_join() direction must be \'backward\' or '
+                         '\'forward\', got: %r' % (direction,))
+
+    group_pairs = _asof_normalize_groups(group)
+    backward = direction == 'backward'
+    time_op = (operator.le if allow_equal else operator.lt) if backward \
+              else (operator.ge if allow_equal else operator.gt)
+
+    def within_tolerance(time_expr):
+        if tolerance is None:
+            return None
+        bound = (left_time - tolerance) if backward else (left_time + tolerance)
+        return (time_expr >= bound) if backward else (time_expr <= bound)
+
+    # Outer join predicates: group keys, direction/equality and tolerance.
+    predicates = [right == left for right, left in group_pairs]
+    predicates.append(time_op(right_time, left_time))
+    tolerance_pred = within_tolerance(right_time)
+    if tolerance_pred is not None:
+        predicates.append(tolerance_pred)
+
+    # Anti-join against a closer right row, expressed as NOT EXISTS over a
+    # fresh alias of the right table. A candidate is closer when its
+    # timestamp is nearer to the left timestamp, or when the timestamps
+    # tie and its tiebreaker value is greater.
+    right_source = right_time.model
+    if isinstance(right_source, ModelAlias):
+        inner = right_source.model.alias()
+    else:
+        inner = right_source.alias()
+    inner_time = getattr(inner, right_time.name)
+    inner_tie = getattr(inner, tiebreaker.name)
+
+    inner_preds = [getattr(inner, right.name) == left
+                   for right, left in group_pairs]
+    inner_preds.append(time_op(inner_time, left_time))
+    inner_tolerance = within_tolerance(inner_time)
+    if inner_tolerance is not None:
+        inner_preds.append(inner_tolerance)
+    nearer = (inner_time > right_time) if backward \
+             else (inner_time < right_time)
+    inner_preds.append(nearer |
+                       ((inner_time == right_time) & (inner_tie > tiebreaker)))
+
+    predicates.append(~fn.EXISTS(inner.select(inner_tie).where(*inner_preds)))
+    return reduce(operator.and_, predicates)
 
 
 class ValuesList(_HashableSource, BaseTable):

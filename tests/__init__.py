@@ -11,6 +11,8 @@ MODULES = []
 # Core modules.
 from . import db_tests
 MODULES.append(db_tests)
+from . import asof
+MODULES.append(asof)
 from . import fields
 MODULES.append(fields)
 from . import manytomany

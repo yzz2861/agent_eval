@@ -5179,6 +5179,47 @@ Query-builder
    Represents a ``CAST(<node> AS <cast>)`` expression.
 
 
+.. function:: asof_join(left_time, right_time, group=None, direction='backward', allow_equal=True, tolerance=None, tiebreaker=None)
+
+   Build a composable ON-expression implementing an ASOF (nearest-in-time)
+   join. For each row of the left (driving) table, the expression matches at
+   most one row of the right table: the row sharing the given group key(s)
+   whose timestamp is the nearest one that is not later (``'backward'``) or
+   not earlier (``'forward'``) than the left row's timestamp.
+
+   :param left_time: field/expression giving the left row's timestamp.
+   :param right_time: field on the right model (or model alias) giving the
+       right row's timestamp.
+   :param group: optional list of ``(right_field, left_field)`` pairs that
+       must be equal for rows to be considered part of the same group.
+   :param str direction: ``'backward'`` (default) or ``'forward'``.
+   :param bool allow_equal: whether rows with exactly equal timestamps
+       match (default ``True``).
+   :param tolerance: optional maximum time difference; right rows farther
+       than this from the left timestamp are not matched. The value is
+       subtracted from (backward) or added to (forward) ``left_time`` and
+       is passed as a bound parameter.
+   :param tiebreaker: required field on the right model used to pick a
+       stable winner when multiple right rows share the nearest timestamp;
+       the row with the greatest tiebreaker value is chosen.
+
+   Use it with a ``JOIN.LEFT_OUTER`` so that left rows without a matching
+   right row are preserved (with NULLs for the right-side columns). The
+   result is an ordinary predicate, so the query remains composable:
+   additional filters, ordering and column selection can be applied freely.
+
+   .. code-block:: python
+
+       on = asof_join(Trade.ts, Quote.ts,
+                      group=[(Quote.symbol, Trade.symbol)],
+                      tolerance=60,
+                      tiebreaker=Quote.id)
+       query = (Trade
+                .select(Trade, Quote)
+                .join(Quote, JOIN.LEFT_OUTER, on=on)
+                .order_by(Trade.ts))
+
+
 .. class:: Ordering(node, direction, collation=None, nulls=None)
 
    :param node: A column-like object.
