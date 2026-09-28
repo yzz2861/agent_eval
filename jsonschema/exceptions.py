@@ -282,6 +282,46 @@ class UndefinedTypeCheck(Exception):
         return f"Type {self.type!r} is unknown to this type checker"
 
 
+class BundleError(Exception):
+    """
+    An error occurred while creating or loading an offline schema bundle.
+    """
+
+
+class MissingResourceError(BundleError):
+    """
+    A resource referenced while bundling was not present in the registry.
+    """
+
+    def __init__(self, uri: str, referenced_from: str) -> None:
+        self.uri = uri
+        self.referenced_from = referenced_from
+
+    def __str__(self) -> str:
+        return (
+            f"{self.uri!r} is referenced from {self.referenced_from!r} "
+            f"but is not present in the registry"
+        )
+
+
+class ConflictingResourceError(BundleError):
+    """
+    Two different resources were found for the same URI while bundling.
+    """
+
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
+
+    def __str__(self) -> str:
+        return f"{self.uri!r} identifies two different resources"
+
+
+class BundleIntegrityError(BundleError):
+    """
+    An offline bundle is malformed, incomplete, or fails verification.
+    """
+
+
 class UnknownType(Exception):
     """
     A validator was asked to validate an instance against an unknown type.

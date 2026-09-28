@@ -1,3 +1,13 @@
+Unreleased
+==========
+
+* Add a new ``jsonschema.bundling`` module which packages
+  an entry schema together with all resources it references (drawn from a
+  caller-provided ``referencing`` registry, never the
+  network) into a JSON-serializable, digest-verified bundle, and which
+  loads such bundles back into an equivalent offline registry for use in
+  environments without network access.
+
 v4.27.0
 =======
 
