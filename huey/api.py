@@ -582,10 +582,27 @@ class Huey(object):
     def _check_chord(self, cc, value):
         chord_key = 'chord:%s' % cc.cid
         result_key = 'chord:%s:%s' % (cc.cid, cc.idx)
+
+        # Atomically claim this member's position so a duplicate success or
+        # failure notification for the same position is only counted once.
+        # This relies on the storage's atomic counter, so it is safe when
+        # multiple workers (across processes) report concurrently.
+        member_key = 'chord:%s:member:%s' % (cc.cid, cc.idx)
+        if self.storage.incr(member_key) != 1:
+            return
+
         self.put_result(result_key, value)
 
         if self.storage.incr(chord_key) == cc.size:
-            self.storage.delete_counter(chord_key)
+            # The chord counter is intentionally left behind as a tombstone:
+            # exactly one reporter observes the count reaching the chord
+            # size, and late duplicate reports (which may re-claim a member
+            # position after the member counters are cleaned up below) only
+            # push the count past the size, so the callback cannot be
+            # enqueued a second time.
+            for idx in range(cc.size):
+                self.storage.delete_counter('chord:%s:member:%s'
+                                            % (cc.cid, idx))
 
             # Read raw results w/o raising for errors, then delete explicitly
             # as expiring storages implement pop_data as a peek.

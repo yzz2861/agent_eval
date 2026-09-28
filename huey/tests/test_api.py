@@ -1,6 +1,8 @@
 import asyncio
 import datetime
 import inspect
+import os
+import threading
 import time
 
 from huey.api import ChordResult
@@ -8,6 +10,7 @@ from huey.api import MemoryHuey
 from huey.api import PeriodicTask
 from huey.api import Result
 from huey.api import ResultGroup
+from huey.api import SqliteHuey
 from huey.api import Task
 from huey.api import TaskWrapper
 from huey.api import chord
@@ -1955,8 +1958,131 @@ class TestChordPrimitive(BaseTestCase):
             self.execute_next()
         self.assertEqual(r(), [1, 2])
         self.assertEqual(r.results(), [1, 2])
-        self.assertEqual(self.huey.storage._counters, {})
+
+        # The per-member claim counters are cleaned up. The chord counter
+        # itself remains as a tombstone so that late duplicate reports
+        # cannot re-trigger the callback.
+        counters = self.huey.storage._counters
+        self.assertEqual(len(counters), 1)
+        key, = counters
+        self.assertTrue(key.startswith('chord:'))
+        self.assertEqual(counters[key], 2)
         self.assertEqual(self.huey.result_count(), 0)
+
+    def test_chord_late_duplicate_after_completion(self):
+        # Duplicate reports that arrive after the chord completed (and its
+        # member bookkeeping was cleaned up) cannot re-trigger the callback.
+        prod, agg = self.funcs()
+
+        c = chord([prod.s(1), prod.s(2)], agg.s())
+        r = self.huey.enqueue(c)
+        tasks = [self.huey.dequeue() for _ in range(2)]
+
+        for task in tasks:
+            self.huey.execute(task)
+        self.assertEqual(len(self.huey), 1)
+        self.assertEqual(self.execute_next(), 5)
+        self.assertEqual(r(), 5)
+
+        # A full second round of duplicate reports for every member.
+        for task in tasks:
+            self.huey.execute(task)
+        self.assertEqual(len(self.huey), 0)  # Callback not re-enqueued.
+
+    def test_chord_duplicate_member_completion(self):
+        # A member that reports completion twice (e.g. redelivered and run by
+        # two workers) is only counted once -- the callback fires only after
+        # every distinct member position has reported.
+        prod, agg = self.funcs()
+
+        c = chord([prod.s(1), prod.s(2)], agg.s())
+        r = self.huey.enqueue(c)
+        task0 = self.huey.dequeue()
+        task1 = self.huey.dequeue()
+
+        # Member 0 completes twice while member 1 is still pending.
+        self.assertEqual(self.huey.execute(task0), 2)
+        self.assertEqual(self.huey.execute(task0), 2)
+        self.assertEqual(len(self.huey), 0)  # Callback not enqueued early.
+
+        self.assertEqual(self.huey.execute(task1), 3)
+        self.assertEqual(len(self.huey), 1)
+        self.assertEqual(self.execute_next(), 5)  # agg([2, 3]).
+        self.assertEqual(r(), 5)
+        self.assertEqual(r.results(), [2, 3])
+        self.assertEqual(len(self.huey), 0)
+
+    def test_chord_duplicate_member_failure(self):
+        # A duplicate failure notification for the same member position is
+        # counted once, and the error is contributed at the member's
+        # position in the results passed to the callback.
+        @self.huey.task()
+        def prod(n):
+            return n + 1
+
+        @self.huey.task()
+        def fail(n):
+            raise TestError('bad')
+
+        @self.huey.task()
+        def agg(ns):
+            return ns
+
+        c = chord([fail.s(1), prod.s(2)], agg.s())
+        r = self.huey.enqueue(c)
+        task0 = self.huey.dequeue()
+        task1 = self.huey.dequeue()
+
+        # Member 0 fails (no retries) and the failure is reported twice.
+        self.assertTrue(self.huey.execute(task0) is None)
+        self.assertTrue(self.huey.execute(task0) is None)
+        self.assertEqual(len(self.huey), 0)  # Callback not enqueued early.
+
+        self.assertEqual(self.huey.execute(task1), 3)
+        self.assertEqual(len(self.huey), 1)
+
+        err, val = self.execute_next()
+        self.assertTrue(isinstance(err, Error))
+        self.assertEqual(err.metadata['error'], 'TestError(bad)')
+        self.assertEqual(val, 3)
+        self.assertEqual(len(self.huey), 0)
+
+    def test_chord_concurrent_completion(self):
+        # Multiple workers reporting the final members concurrently (plus
+        # duplicate reports for the same member) enqueue the callback
+        # exactly once, with results in member order.
+        @self.huey.task()
+        def prod(n):
+            return n + 1
+
+        @self.huey.task()
+        def agg(ns):
+            return sum(ns)
+
+        n = 6
+        c = chord([prod.s(i) for i in range(n)], agg.s())
+        r = self.huey.enqueue(c)
+        tasks = [self.huey.dequeue() for _ in range(n)]
+
+        # Each member is executed twice, concurrently, simulating duplicate
+        # deliveries racing across workers.
+        barrier = threading.Barrier(n * 2)
+        def run(task):
+            barrier.wait()
+            self.huey.execute(task)
+
+        threads = [threading.Thread(target=run, args=(task,))
+                   for task in tasks for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(self.huey), 1)  # Callback enqueued once.
+        self.assertEqual(self.execute_next(), 21)
+        self.assertEqual(r(), 21)
+        self.assertEqual(r.results(), [1, 2, 3, 4, 5, 6])
+        self.assertEqual(len(self.huey), 0)
 
     def test_chord_member_retry_then_success(self):
         # A chord member that fails once, then succeeds on retry, should
@@ -2379,6 +2505,54 @@ class TestChordPrimitive(BaseTestCase):
         self.assertEqual(self.execute_next(), -1)
         self.assertEqual(len(self.huey), 0)
         self.assertEqual(state, [99])
+
+
+class TestChordPrimitiveSqlite(TestChordPrimitive):
+    # Run the chord tests against the SQLite storage engine to verify the
+    # atomic counters used for chord member bookkeeping.
+    db_file = 'huey_test_chord.db'
+
+    def get_huey(self):
+        return SqliteHuey(filename=self.db_file, utc=False)
+
+    def setUp(self):
+        self._remove_db_files()
+        super(TestChordPrimitiveSqlite, self).setUp()
+
+    def tearDown(self):
+        self.huey.storage.close()
+        super(TestChordPrimitiveSqlite, self).tearDown()
+        self._remove_db_files()
+
+    def _remove_db_files(self):
+        for suffix in ('', '-shm', '-wal'):
+            if os.path.exists(self.db_file + suffix):
+                os.unlink(self.db_file + suffix)
+
+    def test_chord_bookkeeping_cleared(self):
+        @self.huey.task()
+        def prod(n):
+            return n
+
+        @self.huey.task()
+        def agg(ns):
+            return ns
+
+        r = self.huey.enqueue(chord([prod.s(1), prod.s(2)], agg.s()))
+        for _ in range(3):
+            self.execute_next()
+        self.assertEqual(r(), [1, 2])
+        self.assertEqual(r.results(), [1, 2])
+
+        # Only the chord counter tombstone remains (see the memory-storage
+        # variant of this test for details).
+        rows = self.huey.storage.sql('select key, value from counter',
+                                     results=True)
+        self.assertEqual(len(rows), 1)
+        key, value = rows[0]
+        self.assertTrue(key.startswith('chord:'))
+        self.assertEqual(value, 2)
+        self.assertEqual(self.huey.result_count(), 0)
 
 
 class TestTaskChaining(BaseTestCase):
