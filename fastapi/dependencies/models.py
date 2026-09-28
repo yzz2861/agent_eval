@@ -6,7 +6,7 @@ from functools import lru_cache, partial
 from typing import Any, Literal
 
 from fastapi._compat import ModelField
-from fastapi.security.base import SecurityBase
+from fastapi.security.base import SecurityBase, SecurityGroupBase
 from fastapi.types import DependencyCacheKey
 
 if sys.version_info >= (3, 13):  # pragma: no cover
@@ -131,6 +131,20 @@ def _get_security_scheme(*, dependant: Dependant) -> SecurityBase:
     # Mainly to get the type of SecurityBase, but it's the same dependant.call
     unwrapped = _unwrapped_call(dependant.call)
     assert isinstance(unwrapped, SecurityBase)
+    return unwrapped
+
+
+def _is_security_group(*, dependant: Dependant) -> bool:
+    if dependant.call is None:
+        return False  # pragma: no cover
+    unwrapped = _unwrapped_call(dependant.call)
+    return isinstance(unwrapped, SecurityGroupBase)
+
+
+def _get_security_group(*, dependant: Dependant) -> SecurityGroupBase:
+    # Mainly to get the type of SecurityGroupBase, but it's the same dependant.call
+    unwrapped = _unwrapped_call(dependant.call)
+    assert isinstance(unwrapped, SecurityGroupBase)
     return unwrapped
 
 

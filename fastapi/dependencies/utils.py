@@ -59,13 +59,17 @@ from fastapi.dependencies.models import (
     _get_cache_key,
     _get_computed_scope,
     _get_oauth_scopes,
+    _get_security_group,
     _is_async_gen_callable,
     _is_coroutine_callable,
     _is_gen_callable,
+    _is_security_group,
+    _unwrapped_call,
     _UsesScopesCache,
 )
 from fastapi.exceptions import DependencyScopeError
 from fastapi.logger import logger
+from fastapi.security.base import AllOf, AnyOf, SecurityBase, SecurityGroupBase
 from fastapi.security.oauth2 import SecurityScopes
 from fastapi.types import DependencyCacheKey
 from fastapi.utils import create_model_field, get_path_param_names
@@ -80,6 +84,7 @@ from starlette.datastructures import (
     QueryParams,
     UploadFile,
 )
+from starlette.exceptions import HTTPException
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response
 from starlette.websockets import WebSocket
@@ -130,9 +135,9 @@ def ensure_multipart_is_installed() -> None:
 
 
 def get_parameterless_sub_dependant(*, depends: params.Depends, path: str) -> Dependant:
-    assert callable(depends.dependency), (
-        "A parameter-less dependency must have a callable dependency"
-    )
+    assert callable(depends.dependency) or isinstance(
+        depends.dependency, SecurityGroupBase
+    ), "A parameter-less dependency must have a callable dependency or security group"
     own_oauth_scopes: list[str] = []
     if isinstance(depends, params.Security) and depends.scopes:
         own_oauth_scopes.extend(depends.scopes)
@@ -268,6 +273,39 @@ def get_stream_item_type(annotation: Any) -> Any | None:
     return None
 
 
+def _get_security_group_sub_dependant(
+    *, path: str, sub_dependency: Any, parent_oauth_scopes: list[str]
+) -> Dependant:
+    use_cache = True
+    scope: Literal["function", "request"] | None = None
+    own_oauth_scopes: list[str] = []
+    call = sub_dependency
+    if isinstance(sub_dependency, params.Depends):
+        if sub_dependency.dependency is None:
+            raise ValueError(
+                "Security group entries declared with Depends() or Security() "
+                "must have a dependency"
+            )
+        call = sub_dependency.dependency
+        use_cache = sub_dependency.use_cache
+        scope = sub_dependency.scope
+        if isinstance(sub_dependency, params.Security) and sub_dependency.scopes:
+            own_oauth_scopes = list(sub_dependency.scopes)
+    if not isinstance(_unwrapped_call(call), (SecurityBase, SecurityGroupBase)):
+        raise ValueError(
+            "Security groups can only contain security schemes, other security "
+            "groups, or Depends() / Security() declarations wrapping them"
+        )
+    return get_dependant(
+        path=path,
+        call=call,
+        own_oauth_scopes=own_oauth_scopes,
+        parent_oauth_scopes=parent_oauth_scopes,
+        use_cache=use_cache,
+        scope=scope,
+    )
+
+
 def get_dependant(
     *,
     path: str,
@@ -288,6 +326,16 @@ def get_dependant(
         parent_oauth_scopes=parent_oauth_scopes,
     )
     current_scopes = (parent_oauth_scopes or []) + (own_oauth_scopes or [])
+    if _is_security_group(dependant=dependant):
+        security_group = _get_security_group(dependant=dependant)
+        for sub_dependency in security_group.dependencies:
+            sub_dependant = _get_security_group_sub_dependant(
+                path=path,
+                sub_dependency=sub_dependency,
+                parent_oauth_scopes=current_scopes,
+            )
+            dependant.dependencies.append(sub_dependant)
+        return dependant
     path_param_names = get_path_param_names(path)
     endpoint_signature = get_typed_signature(call)
     signature_params = endpoint_signature.parameters
@@ -583,6 +631,208 @@ class SolvedDependency:
     dependency_cache: dict[DependencyCacheKey, Any]
 
 
+async def _solve_sub_dependant(
+    *,
+    request: Request | WebSocket,
+    sub_dependant: Dependant,
+    body: dict[str, Any] | FormData | bytes | None,
+    background_tasks: StarletteBackgroundTasks | None,
+    response: Response,
+    dependency_overrides_provider: Any | None,
+    dependency_cache: dict[DependencyCacheKey, Any],
+    async_exit_stack: AsyncExitStack,
+    embed_body_fields: bool,
+    _uses_scopes_cache: _UsesScopesCache,
+) -> tuple[Any, list[Any], StarletteBackgroundTasks | None]:
+    request_astack = request.scope.get("fastapi_inner_astack")
+    assert isinstance(request_astack, AsyncExitStack), (
+        "fastapi_inner_astack not found in request scope"
+    )
+    function_astack = request.scope.get("fastapi_function_astack")
+    assert isinstance(function_astack, AsyncExitStack), (
+        "fastapi_function_astack not found in request scope"
+    )
+    sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
+    call = sub_dependant.call
+    use_sub_dependant = sub_dependant
+    if (
+        dependency_overrides_provider
+        and dependency_overrides_provider.dependency_overrides
+    ):
+        original_call = sub_dependant.call
+        call = getattr(dependency_overrides_provider, "dependency_overrides", {}).get(
+            original_call, original_call
+        )
+        use_path: str = sub_dependant.path  # type: ignore
+        use_sub_dependant = get_dependant(
+            path=use_path,
+            call=call,
+            name=sub_dependant.name,
+            parent_oauth_scopes=_get_oauth_scopes(dependant=sub_dependant),
+            scope=sub_dependant.scope,
+        )
+    solved_result = await solve_dependencies(
+        request=request,
+        dependant=use_sub_dependant,
+        body=body,
+        background_tasks=background_tasks,
+        response=response,
+        dependency_overrides_provider=dependency_overrides_provider,
+        dependency_cache=dependency_cache,
+        async_exit_stack=async_exit_stack,
+        embed_body_fields=embed_body_fields,
+        _uses_scopes_cache=_uses_scopes_cache,
+    )
+    background_tasks = solved_result.background_tasks
+    if solved_result.errors:
+        return None, solved_result.errors, background_tasks
+    sub_dependant_cache_key = _get_cache_key(
+        dependant=sub_dependant,
+        uses_scopes_cache=_uses_scopes_cache,
+    )
+    if sub_dependant.use_cache and sub_dependant_cache_key in dependency_cache:
+        solved = dependency_cache[sub_dependant_cache_key]
+    elif _is_gen_callable(use_sub_dependant.call) or _is_async_gen_callable(
+        use_sub_dependant.call
+    ):
+        use_astack = request_astack
+        if sub_dependant.scope == "function":
+            use_astack = function_astack
+        solved = await _solve_generator(
+            dependant=use_sub_dependant,
+            stack=use_astack,
+            sub_values=solved_result.values,
+        )
+    elif _is_coroutine_callable(use_sub_dependant.call):
+        solved = await call(**solved_result.values)
+    else:
+        solved = await run_in_threadpool(call, **solved_result.values)
+    if sub_dependant_cache_key not in dependency_cache:
+        dependency_cache[sub_dependant_cache_key] = solved
+    return solved, [], background_tasks
+
+
+async def _solve_security_group_child(
+    *,
+    request: Request | WebSocket,
+    sub_dependant: Dependant,
+    body: dict[str, Any] | FormData | bytes | None,
+    background_tasks: StarletteBackgroundTasks | None,
+    response: Response,
+    dependency_overrides_provider: Any | None,
+    dependency_cache: dict[DependencyCacheKey, Any],
+    async_exit_stack: AsyncExitStack,
+    embed_body_fields: bool,
+    _uses_scopes_cache: _UsesScopesCache,
+) -> tuple[Any, list[Any], StarletteBackgroundTasks | None]:
+    if _is_security_group(dependant=sub_dependant):
+        return await _solve_security_group(
+            request=request,
+            dependant=sub_dependant,
+            body=body,
+            background_tasks=background_tasks,
+            response=response,
+            dependency_overrides_provider=dependency_overrides_provider,
+            dependency_cache=dependency_cache,
+            async_exit_stack=async_exit_stack,
+            embed_body_fields=embed_body_fields,
+            _uses_scopes_cache=_uses_scopes_cache,
+        )
+    return await _solve_sub_dependant(
+        request=request,
+        sub_dependant=sub_dependant,
+        body=body,
+        background_tasks=background_tasks,
+        response=response,
+        dependency_overrides_provider=dependency_overrides_provider,
+        dependency_cache=dependency_cache,
+        async_exit_stack=async_exit_stack,
+        embed_body_fields=embed_body_fields,
+        _uses_scopes_cache=_uses_scopes_cache,
+    )
+
+
+async def _solve_security_group(
+    *,
+    request: Request | WebSocket,
+    dependant: Dependant,
+    body: dict[str, Any] | FormData | bytes | None,
+    background_tasks: StarletteBackgroundTasks | None,
+    response: Response,
+    dependency_overrides_provider: Any | None,
+    dependency_cache: dict[DependencyCacheKey, Any],
+    async_exit_stack: AsyncExitStack,
+    embed_body_fields: bool,
+    _uses_scopes_cache: _UsesScopesCache,
+) -> tuple[Any, list[Any], StarletteBackgroundTasks | None]:
+    group_cache_key = _get_cache_key(
+        dependant=dependant,
+        uses_scopes_cache=_uses_scopes_cache,
+    )
+    if dependant.use_cache and group_cache_key in dependency_cache:
+        return dependency_cache[group_cache_key], [], background_tasks
+    security_group = _get_security_group(dependant=dependant)
+    solved_group: Any = None
+    if isinstance(security_group, AllOf):
+        results: list[Any] = []
+        errors: list[Any] = []
+        for sub_dependant in dependant.dependencies:
+            solved, sub_errors, background_tasks = await _solve_security_group_child(
+                request=request,
+                sub_dependant=sub_dependant,
+                body=body,
+                background_tasks=background_tasks,
+                response=response,
+                dependency_overrides_provider=dependency_overrides_provider,
+                dependency_cache=dependency_cache,
+                async_exit_stack=async_exit_stack,
+                embed_body_fields=embed_body_fields,
+                _uses_scopes_cache=_uses_scopes_cache,
+            )
+            errors.extend(sub_errors)
+            results.append(solved)
+        if errors:
+            return None, errors, background_tasks
+        solved_group = tuple(results)
+    else:
+        assert isinstance(security_group, AnyOf)
+        for sub_dependant in dependant.dependencies:
+            branch_background_tasks = background_tasks
+            try:
+                (
+                    solved,
+                    sub_errors,
+                    branch_background_tasks,
+                ) = await _solve_security_group_child(
+                    request=request,
+                    sub_dependant=sub_dependant,
+                    body=body,
+                    background_tasks=background_tasks,
+                    response=response,
+                    dependency_overrides_provider=dependency_overrides_provider,
+                    dependency_cache=dependency_cache,
+                    async_exit_stack=async_exit_stack,
+                    embed_body_fields=embed_body_fields,
+                    _uses_scopes_cache=_uses_scopes_cache,
+                )
+            except HTTPException:
+                # A failed branch is discarded, including any value it could
+                # have produced, the next branch is tried instead
+                continue
+            if sub_errors:
+                continue
+            background_tasks = branch_background_tasks
+            solved_group = solved
+            break
+        else:
+            # All the branches failed, raise a single configured error instead
+            # of leaking the internal errors of the individual branches
+            raise security_group.make_error()
+    if group_cache_key not in dependency_cache:
+        dependency_cache[group_cache_key] = solved_group
+    return solved_group, [], background_tasks
+
+
 async def solve_dependencies(
     *,
     request: Request | WebSocket,
@@ -617,67 +867,37 @@ async def solve_dependencies(
     if _uses_scopes_cache is None:
         _uses_scopes_cache = {}
     for sub_dependant in dependant.dependencies:
-        sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
-        call = sub_dependant.call
-        use_sub_dependant = sub_dependant
-        if (
-            dependency_overrides_provider
-            and dependency_overrides_provider.dependency_overrides
-        ):
-            original_call = sub_dependant.call
-            call = getattr(
-                dependency_overrides_provider, "dependency_overrides", {}
-            ).get(original_call, original_call)
-            use_path: str = sub_dependant.path  # type: ignore
-            use_sub_dependant = get_dependant(
-                path=use_path,
-                call=call,
-                name=sub_dependant.name,
-                parent_oauth_scopes=_get_oauth_scopes(dependant=sub_dependant),
-                scope=sub_dependant.scope,
+        if _is_security_group(dependant=sub_dependant):
+            solved, sub_errors, background_tasks = await _solve_security_group(
+                request=request,
+                dependant=sub_dependant,
+                body=body,
+                background_tasks=background_tasks,
+                response=response,
+                dependency_overrides_provider=dependency_overrides_provider,
+                dependency_cache=dependency_cache,
+                async_exit_stack=async_exit_stack,
+                embed_body_fields=embed_body_fields,
+                _uses_scopes_cache=_uses_scopes_cache,
             )
-
-        solved_result = await solve_dependencies(
-            request=request,
-            dependant=use_sub_dependant,
-            body=body,
-            background_tasks=background_tasks,
-            response=response,
-            dependency_overrides_provider=dependency_overrides_provider,
-            dependency_cache=dependency_cache,
-            async_exit_stack=async_exit_stack,
-            embed_body_fields=embed_body_fields,
-            _uses_scopes_cache=_uses_scopes_cache,
-        )
-        background_tasks = solved_result.background_tasks
-        if solved_result.errors:
-            errors.extend(solved_result.errors)
-            continue
-        sub_dependant_cache_key = _get_cache_key(
-            dependant=sub_dependant,
-            uses_scopes_cache=_uses_scopes_cache,
-        )
-        if sub_dependant.use_cache and sub_dependant_cache_key in dependency_cache:
-            solved = dependency_cache[sub_dependant_cache_key]
-        elif _is_gen_callable(use_sub_dependant.call) or _is_async_gen_callable(
-            use_sub_dependant.call
-        ):
-            use_astack = request_astack
-            if sub_dependant.scope == "function":
-                use_astack = function_astack
-            solved = await _solve_generator(
-                dependant=use_sub_dependant,
-                stack=use_astack,
-                sub_values=solved_result.values,
-            )
-        elif _is_coroutine_callable(use_sub_dependant.call):
-            solved = await call(**solved_result.values)
         else:
-            solved = await run_in_threadpool(call, **solved_result.values)
+            solved, sub_errors, background_tasks = await _solve_sub_dependant(
+                request=request,
+                sub_dependant=sub_dependant,
+                body=body,
+                background_tasks=background_tasks,
+                response=response,
+                dependency_overrides_provider=dependency_overrides_provider,
+                dependency_cache=dependency_cache,
+                async_exit_stack=async_exit_stack,
+                embed_body_fields=embed_body_fields,
+                _uses_scopes_cache=_uses_scopes_cache,
+            )
+        errors.extend(sub_errors)
+        if sub_errors:
+            continue
         if sub_dependant.name is not None:
             values[sub_dependant.name] = solved
-        if sub_dependant_cache_key not in dependency_cache:
-            dependency_cache[sub_dependant_cache_key] = solved
     path_values, path_errors = request_params_to_args(
         dependant.path_params, request.path_params
     )

@@ -1,6 +1,8 @@
 from .api_key import APIKeyCookie as APIKeyCookie
 from .api_key import APIKeyHeader as APIKeyHeader
 from .api_key import APIKeyQuery as APIKeyQuery
+from .base import AllOf as AllOf
+from .base import AnyOf as AnyOf
 from .http import HTTPAuthorizationCredentials as HTTPAuthorizationCredentials
 from .http import HTTPBasic as HTTPBasic
 from .http import HTTPBasicCredentials as HTTPBasicCredentials

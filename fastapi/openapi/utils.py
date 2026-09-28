@@ -20,7 +20,9 @@ from fastapi.dependencies.models import (
     Dependant,
     _get_cache_key,
     _get_oauth_scopes,
+    _get_security_group,
     _get_security_scheme,
+    _is_security_group,
     _is_security_scheme,
     _UsesScopesCache,
 )
@@ -35,6 +37,7 @@ from fastapi.openapi.constants import METHODS_WITH_BODY, REF_PREFIX
 from fastapi.openapi.models import OpenAPI
 from fastapi.params import Body, ParamTypes
 from fastapi.responses import Response
+from fastapi.security.base import AnyOf
 from fastapi.sse import _SSE_EVENT_SCHEMA
 from fastapi.types import DependencyCacheKey, ModelNameMap
 from fastapi.utils import (
@@ -86,29 +89,53 @@ status_code_ranges: dict[str, str] = {
 
 
 @dataclass
+class _SecuritySchemeRequirement:
+    dependant: Dependant
+    oauth_scopes: list[str]
+
+
+@dataclass
+class _SecurityAllOfRequirement:
+    children: list["_SecurityRequirement"]
+
+
+@dataclass
+class _SecurityAnyOfRequirement:
+    children: list["_SecurityRequirement"]
+
+
+_SecurityRequirement = (
+    _SecuritySchemeRequirement | _SecurityAllOfRequirement | _SecurityAnyOfRequirement
+)
+
+
+@dataclass
 class _OpenAPIDependencyData:
     path_params: list[ModelField] = field(default_factory=list)
     query_params: list[ModelField] = field(default_factory=list)
     header_params: list[ModelField] = field(default_factory=list)
     cookie_params: list[ModelField] = field(default_factory=list)
-    security_dependencies: list[tuple[Dependant, list[str]]] = field(
-        default_factory=list
-    )
+    security_dependencies: list[_SecurityRequirement] = field(default_factory=list)
 
 
 def _get_openapi_dependency_data(dependant: Dependant) -> _OpenAPIDependencyData:
     dependency_data = _OpenAPIDependencyData()
     visited: list[DependencyCacheKey] = []
     uses_scopes_cache: _UsesScopesCache = {}
-    dependants: list[tuple[Dependant, list[str], bool]] = [(dependant, [], True)]
-    while dependants:
-        current_dependant, parent_oauth_scopes, is_root = dependants.pop()
+
+    def visit(
+        *,
+        current_dependant: Dependant,
+        parent_oauth_scopes: list[str],
+        is_root: bool,
+        sink: list[_SecurityRequirement],
+    ) -> None:
         cache_key = _get_cache_key(
             dependant=current_dependant,
             uses_scopes_cache=uses_scopes_cache,
         )
         if cache_key in visited:
-            continue
+            return
         visited.append(cache_key)
         dependency_data.path_params.extend(current_dependant.path_params)
         dependency_data.query_params.extend(current_dependant.query_params)
@@ -118,41 +145,138 @@ def _get_openapi_dependency_data(dependant: Dependant) -> _OpenAPIDependencyData
         for scope in _get_oauth_scopes(dependant=current_dependant):
             if scope not in oauth_scopes:
                 oauth_scopes.append(scope)
+        if not is_root and _is_security_group(dependant=current_dependant):
+            security_group = _get_security_group(dependant=current_dependant)
+            children: list[_SecurityRequirement] = []
+            for sub_dependant in current_dependant.dependencies:
+                visit(
+                    current_dependant=sub_dependant,
+                    parent_oauth_scopes=oauth_scopes,
+                    is_root=False,
+                    sink=children,
+                )
+            if not children:
+                return
+            if isinstance(security_group, AnyOf):
+                sink.append(_SecurityAnyOfRequirement(children=children))
+            else:
+                sink.append(_SecurityAllOfRequirement(children=children))
+            return
         if not is_root and _is_security_scheme(dependant=current_dependant):
-            dependency_data.security_dependencies.append(
-                (current_dependant, oauth_scopes)
+            sink.append(
+                _SecuritySchemeRequirement(
+                    dependant=current_dependant, oauth_scopes=oauth_scopes
+                )
             )
-        dependants.extend(
-            (sub_dependant, oauth_scopes, False)
-            for sub_dependant in reversed(current_dependant.dependencies)
-        )
+        for sub_dependant in current_dependant.dependencies:
+            visit(
+                current_dependant=sub_dependant,
+                parent_oauth_scopes=oauth_scopes,
+                is_root=False,
+                sink=sink,
+            )
+
+    visit(
+        current_dependant=dependant,
+        parent_oauth_scopes=[],
+        is_root=True,
+        sink=dependency_data.security_dependencies,
+    )
     return dependency_data
 
 
-def _get_openapi_security_definitions(
-    security_dependencies: list[tuple[Dependant, list[str]]],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    security_definitions = {}
-    # Use a dict to merge scopes for same security scheme
-    operation_security_dict: dict[str, list[str]] = {}
-    for security_dependency, oauth_scopes in security_dependencies:
-        security_scheme = _get_security_scheme(dependant=security_dependency)
-        security_definition = jsonable_encoder(
-            security_scheme.model,
-            by_alias=True,
-            exclude_none=True,
+def _get_security_scheme_openapi_definition(
+    *, dependant: Dependant, security_definitions: dict[str, Any]
+) -> str:
+    security_scheme = _get_security_scheme(dependant=dependant)
+    security_definition = jsonable_encoder(
+        security_scheme.model,
+        by_alias=True,
+        exclude_none=True,
+    )
+    security_name = security_scheme.scheme_name
+    security_definitions[security_name] = security_definition
+    return security_name
+
+
+def _merge_security_requirement_objects(
+    *, first: dict[str, list[str]], second: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    merged = {name: scopes.copy() for name, scopes in first.items()}
+    for name, scopes in second.items():
+        if name not in merged:
+            merged[name] = []
+        for scope in scopes:
+            if scope not in merged[name]:
+                merged[name].append(scope)
+    return merged
+
+
+def _get_security_requirement_objects(
+    *,
+    requirement: _SecurityRequirement,
+    security_definitions: dict[str, Any],
+) -> list[dict[str, list[str]]]:
+    if isinstance(requirement, _SecuritySchemeRequirement):
+        security_name = _get_security_scheme_openapi_definition(
+            dependant=requirement.dependant,
+            security_definitions=security_definitions,
         )
-        security_name = security_scheme.scheme_name
-        security_definitions[security_name] = security_definition
-        # Merge scopes for the same security scheme
-        if security_name not in operation_security_dict:
-            operation_security_dict[security_name] = []
-        for scope in oauth_scopes:
-            if scope not in operation_security_dict[security_name]:
-                operation_security_dict[security_name].append(scope)
-    operation_security = [
-        {name: scopes} for name, scopes in operation_security_dict.items()
-    ]
+        return [{security_name: requirement.oauth_scopes.copy()}]
+    if isinstance(requirement, _SecurityAnyOfRequirement):
+        requirement_objects: list[dict[str, list[str]]] = []
+        for child in requirement.children:
+            requirement_objects.extend(
+                _get_security_requirement_objects(
+                    requirement=child,
+                    security_definitions=security_definitions,
+                )
+            )
+        return requirement_objects
+    # AllOf: combine the requirement objects of all the children (logical AND)
+    requirement_objects = [{}]
+    for child in requirement.children:
+        child_objects = _get_security_requirement_objects(
+            requirement=child,
+            security_definitions=security_definitions,
+        )
+        requirement_objects = [
+            _merge_security_requirement_objects(first=current, second=new)
+            for current in requirement_objects
+            for new in child_objects
+        ]
+    return requirement_objects
+
+
+def _get_openapi_security_definitions(
+    security_dependencies: list[_SecurityRequirement],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    security_definitions: dict[str, Any] = {}
+    operation_security: list[dict[str, Any]] = []
+    # Keep the historical behavior for plain (non-grouped) security schemes:
+    # use a dict to merge the scopes of repeated usages of the same scheme
+    flat_security_dict: dict[str, list[str]] = {}
+    for security_dependency in security_dependencies:
+        if isinstance(security_dependency, _SecuritySchemeRequirement):
+            security_name = _get_security_scheme_openapi_definition(
+                dependant=security_dependency.dependant,
+                security_definitions=security_definitions,
+            )
+            if security_name not in flat_security_dict:
+                flat_security_dict[security_name] = []
+            for scope in security_dependency.oauth_scopes:
+                if scope not in flat_security_dict[security_name]:
+                    flat_security_dict[security_name].append(scope)
+            continue
+        operation_security.extend(
+            _get_security_requirement_objects(
+                requirement=security_dependency,
+                security_definitions=security_definitions,
+            )
+        )
+    operation_security.extend(
+        {name: scopes} for name, scopes in flat_security_dict.items()
+    )
     return security_definitions, operation_security
 
 
