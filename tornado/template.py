@@ -210,6 +210,7 @@ and ``{{ }}``).
 """
 
 import datetime
+import hashlib
 import linecache
 import os.path
 import posixpath
@@ -432,6 +433,16 @@ class BaseLoader:
         self.namespace = namespace or {}
         self.whitespace = whitespace
         self.templates: dict[str, Template] = {}
+        # Dependency graph of the loaded templates: _deps maps a template
+        # name to the names it directly references via {% include %} or
+        # {% extends %}, and _dependents is the reverse mapping.  They are
+        # used to invalidate exactly the templates affected by a change.
+        self._deps: dict[str, set[str]] = {}
+        self._dependents: dict[str, set[str]] = {}
+        # Names of the templates currently being compiled, innermost last.
+        # Only one thread can be inside load() at a time (self.lock is held
+        # for the whole compilation), so a plain list is sufficient.
+        self._compile_stack: list[str] = []
         # self.lock protects self.templates.  It's a reentrant lock
         # because templates may load other templates via `include` or
         # `extends`.  Note that thanks to the GIL this code would be safe
@@ -443,6 +454,8 @@ class BaseLoader:
         """Resets the cache of compiled templates."""
         with self.lock:
             self.templates = {}
+            self._deps = {}
+            self._dependents = {}
 
     def resolve_path(self, name: str, parent_path: str | None = None) -> str:
         """Converts a possibly-relative path to absolute (used internally)."""
@@ -452,8 +465,29 @@ class BaseLoader:
         """Loads a template."""
         name = self.resolve_path(name, parent_path=parent_path)
         with self.lock:
+            if parent_path is not None:
+                self._deps.setdefault(parent_path, set()).add(name)
+                self._dependents.setdefault(name, set()).add(parent_path)
             if name not in self.templates:
-                self.templates[name] = self._create_template(name)
+                if name in self._compile_stack:
+                    cycle = self._compile_stack[self._compile_stack.index(name) :]
+                    raise ParseError(
+                        "Circular template dependency: %s"
+                        % " -> ".join(cycle + [name]),
+                        filename=name,
+                    )
+                # A (re)compilation discovers its dependencies from
+                # scratch, so drop any edges left over from a previous
+                # attempt before recording the new ones.
+                for child in self._deps.pop(name, ()):
+                    dependents = self._dependents.get(child)
+                    if dependents is not None:
+                        dependents.discard(name)
+                self._compile_stack.append(name)
+                try:
+                    self.templates[name] = self._create_template(name)
+                finally:
+                    self._compile_stack.pop()
             return self.templates[name]
 
     def _create_template(self, name: str) -> Template:
@@ -467,11 +501,47 @@ class Loader(BaseLoader):
     with relative paths being resolved relative to the ``root_directory``.
     Relative paths in other template directives (such as ``{% include %}``)
     are resolved relative to the including file's directory.
+
+    :arg bool autoreload: If true, every call to ``load()`` checks the
+        files behind the requested template and its dependencies (the
+        transitive closure of ``{% include %}`` and ``{% extends %}``
+        directives) for changes and recompiles only the templates whose
+        files changed and the templates that depend on them.  Unrelated
+        cached templates are left untouched, unlike `~BaseLoader.reset`.
+        If a recompilation fails, the previous compiled templates are
+        kept and the error is re-raised, so a broken edit never replaces
+        the last good cache and a later ``load()`` recovers once the file
+        is fixed.  Changes are detected by a file signature of
+        ``(mtime_ns, size, sha1)``: a missing file (deleted or renamed
+        away) compares unequal to any stored signature, and the content
+        hash catches modifications that preserve the modification
+        timestamp.  Defaults to false, meaning templates are compiled
+        once and cached until `~BaseLoader.reset` is called.
+
+    .. versionadded:: 6.6
+       The ``autoreload`` parameter.
     """
 
-    def __init__(self, root_directory: str, **kwargs: Any) -> None:
+    def __init__(
+        self, root_directory: str, autoreload: bool = False, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.root = os.path.abspath(root_directory)
+        self.autoreload = autoreload
+        # File signatures captured when each template was compiled; see
+        # _file_signature.  Only maintained when autoreload is enabled.
+        self._file_signatures: dict[str, tuple[int, int, str] | None] = {}
+
+    def reset(self) -> None:
+        with self.lock:
+            super().reset()
+            self._file_signatures = {}
+
+    def load(self, name: str, parent_path: str | None = None) -> Template:
+        if self.autoreload:
+            with self.lock:
+                self._reload_if_stale(self.resolve_path(name, parent_path))
+        return super().load(name, parent_path=parent_path)
 
     def resolve_path(self, name: str, parent_path: str | None = None) -> str:
         if (
@@ -490,8 +560,98 @@ class Loader(BaseLoader):
     def _create_template(self, name: str) -> Template:
         path = os.path.join(self.root, name)
         with open(path, "rb") as f:
-            template = Template(f.read(), name=name, loader=self)
-            return template
+            source = f.read()
+        template = Template(source, name=name, loader=self)
+        if self.autoreload:
+            # Record the signature of the exact bytes that were compiled
+            # so a later load() can tell whether the file changed.
+            self._file_signatures[name] = self._file_signature(name, source)
+        return template
+
+    def _file_signature(
+        self, name: str, source: bytes | None = None
+    ) -> tuple[int, int, str] | None:
+        """Returns a signature describing the current state of ``name``'s file.
+
+        The signature is None when the file cannot be read (deleted or
+        renamed away) and a ``(mtime_ns, size, sha1)`` tuple otherwise.
+        The content hash detects modifications that keep the same
+        modification timestamp and size.
+        """
+        path = os.path.join(self.root, name)
+        try:
+            if source is None:
+                with open(path, "rb") as f:
+                    source = f.read()
+            mtime_ns = os.stat(path).st_mtime_ns
+        except OSError:
+            return None
+        return (mtime_ns, len(source), hashlib.sha1(source).hexdigest())
+
+    def _dependency_closure(self, name: str) -> set[str]:
+        """Returns ``name`` plus every template it transitively depends on."""
+        closure = {name}
+        stack = [name]
+        while stack:
+            for child in self._deps.get(stack.pop(), ()):
+                if child not in closure:
+                    closure.add(child)
+                    stack.append(child)
+        return closure
+
+    def _transitive_dependents(self, name: str) -> set[str]:
+        """Returns every template that transitively depends on ``name``."""
+        result: set[str] = set()
+        stack = [name]
+        while stack:
+            for parent in self._dependents.get(stack.pop(), ()):
+                if parent not in result:
+                    result.add(parent)
+                    stack.append(parent)
+        return result
+
+    def _reload_if_stale(self, name: str) -> None:
+        """Recompiles ``name`` if it or any of its dependencies changed.
+
+        Must be called with ``self.lock`` held.  Only templates whose files
+        changed and templates that (transitively) depend on them are
+        invalidated; all other cached templates keep their compiled
+        versions.  If recompilation fails, the previous cache state is
+        restored so a broken edit never replaces the last good compiled
+        templates, and the error is re-raised to the caller.
+        """
+        if name not in self.templates:
+            return
+        changed = {
+            n
+            for n in self._dependency_closure(name)
+            if n not in self.templates
+            or self._file_signature(n) != self._file_signatures.get(n)
+        }
+        if not changed:
+            return
+        stale = set(changed)
+        for n in changed:
+            stale |= self._transitive_dependents(n)
+        # Snapshot enough state to roll back if the recompilation fails.
+        saved_templates = dict(self.templates)
+        saved_signatures = dict(self._file_signatures)
+        saved_deps = {k: set(v) for k, v in self._deps.items()}
+        saved_dependents = {k: set(v) for k, v in self._dependents.items()}
+        for n in stale:
+            self.templates.pop(n, None)
+            self._file_signatures.pop(n, None)
+        try:
+            # Recompile the requested template; nested loads pull in fresh
+            # versions of its dependencies.  Other invalidated templates
+            # are recompiled lazily on their next load().
+            super().load(name)
+        except Exception:
+            self.templates = saved_templates
+            self._file_signatures = saved_signatures
+            self._deps = saved_deps
+            self._dependents = saved_dependents
+            raise
 
 
 class DictLoader(BaseLoader):

@@ -1,6 +1,10 @@
 import os
+import shutil
+import tempfile
+import threading
 import traceback
 import unittest
+from collections import Counter
 
 from tornado.escape import native_str, to_unicode, utf8
 from tornado.template import DictLoader, Loader, ParseError, Template
@@ -503,3 +507,235 @@ class TemplateLoaderTest(TestCase):
         tmpl = self.loader.load("utf8.html")
         result = tmpl.generate()
         self.assertEqual(to_unicode(result).strip(), "H\u00e9llo")
+
+
+class CountingLoader(Loader):
+    """A Loader that records how many times each template is compiled."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.compile_counts: Counter[str] = Counter()
+
+    def _create_template(self, name):
+        self.compile_counts[name] += 1
+        return super()._create_template(name)
+
+
+class DependencyAwareReloadTest(TestCase):
+    """Tests for Loader(autoreload=True) dependency-aware invalidation."""
+
+    # Two template trees that share exactly one leaf template:
+    #   a_page -> a_mid -> shared_leaf
+    #   b_page -> b_base (extends) -> b_mid -> shared_leaf
+    # plus a_solo, which belongs to no dependency chain.
+    TREE = {
+        "shared_leaf.html": "LEAF-v1",
+        "a_mid.html": "M({% include shared_leaf.html %})",
+        "a_page.html": "A[{% include a_mid.html %}]",
+        "b_mid.html": "N({% include shared_leaf.html %})",
+        "b_base.html": "B<{% include b_mid.html %}>{% block content %}base{% end %}",
+        "b_page.html": "{% extends b_base.html %}{% block content %}P{% end %}",
+        "a_solo.html": "SOLO",
+    }
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir)
+        for name, content in self.TREE.items():
+            self.write(name, content)
+        self.loader = CountingLoader(self.dir, autoreload=True)
+
+    def write(self, name, content):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+
+    def render(self, name):
+        return to_unicode(self.loader.load(name).generate())
+
+    def counts(self, *names):
+        return {n: self.loader.compile_counts[n] for n in names}
+
+    def test_invalidation_scope_two_trees_one_shared_leaf(self):
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-v1)]")
+        self.assertEqual(self.render("b_page.html"), "B<N(LEAF-v1)>P")
+        self.assertEqual(self.render("a_solo.html"), "SOLO")
+        self.assertEqual(
+            self.counts(
+                "a_page.html",
+                "a_mid.html",
+                "b_page.html",
+                "b_base.html",
+                "b_mid.html",
+                "shared_leaf.html",
+                "a_solo.html",
+            ),
+            {n: 1 for n in self.TREE},
+        )
+
+        # Touch only the shared leaf.
+        self.write("shared_leaf.html", "LEAF-v2")
+
+        # Reloading the A tree recompiles exactly the A chain and the leaf.
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-v2)]")
+        self.assertEqual(
+            self.counts("a_page.html", "a_mid.html", "shared_leaf.html"),
+            {"a_page.html": 2, "a_mid.html": 2, "shared_leaf.html": 2},
+        )
+        # The B tree has not been recompiled yet (lazy invalidation), and
+        # the unrelated template was never touched (no global reset).
+        self.assertEqual(
+            self.counts("b_page.html", "b_base.html", "b_mid.html", "a_solo.html"),
+            {"b_page.html": 1, "b_base.html": 1, "b_mid.html": 1, "a_solo.html": 1},
+        )
+
+        # Reloading the B tree recompiles only its own chain; the shared
+        # leaf is already fresh and is not compiled a third time.
+        self.assertEqual(self.render("b_page.html"), "B<N(LEAF-v2)>P")
+        self.assertEqual(
+            self.counts("b_page.html", "b_base.html", "b_mid.html", "shared_leaf.html"),
+            {"b_page.html": 2, "b_base.html": 2, "b_mid.html": 2, "shared_leaf.html": 2},
+        )
+        self.assertEqual(self.render("a_solo.html"), "SOLO")
+        self.assertEqual(self.counts("a_solo.html"), {"a_solo.html": 1})
+
+    def test_failed_reload_keeps_old_cache_and_recovers(self):
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-v1)]")
+        old_template = self.loader.templates["a_page.html"]
+        old_leaf = self.loader.templates["shared_leaf.html"]
+
+        # Break the leaf; the reload must fail without touching the cache.
+        self.write("shared_leaf.html", "{% if %}broken")
+        with self.assertRaises(ParseError):
+            self.loader.load("a_page.html")
+        self.assertIs(self.loader.templates["a_page.html"], old_template)
+        self.assertIs(self.loader.templates["shared_leaf.html"], old_leaf)
+        self.assertEqual(to_unicode(old_template.generate()), "A[M(LEAF-v1)]")
+        # The failed attempt did not evict anything from the cache.
+        self.assertIn("a_mid.html", self.loader.templates)
+        counts_after_failure = dict(self.loader.compile_counts)
+
+        # Fix the file; the next load recompiles and recovers.
+        self.write("shared_leaf.html", "LEAF-fixed")
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-fixed)]")
+        self.assertEqual(
+            self.loader.compile_counts["shared_leaf.html"],
+            counts_after_failure["shared_leaf.html"] + 1,
+        )
+
+    def test_same_timestamp_content_change_detected(self):
+        self.write("shared_leaf.html", "AAAA")
+        self.assertEqual(self.render("a_page.html"), "A[M(AAAA)]")
+        stat = os.stat(os.path.join(self.dir, "shared_leaf.html"))
+
+        # Rewrite with different content of the same length and restore
+        # the exact original mtime: only the content hash can catch this.
+        path = self.write("shared_leaf.html", "BBBB")
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+        self.assertEqual(self.render("a_page.html"), "A[M(BBBB)]")
+        self.assertEqual(self.counts("shared_leaf.html"), {"shared_leaf.html": 2})
+
+    def test_deleted_dependency_detected_and_recovers(self):
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-v1)]")
+        old_template = self.loader.templates["a_page.html"]
+
+        os.remove(os.path.join(self.dir, "shared_leaf.html"))
+        with self.assertRaises(FileNotFoundError):
+            self.loader.load("a_page.html")
+        # The old compiled templates survive the failed reload.
+        self.assertIs(self.loader.templates["a_page.html"], old_template)
+
+        self.write("shared_leaf.html", "LEAF-back")
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-back)]")
+
+    def test_renamed_dependency_detected_and_recovers(self):
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-v1)]")
+
+        os.rename(
+            os.path.join(self.dir, "shared_leaf.html"),
+            os.path.join(self.dir, "renamed_leaf.html"),
+        )
+        with self.assertRaises(FileNotFoundError):
+            self.loader.load("a_page.html")
+        self.assertIn("a_page.html", self.loader.templates)
+
+        os.rename(
+            os.path.join(self.dir, "renamed_leaf.html"),
+            os.path.join(self.dir, "shared_leaf.html"),
+        )
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-v1)]")
+        self.assertEqual(self.counts("shared_leaf.html"), {"shared_leaf.html": 2})
+
+    def test_circular_include_reports_chain(self):
+        self.write("loop_a.html", "{% include loop_b.html %}")
+        self.write("loop_b.html", "{% include loop_a.html %}")
+        with self.assertRaises(ParseError) as cm:
+            self.loader.load("loop_a.html")
+        self.assertIn("loop_a.html -> loop_b.html -> loop_a.html", str(cm.exception))
+
+    def test_circular_extends_reports_chain(self):
+        self.write("loop_c.html", "{% extends loop_d.html %}")
+        self.write("loop_d.html", "{% extends loop_c.html %}")
+        with self.assertRaises(ParseError) as cm:
+            self.loader.load("loop_c.html")
+        self.assertIn("loop_c.html -> loop_d.html -> loop_c.html", str(cm.exception))
+
+    def test_concurrent_loads_return_consistent_versions(self):
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-v1)]")
+        leaf_path = os.path.join(self.dir, "shared_leaf.html")
+        versions = ["LEAF-v1", "LEAF-v2"]
+        expected = {"A[M(LEAF-v1)]", "A[M(LEAF-v2)]"}
+        errors = []
+        stop = threading.Event()
+
+        def writer():
+            # Atomic replace so readers always see a complete file.
+            for i in range(200):
+                if stop.is_set():
+                    return
+                tmp = leaf_path + ".tmp"
+                with open(tmp, "w") as f:
+                    f.write(versions[i % 2])
+                os.replace(tmp, leaf_path)
+
+        def reader():
+            try:
+                for _ in range(200):
+                    if stop.is_set():
+                        return
+                    result = to_unicode(self.loader.load("a_page.html").generate())
+                    if result not in expected:
+                        raise AssertionError("inconsistent render: %r" % result)
+            except Exception as e:  # noqa: BLE001 - reported to main thread
+                errors.append(e)
+                stop.set()
+
+        threads = [threading.Thread(target=writer)] + [
+            threading.Thread(target=reader) for _ in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        # Both versions were rendered at some point and every render came
+        # from one consistent compiled version of the whole chain.
+        self.assertEqual(self.render("a_page.html"), "A[M(LEAF-v2)]")
+
+    def test_no_reload_without_autoreload(self):
+        loader = CountingLoader(self.dir)
+        self.assertEqual(
+            to_unicode(loader.load("a_page.html").generate()), "A[M(LEAF-v1)]"
+        )
+        self.write("shared_leaf.html", "LEAF-v2")
+        # Default behavior is unchanged: the cache is kept until reset().
+        self.assertEqual(
+            to_unicode(loader.load("a_page.html").generate()), "A[M(LEAF-v1)]"
+        )
+        self.assertEqual(loader.compile_counts["shared_leaf.html"], 1)
+        loader.reset()
+        self.assertEqual(
+            to_unicode(loader.load("a_page.html").generate()), "A[M(LEAF-v2)]"
+        )
