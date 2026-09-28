@@ -290,6 +290,10 @@ API Reference
 
 .. autoclass:: CallsiteParameterAdder
 
+.. autoclass:: Branch
+
+.. autoclass:: FanOut
+
 
 `structlog.stdlib` Module
 -------------------------

@@ -20,11 +20,13 @@ import threading
 import time
 
 from collections.abc import Callable, Collection, Sequence
+from copy import deepcopy
 from types import FrameType, TracebackType
 from typing import (
     Any,
     ClassVar,
     Final,
+    Literal,
     NamedTuple,
     TextIO,
     cast,
@@ -38,21 +40,25 @@ from ._frames import (
 from ._log_levels import NAME_TO_LEVEL, add_log_level
 from ._utils import get_processname
 from .contextvars import _ASYNC_CALLING_THREAD
+from .exceptions import DropEvent
 from .tracebacks import ExceptionDictTransformer
 from .typing import (
     EventDict,
     ExceptionTransformer,
     ExcInfo,
+    Processor,
     WrappedLogger,
 )
 
 
 __all__ = [
     "NAME_TO_LEVEL",  # some people rely on it being here
+    "Branch",
     "CallsiteParameter",
     "CallsiteParameterAdder",
     "EventRenamer",
     "ExceptionPrettyPrinter",
+    "FanOut",
     "JSONRenderer",
     "KeyValueRenderer",
     "LogfmtRenderer",
@@ -1003,3 +1009,115 @@ class EventRenamer:
                 event_dict["event"] = replace_by
 
         return event_dict
+
+
+class Branch(NamedTuple):
+    """
+    A single output branch of `FanOut`.
+
+    Args:
+        processors:
+            The branch's own processors, run on a private copy of the event
+            dict. The last one should render the event into whatever *sink*
+            accepts.
+
+        sink:
+            A callable that receives the return value of the branch's last
+            processor -- for example ``structlog.PrintLogger.msg``, or a
+            callable that writes the rendered event into an audit file.
+
+    .. versionadded:: 26.2.0
+    """
+
+    processors: Sequence[Processor]
+    sink: Callable[[Any], None]
+
+
+class FanOut:
+    """
+    Fan out the event dict to multiple `Branch`es, each with an isolated view
+    of the event.
+
+    Must be the last processor in the chain. The processors in front of it
+    are the *shared* stage and run exactly once -- so bound context and
+    standard `logging` extra fields are merged only once, too. Afterwards,
+    each branch gets its own `copy.deepcopy` of the resulting event dict,
+    runs its own processors, and passes the rendered result to its sink.
+
+    Branches are fully isolated: deleting keys, mutating nested values, or
+    raising `structlog.DropEvent` in one branch never affects the others. If
+    the console branch drops an event, the audit branch still receives the
+    complete data left behind by the shared stage.
+
+    Once all branches are done, `structlog.DropEvent` is raised so the event
+    is not passed on to the wrapped logger.
+
+    Args:
+        branches: The branches to dispatch the event to, in order.
+
+        on_branch_error:
+            What to do when a branch raises an exception (other than
+            `structlog.DropEvent`, which always only drops the event for that
+            branch): ``"raise"`` re-raises the exception, aborting the
+            remaining branches; ``"continue"`` logs it using the standard
+            `logging` package and moves on to the next branch.
+
+        copy:
+            A callable that creates each branch's isolated view of the event
+            dict. Defaults to `copy.deepcopy`.
+
+    .. versionadded:: 26.2.0
+    """
+
+    def __init__(
+        self,
+        branches: Sequence[Branch],
+        *,
+        on_branch_error: Literal["raise", "continue"] = "raise",
+        copy: Callable[[EventDict], EventDict] = deepcopy,
+    ):
+        if on_branch_error not in ("raise", "continue"):
+            msg = (
+                "on_branch_error must be 'raise' or 'continue', "
+                f"not {on_branch_error!r}."
+            )
+            raise ValueError(msg)
+
+        self._branches = tuple(branches)
+        self._on_branch_error = on_branch_error
+        self._copy = copy
+
+    def __call__(
+        self, logger: WrappedLogger, method_name: str, event_dict: EventDict
+    ) -> EventDict:
+        for branch in self._branches:
+            self._dispatch(logger, method_name, branch, event_dict)
+
+        raise DropEvent
+
+    def _dispatch(
+        self,
+        logger: WrappedLogger,
+        method_name: str,
+        branch: Branch,
+        event_dict: EventDict,
+    ) -> None:
+        try:
+            branch_event_dict = self._copy(event_dict)
+
+            result: Any = branch_event_dict
+            for proc in branch.processors:
+                result = proc(logger, method_name, result)
+
+            branch.sink(result)
+        except DropEvent:
+            return
+        except Exception:
+            if self._on_branch_error == "raise":
+                raise
+
+            logging.getLogger("structlog.fanout").exception(
+                "Fan-out branch %r failed; continuing with remaining "
+                "branches.",
+                branch,
+            )

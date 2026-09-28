@@ -15,6 +15,11 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.processors.FanOut` and `structlog.processors.Branch` for fanning out the same event to multiple branches (e.g. an audit file and the console) with different processors and sinks.
+  The shared processors in front of the fan-out run only once; each branch gets its own deep copy of the event dict, so mutations, `structlog.DropEvent`, and exceptions (configurable via *on_branch_error*) in one branch never affect the others.
+
 
 ## [26.1.0](https://github.com/hynek/structlog/compare/25.5.0...26.1.0) - 2026-06-06
 

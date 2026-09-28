@@ -23,10 +23,12 @@ import structlog
 from structlog import BoundLogger
 from structlog._utils import get_processname
 from structlog.processors import (
+    Branch,
     CallsiteParameter,
     CallsiteParameterAdder,
     EventRenamer,
     ExceptionPrettyPrinter,
+    FanOut,
     JSONRenderer,
     StackInfoRenderer,
     UnicodeDecoder,
@@ -762,3 +764,282 @@ class TestRenameKey:
         assert {"msg": "hi", "foo": "bar"} == EventRenamer("msg", "missing")(
             None, None, {"event": "hi", "foo": "bar"}
         )
+
+
+class TestFanOut:
+    def test_shared_stage_runs_once_and_reaches_all_branches(self):
+        """
+        Processors in front of the FanOut run exactly once per event; bound
+        context and event keyword arguments are merged once and reach every
+        branch.
+        """
+        shared_calls = []
+
+        def shared(logger, method_name, event_dict):
+            shared_calls.append(dict(event_dict))
+            event_dict["shared"] = True
+
+            return event_dict
+
+        audit, console = [], []
+        log = structlog.wrap_logger(
+            None,
+            processors=[
+                shared,
+                FanOut(
+                    [
+                        Branch([JSONRenderer()], audit.append),
+                        Branch([], console.append),
+                    ]
+                ),
+            ],
+            wrapper_class=BoundLogger,
+        )
+
+        log.bind(user="alice").info("hello", answer=42)
+
+        assert 1 == len(shared_calls)
+        assert {
+            "user": "alice",
+            "answer": 42,
+            "event": "hello",
+            "shared": True,
+        } == json.loads(audit[0])
+        assert {
+            "user": "alice",
+            "answer": 42,
+            "event": "hello",
+            "shared": True,
+        } == console[0]
+
+    def test_branches_are_isolated(self):
+        """
+        Deleting keys and mutating nested values in one branch does not
+        affect the event dicts of the other branches.
+        """
+
+        def vandal(logger, method_name, event_dict):
+            del event_dict["secret"]
+            event_dict["nested"]["x"] = "mutated"
+
+            return event_dict
+
+        audit = []
+        log = structlog.wrap_logger(
+            None,
+            processors=[
+                FanOut(
+                    [
+                        Branch([vandal], lambda _: None),
+                        Branch([], audit.append),
+                    ]
+                )
+            ],
+            wrapper_class=BoundLogger,
+        )
+
+        log.info("hello", secret="s3cr3t", nested={"x": "original"})
+
+        (event,) = audit
+        assert "s3cr3t" == event["secret"]
+        assert {"x": "original"} == event["nested"]
+
+    def test_drop_event_only_drops_its_own_branch(self):
+        """
+        A branch raising DropEvent (e.g. the console branch) does not keep
+        other branches (e.g. audit) from receiving the full event left by
+        the shared stage.
+        """
+
+        def drop(logger, method_name, event_dict):
+            raise structlog.DropEvent
+
+        audit = []
+        log = structlog.wrap_logger(
+            None,
+            processors=[
+                FanOut(
+                    [
+                        Branch([drop], lambda _: None),
+                        Branch([], audit.append),
+                    ]
+                )
+            ],
+            wrapper_class=BoundLogger,
+        )
+
+        log.info("hello", secret="s3cr3t")
+
+        assert [{"event": "hello", "secret": "s3cr3t"}] == audit
+
+    def test_branch_error_raises_by_default(self):
+        """
+        By default, an exception in a branch aborts the remaining branches
+        and propagates.
+        """
+
+        def boom(logger, method_name, event_dict):
+            raise ValueError("nope")
+
+        audit = []
+        log = structlog.wrap_logger(
+            None,
+            processors=[
+                FanOut(
+                    [
+                        Branch([boom], lambda _: None),
+                        Branch([], audit.append),
+                    ]
+                )
+            ],
+            wrapper_class=BoundLogger,
+        )
+
+        with pytest.raises(ValueError, match="nope"):
+            log.info("hello")
+
+        assert [] == audit
+
+    def test_branch_error_continue(self, caplog):
+        """
+        With on_branch_error="continue", a failing branch is logged and the
+        remaining branches still run.
+        """
+
+        def boom(logger, method_name, event_dict):
+            raise ValueError("nope")
+
+        audit = []
+        log = structlog.wrap_logger(
+            None,
+            processors=[
+                FanOut(
+                    [
+                        Branch([boom], lambda _: None),
+                        Branch([], audit.append),
+                    ],
+                    on_branch_error="continue",
+                )
+            ],
+            wrapper_class=BoundLogger,
+        )
+
+        log.info("hello")
+
+        assert [{"event": "hello"}] == audit
+        (record,) = caplog.records
+        assert "structlog.fanout" == record.name
+        assert logging.ERROR == record.levelno
+        assert "Fan-out branch" in record.message
+
+    def test_sink_error_uses_same_policy(self):
+        """
+        Exceptions raised by a branch's sink are handled according to
+        on_branch_error, too.
+        """
+
+        def boom(_):
+            raise ValueError("nope")
+
+        audit = []
+        log = structlog.wrap_logger(
+            None,
+            processors=[
+                FanOut(
+                    [
+                        Branch([], boom),
+                        Branch([], audit.append),
+                    ],
+                    on_branch_error="continue",
+                )
+            ],
+            wrapper_class=BoundLogger,
+        )
+
+        log.info("hello")
+
+        assert [{"event": "hello"}] == audit
+
+    def test_invalid_on_branch_error(self):
+        """
+        An unknown on_branch_error policy is rejected.
+        """
+        with pytest.raises(ValueError, match="on_branch_error"):
+            FanOut([], on_branch_error="bogus")
+
+    def test_event_is_not_forwarded_to_wrapped_logger(self):
+        """
+        After fanning out, the event is not passed on to the wrapped logger.
+        """
+        factory = CapturingLoggerFactory()
+        log = structlog.wrap_logger(
+            factory(),
+            processors=[FanOut([Branch([], lambda _: None)])],
+            wrapper_class=BoundLogger,
+        )
+
+        assert log.info("hello") is None
+        assert [] == factory.logger.calls
+
+    def test_custom_copy(self):
+        """
+        The callable used to create the branches' isolated views of the
+        event dict can be customized.
+        """
+        copies = []
+
+        def counting_copy(event_dict):
+            copies.append(event_dict)
+
+            return dict(event_dict)
+
+        log = structlog.wrap_logger(
+            None,
+            processors=[
+                FanOut(
+                    [
+                        Branch([], lambda _: None),
+                        Branch([], lambda _: None),
+                    ],
+                    copy=counting_copy,
+                )
+            ],
+            wrapper_class=BoundLogger,
+        )
+
+        log.info("hello")
+
+        assert 2 == len(copies)
+
+    def test_stdlib_bound_logger(self):
+        """
+        FanOut works as the last processor of a stdlib-bound logger; extra
+        keyword arguments are merged once and reach every branch.
+        """
+        shared_calls = []
+
+        def shared(logger, method_name, event_dict):
+            shared_calls.append(event_dict)
+
+            return event_dict
+
+        audit, console = [], []
+        log = structlog.wrap_logger(
+            logging.getLogger("test.fanout"),
+            processors=[
+                shared,
+                FanOut(
+                    [
+                        Branch([], audit.append),
+                        Branch([], console.append),
+                    ]
+                ),
+            ],
+            wrapper_class=structlog.stdlib.BoundLogger,
+        )
+
+        log.info("hello", extra_field="yes")
+
+        assert 1 == len(shared_calls)
+        assert [{"event": "hello", "extra_field": "yes"}] == audit
+        assert [{"event": "hello", "extra_field": "yes"}] == console
