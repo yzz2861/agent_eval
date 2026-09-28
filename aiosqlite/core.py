@@ -8,8 +8,10 @@ Core implementation of aiosqlite proxies
 import asyncio
 import logging
 import sqlite3
-from collections.abc import AsyncIterator, Generator, Iterable
+from collections.abc import AsyncIterable, AsyncIterator, Generator, Iterable
+from dataclasses import dataclass
 from functools import partial
+from itertools import count
 from pathlib import Path
 from queue import Empty, Queue, SimpleQueue
 from threading import Thread
@@ -19,7 +21,13 @@ from warnings import warn
 from .context import contextmanager
 from .cursor import Cursor
 
-__all__ = ["connect", "Connection", "Cursor"]
+__all__ = [
+    "connect",
+    "BatchExecutionError",
+    "BatchResult",
+    "Connection",
+    "Cursor",
+]
 
 AuthorizerCallback = Callable[[int, str, str, str, str], int]
 
@@ -43,6 +51,31 @@ def set_exception(fut: asyncio.Future, e: BaseException) -> None:
 
 _STOP_RUNNING_SENTINEL = object()
 _TxQueue = SimpleQueue[tuple[Optional[asyncio.Future], Callable[[], Any]]]
+_savepoint_ids = count(1)
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """Summary of a `Connection.executemany_async` call."""
+
+    batches_completed: int = 0
+    rows_written: int = 0
+
+
+class BatchExecutionError(Exception):
+    """
+    Raised by `Connection.executemany_async` in non-atomic mode when the
+    parameter source or a batch execution fails.
+
+    Batches that completed before the failure are left as-is (committed,
+    unless the caller had already opened a transaction). The ``result``
+    attribute describes how much work completed, and the original error
+    is available as ``__cause__``.
+    """
+
+    def __init__(self, message: str, result: BatchResult) -> None:
+        super().__init__(message)
+        self.result = result
 
 
 def _connection_worker_thread(tx: _TxQueue):
@@ -147,6 +180,9 @@ class Connection:
         cursor = self._conn.execute(sql, parameters)
         return cursor.fetchall()
 
+    def _in_transaction(self) -> bool:
+        return self._conn.in_transaction
+
     async def _execute(self, fn, *args, **kwargs):
         """Queue a function with the given arguments for execution."""
         if not self._running or not self._connection:
@@ -248,6 +284,107 @@ class Connection:
         """Helper to create a cursor and execute the given multiquery."""
         cursor = await self._execute(self._conn.executemany, sql, parameters)
         return Cursor(self, cursor)
+
+    async def executemany_async(
+        self,
+        sql: str,
+        parameters: AsyncIterable[Iterable[Any]],
+        *,
+        batch_size: int = 100,
+        atomic: bool = True,
+    ) -> BatchResult:
+        """
+        Execute the given query repeatedly, consuming parameters from an
+        async iterable in batches of at most ``batch_size``.
+
+        Parameters are pulled from ``parameters`` on the event loop, while
+        each batch is executed on the connection thread. At most one batch
+        of parameters is buffered in memory at a time, so a slow consumer
+        cannot turn into unbounded prefetching of the source.
+
+        If ``atomic`` is true (the default), all batches are executed inside
+        a savepoint: if parameter generation fails, a batch violates a
+        constraint, or the call is cancelled, every batch written by this
+        call is rolled back and the original error is re-raised. A
+        transaction that was already open before the call is never
+        committed or rolled back.
+
+        If ``atomic`` is false, each batch is committed as it completes
+        (unless the caller already had a transaction open, which is left
+        untouched), and failures raise ``BatchExecutionError`` carrying a
+        ``BatchResult`` describing the batches that completed before the
+        failure.
+
+        Returns a ``BatchResult`` with the number of batches executed and
+        rows written.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+
+        iterator = parameters.__aiter__()
+        savepoint: Optional[str] = None
+        commit_batches = not atomic and not await self._execute(self._in_transaction)
+        batches_completed = 0
+        rows_written = 0
+
+        try:
+            exhausted = False
+            while not exhausted:
+                batch = []
+                while len(batch) < batch_size:
+                    try:
+                        batch.append(await iterator.__anext__())
+                    except StopAsyncIteration:
+                        exhausted = True
+                        break
+                if not batch:
+                    break
+
+                if atomic and savepoint is None:
+                    savepoint = f"aiosqlite_batch_{next(_savepoint_ids)}"
+                    await self._execute(self._conn.execute, f"SAVEPOINT {savepoint}")
+
+                cursor = await self._execute(self._conn.executemany, sql, batch)
+                batches_completed += 1
+                if cursor.rowcount > 0:
+                    rows_written += cursor.rowcount
+
+                if commit_batches:
+                    await self._execute(self._conn.commit)
+
+        except BaseException as error:
+            if savepoint is not None:
+                await self._rollback_to_savepoint(savepoint)
+            if atomic or not isinstance(error, Exception):
+                raise
+            result = BatchResult(batches_completed, rows_written)
+            raise BatchExecutionError(
+                f"batch execution failed after {batches_completed} batch(es)",
+                result,
+            ) from error
+
+        finally:
+            await self._close_async_iterator(iterator)
+
+        return BatchResult(batches_completed, rows_written)
+
+    async def _rollback_to_savepoint(self, savepoint: str) -> None:
+        """Best-effort rollback of a savepoint, logging any failure."""
+        try:
+            await self._execute(self._conn.execute, f"ROLLBACK TO {savepoint}")
+            await self._execute(self._conn.execute, f"RELEASE {savepoint}")
+        except Exception:
+            LOG.exception("failed to roll back savepoint %s", savepoint)
+
+    async def _close_async_iterator(self, iterator: AsyncIterator[Any]) -> None:
+        """Close an async iterator so generator finally blocks can run."""
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is None:
+            return
+        try:
+            await aclose()
+        except Exception:
+            LOG.exception("exception while closing async parameter source")
 
     @contextmanager
     async def executescript(self, sql_script: str) -> Cursor:

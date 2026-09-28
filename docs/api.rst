@@ -12,6 +12,9 @@ Connection
 .. autoclass:: Connection
     :special-members: __aenter__, __aexit__, __await__
 
+.. autoclass:: BatchResult
+    :members:
+
 Cursors
 -------
 
@@ -42,10 +45,12 @@ Errors
 .. autoexception:: NotSupportedError
     :members:
 
+.. autoexception:: BatchExecutionError
+    :members:
+
 Advanced
 --------
 
 .. autofunction:: register_adapter
 
 .. autofunction:: register_converter
-
