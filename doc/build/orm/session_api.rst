@@ -23,6 +23,12 @@ Session and sessionmaker()
 .. autoclass:: SessionTransactionOrigin
    :members:
 
+.. autoclass:: VersionedUpdateResult
+   :members:
+
+.. autoclass:: VersionedUpdateStatus
+   :members:
+
 Session Utilities
 -----------------
 
@@ -83,4 +89,3 @@ those described in :doc:`/orm/events`.
 
 .. autoclass:: History
     :members:
-

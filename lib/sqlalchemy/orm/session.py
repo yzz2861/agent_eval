@@ -24,6 +24,7 @@ from typing import Iterator
 from typing import List
 from typing import Literal
 from typing import Mapping
+from typing import NamedTuple
 from typing import NoReturn
 from typing import Optional
 from typing import overload
@@ -63,6 +64,7 @@ from .base import state_str
 from .context import _ORMCompileState
 from .context import FromStatement
 from .identity import IdentityMap
+from .properties import ColumnProperty
 from .query import Query
 from .state import InstanceState
 from .state_changes import _StateChange
@@ -1467,6 +1469,40 @@ class _SessionCloseState(Enum):
     ACTIVE = 1
     CLOSED = 2
     CLOSE_IS_RESET = 3
+
+
+class VersionedUpdateStatus(Enum):
+    """Describe the outcome of a single row processed by
+    :meth:`.Session.bulk_update_versioned`.
+
+    .. versionadded:: 2.1
+
+    """
+
+    SUCCEEDED = "succeeded"
+    """The UPDATE matched the given primary key and expected version id;
+    the row was updated and the version id was advanced."""
+
+    STALE = "stale"
+    """The UPDATE matched no row for the given primary key and expected
+    version id, meaning the row was concurrently modified or deleted;
+    no change was applied for this entry."""
+
+
+class VersionedUpdateResult(NamedTuple):
+    """Per-entry result returned by
+    :meth:`.Session.bulk_update_versioned`.
+
+    .. versionadded:: 2.1
+
+    """
+
+    status: VersionedUpdateStatus
+    """The outcome for this entry."""
+
+    primary_key: Tuple[Any, ...]
+    """The primary key of the row, as a tuple in mapper primary key
+    column order."""
 
 
 class Session(_SessionClassMethods, EventTarget):
@@ -4914,6 +4950,236 @@ class Session(_SessionClassMethods, EventTarget):
             update_changed_only=False,
             render_nulls=False,
         )
+
+    def bulk_update_versioned(
+        self,
+        mapper: _EntityBindKey[Any],
+        mappings: Iterable[Dict[str, Any]],
+    ) -> List[VersionedUpdateResult]:
+        """Update rows for a versioned mapper, returning per-entry results.
+
+        This is an explicitly invoked alternative to flush-time optimistic
+        concurrency control.  Each mapping supplies a full primary key and
+        the *expected* value of the mapper's ``version_id_col`` (i.e. the
+        version the caller most recently read).  Every entry is applied
+        with an individual UPDATE statement whose WHERE clause matches on
+        the primary key **and** the expected version id::
+
+            UPDATE item SET name=:name, version_id=:new_version
+            WHERE id=:id AND version_id=:expected_version
+
+        Instead of raising a single :class:`~sqlalchemy.orm.exc.StaleDataError`
+        for the whole batch, the method returns a list of
+        :class:`.VersionedUpdateResult` that lines up with the input
+        order, marking each entry as
+        :attr:`.VersionedUpdateStatus.SUCCEEDED` (exactly one row
+        matched) or :attr:`.VersionedUpdateStatus.STALE` (no row
+        matched, i.e. a version conflict or a deleted row).  A stale
+        entry does not prevent the remaining entries from being
+        attempted.
+
+        Only the version-conflict case is converted into a per-entry
+        result.  Database errors such as integrity violations, SQL
+        syntax errors or connection failures are **not** swallowed and
+        propagate to the caller as usual.
+
+        The method participates in the caller's transaction: it never
+        commits, so the caller may still roll back the whole unit of
+        work, including all successful entries.
+
+        Objects already present in this :class:`.Session`'s identity map
+        are synchronized with the state that was actually written: for
+        successful entries the mapped attributes (including the new
+        version id) are installed as committed values.  Entries that
+        came back :attr:`~.VersionedUpdateStatus.STALE` leave any
+        session-local object untouched, so the identity map, the
+        database and the returned results always describe the same
+        state.
+
+        :param mapper: a mapped class or :class:`_orm.Mapper`.  The
+         mapper must be configured with a ``version_id_col`` and must
+         map to a single table.
+
+        :param mappings: a sequence of dictionaries keyed by mapped
+         attribute names.  Each dictionary must contain:
+
+         * every primary key attribute (composite primary keys are
+           supported),
+         * the version id attribute, holding the *expected* version,
+         * any additional column-mapped attributes to be written.
+
+         All dictionaries must contain the same set of keys.  A given
+         primary key may appear **at most once** in the sequence;
+         passing the same primary key twice raises
+         :class:`~sqlalchemy.exc.InvalidRequestError` before any row
+         is written.
+
+        :return: a list of :class:`.VersionedUpdateResult`, one per
+         input mapping, in input order.
+
+        .. versionadded:: 2.1
+
+        """
+        mapper_ = _class_to_mapper(mapper)
+
+        if mapper_.version_id_col is None:
+            raise sa_exc.InvalidRequestError(
+                "bulk_update_versioned() requires the target mapper to be "
+                "configured with a version_id_col; mapper %s does not "
+                "define one." % mapper_
+            )
+
+        table = mapper_.local_table
+        version_col = mapper_.version_id_col
+        version_prop = mapper_._version_id_prop
+        assert version_prop is not None
+        version_key = version_prop.key
+
+        pk_cols = list(mapper_.primary_key)
+        pk_props = []
+        for pk_col in pk_cols:
+            try:
+                pk_props.append(mapper_._columntoproperty[pk_col])
+            except KeyError as ke:
+                raise sa_exc.InvalidRequestError(
+                    "bulk_update_versioned() requires primary key columns "
+                    "to be mapped as simple column properties; column %s "
+                    "is not." % pk_col
+                ) from ke
+
+        dict_mappings = [dict(m) for m in mappings]
+        if not dict_mappings:
+            return []
+
+        pk_attr_keys = {prop.key for prop in pk_props}
+        expected_keys = set(dict_mappings[0])
+        seen_pks = set()
+        records = []
+        for mapping in dict_mappings:
+            for prop in pk_props:
+                if prop.key not in mapping:
+                    raise sa_exc.InvalidRequestError(
+                        "bulk_update_versioned() mappings must include "
+                        "the primary key attribute %r." % prop.key
+                    )
+            if version_key not in mapping:
+                raise sa_exc.InvalidRequestError(
+                    "bulk_update_versioned() mappings must include the "
+                    "expected value of the version attribute %r."
+                    % version_key
+                )
+            if set(mapping) != expected_keys:
+                raise sa_exc.InvalidRequestError(
+                    "bulk_update_versioned() requires all mappings to "
+                    "contain the same set of keys; got %r, expected %r."
+                    % (sorted(mapping), sorted(expected_keys))
+                )
+            pk_tuple = tuple(mapping[prop.key] for prop in pk_props)
+            if pk_tuple in seen_pks:
+                raise sa_exc.InvalidRequestError(
+                    "bulk_update_versioned() got more than one mapping "
+                    "for primary key %r; each primary key may appear at "
+                    "most once in the mappings sequence." % (pk_tuple,)
+                )
+            seen_pks.add(pk_tuple)
+            records.append((mapping, pk_tuple))
+
+        set_cols = []
+        for key in expected_keys:
+            if key in pk_attr_keys or key == version_key:
+                continue
+            if key not in mapper_.attrs:
+                raise sa_exc.InvalidRequestError(
+                    "bulk_update_versioned() can't locate mapped "
+                    "attribute %r on mapper %s." % (key, mapper_)
+                )
+            prop = mapper_.attrs[key]
+            if (
+                not isinstance(prop, ColumnProperty)
+                or len(prop.columns) != 1
+                or prop.columns[0].table is not table
+            ):
+                raise sa_exc.InvalidRequestError(
+                    "bulk_update_versioned() only supports simple "
+                    "single-column attributes on the mapped table; "
+                    "attribute %r is not supported." % key
+                )
+            set_cols.append((key, prop.columns[0]))
+
+        stmt = table.update().where(
+            *[
+                pk_col == sql.bindparam("bulk_pk_%s" % pk_col.key)
+                for pk_col in pk_cols
+            ],
+            version_col == sql.bindparam("bulk_expected_version"),
+        )
+        values: Dict[Any, Any] = {version_col: sql.bindparam("bulk_new_version")}
+        for key, col in set_cols:
+            values[col] = sql.bindparam("bulk_set_%s" % col.key)
+        stmt = stmt.values(values)
+
+        self._autoflush()
+
+        bind = self.get_bind(mapper=mapper_, clause=stmt)
+        connection = self._connection_for_bind(bind)
+
+        if not connection.dialect.supports_sane_rowcount:
+            raise sa_exc.InvalidRequestError(
+                "bulk_update_versioned() requires a database driver "
+                "that reports accurate rowcounts for UPDATE statements; "
+                "dialect %s does not."
+                % connection.dialect.dialect_description
+            )
+
+        results: List[VersionedUpdateResult] = []
+        for mapping, pk_tuple in records:
+            expected_version = mapping[version_key]
+            if mapper_.version_id_generator is not False:
+                new_version = mapper_.version_id_generator(expected_version)
+            else:
+                new_version = expected_version
+
+            params: Dict[str, Any] = {
+                "bulk_expected_version": expected_version,
+                "bulk_new_version": new_version,
+            }
+            for pk_col, value in zip(pk_cols, pk_tuple):
+                params["bulk_pk_%s" % pk_col.key] = value
+            for key, col in set_cols:
+                params["bulk_set_%s" % col.key] = mapping[key]
+
+            cursor = connection.execute(stmt, params)
+
+            if cursor.rowcount == 1:
+                identity_key = mapper_.identity_key_from_primary_key(pk_tuple)
+                instance = self.identity_map.get(identity_key)
+                if instance is not None:
+                    for key, col in set_cols:
+                        attributes.set_committed_value(
+                            instance, key, mapping[key]
+                        )
+                    attributes.set_committed_value(
+                        instance, version_key, new_version
+                    )
+                results.append(
+                    VersionedUpdateResult(
+                        VersionedUpdateStatus.SUCCEEDED, pk_tuple
+                    )
+                )
+            elif cursor.rowcount == 0:
+                results.append(
+                    VersionedUpdateResult(
+                        VersionedUpdateStatus.STALE, pk_tuple
+                    )
+                )
+            else:
+                raise exc.StaleDataError(
+                    "UPDATE statement on table %s matched %d rows for "
+                    "primary key %r; expected exactly one."
+                    % (table.description, cursor.rowcount, pk_tuple)
+                )
+
+        return results
 
     def _bulk_save_mappings(
         self,

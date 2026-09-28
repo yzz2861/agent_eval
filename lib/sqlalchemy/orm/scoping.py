@@ -13,6 +13,7 @@ from typing import Dict
 from typing import Generic
 from typing import Iterable
 from typing import Iterator
+from typing import List
 from typing import Mapping
 from typing import Optional
 from typing import overload
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
     from .session import _SessionBindKey
     from .session import sessionmaker
     from .session import SessionTransaction
+    from .session import VersionedUpdateResult
     from ..engine import Connection
     from ..engine import Engine
     from ..engine import Result
@@ -133,6 +135,7 @@ __all__ = ["scoped_session"]
         "bulk_save_objects",
         "bulk_insert_mappings",
         "bulk_update_mappings",
+        "bulk_update_versioned",
         "merge",
         "merge_all",
         "query",
@@ -1528,6 +1531,82 @@ class scoped_session(Generic[_S]):
 
         return self._proxied.bulk_update_mappings(mapper, mappings)
 
+    def bulk_update_versioned(
+        self,
+        mapper: _EntityBindKey[Any],
+        mappings: Iterable[Dict[str, Any]],
+    ) -> List[VersionedUpdateResult]:
+        r"""Update rows for a versioned mapper, returning per-entry results.
+
+        .. container:: class_bases
+
+            Proxied for the :class:`_orm.Session` class on
+            behalf of the :class:`_orm.scoping.scoped_session` class.
+
+        This is an explicitly invoked alternative to flush-time optimistic
+        concurrency control.  Each mapping supplies a full primary key and
+        the *expected* value of the mapper's ``version_id_col`` (i.e. the
+        version the caller most recently read).  Every entry is applied
+        with an individual UPDATE statement whose WHERE clause matches on
+        the primary key **and** the expected version id::
+
+            UPDATE item SET name=:name, version_id=:new_version
+            WHERE id=:id AND version_id=:expected_version
+
+        Instead of raising a single :class:`~sqlalchemy.orm.exc.StaleDataError`
+        for the whole batch, the method returns a list of
+        :class:`.VersionedUpdateResult` that lines up with the input
+        order, marking each entry as
+        :attr:`.VersionedUpdateStatus.SUCCEEDED` (exactly one row
+        matched) or :attr:`.VersionedUpdateStatus.STALE` (no row
+        matched, i.e. a version conflict or a deleted row).  A stale
+        entry does not prevent the remaining entries from being
+        attempted.
+
+        Only the version-conflict case is converted into a per-entry
+        result.  Database errors such as integrity violations, SQL
+        syntax errors or connection failures are **not** swallowed and
+        propagate to the caller as usual.
+
+        The method participates in the caller's transaction: it never
+        commits, so the caller may still roll back the whole unit of
+        work, including all successful entries.
+
+        Objects already present in this :class:`.Session`'s identity map
+        are synchronized with the state that was actually written: for
+        successful entries the mapped attributes (including the new
+        version id) are installed as committed values.  Entries that
+        came back :attr:`~.VersionedUpdateStatus.STALE` leave any
+        session-local object untouched, so the identity map, the
+        database and the returned results always describe the same
+        state.
+
+        :param mapper: a mapped class or :class:`_orm.Mapper`.  The
+         mapper must be configured with a ``version_id_col`` and must
+         map to a single table.
+
+        :param mappings: a sequence of dictionaries keyed by mapped
+         attribute names.  Each dictionary must contain:
+
+         * every primary key attribute (composite primary keys are
+           supported),
+         * the version id attribute, holding the *expected* version,
+         * any additional column-mapped attributes to be written.
+
+         All dictionaries must contain the same set of keys.  A given
+         primary key may appear **at most once** in the sequence;
+         passing the same primary key twice raises
+         :class:`~sqlalchemy.exc.InvalidRequestError` before any row
+         is written.
+
+        :return: a list of :class:`.VersionedUpdateResult`, one per
+         input mapping, in input order.
+
+        .. versionadded:: 2.1
+
+        """  # noqa: E501
+
+        return self._proxied.bulk_update_versioned(mapper, mappings)
     def merge(
         self,
         instance: _O,

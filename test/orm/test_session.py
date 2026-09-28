@@ -2625,7 +2625,8 @@ class SessionInterface(fixtures.MappedTest):
             - {
                 "bulk_update_mappings",
                 "bulk_insert_mappings",
-                "bulk_save_objects",
+               "bulk_save_objects",
+                "bulk_update_versioned",
             }
         )
 
