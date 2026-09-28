@@ -1,0 +1,2 @@
+:class:`BranchFanout`. The shared processors run exactly once; afterwards
+- `"continue"`: swallow the exception and keep processing the remaining

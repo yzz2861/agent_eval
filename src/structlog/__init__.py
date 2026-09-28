@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from structlog import (
+    branching,
     contextvars,
     dev,
     processors,
@@ -68,6 +69,7 @@ __all__ = [
     "ReturnLoggerFactory",
     "WriteLogger",
     "WriteLoggerFactory",
+    "branching",
     "configure",
     "configure_once",
     "contextvars",

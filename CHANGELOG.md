@@ -15,6 +15,12 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.branching` with `structlog.branching.BranchFanout` and `structlog.branching.Branch`: a terminal processor that fans one log event out to multiple isolated processing branches (for example, an audit file and the console) after the shared processors ran exactly once.
+  Each branch gets its own deep copy of the event dict, so deleting keys, mutating nested values, or raising `structlog.DropEvent` in one branch never affects the others.
+  Branch exceptions either get swallowed (`on_branch_error="continue"`, the default) or re-raised (`on_branch_error="raise"`).
+
 
 ## [26.1.0](https://github.com/hynek/structlog/compare/25.5.0...26.1.0) - 2026-06-06
 

@@ -98,6 +98,16 @@ API Reference
 .. autofunction:: set_exc_info
 
 
+`structlog.branching` Module
+-----------------------------
+
+.. automodule:: structlog.branching
+
+.. autoclass:: Branch
+
+.. autoclass:: BranchFanout
+
+
 `structlog.testing` Module
 --------------------------
 

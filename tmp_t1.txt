@@ -1,0 +1,9 @@
+# comment
+
+"""
+Fan out one log event to multiple isolated processing branches.
+
+.. versionadded:: 26.2.0
+"""
+
+from __future__ import annotations
