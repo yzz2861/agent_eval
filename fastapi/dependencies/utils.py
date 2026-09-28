@@ -56,6 +56,7 @@ from fastapi.concurrency import (
 )
 from fastapi.dependencies.models import (
     Dependant,
+    SecurityGroupInfo,
     _get_cache_key,
     _get_computed_scope,
     _get_oauth_scopes,
@@ -64,8 +65,9 @@ from fastapi.dependencies.models import (
     _is_gen_callable,
     _UsesScopesCache,
 )
-from fastapi.exceptions import DependencyScopeError
+from fastapi.exceptions import DependencyScopeError, HTTPException
 from fastapi.logger import logger
+from fastapi.security.base import SecurityResult
 from fastapi.security.oauth2 import SecurityScopes
 from fastapi.types import DependencyCacheKey
 from fastapi.utils import create_model_field, get_path_param_names
@@ -80,6 +82,8 @@ from starlette.datastructures import (
     QueryParams,
     UploadFile,
 )
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.exceptions import WebSocketException as StarletteWebSocketException
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response
 from starlette.websockets import WebSocket
@@ -300,6 +304,20 @@ def get_dependant(
             is_path_param=is_path_param,
         )
         if param_details.depends is not None:
+            if (
+                isinstance(param_details.depends, params.Security)
+                and param_details.depends.any_of is not None
+            ):
+                dependant.dependencies.append(
+                    get_security_group_dependant(
+                        path=path,
+                        name=param_name,
+                        security=param_details.depends,
+                        parent_oauth_scopes=current_scopes
+                        + list(param_details.depends.scopes or []),
+                    )
+                )
+                continue
             assert param_details.depends.dependency
             if (
                 (
@@ -345,6 +363,65 @@ def get_dependant(
         else:
             add_param_to_fields(field=param_details.field, dependant=dependant)
     return dependant
+
+
+def get_security_group_dependant(
+    *,
+    path: str,
+    name: str | None,
+    security: params.Security,
+    parent_oauth_scopes: list[str],
+) -> Dependant:
+    assert security.any_of is not None
+    groups: list[list[Dependant]] = []
+    for alternative in security.any_of:
+        if isinstance(alternative, params.AllOf):
+            members: Sequence[params.Security | Callable[..., Any]] = (
+                alternative.requirements
+            )
+        else:
+            members = [alternative]
+        group: list[Dependant] = []
+        for member in members:
+            if isinstance(member, params.Security):
+                member_security = member
+            elif callable(member):
+                member_security = params.Security(dependency=member)
+            else:
+                raise ValueError(
+                    "Security any_of groups can only contain Security(...) "
+                    "declarations, AllOf(...) groups or dependable callables, "
+                    f"got: {member!r}"
+                )
+            if member_security.any_of is not None:
+                raise ValueError(
+                    "Cannot nest Security any_of groups, declare a single level "
+                    "of alternative groups instead"
+                )
+            if member_security.dependency is None:
+                raise ValueError(
+                    "Security requirements inside any_of must declare a dependency"
+                )
+            group.append(
+                get_dependant(
+                    path=path,
+                    call=member_security.dependency,
+                    own_oauth_scopes=list(member_security.scopes or []),
+                    parent_oauth_scopes=parent_oauth_scopes,
+                    use_cache=member_security.use_cache,
+                )
+            )
+        groups.append(group)
+    return Dependant(
+        name=name,
+        path=path,
+        parent_oauth_scopes=parent_oauth_scopes,
+        security_group=SecurityGroupInfo(
+            groups=groups,
+            status_code=security.status_code,
+            authenticate_header=security.authenticate_header,
+        ),
+    )
 
 
 def add_non_field_param_to_dependency(
@@ -617,29 +694,25 @@ async def solve_dependencies(
     if _uses_scopes_cache is None:
         _uses_scopes_cache = {}
     for sub_dependant in dependant.dependencies:
-        sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
-        call = sub_dependant.call
-        use_sub_dependant = sub_dependant
-        if (
-            dependency_overrides_provider
-            and dependency_overrides_provider.dependency_overrides
-        ):
-            original_call = sub_dependant.call
-            call = getattr(
-                dependency_overrides_provider, "dependency_overrides", {}
-            ).get(original_call, original_call)
-            use_path: str = sub_dependant.path  # type: ignore
-            use_sub_dependant = get_dependant(
-                path=use_path,
-                call=call,
-                name=sub_dependant.name,
-                parent_oauth_scopes=_get_oauth_scopes(dependant=sub_dependant),
-                scope=sub_dependant.scope,
+        if sub_dependant.security_group is not None:
+            group_result, background_tasks = await _solve_security_group(
+                request=request,
+                dependant=sub_dependant,
+                body=body,
+                background_tasks=background_tasks,
+                response=response,
+                dependency_overrides_provider=dependency_overrides_provider,
+                dependency_cache=dependency_cache,
+                async_exit_stack=async_exit_stack,
+                embed_body_fields=embed_body_fields,
+                _uses_scopes_cache=_uses_scopes_cache,
             )
-
-        solved_result = await solve_dependencies(
+            if sub_dependant.name is not None:
+                values[sub_dependant.name] = group_result
+            continue
+        solved, solved_result = await _call_sub_dependant(
+            sub_dependant=sub_dependant,
             request=request,
-            dependant=use_sub_dependant,
             body=body,
             background_tasks=background_tasks,
             response=response,
@@ -653,31 +726,8 @@ async def solve_dependencies(
         if solved_result.errors:
             errors.extend(solved_result.errors)
             continue
-        sub_dependant_cache_key = _get_cache_key(
-            dependant=sub_dependant,
-            uses_scopes_cache=_uses_scopes_cache,
-        )
-        if sub_dependant.use_cache and sub_dependant_cache_key in dependency_cache:
-            solved = dependency_cache[sub_dependant_cache_key]
-        elif _is_gen_callable(use_sub_dependant.call) or _is_async_gen_callable(
-            use_sub_dependant.call
-        ):
-            use_astack = request_astack
-            if sub_dependant.scope == "function":
-                use_astack = function_astack
-            solved = await _solve_generator(
-                dependant=use_sub_dependant,
-                stack=use_astack,
-                sub_values=solved_result.values,
-            )
-        elif _is_coroutine_callable(use_sub_dependant.call):
-            solved = await call(**solved_result.values)
-        else:
-            solved = await run_in_threadpool(call, **solved_result.values)
         if sub_dependant.name is not None:
             values[sub_dependant.name] = solved
-        if sub_dependant_cache_key not in dependency_cache:
-            dependency_cache[sub_dependant_cache_key] = solved
     path_values, path_errors = request_params_to_args(
         dependant.path_params, request.path_params
     )
@@ -728,6 +778,161 @@ async def solve_dependencies(
         background_tasks=background_tasks,
         response=response,
         dependency_cache=dependency_cache,
+    )
+
+
+async def _call_sub_dependant(
+    *,
+    sub_dependant: Dependant,
+    request: Request | WebSocket,
+    body: dict[str, Any] | FormData | bytes | None,
+    background_tasks: StarletteBackgroundTasks | None,
+    response: Response,
+    dependency_overrides_provider: Any | None,
+    dependency_cache: dict[DependencyCacheKey, Any],
+    async_exit_stack: AsyncExitStack,
+    embed_body_fields: bool,
+    _uses_scopes_cache: _UsesScopesCache,
+) -> tuple[Any, SolvedDependency]:
+    sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
+    call = sub_dependant.call
+    use_sub_dependant = sub_dependant
+    if (
+        dependency_overrides_provider
+        and dependency_overrides_provider.dependency_overrides
+    ):
+        original_call = sub_dependant.call
+        call = getattr(
+            dependency_overrides_provider, "dependency_overrides", {}
+        ).get(original_call, original_call)
+        use_path: str = sub_dependant.path  # type: ignore
+        use_sub_dependant = get_dependant(
+            path=use_path,
+            call=call,
+            name=sub_dependant.name,
+            parent_oauth_scopes=_get_oauth_scopes(dependant=sub_dependant),
+            scope=sub_dependant.scope,
+        )
+
+    solved_result = await solve_dependencies(
+        request=request,
+        dependant=use_sub_dependant,
+        body=body,
+        background_tasks=background_tasks,
+        response=response,
+        dependency_overrides_provider=dependency_overrides_provider,
+        dependency_cache=dependency_cache,
+        async_exit_stack=async_exit_stack,
+        embed_body_fields=embed_body_fields,
+        _uses_scopes_cache=_uses_scopes_cache,
+    )
+    if solved_result.errors:
+        return None, solved_result
+    sub_dependant_cache_key = _get_cache_key(
+        dependant=sub_dependant,
+        uses_scopes_cache=_uses_scopes_cache,
+    )
+    if sub_dependant.use_cache and sub_dependant_cache_key in dependency_cache:
+        solved = dependency_cache[sub_dependant_cache_key]
+    elif _is_gen_callable(use_sub_dependant.call) or _is_async_gen_callable(
+        use_sub_dependant.call
+    ):
+        request_astack = request.scope.get("fastapi_inner_astack")
+        assert isinstance(request_astack, AsyncExitStack), (
+            "fastapi_inner_astack not found in request scope"
+        )
+        function_astack = request.scope.get("fastapi_function_astack")
+        assert isinstance(function_astack, AsyncExitStack), (
+            "fastapi_function_astack not found in request scope"
+        )
+        use_astack = request_astack
+        if sub_dependant.scope == "function":
+            use_astack = function_astack
+        solved = await _solve_generator(
+            dependant=use_sub_dependant,
+            stack=use_astack,
+            sub_values=solved_result.values,
+        )
+    elif _is_coroutine_callable(use_sub_dependant.call):
+        solved = await call(**solved_result.values)
+    else:
+        solved = await run_in_threadpool(call, **solved_result.values)
+    if sub_dependant_cache_key not in dependency_cache:
+        dependency_cache[sub_dependant_cache_key] = solved
+    return solved, solved_result
+
+
+async def _solve_security_group(
+    *,
+    request: Request | WebSocket,
+    dependant: Dependant,
+    body: dict[str, Any] | FormData | bytes | None,
+    background_tasks: StarletteBackgroundTasks | None,
+    response: Response,
+    dependency_overrides_provider: Any | None,
+    dependency_cache: dict[DependencyCacheKey, Any],
+    async_exit_stack: AsyncExitStack,
+    embed_body_fields: bool,
+    _uses_scopes_cache: _UsesScopesCache,
+) -> tuple[SecurityResult, StarletteBackgroundTasks | None]:
+    group_info = dependant.security_group
+    assert group_info is not None
+    for group_index, group in enumerate(group_info.groups):
+        pre_existing_cache_keys = set(dependency_cache)
+        pre_group_background_tasks = background_tasks
+        pre_group_tasks_count = (
+            len(background_tasks.tasks) if background_tasks is not None else 0
+        )
+        current_background_tasks = background_tasks
+        member_values: list[Any] = []
+        group_failed = False
+        for member_dependant in group:
+            try:
+                solved, solved_result = await _call_sub_dependant(
+                    sub_dependant=member_dependant,
+                    request=request,
+                    body=body,
+                    background_tasks=current_background_tasks,
+                    response=response,
+                    dependency_overrides_provider=dependency_overrides_provider,
+                    dependency_cache=dependency_cache,
+                    async_exit_stack=async_exit_stack,
+                    embed_body_fields=embed_body_fields,
+                    _uses_scopes_cache=_uses_scopes_cache,
+                )
+            except (StarletteHTTPException, StarletteWebSocketException):
+                group_failed = True
+                break
+            current_background_tasks = solved_result.background_tasks
+            if solved_result.errors:
+                group_failed = True
+                break
+            member_values.append(solved)
+        if not group_failed:
+            return (
+                SecurityResult(group_index=group_index, values=tuple(member_values)),
+                current_background_tasks,
+            )
+        # Roll back everything produced by the failed group, so that
+        # credentials and other temporary values from a failed group cannot
+        # leak into the next group or into the endpoint.
+        for cache_key in list(dependency_cache):
+            if cache_key not in pre_existing_cache_keys:
+                del dependency_cache[cache_key]
+        if (
+            pre_group_background_tasks is not None
+            and current_background_tasks is pre_group_background_tasks
+        ):
+            del pre_group_background_tasks.tasks[pre_group_tasks_count:]
+    headers = None
+    if group_info.authenticate_header:
+        headers = {"WWW-Authenticate": group_info.authenticate_header}
+    # Don't include any detail from the exceptions raised by the failed
+    # attempts, to not leak internal information.
+    raise HTTPException(
+        status_code=group_info.status_code,
+        detail="Not authenticated",
+        headers=headers,
     )
 
 

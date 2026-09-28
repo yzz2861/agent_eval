@@ -49,6 +49,16 @@ class Dependant:
     use_cache: bool = True
     path: str | None = None
     scope: Literal["function", "request"] | None = None
+    security_group: "SecurityGroupInfo | None" = None
+
+
+@dataclass(slots=True)
+class SecurityGroupInfo:
+    # Each inner list is a group of dependants that must all succeed (AND),
+    # groups are tried in order until one succeeds (OR).
+    groups: list[list[Dependant]]
+    status_code: int = 401
+    authenticate_header: str | None = None
 
 
 _UsesScopesCache = dict[int, tuple[Dependant, bool]]

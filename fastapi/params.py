@@ -752,3 +752,25 @@ class Depends:
 @dataclass(frozen=True)
 class Security(Depends):
     scopes: Sequence[str] | None = None
+    any_of: Sequence["AllOf | Security | Callable[..., Any]"] | None = None
+    status_code: int = 401
+    authenticate_header: str | None = None
+
+
+class AllOf:
+    """
+    A group of security requirements that must all succeed (logical AND), to be
+    used inside Security(any_of=[...]).
+
+    Each requirement can be a Security(...) declaration (to attach OAuth2
+    scopes or cache settings to that branch) or a bare "dependable" callable.
+    """
+
+    def __init__(self, *requirements: "Security | Callable[..., Any]") -> None:
+        if not requirements:
+            raise ValueError("AllOf requires at least one security requirement")
+        self.requirements = tuple(requirements)
+
+    def __repr__(self) -> str:
+        requirements = ", ".join(repr(req) for req in self.requirements)
+        return f"AllOf({requirements})"

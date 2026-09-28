@@ -2421,6 +2421,48 @@ def Security(  # noqa: N802
             """
         ),
     ] = True,
+    any_of: Annotated[
+        Sequence[params.AllOf | params.Security | Callable[..., Any]] | None,
+        Doc(
+            """
+            Declare alternative groups of security requirements (logical OR)
+            instead of a single dependency.
+
+            Each item is a group tried in declaration order: a group passes
+            only if all its requirements succeed (logical AND). A group can be
+            an AllOf(...) with several requirements, or a single Security(...)
+            or dependable callable for a single-requirement group.
+
+            If all groups fail, a single error is raised with the configured
+            status_code and authenticate_header, without exposing the errors
+            of the individual attempts.
+
+            The parameter receives a fastapi.security.SecurityResult with the
+            index of the group that passed and the values it produced.
+            """
+        ),
+    ] = None,
+    status_code: Annotated[
+        int,
+        Doc(
+            """
+            The HTTP status code to use when all the groups in any_of fail.
+
+            Only used with any_of.
+            """
+        ),
+    ] = 401,
+    authenticate_header: Annotated[
+        str | None,
+        Doc(
+            """
+            The value for the WWW-Authenticate header to send when all the
+            groups in any_of fail.
+
+            Only used with any_of.
+            """
+        ),
+    ] = None,
 ) -> Any:
     """
     Declare a FastAPI Security dependency.
@@ -2457,4 +2499,18 @@ def Security(  # noqa: N802
         return [{"item_id": "Foo", "owner": current_user.username}]
     ```
     """
-    return params.Security(dependency=dependency, scopes=scopes, use_cache=use_cache)
+    if dependency is not None and any_of is not None:
+        raise ValueError(
+            "Cannot use a single dependency and any_of in the same Security(), "
+            "use one or the other"
+        )
+    if any_of is not None and len(any_of) == 0:
+        raise ValueError("Security any_of requires at least one group")
+    return params.Security(
+        dependency=dependency,
+        scopes=scopes,
+        use_cache=use_cache,
+        any_of=tuple(any_of) if any_of is not None else None,
+        status_code=status_code,
+        authenticate_header=authenticate_header,
+    )
