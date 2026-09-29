@@ -286,6 +286,11 @@ class MongoDBDataStore(BaseExternalDataStore):
             if conflict_policy is ConflictPolicy.exception:
                 raise ConflictingIdError(schedule.id) from None
             elif conflict_policy is ConflictPolicy.replace:
+                # The replacement is a new, unprocessed schedule, so any
+                # acquisition claims on the old schedule must not carry over to it
+                document.pop("acquired_by", None)
+                document.pop("acquired_until", None)
+                document.pop("acquired_until_utcoffset", None)
                 async for attempt in self._retry():
                     with attempt:
                         await self._schedules.replace_one(
@@ -432,8 +437,25 @@ class MongoDBDataStore(BaseExternalDataStore):
         finished_schedule_ids: list[str] = []
         task_ids = {result.schedule_id: result.task_id for result in results}
 
+        # Find out which of the schedules are still acquired by this scheduler
+        # (they may have been removed or replaced, thus resetting the acquisition
+        # claim, since they were acquired)
+        async for attempt in self._retry():
+            with attempt:
+                async with self._schedules.find(
+                    {
+                        "_id": {"$in": list(task_ids)},
+                        "acquired_by": scheduler_id,
+                    },
+                    projection=["_id"],
+                ) as cursor:
+                    acquired_schedule_ids = {doc["_id"] async for doc in cursor}
+
         requests: list[UpdateOne | DeleteOne] = []
         for result in results:
+            if result.schedule_id not in acquired_schedule_ids:
+                continue
+
             filters = {"_id": result.schedule_id, "acquired_by": scheduler_id}
             try:
                 serialized_trigger = self.serializer.serialize(result.trigger)

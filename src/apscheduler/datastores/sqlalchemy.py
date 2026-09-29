@@ -570,6 +570,10 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                 raise ConflictingIdError(schedule.id) from None
             elif conflict_policy is ConflictPolicy.replace:
                 del values["id"]
+                # The replacement is a new, unprocessed schedule, so any
+                # acquisition claims on the old schedule must not carry over to it
+                values["acquired_by"] = None
+                values["acquired_until"] = None
                 update = (
                     self._t_schedules.update()
                     .where(self._t_schedules.c.id == schedule.id)
@@ -709,9 +713,27 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             with attempt:
                 async with self._begin_transaction() as conn:
                     update_events: list[ScheduleUpdated] = []
+                    # Find out which of the schedules are still acquired by this
+                    # scheduler (they may have been removed or replaced, thus
+                    # resetting the acquisition claim, since they were acquired)
+                    query = select(self._t_schedules.c.id).where(
+                        and_(
+                            self._t_schedules.c.id.in_(list(task_ids)),
+                            self._t_schedules.c.acquired_by == scheduler_id,
+                        )
+                    )
+                    acquired_schedule_ids = {
+                        row[0] for row in await self._execute(conn, query)
+                    }
                     finished_schedule_ids: list[str] = []
                     update_args: list[dict[str, Any]] = []
                     for result in results:
+                        if result.schedule_id not in acquired_schedule_ids:
+                            # The schedule was removed or replaced while the result
+                            # was being computed, so the result is stale and must
+                            # be discarded
+                            continue
+
                         try:
                             serialized_trigger = self.serializer.serialize(
                                 result.trigger
@@ -780,9 +802,8 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                                 **extra_values,
                             )
                         )
-                        # TODO: actually check which rows were updated?
                         await self._execute(conn, update, update_args)
-                        updated_ids = list(next_fire_times)
+                        updated_ids = [args["p_id"] for args in update_args]
 
                         for schedule_id in updated_ids:
                             event = ScheduleUpdated(
@@ -795,7 +816,10 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                     # Remove schedules that failed to serialize
                     if finished_schedule_ids:
                         delete = self._t_schedules.delete().where(
-                            self._t_schedules.c.id.in_(finished_schedule_ids)
+                            and_(
+                                self._t_schedules.c.id.in_(finished_schedule_ids),
+                                self._t_schedules.c.acquired_by == scheduler_id,
+                            )
                         )
                         await self._execute(conn, delete)
 

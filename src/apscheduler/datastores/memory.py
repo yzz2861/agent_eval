@@ -107,6 +107,10 @@ class MemoryDataStore(BaseDataStore):
             del self._schedules[index]
             self._schedules_by_task_id[old_schedule.task_id].remove(old_schedule)
 
+            # The replacement is a new, unprocessed schedule, so any acquisition
+            # claims on the old schedule must not carry over to it
+            schedule = attrs.evolve(schedule, acquired_by=None, acquired_until=None)
+
         self._schedules_by_id[schedule.id] = schedule
         self._schedules_by_task_id[schedule.task_id].add(schedule)
         insort_right(self._schedules, schedule)
@@ -178,7 +182,12 @@ class MemoryDataStore(BaseDataStore):
         # Send update events for schedules
         for result in results:
             # Remove the schedule
-            schedule = self._schedules_by_id[result.schedule_id]
+            schedule = self._schedules_by_id.get(result.schedule_id)
+            if schedule is None or schedule.acquired_by != scheduler_id:
+                # The schedule was removed or replaced while the result was being
+                # computed, so the result is stale and must be discarded
+                continue
+
             index = self._find_schedule_index(schedule)
             del self._schedules[index]
 

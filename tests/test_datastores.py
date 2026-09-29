@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import anyio
+import attrs
 import pytest
 from anyio import CancelScope
 from pytest_mock.plugin import MockerFixture
@@ -302,6 +303,208 @@ async def test_acquire_release_schedules(
     assert received_event.next_fire_time == datetime(2020, 9, 15, tzinfo=timezone.utc)
 
     assert not events
+
+
+async def test_release_schedules_after_replace(datastore: DataStore) -> None:
+    """
+    Test that a stale schedule result does not overwrite a schedule that was
+    replaced while it was being processed.
+
+    """
+    old_trigger = DateTrigger(datetime(2020, 9, 13, tzinfo=timezone.utc))
+    schedule = Schedule(
+        id="s1", task_id="task1", job_executor="async", trigger=old_trigger
+    )
+    schedule.next_fire_time = old_trigger.next()
+    await datastore.add_schedule(schedule, ConflictPolicy.exception)
+
+    acquired = await datastore.acquire_schedules("scheduler1", timedelta(seconds=30), 1)
+    assert len(acquired) == 1
+
+    # Replace the schedule with a new trigger while it is being processed
+    new_trigger = DateTrigger(datetime(2020, 9, 20, tzinfo=timezone.utc))
+    replacement = Schedule(
+        id="s1", task_id="task1", job_executor="async", trigger=new_trigger
+    )
+    replacement.next_fire_time = new_trigger.next()
+
+    event_types = {ScheduleAdded, ScheduleUpdated, ScheduleRemoved}
+    async with capture_events(datastore, 0, event_types) as events:
+        await datastore.add_schedule(replacement, ConflictPolicy.replace)
+
+        # The stale result must be discarded silently
+        result = ScheduleResult(
+            schedule_id="s1",
+            task_id="task1",
+            trigger=old_trigger,
+            last_fire_time=datetime(2020, 9, 13, tzinfo=timezone.utc),
+            next_fire_time=None,
+        )
+        await datastore.release_schedules("scheduler1", [result])
+        await anyio.sleep(0.1)
+
+        # Only the replacement should have produced an event
+        assert len(events) == 1
+        assert isinstance(events[0], ScheduleUpdated)
+        assert events[0].schedule_id == "s1"
+        assert events[0].task_id == "task1"
+        assert events[0].next_fire_time == datetime(2020, 9, 20, tzinfo=timezone.utc)
+
+    # The stored schedule must reflect the replacement, not the stale result
+    schedules = await datastore.get_schedules()
+    assert len(schedules) == 1
+    assert schedules[0].next_fire_time == datetime(2020, 9, 20, tzinfo=timezone.utc)
+    assert schedules[0].last_fire_time is None
+    assert schedules[0].acquired_by is None
+    assert schedules[0].acquired_until is None
+
+    # The replacement must be available for acquisition by any scheduler
+    acquired = await datastore.acquire_schedules("scheduler2", timedelta(seconds=30), 1)
+    assert len(acquired) == 1
+    assert acquired[0].id == "s1"
+
+
+async def test_release_schedules_after_pause(datastore: DataStore) -> None:
+    """
+    Test that a stale schedule result does not overwrite a schedule that was
+    paused while it was being processed.
+
+    """
+    trigger = DateTrigger(datetime(2020, 9, 13, tzinfo=timezone.utc))
+    schedule = Schedule(id="s1", task_id="task1", job_executor="async", trigger=trigger)
+    schedule.next_fire_time = trigger.next()
+    await datastore.add_schedule(schedule, ConflictPolicy.exception)
+
+    acquired = await datastore.acquire_schedules("scheduler1", timedelta(seconds=30), 1)
+    assert len(acquired) == 1
+
+    # Pause the schedule while it is being processed (this is what
+    # Scheduler.pause_schedule() does)
+    paused_schedule = attrs.evolve(acquired[0], paused=True)
+
+    event_types = {ScheduleAdded, ScheduleUpdated, ScheduleRemoved}
+    async with capture_events(datastore, 0, event_types) as events:
+        await datastore.add_schedule(paused_schedule, ConflictPolicy.replace)
+
+        # The stale result must be discarded silently
+        result = ScheduleResult(
+            schedule_id="s1",
+            task_id="task1",
+            trigger=trigger,
+            last_fire_time=datetime(2020, 9, 13, tzinfo=timezone.utc),
+            next_fire_time=None,
+        )
+        await datastore.release_schedules("scheduler1", [result])
+        await anyio.sleep(0.1)
+
+        # Only the pausing should have produced an event
+        assert len(events) == 1
+        assert isinstance(events[0], ScheduleUpdated)
+        assert events[0].schedule_id == "s1"
+        assert events[0].next_fire_time == datetime(2020, 9, 13, tzinfo=timezone.utc)
+
+    # The stored schedule must still be paused, with its fire times intact
+    schedules = await datastore.get_schedules()
+    assert len(schedules) == 1
+    assert schedules[0].paused
+    assert schedules[0].next_fire_time == datetime(2020, 9, 13, tzinfo=timezone.utc)
+    assert schedules[0].last_fire_time is None
+    assert schedules[0].acquired_by is None
+    assert schedules[0].acquired_until is None
+
+
+async def test_release_schedules_after_removal(datastore: DataStore) -> None:
+    """
+    Test that releasing a schedule that was removed while being processed does
+    not raise an exception or emit any events.
+
+    """
+    trigger = DateTrigger(datetime(2020, 9, 13, tzinfo=timezone.utc))
+    schedule = Schedule(id="s1", task_id="task1", job_executor="async", trigger=trigger)
+    schedule.next_fire_time = trigger.next()
+    await datastore.add_schedule(schedule, ConflictPolicy.exception)
+
+    acquired = await datastore.acquire_schedules("scheduler1", timedelta(seconds=30), 1)
+    assert len(acquired) == 1
+
+    event_types = {ScheduleAdded, ScheduleUpdated, ScheduleRemoved}
+    async with capture_events(datastore, 0, event_types) as events:
+        await datastore.remove_schedules(["s1"])
+
+        # The stale result must be discarded silently
+        result = ScheduleResult(
+            schedule_id="s1",
+            task_id="task1",
+            trigger=trigger,
+            last_fire_time=datetime(2020, 9, 13, tzinfo=timezone.utc),
+            next_fire_time=None,
+        )
+        await datastore.release_schedules("scheduler1", [result])
+        await anyio.sleep(0.1)
+
+        # Only the removal should have produced an event
+        assert len(events) == 1
+        assert isinstance(events[0], ScheduleRemoved)
+        assert events[0].schedule_id == "s1"
+
+    assert not await datastore.get_schedules()
+
+
+async def test_release_schedules_after_recreate(datastore: DataStore) -> None:
+    """
+    Test that a stale schedule result does not overwrite a schedule that was
+    removed and then recreated with the same ID while it was being processed.
+
+    """
+    old_trigger = DateTrigger(datetime(2020, 9, 13, tzinfo=timezone.utc))
+    schedule = Schedule(
+        id="s1", task_id="task1", job_executor="async", trigger=old_trigger
+    )
+    schedule.next_fire_time = old_trigger.next()
+    await datastore.add_schedule(schedule, ConflictPolicy.exception)
+
+    acquired = await datastore.acquire_schedules("scheduler1", timedelta(seconds=30), 1)
+    assert len(acquired) == 1
+
+    # Remove and recreate the schedule with the same ID while it is being
+    # processed
+    new_trigger = DateTrigger(datetime(2020, 9, 20, tzinfo=timezone.utc))
+    recreated = Schedule(
+        id="s1", task_id="task1", job_executor="async", trigger=new_trigger
+    )
+    recreated.next_fire_time = new_trigger.next()
+
+    event_types = {ScheduleAdded, ScheduleUpdated, ScheduleRemoved}
+    async with capture_events(datastore, 0, event_types) as events:
+        await datastore.remove_schedules(["s1"])
+        await datastore.add_schedule(recreated, ConflictPolicy.exception)
+
+        # The stale result must be discarded silently
+        result = ScheduleResult(
+            schedule_id="s1",
+            task_id="task1",
+            trigger=old_trigger,
+            last_fire_time=datetime(2020, 9, 13, tzinfo=timezone.utc),
+            next_fire_time=None,
+        )
+        await datastore.release_schedules("scheduler1", [result])
+        await anyio.sleep(0.1)
+
+        # Only the removal and re-addition should have produced events
+        assert len(events) == 2
+        assert isinstance(events[0], ScheduleRemoved)
+        assert events[0].schedule_id == "s1"
+        assert isinstance(events[1], ScheduleAdded)
+        assert events[1].schedule_id == "s1"
+        assert events[1].next_fire_time == datetime(2020, 9, 20, tzinfo=timezone.utc)
+
+    # The stored schedule must reflect the recreated one, not the stale result
+    schedules = await datastore.get_schedules()
+    assert len(schedules) == 1
+    assert schedules[0].next_fire_time == datetime(2020, 9, 20, tzinfo=timezone.utc)
+    assert schedules[0].last_fire_time is None
+    assert schedules[0].acquired_by is None
+    assert schedules[0].acquired_until is None
 
 
 async def test_release_schedule_two_identical_fire_times(datastore: DataStore) -> None:

@@ -1,0 +1,2 @@
+class AsyncCollection:
+    pass

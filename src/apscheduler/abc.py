@@ -233,6 +233,11 @@ class DataStore(metaclass=ABCMeta):
         """
         Add or update the given schedule in the data store.
 
+        When an existing schedule is replaced, it is considered a new, unprocessed
+        schedule, so any acquisition claims (``acquired_by`` and
+        ``acquired_until``) are reset. This ensures that stale processing results
+        from :meth:`release_schedules` cannot overwrite the replacement.
+
         :param schedule: schedule to be added
         :param conflict_policy: policy that determines what to do if there is an
             existing schedule with the same ID
@@ -276,6 +281,12 @@ class DataStore(metaclass=ABCMeta):
     ) -> None:
         """
         Release the claims on the given schedules and update them on the store.
+
+        Each result is only applied if the schedule still exists and is still
+        acquired by the given scheduler. Results for schedules that were removed,
+        replaced (thus resetting the acquisition claim) or otherwise released
+        since acquisition are silently discarded, and no events are emitted for
+        them.
 
         The data store is responsible for updating the following fields on stored
         schedules:
