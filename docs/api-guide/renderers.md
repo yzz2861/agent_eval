@@ -253,6 +253,63 @@ This renderer is used for rendering HTML multipart form data.  **It is not suita
 
 **.charset**: `utf-8`
 
+### StreamingCSVRenderer
+
+Renders the response as a streamed CSV download, suitable for exporting large
+result sets without buffering the entire output in memory.  The view returns a
+regular `Response`, and REST framework takes care of turning it into a
+`StreamingHttpResponse`, so authentication, permission, throttling, exception
+handling and content negotiation all behave as usual.
+
+The response data should be a mapping with a `'columns'` definition and a
+`'rows'` iterable, which will typically be a generator:
+
+    class UserExportView(APIView):
+        renderer_classes = [StreamingCSVRenderer]
+
+        def get(self, request):
+            return Response({
+                'columns': [
+                    'username',
+                    ('profile.email', 'Email address'),
+                    {'path': 'last_login', 'header': 'Last login'},
+                ],
+                'rows': self.iter_rows(),
+            })
+
+        def iter_rows(self):
+            for user in User.objects.iterator():
+                yield user
+
+Each column may be a dotted field path string, a `(path, header)` two-tuple,
+or a mapping with `'path'` and optional `'header'` keys.  Column order is
+fixed by the definition.  Dotted paths traverse nested mappings and object
+attributes, `None` values render as empty cells, and embedded newlines are
+quoted following the CSV specification.  Alternatively, `columns` may be set
+as a class attribute on a renderer subclass, in which case the response data
+itself is used as the rows iterable.
+
+Text cells that begin with a spreadsheet formula trigger character
+(`=`, `+`, `-`, `@`, tab or carriage return) are escaped to guard against
+CSV injection when the output is opened in a spreadsheet application.  The
+strategy is configurable on the renderer class:
+
+    class TSVSafeCSVRenderer(StreamingCSVRenderer):
+        formula_escape_strategy = 'prefix'  # The default. Prepend a quote.
+        formula_escape_prefix = "'"
+        # formula_escape_strategy = 'none'  # Disable escaping entirely.
+
+Invalid column definitions raise `ImproperlyConfigured` before any response
+headers are sent.  Exceptions raised by the rows iterable part way through
+the stream are propagated as-is, and closing the response early, for example
+when the client disconnects, closes the source rows iterator.
+
+**.media_type**: `text/csv`
+
+**.format**: `'csv'`
+
+**.charset**: `utf-8`
+
 ---
 
 ## Custom renderers

@@ -8,8 +8,10 @@ REST framework also provides an HTML renderer that renders the browsable API.
 """
 
 import contextlib
+import csv
 import datetime
 import sys
+from collections.abc import Mapping
 
 from django import forms
 from django.conf import settings
@@ -45,6 +47,9 @@ class BaseRenderer:
     format = None
     charset = 'utf-8'
     render_style = 'text'
+    # Renderers that return an iterator of content chunks from `.render()`,
+    # rather than a single string or bytestring, should set this to `True`.
+    streaming = False
 
     def render(self, data, accepted_media_type=None, renderer_context=None):
         raise NotImplementedError('Renderer class requires .render() to be implemented')
@@ -105,6 +110,175 @@ class JSONRenderer(BaseRenderer):
         # See: https://gist.github.com/damncabbage/623b879af56f850a6ddc
         ret = ret.replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
         return ret.encode()
+
+
+class _EchoBuffer:
+    """
+    A file-like object that returns anything written to it, allowing
+    `csv.writer` to be used without an intermediate buffer.
+    """
+
+    def write(self, value):
+        return value
+
+
+class StreamingCSVRenderer(BaseRenderer):
+    """
+    Renderer which streams CSV content, suitable for exporting large
+    result sets without buffering the entire output in memory.
+
+    Views should return a `Response` whose data is a mapping with:
+
+    * `'columns'`: A list of column definitions. Each column may be a
+      dotted field path string, a `(path, header)` two-tuple, or a mapping
+      with `'path'` and optional `'header'` keys.
+    * `'rows'`: An iterable, typically a generator, of rows. Rows may be
+      mappings or plain objects. Dotted paths traverse nested
+      mappings/attributes, `None` values render as empty cells, and
+      embedded newlines are quoted following the CSV specification.
+
+    Alternatively `columns` may be set as a class attribute, in which case
+    the response data itself is used as the rows iterable.
+
+    Text cells beginning with a spreadsheet formula trigger character are
+    escaped according to `formula_escape_strategy`, guarding against CSV
+    injection when the output is opened in a spreadsheet application.
+    """
+    media_type = 'text/csv'
+    format = 'csv'
+    charset = 'utf-8'
+    streaming = True
+
+    # May be set on subclasses instead of passing 'columns' in the data.
+    columns = None
+
+    # Escaping strategy for cells that look like spreadsheet formulas.
+    # Either 'prefix' (prepend `formula_escape_prefix`) or 'none'.
+    formula_escape_strategy = 'prefix'
+    formula_escape_prefix = "'"
+    formula_triggers = ('=', '+', '-', '@', '\t', '\r')
+
+    def get_columns(self, data):
+        if isinstance(data, Mapping) and 'rows' in data:
+            return data.get('columns', self.columns)
+        return self.columns
+
+    def get_rows(self, data):
+        if isinstance(data, Mapping) and 'rows' in data:
+            return data['rows']
+        return data
+
+    def normalize_columns(self, columns):
+        if columns is None:
+            raise ImproperlyConfigured(
+                "StreamingCSVRenderer requires a 'columns' definition, "
+                'either in the response data or as a class attribute.'
+            )
+        normalized = []
+        for column in columns:
+            if isinstance(column, str):
+                path, header = column, column
+            elif isinstance(column, Mapping):
+                if 'path' not in column:
+                    raise ImproperlyConfigured(
+                        "Column mappings must include a 'path' key."
+                    )
+                path = column['path']
+                header = column.get('header', path)
+            elif isinstance(column, (list, tuple)) and len(column) == 2:
+                path, header = column
+            else:
+                raise ImproperlyConfigured(
+                    'Columns must be dotted path strings, (path, header) '
+                    'tuples, or mappings with path/header keys. '
+                    'Got: %r' % (column,)
+                )
+            if not isinstance(path, str) or not path:
+                raise ImproperlyConfigured(
+                    'Column paths must be non-empty strings. Got: %r' % (path,)
+                )
+            if not isinstance(header, str):
+                raise ImproperlyConfigured(
+                    'Column headers must be strings. Got: %r' % (header,)
+                )
+            normalized.append((path.split('.'), header))
+        if not normalized:
+            raise ImproperlyConfigured(
+                'StreamingCSVRenderer requires at least one column.'
+            )
+        return normalized
+
+    def validate_formula_escape_strategy(self):
+        if self.formula_escape_strategy not in ('none', 'prefix'):
+            raise ImproperlyConfigured(
+                "formula_escape_strategy must be 'none' or 'prefix'. "
+                'Got: %r' % (self.formula_escape_strategy,)
+            )
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        """
+        Validate the column definitions eagerly, so that misconfiguration
+        raises before any response headers are sent, then return a
+        generator streaming the CSV output line by line.
+        """
+        renderer_context = renderer_context or {}
+        response = renderer_context.get('response')
+        if response is not None and response.exception:
+            # Error responses do not follow the columns/rows export format.
+            # Render the error data as a single JSON chunk instead.
+            return [json.dumps(data)]
+        request = renderer_context.get('request')
+        if request is not None and request.method == 'OPTIONS':
+            # Metadata responses do not follow the columns/rows export
+            # format either. Render them as a single JSON chunk.
+            return [json.dumps(data)]
+
+        self.validate_formula_escape_strategy()
+        columns = self.normalize_columns(self.get_columns(data))
+        rows = self.get_rows(data)
+        return self.stream_rows(columns, rows)
+
+    def stream_rows(self, columns, rows):
+        writer = csv.writer(_EchoBuffer())
+        try:
+            yield writer.writerow([header for path, header in columns])
+            for row in rows:
+                yield writer.writerow([
+                    self.format_value(self.resolve_path(row, path))
+                    for path, _header in columns
+                ])
+        finally:
+            # Ensure the source iterator is closed if the client stops
+            # reading before the stream has been exhausted.
+            close = getattr(rows, 'close', None)
+            if callable(close):
+                close()
+
+    def resolve_path(self, row, path):
+        value = row
+        for part in path:
+            if value is None:
+                return None
+            if isinstance(value, Mapping):
+                value = value.get(part)
+            else:
+                value = getattr(value, part, None)
+        return value
+
+    def format_value(self, value):
+        if value is None:
+            return ''
+        if isinstance(value, str):
+            return self.escape_formula(value)
+        return value
+
+    def escape_formula(self, value):
+        if (
+            self.formula_escape_strategy == 'prefix' and
+            value.startswith(self.formula_triggers)
+        ):
+            return self.formula_escape_prefix + value
+        return value
 
 
 class TemplateHTMLRenderer(BaseRenderer):

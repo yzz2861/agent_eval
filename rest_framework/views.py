@@ -4,7 +4,7 @@ Provides an APIView class that is the base of all views in REST framework.
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.db import connections, models
-from django.http import Http404
+from django.http import Http404, StreamingHttpResponse
 from django.http.response import HttpResponseBase
 from django.utils.cache import patch_vary_headers
 from django.utils.encoding import smart_str
@@ -448,7 +448,48 @@ class APIView(View):
         for key, value in self.headers.items():
             response[key] = value
 
+        if (
+            isinstance(response, Response) and
+            not response.exception and
+            request.method != 'OPTIONS' and
+            getattr(response.accepted_renderer, 'streaming', False)
+        ):
+            return self.finalize_streaming_response(response)
+
         return response
+
+    def finalize_streaming_response(self, response):
+        """
+        Render a `Response` into a `StreamingHttpResponse`, for renderers
+        that return an iterator of content chunks from `.render()`.
+        """
+        renderer = response.accepted_renderer
+        renderer_context = response.renderer_context
+        renderer_context['response'] = response
+
+        # Any exceptions raised here, such as renderer misconfiguration,
+        # occur before the streaming response exists, and therefore before
+        # any response headers have been sent to the client.
+        streaming_content = renderer.render(
+            response.data, response.accepted_media_type, renderer_context
+        )
+
+        content_type = response.content_type
+        if content_type is None:
+            content_type = renderer.media_type
+            if renderer.charset:
+                content_type = f'{renderer.media_type}; charset={renderer.charset}'
+
+        streaming_response = StreamingHttpResponse(
+            streaming_content=streaming_content,
+            status=response.status_code,
+            content_type=content_type,
+        )
+        for key, value in response.items():
+            if key.lower() == 'content-type':
+                continue
+            streaming_response[key] = value
+        return streaming_response
 
     def handle_exception(self, exc):
         """
