@@ -3819,6 +3819,104 @@ class TypeCoerce(WrapsColumnExpression[_T]):
             return self
 
 
+class JSONPathSet(ColumnElement[Any]):
+    """Represent a JSON "set the value at a path" expression.
+
+    This construct is produced by the
+    :meth:`_types.JSON.Comparator.json_set` method; see that method for
+    details on semantics and backend support.
+
+    .. versionadded:: 2.1
+
+    """
+
+    __visit_name__ = "json_path_set"
+
+    inherit_cache = True
+
+    _traverse_internals: _TraverseInternalsType = [
+        ("expr", InternalTraversal.dp_clauseelement),
+        ("path", InternalTraversal.dp_clauseelement),
+        ("value", InternalTraversal.dp_clauseelement),
+        ("type", InternalTraversal.dp_type),
+    ]
+
+    expr: ColumnElement[Any]
+    """The JSON expression that is modified."""
+
+    path: ColumnElement[Any]
+    """Bound parameter holding the JSON path, as a sequence of string
+    keys and integer array indexes."""
+
+    value: ColumnElement[Any]
+    """The value to set at the given path."""
+
+    type: TypeEngine[Any]
+
+    def __init__(
+        self,
+        expr: ColumnElement[Any],
+        path: ColumnElement[Any],
+        value: ColumnElement[Any],
+    ):
+        self.expr = expr
+        self.path = path
+        self.value = value
+        self.type = expr.type
+
+    @util.ro_non_memoized_property
+    def _from_objects(self) -> List[FromClause]:
+        froms = list(self.expr._from_objects)
+        froms.extend(
+            elem for elem in self.value._from_objects if elem not in froms
+        )
+        return froms
+
+
+class JSONPathDelete(ColumnElement[Any]):
+    """Represent a JSON "delete the value at a path" expression.
+
+    This construct is produced by the
+    :meth:`_types.JSON.Comparator.json_delete` method; see that method
+    for details on semantics and backend support.
+
+    .. versionadded:: 2.1
+
+    """
+
+    __visit_name__ = "json_path_delete"
+
+    inherit_cache = True
+
+    _traverse_internals: _TraverseInternalsType = [
+        ("expr", InternalTraversal.dp_clauseelement),
+        ("path", InternalTraversal.dp_clauseelement),
+        ("type", InternalTraversal.dp_type),
+    ]
+
+    expr: ColumnElement[Any]
+    """The JSON expression that is modified."""
+
+    path: ColumnElement[Any]
+    """Bound parameter holding the JSON path, as a sequence of string
+    keys and integer array indexes."""
+
+    type: TypeEngine[Any]
+
+    def __init__(
+        self,
+        expr: ColumnElement[Any],
+        path: ColumnElement[Any],
+    ):
+        self.expr = expr
+        self.path = path
+        self.type = expr.type
+
+    @util.ro_non_memoized_property
+    def _from_objects(self) -> List[FromClause]:
+        return self.expr._from_objects
+
+
 class Extract(ColumnElement[int]):
     """Represent a SQL EXTRACT clause, ``extract(field FROM expr)``."""
 

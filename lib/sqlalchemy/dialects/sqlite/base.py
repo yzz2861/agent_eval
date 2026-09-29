@@ -1640,6 +1640,37 @@ class SQLiteCompiler(compiler.SQLCompiler):
             self.process(binary.right, **kw),
         )
 
+    def _check_json_path_indexes(self, element):
+        path = getattr(element.path, "value", None)
+        if path and any(isinstance(elem, int) and elem < 0 for elem in path):
+            raise exc.CompileError(
+                "SQLite JSON paths do not support negative array indexes; "
+                "got path %r" % (tuple(path),)
+            )
+
+    def visit_json_path_set(self, element, **kw):
+        self._check_json_path_indexes(element)
+        value = element.value
+        if isinstance(value, elements.BindParameter):
+            # JSON() marks the bound, serialized JSON value with the JSON
+            # subtype so that JSON_SET stores it as JSON rather than as a
+            # plain string
+            value_sql = "JSON(%s)" % self.process(value, **kw)
+        else:
+            value_sql = self.process(value, **kw)
+        return "JSON_SET(%s, %s, %s)" % (
+            self.process(element.expr, **kw),
+            self.process(element.path, **kw),
+            value_sql,
+        )
+
+    def visit_json_path_delete(self, element, **kw):
+        self._check_json_path_indexes(element)
+        return "JSON_REMOVE(%s, %s)" % (
+            self.process(element.expr, **kw),
+            self.process(element.path, **kw),
+        )
+
     def visit_empty_set_op_expr(self, type_, expand_op, **kw):
         # slightly old SQLite versions don't seem to be able to handle
         # the empty set impl

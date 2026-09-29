@@ -310,6 +310,321 @@ class JSONTest(fixtures.TestBase):
             eq_(jd.mock_calls, [mock.call(json.dumps(data_element))])
 
 
+class JSONPathModifierCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    __dialect__ = "sqlite"
+
+    def setup_test(self):
+        self.test_table = Table(
+            "t", MetaData(), Column("data", sqltypes.JSON)
+        )
+        self.jsoncol = self.test_table.c.data
+
+    def test_json_set_select(self):
+        self.assert_compile(
+            select(self.jsoncol.json_set(("a", "b", 1), 5)),
+            "SELECT JSON_SET(t.data, ?, JSON(?)) AS anon_1 FROM t",
+        )
+
+    def test_json_delete_select(self):
+        self.assert_compile(
+            select(self.jsoncol.json_delete(("a", "b"))),
+            "SELECT JSON_REMOVE(t.data, ?) AS anon_1 FROM t",
+        )
+
+    def test_json_set_update(self):
+        self.assert_compile(
+            self.test_table.update().values(
+                data=self.jsoncol.json_set(("a",), {"x": 1})
+            ),
+            "UPDATE t SET data=JSON_SET(t.data, ?, JSON(?))",
+        )
+
+    def test_json_set_nested(self):
+        self.assert_compile(
+            select(
+                self.jsoncol.json_set(("a",), {"x": 1}).json_set(
+                    ("a", "x"), 2
+                )
+            ),
+            "SELECT JSON_SET(JSON_SET(t.data, ?, JSON(?)), ?, JSON(?)) "
+            "AS anon_1 FROM t",
+        )
+
+    def test_json_set_null_value(self):
+        from sqlalchemy import null
+
+        self.assert_compile(
+            select(self.jsoncol.json_set(("a",), null())),
+            "SELECT JSON_SET(t.data, ?, NULL) AS anon_1 FROM t",
+        )
+
+    def test_negative_index_not_supported(self):
+        assert_raises_message(
+            exc.CompileError,
+            "SQLite JSON paths do not support negative array indexes",
+            select(self.jsoncol.json_set(("a", -1), 5)).compile,
+            dialect=sqlite.dialect(),
+        )
+        assert_raises_message(
+            exc.CompileError,
+            "SQLite JSON paths do not support negative array indexes",
+            select(self.jsoncol.json_delete(("a", -1))).compile,
+            dialect=sqlite.dialect(),
+        )
+
+    def test_unsupported_dialect(self):
+        from sqlalchemy.dialects import mysql
+
+        assert_raises(
+            exc.UnsupportedCompilationError,
+            select(self.jsoncol.json_set(("a",), 5)).compile,
+            dialect=mysql.dialect(),
+        )
+        assert_raises(
+            exc.UnsupportedCompilationError,
+            select(self.jsoncol.json_delete(("a",))).compile,
+            dialect=mysql.dialect(),
+        )
+
+    def test_invalid_path(self):
+        for path in ((), "ab", ("a", 1.5), ("a", True), ("a", None)):
+            assert_raises(exc.ArgumentError, self.jsoncol.json_set, path, 5)
+            assert_raises(exc.ArgumentError, self.jsoncol.json_delete, path)
+
+    def test_cache_key(self):
+        eq_(
+            self.jsoncol.json_set(("a", "b"), 1)._generate_cache_key(),
+            self.jsoncol.json_set(("a", "b"), 1)._generate_cache_key(),
+        )
+        # paths and values are bound parameters and do not take part in
+        # the cache key, consistent with other literal binds
+        eq_(
+            self.jsoncol.json_set(("a", "b"), 1)._generate_cache_key(),
+            self.jsoncol.json_set(("c", "d"), 2)._generate_cache_key(),
+        )
+        assert (
+            self.jsoncol.json_set(("a",), 1)._generate_cache_key()
+            != self.jsoncol.json_delete(("a",))._generate_cache_key()
+        )
+        assert (
+            self.jsoncol.json_set(("a",), 1)._generate_cache_key()
+            != self.jsoncol.json_set(("a",), 1)
+            .json_set(("b",), 2)
+            ._generate_cache_key()
+        )
+
+
+class JSONPathModifierTest(fixtures.TestBase):
+    __requires__ = ("json_type",)
+    __only_on__ = "sqlite"
+    __backend__ = True
+
+    @testing.fixture
+    def json_table(self, connection, metadata):
+        t = Table(
+            "json_test",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("data", sqltypes.JSON),
+        )
+        metadata.create_all(connection)
+        connection.execute(
+            t.insert(),
+            [
+                {"id": 1, "data": {"a": {"b": [1, 2, 3]}, "s": "x"}},
+                {"id": 2, "data": None},
+            ],
+        )
+        return t
+
+    def _data(self, connection, t, id_=1):
+        return connection.scalar(select(t.c.data).where(t.c.id == id_))
+
+    def test_set_nested_object_key(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(data=json_table.c.data.json_set(("a", "c"), 9))
+        )
+        eq_(
+            self._data(connection, json_table),
+            {"a": {"b": [1, 2, 3], "c": 9}, "s": "x"},
+        )
+
+    def test_set_array_index(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(data=json_table.c.data.json_set(("a", "b", 1), 9))
+        )
+        eq_(
+            self._data(connection, json_table),
+            {"a": {"b": [1, 9, 3]}, "s": "x"},
+        )
+
+    def test_set_creates_missing_intermediate_levels(
+        self, connection, json_table
+    ):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(
+                data=json_table.c.data.json_set(("new", "deep", 0), True)
+            )
+        )
+        eq_(
+            self._data(connection, json_table),
+            {
+                "a": {"b": [1, 2, 3]},
+                "s": "x",
+                "new": {"deep": [True]},
+            },
+        )
+
+    def test_set_json_null_value(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(data=json_table.c.data.json_set(("a", "b", 0), None))
+        )
+        eq_(
+            self._data(connection, json_table),
+            {"a": {"b": [None, 2, 3]}, "s": "x"},
+        )
+
+    def test_set_json_null_constant(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(
+                data=json_table.c.data.json_set(
+                    ("a", "b", 0), sqltypes.JSON.NULL
+                )
+            )
+        )
+        eq_(
+            self._data(connection, json_table),
+            {"a": {"b": [None, 2, 3]}, "s": "x"},
+        )
+
+    def test_set_sql_null_expression(self, connection, json_table):
+        from sqlalchemy import null
+
+        # a SQL NULL expression as the value stores JSON null at the path
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(data=json_table.c.data.json_set(("s",), null()))
+        )
+        eq_(
+            self._data(connection, json_table),
+            {"a": {"b": [1, 2, 3]}, "s": None},
+        )
+
+    def test_sql_null_document_stays_null(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 2)
+            .values(data=json_table.c.data.json_set(("a",), 1))
+        )
+        is_(self._data(connection, json_table, 2), None)
+
+    def test_delete_object_key(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(data=json_table.c.data.json_delete(("s",)))
+        )
+        eq_(self._data(connection, json_table), {"a": {"b": [1, 2, 3]}})
+
+    def test_delete_array_element(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(data=json_table.c.data.json_delete(("a", "b", 2)))
+        )
+        eq_(
+            self._data(connection, json_table),
+            {"a": {"b": [1, 2]}, "s": "x"},
+        )
+
+    def test_delete_missing_path_is_noop(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(data=json_table.c.data.json_delete(("a", "nope", 5)))
+        )
+        eq_(
+            self._data(connection, json_table),
+            {"a": {"b": [1, 2, 3]}, "s": "x"},
+        )
+
+    def test_nested_modification_order(self, connection, json_table):
+        # innermost modification applies first; the outermost one wins
+        # when the same path is modified twice
+        expr = json_table.c.data.json_set(("a", "b", 0), 1).json_set(
+            ("a", "b", 0), 2
+        )
+        eq_(
+            connection.scalar(select(expr).where(json_table.c.id == 1)),
+            {"a": {"b": [2, 2, 3]}, "s": "x"},
+        )
+
+    def test_set_after_delete(self, connection, json_table):
+        expr = json_table.c.data.json_delete(("a", "b")).json_set(
+            ("a", "b"), {"fresh": True}
+        )
+        eq_(
+            connection.scalar(select(expr).where(json_table.c.id == 1)),
+            {"a": {"b": {"fresh": True}}, "s": "x"},
+        )
+
+    def test_scalar_value_types(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(
+                data=json_table.c.data.json_set(("s",), "plain")
+                .json_set(("f",), 2.5)
+                .json_set(("flag",), False)
+            )
+        )
+        eq_(
+            self._data(connection, json_table),
+            {
+                "a": {"b": [1, 2, 3]},
+                "s": "plain",
+                "f": 2.5,
+                "flag": False,
+            },
+        )
+
+    def test_value_as_sql_expression(self, connection, json_table):
+        connection.execute(
+            json_table.update()
+            .where(json_table.c.id == 1)
+            .values(
+                data=json_table.c.data.json_set(
+                    ("s",), func.upper(json_table.c.data["s"].as_string())
+                )
+            )
+        )
+        eq_(
+            self._data(connection, json_table),
+            {"a": {"b": [1, 2, 3]}, "s": "X"},
+        )
+
+    def test_expression_in_select(self, connection, json_table):
+        eq_(
+            connection.scalar(
+                select(json_table.c.data.json_set(("z",), [1, 2])).where(
+                    json_table.c.id == 1
+                )
+            ),
+            {"a": {"b": [1, 2, 3]}, "s": "x", "z": [1, 2]},
+        )
+
+
 class JSONBTest(fixtures.TestBase, AssertsCompiledSQL):
     __requires__ = ("sqlite_jsonb",)
     __only_on__ = "sqlite"

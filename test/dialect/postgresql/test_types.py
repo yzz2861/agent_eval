@@ -7005,6 +7005,101 @@ class JSONBTest(JSONTest):
         )
 
 
+class JSONPathModifierCompileTest(AssertsCompiledSQL, fixtures.TestBase):
+    __dialect__ = "postgresql"
+
+    def setup_test(self):
+        metadata = MetaData()
+        self.test_table = Table(
+            "test_table",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("test_column", JSON),
+        )
+        self.test_table_b = Table(
+            "test_table_b",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("test_column", JSONB),
+        )
+        self.jsoncol = self.test_table.c.test_column
+        self.jsonbcol = self.test_table_b.c.test_column
+
+    def test_json_set_json_type(self):
+        self.assert_compile(
+            select(self.jsoncol.json_set(("a", "b", 1), 5)),
+            "SELECT CAST(jsonb_set(CAST(test_table.test_column AS JSONB), "
+            "CAST(%(test_column_1)s AS TEXT[]), "
+            "CAST(%(test_column_2)s::JSON AS JSONB), true) AS JSON) "
+            "AS anon_1 FROM test_table",
+        )
+
+    def test_json_set_jsonb_type(self):
+        self.assert_compile(
+            select(self.jsonbcol.json_set(("a", "b", 1), 5)),
+            "SELECT jsonb_set(test_table_b.test_column, "
+            "CAST(%(test_column_1)s AS TEXT[]), "
+            "CAST(%(test_column_2)s::JSONB AS JSONB), true) "
+            "AS anon_1 FROM test_table_b",
+        )
+
+    def test_json_delete_json_type(self):
+        self.assert_compile(
+            select(self.jsoncol.json_delete(("a", "b"))),
+            "SELECT CAST((CAST(test_table.test_column AS JSONB) "
+            "#- CAST(%(test_column_1)s AS TEXT[])) AS JSON) AS anon_1 "
+            "FROM test_table",
+        )
+
+    def test_json_delete_jsonb_type(self):
+        self.assert_compile(
+            select(self.jsonbcol.json_delete(("a", "b"))),
+            "SELECT (test_table_b.test_column "
+            "#- CAST(%(test_column_1)s AS TEXT[])) AS anon_1 "
+            "FROM test_table_b",
+        )
+
+    def test_json_set_update(self):
+        self.assert_compile(
+            self.test_table_b.update().values(
+                test_column=self.jsonbcol.json_set(("a",), {"x": 1})
+            ),
+            "UPDATE test_table_b SET test_column="
+            "jsonb_set(test_table_b.test_column, "
+            "CAST(%(test_column_1)s AS TEXT[]), "
+            "CAST(%(test_column_2)s::JSONB AS JSONB), true)",
+        )
+
+    def test_json_set_nested(self):
+        self.assert_compile(
+            select(self.jsonbcol.json_set(("a",), 1).json_delete(("b",))),
+            "SELECT (jsonb_set(test_table_b.test_column, "
+            "CAST(%(test_column_1)s AS TEXT[]), "
+            "CAST(%(test_column_2)s::JSONB AS JSONB), true) "
+            "#- CAST(%(param_1)s AS TEXT[])) AS anon_1 "
+            "FROM test_table_b",
+        )
+
+    def test_json_set_null_value(self):
+        self.assert_compile(
+            select(self.jsonbcol.json_set(("a",), null())),
+            "SELECT jsonb_set(test_table_b.test_column, "
+            "CAST(%(test_column_1)s AS TEXT[]), "
+            "CAST(NULL AS JSONB), true) AS anon_1 FROM test_table_b",
+        )
+
+    def test_json_set_negative_index_ok(self):
+        # negative array indexes count from the end of existing arrays
+        # on PostgreSQL
+        self.assert_compile(
+            select(self.jsonbcol.json_set(("a", -1), 5)),
+            "SELECT jsonb_set(test_table_b.test_column, "
+            "CAST(%(test_column_1)s AS TEXT[]), "
+            "CAST(%(test_column_2)s::JSONB AS JSONB), true) "
+            "AS anon_1 FROM test_table_b",
+        )
+
+
 class JSONBRoundTripTest(JSONRoundTripTest):
     __requires__ = ("postgresql_jsonb",)
 

@@ -379,6 +379,14 @@ class CoreFixtures:
             column("y", JSON)["key1"].as_string(),
         ),
         lambda: (
+            column("x", JSON).json_set(("a", "b", 1), 5),
+            column("x", JSON).json_set(("a", "b", 1), 6),
+            column("x", JSON).json_set(("a", "b", 2), 5),
+            column("x", JSON).json_delete(("a", "b")),
+            column("x", JSON).json_delete(("a", "c")),
+            column("y", JSON).json_set(("a",), {"k": 1}),
+        ),
+        lambda: (
             bindparam("x"),
             bindparam("x", literal_execute=True),
             bindparam("y"),

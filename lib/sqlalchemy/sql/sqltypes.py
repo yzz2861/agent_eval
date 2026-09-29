@@ -2908,6 +2908,162 @@ class JSON(Indexable, TypeEngine[_T_JSON]):
             """
             return self.expr
 
+        def json_set(
+            self, path: Sequence[Union[str, int]], value: Any
+        ) -> ColumnElement[Any]:
+            """Return a JSON expression that sets the value at the given
+            path, producing a new JSON document.
+
+            The expression may be used as an UPDATE value, inside a SELECT,
+            or nested within another JSON modification expression; the
+            result carries the same :class:`_types.JSON` type as the
+            originating expression, so further JSON operations may be
+            chained onto it::
+
+                stmt = data_table.update().values(
+                    data=data_table.c.data.json_set(("a", "b", 1), 5)
+                )
+
+                # nested; the innermost modification applies first, so the
+                # outermost one wins when the same path is set twice
+                stmt = select(
+                    data_table.c.data.json_set(("a",), {"x": 1}).json_set(
+                        ("a", "x"), 2
+                    )
+                )
+
+            :param path: a non-empty sequence of string object keys and
+             integer array indexes locating the value to set, e.g.
+             ``("a", "b", 1)``.  The path and all values
+             are always rendered as bound parameters; no user input is
+             interpolated into SQL text.
+
+            :param value: the value to set.  Python values are bound using
+             the :class:`_types.JSON` type of the expression, so
+             dictionaries, lists, scalars and ``None``
+             are stored as their JSON equivalents.  A SQL expression (e.g.
+             a column, a :func:`_expression.func` call, or
+             :func:`_expression.null`) may also be passed and is
+             rendered directly.
+
+            **NULL semantics.**  Setting a path to ``None``,
+            :attr:`_types.JSON.NULL`, or
+            :func:`_expression.null` stores JSON
+            ``null`` at that path on all backends; a SQL
+            NULL can only ever be the value of the whole document (i.e.
+            the base expression itself evaluates to SQL NULL, in which
+            case the result is SQL NULL).  To remove a key or array
+            element entirely, use
+            :meth:`_types.JSON.Comparator.json_delete`.
+
+            **Backend semantics.**  Given a document
+            ``{"a": {"b": [1, 2, 3]}}``:
+
+            * SQLite (requires the JSON1 extension) renders
+              ``JSON_SET(data, '$."a"."b"[1]', json(?))``.
+              Missing intermediate objects and arrays are created.
+              Negative array indexes are not supported by SQLite and
+              raise :class:`_exc.CompileError`.
+
+            * PostgreSQL renders
+              ``jsonb_set(data, CAST(? AS TEXT[]), CAST(? AS
+              JSONB), true)``, casting to and from
+              ``JSONB`` when the column type is
+              :class:`_types.JSON` rather than
+              :class:`_postgresql.JSONB`.  Missing intermediate
+              levels are created (``create_missing`` is
+              true); negative array indexes count from the end of
+              existing arrays.
+
+            Other backends raise
+            :class:`_exc.UnsupportedCompilationError` when the
+            expression is compiled.
+
+            .. versionadded:: 2.1
+
+            """
+            return elements.JSONPathSet(
+                self.expr,
+                self._json_path_bind(path),
+                self._json_value_bind(value),
+            )
+
+        def json_delete(
+            self, path: Sequence[Union[str, int]]
+        ) -> ColumnElement[Any]:
+            """Return a JSON expression that deletes the key or array
+            element at the given path, producing a new JSON document.
+
+            The expression may be used as an UPDATE value, inside a SELECT,
+            or nested within other JSON modification expressions::
+
+                stmt = data_table.update().values(
+                    data=data_table.c.data.json_delete(("a", "b", 1))
+                )
+
+            :param path: a non-empty sequence of string object keys and
+             integer array indexes locating the element to delete, e.g.
+             ``("a", "b", 1)``.  The path is always
+             rendered as a bound parameter; no user input is interpolated
+             into SQL text.
+
+            Deleting a path that does not exist leaves the document
+            unchanged on all backends.  This is distinct from setting a
+            path to JSON ``null`` (see
+            :meth:`_types.JSON.Comparator.json_set`): given a
+            document ``{"a": {"b": [1, 2, 3]}}``,
+            ``json_delete(("a", "b", 2))`` produces
+            ``{"a": {"b": [1, 2]}}``, whereas
+            ``json_set(("a", "b", 2), None)`` produces
+            ``{"a": {"b": [1, 2, null]}}``.
+
+            **Backend semantics.**  SQLite renders
+            ``JSON_REMOVE(data, '$."a"."b"[2]')`` and
+            does not support negative array indexes, which raise
+            :class:`_exc.CompileError`.  PostgreSQL renders the
+            ``#-`` operator, casting to and from
+            ``JSONB`` when the column type is
+            :class:`_types.JSON` rather than
+            :class:`_postgresql.JSONB`.  Other backends raise
+            :class:`_exc.UnsupportedCompilationError` when the
+            expression is compiled.
+
+            .. versionadded:: 2.1
+
+            """
+            return elements.JSONPathDelete(
+                self.expr, self._json_path_bind(path)
+            )
+
+        def _json_path_bind(self, path):
+            if isinstance(path, str) or not isinstance(
+                path, collections_abc.Sequence
+            ):
+                raise exc.ArgumentError(
+                    "JSON path must be a sequence of string keys and "
+                    "integer array indexes, e.g. ('a', 'b', 1); got %r"
+                    % (path,)
+                )
+            path = tuple(path)
+            if not path:
+                raise exc.ArgumentError(
+                    "JSON path must contain at least one element"
+                )
+            for elem in path:
+                if isinstance(elem, bool) or not isinstance(elem, (str, int)):
+                    raise exc.ArgumentError(
+                        "JSON path elements must be strings (object keys) "
+                        "or integers (array indexes); got %r" % (elem,)
+                    )
+            return self.expr._bind_param(
+                None, path, type_=JSON.JSONPathType()
+            )
+
+        def _json_value_bind(self, value):
+            if isinstance(value, elements.ColumnElement):
+                return value
+            return self.expr._bind_param(None, value, type_=self.type)
+
         def _binary_w_type(self, typ, method_name):
             if not isinstance(
                 self.expr, elements.BinaryExpression

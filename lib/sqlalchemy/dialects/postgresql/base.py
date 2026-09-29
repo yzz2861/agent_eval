@@ -2285,6 +2285,34 @@ class PGCompiler(compiler.SQLCompiler):
             binary, " #> " if not _cast_applied else " #>> ", **kw
         )
 
+    def visit_json_path_set(self, element, **kw):
+        kw["eager_grouping"] = True
+        expr = self.process(element.expr, **kw)
+        path = "CAST(%s AS TEXT[])" % self.process(element.path, **kw)
+        value = "CAST(%s AS JSONB)" % self.process(element.value, **kw)
+        if isinstance(element.type, _json.JSONB):
+            return "jsonb_set(%s, %s, %s, true)" % (expr, path, value)
+        else:
+            return "CAST(jsonb_set(CAST(%s AS JSONB), %s, %s, true) AS %s)" % (
+                expr,
+                path,
+                value,
+                self.dialect.type_compiler_instance.process(element.type),
+            )
+
+    def visit_json_path_delete(self, element, **kw):
+        kw["eager_grouping"] = True
+        expr = self.process(element.expr, **kw)
+        path = "CAST(%s AS TEXT[])" % self.process(element.path, **kw)
+        if isinstance(element.type, _json.JSONB):
+            return "(%s #- %s)" % (expr, path)
+        else:
+            return "CAST((CAST(%s AS JSONB) #- %s) AS %s)" % (
+                expr,
+                path,
+                self.dialect.type_compiler_instance.process(element.type),
+            )
+
     def visit_hstore_getitem_op_binary(self, binary, operator, **kw):
         kw["eager_grouping"] = True
 
