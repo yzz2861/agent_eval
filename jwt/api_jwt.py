@@ -33,7 +33,7 @@ if TYPE_CHECKING or bool(os.getenv("SPHINX_BUILD", "")):
 
     from .algorithms import AllowedPrivateKeys, AllowedPublicKeys
     from .api_jwk import PyJWK
-    from .types import FullOptions, Options, SigOptions
+    from .types import CritValidator, FullOptions, Options, SigOptions
 
     AllowedPrivateKeyTypes: TypeAlias = Union[AllowedPrivateKeys, PyJWK, str, bytes]
     AllowedPublicKeyTypes: TypeAlias = Union[AllowedPublicKeys, PyJWK, str, bytes]
@@ -89,6 +89,29 @@ class PyJWT:
             merged_options["verify_jti"] = merged_options.get("verify_jti", False)
         return {**self.options, **merged_options}
 
+    def register_crit_extension(self, name: str, validator: CritValidator) -> None:
+        """
+        Registers a critical ("crit") header extension that this instance
+        understands, together with its semantic validation callback. See
+        jwt.api_jws.PyJWS.register_crit_extension.
+        """
+        self._jws.register_crit_extension(name, validator)
+
+    def unregister_crit_extension(self, name: str) -> None:
+        """
+        Unregisters a critical ("crit") header extension from this instance.
+        """
+        self._jws.unregister_crit_extension(name)
+
+    def get_crit_extensions(self) -> list[str]:
+        """
+        Returns the names of the critical ("crit") header extensions this
+        instance understands, including the built-in ones.
+
+        :rtype: list[str]
+        """
+        return self._jws.get_crit_extensions()
+
     def encode(
         self,
         payload: dict[str, Any],
@@ -97,6 +120,7 @@ class PyJWT:
         headers: dict[str, Any] | None = None,
         json_encoder: type[json.JSONEncoder] | None = None,
         sort_headers: bool = True,
+        validate_crit: bool = False,
     ) -> str:
         """Encode the ``payload`` as JSON Web Token.
 
@@ -153,6 +177,7 @@ class PyJWT:
             headers,
             json_encoder,
             sort_headers=sort_headers,
+            validate_crit=validate_crit,
         )
 
     def _encode_payload(

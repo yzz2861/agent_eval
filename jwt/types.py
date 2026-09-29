@@ -4,6 +4,12 @@ JWKDict = dict[str, Any]
 
 HashlibHash = Callable[..., Any]
 
+# Semantic validator for a "crit" (critical) header extension. Receives the
+# extension's header value and the complete protected header dict, and must
+# raise (typically ``jwt.exceptions.InvalidTokenError``) when the value is
+# not acceptable. Only invoked after the signature has been verified.
+CritValidator = Callable[[Any, dict[str, Any]], None]
+
 
 class SigOptions(TypedDict, total=False):
     """Options for PyJWS class (TypedDict). Note that this is a smaller set of options than

@@ -25,12 +25,24 @@ from .warnings import InsecureKeyLengthWarning, RemovedInPyjwt3Warning
 
 if TYPE_CHECKING:
     from .algorithms import AllowedPrivateKeys, AllowedPublicKeys
-    from .types import SigOptions
+    from .types import CritValidator, SigOptions
 
 _ALGORITHM_UNSET = object()
 _BASE64URL_ALPHABET = (
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 )
+
+
+def _validate_b64_crit(value: Any, header: dict[str, Any]) -> None:
+    # RFC 7797 §4: the "b64" header parameter value must be a boolean.
+    if not isinstance(value, bool):
+        raise InvalidTokenError("The 'b64' header parameter must be a boolean")
+
+
+# Critical header extensions that PyJWT understands out of the box. These
+# are always present in every instance registry and cannot be overridden
+# or unregistered.
+_BUILTIN_CRIT_EXTENSIONS: dict[str, CritValidator] = {"b64": _validate_b64_crit}
 
 
 class PyJWS:
@@ -54,6 +66,11 @@ class PyJWS:
         self.options: SigOptions = self._get_default_options()
         if options is not None:
             self.options = {**self.options, **options}
+
+        # Per-instance registry of understood "crit" extensions. Starts
+        # from the built-ins; applications declare additional extensions
+        # via register_crit_extension(). Never a process-global set.
+        self._crit_extensions: dict[str, CritValidator] = dict(_BUILTIN_CRIT_EXTENSIONS)
 
     @staticmethod
     def _get_default_options() -> SigOptions:
@@ -120,6 +137,64 @@ class PyJWS:
                 ) from e
             raise NotImplementedError("Algorithm not supported") from e
 
+    def register_crit_extension(self, name: str, validator: CritValidator) -> None:
+        """
+        Registers a critical ("crit") header extension that this instance
+        understands, together with its semantic validation callback.
+
+        The validator is called with the extension's header value and the
+        complete protected header dict, and must raise (typically
+        jwt.exceptions.InvalidTokenError) when the value is not acceptable.
+        Validators only run after the signature has been verified, so they
+        are never invoked for unauthenticated tokens.
+
+        Registration is per-instance and does not affect other decoders.
+        Built-in extensions (currently only "b64") cannot be overridden.
+
+        :param str name: the extension name as it appears in "crit"
+        :param validator: the semantic validation callback
+        :raises TypeError: if 'name' is not a string or 'validator' is not
+            callable
+        :raises ValueError: if 'name' is empty or already registered
+        """
+        if not isinstance(name, str):
+            raise TypeError("Critical extension name must be a string")
+        if not name:
+            raise ValueError("Critical extension name must not be empty")
+        if name in self._crit_extensions:
+            raise ValueError(f"Critical extension {name!r} is already registered")
+        if not callable(validator):
+            raise TypeError("Critical extension validator must be callable")
+
+        self._crit_extensions[name] = validator
+
+    def unregister_crit_extension(self, name: str) -> None:
+        """
+        Unregisters a critical ("crit") header extension from this instance.
+
+        :param str name: the extension name to remove
+        :raises ValueError: if 'name' is a built-in extension
+        :raises KeyError: if 'name' is not registered
+        """
+        if name in _BUILTIN_CRIT_EXTENSIONS:
+            raise ValueError(f"Cannot unregister built-in critical extension {name!r}")
+        if name not in self._crit_extensions:
+            raise KeyError(
+                "The specified critical extension could not be removed"
+                " because it is not registered."
+            )
+
+        del self._crit_extensions[name]
+
+    def get_crit_extensions(self) -> list[str]:
+        """
+        Returns the names of the critical ("crit") header extensions this
+        instance understands, including the built-in ones.
+
+        :rtype: list[str]
+        """
+        return list(self._crit_extensions)
+
     def encode(
         self,
         payload: bytes,
@@ -129,6 +204,7 @@ class PyJWS:
         json_encoder: type[json.JSONEncoder] | None = None,
         is_payload_detached: bool = False,
         sort_headers: bool = True,
+        validate_crit: bool = False,
     ) -> str:
         segments: list[bytes] = []
 
@@ -180,6 +256,14 @@ class PyJWS:
         elif "b64" in header:
             # True is the standard value for b64, so no need for it
             del header["b64"]
+
+        if validate_crit and "crit" in header:
+            # Opt-in producer-side check: verify that the extension headers
+            # being generated are complete and well-formed according to the
+            # extensions registered on this instance.
+            crit_registry = dict(self._crit_extensions)
+            self._validate_crit_format(header, crit_registry)
+            self._run_crit_validators(header, crit_registry)
 
         json_header = json.dumps(
             header, separators=(",", ":"), cls=json_encoder, sort_keys=sort_headers
@@ -249,9 +333,14 @@ class PyJWS:
                 'It is required that you pass in a value for the "algorithms" argument when calling decode().'
             )
 
+        # Snapshot the extension registry so the whole decode uses one
+        # consistent view, even if extensions are registered or
+        # unregistered concurrently while the decode is in flight.
+        crit_registry = dict(self._crit_extensions)
+
         payload, signing_input, header, signature = self._load(jwt)
 
-        self._validate_headers(header)
+        self._validate_headers(header, crit_registry=crit_registry)
 
         if detached_payload is not None and header.get("b64", True) is not False:
             raise DecodeError(
@@ -283,6 +372,10 @@ class PyJWS:
                 algorithms,
                 options=merged_options,
             )
+            # Semantic extension callbacks run only after the signature
+            # has been verified, so validators with side effects never
+            # execute for unauthenticated tokens.
+            self._run_crit_validators(header, crit_registry)
 
         return {
             "payload": payload,
@@ -432,34 +525,64 @@ class PyJWS:
         if not alg_obj.verify(signing_input, prepared_key, signature):
             raise InvalidSignatureError("Signature verification failed")
 
-    # Extensions that PyJWT actually understands and supports
-    _supported_crit: set[str] = {"b64"}
-
     def _validate_headers(
-        self, headers: dict[str, Any], *, encoding: bool = False
+        self,
+        headers: dict[str, Any],
+        *,
+        encoding: bool = False,
+        crit_registry: dict[str, CritValidator] | None = None,
     ) -> None:
         if "kid" in headers:
             self._validate_kid(headers["kid"])
         if not encoding and "crit" in headers:
-            self._validate_crit(headers)
+            if crit_registry is None:
+                crit_registry = dict(self._crit_extensions)
+            self._validate_crit_format(headers, crit_registry)
 
     def _validate_kid(self, kid: Any) -> None:
         if not isinstance(kid, str):
             raise InvalidTokenError("Key ID header parameter must be a string")
 
-    def _validate_crit(self, headers: dict[str, Any]) -> None:
+    @staticmethod
+    def _validate_crit_format(
+        headers: dict[str, Any], crit_registry: dict[str, CritValidator]
+    ) -> None:
+        # Structural validation only: this runs before signature
+        # verification and must stay free of application-level side
+        # effects. Semantic checks live in _run_crit_validators.
         crit = headers["crit"]
         if not isinstance(crit, list) or len(crit) == 0:
             raise InvalidTokenError("Invalid 'crit' header: must be a non-empty list")
+        seen: set[str] = set()
         for ext in crit:
             if not isinstance(ext, str):
                 raise InvalidTokenError("Invalid 'crit' header: values must be strings")
-            if ext not in self._supported_crit:
+            if ext in seen:
+                raise InvalidTokenError(
+                    f"Invalid 'crit' header: duplicate extension {ext!r}"
+                )
+            seen.add(ext)
+            if ext not in crit_registry:
                 raise InvalidTokenError(f"Unsupported critical extension: {ext}")
             if ext not in headers:
                 raise InvalidTokenError(
                     f"Critical extension '{ext}' is missing from headers"
                 )
+
+    @staticmethod
+    def _run_crit_validators(
+        headers: dict[str, Any], crit_registry: dict[str, CritValidator]
+    ) -> None:
+        # Semantic validation for each declared critical extension. Only
+        # called after the signature has been verified (or, on the encode
+        # path, for self-produced headers).
+        crit = headers.get("crit")
+        if not crit:
+            return
+        for ext in crit:
+            validator = crit_registry.get(ext)
+            if validator is not None:
+                validator(headers[ext], headers)
 
 
 _jws_global_obj = PyJWS()

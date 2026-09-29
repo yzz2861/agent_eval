@@ -7,6 +7,23 @@ This project adheres to `Semantic Versioning <https://semver.org/>`__.
 `Unreleased <https://github.com/jpadilla/pyjwt/compare/2.15.0...HEAD>`__
 -------------------------------------------------------------------------
 
+Added
+~~~~~
+
+- Per-instance registration of critical ("crit") header extensions:
+  PyJWS.register_crit_extension() / unregister_crit_extension() /
+  get_crit_extensions() (also exposed on PyJWT) let applications declare
+  which extensions a decoder understands, each with a semantic validation
+  callback. Structural crit validation (non-empty list, string values, no
+  duplicates, known extension, header value present) runs before signature
+  verification, while the registered semantic callbacks only run after the
+  signature has been verified, so validators with side effects never
+  execute for unauthenticated tokens. Each decode operates on a snapshot
+  of the registry, the built-in b64 rules cannot be overridden, and
+  encode(..., validate_crit=True) lets producers verify the completeness
+  of the extension headers they generate.
+
+
 `v2.15.0 <https://github.com/jpadilla/pyjwt/compare/2.14.0...2.15.0>`__
 -----------------------------------------------------------------------
 

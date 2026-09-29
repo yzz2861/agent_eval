@@ -1272,3 +1272,317 @@ class TestJWS:
             jwt.PyJWK.from_dict(
                 {"kty": "oct", "k": "", "kid": "active", "alg": "HS256"}
             )
+
+
+class TestCritExtensionRegistry:
+    def test_register_and_decode_custom_extension(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        secret = "secret"
+        seen: dict[str, object] = {}
+
+        def validator(value: object, header: dict) -> None:
+            seen["value"] = value
+            seen["header"] = header
+
+        jws.register_crit_extension("x-policy", validator)
+        assert "x-policy" in jws.get_crit_extensions()
+        assert "b64" in jws.get_crit_extensions()
+
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-policy"], "x-policy": "require-mfa"},
+        )
+        assert jws.decode(token, secret, algorithms=["HS256"]) == payload
+        assert seen["value"] == "require-mfa"
+        assert seen["header"]["x-policy"] == "require-mfa"  # type: ignore[index]
+
+    def test_decode_rejects_when_crit_validator_raises(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        secret = "secret"
+
+        def validator(value: object, header: dict) -> None:
+            raise InvalidTokenError("mfa required")
+
+        jws.register_crit_extension("x-policy", validator)
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-policy"], "x-policy": "mfa"},
+        )
+        with pytest.raises(InvalidTokenError, match="mfa required"):
+            jws.decode(token, secret, algorithms=["HS256"])
+
+    def test_crit_registry_is_per_instance(self, jws: PyJWS, payload: bytes) -> None:
+        secret = "secret"
+        other = PyJWS()
+        jws.register_crit_extension("x-ext", lambda value, header: None)
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-ext"], "x-ext": 1},
+        )
+        assert jws.decode(token, secret, algorithms=["HS256"]) == payload
+        with pytest.raises(InvalidTokenError, match="Unsupported critical extension"):
+            other.decode(token, secret, algorithms=["HS256"])
+
+    def test_register_crit_extension_rejects_non_string_name(self, jws: PyJWS) -> None:
+        with pytest.raises(TypeError, match="must be a string"):
+            jws.register_crit_extension(123, lambda value, header: None)  # type: ignore[arg-type]
+
+    def test_register_crit_extension_rejects_empty_name(self, jws: PyJWS) -> None:
+        with pytest.raises(ValueError, match="must not be empty"):
+            jws.register_crit_extension("", lambda value, header: None)
+
+    def test_register_crit_extension_rejects_non_callable(self, jws: PyJWS) -> None:
+        with pytest.raises(TypeError, match="must be callable"):
+            jws.register_crit_extension("x-ext", "not-callable")  # type: ignore[arg-type]
+
+    def test_register_crit_extension_rejects_duplicate(self, jws: PyJWS) -> None:
+        jws.register_crit_extension("x-ext", lambda value, header: None)
+        with pytest.raises(ValueError, match="already registered"):
+            jws.register_crit_extension("x-ext", lambda value, header: None)
+
+    def test_register_crit_extension_cannot_override_builtin_b64(
+        self, jws: PyJWS
+    ) -> None:
+        with pytest.raises(ValueError, match="already registered"):
+            jws.register_crit_extension("b64", lambda value, header: None)
+
+    def test_unregister_crit_extension(self, jws: PyJWS, payload: bytes) -> None:
+        secret = "secret"
+        jws.register_crit_extension("x-ext", lambda value, header: None)
+        assert "x-ext" in jws.get_crit_extensions()
+
+        jws.unregister_crit_extension("x-ext")
+        assert "x-ext" not in jws.get_crit_extensions()
+
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-ext"], "x-ext": 1},
+        )
+        with pytest.raises(InvalidTokenError, match="Unsupported critical extension"):
+            jws.decode(token, secret, algorithms=["HS256"])
+
+    def test_unregister_crit_extension_rejects_builtin(self, jws: PyJWS) -> None:
+        with pytest.raises(ValueError, match="built-in"):
+            jws.unregister_crit_extension("b64")
+
+    def test_unregister_crit_extension_rejects_unknown(self, jws: PyJWS) -> None:
+        with pytest.raises(KeyError):
+            jws.unregister_crit_extension("x-missing")
+
+    def test_decode_rejects_duplicate_crit_names(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        secret = "secret"
+        jws.register_crit_extension("x-ext", lambda value, header: None)
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-ext", "x-ext"], "x-ext": 1},
+        )
+        with pytest.raises(InvalidTokenError, match="duplicate"):
+            jws.decode(token, secret, algorithms=["HS256"])
+
+    def test_crit_validator_not_run_when_signature_invalid(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        secret = "secret"
+        calls: list[object] = []
+        jws.register_crit_extension("x-ext", lambda value, header: calls.append(value))
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-ext"], "x-ext": "v1"},
+        )
+        with pytest.raises(InvalidSignatureError):
+            jws.decode(token, "wrong-secret", algorithms=["HS256"])
+        assert calls == []
+
+    def test_crit_validator_not_run_when_signature_not_verified(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        secret = "secret"
+        calls: list[object] = []
+        jws.register_crit_extension("x-ext", lambda value, header: calls.append(value))
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-ext"], "x-ext": "v1"},
+        )
+        decoded = jws.decode(token, options={"verify_signature": False})
+        assert decoded == payload
+        assert calls == []
+
+    def test_get_unverified_header_does_not_run_crit_validators(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        secret = "secret"
+        calls: list[object] = []
+        jws.register_crit_extension("x-ext", lambda value, header: calls.append(value))
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-ext"], "x-ext": "v1"},
+        )
+        header = jws.get_unverified_header(token)
+        assert header["x-ext"] == "v1"
+        assert calls == []
+
+    def test_decode_uses_registry_snapshot(self, jws: PyJWS, payload: bytes) -> None:
+        secret = "secret"
+        calls: list[str] = []
+
+        def validator_a(value: object, header: dict) -> None:
+            calls.append("a")
+            # Mutating the registry mid-decode must not affect the decode
+            # in flight: it keeps using the snapshot taken at the start.
+            jws.unregister_crit_extension("x-b")
+
+        def validator_b(value: object, header: dict) -> None:
+            calls.append("b")
+
+        jws.register_crit_extension("x-a", validator_a)
+        jws.register_crit_extension("x-b", validator_b)
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-a", "x-b"], "x-a": 1, "x-b": 2},
+        )
+        assert jws.decode(token, secret, algorithms=["HS256"]) == payload
+        assert calls == ["a", "b"]
+        assert "x-b" not in jws.get_crit_extensions()
+
+    def test_decode_rejects_non_boolean_b64(self, jws: PyJWS, payload: bytes) -> None:
+        import hashlib
+        import hmac
+
+        secret = "secret"
+        header_obj = {"typ": "JWT", "alg": "HS256", "b64": "yes", "crit": ["b64"]}
+        header_b64 = base64url_encode(
+            json.dumps(header_obj, separators=(",", ":")).encode()
+        )
+        payload_b64 = base64url_encode(payload)
+        signing_input = b".".join([header_b64, payload_b64])
+        sig = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+        token = b".".join([signing_input, base64url_encode(sig)]).decode()
+
+        with pytest.raises(InvalidTokenError, match="must be a boolean"):
+            jws.decode(token, secret, algorithms=["HS256"])
+
+    def test_encode_validate_crit_rejects_missing_header(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        with pytest.raises(InvalidTokenError, match="missing from headers"):
+            jws.encode(
+                payload,
+                "secret",
+                algorithm="HS256",
+                headers={"crit": ["b64"]},
+                validate_crit=True,
+            )
+
+    def test_encode_validate_crit_rejects_unknown_extension(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        with pytest.raises(InvalidTokenError, match="Unsupported critical extension"):
+            jws.encode(
+                payload,
+                "secret",
+                algorithm="HS256",
+                headers={"crit": ["x-unknown"], "x-unknown": 1},
+                validate_crit=True,
+            )
+
+    def test_encode_validate_crit_runs_registered_validator(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        secret = "secret"
+
+        def validator(value: object, header: dict) -> None:
+            if value != "ok":
+                raise InvalidTokenError("bad value")
+
+        jws.register_crit_extension("x-ext", validator)
+        with pytest.raises(InvalidTokenError, match="bad value"):
+            jws.encode(
+                payload,
+                secret,
+                algorithm="HS256",
+                headers={"crit": ["x-ext"], "x-ext": "nope"},
+                validate_crit=True,
+            )
+
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"crit": ["x-ext"], "x-ext": "ok"},
+            validate_crit=True,
+        )
+        assert jws.decode(token, secret, algorithms=["HS256"]) == payload
+
+    def test_encode_validate_crit_accepts_detached_b64(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        secret = "secret"
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            is_payload_detached=True,
+            validate_crit=True,
+        )
+        assert (
+            jws.decode(token, secret, algorithms=["HS256"], detached_payload=payload)
+            == payload
+        )
+
+    def test_encode_without_validate_crit_stays_permissive(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        # Default behavior is unchanged: encode does not reject unknown
+        # extensions unless validate_crit is requested.
+        token = jws.encode(
+            payload,
+            "secret",
+            algorithm="HS256",
+            headers={"crit": ["x-unknown"], "x-unknown": 1},
+        )
+        assert token
+
+    def test_pyjwt_register_crit_extension_passthrough(self, payload: bytes) -> None:
+        from jwt.api_jwt import PyJWT
+
+        jwt_obj = PyJWT()
+        calls: list[object] = []
+        jwt_obj.register_crit_extension(
+            "x-ext", lambda value, header: calls.append(value)
+        )
+        assert "x-ext" in jwt_obj.get_crit_extensions()
+
+        token = jwt_obj.encode(
+            {"sub": "user-1"},
+            "secret",
+            algorithm="HS256",
+            headers={"crit": ["x-ext"], "x-ext": "v1"},
+        )
+        decoded = jwt_obj.decode(token, "secret", algorithms=["HS256"])
+        assert decoded["sub"] == "user-1"
+        assert calls == ["v1"]
+
+        jwt_obj.unregister_crit_extension("x-ext")
+        assert "x-ext" not in jwt_obj.get_crit_extensions()
