@@ -8,6 +8,19 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 -------------
 
+Added
+^^^^^
+
+* Added cooperative message cancellation via the
+  :class:`dramatiq.middleware.Cancel` middleware.  Cancellation
+  requests are stored in a pluggable
+  :class:`dramatiq.cancel.CancellationBackend` (a local, in-process
+  implementation is provided) and actors can poll a
+  :class:`dramatiq.cancel.CancellationToken` at checkpoints to exit
+  cooperatively.  Messages that have not started yet are skipped,
+  cancelled messages are never retried, do not continue pipelines and
+  count towards group completion.
+
 
 `2.2.1`_ -- 2026-09-01
 ----------------------

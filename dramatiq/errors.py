@@ -89,6 +89,16 @@ class Retry(DramatiqError):
         self.delay = delay
 
 
+class MessageCancelled(DramatiqError):
+    """Raised by actors, via their cancellation token, to
+    cooperatively abort processing of a message that has been
+    cancelled.
+
+    This is a terminal state: cancelled messages are acknowledged,
+    never retried and their pipelines are not continued.
+    """
+
+
 def __getattr__(name):
     if name == "ConnectionError":
         warnings.warn(

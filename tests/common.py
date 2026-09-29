@@ -49,7 +49,7 @@ def rabbit_mq_is_unreachable():
     )
     try:
         broker.connection
-    except pika.exceptions.AMQPConnectionError:
+    except (pika.exceptions.AMQPConnectionError, OSError):
         # RabbitMQ is unreachable
         return True
     return False

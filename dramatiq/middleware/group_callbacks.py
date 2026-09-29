@@ -20,12 +20,19 @@ from __future__ import annotations
 import os
 import warnings
 
+from ..errors import MessageCancelled
 from ..rate_limits import Barrier, RateLimiterBackend
 from .middleware import Middleware
 
 
 class GroupCallbacks(Middleware):
-    """Middleware that enables adding completion callbacks to |Groups|."""
+    """Middleware that enables adding completion callbacks to |Groups|.
+
+    Cancelled messages count towards group completion: cancellation
+    is a terminal state, so a group whose members were all either
+    completed or cancelled is considered complete and its completion
+    callbacks run.
+    """
 
     def __init__(self, rate_limiter_backend: RateLimiterBackend, *, barrier_ttl: int = 86400 * 1000) -> None:
         self.rate_limiter_backend = rate_limiter_backend
@@ -44,17 +51,24 @@ class GroupCallbacks(Middleware):
             self.barrier_ttl = barrier_ttl
 
     def after_process_message(self, broker, message, *, result=None, exception=None):
+        if exception is None or isinstance(exception, MessageCancelled):
+            self._count_towards_completion(broker, message)
+
+    def after_skip_message(self, broker, message):
+        if message.cancelled:
+            self._count_towards_completion(broker, message)
+
+    def _count_towards_completion(self, broker, message):
         from ..message import Message
 
-        if exception is None:
-            group_completion_uuid = message.options.get("group_completion_uuid")
-            group_completion_callbacks = message.options.get("group_completion_callbacks")
-            if group_completion_uuid and group_completion_callbacks:
-                barrier = Barrier(
-                    self.rate_limiter_backend,
-                    group_completion_uuid,
-                    ttl=self.barrier_ttl,
-                )
-                if barrier.wait(block=False):
-                    for message in group_completion_callbacks:
-                        broker.enqueue(Message(**message))
+        group_completion_uuid = message.options.get("group_completion_uuid")
+        group_completion_callbacks = message.options.get("group_completion_callbacks")
+        if group_completion_uuid and group_completion_callbacks:
+            barrier = Barrier(
+                self.rate_limiter_backend,
+                group_completion_uuid,
+                ttl=self.barrier_ttl,
+            )
+            if barrier.wait(block=False):
+                for message in group_completion_callbacks:
+                    broker.enqueue(Message(**message))

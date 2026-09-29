@@ -22,7 +22,7 @@ import traceback
 from typing import Callable, Optional
 
 from ..common import compute_backoff
-from ..errors import Retry
+from ..errors import MessageCancelled, Retry
 from ..logging import get_logger
 from .middleware import Middleware
 
@@ -96,6 +96,11 @@ class Retries(Middleware):
 
     def after_process_message(self, broker, message, *, result=None, exception=None):
         if exception is None:
+            return
+
+        if isinstance(exception, MessageCancelled):
+            # Cancelled messages are never retried; cancellation is a
+            # terminal state.
             return
 
         actor = broker.get_actor(message.actor_name)

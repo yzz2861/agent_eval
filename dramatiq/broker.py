@@ -401,6 +401,7 @@ class MessageProxy:
 
     def __init__(self, message: Message) -> None:
         self.failed = False
+        self.cancelled = False
         self._message = message
         self._exception: Optional[BaseException] = None
 

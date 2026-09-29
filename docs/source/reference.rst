@@ -107,6 +107,9 @@ Optional Middleware
 The following middleware classes are available, but not enabled by default.
 
 .. autoclass:: dramatiq.middleware.AsyncIO
+.. autoclass:: dramatiq.middleware.Cancel
+   :members: cancel, is_cancelled, get_current_token
+   :member-order: bysource
 .. autoclass:: dramatiq.middleware.CurrentMessage
    :members: get_current_message
    :member-order: bysource
@@ -215,6 +218,21 @@ Barriers
    :members:
 
 
+Cancellation
+------------
+
+Messages can be cancelled cooperatively via the Cancel middleware.
+Cancellation backends store cancellation requests; the local backend
+keeps them in the current process and is the default.
+
+.. autoclass:: dramatiq.cancel.CancellationBackend
+   :members:
+.. autoclass:: dramatiq.cancel.LocalCancellationBackend
+   :show-inheritance:
+.. autoclass:: dramatiq.cancel.CancellationToken
+   :members:
+
+
 Workers
 -------
 
@@ -250,6 +268,9 @@ Errors
    :members:
    :show-inheritance:
 .. autoexception:: RateLimitExceeded
+   :members:
+   :show-inheritance:
+.. autoexception:: MessageCancelled
    :members:
    :show-inheritance:
 .. autoexception:: Retry

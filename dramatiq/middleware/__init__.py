@@ -20,6 +20,7 @@ from __future__ import annotations
 from .age_limit import AgeLimit
 from .asyncio import AsyncIO
 from .callbacks import Callbacks
+from .cancel import Cancel
 from .current_message import CurrentMessage
 from .group_callbacks import GroupCallbacks
 from .middleware import Middleware, MiddlewareError, SkipMessage
@@ -41,6 +42,7 @@ __all__ = [
     "AgeLimit",
     "AsyncIO",
     "Callbacks",
+    "Cancel",
     "CurrentMessage",
     "GroupCallbacks",
     "Pipelines",

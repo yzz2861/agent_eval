@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Iterable, Optional, Union
 
 from .broker import Broker, Consumer, MessageProxy
 from .common import current_millis, iter_queue, join_all, q_name
-from .errors import ActorNotFound, BrokerConnectionError, RateLimitExceeded, Retry
+from .errors import ActorNotFound, BrokerConnectionError, MessageCancelled, RateLimitExceeded, Retry
 from .logging import get_logger
 from .middleware import Middleware, SkipMessage
 from .results.middleware import Results
@@ -584,6 +584,8 @@ class WorkerThread(Thread):
             throws = message.options.get("throws") or (actor and actor.options.get("throws"))
             if isinstance(e, RateLimitExceeded):
                 self.logger.debug("Rate limit exceeded in message %s: %s.", message, e)
+            elif isinstance(e, MessageCancelled):
+                self.logger.info("Message %s was cancelled.", message.message_id)
             elif throws and isinstance(e, throws):
                 self.logger.info(
                     "Failed to process message %s with expected exception %s.",

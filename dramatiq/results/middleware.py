@@ -16,7 +16,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 from __future__ import annotations
 
-from ..errors import ActorNotFound
+from ..errors import ActorNotFound, MessageCancelled
 from ..logging import get_logger
 from ..middleware import Middleware
 
@@ -95,6 +95,12 @@ class Results(Middleware):
         store_results, result_ttl = self._lookup_options(broker, message)
         if store_results and exception is None:
             self.backend.store_result(message, result, result_ttl)
+        elif store_results and isinstance(exception, MessageCancelled):
+            # Cancellation is terminal: store the cancellation as the
+            # message's result so that waiters are unblocked.  This
+            # can never overwrite a completed result because a
+            # message only reaches a single terminal state.
+            self.backend.store_exception(message, exception, result_ttl)
         if not store_results and result is not None and message.options.get("pipe_target") is None:
             self.logger.warning(
                 "Actor '%s' returned a value that is not None, but you "
@@ -108,7 +114,14 @@ class Results(Middleware):
         """
         store_results, result_ttl = self._lookup_options(broker, message)
         if store_results and not message.failed:
-            self.backend.store_result(message, None, result_ttl)
+            if message.cancelled:
+                self.backend.store_exception(
+                    message,
+                    MessageCancelled("Message %s was cancelled before it started." % message.message_id),
+                    result_ttl,
+                )
+            else:
+                self.backend.store_result(message, None, result_ttl)
 
     def after_nack(self, broker, message):
         store_results, result_ttl = self._lookup_options(broker, message)

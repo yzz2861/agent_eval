@@ -31,6 +31,7 @@ from .errors import (
     ConnectionFailed,
     DecodeError,
     DramatiqError,
+    MessageCancelled,
     QueueJoinTimeout,
     QueueNotFound,
     RateLimitExceeded,
@@ -71,6 +72,7 @@ __all__ = [
     "ConnectionClosed",
     "ConnectionFailed",
     "RateLimitExceeded",
+    "MessageCancelled",
     "Retry",
     # Logging
     "get_logger",
