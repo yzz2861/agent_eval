@@ -66,8 +66,8 @@ inserted into the cache.
    synchronized, e.g. by using one of the memoizing decorators with a
    suitable `lock` object.
 
-.. autoclass:: Cache(maxsize, getsizeof=None)
-   :members: currsize, getsizeof, maxsize
+.. autoclass:: Cache(maxsize, getsizeof=None, on_remove=None, on_remove_error="ignore")
+   :members: currsize, getsizeof, maxsize, on_remove, on_remove_error
 
    This class discards arbitrary items using :meth:`popitem` to make
    space when necessary.  Derived classes may override :meth:`popitem`
@@ -75,6 +75,20 @@ inserted into the cache.
    keep track of item access, insertion or deletion, it may
    additionally need to override :meth:`__getitem__`,
    :meth:`__setitem__` and :meth:`__delitem__`.
+
+   If `on_remove` is given, it will be called with a
+   :class:`RemovalEvent` for each item removed from the cache, e.g.
+   when an item expires, is evicted to make space, is replaced by a
+   new value, is explicitly deleted, or the cache is cleared.  The
+   listener is called after the removal has been fully applied, and
+   may safely perform further cache operations.  Exceptions raised by
+   the listener are handled according to `on_remove_error`.
+
+.. autoclass:: RemovalEvent
+   :members: key, value, reason, sequence
+
+.. autoclass:: RemovalReason
+   :members: EXPIRED, EVICTED, REPLACED, DELETED, CLEARED
 
 .. autoclass:: FIFOCache(maxsize, getsizeof=None)
    :members: popitem

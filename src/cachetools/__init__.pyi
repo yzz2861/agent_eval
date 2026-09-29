@@ -1,6 +1,7 @@
 import random
 from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from contextlib import AbstractContextManager
+from enum import Enum
 from typing import (
     Any,
     Concatenate,
@@ -20,6 +21,8 @@ __all__: Final = (
     "FIFOCache",
     "LFUCache",
     "LRUCache",
+    "RemovalEvent",
+    "RemovalReason",
     "RRCache",
     "TLRUCache",
     "TTLCache",
@@ -37,9 +40,31 @@ _TT = TypeVar("_TT", default=float)
 _KT2 = TypeVar("_KT2")
 _VT2 = TypeVar("_VT2")
 
+class RemovalReason(Enum):
+    EXPIRED = "expired"
+    EVICTED = "evicted"
+    REPLACED = "replaced"
+    DELETED = "deleted"
+    CLEARED = "cleared"
+
+class RemovalEvent(NamedTuple):
+    key: Any
+    value: Any
+    reason: RemovalReason
+    sequence: int
+
+_OnRemoveCallback = Callable[[RemovalEvent], None]
+_OnRemoveErrorPolicy = (
+    Literal["ignore", "raise"] | Callable[[Exception, RemovalEvent], None]
+)
+
 class Cache(MutableMapping[_KT, _VT]):
     def __init__(
-        self, maxsize: float, getsizeof: Callable[[_VT], float] | None = None
+        self,
+        maxsize: float,
+        getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemoveCallback | None = None,
+        on_remove_error: _OnRemoveErrorPolicy = "ignore",
     ) -> None: ...
     def __getitem__(self, key: _KT) -> _VT: ...
     def __setitem__(self, key: _KT, value: _VT) -> None: ...
@@ -56,6 +81,14 @@ class Cache(MutableMapping[_KT, _VT]):
     def maxsize(self) -> float: ...
     @property
     def currsize(self) -> float: ...
+    @property
+    def on_remove(self) -> _OnRemoveCallback | None: ...
+    @on_remove.setter
+    def on_remove(self, callback: _OnRemoveCallback | None) -> None: ...
+    @property
+    def on_remove_error(self) -> _OnRemoveErrorPolicy: ...
+    @on_remove_error.setter
+    def on_remove_error(self, policy: _OnRemoveErrorPolicy) -> None: ...
     @staticmethod
     def getsizeof(value: _VT) -> float: ...
 
@@ -69,6 +102,8 @@ class RRCache(Cache[_KT, _VT]):
         maxsize: float,
         choice: Callable[[Sequence[_KT]], _KT] = random.choice,
         getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemoveCallback | None = None,
+        on_remove_error: _OnRemoveErrorPolicy = "ignore",
     ) -> None: ...
     @property
     def choice(self) -> Callable[[Sequence[_KT]], _KT]: ...
@@ -79,6 +114,8 @@ class _TimedCache(Cache[_KT, _VT], Generic[_KT, _VT, _TT]):
         maxsize: float,
         timer: Callable[[], _TT],
         getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemoveCallback | None = None,
+        on_remove_error: _OnRemoveErrorPolicy = "ignore",
     ) -> None: ...
 
     class _Timer(AbstractContextManager[_T]):
@@ -99,6 +136,8 @@ class TTLCache(_TimedCache[_KT, _VT, _TT]):
         ttl: float,
         *,
         getsizeof: Callable[[_VT2], float] | None = None,
+        on_remove: _OnRemoveCallback | None = None,
+        on_remove_error: _OnRemoveErrorPolicy = "ignore",
     ) -> None: ...
     @overload
     def __init__(
@@ -107,6 +146,8 @@ class TTLCache(_TimedCache[_KT, _VT, _TT]):
         ttl: Any,  # FIXME: must be "addable" to _TT
         timer: Callable[[], _TT],
         getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemoveCallback | None = None,
+        on_remove_error: _OnRemoveErrorPolicy = "ignore",
     ) -> None: ...
     @property
     def ttl(self) -> Any: ...
@@ -120,6 +161,8 @@ class TLRUCache(_TimedCache[_KT, _VT, _TT]):
         ttu: Callable[[_KT2, _VT2, float], float],
         *,
         getsizeof: Callable[[_VT2], float] | None = None,
+        on_remove: _OnRemoveCallback | None = None,
+        on_remove_error: _OnRemoveErrorPolicy = "ignore",
     ) -> None: ...
     @overload
     def __init__(
@@ -128,6 +171,8 @@ class TLRUCache(_TimedCache[_KT, _VT, _TT]):
         ttu: Callable[[_KT, _VT, _TT], _TT],
         timer: Callable[[], _TT],
         getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemoveCallback | None = None,
+        on_remove_error: _OnRemoveErrorPolicy = "ignore",
     ) -> None: ...
     @property
     def ttu(self) -> Callable[[_KT, _VT, _TT], _TT]: ...

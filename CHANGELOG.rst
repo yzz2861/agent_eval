@@ -1,3 +1,15 @@
+Unreleased
+==========
+
+- Add optional removal listeners to all cache classes.  The new
+  ``on_remove`` constructor argument and property registers a
+  callback that is invoked with a ``RemovalEvent`` (key, old value,
+  ``RemovalReason`` and sequence number) whenever an item leaves the
+  cache, including lazy expiration, capacity eviction, replacement,
+  explicit deletion and ``clear()``.  Listener exceptions are handled
+  according to the configurable ``on_remove_error`` policy.
+
+
 v7.2.0 (2026-09-16)
 ===================
 
