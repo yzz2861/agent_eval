@@ -6,6 +6,7 @@ The appropriate renderer is called during Django's template response rendering.
 """
 from http.client import responses
 
+from django.http import StreamingHttpResponse
 from django.template.response import SimpleTemplateResponse
 
 from rest_framework.serializers import Serializer
@@ -105,3 +106,29 @@ class Response(SimpleTemplateResponse):
                 del state[key]
         state['_closable_objects'] = []
         return state
+
+
+class StreamingResponse(Response):
+    """
+    A `Response` that is rendered into a `StreamingHttpResponse`, for use
+    with renderers that return an iterator of chunks from `.render()`,
+    such as `StreamingCSVRenderer`.
+
+    Authentication, content negotiation and exception handling behave
+    exactly as they do for a regular `Response`; only the rendering of
+    the response body is streamed, so the first chunk may be sent to the
+    client before the underlying data has been fully consumed.
+    """
+
+    def render(self):
+        content = self.rendered_content
+        if isinstance(content, (bytes, bytearray, memoryview)):
+            content = (content,)
+        response = StreamingHttpResponse(
+            streaming_content=content,
+            status=self.status_code,
+        )
+        for key, value in self.headers.items():
+            response[key] = value
+        self._is_rendered = True
+        return response

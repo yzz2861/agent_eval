@@ -7,9 +7,11 @@ on the response, such as JSON encoded data or HTML output.
 REST framework also provides an HTML renderer that renders the browsable API.
 """
 
+import csv
 import contextlib
 import datetime
 import sys
+from collections.abc import Iterable, Mapping
 
 from django import forms
 from django.conf import settings
@@ -105,6 +107,168 @@ class JSONRenderer(BaseRenderer):
         # See: https://gist.github.com/damncabbage/623b879af56f850a6ddc
         ret = ret.replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
         return ret.encode()
+
+
+class CSVStream:
+    """
+    Container for the column definitions and row iterable consumed by
+    `StreamingCSVRenderer`.
+
+    `columns` is a sequence of column definitions. Each definition may be
+    a dotted field path (used as both the header label and the lookup), a
+    `(label, field_path)` two-tuple, or a `{'label': ..., 'field': ...}`
+    mapping. Column order is fixed: fields are always emitted in the order
+    the columns are defined in.
+
+    `rows` is an iterable, typically a generator, of row objects. Rows may
+    be mappings or plain objects. Dotted field paths are resolved against
+    keys or attributes, with missing values and `None` rendered as empty
+    fields.
+
+    Column definitions are validated eagerly, so that misconfiguration
+    raises before any response headers are sent.
+    """
+
+    def __init__(self, columns, rows):
+        self.columns = self.validate_columns(columns)
+        self.rows = rows
+
+    @staticmethod
+    def validate_columns(columns):
+        if isinstance(columns, (str, bytes)) or not isinstance(columns, Iterable):
+            raise ImproperlyConfigured(
+                '`CSVStream` requires `columns` to be an iterable of column '
+                'definitions.'
+            )
+        validated = []
+        for column in columns:
+            if isinstance(column, str):
+                label, field = column, column
+            elif isinstance(column, Mapping):
+                label, field = column.get('label'), column.get('field')
+            else:
+                try:
+                    label, field = column
+                except (TypeError, ValueError):
+                    raise ImproperlyConfigured(
+                        'CSV column definitions must be field paths, '
+                        '(label, field) pairs, or {"label": ..., "field": ...} '
+                        'mappings. Got: %r' % (column,)
+                    )
+            if not isinstance(label, str) or not isinstance(field, str) or not field:
+                raise ImproperlyConfigured(
+                    'CSV column definitions require a string label and a '
+                    'non-empty field path. Got: %r' % (column,)
+                )
+            validated.append((label, field))
+        if not validated:
+            raise ImproperlyConfigured(
+                '`CSVStream` requires at least one column definition.'
+            )
+        return validated
+
+
+class _Echo:
+    """
+    A pseudo-buffer that returns anything written to it, allowing
+    `csv.writer` to build a single line at a time.
+    """
+
+    def write(self, value):
+        return value
+
+
+class StreamingCSVRenderer(BaseRenderer):
+    """
+    Renderer that streams CSV content, for use with `StreamingResponse`.
+
+    The response data must be a `CSVStream` instance, providing the column
+    definitions and an iterable of rows. Rows are encoded and yielded one
+    at a time, so the first row may be sent to the client before the row
+    iterable has been fully consumed.
+
+    Text values starting with a character in `formula_prefixes` may be
+    interpreted as formulas when opened in a spreadsheet application. The
+    `formula_escape` attribute controls how they are escaped: a string
+    prefix (defaults to a single quote), a callable mapping the value to
+    its escaped form, or `None` to disable escaping.
+    """
+
+    media_type = 'text/csv'
+    format = 'csv'
+    charset = 'utf-8'
+
+    formula_prefixes = ('=', '+', '-', '@')
+    formula_escape = "'"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        if isinstance(data, CSVStream):
+            return self.stream_rows(data)
+        response = (renderer_context or {}).get('response')
+        if response is not None and response.exception:
+            # Error responses, such as those for failed content
+            # negotiation, are rendered as a simple two-column document.
+            return self.stream_rows(self.error_stream(data))
+        raise ImproperlyConfigured(
+            '`StreamingCSVRenderer` requires the response data to be a '
+            '`CSVStream` instance.'
+        )
+
+    def error_stream(self, data):
+        if isinstance(data, Mapping):
+            rows = ({'field': field, 'detail': detail}
+                    for field, detail in data.items())
+        elif isinstance(data, list):
+            rows = ({'field': '', 'detail': detail} for detail in data)
+        else:
+            rows = iter([{'field': '', 'detail': data}])
+        return CSVStream([('Field', 'field'), ('Detail', 'detail')], rows)
+
+    def stream_rows(self, stream):
+        writer = csv.writer(_Echo(), lineterminator='\r\n')
+        try:
+            yield self.encode_line(writer, [label for label, field in stream.columns])
+            for row in stream.rows:
+                values = [
+                    self.format_value(self.resolve_field(row, field))
+                    for label, field in stream.columns
+                ]
+                yield self.encode_line(writer, values)
+        finally:
+            # Ensure the row iterable is closed when the client disconnects
+            # mid-stream, or when it raises part way through.
+            close = getattr(stream.rows, 'close', None)
+            if callable(close):
+                close()
+
+    def encode_line(self, writer, values):
+        return writer.writerow(values).encode(self.charset)
+
+    def resolve_field(self, row, field):
+        value = row
+        for part in field.split('.'):
+            if value is None:
+                return None
+            if isinstance(value, Mapping):
+                value = value.get(part)
+            else:
+                value = getattr(value, part, None)
+        return value
+
+    def format_value(self, value):
+        if value is None:
+            return ''
+        if not isinstance(value, str):
+            value = str(value)
+        return self.escape_formula(value)
+
+    def escape_formula(self, value):
+        escape = self.formula_escape
+        if not escape or not value or value[0] not in self.formula_prefixes:
+            return value
+        if callable(escape):
+            return escape(value)
+        return escape + value
 
 
 class TemplateHTMLRenderer(BaseRenderer):

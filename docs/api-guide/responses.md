@@ -39,6 +39,27 @@ Arguments:
 * `headers`: A dictionary of HTTP headers to use in the response.
 * `content_type`: The content type of the response.  Typically, this will be set automatically by the renderer as determined by content negotiation, but there may be some cases where you need to specify the content type explicitly.
 
+### StreamingResponse()
+
+**Signature:** `StreamingResponse(data, status=None, headers=None, content_type=None)`
+
+A `Response` subclass that renders into Django's `StreamingHttpResponse`, for
+use with renderers that return an iterator of chunks from `.render()`, such
+as `StreamingCSVRenderer`.
+
+Authentication, permissions, throttling, content negotiation and exception
+handling behave exactly as they do for a regular `Response`. Only the
+rendering of the response body differs: chunks are sent to the client as
+they are produced, rather than being buffered first. Renderers that return
+fully rendered content are also supported, and are sent as a single chunk.
+
+    class UserExportView(APIView):
+        renderer_classes = [StreamingCSVRenderer]
+
+        def get(self, request):
+            stream = CSVStream(columns, rows)
+            return StreamingResponse(stream)
+
 ---
 
 ## Attributes

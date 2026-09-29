@@ -96,6 +96,62 @@ The default JSON encoding style can be altered using the `UNICODE_JSON` and `COM
 
 **.charset**: `None`
 
+### StreamingCSVRenderer
+
+Renders rows into `CSV`, streaming the output one row at a time. Intended for
+exporting large result sets without buffering the entire document, for use
+together with `StreamingResponse`.
+
+The response data must be a `CSVStream` instance, which pairs a fixed set of
+column definitions with an iterable of rows:
+
+    from rest_framework.renderers import CSVStream, StreamingCSVRenderer
+    from rest_framework.response import StreamingResponse
+
+    class UserExportView(APIView):
+        renderer_classes = [StreamingCSVRenderer]
+
+        def get(self, request):
+            columns = [
+                ('ID', 'id'),
+                ('Username', 'user.username'),
+                ('Email', 'user.email'),
+            ]
+            rows = (
+                {'id': user.id, 'user': user, 'email': user.email}
+                for user in User.objects.iterator()
+            )
+            return StreamingResponse(CSVStream(columns, rows))
+
+Each column definition may be a dotted field path, a `(label, field_path)`
+two-tuple, or a `{'label': ..., 'field': ...}` mapping. Column order is fixed
+by the definition order. Field paths are resolved against mapping keys or
+object attributes; missing values and `None` are rendered as empty fields.
+Column definitions are validated when the `CSVStream` is created, so
+misconfiguration raises before any response headers are sent.
+
+The row iterable is consumed lazily: the header row and first data row may
+reach the client before the iterable is exhausted, and the iterable is closed
+if the client disconnects mid-stream. Exceptions raised by the row iterable
+propagate once streaming has started, and are not converted into an in-band
+error response.
+
+Text values beginning with one of the `formula_prefixes` characters
+(`=`, `+`, `-`, `@`) are escaped to prevent formula injection when the
+output is opened in a spreadsheet application. The escaping strategy is
+controlled by the `formula_escape` attribute: a string prefix (the default
+is a single quote), a callable mapping the value to its escaped form, or
+`None` to disable escaping.
+
+    class UnsafeCSVRenderer(StreamingCSVRenderer):
+        formula_escape = None  # Disable formula escaping.
+
+**.media_type**: `text/csv`
+
+**.format**: `'csv'`
+
+**.charset**: `utf-8`
+
 ### TemplateHTMLRenderer
 
 Renders data to HTML, using Django's standard template rendering.
