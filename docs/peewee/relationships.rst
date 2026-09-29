@@ -1140,6 +1140,53 @@ A plain ``query.limit(n)`` instead applies one ``LIMIT`` to the whole relation,
 returning ``n`` rows in total (the same as :func:`prefetch`). Per-parent limits
 require window-function support (SQLite 3.25+, PostgreSQL, MySQL 8).
 
+.. _eager-loading-many-to-many:
+
+Many-to-many relations
+^^^^^^^^^^^^^^^^^^^^^^
+
+:class:`Load` also accepts a :class:`ManyToManyField`. This is useful when the
+through model carries data of its own -- a role, an ordering, a timestamp --
+because the load exposes both sides of every edge at once:
+
+* the field itself (``post.categories``) is a list of the related objects,
+* the through model's back-reference (``post.category_links`` here) is the
+  list of through rows, aligned with it.
+
+.. code-block:: python
+
+   class PostCategory(Model):
+       post = ForeignKeyField(Post, backref='category_links')
+       category = ForeignKeyField(Category, backref='post_links')
+       role = CharField()
+
+   query = Post.select().with_related(Load(Post.categories))
+
+   for post in query:
+       for category, link in zip(post.categories, post.category_links):
+           print(post.title, category.name, link.role)  # No extra queries.
+
+Two queries run in total, no matter how many relations exist. Each edge gets
+its own through-row instance -- duplicate edges are preserved as separate
+rows -- while a target related to several parents is a single shared
+instance, so neither ``link.category`` nor ``link.post`` issues a query.
+Filtering and ordering expressed on the through model are preserved:
+
+.. code-block:: python
+
+   links = (PostCategory
+            .select()
+            .where(PostCategory.role != 'archived')
+            .order_by(PostCategory.position))
+   query = Post.select().with_related(Load(Post.categories, links))
+
+A relation query that joins and selects the target (e.g.
+``PostCategory.select(PostCategory, Category).join(Category)``) hydrates both
+sides from one query; otherwise the targets are fetched in a single
+additional ``IN`` query. Self-referential many-to-many relations and custom
+primary-keys are supported. ``per_parent`` is not available for many-to-many
+loads.
+
 .. _prefetch-strategy:
 
 Load strategy and materialize

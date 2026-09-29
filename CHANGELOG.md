@@ -7,6 +7,11 @@ https://github.com/coleifer/peewee/releases
 
 ## master
 
+* `Load()` / `ModelSelect.with_related()` accept a `ManyToManyField`,
+  preloading both the related objects and the through-model rows (including
+  any relation attributes stored on the through model) in a constant number
+  of queries. The many-to-many accessor now supports self-referential
+  relations.
 * Don't cache ``None`` on unselected FK join trees, see #3083.
 * Some fixes for edge-cases around non-unique aliases and unicode aliases,
   see #3081 and #3078.

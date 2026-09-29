@@ -763,3 +763,82 @@ class TestM2MBangBackref(ModelTestCase):
         note = BangNote.create(text='n1')
         BangThroughModel.create(user=user, note=note)
         self.assertEqual([u.username for u in note.users], ['u1'])
+
+
+MemberFollowDeferred = DeferredThroughModel()
+
+class Member(TestModel):
+    name = CharField(unique=True)
+
+# A self-referential m2m must be attached once the model exists. The first
+# foreign-key on the through model is the source side, the second the
+# destination; the backref field ("followers") swaps them.
+Member._meta.add_field('following', ManyToManyField(
+    Member, through_model=MemberFollowDeferred, backref='followers'))
+
+class MemberFollow(TestModel):
+    from_member = ForeignKeyField(Member, backref='following_links')
+    to_member = ForeignKeyField(Member, backref='follower_links')
+    kind = CharField(default='')
+
+MemberFollowDeferred.set_model(MemberFollow)
+
+
+class TestSelfReferentialManyToMany(ModelTestCase):
+    requires = [Member, MemberFollow]
+
+    def setUp(self):
+        super(TestSelfReferentialManyToMany, self).setUp()
+        self.huey = Member.create(name='huey')
+        self.mickey = Member.create(name='mickey')
+        self.zaizee = Member.create(name='zaizee')
+        MemberFollow.create(from_member=self.huey, to_member=self.mickey,
+                            kind='friend')
+        MemberFollow.create(from_member=self.huey, to_member=self.zaizee,
+                            kind='bot')
+        MemberFollow.create(from_member=self.mickey, to_member=self.zaizee,
+                            kind='friend')
+
+    def test_accessor_query(self):
+        self.assertEqual(
+            [m.name for m in self.huey.following.order_by(Member.name)],
+            ['mickey', 'zaizee'])
+        self.assertEqual(
+            [m.name for m in self.mickey.following], ['zaizee'])
+        self.assertEqual(list(self.zaizee.following), [])
+
+    def test_accessor_backref_query(self):
+        self.assertEqual(list(self.huey.followers), [])
+        self.assertEqual(
+            [m.name for m in self.mickey.followers], ['huey'])
+        self.assertEqual(
+            [m.name for m in self.zaizee.followers.order_by(Member.name)],
+            ['huey', 'mickey'])
+
+    def test_accessor_src_dest_fks(self):
+        # Class-dict access returns the accessor itself, not the field.
+        accessor = Member.__dict__['following']
+        self.assertEqual(accessor.src_fk.name, 'from_member')
+        self.assertEqual(accessor.dest_fk.name, 'to_member')
+        backref_accessor = Member.__dict__['followers']
+        self.assertEqual(backref_accessor.src_fk.name, 'to_member')
+        self.assertEqual(backref_accessor.dest_fk.name, 'from_member')
+
+    def test_add_and_remove(self):
+        self.mickey.following.add([self.huey])
+        self.assertEqual(
+            [m.name for m in self.huey.followers.order_by(Member.name)],
+            ['mickey'])
+        link = MemberFollow.get(
+            (MemberFollow.from_member == self.mickey) &
+            (MemberFollow.to_member == self.huey))
+        self.assertEqual(link.to_member_id, self.huey.id)
+
+        self.huey.following.remove([self.mickey])
+        self.assertEqual([m.name for m in self.huey.following], ['zaizee'])
+
+    def test_clear(self):
+        self.huey.following.clear()
+        self.assertEqual(list(self.huey.following), [])
+        # The other direction is untouched.
+        self.assertEqual([m.name for m in self.mickey.following], ['zaizee'])

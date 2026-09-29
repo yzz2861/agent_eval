@@ -6828,28 +6828,51 @@ class MetaField(Field):
     primary_key = False
 
 
+def _m2m_through_fks(field):
+    # Resolve the (source, destination) foreign-keys on the through model for
+    # a many-to-many field. For a self-referential relation both sides point
+    # at the same model, so declaration order determines the direction: the
+    # first foreign-key is the source side (the second, the destination),
+    # swapped for the automatically-created backref field.
+    through_model = field.through_model
+    src_fks = through_model._meta.model_refs[field.model]
+    dest_fks = through_model._meta.model_refs[field.rel_model]
+    if src_fks is dest_fks and len(src_fks) > 1:
+        src_fk, dest_fk = src_fks[0], src_fks[1]
+        if field._is_backref:
+            src_fk, dest_fk = dest_fk, src_fk
+        return src_fk, dest_fk
+    src_fk = src_fks[0] if src_fks else None
+    dest_fk = dest_fks[0] if dest_fks else None
+    return src_fk, dest_fk
+
+
 class ManyToManyFieldAccessor(FieldAccessor):
     def __init__(self, model, field, name):
         super(ManyToManyFieldAccessor, self).__init__(model, field, name)
         self.model = field.model
         self.rel_model = field.rel_model
         self.through_model = field.through_model
-        src_fks = self.through_model._meta.model_refs[self.model]
-        dest_fks = self.through_model._meta.model_refs[self.rel_model]
-        if not src_fks:
+        self.src_fk, self.dest_fk = _m2m_through_fks(field)
+        if self.src_fk is None:
             raise ValueError('Cannot find foreign-key to "%s" on "%s" model.' %
                              (self.model, self.through_model))
-        elif not dest_fks:
+        elif self.dest_fk is None:
             raise ValueError('Cannot find foreign-key to "%s" on "%s" model.' %
                              (self.rel_model, self.through_model))
-        self.src_fk = src_fks[0]
-        self.dest_fk = dest_fks[0]
 
     def get_query(self, instance):
         src_id = getattr(instance, self.src_fk.rel_field.name)
         if src_id is None and self.field._prevent_unsaved:
             raise ValueError('Cannot access many-to-many "%s" on unsaved '
                              'instance "%s".' % (self.field, instance))
+        if self.model is self.rel_model:
+            # Self-referential: name the join condition explicitly and skip
+            # the redundant join back to the source model.
+            return (ManyToManyQuery(instance, self, self.rel_model)
+                    .join(self.through_model,
+                          on=(self.dest_fk == self.dest_fk.rel_field))
+                    .where(self.src_fk == src_id))
         return (ManyToManyQuery(instance, self, self.rel_model)
                 .join(self.through_model)
                 .join(self.model)
@@ -6857,6 +6880,9 @@ class ManyToManyFieldAccessor(FieldAccessor):
 
     def __get__(self, instance, instance_type=None):
         if instance is not None:
+            # A preloaded list (e.g. via Load()) is returned as-is.
+            if self.name in instance.__rel__:
+                return instance.__rel__[self.name]
             if self.src_fk.backref not in ('+', '!'):
                 backref = getattr(instance, self.src_fk.backref)
                 if isinstance(backref, list):
@@ -6865,6 +6891,9 @@ class ManyToManyFieldAccessor(FieldAccessor):
         return self.field
 
     def __set__(self, instance, value):
+        instance.__rel__.pop(self.name, None)
+        if self.src_fk.backref not in ('+', '!'):
+            instance.__dict__.pop(self.src_fk.backref, None)
         self.get_query(instance).add(value, clear_existing=True)
 
 
@@ -8911,6 +8940,13 @@ class ManyToManyQuery(ModelSelect):
         self._dest_attr = accessor.dest_fk.rel_field.name
         super(ManyToManyQuery, self).__init__(rel, (rel,), *args, **kwargs)
 
+    def _invalidate(self):
+        # Drop any preloaded relation data so a later access re-queries.
+        accessor = self._accessor
+        self._instance.__rel__.pop(accessor.name, None)
+        if accessor.src_fk.backref not in ('+', '!'):
+            self._instance.__dict__.pop(accessor.src_fk.backref, None)
+
     def _id_list(self, model_or_id_list):
         if isinstance(model_or_id_list[0], Model):
             return [getattr(obj, self._dest_attr) for obj in model_or_id_list]
@@ -8919,6 +8955,7 @@ class ManyToManyQuery(ModelSelect):
     def add(self, value, clear_existing=False):
         if clear_existing:
             self.clear()
+        self._invalidate()
 
         accessor = self._accessor
         src_id = getattr(self._instance, self._src_attr)
@@ -8941,6 +8978,7 @@ class ManyToManyQuery(ModelSelect):
 
     def remove(self, value):
         src_id = getattr(self._instance, self._src_attr)
+        self._invalidate()
         if isinstance(value, SelectQuery):
             column = getattr(value.model, self._dest_attr)
             subquery = value.columns(column)
@@ -8963,6 +9001,7 @@ class ManyToManyQuery(ModelSelect):
 
     def clear(self):
         src_id = getattr(self._instance, self._src_attr)
+        self._invalidate()
         return (self._accessor.through_model
                 .delete()
                 .where(self._accessor.src_fk == src_id)
@@ -9526,8 +9565,14 @@ class Load(Node):
     def __init__(self, rel, query=None, strategy=PREFETCH_TYPE.WHERE,
                  per_parent=None):
         self._field, self._is_backref = self._resolve(rel)
-        rel_model = (self._field.model if self._is_backref
-                     else self._field.rel_model)
+        self._is_m2m = isinstance(self._field, ManyToManyField)
+        if self._is_m2m:
+            # The relation query selects from the through model.
+            rel_model = self._field.through_model
+        elif self._is_backref:
+            rel_model = self._field.model
+        else:
+            rel_model = self._field.rel_model
         if query is not None and query.model is not rel_model:
             raise ValueError('Load() query must select from %s, got %s.' %
                              (rel_model, query.model))
@@ -9536,6 +9581,9 @@ class Load(Node):
                              'dicts/tuples/namedtuples.')
         if strategy not in PREFETCH_TYPE.values():
             raise ValueError('Load() strategy must be a PREFETCH_TYPE value.')
+        if per_parent is not None and self._is_m2m:
+            raise ValueError('per_parent is not supported for many-to-many '
+                             'relations.')
         self._query = query
         self._strategy = strategy
         self._per_parent = per_parent
@@ -9549,8 +9597,10 @@ class Load(Node):
             return rel.field, True
         elif isinstance(rel, ForeignKeyField):
             return rel, False
-        raise ValueError('Load() expects a foreign-key or backref reference, '
-                         'got %r.' % rel)
+        elif isinstance(rel, ManyToManyField):
+            return rel, None
+        raise ValueError('Load() expects a foreign-key, backref or '
+                         'many-to-many reference, got %r.' % rel)
 
     @Node.copy
     def then(self, *children):
@@ -9594,6 +9644,8 @@ class Load(Node):
                        self._strategy)
 
     def _run(self, parents, parent_query, depth=0, database=None):
+        if self._is_m2m:
+            return self._run_m2m(parents, parent_query, depth, database)
         field = self._field
         if self._is_backref:
             if self._per_parent is not None:
@@ -9608,6 +9660,97 @@ class Load(Node):
         children = list(child_query.execute(database))
         _bucket(field, self._is_backref, children, parents)
         return children, child_query
+
+    def _m2m_base(self, through_model, rel_model, dest_fk):
+        # The relation query selects the through rows. The default query also
+        # joins the target so both sides hydrate from a single query. The
+        # join condition is named explicitly to support self-referential
+        # relations and custom primary-keys.
+        if self._query is None:
+            return (through_model
+                    .select(through_model, rel_model)
+                    .join(rel_model, on=(dest_fk == dest_fk.rel_field)))
+        return self._query
+
+    def _link_m2m(self, query, parent_query, parents, src_fk):
+        if self._strategy == PREFETCH_TYPE.MATERIALIZE:
+            keys = self._distinct(parents,
+                                  lambda p: getattr(p, src_fk.rel_field.name))
+            return query.where(src_fk << keys)
+        pk = getattr(parent_query.model, src_fk.rel_field.name)
+        return _relate(query, parent_query, [(src_fk, pk)], self._strategy)
+
+    def _run_m2m(self, parents, parent_query, depth=0, database=None):
+        field = self._field
+        through_model = field.through_model
+        rel_model = field.rel_model
+        src_fk, dest_fk = _m2m_through_fks(field)
+        query = self._m2m_base(through_model, rel_model, dest_fk)
+        query = self._link_m2m(query, parent_query, parents, src_fk)
+        through_rows = list(query.execute(database))
+        children = self._distribute_m2m(field, rel_model, src_fk, dest_fk,
+                                        through_rows, parents, database)
+        # Nested loads hang off the deduplicated target instances. Restrict a
+        # child subquery to the targets actually loaded.
+        keys = [target.__data__[dest_fk.rel_field.name] for target in children]
+        child_query = rel_model.select().where(dest_fk.rel_field << keys)
+        return children, child_query
+
+    def _distribute_m2m(self, field, rel_model, src_fk, dest_fk,
+                        through_rows, parents, database):
+        rel_field = dest_fk.rel_field
+        # Deduplicate targets by their referenced key, so a target related to
+        # multiple parents (or by duplicate edges) is one shared instance.
+        target_map = {}
+        for row in through_rows:
+            target = row.__rel__.get(dest_fk.name)
+            if target is not None:
+                target_map.setdefault(row.__data__[dest_fk.name], target)
+        # A relation query that did not join the target leaves the foreign
+        # key uncached. Fetch the missing targets in a single query.
+        missing = []
+        seen = set()
+        for row in through_rows:
+            value = row.__data__[dest_fk.name]
+            if (value is not None and value not in target_map
+                    and value not in seen):
+                seen.add(value)
+                missing.append(value)
+        if missing:
+            query = rel_model.select().where(rel_field << missing)
+            for target in query.execute(database):
+                target_map[target.__data__[rel_field.name]] = target
+
+        buckets = {}
+        for row in through_rows:
+            target = target_map.get(row.__data__[dest_fk.name])
+            if target is not None:
+                row.__rel__[dest_fk.name] = target
+            buckets.setdefault(row.__data__[src_fk.name], []).append(row)
+
+        children = []
+        seen = set()
+        use_backref = src_fk.backref not in ('+', '!')
+        for parent in parents:
+            key = parent.__data__[src_fk.rel_field.name]
+            rel = buckets.get(key, [])
+            targets = []
+            for row in rel:
+                row.__rel__[src_fk.name] = parent
+                target = row.__rel__.get(dest_fk.name)
+                if target is None:
+                    continue
+                # Duplicate edges keep their own through row and appear once
+                # per edge in the parent's target list.
+                targets.append(target)
+                tkey = row.__data__[dest_fk.name]
+                if tkey not in seen:
+                    seen.add(tkey)
+                    children.append(target)
+            if use_backref:
+                setattr(parent, src_fk.backref, rel)
+            parent.__rel__[field.name] = targets
+        return children
 
     @staticmethod
     def _rank_term(term, pks, field):

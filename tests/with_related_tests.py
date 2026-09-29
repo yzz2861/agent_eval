@@ -1326,3 +1326,312 @@ class TestWithRelatedNonPKFK(ModelTestCase):
                 ('a', '101'), ('a', '104'),
                 ('b', '101'), ('b', '104'),
                 ('c', '104')])
+
+
+# M2M binding installs accessors on the related models at import, so these
+# are module-local rather than shared base_models.
+PostCategoryDeferred = DeferredThroughModel()
+
+
+class Category(TestModel):
+    name = TextField()
+
+
+class Post(TestModel):
+    title = TextField()
+    categories = ManyToManyField(Category, through_model=PostCategoryDeferred,
+                                 backref='posts')
+
+
+class PostCategory(TestModel):
+    post = ForeignKeyField(Post, backref='category_links')
+    category = ForeignKeyField(Category, backref='post_links')
+    role = CharField(max_length=32, default='')
+    position = IntegerField(default=0)
+
+
+PostCategoryDeferred.set_model(PostCategory)
+
+
+FollowDeferred = DeferredThroughModel()
+
+
+class Contact(TestModel):
+    name = TextField()
+
+
+# A self-referential m2m must be attached after the model exists.
+Contact._meta.add_field('following', ManyToManyField(
+    Contact, through_model=FollowDeferred, backref='followers'))
+
+
+class Follow(TestModel):
+    from_contact = ForeignKeyField(Contact, backref='following_links')
+    to_contact = ForeignKeyField(Contact, backref='follower_links')
+    kind = CharField(max_length=32, default='')
+
+
+FollowDeferred.set_model(Follow)
+
+
+MachineServiceDeferred = DeferredThroughModel()
+
+
+class Machine(TestModel):
+    hostname = CharField(max_length=64, primary_key=True)
+
+
+class Service(TestModel):
+    title = TextField()
+    machines = ManyToManyField(Machine, through_model=MachineServiceDeferred,
+                               backref='services')
+
+
+class MachineService(TestModel):
+    service = ForeignKeyField(Service, backref='machine_links')
+    machine = ForeignKeyField(Machine, backref='service_links')
+    port = IntegerField(default=0)
+
+
+MachineServiceDeferred.set_model(MachineService)
+
+
+class TestWithRelatedManyToMany(ModelTestCase):
+    requires = [Post, Category, PostCategory]
+
+    def setUp(self):
+        super(TestWithRelatedManyToMany, self).setUp()
+        self.p1 = Post.create(title='p1')
+        self.p2 = Post.create(title='p2')
+        self.p3 = Post.create(title='p3')
+        self.c1 = Category.create(name='c1')
+        self.c2 = Category.create(name='c2')
+        PostCategory.create(post=self.p1, category=self.c1,
+                            role='primary', position=2)
+        PostCategory.create(post=self.p1, category=self.c2,
+                            role='extra', position=1)
+        PostCategory.create(post=self.p2, category=self.c1,
+                            role='shared', position=1)
+        # A duplicate edge: same (post, category) pair, distinct row.
+        PostCategory.create(post=self.p2, category=self.c1,
+                            role='dupe', position=3)
+
+    def _posts(self, *loads):
+        return (Post.select()
+                .order_by(Post.title)
+                .with_related(*loads))
+
+    def test_targets_and_through_rows(self):
+        for pt in PREFETCH_TYPE.values():
+            load = Load(Post.categories, strategy=pt)
+            with self.assertQueryCount(2):
+                posts = list(self._posts(load))
+                got = [(p.title,
+                        [c.name for c in p.categories],
+                        [(l.role, l.position) for l in p.category_links])
+                       for p in posts]
+            self.assertEqual(got, [
+                ('p1', ['c1', 'c2'], [('primary', 2), ('extra', 1)]),
+                ('p2', ['c1', 'c1'], [('shared', 1), ('dupe', 3)]),
+                ('p3', [], [])])
+
+    def test_no_queries_after_load(self):
+        posts = list(self._posts(Load(Post.categories)))
+        with self.assertQueryCount(0):
+            for post in posts:
+                for category in post.categories:
+                    category.name
+                for link in post.category_links:
+                    # Both sides of the through row are cached.
+                    link.category.name
+                    link.post.title
+
+    def test_target_shared_through_rows_are_not(self):
+        posts = list(self._posts(Load(Post.categories)))
+        p1, p2, _ = posts
+        # The same target row is one shared instance across parents.
+        self.assertIs(p1.categories[0], p2.categories[0])
+        self.assertIs(p1.categories[0], p1.category_links[0].category)
+        # Each edge keeps its own through row and its own attributes.
+        self.assertIsNot(p1.category_links[0], p2.category_links[0])
+        self.assertEqual(p1.category_links[0].role, 'primary')
+        self.assertEqual(p2.category_links[0].role, 'shared')
+        self.assertIs(p1.category_links[0].post, p1)
+
+    def test_duplicate_edges_preserved(self):
+        posts = list(self._posts(Load(Post.categories)))
+        p2 = posts[1]
+        self.assertEqual(len(p2.category_links), 2)
+        self.assertEqual([c.name for c in p2.categories], ['c1', 'c1'])
+        self.assertIs(p2.categories[0], p2.categories[1])
+        self.assertEqual(sorted(l.role for l in p2.category_links),
+                         ['dupe', 'shared'])
+
+    def test_through_query_filter_and_order(self):
+        # A relation query on the through model keeps its filtering and
+        # ordering. The targets are fetched in one additional query.
+        links = (PostCategory
+                 .select()
+                 .where(PostCategory.role != 'dupe')
+                 .order_by(PostCategory.position.desc()))
+        with self.assertQueryCount(3):
+            posts = list(self._posts(Load(Post.categories, links)))
+            got = [(p.title,
+                    [c.name for c in p.categories],
+                    [(l.role, l.category.name) for l in p.category_links])
+                   for p in posts]
+        self.assertEqual(got, [
+            ('p1', ['c1', 'c2'], [('primary', 'c1'), ('extra', 'c2')]),
+            ('p2', ['c1'], [('shared', 'c1')]),
+            ('p3', [], [])])
+
+    def test_through_query_joining_target(self):
+        # When the relation query already joins and selects the target, no
+        # additional query is needed to hydrate it.
+        links = (PostCategory
+                 .select(PostCategory, Category)
+                 .join(Category)
+                 .order_by(Category.name.desc()))
+        with self.assertQueryCount(2):
+            posts = list(self._posts(Load(Post.categories, links)))
+            got = [[c.name for c in p.categories] for p in posts]
+        self.assertEqual(got, [['c2', 'c1'], ['c1', 'c1'], []])
+
+    def test_backref_many_to_many(self):
+        with self.assertQueryCount(2):
+            categories = list(Category.select()
+                              .order_by(Category.name)
+                              .with_related(Load(Category.posts)))
+            got = [(c.name, [p.title for p in c.posts],
+                    [l.role for l in c.post_links])
+                   for c in categories]
+        self.assertEqual(got, [
+            ('c1', ['p1', 'p2', 'p2'], ['primary', 'shared', 'dupe']),
+            ('c2', ['p1'], ['extra'])])
+
+    def test_query_count_independent_of_relation_count(self):
+        # Add many more relations: the load is still two queries.
+        for i in range(20):
+            PostCategory.create(post=self.p3, category=self.c1,
+                                role='r%d' % i, position=i)
+        with self.assertQueryCount(2):
+            posts = list(self._posts(Load(Post.categories)))
+            self.assertEqual(len(posts[2].category_links), 20)
+            self.assertEqual(len(posts[2].categories), 20)
+
+    def test_then_nests_off_targets(self):
+        load = Load(Post.categories).then(Load(Category.post_links))
+        with self.assertQueryCount(3):
+            posts = list(self._posts(load))
+            got = {p.title: {c.name: len(c.post_links)
+                             for c in p.categories}
+                   for p in posts}
+        self.assertEqual(got, {
+            'p1': {'c1': 3, 'c2': 1},
+            'p2': {'c1': 3},
+            'p3': {}})
+
+    def test_set_replaces_preloaded_data(self):
+        posts = list(self._posts(Load(Post.categories)))
+        p1 = posts[0]
+        p1.categories = [self.c2]
+        with self.assertQueryCount(1):
+            self.assertEqual([c.name for c in p1.categories], ['c2'])
+
+    def test_load_validation(self):
+        self.assertRaises(ValueError, Load, Post.categories,
+                          Category.select())
+        self.assertRaises(ValueError, Load, Post.categories, None,
+                          PREFETCH_TYPE.WHERE, 2)
+
+
+class TestWithRelatedManyToManySelfRef(ModelTestCase):
+    requires = [Contact, Follow]
+
+    def setUp(self):
+        super(TestWithRelatedManyToManySelfRef, self).setUp()
+        self.c1 = Contact.create(name='c1')
+        self.c2 = Contact.create(name='c2')
+        self.c3 = Contact.create(name='c3')
+        Follow.create(from_contact=self.c1, to_contact=self.c2, kind='friend')
+        Follow.create(from_contact=self.c1, to_contact=self.c3, kind='bot')
+        Follow.create(from_contact=self.c2, to_contact=self.c3, kind='friend')
+
+    def test_self_referential_load(self):
+        for pt in PREFETCH_TYPE.values():
+            load = Load(Contact.following, strategy=pt)
+            with self.assertQueryCount(2):
+                contacts = list(Contact.select()
+                                .order_by(Contact.name)
+                                .with_related(load))
+                got = [(c.name,
+                        [f.name for f in c.following],
+                        [l.kind for l in c.following_links])
+                       for c in contacts]
+            self.assertEqual(got, [
+                ('c1', ['c2', 'c3'], ['friend', 'bot']),
+                ('c2', ['c3'], ['friend']),
+                ('c3', [], [])])
+
+    def test_self_referential_backref_load(self):
+        with self.assertQueryCount(2):
+            contacts = list(Contact.select()
+                            .order_by(Contact.name)
+                            .with_related(Load(Contact.followers)))
+            got = [(c.name, [f.name for f in c.followers],
+                    [l.kind for l in c.follower_links])
+                   for c in contacts]
+        self.assertEqual(got, [
+            ('c1', [], []),
+            ('c2', ['c1'], ['friend']),
+            ('c3', ['c1', 'c2'], ['bot', 'friend'])])
+
+    def test_self_referential_shared_target(self):
+        contacts = list(Contact.select()
+                        .order_by(Contact.name)
+                        .with_related(Load(Contact.followers)))
+        c1_from_c2 = contacts[1].followers[0]
+        c1_from_c3 = contacts[2].followers[0]
+        self.assertIs(c1_from_c2, c1_from_c3)
+        self.assertIsNot(contacts[1].follower_links[0],
+                         contacts[2].follower_links[0])
+
+
+class TestWithRelatedManyToManyCustomPK(ModelTestCase):
+    requires = [Machine, Service, MachineService]
+
+    def setUp(self):
+        super(TestWithRelatedManyToManyCustomPK, self).setUp()
+        self.m1 = Machine.create(hostname='alpha')
+        self.m2 = Machine.create(hostname='beta')
+        self.s1 = Service.create(title='web')
+        self.s2 = Service.create(title='worker')
+        MachineService.create(service=self.s1, machine=self.m1, port=80)
+        MachineService.create(service=self.s1, machine=self.m2, port=8080)
+        MachineService.create(service=self.s2, machine=self.m1, port=9000)
+
+    def test_custom_primary_key(self):
+        for pt in PREFETCH_TYPE.values():
+            load = Load(Service.machines, strategy=pt)
+            with self.assertQueryCount(2):
+                services = list(Service.select()
+                                .order_by(Service.title)
+                                .with_related(load))
+                got = [(s.title,
+                        [m.hostname for m in s.machines],
+                        [(l.port, l.machine.hostname) for l in s.machine_links])
+                       for s in services]
+            self.assertEqual(got, [
+                ('web', ['alpha', 'beta'], [(80, 'alpha'), (8080, 'beta')]),
+                ('worker', ['alpha'], [(9000, 'alpha')])])
+
+    def test_custom_primary_key_backref(self):
+        with self.assertQueryCount(2):
+            machines = list(Machine.select()
+                            .order_by(Machine.hostname)
+                            .with_related(Load(Machine.services)))
+            got = [(m.hostname, [s.title for s in m.services])
+                   for m in machines]
+        self.assertEqual(got, [
+            ('alpha', ['web', 'worker']),
+            ('beta', ['web'])])
