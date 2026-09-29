@@ -39,6 +39,7 @@ from falcon.util.misc import http_status_to_code
 from falcon.util.misc import is_python_func
 from falcon.util.misc import secure_filename
 from falcon.util.misc import to_query_str
+from falcon.util.projection import FieldSelector
 from falcon.util.structures import CaseInsensitiveDict
 from falcon.util.structures import Context
 from falcon.util.structures import ETag
@@ -63,6 +64,7 @@ __all__ = (
     'DeprecatedWarning',
     'dt_to_http',
     'ETag',
+    'FieldSelector',
     'get_argnames',
     'get_bound_method',
     'get_running_loop',

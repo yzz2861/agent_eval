@@ -73,6 +73,14 @@ These functions help traverse the barrier between sync and async code.
 .. autofunction:: falcon.async_to_sync
 .. autofunction:: falcon.runs_sync
 
+.. _field_projection:
+
+Field Projection
+----------------
+
+.. autoclass:: falcon.FieldSelector
+    :members:
+
 Other
 -----
 

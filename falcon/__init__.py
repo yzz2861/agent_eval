@@ -77,6 +77,7 @@ __all__ = (
     'deprecated',
     'dt_to_http',
     'ETag',
+    'FieldSelector',
     'get_argnames',
     'get_bound_method',
     'get_running_loop',
@@ -617,6 +618,7 @@ from falcon.util import create_task
 from falcon.util import deprecated
 from falcon.util import dt_to_http
 from falcon.util import ETag
+from falcon.util import FieldSelector
 from falcon.util import get_argnames
 from falcon.util import get_bound_method
 from falcon.util import get_running_loop
