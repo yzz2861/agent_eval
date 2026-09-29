@@ -229,6 +229,26 @@ API Reference
 
 .. autoclass:: EventRenamer
 
+.. autoclass:: PathRedactor
+
+   .. doctest::
+
+      >>> from structlog.processors import PathRedactor
+      >>> redactor = PathRedactor(rules=[
+      ...     PathRedactor.replace("password"),
+      ...     PathRedactor.transform(
+      ...         ("users", PathRedactor.ANY, "ip"),
+      ...         lambda ip: ip.rpartition(".")[0] + ".0",
+      ...     ),
+      ...     PathRedactor.delete(("credentials",)),
+      ... ])
+      >>> redactor(None, "", {
+      ...     "password": "hunter2",
+      ...     "users": [{"name": "alice", "ip": "192.168.1.7"}],
+      ...     "credentials": {"token": "secret"},
+      ... })
+      {'password': '***', 'users': [{'name': 'alice', 'ip': '192.168.1.0'}]}
+
 .. autofunction:: add_log_level
 
 .. autoclass:: UnicodeDecoder

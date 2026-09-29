@@ -56,6 +56,7 @@ __all__ = [
     "JSONRenderer",
     "KeyValueRenderer",
     "LogfmtRenderer",
+    "PathRedactor",
     "StackInfoRenderer",
     "TimeStamper",
     "UnicodeDecoder",
@@ -1003,3 +1004,422 @@ class EventRenamer:
                 event_dict["event"] = replace_by
 
         return event_dict
+
+
+class _AnySegment:
+    """
+    Sentinel type for :data:`PathRedactor.ANY`.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "PathRedactor.ANY"
+
+
+class _Deleted:
+    """
+    Sentinel for values that a :class:`PathRedactor` rule deletes.
+    """
+
+    __slots__ = ()
+
+
+_DELETED: Final = _Deleted()
+
+
+class _RedactionRule(NamedTuple):
+    """
+    A single redaction rule for :class:`PathRedactor`.
+
+    Created via :meth:`PathRedactor.replace`,
+    :meth:`PathRedactor.delete`, or
+    :meth:`PathRedactor.transform`.
+    """
+
+    #: Full path to match, or None if this is a field-name rule.
+    path: tuple[Any, ...] | None
+    #: Field (dict key) name to match at any depth, or None for path rules.
+    field: str | None
+    #: One of "replace", "delete", or "transform".
+    action: str
+    #: Replacement value for "replace", callable for "transform".
+    value: Any
+
+
+class PathRedactor:
+    r"""
+    Redact sensitive data anywhere in an event dict using path rules.
+
+    Rules can target:
+
+    - **Exact paths**: a tuple of dict keys and/or list indices, for example
+      ``("users", 0, "password")``.
+    - **Wildcard paths**: use :data:`PathRedactor.ANY` as a path
+      segment to match any single key or index, for example
+      ``("users", PathRedactor.ANY, "password")`` redacts
+      the password of every list item.
+    - **Field names**: a plain string matches *every* dict key with that name
+      at any depth -- including dicts nested in lists, or ``locals``
+      dicts of exceptions rendered by :class:`ExceptionRenderer` /
+      :func:`dict_tracebacks`.
+
+    Each rule applies one of three actions:
+
+    - **replace**: substitute the matched value with a constant (default
+      ``"***"``).
+    - **delete**: remove the matched key (or list item) entirely.
+    - **transform**: call a function with the matched value and use its
+      return value instead. The return value is used as-is and is *not*
+      traversed further.
+
+    Rule priority is fixed: exact path rules beat wildcard path rules, which
+    beat field-name rules. Within the same tier, the rule declared first
+    wins.
+
+    The original objects passed by your code are **never** mutated; redaction
+    works on copies. Shared sub-objects stay shared in the result and
+    circular references are replaced by *circular_marker* instead of
+    recursing forever.
+
+    If *max_depth* or *max_nodes* is exhausted, the remaining content is
+    replaced by *truncated_marker* -- it never falls back to a full
+    :func:`repr` of the unredacted data.
+
+    Values that are not matched by any rule -- and are not containers -- are
+    passed through unchanged, so regular event fields keep their types.
+
+    Args:
+        rules: An iterable of rules created by :meth:`replace`,
+            :meth:`delete`, or :meth:`transform`.
+
+        max_depth:
+            Maximum nesting depth that is traversed. Deeper containers are
+            replaced by *truncated_marker*. None disables the limit.
+
+        max_nodes:
+            Maximum number of nodes (containers and values) that are visited.
+            Everything beyond the budget is replaced by *truncated_marker*.
+            None disables the limit.
+
+        truncated_marker:
+            Value used when *max_depth* or *max_nodes* is exhausted.
+
+        circular_marker: Value used in place of circular references.
+
+    .. versionadded:: 26.2.0
+
+    .. doctest::
+
+        >>> from structlog.processors import PathRedactor
+        >>> redactor = PathRedactor(rules=[
+        ...     PathRedactor.replace("password"),
+        ...     PathRedactor.delete(("credentials",)),
+        ... ])
+        >>> redactor(None, "", {
+        ...     "user": {"name": "alice", "password": "hunter2"},
+        ...     "credentials": {"token": "secret"},
+        ...     "attempts": 3,
+        ... })
+        {'user': {'name': 'alice', 'password': '***'}, 'attempts': 3}
+    """
+
+    #: Wildcard path segment that matches any single dict key or list index.
+    ANY: ClassVar[Any] = _AnySegment()
+
+    def __init__(
+        self,
+        rules: Collection[_RedactionRule],
+        *,
+        max_depth: int | None = 32,
+        max_nodes: int | None = 4096,
+        truncated_marker: Any = "<truncated>",
+        circular_marker: Any = "<circular reference>",
+    ) -> None:
+        exact: dict[tuple[Any, ...], _RedactionRule] = {}
+        wildcard: list[_RedactionRule] = []
+        fields: dict[str, _RedactionRule] = {}
+
+        for rule in rules:
+            if not isinstance(rule, _RedactionRule):
+                msg = (
+                    "rules must be created using PathRedactor.replace(), "
+                    "PathRedactor.delete(), or PathRedactor.transform(); "
+                    f"got {rule!r}"
+                )
+                raise TypeError(msg)
+
+            if rule.path is None:
+                fields.setdefault(cast("str", rule.field), rule)
+            elif any(segment is self.ANY for segment in rule.path):
+                wildcard.append(rule)
+            else:
+                exact.setdefault(rule.path, rule)
+
+        self._exact = exact
+        self._wildcard = tuple(wildcard)
+        self._fields = fields
+        self._max_depth = max_depth
+        self._max_nodes = max_nodes
+        self._truncated_marker = truncated_marker
+        self._circular_marker = circular_marker
+
+    @staticmethod
+    def _make_rule(
+        target: str | tuple[Any, ...], action: str, value: Any
+    ) -> _RedactionRule:
+        if isinstance(target, str):
+            return _RedactionRule(None, target, action, value)
+
+        if isinstance(target, tuple):
+            if not target:
+                msg = "path rules must not be empty"
+                raise ValueError(msg)
+
+            for segment in target:
+                if (
+                    not isinstance(segment, (str, int))
+                    and segment is not PathRedactor.ANY
+                ):
+                    msg = (
+                        "path segments must be strings, integers, or "
+                        f"PathRedactor.ANY; got {segment!r}"
+                    )
+                    raise TypeError(msg)
+
+            return _RedactionRule(target, None, action, value)
+
+        msg = (
+            "rule target must be a field name (str) or a path (tuple); "
+            f"got {target!r}"
+        )
+        raise TypeError(msg)
+
+    @classmethod
+    def replace(
+        cls, target: str | tuple[Any, ...], with_: Any = "***"
+    ) -> _RedactionRule:
+        """
+        Replace the value at *target* with *with_* (default: ``"***"``).
+        """
+        return cls._make_rule(target, "replace", with_)
+
+    @classmethod
+    def delete(cls, target: str | tuple[Any, ...]) -> _RedactionRule:
+        """
+        Remove the key or list item at *target* entirely.
+        """
+        return cls._make_rule(target, "delete", None)
+
+    @classmethod
+    def transform(
+        cls,
+        target: str | tuple[Any, ...],
+        func: Callable[[Any], Any],
+    ) -> _RedactionRule:
+        """
+        Replace the value at *target* with the result of calling *func* on
+        it. The result is used as-is and is not traversed further.
+        """
+        return cls._make_rule(target, "transform", func)
+
+    def __call__(
+        self, logger: WrappedLogger, name: str, event_dict: EventDict
+    ) -> EventDict:
+        budget = None if self._max_nodes is None else [self._max_nodes]
+        result = self._walk(event_dict, (), None, 0, {}, set(), budget)
+
+        # The root can never be deleted: no rule matches the empty path.
+        return cast("EventDict", result)
+
+    def _match(
+        self, path: tuple[Any, ...], field: Any
+    ) -> _RedactionRule | None:
+        rule = self._exact.get(path)
+        if rule is not None:
+            return rule
+
+        for rule in self._wildcard:
+            if len(rule.path) == len(path) and all(
+                segment is self.ANY or segment == actual
+                for segment, actual in zip(rule.path, path, strict=True)
+            ):
+                return rule
+
+        if field is not None:
+            return self._fields.get(field)
+
+        return None
+
+    def _walk(
+        self,
+        value: Any,
+        path: tuple[Any, ...],
+        field: Any,
+        depth: int,
+        memo: dict[int, Any],
+        active: set[int],
+        budget: list[int] | None,
+    ) -> Any:
+        rule = self._match(path, field)
+        if rule is not None:
+            return self._apply(rule, value)
+
+        is_container = isinstance(value, (dict, list, tuple, set, frozenset))
+
+        if (budget is not None and budget[0] <= 0) or (
+            is_container
+            and self._max_depth is not None
+            and depth >= self._max_depth
+        ):
+            return self._truncated_marker
+
+        if budget is not None:
+            budget[0] -= 1
+
+        if not is_container:
+            return value
+
+        oid = id(value)
+        if oid in active:
+            return self._circular_marker
+
+        cached = memo.get(oid)
+        if cached is not None:
+            return cached
+
+        handler: Callable[..., Any]
+        if isinstance(value, dict):
+            handler = self._walk_dict
+        elif isinstance(value, list):
+            handler = self._walk_list
+        else:
+            # Tuples and sets are immutable, so they can only be memoized
+            # after rebuilding. The active set still protects against
+            # pathological cycles.
+            handler = self._walk_tuple_or_set
+
+        return handler(value, path, depth, memo, active, budget)
+
+    @staticmethod
+    def _apply(rule: _RedactionRule, value: Any) -> Any:
+        if rule.action == "delete":
+            return _DELETED
+
+        if rule.action == "replace":
+            return rule.value
+
+        return rule.value(value)
+
+    def _walk_dict(
+        self,
+        value: dict[Any, Any],
+        path: tuple[Any, ...],
+        depth: int,
+        memo: dict[int, Any],
+        active: set[int],
+        budget: list[int] | None,
+    ) -> Any:
+        new: Any = {}
+        memo[id(value)] = new
+        active.add(id(value))
+        try:
+            for k, v in value.items():
+                child = self._walk(
+                    v, (*path, k), k, depth + 1, memo, active, budget
+                )
+                if child is not _DELETED:
+                    new[k] = child
+        finally:
+            active.discard(id(value))
+
+        return new
+
+    def _walk_list(
+        self,
+        value: list[Any],
+        path: tuple[Any, ...],
+        depth: int,
+        memo: dict[int, Any],
+        active: set[int],
+        budget: list[int] | None,
+    ) -> Any:
+        new: Any = []
+        memo[id(value)] = new
+        active.add(id(value))
+        try:
+            for i, v in enumerate(value):
+                child = self._walk(
+                    v, (*path, i), None, depth + 1, memo, active, budget
+                )
+                if child is not _DELETED:
+                    new.append(child)
+        finally:
+            active.discard(id(value))
+
+        return new
+
+    def _walk_tuple_or_set(
+        self,
+        value: tuple[Any, ...] | set[Any] | frozenset[Any],
+        path: tuple[Any, ...],
+        depth: int,
+        memo: dict[int, Any],
+        active: set[int],
+        budget: list[int] | None,
+    ) -> Any:
+        oid = id(value)
+        active.add(oid)
+        try:
+            if isinstance(value, tuple):
+                items = [
+                    child
+                    for i, v in enumerate(value)
+                    if (
+                        child := self._walk(
+                            v,
+                            (*path, i),
+                            None,
+                            depth + 1,
+                            memo,
+                            active,
+                            budget,
+                        )
+                    )
+                    is not _DELETED
+                ]
+                new = (
+                    tuple(items)
+                    if type(value) is tuple
+                    else _try_rebuild(type(value), items)
+                )
+            else:
+                items = [
+                    child
+                    for v in value
+                    if (
+                        child := self._walk(
+                            v, path, None, depth + 1, memo, active, budget
+                        )
+                    )
+                    is not _DELETED
+                ]
+                new = type(value)(items)
+        finally:
+            active.discard(oid)
+
+        memo[oid] = new
+
+        return new
+
+
+def _try_rebuild(cls: type, items: list[Any]) -> Any:
+    """
+    Try to rebuild a tuple subclass (e.g. a NamedTuple) from *items*.
+
+    Fall back to a plain tuple if the arity changed (e.g. due to deletion).
+    """
+    try:
+        return cls(*items)
+    except TypeError:
+        return tuple(items)

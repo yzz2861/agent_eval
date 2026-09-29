@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import datetime
 import functools
 import inspect
 import json
@@ -15,6 +16,7 @@ import sys
 import threading
 
 from io import StringIO
+from typing import NamedTuple
 
 import pytest
 
@@ -27,15 +29,18 @@ from structlog.processors import (
     CallsiteParameterAdder,
     EventRenamer,
     ExceptionPrettyPrinter,
+    ExceptionRenderer,
     JSONRenderer,
+    PathRedactor,
     StackInfoRenderer,
     UnicodeDecoder,
     UnicodeEncoder,
     _figure_out_exc_info,
     format_exc_info,
 )
-from structlog.stdlib import ProcessorFormatter
+from structlog.stdlib import ExtraAdder, ProcessorFormatter
 from structlog.testing import CapturingLoggerFactory
+from structlog.tracebacks import ExceptionDictTransformer
 from structlog.typing import EventDict, ExcInfo
 
 from ..additional_frame import additional_frame
@@ -762,3 +767,415 @@ class TestRenameKey:
         assert {"msg": "hi", "foo": "bar"} == EventRenamer("msg", "missing")(
             None, None, {"event": "hi", "foo": "bar"}
         )
+
+
+class TestPathRedactor:
+    def test_replace_exact_path(self):
+        """
+        An exact path rule replaces only the value at that path.
+        """
+        redactor = PathRedactor(
+            [PathRedactor.replace(("user", "password"), with_="[redacted]")]
+        )
+
+        assert {
+            "user": {"name": "alice", "password": "[redacted]"},
+            "password": "untouched",
+        } == redactor(
+            None,
+            "",
+            {
+                "user": {"name": "alice", "password": "hunter2"},
+                "password": "untouched",
+            },
+        )
+
+    def test_replace_by_field_name_anywhere(self):
+        """
+        A field-name rule matches dict keys at any depth, including dicts
+        nested in lists and structures resembling exception locals.
+        """
+        redactor = PathRedactor([PathRedactor.replace("password")])
+        event_dict = {
+            "password": "top",
+            "user": {"password": "nested"},
+            "users": [{"password": "in-list"}],
+            "exception": [
+                {
+                    "exc_type": "ValueError",
+                    "frames": [
+                        {
+                            "filename": "app.py",
+                            "locals": {"password": "in-locals", "x": "1"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+        result = redactor(None, "", event_dict)
+
+        assert "***" == result["password"]
+        assert "***" == result["user"]["password"]
+        assert "***" == result["users"][0]["password"]
+        assert (
+            "***" == result["exception"][0]["frames"][0]["locals"]["password"]
+        )
+        assert "1" == result["exception"][0]["frames"][0]["locals"]["x"]
+
+    def test_wildcard_matches_list_positions(self):
+        """
+        PathRedactor.ANY matches any single path segment, e.g. every index
+        of a list.
+        """
+        redactor = PathRedactor(
+            [
+                PathRedactor.replace(
+                    ("users", PathRedactor.ANY, "token"), with_="X"
+                )
+            ]
+        )
+
+        assert {
+            "users": [{"token": "X"}, {"token": "X"}, {"name": "no-token"}]
+        } == redactor(
+            None,
+            "",
+            {
+                "users": [
+                    {"token": "a"},
+                    {"token": "b"},
+                    {"name": "no-token"},
+                ]
+            },
+        )
+
+    def test_exact_list_index(self):
+        """
+        Integer path segments match list indices.
+        """
+        redactor = PathRedactor([PathRedactor.replace(("items", 1))])
+
+        assert {"items": ["keep", "***", "keep"]} == redactor(
+            None, "", {"items": ["keep", "secret", "keep"]}
+        )
+
+    def test_delete_removes_keys_and_list_items(self):
+        """
+        Delete rules remove dict keys and list items entirely.
+        """
+        redactor = PathRedactor(
+            [
+                PathRedactor.delete(("credentials",)),
+                PathRedactor.delete("session_id"),
+                PathRedactor.delete(("history", 0)),
+            ]
+        )
+
+        assert {
+            "user": {"name": "alice"},
+            "history": ["second"],
+        } == redactor(
+            None,
+            "",
+            {
+                "credentials": {"token": "t"},
+                "user": {"name": "alice", "session_id": "s"},
+                "history": ["first", "second"],
+            },
+        )
+
+    def test_transform_calls_function(self):
+        """
+        Transform rules replace the value with the result of calling the
+        given function on it. The result is not traversed further.
+        """
+        redactor = PathRedactor(
+            [
+                PathRedactor.transform(
+                    "ip", lambda ip: ip.rpartition(".")[0] + ".0"
+                ),
+                PathRedactor.replace("password"),
+            ]
+        )
+
+        result = redactor(
+            None,
+            "",
+            {"ip": "192.168.1.123", "a": {"ip": "10.0.0.7"}},
+        )
+
+        assert {"ip": "192.168.1.0", "a": {"ip": "10.0.0.0"}} == result
+
+        # The transform result is used as-is, not redacted further.
+        redactor = PathRedactor(
+            [
+                PathRedactor.transform("a", lambda v: {"password": "x"}),
+                PathRedactor.replace("password"),
+            ]
+        )
+
+        assert {"a": {"password": "x"}} == redactor(None, "", {"a": 1})
+
+    def test_priority_exact_wildcard_field(self):
+        """
+        Exact path rules beat wildcard path rules, which beat field-name
+        rules, regardless of declaration order.
+        """
+        redactor = PathRedactor(
+            [
+                PathRedactor.replace("secret", with_="field"),
+                PathRedactor.replace(
+                    ("a", PathRedactor.ANY, "secret"), with_="wild"
+                ),
+                PathRedactor.replace(("a", 0, "secret"), with_="exact"),
+            ]
+        )
+
+        assert {
+            "a": [{"secret": "exact"}, {"secret": "wild"}],
+            "secret": "field",
+        } == redactor(
+            None,
+            "",
+            {"a": [{"secret": 1}, {"secret": 2}], "secret": 3},
+        )
+
+    def test_first_rule_wins_within_tier(self):
+        """
+        Within one priority tier, the rule declared first wins.
+        """
+        redactor = PathRedactor(
+            [
+                PathRedactor.replace("x", with_="first"),
+                PathRedactor.delete("x"),
+            ]
+        )
+
+        assert {"x": "first"} == redactor(None, "", {"x": 1})
+
+    def test_does_not_mutate_original(self):
+        """
+        The event dict and all of its nested containers are left untouched.
+        """
+        redactor = PathRedactor(
+            [PathRedactor.replace("password"), PathRedactor.delete("token")]
+        )
+        event_dict = {
+            "user": {"password": "hunter2", "token": "t", "roles": ["a"]},
+            "items": [{"password": "p"}],
+        }
+        snapshot = repr(event_dict)
+
+        redactor(None, "", event_dict)
+
+        assert snapshot == repr(event_dict)
+
+    def test_shared_subobjects_stay_shared(self):
+        """
+        A sub-object referenced multiple times is redacted once and the
+        result keeps the shared reference instead of blowing up.
+        """
+        redactor = PathRedactor([PathRedactor.replace("password")])
+        shared = {"password": "p", "v": 1}
+
+        result = redactor(None, "", {"a": shared, "b": [shared]})
+
+        assert result["a"] is result["b"][0]
+        assert {"password": "***", "v": 1} == result["a"]
+
+    def test_circular_reference(self):
+        """
+        Circular references are replaced by the circular marker instead of
+        recursing forever, and the result stays JSON-serializable.
+        """
+        redactor = PathRedactor([PathRedactor.replace("password")])
+        event_dict = {"password": "p"}
+        event_dict["self"] = event_dict
+        event_dict["list"] = [event_dict]
+
+        result = redactor(None, "", event_dict)
+
+        assert "<circular reference>" == result["self"]
+        assert ["<circular reference>"] == result["list"]
+        assert "***" == result["password"]
+        json.dumps(result)
+
+    def test_max_depth_truncates_without_repr(self):
+        """
+        Containers deeper than max_depth are replaced by the truncation
+        marker; no content (not even a repr) leaks.
+        """
+        redactor = PathRedactor([], max_depth=2)
+
+        result = redactor(
+            None, "", {"a": {"b": {"secret": "leak", "c": {"d": 1}}}}
+        )
+
+        assert {"a": {"b": "<truncated>"}} == result
+        assert "leak" not in json.dumps(result)
+
+    def test_max_nodes_truncates_without_repr(self):
+        """
+        Once the node budget is exhausted, remaining values are replaced by
+        the truncation marker.
+        """
+        redactor = PathRedactor([], max_nodes=4)
+
+        result = redactor(None, "", {"a": 1, "b": 2, "c": 3, "d": "secret"})
+
+        assert "<truncated>" == result["d"]
+        assert "secret" not in json.dumps(result)
+
+    def test_budgets_can_be_disabled(self):
+        """
+        max_depth=None and max_nodes=None disable the limits.
+        """
+        redactor = PathRedactor([], max_depth=None, max_nodes=None)
+        deep = value = {}
+        for _ in range(100):
+            value["next"] = {}
+            value = value["next"]
+
+        result = redactor(None, "", deep)
+        for _ in range(100):
+            result = result["next"]
+
+        assert {} == result
+
+    def test_types_are_preserved(self):
+        """
+        Untouched values keep their types and identity; containers keep
+        their container types.
+        """
+        now = datetime.datetime.now(datetime.timezone.utc)
+        obj = object()
+        redactor = PathRedactor([PathRedactor.replace("password")])
+
+        result = redactor(
+            None,
+            "",
+            {
+                "int": 42,
+                "float": 1.5,
+                "none": None,
+                "dt": now,
+                "obj": obj,
+                "tuple": (1, 2),
+                "list": [1],
+                "dict": {"a": 1},
+            },
+        )
+
+        assert 42 == result["int"]
+        assert isinstance(result["int"], int)
+        assert now is result["dt"]
+        assert obj is result["obj"]
+        assert (1, 2) == result["tuple"]
+        assert isinstance(result["tuple"], tuple)
+        assert isinstance(result["list"], list)
+        assert isinstance(result["dict"], dict)
+
+    def test_namedtuple_preserved(self):
+        """
+        Tuple subclasses are rebuilt as their own type when possible.
+        """
+
+        class Point(NamedTuple):
+            x: int
+            y: int
+
+        redactor = PathRedactor([PathRedactor.replace("password")])
+
+        result = redactor(None, "", {"p": Point(1, 2)})
+
+        assert Point(1, 2) == result["p"]
+        assert isinstance(result["p"], Point)
+
+    def test_invalid_rules(self):
+        """
+        Nonsensical rules are rejected eagerly.
+        """
+        with pytest.raises(TypeError):
+            PathRedactor([("not", "a", "rule")])
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            PathRedactor.replace(())
+
+        with pytest.raises(TypeError, match="field name"):
+            PathRedactor.replace(42)
+
+        with pytest.raises(TypeError, match="path segments"):
+            PathRedactor.replace(("a", 1.5))
+
+    def test_exception_locals_redacted(self):
+        """
+        Secrets in structured exception locals (as produced by
+        ExceptionRenderer with show_locals) are redacted by field-name
+        rules.
+        """
+        renderer = ExceptionRenderer(
+            ExceptionDictTransformer(show_locals=True)
+        )
+
+        try:
+            password = "hunter2"  # noqa: F841
+            1 / 0
+        except ZeroDivisionError:
+            event_dict = renderer(None, "", {"exc_info": sys.exc_info()})
+
+        redactor = PathRedactor([PathRedactor.replace("password")])
+        result = redactor(None, "", event_dict)
+
+        frame_locals = result["exception"][0]["frames"][-1]["locals"]
+        assert "***" == frame_locals["password"]
+        # The original structured exception is untouched.
+        assert (
+            "hunter2"
+            in event_dict["exception"][0]["frames"][-1]["locals"]["password"]
+        )
+
+    def test_json_renderer_and_stdlib_bridge_agree(self):
+        """
+        The same redaction result is produced whether the event is rendered
+        directly by JSONRenderer or routed through the stdlib bridge
+        (ProcessorFormatter).
+        """
+        redactor = PathRedactor(
+            [
+                PathRedactor.replace("password"),
+                PathRedactor.delete(("credentials",)),
+            ]
+        )
+        data = {
+            "user": {"name": "alice", "password": "hunter2"},
+            "credentials": {"token": "t"},
+            "attempts": 3,
+        }
+
+        native = JSONRenderer(sort_keys=True)(
+            None, "", redactor(None, "", {"event": "login", **data})
+        )
+
+        stream = StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(
+            ProcessorFormatter(
+                foreign_pre_chain=[ExtraAdder()],
+                processors=[
+                    redactor,
+                    ProcessorFormatter.remove_processors_meta,
+                    JSONRenderer(sort_keys=True),
+                ],
+            )
+        )
+        stdlib_logger = logging.getLogger("test_path_redactor_bridge")
+        stdlib_logger.addHandler(handler)
+        stdlib_logger.setLevel(logging.INFO)
+        stdlib_logger.propagate = False
+        try:
+            stdlib_logger.info("login", extra=data)
+        finally:
+            stdlib_logger.removeHandler(handler)
+
+        assert json.loads(native) == json.loads(stream.getvalue())
