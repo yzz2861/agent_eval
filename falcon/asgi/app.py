@@ -32,6 +32,7 @@ from typing import (
 import warnings
 
 from falcon import constants
+from falcon import negotiation
 from falcon import responders
 from falcon import routing
 from falcon._typing import _AReqT as _ReqT
@@ -519,6 +520,7 @@ class App(falcon.app.App[_ReqT, _RespT]):
         resp = self._response_type(options=self.resp_options)
 
         resource: Resource | None = None
+        responder: AsgiResponderCallable | None = None
         params: dict[str, Any] = {}
 
         dependent_mw_resp_stack: list[Any] = []
@@ -558,7 +560,6 @@ class App(falcon.app.App[_ReqT, _RespT]):
                 # next-hop child resource. In that case, the object
                 # being asked to dispatch to its child will raise an
                 # HTTP exception signaling the problem, e.g. a 404.
-                responder: AsgiResponderCallable
                 responder, params, resource, req.uri_template = self._get_responder(req)  # type: ignore[assignment]
 
         except Exception as ex:
@@ -582,6 +583,9 @@ class App(falcon.app.App[_ReqT, _RespT]):
                             break
 
                 if not resp.complete:
+                    # The responder is guaranteed to be set here,
+                    #   since routing was not skipped.
+                    assert responder is not None
                     await responder(req, resp, **params)
 
                 req_succeeded = True
@@ -600,6 +604,17 @@ class App(falcon.app.App[_ReqT, _RespT]):
                     raise
 
                 req_succeeded = False
+
+        # When the resource or responder declares a produces
+        #   constraint, negotiate the response media type against the
+        #   Accept header. Error responses are exempt, so a failure to
+        #   negotiate (resulting in a 406) cannot recurse.
+        if req_succeeded:
+            try:
+                negotiation.negotiate_response_media(req, resp, resource, responder)
+            except Exception as ex:
+                if not await self._handle_exception(req, resp, ex, params):
+                    raise
 
         data: bytes | None = b''
 

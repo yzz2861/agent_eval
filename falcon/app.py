@@ -36,6 +36,7 @@ import warnings
 
 from falcon import app_helpers as helpers
 from falcon import constants
+from falcon import negotiation
 from falcon import responders
 from falcon import routing
 from falcon._typing import _ExcT
@@ -426,6 +427,7 @@ class App(Generic[_ReqT, _RespT]):
         req = self._request_type(env, options=self.req_options)
         resp = self._response_type(options=self.resp_options)
         resource: object | None = None
+        responder: ResponderCallable | None = None
         params: dict[str, Any] = {}
 
         dependent_mw_resp_stack: list[ProcessResponseMethod] = []
@@ -463,7 +465,6 @@ class App(Generic[_ReqT, _RespT]):
                 # next-hop child resource. In that case, the object
                 # being asked to dispatch to its child will raise an
                 # HTTP exception signalling the problem, e.g. a 404.
-                responder: ResponderCallable
                 responder, params, resource, req.uri_template = self._get_responder(req)  # type: ignore[assignment]
         except Exception as ex:
             if not self._handle_exception(req, resp, ex, params):
@@ -484,6 +485,9 @@ class App(Generic[_ReqT, _RespT]):
                             break
 
                 if not resp.complete:
+                    # The responder is guaranteed to be set here,
+                    #   since routing was not skipped.
+                    assert responder is not None
                     responder(req, resp, **params)
 
                 req_succeeded = True
@@ -500,6 +504,17 @@ class App(Generic[_ReqT, _RespT]):
                     raise
 
                 req_succeeded = False
+
+        # When the resource or responder declares a produces
+        #   constraint, negotiate the response media type against the
+        #   Accept header. Error responses are exempt, so a failure to
+        #   negotiate (resulting in a 406) cannot recurse.
+        if req_succeeded:
+            try:
+                negotiation.negotiate_response_media(req, resp, resource, responder)
+            except Exception as ex:
+                if not self._handle_exception(req, resp, ex, params):
+                    raise
 
         body: Iterable[bytes]
         length: int | None

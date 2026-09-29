@@ -99,15 +99,86 @@ implemented in a similar manner to the one above.
 Content-Type Negotiation
 ------------------------
 
-Falcon currently only supports partial negotiation out of the box. By default,
-when the ``get_media()`` method or the ``media`` attribute is used, the
-framework attempts to (de)serialize based on the ``Content-Type`` header value.
-The missing link that Falcon doesn't provide is the connection between the
-``Accept`` header provided by a user and the ``Content-Type`` header set on the
-response.
+Out of the box, when the ``get_media()`` method or the ``media``
+attribute is used, the framework attempts to (de)serialize based on the
+``Content-Type`` header value. In addition, a resource (or an individual
+responder) can declare the media types it is able to produce, and the
+framework will then negotiate the response media type against the request's
+``Accept`` header, serializing :attr:``~falcon.Response.media`` with
+the selected media handler:
 
-If you do need full negotiation, it is very easy to bridge the gap using
-middleware. Here is an example of how this can be done:
+.. tab-set::
+
+    .. tab-item:: WSGI
+
+        .. code:: python
+
+            import falcon
+
+
+            class ReportResource:
+                produces = ('application/json', 'application/msgpack')
+
+                def on_get(self, req, resp):
+                    # The framework selects the best match from produces
+                    #   according to the Accept header, and serializes
+                    #   resp.media with the corresponding media handler.
+                    resp.media = {'rows': []}
+
+    .. tab-item:: ASGI
+
+        .. code:: python
+
+            import falcon
+
+
+            class ReportResource:
+                produces = ('application/json', 'application/msgpack')
+
+                async def on_get(self, req, resp):
+                    resp.media = {'rows': []}
+
+A declaration can also be attached to an individual responder with the
+:func:``falcon.produces`` decorator, in which case it takes precedence
+over the resource-level declaration:
+
+.. code:: python
+
+    class ReportResource:
+        produces = ('application/json',)
+
+        @falcon.produces('application/msgpack', 'application/json')
+        def on_get(self, req, resp):
+            resp.media = {'rows': []}
+
+Only declared types that have a registered media handler
+(see :ref:``custom_media_handlers``) participate in the negotiation.
+Quality factors, wildcards, and media type parameters are honored per
+RFC 9110, and types excluded by the client with ``q=0`` are never
+selected. When several declared types are equally acceptable, the one
+declared first wins. Whenever the framework negotiates, it merges
+``Accept`` into the response's ``Vary`` header.
+
+If none of the declared types is acceptable to the client, the framework
+raises an :class:``~falcon.HTTPNotAcceptable`` (``406``) error
+instead of silently falling back to the default media type. Error responses,
+including the ``406`` itself, are exempt from this negotiation; they are
+rendered by the app's error serializer
+(see :meth:``~falcon.App.set_error_serializer``), so negotiation can
+never recurse. When the client does not accept any of the error
+serializer's media types either, the error response is deterministically
+sent without a body.
+
+An explicitly set :attr:``~falcon.Response.content_type`` always takes
+precedence: negotiation is skipped for such a response, and the declared
+types are ignored.
+
+.. autofunction:: falcon.produces
+
+If you need full control over the negotiation logic, it is also very easy to
+bridge the gap using middleware (note that an explicitly set
+``Content-Type`` disables the declarative negotiation described above).
+Here is an example of how this can be done:
 
 .. tab-set::
 
