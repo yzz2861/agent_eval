@@ -49,8 +49,8 @@ def rabbit_mq_is_unreachable():
     )
     try:
         broker.connection
-    except pika.exceptions.AMQPConnectionError:
-        # RabbitMQ is unreachable
+    except Exception:
+        # RabbitMQ is unreachable (or sockets are restricted)
         return True
     return False
 

@@ -93,7 +93,7 @@ class Results(Middleware):
 
     def after_process_message(self, broker, message, *, result=None, exception=None):
         store_results, result_ttl = self._lookup_options(broker, message)
-        if store_results and exception is None:
+        if store_results and exception is None and not message.options.get("canceled"):
             self.backend.store_result(message, result, result_ttl)
         if not store_results and result is not None and message.options.get("pipe_target") is None:
             self.logger.warning(
@@ -107,7 +107,7 @@ class Results(Middleware):
         Let after_nack handle the case where the message was skipped and failed.
         """
         store_results, result_ttl = self._lookup_options(broker, message)
-        if store_results and not message.failed:
+        if store_results and not message.failed and not message.options.get("canceled"):
             self.backend.store_result(message, None, result_ttl)
 
     def after_nack(self, broker, message):

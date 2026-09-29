@@ -21,6 +21,7 @@ import warnings
 
 from .actor import Actor, actor
 from .broker import Broker, Consumer, MessageProxy, get_broker, set_broker
+from .cancellation import CancellationBackend, CancellationToken, LocalCancellationBackend
 from .composition import group, pipeline
 from .encoder import Encoder, JSONEncoder, PickleEncoder
 from .errors import (
@@ -31,6 +32,7 @@ from .errors import (
     ConnectionFailed,
     DecodeError,
     DramatiqError,
+    MessageCanceled,
     QueueJoinTimeout,
     QueueNotFound,
     RateLimitExceeded,
@@ -53,6 +55,10 @@ __all__ = [
     "MessageProxy",
     "get_broker",
     "set_broker",
+    # Cancellation
+    "CancellationBackend",
+    "CancellationToken",
+    "LocalCancellationBackend",
     # Composition
     "group",
     "pipeline",
@@ -71,6 +77,7 @@ __all__ = [
     "ConnectionClosed",
     "ConnectionFailed",
     "RateLimitExceeded",
+    "MessageCanceled",
     "Retry",
     # Logging
     "get_logger",

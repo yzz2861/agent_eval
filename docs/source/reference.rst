@@ -107,6 +107,9 @@ Optional Middleware
 The following middleware classes are available, but not enabled by default.
 
 .. autoclass:: dramatiq.middleware.AsyncIO
+.. autoclass:: dramatiq.middleware.Cancellation
+   :members: get_current_token, cancel, is_canceled
+   :member-order: bysource
 .. autoclass:: dramatiq.middleware.CurrentMessage
    :members: get_current_message
    :member-order: bysource

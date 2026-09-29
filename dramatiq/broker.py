@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Optional, cast
 from .errors import ActorNotFound
 from .logging import get_logger
 from .middleware import Middleware, MiddlewareError, default_middleware
+from .middleware.cancellation import Cancellation
 from .results import ResultBackend, Results
 
 if TYPE_CHECKING:
@@ -301,6 +302,46 @@ class Broker:
                 return middleware.backend
         else:
             raise RuntimeError("The broker doesn't have a results backend.")
+
+    def get_cancellation_middleware(self) -> Cancellation:
+        """Get the Cancellation middleware of this broker.
+
+        Raises:
+          RuntimeError: If the broker doesn't have the Cancellation
+            middleware.
+
+        Returns:
+          Cancellation: The middleware.
+        """
+        for middleware in self.middleware:
+            if isinstance(middleware, Cancellation):
+                return middleware
+        else:
+            raise RuntimeError("The broker doesn't have the Cancellation middleware.")
+
+    def cancel(self, message: Message) -> bool:
+        """Request the cancellation of a message.
+
+        Messages that have not started processing yet are skipped.
+        Messages that are being processed run until their actor
+        reaches a cancellation checkpoint (see
+        :class:`Cancellation<dramatiq.middleware.Cancellation>`).
+        Cancellation is idempotent and terminal: canceled messages
+        are never retried, and canceling a message that has already
+        completed has no effect.
+
+        Parameters:
+          message(Message): The message to cancel.
+
+        Raises:
+          RuntimeError: If the broker doesn't have the Cancellation
+            middleware.
+
+        Returns:
+          bool: True if the cancellation was recorded, False if the
+          message has already completed.
+        """
+        return self.get_cancellation_middleware().cancel(message)
 
     def flush(self, queue_name: str) -> None:  # pragma: no cover
         """Drop all the messages from a queue.

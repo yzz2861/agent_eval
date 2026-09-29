@@ -74,6 +74,17 @@ class RateLimitExceeded(DramatiqError):
     """Raised when a rate limit has been exceeded."""
 
 
+class MessageCanceled(DramatiqError):
+    """Raised by actors to exit at a cancellation checkpoint after
+    their message has been canceled.
+
+    Actors should not raise this directly; use
+    :meth:`CancellationToken.check<dramatiq.cancellation.CancellationToken.check>`
+    instead.  Canceled messages are terminal: they are acknowledged
+    and never retried.
+    """
+
+
 class Retry(DramatiqError):
     """Actors may raise this error when they should be retried.  This
     behaves just like any other exception from the perspective of the
