@@ -59,6 +59,21 @@ especially important when using a custom `getsizeof` function, since
 the size of an item's value will only be computed when the item is
 inserted into the cache.
 
+All cache classes also accept optional `on_remove` and
+`on_remove_error` constructor parameters to observe item removals.
+`on_remove` is a callable, or an iterable of callables, that is
+invoked with a :class:`RemovalEvent` whenever an item actually
+leaves the cache, whether due to expiration, eviction to make room for
+new items, replacement by a new value, explicit deletion, or
+:meth:`Cache.clear`.  Listeners are called after the cache has
+been fully updated, so they may safely perform further cache
+operations, and each actual removal is reported exactly once.  The
+`on_remove_error` parameter selects how exceptions raised by
+listeners are handled: "raise" (the default) propagates them,
+"ignore" discards them, and a callable is invoked with the
+exception and the event.  A removal that has already happened is never
+undone, regardless of this policy.
+
 .. note::
 
    Please be aware that all these classes are *not* thread-safe.
@@ -66,7 +81,7 @@ inserted into the cache.
    synchronized, e.g. by using one of the memoizing decorators with a
    suitable `lock` object.
 
-.. autoclass:: Cache(maxsize, getsizeof=None)
+.. autoclass:: Cache(maxsize, getsizeof=None, on_remove=None, on_remove_error="raise")
    :members: currsize, getsizeof, maxsize
 
    This class discards arbitrary items using :meth:`popitem` to make
@@ -76,7 +91,7 @@ inserted into the cache.
    additionally need to override :meth:`__getitem__`,
    :meth:`__setitem__` and :meth:`__delitem__`.
 
-.. autoclass:: FIFOCache(maxsize, getsizeof=None)
+.. autoclass:: FIFOCache(maxsize, getsizeof=None, on_remove=None, on_remove_error="raise")
    :members: popitem
 
    This class evicts items in the order they were added to make space
@@ -86,19 +101,19 @@ inserted into the cache.
    like a re-insertion, i.e. deleting the item followed by an insert,
    and therefore will reset the item's position in the cache.
 
-.. autoclass:: LFUCache(maxsize, getsizeof=None)
+.. autoclass:: LFUCache(maxsize, getsizeof=None, on_remove=None, on_remove_error="raise")
    :members: popitem
 
    This class counts how often an item is retrieved, and discards the
    items used least often to make space when necessary.
 
-.. autoclass:: LRUCache(maxsize, getsizeof=None)
+.. autoclass:: LRUCache(maxsize, getsizeof=None, on_remove=None, on_remove_error="raise")
    :members: popitem
 
    This class discards the least recently used items first to make
    space when necessary.
 
-.. autoclass:: RRCache(maxsize, choice=random.choice, getsizeof=None)
+.. autoclass:: RRCache(maxsize, choice=random.choice, getsizeof=None, on_remove=None, on_remove_error="raise")
    :members: choice, popitem
 
    This class randomly selects candidate items and discards them to
@@ -109,7 +124,7 @@ inserted into the cache.
    an alternative function that returns an arbitrary element from a
    non-empty sequence.
 
-.. autoclass:: TTLCache(maxsize, ttl, timer=time.monotonic, getsizeof=None)
+.. autoclass:: TTLCache(maxsize, ttl, timer=time.monotonic, getsizeof=None, on_remove=None, on_remove_error="raise")
    :members: popitem, timer, ttl
 
    This class associates a time-to-live value with each item.  Items
@@ -151,7 +166,7 @@ inserted into the cache.
 
       :returns: An iterable of expired `(key, value)` pairs.
 
-.. autoclass:: TLRUCache(maxsize, ttu, timer=time.monotonic, getsizeof=None)
+.. autoclass:: TLRUCache(maxsize, ttu, timer=time.monotonic, getsizeof=None, on_remove=None, on_remove_error="raise")
    :members: popitem, timer, ttu
 
    Similar to :class:`TTLCache`, this class also associates an
@@ -205,6 +220,16 @@ inserted into the cache.
       :returns: An iterable of expired `(key, value)` pairs.
 
 
+.. _removal-notifications:
+
+Removal notifications
+=====================
+
+.. autoclass:: RemovalEvent
+
+.. autoclass:: RemovalReason
+
+
 Extending cache classes
 =======================
 
@@ -212,6 +237,13 @@ Sometimes it may be desirable to notice when and what cache items are
 evicted, i.e. removed from a cache to make room for new items.  Since
 all cache implementations call :meth:`popitem` to evict items from the
 cache, this can be achieved by overriding this method in a subclass:
+
+.. note::
+
+   For simply observing removals without subclassing, prefer the
+   `on_remove` constructor parameter described in
+   :ref:`removal-notifications`, which also distinguishes evictions
+   from expirations, replacements, deletions and `clear()`.
 
 .. doctest::
 

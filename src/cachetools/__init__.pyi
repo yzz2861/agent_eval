@@ -1,5 +1,6 @@
+import enum
 import random
-from collections.abc import Callable, Iterator, MutableMapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, MutableMapping, Sequence
 from contextlib import AbstractContextManager
 from typing import (
     Any,
@@ -20,6 +21,8 @@ __all__: Final = (
     "FIFOCache",
     "LFUCache",
     "LRUCache",
+    "RemovalEvent",
+    "RemovalReason",
     "RRCache",
     "TLRUCache",
     "TTLCache",
@@ -37,9 +40,30 @@ _TT = TypeVar("_TT", default=float)
 _KT2 = TypeVar("_KT2")
 _VT2 = TypeVar("_VT2")
 
+class RemovalReason(enum.Enum):
+    EXPIRED = "expired"
+    EVICTED = "evicted"
+    REPLACED = "replaced"
+    DELETED = "deleted"
+    CLEARED = "cleared"
+
+class RemovalEvent(NamedTuple, Generic[_KT, _VT]):
+    key: _KT
+    value: _VT
+    reason: RemovalReason
+    sequence: int
+
+_OnRemove = Callable[[RemovalEvent[_KT, _VT]], None]
+_OnRemoveError = Callable[[Exception, RemovalEvent[_KT, _VT]], None]
+
 class Cache(MutableMapping[_KT, _VT]):
     def __init__(
-        self, maxsize: float, getsizeof: Callable[[_VT], float] | None = None
+        self,
+        maxsize: float,
+        getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemove[_KT, _VT] | Iterable[_OnRemove[_KT, _VT]] | None = None,
+        on_remove_error: Literal["raise", "ignore"]
+        | _OnRemoveError[_KT, _VT] = "raise",
     ) -> None: ...
     def __getitem__(self, key: _KT) -> _VT: ...
     def __setitem__(self, key: _KT, value: _VT) -> None: ...
@@ -69,6 +93,9 @@ class RRCache(Cache[_KT, _VT]):
         maxsize: float,
         choice: Callable[[Sequence[_KT]], _KT] = random.choice,
         getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemove[_KT, _VT] | Iterable[_OnRemove[_KT, _VT]] | None = None,
+        on_remove_error: Literal["raise", "ignore"]
+        | _OnRemoveError[_KT, _VT] = "raise",
     ) -> None: ...
     @property
     def choice(self) -> Callable[[Sequence[_KT]], _KT]: ...
@@ -79,6 +106,9 @@ class _TimedCache(Cache[_KT, _VT], Generic[_KT, _VT, _TT]):
         maxsize: float,
         timer: Callable[[], _TT],
         getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemove[_KT, _VT] | Iterable[_OnRemove[_KT, _VT]] | None = None,
+        on_remove_error: Literal["raise", "ignore"]
+        | _OnRemoveError[_KT, _VT] = "raise",
     ) -> None: ...
 
     class _Timer(AbstractContextManager[_T]):
@@ -99,6 +129,11 @@ class TTLCache(_TimedCache[_KT, _VT, _TT]):
         ttl: float,
         *,
         getsizeof: Callable[[_VT2], float] | None = None,
+        on_remove: _OnRemove[_KT2, _VT2]
+        | Iterable[_OnRemove[_KT2, _VT2]]
+        | None = None,
+        on_remove_error: Literal["raise", "ignore"]
+        | _OnRemoveError[_KT2, _VT2] = "raise",
     ) -> None: ...
     @overload
     def __init__(
@@ -107,6 +142,9 @@ class TTLCache(_TimedCache[_KT, _VT, _TT]):
         ttl: Any,  # FIXME: must be "addable" to _TT
         timer: Callable[[], _TT],
         getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemove[_KT, _VT] | Iterable[_OnRemove[_KT, _VT]] | None = None,
+        on_remove_error: Literal["raise", "ignore"]
+        | _OnRemoveError[_KT, _VT] = "raise",
     ) -> None: ...
     @property
     def ttl(self) -> Any: ...
@@ -120,6 +158,11 @@ class TLRUCache(_TimedCache[_KT, _VT, _TT]):
         ttu: Callable[[_KT2, _VT2, float], float],
         *,
         getsizeof: Callable[[_VT2], float] | None = None,
+        on_remove: _OnRemove[_KT2, _VT2]
+        | Iterable[_OnRemove[_KT2, _VT2]]
+        | None = None,
+        on_remove_error: Literal["raise", "ignore"]
+        | _OnRemoveError[_KT2, _VT2] = "raise",
     ) -> None: ...
     @overload
     def __init__(
@@ -128,6 +171,9 @@ class TLRUCache(_TimedCache[_KT, _VT, _TT]):
         ttu: Callable[[_KT, _VT, _TT], _TT],
         timer: Callable[[], _TT],
         getsizeof: Callable[[_VT], float] | None = None,
+        on_remove: _OnRemove[_KT, _VT] | Iterable[_OnRemove[_KT, _VT]] | None = None,
+        on_remove_error: Literal["raise", "ignore"]
+        | _OnRemoveError[_KT, _VT] = "raise",
     ) -> None: ...
     @property
     def ttu(self) -> Callable[[_KT, _VT, _TT], _TT]: ...

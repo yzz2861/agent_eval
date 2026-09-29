@@ -1,3 +1,15 @@
+v7.3.0 (unreleased)
+===================
+
+- Add optional removal listeners to all cache classes.
+
+  The new `on_remove` and `on_remove_error` constructor parameters
+  register callbacks that are notified with a `RemovalEvent`
+  (key, value, reason and sequence number) whenever an item actually
+  leaves the cache, distinguishing expiration, eviction, replacement,
+  explicit deletion and `clear()`.
+
+
 v7.2.0 (2026-09-16)
 ===================
 
