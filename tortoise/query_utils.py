@@ -194,24 +194,31 @@ class QueryModifier:
         where_criterion: Criterion | None = None,
         joins: list[TableCriterionTuple] | None = None,
         having_criterion: Criterion | None = None,
+        window_criterion: Criterion | None = None,
     ) -> None:
         self.where_criterion: Criterion = where_criterion or EmptyCriterion()
         self.joins = joins or []
         self.having_criterion: Criterion = having_criterion or EmptyCriterion()
+        self.window_criterion: Criterion = window_criterion or EmptyCriterion()
 
     def __and__(self, other: QueryModifier) -> QueryModifier:
         return self.__class__(
             where_criterion=_and(self.where_criterion, other.where_criterion),
             joins=self.joins + other.joins,
             having_criterion=_and(self.having_criterion, other.having_criterion),
+            window_criterion=_and(self.window_criterion, other.window_criterion),
         )
 
     def _and_criterion(self) -> Criterion:
-        return _and(self.where_criterion, self.having_criterion)
+        return _and(_and(self.where_criterion, self.having_criterion), self.window_criterion)
 
     def __or__(self, other: QueryModifier) -> QueryModifier:
-        where_criterion = having_criterion = None
-        if self.having_criterion or other.having_criterion:
+        where_criterion = having_criterion = window_criterion = None
+        if self.window_criterion or other.window_criterion:
+            # Window functions are only allowed in an outer query, so anything
+            # OR-ed with a window filter must be evaluated there as well.
+            window_criterion = _or(self._and_criterion(), other._and_criterion())
+        elif self.having_criterion or other.having_criterion:
             having_criterion = _or(self._and_criterion(), other._and_criterion())
         else:
             where_criterion = (
@@ -219,15 +226,19 @@ class QueryModifier:
                 if self.where_criterion and other.where_criterion
                 else (self.where_criterion or other.where_criterion)
             )
-        return self.__class__(where_criterion, self.joins + other.joins, having_criterion)
+        return self.__class__(
+            where_criterion, self.joins + other.joins, having_criterion, window_criterion
+        )
 
     def __invert__(self) -> QueryModifier:
-        where_criterion = having_criterion = None
-        if self.having_criterion:
+        where_criterion = having_criterion = window_criterion = None
+        if self.window_criterion:
+            window_criterion = self._and_criterion().negate()
+        elif self.having_criterion:
             having_criterion = (self.where_criterion & self.having_criterion).negate()
         elif self.where_criterion:
             where_criterion = self.where_criterion.negate()
-        return self.__class__(where_criterion, self.joins, having_criterion)
+        return self.__class__(where_criterion, self.joins, having_criterion, window_criterion)
 
 
 class Prefetch:

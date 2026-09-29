@@ -1,4 +1,4 @@
-from pypika_tortoise import SqlContext, functions
+from pypika_tortoise import SqlContext, analytics, functions
 
 from tortoise.expressions import Aggregate, Function
 
@@ -136,3 +136,107 @@ class Avg(Aggregate):
 
     database_func = functions.Avg
     populate_field_object = True
+
+
+##############################################################################
+# Window functions
+##############################################################################
+
+
+class WindowFunction(Function):
+    """
+    Base for window-only functions. Must be used inside a
+    :class:`tortoise.expressions.Window` expression.
+    """
+
+    def __init__(self, field=None, *default_values) -> None:
+        super().__init__(field, *default_values)
+
+    def _get_function_field(self, field, *default_values) -> analytics.AnalyticFunction:
+        if field is None:
+            return self.database_func(*default_values)
+        return self.database_func(field, *default_values)
+
+
+class RowNumber(WindowFunction):
+    """
+    Returns the number of the current row within its window partition.
+
+    :samp:`Window(RowNumber(), partition_by="{FIELD_NAME}", order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.RowNumber
+
+
+class Rank(WindowFunction):
+    """
+    Returns the rank of the current row, with gaps.
+
+    :samp:`Window(Rank(), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.Rank
+
+
+class DenseRank(WindowFunction):
+    """
+    Returns the rank of the current row, without gaps.
+
+    :samp:`Window(DenseRank(), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.DenseRank
+
+
+class NTile(WindowFunction):
+    """
+    Distributes the rows of a window partition into the given number of buckets.
+
+    :samp:`Window(NTile({NUM_BUCKETS}), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.NTile
+
+
+class Lag(WindowFunction):
+    """
+    Returns the value of the field evaluated at the previous row of the window
+    partition.
+
+    :samp:`Window(Lag("{FIELD_NAME}"), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.Lag
+
+
+class Lead(WindowFunction):
+    """
+    Returns the value of the field evaluated at the next row of the window
+    partition.
+
+    :samp:`Window(Lead("{FIELD_NAME}"), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.Lead
+
+
+class FirstValue(WindowFunction):
+    """
+    Returns the value of the field evaluated at the first row of the window
+    frame.
+
+    :samp:`Window(FirstValue("{FIELD_NAME}"), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.FirstValue
+
+
+class LastValue(WindowFunction):
+    """
+    Returns the value of the field evaluated at the last row of the window
+    frame.
+
+    :samp:`Window(LastValue("{FIELD_NAME}"), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.LastValue

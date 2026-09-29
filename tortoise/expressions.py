@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import operator
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
@@ -8,9 +9,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pypika_tortoise import Case as PypikaCase
 from pypika_tortoise import Field as PypikaField
-from pypika_tortoise import SqlContext, Table
+from pypika_tortoise import Order, SqlContext, Table
 from pypika_tortoise.functions import AggregateFunction, DistinctOptionFunction
 from pypika_tortoise.terms import (
+    AnalyticFunction,
     ArithmeticExpression,
     Criterion,
     Term,
@@ -374,7 +376,14 @@ class Q:
         )
         if overridden_operator:
             operator = overridden_operator
-        if annotation_info.term.is_aggregate:
+        if getattr(annotation_info.term, "is_analytic", False):
+            # Window functions are not allowed in WHERE or HAVING. Filter on the
+            # annotation alias instead; the queryset wraps the query in an outer
+            # SELECT where this criterion is applied.
+            modifier = QueryModifier(
+                window_criterion=operator(PypikaField(having_info["field"]), value)
+            )
+        elif annotation_info.term.is_aggregate:
             modifier = QueryModifier(having_criterion=operator(annotation_info.term, value))
         else:
             modifier = QueryModifier(where_criterion=operator(annotation_info.term, value))
@@ -642,6 +651,136 @@ class Aggregate(Function):
             ret.term = PypikaCase().when(modifier.where_criterion, ret.term).else_(None)
 
         return ret
+
+
+class _WindowFunction(AnalyticFunction):
+    """
+    Analytic function term with an optional ``ROWS`` frame whose bounds are
+    parameterized like regular query values.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *args: Any,
+        rows: tuple[int | None, int | None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(name, *args, **kwargs)
+        self._rows_frame = rows
+
+    @staticmethod
+    def _frame_edge_sql(value: int | None, is_start: bool, ctx: SqlContext) -> str:
+        if value is None:
+            return "UNBOUNDED PRECEDING" if is_start else "UNBOUNDED FOLLOWING"
+        if value == 0:
+            return "CURRENT ROW"
+        modifier = "PRECEDING" if value < 0 else "FOLLOWING"
+        bound_sql = ValueWrapper(abs(value)).get_sql(ctx)
+        return f"{bound_sql} {modifier}"
+
+    def get_partition_sql(self, ctx: SqlContext) -> str:
+        partition_sql = super().get_partition_sql(ctx)
+        if self._rows_frame is None:
+            return partition_sql
+        start, end = self._rows_frame
+        frame_sql = (
+            f"ROWS BETWEEN {self._frame_edge_sql(start, True, ctx)} "
+            f"AND {self._frame_edge_sql(end, False, ctx)}"
+        )
+        return f"{partition_sql} {frame_sql}".strip()
+
+
+class Window(Expression):
+    """
+    Window expression to compute a function over a window of rows, for use
+    with ``.annotate()``.
+
+    The window itself never adds a ``GROUP BY`` to the query, even when the
+    wrapped function is an aggregate like ``Avg``. Filtering on a window
+    annotation is supported; the filter is applied in an outer query, as
+    window functions are not allowed in ``WHERE``/``HAVING``.
+
+    :param func: The function to compute over the window, e.g. ``RowNumber()``.
+    :param partition_by: Field name(s) to partition the window by, e.g. rows
+        are numbered independently per partition.
+    :param order_by: Field name(s) to order the window by. This ordering
+        determines how the window function is computed and is independent of
+        the query-level ``order_by()``, which only determines display order.
+        Prefix a field name with ``-`` for descending order.
+    :param rows: Optional ``(start, end)`` tuple defining a ``ROWS BETWEEN
+        start AND end`` frame. Each bound is ``None`` for UNBOUNDED
+        PRECEDING/FOLLOWING, ``0`` for CURRENT ROW, a negative int ``N`` for
+        ``N PRECEDING`` and a positive int ``N`` for ``N FOLLOWING``. The
+        bounds are sent to the database as query parameters.
+    """
+
+    def __init__(
+        self,
+        func: Function,
+        partition_by: str | F | Sequence[str | F] | None = None,
+        order_by: str | F | Sequence[str | F] | None = None,
+        rows: tuple[int | None, int | None] | None = None,
+    ) -> None:
+        if not isinstance(func, Function):
+            raise TypeError("func must be a Function instance")
+        if rows is not None and (
+            not isinstance(rows, tuple)
+            or len(rows) != 2
+            or any(bound is not None and not isinstance(bound, int) for bound in rows)
+        ):
+            raise ValueError("rows must be a (start, end) tuple of None or int")
+        self.func = func
+        self.partition_by = partition_by
+        self.order_by = order_by
+        self.rows = rows
+
+    @staticmethod
+    def _normalize_items(value: str | F | Sequence[str | F] | None) -> list[str | F]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        return [value]
+
+    def _resolve_item(self, item: str | F, resolve_context: ResolveContext) -> ResolveResult:
+        if isinstance(item, str):
+            item = F(item)
+        if not isinstance(item, Expression):
+            raise FieldError(f"Cannot use {item!r} in a window expression")
+        return item.resolve(resolve_context)
+
+    def resolve(self, resolve_context: ResolveContext) -> ResolveResult:
+        resolved = self.func.resolve(resolve_context)
+        func_term = resolved.term
+        if not isinstance(func_term, PypikaFunction):
+            raise FieldError("Window function must resolve to a SQL function")
+        if isinstance(func_term, DistinctOptionFunction) and func_term._distinct:
+            raise FieldError("DISTINCT is not supported in window functions")
+
+        term = _WindowFunction(func_term.name, *func_term.args, rows=self.rows)
+        joins = list(resolved.joins)
+
+        partition_terms = []
+        for item in self._normalize_items(self.partition_by):
+            result = self._resolve_item(item, resolve_context)
+            partition_terms.append(result.term)
+            joins.extend(result.joins)
+        term = term.over(*partition_terms)
+
+        for item in self._normalize_items(self.order_by):
+            order = Order.asc
+            if isinstance(item, str) and item.startswith("-"):
+                item, order = item[1:], Order.desc
+            result = self._resolve_item(item, resolve_context)
+            term = term.orderby(result.term, order=order)
+            joins.extend(result.joins)
+
+        return ResolveResult(
+            term=term,
+            joins=list(set(joins)),
+            output_field=resolved.output_field,
+        )
 
 
 class _WhenThen(Term):

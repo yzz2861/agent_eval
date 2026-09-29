@@ -11,7 +11,16 @@ from pypika_tortoise.analytics import Count
 from pypika_tortoise.functions import Cast
 from pypika_tortoise.functions import Count as DistinctCount
 from pypika_tortoise.queries import QueryBuilder, _SetOperation
-from pypika_tortoise.terms import Case, Field, Function, Star, Term, Tuple, ValueWrapper
+from pypika_tortoise.terms import (
+    Case,
+    Criterion,
+    Field,
+    Function,
+    Star,
+    Term,
+    Tuple,
+    ValueWrapper,
+)
 
 from tortoise.backends.base.client import BaseDBAsyncClient, Capabilities
 from tortoise.exceptions import (
@@ -22,7 +31,15 @@ from tortoise.exceptions import (
     OperationalError,
     ParamsError,
 )
-from tortoise.expressions import Expression, Q, RawSQL, ResolveContext, ResolveResult, Value
+from tortoise.expressions import (
+    Expression,
+    Q,
+    RawSQL,
+    ResolveContext,
+    ResolveResult,
+    Value,
+    Window,
+)
 from tortoise.fields.base import DatabaseDefault
 from tortoise.fields.relational import (
     ForeignKeyFieldInstance,
@@ -114,6 +131,7 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
         "_annotations",
         "_custom_filters",
         "_q_objects",
+        "_window_filtered",
     )
 
     def __init__(self, model: type[MODEL]) -> None:
@@ -125,6 +143,7 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
         self._annotations: dict[str, Expression | Term] = {}
         self._custom_filters: dict[str, FilterInfoDict] = {}
         self._q_objects: list[Q] = []
+        self._window_filtered: bool = False
 
     @property
     def capabilities(self) -> Capabilities:
@@ -138,6 +157,7 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
 
     def resolve_filters(self, fields_for_select: Collection[str] | None = None) -> None:
         """Builds the common filters for a QuerySet."""
+        self._window_filtered = False
         has_aggregate = self._resolve_annotate(fields_for_select)
 
         modifier = QueryModifier()
@@ -163,6 +183,43 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
             self.query = self.query.groupby(
                 *[self.model._meta.basetable[field] for field in self.model._meta.db_fields]
             )
+
+        if modifier.window_criterion:
+            self._wrap_for_window_filter(modifier.window_criterion)
+
+    def _wrap_for_window_filter(self, window_criterion: Criterion) -> None:
+        """Wrap the query in an outer SELECT to filter on window annotations.
+
+        Window functions are computed in the SELECT clause, so they cannot be
+        referenced in WHERE or HAVING. The annotated query becomes a subquery
+        (aliased like the base table, so existing term references stay valid)
+        and the criterion is applied on the annotation alias in the outer
+        query. Ordering is moved to the outer query as well: the ORDER BY
+        inside OVER() determines how the window is computed, while the
+        query-level ORDER BY only determines the display order of the result.
+        """
+        inner = self.query
+        orderbys = inner._orderbys
+        inner._orderbys = []
+        outer = self.model._meta.db.query_class.from_(inner.as_(self.model._meta.db_table)).select(
+            Star()
+        )
+        outer._wheres = window_criterion
+        for term, order in orderbys:
+            outer = outer.orderby(self._outer_order_term(inner, term), order=order)
+        self.query = outer
+        self._window_filtered = True
+
+    @staticmethod
+    def _outer_order_term(inner: QueryBuilder, term: Term) -> Term:
+        # The outer query can only reference the output columns of the inner
+        # query. Map table-qualified field references to the alias the column
+        # was SELECTed under (values()/values_list() rename columns).
+        if isinstance(term, Field) and term.table is not None:
+            for select in inner._selects:
+                if isinstance(select, Field) and select.name == term.name:
+                    return Field(select.alias or select.name)
+        return term
 
     def _pk_in_subquery(self, table: Table) -> Term:
         """Build ``pk IN (SELECT "_t".pk FROM (SELECT pk ...) AS "_t")`` from the current
@@ -260,7 +317,14 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
                 )
             elif field_name in annotations:
                 term: Term
-                if not fields_for_select or field_name in fields_for_select:
+                annotation = annotations[field_name]
+                if (
+                    not fields_for_select
+                    or field_name in fields_for_select
+                    # window annotations are always SELECTed, so they can
+                    # always be referenced by alias
+                    or isinstance(annotation, Window)
+                ):
                     # The annotation is SELECTed, we can just reference it in the following cases:
                     # - Empty fields_for_select means that all columns and annotations are selected,
                     #   hence we can reference the annotation.
@@ -268,7 +332,6 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
                     term = Field(field_name)
                 else:
                     # The annotation is not in SELECT, resolve it
-                    annotation = annotations[field_name]
                     if isinstance(annotation, Term):
                         term = annotation
                     else:
@@ -318,7 +381,13 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
         for key, info in annotation_info.items():
             for join in info.joins:
                 self._join_table(join)
-            if key in self._annotations and (fields_for_select is None or key in fields_for_select):
+            if key in self._annotations and (
+                fields_for_select is None
+                or key in fields_for_select
+                # window annotations must always be selected, as filters on them
+                # reference the annotation alias in an outer query
+                or getattr(info.term, "is_analytic", False)
+            ):
                 self.query._select_other(info.term.as_(key))  # type:ignore[arg-type]
 
         return any(info.term.is_aggregate for info in annotation_info.values())
@@ -1951,9 +2020,10 @@ class ValuesQuery(FieldSelectQuery, Generic[SINGLE]):
         self.resolve_filters()
 
         # remove annotations that are not in fields_for_select
-        self.query._selects = [
-            select for select in self.query._selects if select.alias in self._fields_for_select
-        ]
+        if not self._window_filtered:
+            self.query._selects = [
+                select for select in self.query._selects if select.alias in self._fields_for_select
+            ]
 
         if self._limit:
             self.query._limit = self.query._wrapper_cls(self._limit)

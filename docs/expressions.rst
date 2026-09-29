@@ -120,6 +120,55 @@ RawSQL provides the capability to execute raw SQL queries within ``filter()`` an
     await Tournament.filter(pk=1).annotate(idp=RawSQL('id + 1')).filter(idp=2).values("idp")
     await Tournament.filter(pk=RawSQL("id + 1"))
 
+Window Expression
+==================
+
+The ``Window`` expression computes a function over a window of rows and is used
+with ``.annotate()``. It supports ``partition_by``, ``order_by`` and an optional
+``ROWS`` frame:
+
+.. code-block:: python3
+
+    from tortoise.expressions import Window
+    from tortoise.functions import Avg, Lag, RowNumber
+
+    # number events per device
+    await DeviceEvent.all().annotate(
+        rn=Window(RowNumber(), partition_by="device", order_by="ts")
+    )
+
+    # previous value per device
+    await DeviceEvent.all().annotate(
+        prev=Window(Lag("value"), partition_by="device", order_by="ts")
+    )
+
+    # moving average over the current and previous row
+    await DeviceEvent.all().annotate(
+        ma=Window(Avg("value"), partition_by="device", order_by="ts", rows=(-1, 0))
+    )
+
+The ``rows`` parameter is a ``(start, end)`` tuple where each bound is ``None``
+for UNBOUNDED PRECEDING/FOLLOWING, ``0`` for CURRENT ROW, a negative int ``N``
+for ``N PRECEDING`` and a positive int ``N`` for ``N FOLLOWING``. The bounds are
+sent to the database as query parameters.
+
+A window annotation never adds a ``GROUP BY`` to the query, even when the wrapped
+function is an aggregate. The ``order_by`` of the window determines how the
+function is computed, while the query-level ``order_by()`` only determines the
+display order of the result.
+
+Filtering on a window annotation is supported; the filter is automatically
+applied in an outer query, as window functions are not allowed in ``WHERE``:
+
+.. code-block:: python3
+
+    # latest event per device
+    await DeviceEvent.all().annotate(
+        rn=Window(RowNumber(), partition_by="device", order_by="-ts")
+    ).filter(rn=1)
+
+.. autoclass:: tortoise.expressions.Window
+
 Case-When Expression
 ====================
 

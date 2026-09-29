@@ -54,6 +54,30 @@ So often makes sense with a ``.first()`` QuerySet.
 .. autoclass:: tortoise.functions.Avg
 
 
+Window functions
+=================
+
+Window functions are computed over a window of rows and must be used inside a
+:class:`tortoise.expressions.Window` expression. Aggregates like ``Avg`` or
+``Sum`` can be used as window functions as well.
+
+.. autoclass:: tortoise.functions.RowNumber
+
+.. autoclass:: tortoise.functions.Rank
+
+.. autoclass:: tortoise.functions.DenseRank
+
+.. autoclass:: tortoise.functions.NTile
+
+.. autoclass:: tortoise.functions.Lag
+
+.. autoclass:: tortoise.functions.Lead
+
+.. autoclass:: tortoise.functions.FirstValue
+
+.. autoclass:: tortoise.functions.LastValue
+
+
 Base function class
 ===================
 

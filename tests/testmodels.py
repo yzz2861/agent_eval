@@ -285,6 +285,13 @@ class IntFields(Model):
     intnum_null = fields.IntField(null=True)
 
 
+class DeviceEvent(Model):
+    id = fields.IntField(primary_key=True)
+    device = fields.CharField(max_length=50)
+    ts = fields.IntField()
+    value = fields.FloatField()
+
+
 class BigIntFields(Model):
     id = fields.BigIntField(primary_key=True)
     intnum = fields.BigIntField()
