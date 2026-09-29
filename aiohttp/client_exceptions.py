@@ -41,6 +41,7 @@ __all__ = (
     "WSServerHandshakeError",
     "ContentTypeError",
     "ClientPayloadError",
+    "RedirectPolicyError",
     "InvalidURL",
     "InvalidUrlClientError",
     "RedirectClientError",
@@ -119,6 +120,10 @@ class ClientHttpProxyError(ClientResponseError):
 
 class TooManyRedirects(ClientResponseError):
     """Client was redirected too many times."""
+
+
+class RedirectPolicyError(ClientResponseError):
+    """A redirect was refused by the session's redirect policy."""
 
 
 class ClientConnectionError(ClientError):

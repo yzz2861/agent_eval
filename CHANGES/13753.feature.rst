@@ -1,0 +1,7 @@
+Added a ``redirect_policy`` parameter to :class:`aiohttp.ClientSession`: an
+async callback consulted before each redirect is followed. It receives the
+current hop's response, the raw ``Location`` value, the resolved target URL
+and the upcoming method, and returns an :class:`aiohttp.RedirectPolicyAction`
+to follow the redirect, refuse it (:exc:`aiohttp.RedirectPolicyError`), or
+stop the chain and return the current 3xx response
+-- by :user:`aiohttp-contributor`.

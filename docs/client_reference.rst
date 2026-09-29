@@ -55,6 +55,7 @@ The client session supports the context manager protocol for self closing.
                          requote_redirect_url=True, \
                          trace_configs=None, \
                          middlewares=(), \
+                         redirect_policy=None, \
                          read_bufsize=2**18, \
                          max_line_size=8190, \
                          max_field_size=8190, \
@@ -228,6 +229,32 @@ The client session supports the context manager protocol for self closing.
                       See :ref:`aiohttp-client-middleware` for more information.
 
       .. versionadded:: 3.12
+
+   :param redirect_policy: An async callback consulted before each redirect
+                      is followed, e.g.::
+
+                         async def policy(response, location, url, method):
+                             return RedirectPolicyAction.ALLOW
+
+                      It receives the current hop's
+                      :class:`ClientResponse`, the raw ``Location`` header
+                      value, the resolved absolute target :class:`~yarl.URL`
+                      and the HTTP method the next request would use, and
+                      must return a :class:`RedirectPolicyAction`:
+
+                      - ``ALLOW`` follows the redirect.
+                      - ``DENY`` raises :exc:`RedirectPolicyError`; the
+                        redirect target is never connected to.
+                      - ``RETURN`` stops the chain and returns the current
+                        (3xx) response to the caller.
+
+                      The policy only decides; URL validation, cross-origin
+                      credential stripping, method rewriting and request body
+                      replay checks remain the client's responsibility.
+                      ``None`` (default) follows redirects as before.
+                      See :ref:`aiohttp-client-redirect-policy`.
+
+      .. versionadded:: 4.0
 
    :param int read_bufsize: Size of the read buffer (:attr:`ClientResponse.content`).
                             256 KiB by default. On a WebSocket connection it
@@ -2855,6 +2882,17 @@ Response errors
    .. versionadded:: 3.2
 
 
+.. class:: RedirectPolicyError
+   :canonical: aiohttp.client_exceptions.RedirectPolicyError
+
+   A redirect was refused by the session's redirect policy
+   (:class:`RedirectPolicyAction.DENY`).
+
+   Derived from :exc:`ClientResponseError`
+
+   .. versionadded:: 4.0
+
+
 .. class:: WSServerHandshakeError
    :canonical: aiohttp.client_exceptions.WSServerHandshakeError
 
@@ -3036,6 +3074,8 @@ Hierarchy of exceptions
 
     * :exc:`TooManyRedirects`
 
+    * :exc:`RedirectPolicyError`
+
     * :exc:`WSServerHandshakeError`
 
   * :exc:`InvalidURL`
@@ -3072,3 +3112,37 @@ Client Types
    Type alias for client request handler functions::
 
       Callable[[ClientRequest], Awaitable[ClientResponse]]
+
+.. class:: RedirectPolicyAction
+   :canonical: aiohttp.client.RedirectPolicyAction
+
+   Decision returned by a redirect policy callback, see
+   :ref:`aiohttp-client-redirect-policy`.
+
+   .. attribute:: ALLOW
+
+      Follow the redirect.
+
+   .. attribute:: DENY
+
+      Refuse the redirect: :exc:`RedirectPolicyError` is raised and the
+      redirect target is never connected to.
+
+   .. attribute:: RETURN
+
+      Stop following redirects: the current (3xx) response is returned
+      to the caller.
+
+   .. versionadded:: 4.0
+
+.. type:: RedirectPolicy
+   :canonical: aiohttp.client.RedirectPolicy
+
+   Type alias for redirect policy callbacks::
+
+      Callable[
+          [ClientResponse, str, yarl.URL, str],
+          Awaitable[RedirectPolicyAction]
+      ]
+
+   .. versionadded:: 4.0

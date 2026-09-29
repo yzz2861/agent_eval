@@ -292,6 +292,45 @@ If no redirects occurred or ``allow_redirects`` is set to ``False``,
 history will be an empty sequence.
 
 
+.. _aiohttp-client-redirect-policy:
+
+Redirect Policy
+---------------
+
+Sometimes redirects should only be followed selectively, so setting
+``allow_redirects=True`` is too permissive.  A *redirect policy* can be
+attached to the session; it is consulted before every redirect is
+followed::
+
+    async def redirect_policy(response, location, url, method):
+        if url.host != 'example.com':
+            return aiohttp.RedirectPolicyAction.RETURN
+        return aiohttp.RedirectPolicyAction.ALLOW
+
+    async with aiohttp.ClientSession(redirect_policy=redirect_policy) as session:
+        ...
+
+The policy is called with the current hop's :class:`aiohttp.ClientResponse`,
+the raw ``Location`` header value, the resolved absolute target
+:class:`~yarl.URL` and the HTTP method the next request would use.  It
+returns an :class:`aiohttp.RedirectPolicyAction`:
+
+- ``ALLOW`` follows the redirect.
+- ``DENY`` raises :exc:`aiohttp.RedirectPolicyError`; the redirect target
+  is never resolved or connected to.
+- ``RETURN`` stops the chain and returns the current (3xx) response,
+  which the caller can still read.
+
+The policy only makes the decision: URL validation, cross-origin
+credential stripping, 303 method rewriting and the 307/308 request body
+replay checks remain the client's responsibility.  A response whose
+redirect was stopped is not recorded in :attr:`~aiohttp.ClientResponse.history`
+and does not emit the ``on_request_redirect`` tracing signal; only
+actually followed redirects do.
+
+.. versionadded:: 4.0
+
+
 Cookie Jar
 ----------
 

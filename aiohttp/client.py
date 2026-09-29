@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import dataclasses
+import enum
 import hashlib
 import json
 import os
@@ -59,6 +60,7 @@ from .client_exceptions import (
     NonHttpUrlClientError,
     NonHttpUrlRedirectClientError,
     RedirectClientError,
+    RedirectPolicyError,
     ServerConnectionError,
     ServerDisconnectedError,
     ServerFingerprintMismatch,
@@ -137,6 +139,7 @@ __all__ = (
     "ServerTimeoutError",
     "SocketTimeoutError",
     "TooManyRedirects",
+    "RedirectPolicyError",
     "WSServerHandshakeError",
     # client_reqrep
     "ClientRequest",
@@ -154,6 +157,8 @@ __all__ = (
     "ClientSession",
     "ClientTimeout",
     "ClientWSTimeout",
+    "RedirectPolicy",
+    "RedirectPolicyAction",
     "request",
     "WSMessageTypeError",
 )
@@ -229,6 +234,30 @@ _RetType_co = TypeVar(
 _CharsetResolver = Callable[[ClientResponse, bytes], str]
 
 
+class RedirectPolicyAction(enum.Enum):
+    """Decision returned by a redirect policy callback."""
+
+    #: Follow the redirect.
+    ALLOW = "allow"
+    #: Refuse the redirect: :exc:`RedirectPolicyError` is raised and the
+    #: redirect target is never connected to.
+    DENY = "deny"
+    #: Stop following redirects: the current (3xx) response is returned
+    #: to the caller.
+    RETURN = "return"
+
+
+# A redirect policy is called before a redirect is followed with the
+# current hop's response, the raw Location header value, the resolved
+# absolute target URL and the method the next request would use.  It only
+# decides whether the redirect happens; URL validation, cross-origin
+# credential stripping, method rewriting and body replay checks remain
+# the client's responsibility.
+RedirectPolicy = Callable[
+    [ClientResponse, str, URL, str], Awaitable[RedirectPolicyAction]
+]
+
+
 # Module-level (not a closure) so it has a stable identity for the
 # ``_cached_build_client_middlewares`` cache key.
 async def _connect_and_send_request(req: ClientRequest) -> ClientResponse:
@@ -289,6 +318,7 @@ class ClientSession:
         "_default_ssl",
         "_retry_connection",
         "_middlewares",
+        "_redirect_policy",
     )
 
     def __init__(
@@ -322,6 +352,7 @@ class ClientSession:
         fallback_charset_resolver: _CharsetResolver = lambda r, b: "utf-8",
         middlewares: Sequence[ClientMiddlewareType] = (),
         ssl_shutdown_timeout: _SENTINEL | None | float = sentinel,
+        redirect_policy: RedirectPolicy | None = None,
     ) -> None:
         # We initialise _connector to None immediately, as it's referenced in __del__()
         # and could cause issues if an exception occurs during initialisation.
@@ -421,6 +452,7 @@ class ClientSession:
         self._default_ssl = ssl
         self._retry_connection: bool = True
         self._middlewares = tuple(middlewares)
+        self._redirect_policy = redirect_policy
 
     def __init_subclass__(cls: type["ClientSession"]) -> None:
         raise TypeError(
@@ -761,59 +793,15 @@ class ClientSession:
 
                     # redirects
                     if resp.status in (301, 302, 303, 307, 308) and allow_redirects:
-                        for trace in traces:
-                            await trace.send_request_redirect(
-                                method, url.update_query(params), headers, resp
-                            )
-
-                        redirects += 1
-                        history.append(resp)
-                        if max_redirects and redirects >= max_redirects:
-                            if req._body is not None:
-                                await req._body.close()
-                            resp.close()
-                            raise TooManyRedirects(
-                                history[0].request_info, tuple(history)
-                            )
-
-                        # For 301 and 302, mimic IE, now changed in RFC
-                        # https://github.com/kennethreitz/requests/pull/269
-                        if (resp.status == 303 and resp.method != hdrs.METH_HEAD) or (
-                            resp.status in (301, 302) and resp.method == hdrs.METH_POST
-                        ):
-                            method = hdrs.METH_GET
-                            data = None
-                            if headers.get(hdrs.CONTENT_LENGTH):
-                                headers.pop(hdrs.CONTENT_LENGTH)
-                        else:
-                            # For 307/308, always preserve the request body
-                            # For 301/302 with non-POST methods, preserve the request body
-                            # https://www.rfc-editor.org/rfc/rfc9110#section-15.4.3-3.1
-                            # Use the existing payload to avoid recreating it from
-                            # a potentially consumed file.
-                            #
-                            # If the payload is already consumed and cannot be replayed,
-                            # fail fast instead of silently sending an empty body.
-                            if req._body.consumed:
-                                resp.close()
-                                raise ClientPayloadError(
-                                    "Cannot follow redirect with a consumed request "
-                                    "body. Use bytes, a seekable file-like object, "
-                                    "or set allow_redirects=False."
-                                )
-                            data = req._body
-
                         r_url = resp.headers.get(hdrs.LOCATION) or resp.headers.get(
                             hdrs.URI
                         )
                         if r_url is None:
                             # see github.com/aio-libs/aiohttp/issues/2022
                             break
-                        else:
-                            # reading from correct redirection
-                            # response is forbidden
-                            resp.release()
 
+                        # The client, not the redirect policy, guarantees that
+                        # only valid HTTP(S) URLs are followed.
                         try:
                             parsed_redirect_url = URL(
                                 r_url, encoded=not self._requote_redirect_url
@@ -846,6 +834,88 @@ class ClientSession:
                                 parsed_redirect_url,
                                 "Invalid redirect URL origin",
                             ) from origin_val_err
+
+                        # For 301 and 302, mimic IE, now changed in RFC
+                        # https://github.com/kennethreitz/requests/pull/269
+                        if (resp.status == 303 and resp.method != hdrs.METH_HEAD) or (
+                            resp.status in (301, 302) and resp.method == hdrs.METH_POST
+                        ):
+                            redirect_method = hdrs.METH_GET
+                            rewrite_to_get = True
+                        else:
+                            redirect_method = method
+                            rewrite_to_get = False
+
+                        if self._redirect_policy is not None:
+                            try:
+                                action = await self._redirect_policy(
+                                    resp, r_url, parsed_redirect_url, redirect_method
+                                )
+                            except BaseException:
+                                # A failing or cancelled policy must not leak
+                                # this hop's response.
+                                resp.release()
+                                raise
+                            if action is RedirectPolicyAction.RETURN:
+                                # Stop following and hand this hop's response
+                                # to the caller.
+                                break
+                            if action is RedirectPolicyAction.DENY:
+                                if req._body is not None:
+                                    await req._body.close()
+                                resp.close()
+                                raise RedirectPolicyError(
+                                    resp.request_info,
+                                    tuple(history),
+                                    status=resp.status,
+                                    message="Redirect refused by redirect policy",
+                                    headers=resp.headers,
+                                )
+                            if action is not RedirectPolicyAction.ALLOW:
+                                if req._body is not None:
+                                    await req._body.close()
+                                resp.close()
+                                raise ValueError(
+                                    f"Invalid redirect policy action: {action!r}"
+                                )
+
+                        for trace in traces:
+                            await trace.send_request_redirect(
+                                method, url.update_query(params), headers, resp
+                            )
+
+                        redirects += 1
+                        history.append(resp)
+                        if max_redirects and redirects >= max_redirects:
+                            if req._body is not None:
+                                await req._body.close()
+                            resp.close()
+                            raise TooManyRedirects(
+                                history[0].request_info, tuple(history)
+                            )
+
+                        if rewrite_to_get:
+                            method = hdrs.METH_GET
+                            data = None
+                            if headers.get(hdrs.CONTENT_LENGTH):
+                                headers.pop(hdrs.CONTENT_LENGTH)
+                        else:
+                            # For 307/308, always preserve the request body
+                            # For 301/302 with non-POST methods, preserve the request body
+                            # https://www.rfc-editor.org/rfc/rfc9110#section-15.4.3-3.1
+                            # Use the existing payload to avoid recreating it from
+                            # a potentially consumed file.
+                            #
+                            # If the payload is already consumed and cannot be replayed,
+                            # fail fast instead of silently sending an empty body.
+                            if req._body.consumed:
+                                resp.close()
+                                raise ClientPayloadError(
+                                    "Cannot follow redirect with a consumed request "
+                                    "body. Use bytes, a seekable file-like object, "
+                                    "or set allow_redirects=False."
+                                )
+                            data = req._body
 
                         if url.origin() != redirect_origin:
                             cookies = None
