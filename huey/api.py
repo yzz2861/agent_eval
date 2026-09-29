@@ -10,6 +10,7 @@ import uuid
 import warnings
 
 from collections import deque
+from collections import namedtuple
 from functools import partial
 from functools import wraps
 
@@ -36,6 +37,10 @@ from huey.storage import PriorityRedisStorage
 from huey.storage import RedisExpireStorage
 from huey.storage import RedisStorage
 from huey.storage import SqliteStorage
+from huey.storage import RESCHEDULE_CONFLICT
+from huey.storage import RESCHEDULE_NOT_FOUND
+from huey.storage import RESCHEDULE_VERSION_MISMATCH
+from huey.storage import RESCHEDULED
 from huey.utils import ChordConfig
 from huey.utils import Error
 from huey.utils import SKIPPED
@@ -47,6 +52,41 @@ from huey.utils import utcnow
 
 logger = logging.getLogger('huey')
 _sentinel = object()
+
+
+#: Outcome of a call to ``Huey.reschedule_task()``. Exposes the task id, a
+#: ``status`` (one of the ``RESCHEDULE*`` constants from ``huey.storage``),
+#: the new ``eta`` and schedule ``version`` when the update succeeded, and
+#: the current ``version`` when it was rejected due to a version mismatch.
+class RescheduleResult(object):
+    RESCHEDULED = RESCHEDULED
+    NOT_FOUND = RESCHEDULE_NOT_FOUND
+    CONFLICT = RESCHEDULE_CONFLICT
+    VERSION_MISMATCH = RESCHEDULE_VERSION_MISMATCH
+
+    def __init__(self, task_id, status, eta=None, version=None):
+        self.task_id = task_id
+        self.status = status
+        self.eta = eta
+        self.version = version
+
+    @property
+    def ok(self):
+        return self.status == RESCHEDULED
+
+    def __bool__(self):
+        return self.ok
+
+    def __repr__(self):
+        return '<RescheduleResult task=%s status=%s version=%s>' % (
+            self.task_id, self.status, self.version)
+
+
+#: Metadata about a task currently held in the schedule, as returned by
+#: ``Huey.scheduled_task_info()``. The ``version`` can be passed to
+#: ``Huey.reschedule_task()`` as ``expected_version`` to perform a
+#: conditional (compare-and-swap) update.
+ScheduledTaskInfo = namedtuple('ScheduledTaskInfo', ('task', 'eta', 'version'))
 
 
 class Huey(object):
@@ -750,6 +790,109 @@ class Huey(object):
         if timestamp is None:
             timestamp = self._get_timestamp()
         return self._deserialize_all(self.storage.read_schedule(timestamp))
+
+    def _find_scheduled_data(self, task_id):
+        # Return the serialized data for the scheduled task with the given
+        # id, or None if no such task is in the schedule.
+        for data in self.storage.scheduled_items():
+            try:
+                task = self.deserialize_task(data)
+            except Exception:
+                continue
+            if task.id == task_id:
+                return data
+
+    def _is_enqueued(self, task_id):
+        # Return whether a task with the given id is in the execution queue.
+        for data in self.storage.enqueued_items():
+            try:
+                task = self.deserialize_task(data)
+            except Exception:
+                continue
+            if task.id == task_id:
+                return True
+        return False
+
+    def _normalize_task_id(self, task_id):
+        if isinstance(task_id, Result):
+            return task_id.id
+        elif isinstance(task_id, Task):
+            return task_id.id
+        return task_id
+
+    def scheduled_task_info(self, task_id):
+        """
+        Return a ``ScheduledTaskInfo`` (task, eta, version) for the task
+        with the given id, if it is currently in the schedule. Returns
+        ``None`` when no matching task is scheduled.
+
+        The ``version`` can be passed to ``reschedule_task()`` as the
+        ``expected_version`` to perform a conditional update.
+        """
+        task_id = self._normalize_task_id(task_id)
+        for data, ts, version in self.storage.scheduled_items_with_meta():
+            try:
+                task = self.deserialize_task(data)
+            except Exception:
+                continue
+            if task.id == task_id:
+                if not isinstance(ts, datetime.datetime):
+                    if self.utc:
+                        ts = (datetime.datetime
+                              .fromtimestamp(ts, datetime.timezone.utc)
+                              .replace(tzinfo=None))
+                    else:
+                        ts = datetime.datetime.fromtimestamp(ts)
+                return ScheduledTaskInfo(task, ts, version)
+
+    def reschedule_task(self, task_id, eta, expected_version=None):
+        """
+        Move a scheduled task to a new execution time, updating the stored
+        task in-place. The task's id, arguments, retry state, pipeline/chord
+        relationships and ``Result`` identity are all preserved -- no new
+        task is created.
+
+        Only tasks that are still in the schedule (i.e. have not been
+        claimed by the scheduler) can be rescheduled. If the scheduler
+        claims the task concurrently, exactly one of the two operations
+        wins, so the task can never run at both the old and the new time.
+
+        :param task_id: Id of the task to reschedule (a ``Task`` or
+            ``Result`` instance may also be given).
+        :param datetime eta: New time at which the task should run.
+        :param int expected_version: Optional schedule version the caller
+            expects, as returned by ``scheduled_task_info()`` or a previous
+            ``reschedule_task()`` call. When given, the update only applies
+            if the version still matches, preventing two operators from
+            silently overwriting each other's changes.
+        :return: A ``RescheduleResult`` describing the outcome. The result
+            is truthy only when the reschedule was applied. Statuses:
+
+            * ``RescheduleResult.RESCHEDULED`` - update applied.
+            * ``RescheduleResult.NOT_FOUND`` - no such scheduled task.
+            * ``RescheduleResult.CONFLICT`` - task already claimed and is
+              in the execution queue (or in-flight); cannot be rescheduled.
+            * ``RescheduleResult.VERSION_MISMATCH`` - ``expected_version``
+              did not match; the current version is available on the result.
+        """
+        task_id = self._normalize_task_id(task_id)
+        eta = normalize_time(eta=eta, utc=self.utc)
+
+        data = self._find_scheduled_data(task_id)
+        if data is None:
+            status = (RESCHEDULE_CONFLICT if self._is_enqueued(task_id)
+                      else RESCHEDULE_NOT_FOUND)
+            return RescheduleResult(task_id, status)
+
+        status, version = self.storage.reschedule_task(
+            data, eta, expected_version)
+        if status == RESCHEDULE_NOT_FOUND and self._is_enqueued(task_id):
+            # The scheduler claimed the task between our lookup and the
+            # atomic update; it is now in the execution queue.
+            status = RESCHEDULE_CONFLICT
+        return RescheduleResult(task_id, status,
+                                eta if status == RESCHEDULED else None,
+                                version)
 
     def _deserialize_all(self, messages):
         accum = []

@@ -37,6 +37,28 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+# Status codes returned by ``Storage.reschedule_task()``. They describe the
+# outcome of an attempt to atomically move a scheduled task to a new
+# timestamp:
+#
+# * ``RESCHEDULED`` - the task was still in the schedule and its timestamp
+#   (and version) was updated.
+# * ``RESCHEDULE_NOT_FOUND`` - the task is not in the schedule and was not
+#   observed in the execution queue. It may never have existed, or it may
+#   already have been claimed by the scheduler and executed.
+# * ``RESCHEDULE_CONFLICT`` - the task is no longer in the schedule because
+#   it has already been claimed and placed in the execution queue (or is
+#   otherwise in-flight). Rescheduling is rejected to avoid running the task
+#   at both the old and the new time.
+# * ``RESCHEDULE_VERSION_MISMATCH`` - the task is still scheduled, but its
+#   version differs from the expected version supplied by the caller, i.e. a
+#   concurrent update already modified it.
+RESCHEDULED = 'rescheduled'
+RESCHEDULE_NOT_FOUND = 'not_found'
+RESCHEDULE_CONFLICT = 'conflict'
+RESCHEDULE_VERSION_MISMATCH = 'version_mismatch'
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
@@ -150,6 +172,44 @@ class BaseStorage(object):
         :return: No return value.
         """
         raise NotImplementedError
+
+    def reschedule_task(self, data, ts, expected_version=None):
+        """
+        Atomically move a scheduled task to a new timestamp, preserving the
+        task data (and therefore its id, arguments, retry state and any
+        pipeline/chord relationships) exactly as stored.
+
+        The operation must be atomic with respect to ``read_schedule()``: if
+        the scheduler claims the task concurrently, exactly one of the two
+        operations may succeed, so the task can never be executed at both the
+        old and the new time.
+
+        :param bytes data: Task data, as previously passed to
+            ``add_to_schedule()``.
+        :param datetime ts: New timestamp at which the task should run.
+        :param int expected_version: Optional version the caller expects the
+            scheduled entry to be at. When given, the update only applies if
+            the stored version matches, providing optimistic concurrency
+            control so two operators cannot silently overwrite each other.
+        :return: 2-tuple of ``(status, version)``. ``status`` is one of the
+            ``RESCHEDULE*`` constants and ``version`` is the entry's version
+            after the operation (or its current version when the update was
+            rejected due to a version mismatch).
+        """
+        raise NotImplementedError(
+            'rescheduling scheduled tasks is not supported by this storage.')
+
+    def scheduled_items_with_meta(self, limit=None):
+        """
+        Non-destructively read scheduled tasks along with their metadata.
+
+        :param int limit: Restrict the number of tasks returned.
+        :return: List of ``(data, timestamp, version)`` tuples, in order
+            from soonest to latest. ``timestamp`` is a datetime for the
+            memory storage and a unix timestamp (float) for sql storages.
+        """
+        raise NotImplementedError(
+            'reading schedule metadata is not supported by this storage.')
 
     def put_data(self, key, value, is_result=False):
         """
@@ -371,17 +431,17 @@ class MemoryStorage(BaseStorage):
 
     def add_to_schedule(self, data, ts):
         with self._lock:
-            heapq.heappush(self._schedule, (ts, data))
+            heapq.heappush(self._schedule, (ts, data, 0))
 
     def read_schedule(self, ts):
         with self._lock:
             accum = []
             while self._schedule:
-                sts, data = heapq.heappop(self._schedule)
+                sts, data, version = heapq.heappop(self._schedule)
                 if sts <= ts:
                     accum.append(data)
                 else:
-                    heapq.heappush(self._schedule, (sts, data))
+                    heapq.heappush(self._schedule, (sts, data, version))
                     break
 
         return accum
@@ -390,13 +450,43 @@ class MemoryStorage(BaseStorage):
         return len(self._schedule)
 
     def scheduled_items(self, limit=None):
-        items = [data for _, data in sorted(self._schedule)]
+        items = [data for _, data, _ in sorted(self._schedule)]
         if limit:
             items = items[:limit]
         return items
 
     def flush_schedule(self):
         self._schedule = []
+
+    def reschedule_task(self, data, ts, expected_version=None):
+        with self._lock:
+            for idx, (sts, sdata, version) in enumerate(self._schedule):
+                if sdata == data:
+                    break
+            else:
+                # The task is not in the schedule. If it has already been
+                # claimed and placed in the execution queue, report a
+                # conflict rather than silently losing the update.
+                for _, _, qdata in self._queue:
+                    if qdata == data:
+                        return RESCHEDULE_CONFLICT, None
+                return RESCHEDULE_NOT_FOUND, None
+
+            if expected_version is not None and version != expected_version:
+                return RESCHEDULE_VERSION_MISMATCH, version
+
+            # Replace the heap entry in-place, preserving the task data.
+            new_version = version + 1
+            self._schedule[idx] = (ts, data, new_version)
+            heapq.heapify(self._schedule)
+            return RESCHEDULED, new_version
+
+    def scheduled_items_with_meta(self, limit=None):
+        items = [(data, ts, version)
+                 for ts, data, version in sorted(self._schedule)]
+        if limit:
+            items = items[:limit]
+        return items
 
     def _expire(self, key):
         if self._expires.get(key, float('inf')) <= time.monotonic():
@@ -890,7 +980,8 @@ class SqliteStorage(BaseSqlStorage):
                 'primary key(queue, key))')
     table_sched = ('create table if not exists schedule ('
                    'id integer not null primary key, queue text not null, '
-                   'data blob not null, timestamp real not null)')
+                   'data blob not null, timestamp real not null, '
+                   'version integer not null default 0)')
     index_sched = ('create index if not exists schedule_queue_timestamp '
                    'on schedule (queue, timestamp)')
     table_task = ('create table if not exists task ('
@@ -932,6 +1023,15 @@ class SqliteStorage(BaseSqlStorage):
         self.to_blob = memoryview
 
         super(SqliteStorage, self).__init__(name, create_tables=create_tables)
+
+    def initialize_schema(self):
+        super(SqliteStorage, self).initialize_schema()
+        # Migrate schedule tables created before the version column existed.
+        # Fresh databases already have it via the DDL above.
+        columns = self.sql('pragma table_info(schedule)', results=True)
+        if columns and not any(column[1] == 'version' for column in columns):
+            self.sql('alter table schedule add column version integer not '
+                     'null default 0', commit=True)
 
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
@@ -1017,6 +1117,52 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_schedule(self):
         self.sql('delete from schedule where queue = ?', (self.name,), True)
+
+    def reschedule_task(self, data, ts, expected_version=None):
+        # The whole check-and-update runs in a single exclusive transaction,
+        # so a concurrent read_schedule() on another connection either runs
+        # completely before or completely after this operation. Exactly one
+        # of the two can win, ensuring the task cannot be executed at both
+        # the old and the new timestamp.
+        sql = ('update schedule set timestamp = ?, version = version + 1 '
+               'where queue = ? and data = ?')
+        params = [ts.timestamp(), self.name, self.to_blob(data)]
+        if expected_version is not None:
+            sql += ' and version = ?'
+            params.append(expected_version)
+
+        with self.db(commit=True) as curs:
+            curs.execute(sql, params)
+            if curs.rowcount == 1:
+                curs.execute('select version from schedule where queue = ? '
+                             'and data = ?', (self.name, self.to_blob(data)))
+                version, = curs.fetchone()
+                return RESCHEDULED, version
+
+            # The update did not apply. Determine why, within the same
+            # transaction so the classification is consistent.
+            curs.execute('select version from schedule where queue = ? and '
+                         'data = ?', (self.name, self.to_blob(data)))
+            row = curs.fetchone()
+            if row is not None:
+                return RESCHEDULE_VERSION_MISMATCH, row[0]
+
+            curs.execute('select 1 from task where queue = ? and data = ? '
+                         'limit 1', (self.name, self.to_blob(data)))
+            if curs.fetchone() is not None:
+                return RESCHEDULE_CONFLICT, None
+            return RESCHEDULE_NOT_FOUND, None
+
+    def scheduled_items_with_meta(self, limit=None):
+        sql = ('select data, timestamp, version from schedule where '
+               'queue = ? order by timestamp')
+        params = (self.name,)
+        if limit is not None:
+            sql += ' limit ?'
+            params = (self.name, limit)
+
+        return [(data, timestamp, version) for data, timestamp, version
+                in self.sql(sql, params, results=True)]
 
     def put_data(self, key, value, is_result=False):
         self.sql('insert or replace into kv (queue, key, value) '

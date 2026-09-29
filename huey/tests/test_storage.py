@@ -35,6 +35,10 @@ from huey.api import chord
 from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
 from huey.storage import FileStorage
+from huey.storage import RESCHEDULE_CONFLICT
+from huey.storage import RESCHEDULE_NOT_FOUND
+from huey.storage import RESCHEDULE_VERSION_MISMATCH
+from huey.storage import RESCHEDULED
 from huey.tests.base import BaseTestCase
 from huey.tests.base import CI
 from huey.tests.base import slow_test
@@ -263,7 +267,118 @@ class StorageTests(object):
             self.assertTrue(task_a.restore())
 
 
-class TestMemoryStorage(StorageTests, BaseTestCase):
+class RescheduleStorageTests(object):
+    # Tests for storages implementing reschedule_task(). Mixed into the
+    # memory and sqlite storage test-cases.
+    def test_reschedule_task(self):
+        ts = datetime.datetime(2020, 1, 1, 12, 0, 0)
+        self.s.add_to_schedule(b'task-a', ts)
+        self.s.add_to_schedule(b'task-b', ts)
+
+        new_ts = ts + datetime.timedelta(hours=1)
+        status, version = self.s.reschedule_task(b'task-a', new_ts)
+        self.assertEqual(status, RESCHEDULED)
+        self.assertEqual(version, 1)
+
+        # The task data is moved to the new timestamp unchanged, and the
+        # other scheduled task is not affected.
+        self.assertEqual(self.s.read_schedule(ts), [b'task-b'])
+        self.assertEqual(self.s.read_schedule(new_ts), [b'task-a'])
+        self.assertEqual(self.s.schedule_size(), 0)
+
+    def test_reschedule_task_not_found(self):
+        status, version = self.s.reschedule_task(
+            b'missing', datetime.datetime(2020, 1, 1))
+        self.assertEqual(status, RESCHEDULE_NOT_FOUND)
+        self.assertTrue(version is None)
+
+    def test_reschedule_task_conflict_enqueued(self):
+        # A task that has been claimed and placed in the execution queue
+        # cannot be rescheduled.
+        self.s.enqueue(b'task-a')
+        status, version = self.s.reschedule_task(
+            b'task-a', datetime.datetime(2020, 1, 1))
+        self.assertEqual(status, RESCHEDULE_CONFLICT)
+        self.assertTrue(version is None)
+        self.assertEqual(self.s.dequeue(), b'task-a')
+
+    def test_reschedule_task_version(self):
+        ts = datetime.datetime(2020, 1, 1)
+        self.s.add_to_schedule(b'task-a', ts)
+
+        # Conditional update succeeds when the expected version matches.
+        status, version = self.s.reschedule_task(b'task-a', ts,
+                                                 expected_version=0)
+        self.assertEqual((status, version), (RESCHEDULED, 1))
+
+        # A stale expected version is rejected and nothing changes.
+        new_ts = ts + datetime.timedelta(hours=1)
+        status, version = self.s.reschedule_task(b'task-a', new_ts,
+                                                 expected_version=0)
+        self.assertEqual((status, version), (RESCHEDULE_VERSION_MISMATCH, 1))
+        self.assertEqual(self.s.read_schedule(ts), [b'task-a'])
+        self.assertEqual(self.s.schedule_size(), 0)
+
+    def test_scheduled_items_with_meta(self):
+        ts = datetime.datetime(2020, 1, 1)
+        second = datetime.timedelta(seconds=1)
+        self.s.add_to_schedule(b'task-b', ts + second)
+        self.s.add_to_schedule(b'task-a', ts)
+
+        items = self.s.scheduled_items_with_meta()
+        self.assertEqual([data for data, _, _ in items],
+                         [b'task-a', b'task-b'])
+        self.assertEqual([version for _, _, version in items], [0, 0])
+
+        self.s.reschedule_task(b'task-a', ts + second + second)
+        items = self.s.scheduled_items_with_meta()
+        self.assertEqual([data for data, _, _ in items],
+                         [b'task-b', b'task-a'])
+        self.assertEqual([version for _, _, version in items], [0, 1])
+
+    def test_reschedule_read_schedule_race(self):
+        # The scheduler claiming a task and an operator rescheduling it
+        # cannot both win: afterwards exactly one executable copy remains.
+        eta = datetime.datetime(2020, 1, 1)
+        later = eta + datetime.timedelta(days=1)
+        for _ in range(20):
+            self.s.flush_schedule()
+            self.s.add_to_schedule(b'task-a', eta)
+
+            barrier = threading.Barrier(2)
+            outcome = {}
+
+            def claim():
+                barrier.wait()
+                outcome['claimed'] = self.s.read_schedule(later)
+
+            def reschedule():
+                barrier.wait()
+                outcome['res'] = self.s.reschedule_task(
+                    b'task-a', later + datetime.timedelta(days=1))
+
+            threads = [threading.Thread(target=claim),
+                       threading.Thread(target=reschedule)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            status, _ = outcome['res']
+            if status == RESCHEDULED:
+                # Reschedule won: nothing was claimed and the task remains
+                # in the schedule exactly once, at the new timestamp.
+                self.assertEqual(outcome['claimed'], [])
+                self.assertEqual(self.s.schedule_size(), 1)
+            else:
+                # The scheduler won: the task was claimed exactly once and
+                # is gone from the schedule.
+                self.assertEqual(status, RESCHEDULE_NOT_FOUND)
+                self.assertEqual(outcome['claimed'], [b'task-a'])
+                self.assertEqual(self.s.schedule_size(), 0)
+
+
+class TestMemoryStorage(StorageTests, RescheduleStorageTests, BaseTestCase):
     def get_huey(self):
         return MemoryHuey(utc=False)
 
@@ -332,6 +447,12 @@ class TestRedisStorage(StorageTests, BaseTestCase):
         self.s.put_data(b'k1', b'')
         self.assertEqual(self.s.peek_data(b'k1'), b'')
         self.assertEqual(self.s.pop_data(b'k1'), b'')
+
+    def test_reschedule_unsupported(self):
+        self.assertRaises(NotImplementedError, self.s.reschedule_task,
+                          b'task-a', datetime.datetime(2020, 1, 1))
+        self.assertRaises(NotImplementedError,
+                          self.s.scheduled_items_with_meta)
 
 
 class TestRedisStorageWaitResult(TestRedisStorage):
@@ -522,7 +643,7 @@ class TestRedisStorageOffline(BaseTestCase):
         self.assertEqual(calls, [(0, -1), (-3, -1)])
 
 
-class TestSqliteStorage(StorageTests, BaseTestCase):
+class TestSqliteStorage(StorageTests, RescheduleStorageTests, BaseTestCase):
     supports_ttl = False
 
     def tearDown(self):
@@ -614,9 +735,112 @@ class TestSqliteStorage(StorageTests, BaseTestCase):
         self.assertEqual([r[0] for r in curs.fetchall()],
                          ['task_queue_priority_id'])
 
+    def test_reschedule_two_connections(self):
+        # Claiming (scheduler) and rescheduling (operator) use two
+        # independent connections to the same database file.
+        other = SqliteHuey(filename='huey_storage.db', timeout=3).storage
+        try:
+            ts = datetime.datetime(2020, 1, 1, 12, 0, 0)
+            new_ts = ts + datetime.timedelta(hours=1)
+            self.s.add_to_schedule(b'task-a', ts)
+
+            # The reschedule commits first: the scheduler's subsequent read
+            # at the old timestamp finds nothing, and the task is read
+            # exactly once at the new timestamp.
+            status, version = other.reschedule_task(b'task-a', new_ts)
+            self.assertEqual((status, version), (RESCHEDULED, 1))
+            self.assertEqual(self.s.read_schedule(ts), [])
+            self.assertEqual(self.s.read_schedule(new_ts), [b'task-a'])
+            self.assertEqual(other.read_schedule(new_ts), [])
+
+            # The claim commits first: the reschedule finds nothing to
+            # update and no copy is left behind in the schedule.
+            self.s.add_to_schedule(b'task-a', ts)
+            self.assertEqual(other.read_schedule(ts), [b'task-a'])
+            status, version = self.s.reschedule_task(b'task-a', new_ts)
+            self.assertEqual(status, RESCHEDULE_NOT_FOUND)
+            self.assertEqual(self.s.schedule_size(), 0)
+            self.assertEqual(other.schedule_size(), 0)
+        finally:
+            other.close()
+
+    def test_reschedule_two_connections_race(self):
+        # Interleave the scheduler's claim (one connection) with an
+        # operator's reschedule (another connection). Exactly one of them
+        # may win, leaving a single executable copy of the task.
+        other = SqliteHuey(filename='huey_storage.db', timeout=3).storage
+        try:
+            eta = datetime.datetime(2020, 1, 1)
+            later = eta + datetime.timedelta(days=1)
+            for _ in range(20):
+                self.s.flush_schedule()
+                self.s.add_to_schedule(b'task-a', eta)
+
+                barrier = threading.Barrier(2)
+                outcome = {}
+
+                def claim():
+                    barrier.wait()
+                    outcome['claimed'] = self.s.read_schedule(later)
+
+                def reschedule():
+                    barrier.wait()
+                    outcome['res'] = other.reschedule_task(
+                        b'task-a', later + datetime.timedelta(days=1))
+
+                threads = [threading.Thread(target=claim),
+                           threading.Thread(target=reschedule)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+                status, _ = outcome['res']
+                # Exactly one executable copy exists after the race: either
+                # claimed by the scheduler or still in the schedule.
+                n_copies = len(outcome['claimed']) + self.s.schedule_size()
+                self.assertEqual(n_copies, 1)
+                if status == RESCHEDULED:
+                    self.assertEqual(outcome['claimed'], [])
+                else:
+                    self.assertEqual(status, RESCHEDULE_NOT_FOUND)
+                    self.assertEqual(outcome['claimed'], [b'task-a'])
+        finally:
+            other.close()
+
+    def test_schedule_version_migration(self):
+        # Databases created before the schedule version column existed are
+        # migrated transparently when the storage is initialized.
+        self.s.close()
+        conn = sqlite3.connect('huey_storage.db')
+        conn.execute('drop table schedule')
+        conn.execute('create table schedule ('
+                     'id integer not null primary key, queue text not null, '
+                     'data blob not null, timestamp real not null)')
+        conn.execute('insert into schedule (queue, data, timestamp) '
+                     'values (?, ?, ?)', ('huey', b'task-a', 1.0))
+        conn.commit()
+        conn.close()
+
+        huey = SqliteHuey(filename='huey_storage.db', timeout=3)
+        try:
+            columns = [row[1] for row in huey.storage.sql(
+                'pragma table_info(schedule)', results=True)]
+            self.assertEqual(columns, ['id', 'queue', 'data', 'timestamp',
+                                       'version'])
+
+            ts = datetime.datetime(2020, 1, 1)
+            status, version = huey.storage.reschedule_task(b'task-a', ts)
+            self.assertEqual((status, version), (RESCHEDULED, 1))
+            self.assertEqual(huey.storage.read_schedule(ts), [b'task-a'])
+        finally:
+            huey.storage.close()
+
+
 
 @unittest.skipIf(cysqlite is None, 'requires cysqlite')
-class TestCySqliteStorage(StorageTests, BaseTestCase):
+class TestCySqliteStorage(StorageTests, RescheduleStorageTests,
+                          BaseTestCase):
     supports_ttl = False
 
     def tearDown(self):
@@ -686,6 +910,12 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
         self.s.enqueue(b'high', priority=2.5)
         self.assertEqual(self.s.dequeue(), b'high')
         self.assertEqual(self.s.dequeue(), b'low')
+
+    def test_reschedule_unsupported(self):
+        self.assertRaises(NotImplementedError, self.s.reschedule_task,
+                          b'task-a', datetime.datetime(2020, 1, 1))
+        self.assertRaises(NotImplementedError,
+                          self.s.scheduled_items_with_meta)
 
     def get_huey(self):
         return Huey('test-file-storage', storage_class=FileStorage,

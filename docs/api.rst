@@ -1124,6 +1124,67 @@ Huey object
         :returns: the number of tasks currently in the schedule, without
             deserializing them.
 
+    .. py:method:: scheduled_task_info(task_id)
+
+        :param task_id: id of the task to look up (a :py:class:`Task` or
+            :py:class:`Result` may also be given).
+        :returns: a ``ScheduledTaskInfo`` namedtuple of ``(task, eta,
+            version)`` if the task is currently in the schedule, or ``None``.
+
+        Inspect a scheduled task, exposing the schedule ``version`` used for
+        conditional updates with :py:meth:`~Huey.reschedule_task`.
+
+        .. note::
+            Only supported by the memory and sqlite storages. Other storages
+            raise ``NotImplementedError``.
+
+    .. py:method:: reschedule_task(task_id, eta, expected_version=None)
+
+        :param task_id: id of the task to reschedule (a :py:class:`Task` or
+            :py:class:`Result` may also be given).
+        :param datetime eta: new time at which the task should run.
+        :param int expected_version: optional schedule version the caller
+            expects, as returned by :py:meth:`~Huey.scheduled_task_info` or a
+            previous ``reschedule_task()`` call.
+        :returns: a :py:class:`RescheduleResult` describing the outcome.
+
+        Move a scheduled task to a new execution time, updating the stored
+        task in-place. The task's id, arguments, retry state, pipeline/chord
+        relationships and :py:class:`Result` identity are all preserved -- no
+        new task is created.
+
+        Only tasks still waiting in the schedule can be rescheduled. If the
+        scheduler claims the task concurrently, exactly one of the two
+        operations wins, so the task can never run at both the old and the
+        new time. When ``expected_version`` is given, the update only applies
+        if the version still matches, preventing two operators from silently
+        overwriting each other's changes.
+
+        The result's ``status`` is one of:
+
+        * ``RescheduleResult.RESCHEDULED`` - the update was applied.
+        * ``RescheduleResult.NOT_FOUND`` - no such scheduled task.
+        * ``RescheduleResult.CONFLICT`` - the task was already claimed and is
+          in the execution queue (or in-flight); it cannot be rescheduled.
+        * ``RescheduleResult.VERSION_MISMATCH`` - ``expected_version`` did
+          not match; the current version is available on the result.
+
+        .. note::
+            Only supported by the memory and sqlite storages. Other storages
+            raise ``NotImplementedError``.
+
+        Example:
+
+        .. code-block:: python
+
+            info = huey.scheduled_task_info(task_id)
+            if info is not None:
+                result = huey.reschedule_task(
+                    task_id, new_eta, expected_version=info.version)
+                if result.status == RescheduleResult.VERSION_MISMATCH:
+                    # Someone else modified the task; retry if desired.
+                    pass
+
     .. py:method:: all_results()
 
         :returns: a dict of task-id to the serialized result data for all
@@ -2077,6 +2138,48 @@ Result
                 value = result.get(blocking=True, timeout=30)
 
 
+.. py:class:: RescheduleResult
+
+    Returned by :py:meth:`Huey.reschedule_task` to describe the outcome of an
+    attempt to move a scheduled task to a new execution time.
+
+    .. py:attribute:: task_id
+
+        Id of the task the reschedule was attempted on.
+
+    .. py:attribute:: status
+
+        One of the following string constants (also available as class
+        attributes):
+
+        * ``RescheduleResult.RESCHEDULED`` (``'rescheduled'``) - the task was
+          still in the schedule and its execution time was updated.
+        * ``RescheduleResult.NOT_FOUND`` (``'not_found'``) - no task with the
+          given id exists in the schedule or the execution queue.
+        * ``RescheduleResult.CONFLICT`` (``'conflict'``) - the task has
+          already been claimed by the scheduler and is in the execution
+          queue (or in-flight), so it cannot be rescheduled.
+        * ``RescheduleResult.VERSION_MISMATCH`` (``'version_mismatch'``) -
+          the ``expected_version`` did not match the current version, i.e. a
+          concurrent update was applied first.
+
+    .. py:attribute:: eta
+
+        The new execution time, when the reschedule was applied.
+
+    .. py:attribute:: version
+
+        The schedule version after a successful update, or the current
+        version when the update was rejected with ``VERSION_MISMATCH``. The
+        version is obtained via :py:meth:`Huey.scheduled_task_info` and can
+        be passed as ``expected_version`` to perform conditional updates.
+
+    .. py:attribute:: ok
+
+        Boolean indicating whether the reschedule was applied. The result
+        object itself is also truthy only in that case.
+
+
 .. py:class:: ResultGroup
 
     A ``ResultGroup`` will be returned when you enqueue a task pipeline or if
@@ -2485,4 +2588,3 @@ Huey comes with several built-in storage implementations:
 
 .. autoclass:: huey.storage.BaseStorage
    :members:
-

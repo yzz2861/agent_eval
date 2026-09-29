@@ -6,6 +6,7 @@ import time
 from huey.api import ChordResult
 from huey.api import MemoryHuey
 from huey.api import PeriodicTask
+from huey.api import RescheduleResult
 from huey.api import Result
 from huey.api import ResultGroup
 from huey.api import Task
@@ -1290,6 +1291,196 @@ class TestQueue(BaseTestCase):
         assertPeriodic(21, 0, ['sleep', 'first_half'])
         assertPeriodic(21, 30, ['first_half'])
         assertPeriodic(21, 31, [])
+
+
+class TestRescheduleTask(BaseTestCase):
+    def move_to_schedule(self, result=None):
+        # Execute the next queued task with a timestamp that precedes its
+        # eta, causing the consumer logic to place it into the schedule.
+        task = self.huey.dequeue()
+        self.assertTrue(task is not None)
+        self.huey.execute(task, timestamp=datetime.datetime(2000, 1, 1))
+        return task
+
+    def test_reschedule_task(self):
+        @self.huey.task()
+        def add(a, b):
+            return a + b
+
+        eta = datetime.datetime.now() + datetime.timedelta(hours=1)
+        r = add.schedule(args=(1, 2), eta=eta)
+        self.move_to_schedule()
+        self.assertEqual(self.huey.scheduled_count(), 1)
+
+        new_eta = eta + datetime.timedelta(hours=2)
+        result = self.huey.reschedule_task(r.id, new_eta)
+        self.assertTrue(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, RescheduleResult.RESCHEDULED)
+        self.assertEqual(result.task_id, r.id)
+        self.assertEqual(result.eta, new_eta)
+        self.assertEqual(result.version, 1)
+
+        # The task no longer runs at the old time, and runs exactly once at
+        # the new time, preserving its id and arguments.
+        self.assertEqual(self.huey.read_schedule(eta), [])
+        task, = self.huey.read_schedule(new_eta)
+        self.assertEqual(task.id, r.id)
+        self.assertEqual(task.data, ((1, 2), {}))
+        self.assertEqual(self.huey.read_schedule(new_eta), [])
+
+        # The original Result handle still resolves to the task's result.
+        self.assertEqual(self.huey.execute(task, new_eta), 3)
+        self.assertEqual(r.get(), 3)
+
+    def test_reschedule_task_accepts_task_and_result(self):
+        @self.huey.task()
+        def task_a(n):
+            return n
+
+        eta = datetime.datetime.now() + datetime.timedelta(hours=1)
+        r = task_a.schedule(args=(1,), eta=eta)
+        task = self.move_to_schedule()
+
+        new_eta = eta + datetime.timedelta(hours=1)
+        result = self.huey.reschedule_task(r, new_eta)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.task_id, r.id)
+
+        result = self.huey.reschedule_task(task, new_eta)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.version, 2)
+
+    def test_reschedule_task_not_found(self):
+        result = self.huey.reschedule_task(
+            'missing-id', datetime.datetime.now())
+        self.assertFalse(result)
+        self.assertEqual(result.status, RescheduleResult.NOT_FOUND)
+        self.assertTrue(self.huey.scheduled_task_info('missing-id') is None)
+
+    def test_reschedule_task_conflict_enqueued(self):
+        @self.huey.task()
+        def task_a(n):
+            return n
+
+        eta = datetime.datetime.now() + datetime.timedelta(hours=1)
+        r = task_a.schedule(args=(1,), eta=eta)
+        # The task is in the execution queue (not the schedule), so it
+        # cannot be rescheduled.
+        result = self.huey.reschedule_task(
+            r.id, eta + datetime.timedelta(hours=1))
+        self.assertFalse(result)
+        self.assertEqual(result.status, RescheduleResult.CONFLICT)
+
+    def test_reschedule_conditional_version(self):
+        @self.huey.task()
+        def task_a(n):
+            return n
+
+        eta = datetime.datetime.now() + datetime.timedelta(hours=1)
+        r = task_a.schedule(args=(1,), eta=eta)
+        self.move_to_schedule()
+
+        # Two operators both read the current version.
+        info_a = self.huey.scheduled_task_info(r.id)
+        info_b = self.huey.scheduled_task_info(r.id)
+        self.assertEqual(info_a.version, 0)
+        self.assertEqual(info_b.version, 0)
+        self.assertEqual(info_a.task.id, r.id)
+        self.assertEqual(info_a.eta, eta)
+
+        eta_a = eta + datetime.timedelta(hours=1)
+        eta_b = eta + datetime.timedelta(hours=2)
+
+        # Operator A's update applies and bumps the version.
+        res_a = self.huey.reschedule_task(r.id, eta_a,
+                                          expected_version=info_a.version)
+        self.assertTrue(res_a.ok)
+        self.assertEqual(res_a.version, 1)
+
+        # Operator B's update, based on the stale version, is rejected and
+        # reports the current version.
+        res_b = self.huey.reschedule_task(r.id, eta_b,
+                                          expected_version=info_b.version)
+        self.assertFalse(res_b)
+        self.assertEqual(res_b.status, RescheduleResult.VERSION_MISMATCH)
+        self.assertEqual(res_b.version, 1)
+
+        # The task still runs at operator A's time.
+        info = self.huey.scheduled_task_info(r.id)
+        self.assertEqual(info.eta, eta_a)
+        self.assertEqual(info.version, 1)
+
+        # Operator B retries with the current version and now succeeds.
+        res_b2 = self.huey.reschedule_task(r.id, eta_b,
+                                           expected_version=res_b.version)
+        self.assertTrue(res_b2.ok)
+        self.assertEqual(self.huey.scheduled_task_info(r.id).eta, eta_b)
+
+    def test_reschedule_preserves_task_state(self):
+        @self.huey.task(retries=3, retry_delay=10, priority=5)
+        def task_a(n):
+            return n
+
+        eta = datetime.datetime.now() + datetime.timedelta(hours=1)
+        r = task_a.schedule(args=(7,), eta=eta)
+        self.move_to_schedule()
+
+        new_eta = eta + datetime.timedelta(hours=3)
+        result = self.huey.reschedule_task(r.id, new_eta)
+        self.assertTrue(result.ok)
+
+        task, = self.huey.read_schedule(new_eta)
+        self.assertEqual(task.id, r.id)
+        self.assertEqual(task.data, ((7,), {}))
+        self.assertEqual(task.retries, 3)
+        self.assertEqual(task.retry_delay, 10)
+        self.assertEqual(task.priority, 5)
+
+    def test_reschedule_preserves_pipeline(self):
+        @self.huey.task()
+        def add(a, b):
+            return a + b
+
+        eta = datetime.datetime.now() + datetime.timedelta(hours=1)
+        task = add.s(1, 2, eta=eta)
+        task = task.then(add, 3)
+        r1, r2 = self.huey.enqueue(task)
+        self.move_to_schedule()
+        self.assertEqual(self.huey.scheduled_count(), 1)
+
+        new_eta = eta + datetime.timedelta(hours=1)
+        result = self.huey.reschedule_task(r1.id, new_eta)
+        self.assertTrue(result.ok)
+
+        # The parent runs at the new eta and the pipeline continues with
+        # the original result identities intact.
+        parent, = self.huey.read_schedule(new_eta)
+        self.assertEqual(parent.id, r1.id)
+        self.assertTrue(parent.on_complete is not None)
+        self.assertEqual(self.huey.execute(parent, new_eta), 3)
+        self.assertEqual(self.huey.execute(self.huey.dequeue(), new_eta), 6)
+        self.assertEqual(r1.get(), 3)
+        self.assertEqual(r2.get(), 6)
+
+    def test_reschedule_unsupported_storage(self):
+        from huey import BlackHoleHuey
+        huey = BlackHoleHuey(utc=False)
+
+        @huey.task()
+        def task_a(n):
+            return n
+
+        # BlackHoleStorage reports everything as not-found, while storages
+        # that hold data but do not implement rescheduling (e.g. file and
+        # redis) raise NotImplementedError from the storage layer itself.
+        result = huey.reschedule_task('task-id', datetime.datetime.now())
+        self.assertEqual(result.status, RescheduleResult.NOT_FOUND)
+        self.assertRaises(NotImplementedError,
+                          huey.storage.reschedule_task, b'x',
+                          datetime.datetime.now())
+        self.assertRaises(NotImplementedError, huey.scheduled_task_info,
+                          'task-id')
 
 
 class TestAsyncTasks(BaseTestCase):
