@@ -52,6 +52,7 @@ Strawberry provides some security extensions to limit various aspects of the
 GraphQL document. These are recommended in production.
 
 - [query depth](../extensions/query-depth-limiter.md)
+- [query cost](../extensions/query-cost-limiter.md)
 - [max number of aliases](../extensions/max-aliases-limiter.md)
 - [max number of tokens](../extensions/max-tokens-limiter.md)
 

@@ -8,6 +8,7 @@ from .max_aliases import MaxAliasesLimiter
 from .max_tokens import MaxTokensLimiter
 from .parser_cache import ParserCache
 from .pydantic_error_extension import PydanticErrorExtension
+from .query_cost_limiter import FieldCost, QueryCostLimiter
 from .query_depth_limiter import IgnoreContext, QueryDepthLimiter
 from .validation_cache import ValidationCache
 
@@ -15,6 +16,7 @@ __all__ = [
     "AddValidationRules",
     "DisableIntrospection",
     "DisableValidation",
+    "FieldCost",
     "FieldExtension",
     "IgnoreContext",
     "LifecycleStep",
@@ -23,6 +25,7 @@ __all__ = [
     "MaxTokensLimiter",
     "ParserCache",
     "PydanticErrorExtension",
+    "QueryCostLimiter",
     "QueryDepthLimiter",
     "SchemaExtension",
     "ValidationCache",
