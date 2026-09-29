@@ -89,3 +89,11 @@ Other
 
 .. autoclass:: falcon.ETag
     :members:
+
+.. _field_projection:
+
+Field Projection
+----------------
+
+.. autoclass:: falcon.FieldProjection
+    :members:
