@@ -15,6 +15,15 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.BufferedLogger` and `structlog.BufferedLoggerFactory` provide an
+  explicitly managed bounded buffer between rendered log events and a
+  potentially slow sink. Full buffers can wait for capacity, drop the new
+  event, or raise `structlog.BufferFull`; `flush()` has a fixed snapshot of
+  events received when called, and `close()` drains remaining data while
+  reporting unfinished sequence numbers on sink failure.
+
 
 ## [26.1.0](https://github.com/hynek/structlog/compare/25.5.0...26.1.0) - 2026-06-06
 

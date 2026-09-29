@@ -64,6 +64,17 @@ API Reference
 
 .. autoclass:: BytesLoggerFactory
 
+.. autoclass:: BufferedLogger
+   :members: flush, close, msg
+
+.. autoclass:: BufferedLoggerFactory
+
+.. autoclass:: FullQueuePolicy
+
+.. autoexception:: BufferFull
+.. autoexception:: BufferedLoggerClosed
+.. autoexception:: BufferedSinkError
+
 .. autoexception:: DropEvent
 
 .. autoclass:: BoundLoggerBase

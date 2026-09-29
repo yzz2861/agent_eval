@@ -31,8 +31,14 @@ from structlog._config import (
 from structlog._generic import BoundLogger
 from structlog._native import make_filtering_bound_logger
 from structlog._output import (
+    BufferedLogger,
+    BufferedLoggerClosed,
+    BufferedLoggerFactory,
+    BufferedSinkError,
+    BufferFull,
     BytesLogger,
     BytesLoggerFactory,
+    FullQueuePolicy,
     PrintLogger,
     PrintLoggerFactory,
     WriteLogger,
@@ -59,9 +65,15 @@ __copyright__ = "Copyright (c) 2013 " + __author__
 __all__ = [
     "BoundLogger",
     "BoundLoggerBase",
+    "BufferFull",
+    "BufferedLogger",
+    "BufferedLoggerClosed",
+    "BufferedLoggerFactory",
+    "BufferedSinkError",
     "BytesLogger",
     "BytesLoggerFactory",
     "DropEvent",
+    "FullQueuePolicy",
     "PrintLogger",
     "PrintLoggerFactory",
     "ReturnLogger",
