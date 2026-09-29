@@ -5,6 +5,10 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 **UNRELEASED**
 
+- Added the ``amap_stream()`` async iterator which maps an async function over a
+  (sync or async) iterable with bounded concurrency (``limit``) and bounded
+  buffering of finished results (``max_buffered``), optionally yielding results in
+  completion order (``ordered=False``)
 - Fixed ``sleep()`` treating a negative delay (including ``-inf``) inconsistently
   across backends (asyncio returned immediately; Trio raised ``ValueError``) by
   raising ``ValueError`` on all backends

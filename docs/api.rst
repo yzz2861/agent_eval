@@ -296,5 +296,6 @@ Concurrency utilities
 ---------------------
 
 .. autofunction:: anyio.amap
+.. autofunction:: anyio.amap_stream
 .. autofunction:: anyio.as_completed
 .. autofunction:: anyio.gather

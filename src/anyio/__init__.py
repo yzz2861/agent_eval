@@ -10,6 +10,7 @@ from ._lazyimport import (
 
 if TYPE_CHECKING or not install_lazy_importer():
     from ._core._concurrency_utils import amap as amap
+    from ._core._concurrency_utils import amap_stream as amap_stream
     from ._core._concurrency_utils import as_completed as as_completed
     from ._core._concurrency_utils import gather as gather
     from ._core._contextmanagers import (
