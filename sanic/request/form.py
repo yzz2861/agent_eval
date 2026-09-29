@@ -29,6 +29,39 @@ class File(NamedTuple):
     name: str
 
 
+def decode_filename(form_parameters):
+    """Decode and normalize a filename from Content-Disposition parameters.
+
+    Handles non-ASCII filenames sent in RFC2231 ``filename*`` format and
+    normalizes the result to NFC (Apple MacOS/iOS send NFD).
+
+    Args:
+        form_parameters (dict): Parameters of a Content-Disposition header.
+
+    Returns:
+        str | None: The decoded filename, or None if none was given.
+    """
+    file_name = form_parameters.get("filename")
+
+    # non-ASCII filenames in RFC2231, "filename*" format
+    if file_name is None and form_parameters.get("filename*"):
+        encoding, _, value = email.utils.decode_rfc2231(
+            form_parameters["filename*"]
+        )
+        file_name = unquote(value, encoding=encoding)
+
+    # Normalize to NFC (Apple MacOS/iOS send NFD)
+    # Notes:
+    # - No effect for Windows, Linux or Android clients which
+    #   already send NFC
+    # - Python open() is tricky (creates files in NFC no matter
+    #   which form you use)
+    if file_name is not None:
+        file_name = unicodedata.normalize("NFC", file_name)
+
+    return file_name
+
+
 def parse_multipart_form(body, boundary):
     """Parse a request body and returns fields and files
 
@@ -67,23 +100,7 @@ def parse_multipart_form(body, boundary):
 
             if form_header_field == "content-disposition":
                 field_name = form_parameters.get("name")
-                file_name = form_parameters.get("filename")
-
-                # non-ASCII filenames in RFC2231, "filename*" format
-                if file_name is None and form_parameters.get("filename*"):
-                    encoding, _, value = email.utils.decode_rfc2231(
-                        form_parameters["filename*"]
-                    )
-                    file_name = unquote(value, encoding=encoding)
-
-                # Normalize to NFC (Apple MacOS/iOS send NFD)
-                # Notes:
-                # - No effect for Windows, Linux or Android clients which
-                #   already send NFC
-                # - Python open() is tricky (creates files in NFC no matter
-                #   which form you use)
-                if file_name is not None:
-                    file_name = unicodedata.normalize("NFC", file_name)
+                file_name = decode_filename(form_parameters)
 
             elif form_header_field == "content-type":
                 content_type = form_header_value

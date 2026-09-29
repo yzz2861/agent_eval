@@ -58,6 +58,12 @@ from sanic.models.protocol_types import TransportProtocol
 from sanic.response import BaseHTTPResponse, HTTPResponse
 
 from .form import parse_multipart_form
+from .multipart import (
+    DEFAULT_MAX_DEPTH,
+    DEFAULT_MAX_HEADERS_SIZE,
+    MultipartStream,
+    request_body_chunks,
+)
 from .parameters import RequestParameters
 
 
@@ -670,6 +676,48 @@ class Request(Generic[sanic_type, ctx_type]):
             error_logger.exception("Failed when parsing form")
 
         return self.parsed_form
+
+    def multipart_stream(
+        self,
+        *,
+        max_depth: int = DEFAULT_MAX_DEPTH,
+        max_headers_size: int = DEFAULT_MAX_HEADERS_SIZE,
+    ) -> MultipartStream:
+        """Stream the parts of a multipart request body, one at a time.
+
+        Unlike the form and files properties, this does not buffer the
+        whole body in memory, so it is suitable for large uploads. Parts
+        are produced in wire order; a part whose content type is
+        multipart/* (for example a multipart/mixed attachment inside
+        multipart/form-data) can be descended into with part.children()
+        to iterate its sub-parts layer by layer.
+
+        Args:
+            max_depth (int): Maximum nested container levels to allow.
+            max_headers_size (int): Maximum size of a single part header
+                block in bytes.
+
+        Returns:
+            MultipartStream: An async iterator of MultipartPart.
+        """
+        content_type = self.headers.getone(
+            "content-type", DEFAULT_HTTP_CONTENT_TYPE
+        )
+        content_type, parameters = parse_content_header(content_type)
+        if not content_type.startswith("multipart/"):
+            raise BadRequest(
+                "Cannot stream multipart parts from "
+                f"content-type: {content_type}"
+            )
+        boundary = parameters.get("boundary")
+        if not boundary:
+            raise BadRequest("Missing boundary in multipart content-type")
+        return MultipartStream(
+            request_body_chunks(self),
+            str(boundary).encode("utf-8"),
+            max_headers_size=max_headers_size,
+            max_depth=max_depth,
+        )
 
     @property
     def form(self) -> RequestParameters | None:
