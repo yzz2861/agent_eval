@@ -1,4 +1,4 @@
-from pypika_tortoise import SqlContext, functions
+from pypika_tortoise import SqlContext, analytics, functions
 
 from tortoise.expressions import Aggregate, Function
 
@@ -136,3 +136,111 @@ class Avg(Aggregate):
 
     database_func = functions.Avg
     populate_field_object = True
+
+
+##############################################################################
+# Window functions
+##############################################################################
+
+
+class RowNumber(Function):
+    """
+    Returns the number of the current row within its window partition, counting from 1.
+
+    Must be used inside a :class:`Window <tortoise.expressions.Window>` expression.
+
+    :samp:`Window(RowNumber(), partition_by="{FIELD_NAME}", order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.RowNumber
+
+    def __init__(self) -> None:
+        super().__init__(None)
+
+
+class Rank(Function):
+    """
+    Returns the rank of the current row, with gaps.
+
+    Must be used inside a :class:`Window <tortoise.expressions.Window>` expression.
+    """
+
+    database_func = analytics.Rank
+
+    def __init__(self) -> None:
+        super().__init__(None)
+
+
+class DenseRank(Function):
+    """
+    Returns the rank of the current row, without gaps.
+
+    Must be used inside a :class:`Window <tortoise.expressions.Window>` expression.
+    """
+
+    database_func = analytics.DenseRank
+
+    def __init__(self) -> None:
+        super().__init__(None)
+
+
+class NTile(Function):
+    """
+    Distributes the rows of the partition into the given number of buckets.
+
+    Must be used inside a :class:`Window <tortoise.expressions.Window>` expression.
+
+    :samp:`Window(NTile({BUCKETS}), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.NTile
+
+
+class Lag(Function):
+    """
+    Returns the value of the field evaluated at the row that is ``offset`` rows
+    before the current row within the partition (default 1).
+
+    Must be used inside a :class:`Window <tortoise.expressions.Window>` expression.
+
+    :samp:`Window(Lag("{FIELD_NAME}"), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.Lag
+
+
+class Lead(Function):
+    """
+    Returns the value of the field evaluated at the row that is ``offset`` rows
+    after the current row within the partition (default 1).
+
+    Must be used inside a :class:`Window <tortoise.expressions.Window>` expression.
+
+    :samp:`Window(Lead("{FIELD_NAME}"), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.Lead
+
+
+class FirstValue(Function):
+    """
+    Returns the value of the field evaluated at the first row of the window frame.
+
+    Must be used inside a :class:`Window <tortoise.expressions.Window>` expression.
+
+    :samp:`Window(FirstValue("{FIELD_NAME}"), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.FirstValue
+
+
+class LastValue(Function):
+    """
+    Returns the value of the field evaluated at the last row of the window frame.
+
+    Must be used inside a :class:`Window <tortoise.expressions.Window>` expression.
+
+    :samp:`Window(LastValue("{FIELD_NAME}"), order_by="{FIELD_NAME}")`
+    """
+
+    database_func = analytics.LastValue

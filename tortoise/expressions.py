@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import operator
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
@@ -8,13 +9,16 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pypika_tortoise import Case as PypikaCase
 from pypika_tortoise import Field as PypikaField
-from pypika_tortoise import SqlContext, Table
+from pypika_tortoise import Order, SqlContext, Table
+from pypika_tortoise import analytics as pypika_analytics
 from pypika_tortoise.functions import AggregateFunction, DistinctOptionFunction
 from pypika_tortoise.terms import (
+    AnalyticFunction,
     ArithmeticExpression,
     Criterion,
     Term,
     ValueWrapper,
+    WindowFrameAnalyticFunction,
 )
 from pypika_tortoise.terms import Function as PypikaFunction
 from pypika_tortoise.utils import format_alias_sql
@@ -374,7 +378,14 @@ class Q:
         )
         if overridden_operator:
             operator = overridden_operator
-        if annotation_info.term.is_aggregate:
+        if getattr(annotation_info.term, "is_analytic", False):
+            # Window functions are not allowed in WHERE or HAVING. The filter is
+            # applied on the annotation alias in an outer query that wraps the
+            # annotated query (see AwaitableQuery._wrap_window_filter).
+            modifier = QueryModifier(
+                window_criterion=operator(PypikaField(having_info["field"]), value)
+            )
+        elif annotation_info.term.is_aggregate:
             modifier = QueryModifier(having_criterion=operator(annotation_info.term, value))
         else:
             modifier = QueryModifier(where_criterion=operator(annotation_info.term, value))
@@ -642,6 +653,164 @@ class Aggregate(Function):
             ret.term = PypikaCase().when(modifier.where_criterion, ret.term).else_(None)
 
         return ret
+
+
+class RowsFrame:
+    """
+    ROWS frame specification for a :class:`Window` expression.
+
+    Bounds are integers where 0 means CURRENT ROW, a negative value -N
+    means N PRECEDING and a positive value N means N FOLLOWING.
+    None means UNBOUNDED PRECEDING for ``start`` and UNBOUNDED FOLLOWING
+    for ``end``.
+
+    :samp:`RowsFrame(-2, 0)` renders ``ROWS BETWEEN 2 PRECEDING AND CURRENT ROW``.
+    """
+
+    __slots__ = ("start", "end")
+
+    def __init__(self, start: int | None = None, end: int | None = None) -> None:
+        for bound in (start, end):
+            if bound is not None and not isinstance(bound, int):
+                raise FieldError("RowsFrame bounds must be integers or None")
+        self.start = start
+        self.end = end
+
+    def _edge(self, value: int | None, preceding: bool) -> Any:
+        if value is None:
+            return pypika_analytics.Preceding() if preceding else pypika_analytics.Following()
+        if value == 0:
+            return pypika_analytics.CURRENT_ROW
+        if value < 0:
+            return pypika_analytics.Preceding(-value)
+        return pypika_analytics.Following(value)
+
+
+class Window(Expression):
+    """
+    Window function expression, to be used as an annotation.
+
+    The window defines how the function is computed: ``partition_by`` divides the
+    rows into groups, ``order_by`` orders the rows inside each partition and the
+    optional ``frame`` (a :class:`RowsFrame`) restricts which rows of the partition
+    each computation sees. The window ``order_by`` only affects the computation;
+    use ``QuerySet.order_by()`` to order the rows of the result.
+
+    Filtering on a window annotation is supported: the annotated query is wrapped
+    in an outer query that filters on the annotation alias, since window functions
+    are not allowed in WHERE or HAVING.
+
+    :param func: The function to compute, e.g. ``RowNumber()``, ``Lag("value")`` or
+        an aggregate like ``Avg("value")``.
+    :param partition_by: Field name(s) to partition the rows by.
+    :param order_by: Field name(s) to order rows by inside the window.
+        Prefix a field name with ``-`` to order descending.
+    :param frame: Optional :class:`RowsFrame` defining the ROWS frame.
+
+    :samp:`Window(RowNumber(), partition_by="device_id", order_by="timestamp")`
+    """
+
+    def __init__(
+        self,
+        func: Function | AnalyticFunction,
+        partition_by: str
+        | F
+        | Expression
+        | Term
+        | Sequence[str | F | Expression | Term]
+        | None = None,
+        order_by: str | F | Expression | Term | Sequence[str | F | Expression | Term] | None = None,
+        frame: RowsFrame | None = None,
+    ) -> None:
+        self.func = func
+        self.partition_by = self._normalize_terms(partition_by)
+        self.order_by = self._normalize_terms(order_by)
+        self.frame = frame
+        self.field_object: Field | None = None
+
+    @staticmethod
+    def _normalize_terms(
+        terms: str | F | Expression | Term | Sequence[str | F | Expression | Term] | None,
+    ) -> tuple[str | F | Expression | Term, ...]:
+        if terms is None:
+            return ()
+        if isinstance(terms, (str, Expression, Term)):
+            return (terms,)
+        return tuple(terms)
+
+    def _resolve_function(
+        self, resolve_context: ResolveContext
+    ) -> tuple[AnalyticFunction, list[TableCriterionTuple]]:
+        func = self.func
+        if isinstance(func, Function):
+            args: list[Any] = []
+            joins: list[TableCriterionTuple] = []
+            if func.field is not None:
+                resolved = func._resolve_argument(
+                    resolve_context, func.field, treat_str_as_field=True
+                )
+                args.append(resolved.term)
+                joins += resolved.joins
+            for value in func.default_values:
+                resolved = func._resolve_argument(resolve_context, value, treat_str_as_field=False)
+                args.append(resolved.term)
+                joins += resolved.joins
+            database_func = func.database_func
+            if not (
+                isinstance(database_func, type) and issubclass(database_func, AnalyticFunction)
+            ):
+                analytic_func = getattr(pypika_analytics, database_func.__name__, None)
+                if analytic_func is None or not issubclass(analytic_func, AnalyticFunction):
+                    raise FieldError(
+                        f"Function {database_func.__name__} can not be used as a window function"
+                    )
+                database_func = analytic_func
+            if getattr(func, "distinct", False):
+                raise FieldError("DISTINCT is not supported in window functions")
+            if func.populate_field_object:
+                self.field_object = func.field_object
+            return database_func(*args), joins
+        if isinstance(func, AnalyticFunction):
+            return func, []
+        raise FieldError("Window func must be a Function or an analytic function term")
+
+    def _resolve_term(self, resolve_context: ResolveContext, item: Any) -> ResolveResult:
+        if isinstance(item, str):
+            return F(item).resolve(resolve_context)
+        if isinstance(item, Expression):
+            return item.resolve(resolve_context)
+        if isinstance(item, Term):
+            return ResolveResult(term=item)
+        raise FieldError(f"Invalid window term: {item!r}")
+
+    def resolve(self, resolve_context: ResolveContext) -> ResolveResult:
+        term, joins = self._resolve_function(resolve_context)
+
+        for item in self.partition_by:
+            resolved = self._resolve_term(resolve_context, item)
+            if resolved.joins:
+                joins = list(set(joins + resolved.joins))
+            term = term.over(resolved.term)
+
+        for item in self.order_by:
+            order = None
+            if isinstance(item, str) and item.startswith("-"):
+                order = Order.desc
+                item = item[1:]
+            resolved = self._resolve_term(resolve_context, item)
+            if resolved.joins:
+                joins = list(set(joins + resolved.joins))
+            term = term.orderby(resolved.term, order=order)
+
+        if self.frame is not None:
+            if not isinstance(term, WindowFrameAnalyticFunction):
+                raise FieldError(f"Function {term.name} does not support a ROWS frame")
+            term = term.rows(
+                self.frame._edge(self.frame.start, preceding=True),
+                self.frame._edge(self.frame.end, preceding=False),
+            )
+
+        return ResolveResult(term=term, joins=joins)
 
 
 class _WhenThen(Term):

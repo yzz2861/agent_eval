@@ -15,6 +15,7 @@ Added
 ^^^^^
 - ``Q.__bool__()`` so ``Q`` objects with no filters/children (including nested empty ``Q`` children) are falsy. (#2227)
 - PostgreSQL ``password`` credential now accepts a sync or async callable, resolved once per new connection, to support short-lived credentials such as AWS RDS/Aurora IAM tokens and Azure Entra ID tokens. (#2261)
+- ``Window`` expression for window (analytic) functions in ``annotate()``, with ``partition_by``, ``order_by`` and a ``ROWS`` frame (``RowsFrame``), plus the ``RowNumber``/``Rank``/``DenseRank``/``NTile``/``Lag``/``Lead``/``FirstValue``/``LastValue`` window functions. Window annotations do not trigger ``GROUP BY``, and filtering on them wraps the query in a legal outer query instead of putting the window function in ``WHERE``.
 
 Changed
 ^^^^^^^

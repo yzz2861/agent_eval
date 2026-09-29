@@ -140,3 +140,51 @@ Example usage:
             default='middle'
         )
     )
+
+Window Expression
+=================
+
+The Window expression computes window (analytic) functions over a partition of the
+result set, e.g. numbering events per device, fetching the previous value or
+computing a moving average.
+
+.. autoclass:: tortoise.expressions.Window
+
+.. autoclass:: tortoise.expressions.RowsFrame
+
+The window ``order_by`` only decides how the window function is computed; the
+query's own ``order_by()`` decides how the rows are presented. Filtering on a
+window annotation is supported: the annotated query is wrapped in an outer query
+that filters on the annotation alias.
+
+Example usage:
+
+.. code-block:: python3
+
+    from tortoise.expressions import RowsFrame, Window
+    from tortoise.functions import Avg, Lag, RowNumber
+
+    # number events per device
+    await Event.all().annotate(
+        rn=Window(RowNumber(), partition_by="device_id", order_by="timestamp")
+    ).values("id", "rn")
+
+    # previous value per device
+    await Event.all().annotate(
+        prev=Window(Lag("value"), partition_by="device_id", order_by="timestamp")
+    ).values("id", "prev")
+
+    # moving average over the current and the two preceding rows
+    await Event.all().annotate(
+        ma=Window(
+            Avg("value"),
+            partition_by="device_id",
+            order_by="timestamp",
+            frame=RowsFrame(-2, 0),
+        )
+    ).values("id", "ma")
+
+    # keep only the first event of each device
+    await Event.all().annotate(
+        rn=Window(RowNumber(), partition_by="device_id", order_by="timestamp")
+    ).filter(rn=1)

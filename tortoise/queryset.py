@@ -11,7 +11,16 @@ from pypika_tortoise.analytics import Count
 from pypika_tortoise.functions import Cast
 from pypika_tortoise.functions import Count as DistinctCount
 from pypika_tortoise.queries import QueryBuilder, _SetOperation
-from pypika_tortoise.terms import Case, Field, Function, Star, Term, Tuple, ValueWrapper
+from pypika_tortoise.terms import (
+    Case,
+    Criterion,
+    Field,
+    Function,
+    Star,
+    Term,
+    Tuple,
+    ValueWrapper,
+)
 
 from tortoise.backends.base.client import BaseDBAsyncClient, Capabilities
 from tortoise.exceptions import (
@@ -22,7 +31,15 @@ from tortoise.exceptions import (
     OperationalError,
     ParamsError,
 )
-from tortoise.expressions import Expression, Q, RawSQL, ResolveContext, ResolveResult, Value
+from tortoise.expressions import (
+    Expression,
+    Q,
+    RawSQL,
+    ResolveContext,
+    ResolveResult,
+    Value,
+    Window,
+)
 from tortoise.fields.base import DatabaseDefault
 from tortoise.fields.relational import (
     ForeignKeyFieldInstance,
@@ -138,6 +155,11 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
 
     def resolve_filters(self, fields_for_select: Collection[str] | None = None) -> None:
         """Builds the common filters for a QuerySet."""
+        window_filter_keys = self._window_annotations_in_filters()
+        if window_filter_keys and fields_for_select is not None:
+            # Window annotations referenced by filters must be selected by the inner
+            # query so that the outer query can filter on their aliases.
+            fields_for_select = {*fields_for_select, *window_filter_keys}
         has_aggregate = self._resolve_annotate(fields_for_select)
 
         modifier = QueryModifier()
@@ -163,6 +185,84 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
             self.query = self.query.groupby(
                 *[self.model._meta.basetable[field] for field in self.model._meta.db_fields]
             )
+
+        if modifier.window_criterion:
+            self._wrap_window_filter(modifier.window_criterion)
+
+    @staticmethod
+    def _is_window_annotation(annotation: Any) -> bool:
+        if isinstance(annotation, Window):
+            return True
+        return isinstance(annotation, Term) and getattr(annotation, "is_analytic", False)
+
+    def _window_annotations_in_filters(self) -> set[str]:
+        """Names of window annotations that are referenced by any filter."""
+        window_keys = set()
+        stack = list(self._q_objects)
+        while stack:
+            node = stack.pop()
+            for key in node.filters:
+                annotation = self._annotations.get(key.split("__")[0])
+                if annotation is not None and self._is_window_annotation(annotation):
+                    window_keys.add(key.split("__")[0])
+            stack.extend(node.children)
+        return window_keys
+
+    def _wrap_window_filter(self, window_criterion: Criterion) -> None:
+        """Wrap the query in an outer query filtering on window annotation aliases.
+
+        Window functions can not appear in WHERE or HAVING, so the annotated query
+        becomes a subquery and the window criterion is applied on the outer query.
+        ORDER BY is moved to the outer query as well: the window's own ORDER BY
+        (inside OVER) decides how the window is computed, while the query's ORDER
+        BY only decides how the result rows are presented.
+        """
+        inner = self.query
+        base_table_name = self.model._meta.basetable.get_table_name()
+        select_names = set()
+        for select in inner._selects:
+            name = getattr(select, "alias", None) or getattr(select, "name", None)
+            if name is not None:
+                select_names.add(name)
+
+        outer_orderbys = []
+        orderbys = list(inner._orderbys)
+        inner._orderbys = []
+        for index, (term, order) in enumerate(orderbys):
+            if isinstance(term, Field):
+                if term.table is None:
+                    # reference to a select alias (e.g. an annotation), stays valid
+                    outer_orderbys.append((term, order))
+                    continue
+                table_name = term.table.get_table_name()
+                if table_name == base_table_name and term.name in select_names:
+                    outer_orderbys.append((Field(term.name), order))
+                    continue
+                qualified_name = f"{table_name}.{term.name}"
+                if qualified_name in select_names:
+                    outer_orderbys.append((Field(qualified_name), order))
+                    continue
+            # the term is not directly selectable from the inner query output,
+            # compute it in the inner query and reference it by alias
+            orderby_alias = f"_orderby_{index}"
+            inner._select_other(term.as_(orderby_alias))
+            select_names.add(orderby_alias)
+            outer_orderbys.append((Field(orderby_alias), order))
+
+        wrapper_alias = "_windowed"
+        wrapper_table = Table(wrapper_alias)
+        outer_query = self.model._meta.db.query_class.from_(inner.as_(wrapper_alias))
+        for select in inner._selects:
+            name = getattr(select, "alias", None) or getattr(select, "name", None)
+            if name is None:
+                raise OperationalError(
+                    "Can not filter on a window annotation: an inner select has no name"
+                )
+            outer_query = outer_query.select(wrapper_table[name].as_(name))
+        outer_query._wheres = window_criterion
+        for term, order in outer_orderbys:
+            outer_query = outer_query.orderby(term, order=order)
+        self.query = outer_query
 
     def _pk_in_subquery(self, table: Table) -> Term:
         """Build ``pk IN (SELECT "_t".pk FROM (SELECT pk ...) AS "_t")`` from the current
@@ -1381,6 +1481,10 @@ class UpdateQuery(AwaitableQuery):
         # Resolve filters on a SELECT-shaped query first: filters on related fields add
         # JOINs, which are not valid in UPDATE statements on most backends, so the target
         # rows are selected by primary key through a subquery instead (see _pk_in_subquery).
+        if self._window_annotations_in_filters():
+            raise OperationalError(
+                "Filtering on window function annotations is not supported in UPDATE queries"
+            )
         self.query = copy(self.model._meta.basequery)
         if self.capabilities.support_update_limit_order_by and self._limit:
             self.query._limit = self.query._wrapper_cls(self._limit)
@@ -1469,6 +1573,10 @@ class DeleteQuery(AwaitableQuery):
 
     def _make_query(self) -> None:
         table = self.model._meta.basetable
+        if self._window_annotations_in_filters():
+            raise OperationalError(
+                "Filtering on window function annotations is not supported in DELETE queries"
+            )
         self.query = copy(self.model._meta.basequery)
         if self.capabilities.support_update_limit_order_by and self._limit:
             self.query._limit = self.query._wrapper_cls(self._limit)
