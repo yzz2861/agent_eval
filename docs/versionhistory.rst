@@ -5,6 +5,10 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 **UNRELEASED**
 
+- Added the ``amap_iter()`` asynchronous context manager which maps an async
+  function over an iterable concurrently and yields the results via an async
+  iterator, with bounded concurrency (``max_tasks``) and bounded buffering
+  (``max_buffered``), optionally preserving the input order
 - Fixed ``sleep()`` treating a negative delay (including ``-inf``) inconsistently
   across backends (asyncio returned immediately; Trio raised ``ValueError``) by
   raising ``ValueError`` on all backends

@@ -2,16 +2,26 @@ from __future__ import annotations
 
 from inspect import iscoroutine
 
-__all__ = ("amap", "as_completed", "gather")
+__all__ = ("amap", "amap_iter", "as_completed", "gather")
 
-from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterable
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    Iterator,
+)
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 from ..abc._tasks import get_coro_name
-from ._exceptions import BrokenResourceError
+from ._exceptions import BrokenResourceError, EndOfStream
 from ._streams import create_memory_object_stream
-from ._tasks import TaskHandle, create_task_group
+from ._synchronization import Event, Semaphore
+from ._tasks import CancelScope, TaskHandle, create_task_group
 
 if TYPE_CHECKING:
     from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
@@ -154,3 +164,209 @@ async def amap(
         handles.extend(tg.start_soon(func, arg) for arg in args)
 
     return [h.return_value for h in handles]
+
+
+class _IterableAsyncIterator(AsyncIterator[T]):
+    def __init__(self, iterator: Iterator[T]) -> None:
+        self._iterator = iterator
+
+    async def __anext__(self) -> T:
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+def _iterate(iterable: Iterable[T] | AsyncIterable[T]) -> AsyncIterator[T]:
+    if isinstance(iterable, AsyncIterable):
+        return iterable.__aiter__()
+
+    return _IterableAsyncIterator(iter(iterable))
+
+
+class _MapSlot(Generic[R]):
+    __slots__ = ("event", "is_exception", "value")
+
+    def __init__(self) -> None:
+        self.event = Event()
+        self.is_exception = False
+        self.value: R | BaseException | None = None
+
+
+class _OrderedMapIterator(AsyncIterator[R]):
+    __slots__ = ("_slots", "_window")
+
+    def __init__(
+        self, slots: MemoryObjectReceiveStream[_MapSlot[R]], window: Semaphore
+    ) -> None:
+        self._slots = slots
+        self._window = window
+
+    async def __anext__(self) -> R:
+        try:
+            slot = await self._slots.receive()
+        except EndOfStream:
+            raise StopAsyncIteration from None
+
+        await slot.event.wait()
+        self._window.release()
+        if slot.is_exception:
+            raise cast(BaseException, slot.value)
+
+        return cast(R, slot.value)
+
+
+class _UnorderedMapIterator(AsyncIterator[R]):
+    __slots__ = ("_results", "_window")
+
+    def __init__(
+        self, results: MemoryObjectReceiveStream[R], window: Semaphore
+    ) -> None:
+        self._results = results
+        self._window = window
+
+    async def __anext__(self) -> R:
+        try:
+            result = await self._results.receive()
+        except EndOfStream:
+            raise StopAsyncIteration from None
+
+        self._window.release()
+        return result
+
+
+@asynccontextmanager
+async def amap_iter(
+    func: Callable[[T], Awaitable[R]],
+    iterable: Iterable[T] | AsyncIterable[T],
+    *,
+    max_tasks: int = 10,
+    max_buffered: int = 0,
+    ordered: bool = True,
+) -> AsyncGenerator[AsyncIterator[R], None]:
+    """
+    Map an asynchronous function over an iterable concurrently, returning an
+    asynchronous iterator of the results.
+
+    The source iterable is consumed lazily by a background task: at most
+    ``max_tasks`` calls to ``func`` are in flight at any time, and the number of
+    items pulled from the source but not yet consumed never exceeds
+    ``max_tasks + max_buffered``. This provides backpressure, so a slow consumer
+    (or, in ordered mode, a slow first item) cannot cause the source to be read
+    in its entirety or completed results to pile up without bound.
+
+    If the consumer stops iterating early, the source iterable fails, or any call
+    to ``func`` fails, the source iterator is closed and all remaining worker
+    tasks are cancelled and awaited before the context manager exits. Exceptions
+    are propagated with their original tracebacks; ``None`` is treated as a
+    regular result value.
+
+    :param func: an async function (or any callable returning an awaitable) that
+        takes a single argument
+    :param iterable: a synchronous or asynchronous iterable of argument values to
+        pass to ``func``
+    :param max_tasks: maximum number of calls to ``func`` running concurrently
+    :param max_buffered: maximum number of items allowed to be completed or in
+        flight but not yet consumed, in excess of ``max_tasks``
+    :param ordered: if ``True`` (the default), yield the results in the order of
+        the input items; if ``False``, yield them in order of completion
+    :return: an asynchronous iterator of the results
+
+    """
+    if max_tasks < 1:
+        raise ValueError("max_tasks must be at least 1")
+    if max_buffered < 0:
+        raise ValueError("max_buffered must be at least 0")
+
+    iterator = _iterate(iterable)
+    task_semaphore = Semaphore(max_tasks)
+    window = Semaphore(max_tasks + max_buffered, max_value=max_tasks + max_buffered)
+
+    async def close_iterator() -> None:
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            with CancelScope(shield=True):
+                await aclose()
+
+    async with create_task_group() as tg:
+        if ordered:
+            send_slots, receive_slots = create_memory_object_stream[_MapSlot[R]](
+                max_tasks + max_buffered
+            )
+
+            async def ordered_worker(slot: _MapSlot[R], item: T) -> None:
+                try:
+                    async with task_semaphore:
+                        slot.value = await func(item)
+                except BaseException as exc:
+                    slot.is_exception = True
+                    slot.value = exc
+                    slot.event.set()
+                    raise
+
+                slot.event.set()
+
+            async def ordered_producer() -> None:
+                try:
+                    async with send_slots:
+                        while True:
+                            await window.acquire()
+                            try:
+                                item = await anext(iterator)
+                            except StopAsyncIteration:
+                                window.release()
+                                break
+
+                            slot: _MapSlot[R] = _MapSlot()
+                            try:
+                                send_slots.send_nowait(slot)
+                            except BrokenResourceError:
+                                window.release()
+                                break
+
+                            tg.start_soon(ordered_worker, slot, item)
+                finally:
+                    await close_iterator()
+
+            tg.start_soon(ordered_producer)
+            try:
+                async with receive_slots:
+                    yield _OrderedMapIterator(receive_slots, window)
+            finally:
+                tg.cancel_scope.cancel()
+        else:
+            send_results, receive_results = create_memory_object_stream[R](max_buffered)
+
+            async def unordered_worker(
+                item: T, send: MemoryObjectSendStream[R]
+            ) -> None:
+                async with send:
+                    async with task_semaphore:
+                        result = await func(item)
+
+                    try:
+                        await send.send(result)
+                    except BrokenResourceError:
+                        pass
+
+            async def unordered_producer() -> None:
+                try:
+                    async with send_results:
+                        while True:
+                            await window.acquire()
+                            try:
+                                item = await anext(iterator)
+                            except StopAsyncIteration:
+                                window.release()
+                                break
+
+                            tg.start_soon(unordered_worker, item, send_results.clone())
+                finally:
+                    await close_iterator()
+
+            tg.start_soon(unordered_producer)
+            try:
+                async with receive_results:
+                    yield _UnorderedMapIterator(receive_results, window)
+            finally:
+                tg.cancel_scope.cancel()
