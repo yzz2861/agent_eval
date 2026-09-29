@@ -6951,6 +6951,15 @@ class SQLCompiler(Compiled):
             savepoint_stmt
         )
 
+    def visit_json_path_update(self, element, **kw):
+        raise exc.UnsupportedCompilationError(
+            self,
+            type(element),
+            "JSON path update expressions (JSON.Comparator.set_path() / "
+            "JSON.Comparator.remove_path()) are not supported by the "
+            f"{self.dialect.name!r} dialect",
+        )
+
 
 class StrSQLCompiler(SQLCompiler):
     """A :class:`.SQLCompiler` subclass which allows a small selection

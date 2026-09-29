@@ -1640,6 +1640,18 @@ class SQLiteCompiler(compiler.SQLCompiler):
             self.process(binary.right, **kw),
         )
 
+    def visit_json_path_update(self, element, **kw):
+        expr = self.process(element.expr, **kw)
+        path = self.process(element.path, **kw)
+        if element.operation == "set":
+            # JSON() marks the bound value with the JSON subtype so that
+            # JSON_SET stores it as JSON rather than as a plain string;
+            # a JSON "null" value is stored as JSON null, not SQL NULL
+            value = self.process(element.value, **kw)
+            return "JSON_SET(%s, %s, JSON(%s))" % (expr, path, value)
+        else:
+            return "JSON_REMOVE(%s, %s)" % (expr, path)
+
     def visit_empty_set_op_expr(self, type_, expand_op, **kw):
         # slightly old SQLite versions don't seem to be able to handle
         # the empty set impl

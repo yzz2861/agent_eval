@@ -2478,6 +2478,16 @@ class JSON(Indexable, TypeEngine[_T_JSON]):
 
         data_table.c.data["some key"].as_integer()
 
+    * Path-based set and delete expressions that produce a modified
+      JSON document, usable within UPDATE and SELECT statements::
+
+        data_table.c.data.set_path(("key_1", "key_2", 5), "new value")
+
+        data_table.c.data.remove_path(("key_1", "key_2", 5))
+
+      See :meth:`_types.JSON.Comparator.set_path` and
+      :meth:`_types.JSON.Comparator.remove_path` for details.
+
     Additional operations may be available from the dialect-specific versions
     of :class:`_types.JSON`, such as
     :class:`sqlalchemy.dialects.postgresql.JSON` and
@@ -2809,6 +2819,141 @@ class JSON(Indexable, TypeEngine[_T_JSON]):
                 operator = operators.json_getitem_op
 
             return operator, index, self.type
+
+        def set_path(self, path, value):
+            r"""Produce a JSON expression that sets the value at a path.
+
+            .. versionadded:: 2.1
+
+            The path is a non-empty sequence of string keys and integer
+            array indexes.  Both the path and the value are sent to the
+            database as bound parameters; nothing is interpolated into
+            the SQL string, so untrusted input is safe to use::
+
+                stmt = data_table.update().values(
+                    data=data_table.c.data.set_path(("meta", "views"), 4)
+                )
+
+            The expression evaluates to the whole modified JSON document
+            and keeps the :class:`_types.JSON` type, so it can be
+            used in the VALUES clause of an UPDATE, embedded in a SELECT,
+            or nested inside another JSON path expression.  When the same
+            path is modified repeatedly, modifications apply inside-out,
+            i.e. the outermost (last) modification wins::
+
+                expr = data_table.c.data.set_path(("a",), 1)
+                expr = expr.set_path(("a",), 2)  # "a" will be 2
+
+            **SQL NULL vs. JSON null vs. delete**
+
+            * Passing Python ``None`` or
+              :attr:`_types.JSON.NULL` as the value stores a JSON
+              ``null``; the key remains present.
+            * SQL NULL is not a storable JSON value; passing
+              :func:`_expression.null` raises an error.  Assign
+              NULL to the whole column to store SQL NULL.
+            * Use :meth:`_types.JSON.Comparator.remove_path` to
+              remove a key or array element entirely.
+            * If the source document itself is SQL NULL, the result is
+              SQL NULL on all backends.
+
+            **Cross-dialect semantics**
+
+            Given a JSON column ``data`` containing::
+
+                {"name": "ann", "tags": ["a", "b"],
+                 "meta": {"views": 3, "note": null}}
+
+            the following expressions have the same meaning on SQLite
+            (compiled to ``JSON_SET`` /
+            ``JSON_REMOVE``) and on PostgreSQL (compiled
+            to ``jsonb_set`` / ``#-``):
+
+            ==================================  ==========================
+            expression                          resulting document
+            ==================================  ==========================
+            set_path(("meta", "views"), 4)      {"name": "ann",
+                                                 "tags": ["a", "b"],
+                                                 "meta": {"views": 4,
+                                                 "note": null}}
+            set_path(("tags", 0), "z")          {"name": "ann",
+                                                 "tags": ["z", "b"],
+                                                 "meta": {"views": 3,
+                                                 "note": null}}
+            set_path(("meta", "new", "deep"),   {"name": "ann",
+            True)                                "tags": ["a", "b"],
+                                                 "meta": {"views": 3,
+                                                 "note": null,
+                                                 "new": {"deep": true}}}
+            set_path(("name",), None)           {"name": null,
+                                                 "tags": ["a", "b"],
+                                                 "meta": {"views": 3,
+                                                 "note": null}}
+            remove_path(("meta", "note"))       {"name": "ann",
+                                                 "tags": ["a", "b"],
+                                                 "meta": {"views": 3}}
+            remove_path(("tags", 1))            {"name": "ann",
+                                                 "tags": ["a"],
+                                                 "meta": {"views": 3,
+                                                 "note": null}}
+            ==================================  ==========================
+
+            Additional notes:
+
+            * Missing intermediate levels are created as needed, as JSON
+              objects, or as JSON arrays when the next path element is an
+              integer index.
+            * Negative array indexes are rejected with
+              :class:`_exc.ArgumentError` at construction time,
+              since their meaning differs across backends.
+            * Deleting a path that does not exist leaves the document
+              unchanged.
+            * Setting an array index past the end of an existing array
+              appends the value on PostgreSQL and leaves the document
+              unchanged on SQLite.
+            * Dialects without support, including the default dialect,
+              raise :class:`_exc.UnsupportedCompilationError`
+              when the expression is compiled.
+
+            :param path: sequence of string keys and/or integer array
+             indexes identifying the element to set.
+            :param value: the value to store; any JSON-serializable
+             Python value, or a SQL expression.
+
+            .. seealso::
+
+                :meth:`_types.JSON.Comparator.remove_path`
+
+            """
+            return elements.JSONPathUpdate(self.expr, path, value, "set")
+
+        def remove_path(self, path):
+            r"""Produce a JSON expression that deletes the value
+            at a path.
+
+            .. versionadded:: 2.1
+
+            The path is a non-empty sequence of string keys and integer
+            array indexes, sent to the database as a bound parameter.
+            Deleting an object key removes the key; deleting an array
+            element removes the element and shifts the remaining
+            elements.  A path that does not exist leaves the document
+            unchanged::
+
+                stmt = data_table.update().values(
+                    data=data_table.c.data.remove_path(("meta", "note"))
+                )
+
+            On SQLite this compiles to ``JSON_REMOVE``;
+            on PostgreSQL to the ``#-`` operator.  See
+            :meth:`_types.JSON.Comparator.set_path` for a table of
+            cross-dialect examples and notes on NULL handling.
+
+            :param path: sequence of string keys and/or integer array
+             indexes identifying the element to delete.
+
+            """
+            return elements.JSONPathUpdate(self.expr, path, None, "delete")
 
         def as_boolean(self):
             """Consider an indexed value as boolean.

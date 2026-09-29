@@ -57,6 +57,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import JSONPATH
+from sqlalchemy.dialects.postgresql import json
 from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.dialects.postgresql import REGCONFIG
 from sqlalchemy.dialects.postgresql import TSQUERY
@@ -77,6 +78,7 @@ from sqlalchemy.sql import util as sql_util
 from sqlalchemy.sql.functions import GenericFunction
 from sqlalchemy.testing import expect_raises
 from sqlalchemy.testing import expect_raises_message
+from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertions import assert_raises
 from sqlalchemy.testing.assertions import assert_raises_message
@@ -3241,6 +3243,89 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             stmt,
             "SELECT jsonb_path_exists(data.x, CAST(%(param_1)s AS JSONPATH)) "
             "AS jsonb_path_exists_1 FROM data",
+        )
+
+    def test_json_set_path_jsonb(self):
+        data = table("data", column("id", Integer), column("x", JSONB))
+        stmt = data.update().values(x=data.c.x.set_path(("meta", "views"), 4))
+        self.assert_compile(
+            stmt,
+            "UPDATE data SET x=jsonb_set(data.x, "
+            "CAST(%(json_path_1)s AS TEXT[]), "
+            "CAST(%(json_path_value_1)s::JSONB AS JSONB), true)",
+        )
+
+    def test_json_set_path_json(self):
+        data = table("data", column("id", Integer), column("x", JSON))
+        stmt = data.update().values(x=data.c.x.set_path(("tags", 0), "z"))
+        self.assert_compile(
+            stmt,
+            "UPDATE data SET x=jsonb_set(CAST(data.x AS JSONB), "
+            "CAST(%(json_path_1)s AS TEXT[]), "
+            "CAST(%(json_path_value_1)s::JSON AS JSONB), true)",
+        )
+
+    def test_json_remove_path_jsonb(self):
+        data = table("data", column("id", Integer), column("x", JSONB))
+        stmt = data.update().values(x=data.c.x.remove_path(("meta", "note")))
+        self.assert_compile(
+            stmt,
+            "UPDATE data SET x=data.x #- CAST(%(json_path_1)s AS TEXT[])",
+        )
+
+    def test_json_remove_path_json(self):
+        data = table("data", column("id", Integer), column("x", JSON))
+        stmt = data.update().values(x=data.c.x.remove_path(("tags", 1)))
+        self.assert_compile(
+            stmt,
+            "UPDATE data SET x=CAST(data.x AS JSONB) #- "
+            "CAST(%(json_path_1)s AS TEXT[])",
+        )
+
+    def test_json_path_update_nested(self):
+        data = table("data", column("id", Integer), column("x", JSONB))
+        stmt = select(data.c.x.set_path(("a",), 1).set_path(("a",), 2))
+        self.assert_compile(
+            stmt,
+            "SELECT jsonb_set(jsonb_set(data.x, "
+            "CAST(%(json_path_1)s AS TEXT[]), "
+            "CAST(%(json_path_value_1)s::JSONB AS JSONB), true), "
+            "CAST(%(json_path_2)s AS TEXT[]), "
+            "CAST(%(json_path_value_2)s::JSONB AS JSONB), true) AS anon_1 "
+            "FROM data",
+        )
+
+    def test_json_path_update_remove_of_set(self):
+        data = table("data", column("id", Integer), column("x", JSONB))
+        stmt = select(data.c.x.set_path(("a",), 1).remove_path(("b",)))
+        self.assert_compile(
+            stmt,
+            "SELECT jsonb_set(data.x, CAST(%(json_path_1)s AS TEXT[]), "
+            "CAST(%(json_path_value_1)s::JSONB AS JSONB), true) "
+            "#- CAST(%(json_path_2)s AS TEXT[]) AS anon_1 FROM data",
+        )
+
+    def test_json_path_update_paths_and_values_are_bound(self):
+        data = table("data", column("id", Integer), column("x", JSONB))
+        stmt = data.update().values(
+            x=data.c.x.set_path(("weird'; DROP TABLE data;--", 0), "v")
+        )
+        compiled = stmt.compile(dialect=postgresql.dialect())
+        # nothing from the path or the value is interpolated into the SQL
+        assert "weird" not in compiled.string
+        assert "DROP" not in compiled.string
+        eq_(
+            compiled.params["json_path_1"],
+            ("weird'; DROP TABLE data;--", 0),
+        )
+        eq_(compiled.params["json_path_value_1"], "v")
+
+    def test_json_path_type_escapes_special_chars(self):
+        dialect_ = postgresql.dialect()
+        processor = json.JSONPathType().bind_processor(dialect_)
+        eq_(
+            processor(("a,b", 'qu"ote', "sp ace", 5, "plain")),
+            '{"a,b", "qu\\"ote", "sp ace", 5, plain}',
         )
 
     @testing.combinations(

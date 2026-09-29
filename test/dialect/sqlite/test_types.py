@@ -8,6 +8,7 @@ from sqlalchemy import Column
 from sqlalchemy import exc
 from sqlalchemy import func
 from sqlalchemy import MetaData
+from sqlalchemy import null
 from sqlalchemy import select
 from sqlalchemy import Table
 from sqlalchemy import testing
@@ -374,6 +375,342 @@ class JSONBTest(fixtures.TestBase, AssertsCompiledSQL):
             "select typeof(foo) from jsonb_test"
         ).scalar()
         eq_(raw, "blob")
+
+
+class JSONPathUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    __dialect__ = "sqlite"
+
+    def test_set_path_compile(self):
+        t = Table("t", MetaData(), Column("data", sqlite.JSON))
+        self.assert_compile(
+            t.c.data.set_path(("meta", "views"), 4),
+            "JSON_SET(t.data, ?, JSON(?))",
+        )
+
+    def test_remove_path_compile(self):
+        t = Table("t", MetaData(), Column("data", sqlite.JSON))
+        self.assert_compile(
+            t.c.data.remove_path(("tags", 1)),
+            "JSON_REMOVE(t.data, ?)",
+        )
+
+    def test_nested_compile(self):
+        t = Table("t", MetaData(), Column("data", sqlite.JSON))
+        self.assert_compile(
+            t.c.data.set_path(("a",), 1).remove_path(("b",)),
+            "JSON_REMOVE(JSON_SET(t.data, ?, JSON(?)), ?)",
+        )
+
+    def test_default_dialect_not_supported(self):
+        t = Table("t", MetaData(), Column("data", sqltypes.JSON))
+        expr = t.c.data.set_path(("a",), 1)
+        assert_raises_message(
+            exc.UnsupportedCompilationError,
+            "are not supported by the 'default' dialect",
+            expr.compile,
+        )
+
+    def test_mysql_dialect_not_supported(self):
+        from sqlalchemy.dialects import mysql
+
+        t = Table("t", MetaData(), Column("data", sqltypes.JSON))
+        expr = t.c.data.remove_path(("a",))
+        assert_raises_message(
+            exc.UnsupportedCompilationError,
+            "are not supported by the 'mysql' dialect",
+            expr.compile,
+            dialect=mysql.dialect(),
+        )
+
+
+class JSONPathUpdateTest(fixtures.TestBase):
+    """Round trip tests for JSON.Comparator.set_path() and
+    JSON.Comparator.remove_path() on SQLite."""
+
+    __backend__ = True
+    __only_on__ = "sqlite"
+    __requires__ = ("json_type",)
+
+    @testing.fixture
+    def json_table(self, metadata, connection):
+        table = Table(
+            "json_path_test",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("data", sqlite.JSON),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert(),
+            [
+                {
+                    "id": 1,
+                    "data": {
+                        "name": "ann",
+                        "tags": ["a", "b"],
+                        "meta": {"views": 3, "note": None},
+                    },
+                },
+                {"id": 2, "data": null()},
+            ],
+        )
+        return table
+
+    def _update(self, connection, table, expr, id_=1):
+        connection.execute(
+            table.update().where(table.c.id == id_).values(data=expr)
+        )
+        return connection.scalar(select(table.c.data).where(table.c.id == id_))
+
+    def test_set_nested_key(self, connection, json_table):
+        eq_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.set_path(("meta", "views"), 4),
+            ),
+            {
+                "name": "ann",
+                "tags": ["a", "b"],
+                "meta": {"views": 4, "note": None},
+            },
+        )
+
+    def test_set_array_element(self, connection, json_table):
+        eq_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.set_path(("tags", 0), "z"),
+            ),
+            {
+                "name": "ann",
+                "tags": ["z", "b"],
+                "meta": {"views": 3, "note": None},
+            },
+        )
+
+    def test_set_creates_missing_intermediate_levels(
+        self, connection, json_table
+    ):
+        eq_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.set_path(("meta", "new", "deep"), True),
+            ),
+            {
+                "name": "ann",
+                "tags": ["a", "b"],
+                "meta": {
+                    "views": 3,
+                    "note": None,
+                    "new": {"deep": True},
+                },
+            },
+        )
+
+    def test_set_json_null_keeps_key(self, connection, json_table):
+        result = self._update(
+            connection, json_table, json_table.c.data.set_path(("name",), None)
+        )
+        eq_(
+            result,
+            {
+                "name": None,
+                "tags": ["a", "b"],
+                "meta": {"views": 3, "note": None},
+            },
+        )
+        # the key is still present, holding JSON null
+        is_(
+            connection.scalar(
+                select(json_table.c.data["name"].as_string()).where(
+                    json_table.c.id == 1
+                )
+            ),
+            None,
+        )
+        eq_(
+            connection.scalar(
+                select(func.json_type(json_table.c.data, "$.name")).where(
+                    json_table.c.id == 1
+                )
+            ),
+            "null",
+        )
+
+    def test_set_json_null_constant(self, connection, json_table):
+        eq_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.set_path(("name",), sqltypes.JSON.NULL),
+            ),
+            {
+                "name": None,
+                "tags": ["a", "b"],
+                "meta": {"views": 3, "note": None},
+            },
+        )
+
+    def test_set_structured_value(self, connection, json_table):
+        eq_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.set_path(("meta",), {"x": [1, 2]}),
+            ),
+            {"name": "ann", "tags": ["a", "b"], "meta": {"x": [1, 2]}},
+        )
+
+    def test_remove_key(self, connection, json_table):
+        eq_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.remove_path(("meta", "note")),
+            ),
+            {"name": "ann", "tags": ["a", "b"], "meta": {"views": 3}},
+        )
+
+    def test_remove_array_element(self, connection, json_table):
+        eq_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.remove_path(("tags", 1)),
+            ),
+            {
+                "name": "ann",
+                "tags": ["a"],
+                "meta": {"views": 3, "note": None},
+            },
+        )
+
+    def test_remove_missing_path_is_noop(self, connection, json_table):
+        eq_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.remove_path(("meta", "missing", "path")),
+            ),
+            {
+                "name": "ann",
+                "tags": ["a", "b"],
+                "meta": {"views": 3, "note": None},
+            },
+        )
+
+    def test_sql_null_document_stays_null(self, connection, json_table):
+        is_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.set_path(("a",), 1),
+                id_=2,
+            ),
+            None,
+        )
+
+    def test_repeated_set_same_path_last_wins(self, connection, json_table):
+        expr = json_table.c.data.set_path(("name",), "x")
+        expr = expr.set_path(("name",), "y")
+        result = self._update(connection, json_table, expr)
+        eq_(result["name"], "y")
+
+    def test_nested_set_and_remove(self, connection, json_table):
+        expr = json_table.c.data.set_path(("meta", "views"), 10)
+        expr = expr.remove_path(("meta", "note"))
+        eq_(
+            self._update(connection, json_table, expr),
+            {"name": "ann", "tags": ["a", "b"], "meta": {"views": 10}},
+        )
+
+    def test_expression_in_select(self, connection, json_table):
+        eq_(
+            connection.scalar(
+                select(json_table.c.data.set_path(("tags", 1), "z")).where(
+                    json_table.c.id == 1
+                )
+            ),
+            {
+                "name": "ann",
+                "tags": ["a", "z"],
+                "meta": {"views": 3, "note": None},
+            },
+        )
+        # the stored row is unchanged
+        eq_(
+            connection.scalar(
+                select(json_table.c.data).where(json_table.c.id == 1)
+            ),
+            {
+                "name": "ann",
+                "tags": ["a", "b"],
+                "meta": {"views": 3, "note": None},
+            },
+        )
+
+    def test_value_as_sql_expression(self, connection, json_table):
+        eq_(
+            self._update(
+                connection,
+                json_table,
+                json_table.c.data.set_path(
+                    ("meta",), json_table.c.data["meta"]
+                ),
+            ),
+            {
+                "name": "ann",
+                "tags": ["a", "b"],
+                "meta": {"views": 3, "note": None},
+            },
+        )
+
+    def test_negative_index_rejected(self, json_table):
+        assert_raises_message(
+            exc.ArgumentError,
+            "Negative array indexes are not supported",
+            json_table.c.data.set_path,
+            ("tags", -1),
+            9,
+        )
+
+    def test_empty_path_rejected(self, json_table):
+        assert_raises_message(
+            exc.ArgumentError,
+            "must contain at least one key or array index",
+            json_table.c.data.set_path,
+            (),
+            9,
+        )
+
+    def test_non_sequence_path_rejected(self, json_table):
+        assert_raises_message(
+            exc.ArgumentError,
+            "must be a sequence of string keys",
+            json_table.c.data.remove_path,
+            "meta",
+        )
+
+    def test_invalid_path_element_rejected(self, json_table):
+        assert_raises_message(
+            exc.ArgumentError,
+            "must be string keys or integer array indexes",
+            json_table.c.data.set_path,
+            ("a", 1.5),
+            9,
+        )
+
+    def test_sql_null_value_rejected(self, json_table):
+        assert_raises_message(
+            exc.ArgumentError,
+            "SQL NULL cannot be stored at a JSON path",
+            json_table.c.data.set_path,
+            ("a",),
+            null(),
+        )
 
 
 class DateTimeTest(fixtures.TestBase, AssertsCompiledSQL):

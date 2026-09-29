@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import collections.abc as collections_abc
 from decimal import Decimal
 from enum import Enum
 import itertools
@@ -3817,6 +3818,122 @@ class TypeCoerce(WrapsColumnExpression[_T]):
             return TypeCoerce(grouped, self.type)
         else:
             return self
+
+
+class JSONPathUpdate(ColumnElement[Any]):
+    """Represent a JSON path set or delete expression.
+
+    Produced by :meth:`_types.JSON.Comparator.set_path` and
+    :meth:`_types.JSON.Comparator.remove_path`; see those methods
+    for usage details and cross-dialect semantics.
+
+    The expression evaluates to a new JSON value and may be used anywhere
+    a SQL expression is accepted, including the VALUES clause of an
+    UPDATE statement, the columns clause of a SELECT, or nested
+    inside another JSON path update expression.
+
+    .. versionadded:: 2.1
+
+    """
+
+    __visit_name__ = "json_path_update"
+
+    _traverse_internals: _TraverseInternalsType = [
+        ("expr", InternalTraversal.dp_clauseelement),
+        ("path", InternalTraversal.dp_clauseelement),
+        ("value", InternalTraversal.dp_clauseelement),
+        ("operation", InternalTraversal.dp_string),
+        ("type", InternalTraversal.dp_type),
+    ]
+
+    inherit_cache = True
+
+    def __init__(
+        self,
+        expr: _ColumnExpressionArgument[Any],
+        path: Sequence[Union[str, int]],
+        value: Any,
+        operation: str,
+    ):
+        from . import sqltypes
+
+        if operation not in ("set", "delete"):
+            raise exc.ArgumentError(
+                "JSON path update operation must be 'set' or 'delete', "
+                "got %r" % (operation,)
+            )
+        self.operation = operation
+
+        self.expr = coercions.expect(
+            roles.ExpressionElementRole, expr, apply_propagate_attrs=self
+        )
+        json_type = self.expr.type
+        if not isinstance(json_type, sqltypes.JSON):
+            json_type = sqltypes.JSON()
+        self.type = json_type
+
+        path_tuple = self._validate_path(path)
+        self.path = BindParameter(
+            "json_path",
+            path_tuple,
+            type_=sqltypes.JSON.JSONPathType(),
+            unique=True,
+        )
+
+        if operation == "delete":
+            self.value = None
+        else:
+            if value is None:
+                # a JSON document has no SQL NULL; interpret Python None
+                # as JSON "null" so the result is predictable on all
+                # backends
+                value = sqltypes.JSON.NULL
+            elif isinstance(value, Null):
+                raise exc.ArgumentError(
+                    "SQL NULL cannot be stored at a JSON path; use None or "
+                    "JSON.NULL to store a JSON null, JSON.Comparator."
+                    "remove_path() to remove the key, or assign NULL to "
+                    "the whole column to store SQL NULL"
+                )
+            if isinstance(value, ColumnElement):
+                self.value = value
+            else:
+                self.value = BindParameter(
+                    "json_path_value", value, type_=json_type, unique=True
+                )
+
+    @staticmethod
+    def _validate_path(path):
+        if isinstance(path, (str, bytes)) or not isinstance(
+            path, collections_abc.Sequence
+        ):
+            raise exc.ArgumentError(
+                "JSON path must be a sequence of string keys and/or "
+                "integer array indexes, got %r" % (path,)
+            )
+        path_tuple = tuple(path)
+        if not path_tuple:
+            raise exc.ArgumentError(
+                "JSON path must contain at least one key or array index"
+            )
+        for element in path_tuple:
+            if isinstance(element, bool) or not isinstance(
+                element, (str, int)
+            ):
+                raise exc.ArgumentError(
+                    "JSON path elements must be string keys or integer "
+                    "array indexes, got %r" % (element,)
+                )
+            if isinstance(element, int) and element < 0:
+                raise exc.ArgumentError(
+                    "Negative array indexes are not supported in JSON path "
+                    "update expressions, got %r" % (element,)
+                )
+        return path_tuple
+
+    @util.ro_non_memoized_property
+    def _from_objects(self) -> List[FromClause]:
+        return self.expr._from_objects
 
 
 class Extract(ColumnElement[int]):

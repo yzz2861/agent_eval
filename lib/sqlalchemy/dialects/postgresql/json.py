@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from typing import Callable
 from typing import List
@@ -44,6 +45,16 @@ __all__ = ("JSON", "JSONB")
 
 
 class JSONPathType(sqltypes.JSON.JSONPathType):
+    @staticmethod
+    def _array_literal_element(element: Any) -> str:
+        # render one element of a PostgreSQL text[] literal, quoting and
+        # escaping elements that contain characters which are significant
+        # in the array literal format
+        element = str(element)
+        if not element or re.search(r'[{}\s,"\\]', element):
+            return '"%s"' % element.replace("\\", "\\\\").replace('"', '\\"')
+        return element
+
     def _processor(
         self, dialect: Dialect, super_proc: Optional[Callable[[Any], Any]]
     ) -> Callable[[Any], Any]:
@@ -56,9 +67,9 @@ class JSONPathType(sqltypes.JSON.JSONPathType):
                     value = super_proc(value)
                 return value
             elif value:
-                # If it's already a string assume that it's in json path
-                # format. This allows using cast with json paths literals
-                value = "{%s}" % (", ".join(map(str, value)))
+                value = "{%s}" % (
+                    ", ".join(map(self._array_literal_element, value))
+                )
             else:
                 value = "{}"
             if super_proc:
