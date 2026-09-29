@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
+    AsyncIterable,
     Generic,
     cast,
 )
@@ -58,6 +59,12 @@ from sanic.models.protocol_types import TransportProtocol
 from sanic.response import BaseHTTPResponse, HTTPResponse
 
 from .form import parse_multipart_form
+from .multipart import (
+    DEFAULT_MAX_DEPTH,
+    DEFAULT_MAX_HEADER_SIZE,
+    MultipartError,
+    MultipartReader,
+)
 from .parameters import RequestParameters
 
 
@@ -694,6 +701,57 @@ class Request(Generic[sanic_type, ctx_type]):
             self.form  # compute form to get files
 
         return self.parsed_files
+
+    def stream_multipart(
+        self,
+        *,
+        max_depth: int = DEFAULT_MAX_DEPTH,
+        max_header_size: int = DEFAULT_MAX_HEADER_SIZE,
+    ) -> MultipartReader:
+        """Create a streaming reader to traverse a multipart request body.
+
+        Works on both streaming routes (consuming ``request.stream``)
+        and regular routes (parsing the already buffered
+        ``request.body``). Nested multipart containers (for example a
+        ``multipart/mixed`` part inside ``multipart/form-data``) can be
+        descended into layer by layer with ``MultipartPart.open()``,
+        and large parts can be streamed or skipped without buffering
+        them in memory.
+
+        Args:
+            max_depth (int): Maximum nested container depth.
+            max_header_size (int): Maximum size of one part's header block.
+
+        Returns:
+            MultipartReader: The streaming multipart reader.
+        """
+        content_type = self.headers.getone(
+            "content-type", DEFAULT_HTTP_CONTENT_TYPE
+        )
+        content_type, parameters = parse_content_header(content_type)
+        if not content_type.startswith("multipart/"):
+            raise MultipartError(
+                f"Cannot stream multipart from content type: {content_type}"
+            )
+        boundary_param = parameters.get("boundary")
+        if not boundary_param:
+            raise MultipartError("Missing multipart boundary")
+        boundary = str(boundary_param).encode("utf-8")
+        if self.body:
+            return MultipartReader.from_bytes(
+                self.body,
+                boundary,
+                max_depth=max_depth,
+                max_header_size=max_header_size,
+            )
+        if self.stream is None:
+            raise MultipartError("No request body available to stream")
+        return MultipartReader(
+            cast("AsyncIterable[bytes]", self.stream),
+            boundary,
+            max_depth=max_depth,
+            max_header_size=max_header_size,
+        )
 
     def get_args(
         self,

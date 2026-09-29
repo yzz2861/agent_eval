@@ -151,7 +151,45 @@ The `Request` object allows you to access the content of the request body in a f
     [File(type='application/octet-stream', body=b'hello\n', name='TEST')]
     ```
 
+### Streaming multipart
+
+.. column::
+
+    **Parameter**: `request.stream_multipart()`
+    **Description**: Traverse a multipart body as a stream, one part at a
+    time, without buffering the whole request. Nested multipart containers
+    (for example `multipart/mixed` inside `multipart/form-data`) can be
+    descended into layer by layer with `part.open()`. Nesting depth and
+    part header size are limited by the `max_depth` and `max_header_size`
+    keyword arguments.
+
+.. column::
+
+    ```python
+    @app.post("/upload", stream=True)
+    async def upload(request):
+        async with request.stream_multipart() as reader:
+            async for part in reader:
+                if part.is_multipart:
+                    async for sub in part.open():
+                        print(sub.field_name, sub.filename)
+                elif part.filename:
+                    async for chunk in part.iter_chunks():
+                        ...  # stream large files to disk
+                else:
+                    print(part.field_name, await part.text())
+        return text("OK")
+    ```
+
+    Skipping a part with `await part.skip()` (or simply advancing to the
+    next part) drains only that part; `await reader.close()` stops
+    consuming the request body entirely. Each part carries traceable
+    hierarchy info: `part.field_name` (for example `attachments[2]`),
+    `part.path`, `part.index`, and `part.occurrence` for repeated
+    names or filenames.
+
 ## Context
+
 
 ### Request context
 
