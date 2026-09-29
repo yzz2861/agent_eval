@@ -74,6 +74,12 @@ class RateLimitExceeded(DramatiqError):
     """Raised when a rate limit has been exceeded."""
 
 
+class BatchResultError(DramatiqError):
+    """Raised when a batch actor returns an invalid set of results,
+    e.g. fewer or more results than there were inputs in the batch.
+    """
+
+
 class Retry(DramatiqError):
     """Actors may raise this error when they should be retried.  This
     behaves just like any other exception from the perspective of the

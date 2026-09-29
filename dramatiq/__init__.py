@@ -25,6 +25,7 @@ from .composition import group, pipeline
 from .encoder import Encoder, JSONEncoder, PickleEncoder
 from .errors import (
     ActorNotFound,
+    BatchResultError,
     BrokerConnectionError,
     BrokerError,
     ConnectionClosed,
@@ -62,6 +63,7 @@ __all__ = [
     "PickleEncoder",
     # Errors
     "DramatiqError",
+    "BatchResultError",
     "BrokerError",
     "DecodeError",
     "ActorNotFound",

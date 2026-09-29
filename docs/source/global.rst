@@ -2,6 +2,8 @@
 
 .. |AgeLimit| replace:: :class:`AgeLimit<dramatiq.middleware.AgeLimit>`
 .. |AsyncIO| replace:: :class:`AsyncIO<dramatiq.middleware.AsyncIO>`
+.. |BatchResultError| replace:: :class:`BatchResultError<dramatiq.BatchResultError>`
+.. |Batching| replace:: :class:`Batching<dramatiq.middleware.Batching>`
 .. |Barriers| replace:: :class:`Barriers<dramatiq.rate_limits.Barrier>`
 .. |Brokers| replace:: :class:`Brokers<dramatiq.Broker>`
 .. |Broker| replace:: :class:`Broker<dramatiq.Broker>`

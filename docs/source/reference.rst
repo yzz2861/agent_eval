@@ -93,6 +93,7 @@ Default Middleware
 The following middleware classes are all enabled by default, with their default settings.
 
 .. autoclass:: dramatiq.middleware.AgeLimit
+.. autoclass:: dramatiq.middleware.Batching
 .. autoclass:: dramatiq.middleware.Callbacks
 .. autoclass:: dramatiq.middleware.Pipelines
 .. autoclass:: dramatiq.middleware.Retries
@@ -250,6 +251,9 @@ Errors
    :members:
    :show-inheritance:
 .. autoexception:: RateLimitExceeded
+   :members:
+   :show-inheritance:
+.. autoexception:: BatchResultError
    :members:
    :show-inheritance:
 .. autoexception:: Retry

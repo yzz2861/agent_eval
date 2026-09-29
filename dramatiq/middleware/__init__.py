@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from .age_limit import AgeLimit
 from .asyncio import AsyncIO
+from .batching import Batching
 from .callbacks import Callbacks
 from .current_message import CurrentMessage
 from .group_callbacks import GroupCallbacks
@@ -40,6 +41,7 @@ __all__ = [
     # Middlewares
     "AgeLimit",
     "AsyncIO",
+    "Batching",
     "Callbacks",
     "CurrentMessage",
     "GroupCallbacks",
@@ -60,4 +62,5 @@ default_middleware = [
     Callbacks,
     Pipelines,
     Retries,
+    Batching,
 ]

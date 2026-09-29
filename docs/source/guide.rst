@@ -320,6 +320,60 @@ wrap its source code in a try block and catch |TimeLimitExceeded|::
           teardown_missiles()  # <- this will run
 
 
+.. _batch-actors:
+
+Batch Actors
+------------
+
+When many small messages all have to be handed to the same external
+batch API, calling that API once per message is wasteful.  Actors
+declared with the ``max_batch_size`` option become *batch actors*:
+their messages are buffered by the worker and their function is
+called once per batch with a list of ``(args, kwargs)`` inputs
+instead of once per message::
+
+  @dramatiq.actor(max_batch_size=100, batch_max_wait_ms=1000)
+  def record_events(batch):
+      response = events_api.bulk_insert([args[0] for args, _ in batch])
+      return [None if item.ok else RuntimeError(item.error) for item in response]
+
+A batch is flushed as soon as it holds ``max_batch_size`` messages
+or once its oldest message has waited ``batch_max_wait_ms``
+milliseconds (1000 by default), whichever comes first.  Buffers are
+capped at ``max_batch_size`` and, when a worker shuts down,
+messages that never completed a batch are requeued so they aren't
+lost.
+
+The function must return exactly one result per input.  A result that
+is an exception instance marks only that input as failed: it is
+retried on its own (with the usual retry options) while the
+successful inputs are acknowledged independently and are never
+reprocessed alongside the retry.  Raising an exception from the
+function fails every input in the batch with that exception, and
+returning the wrong number of results fails every input with
+|BatchResultError|.
+
+Messages are only grouped with messages of the same actor that carry
+the same ``batch_key``.  The key can be set for the whole actor
+or per message; messages with different keys are never mixed::
+
+  record_events.send_with_options(args=(event,), batch_key="tenant-1")
+
+The following batch options are configurable on a per-actor basis:
+
+=======================  ==========  ==============================================================================================================
+Option                   Default     Description
+=======================  ==========  ==============================================================================================================
+``max_batch_size``                   The maximum number of messages a batch may contain.  Declaring it makes the actor a batch actor.
+``batch_max_wait_ms``    1 second    The maximum number of milliseconds the oldest message in a batch may wait before the batch is flushed.
+``batch_key``            ``None``    The key batches are grouped by.  May be overridden per message with ``send_with_options``.
+=======================  ==========  ==============================================================================================================
+
+.. note::
+   For size-based flushing to work, the worker's prefetch count
+   should be at least as large as ``max_batch_size``.
+
+
 Scheduling Messages
 -------------------
 

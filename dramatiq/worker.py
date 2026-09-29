@@ -31,6 +31,7 @@ from .common import current_millis, iter_queue, join_all, q_name
 from .errors import ActorNotFound, BrokerConnectionError, RateLimitExceeded, Retry
 from .logging import get_logger
 from .middleware import Middleware, SkipMessage
+from .middleware.batching import Batching
 from .results.middleware import Results
 
 #: The number of milliseconds to wait before restarting consumers
@@ -172,6 +173,11 @@ class Worker:
         for item in iter_queue(self.work_queue):
             messages_by_queue[item.message.queue_name].append(item.message)
 
+        batching = get_batching_middleware(self.broker)
+        if batching is not None and batching.manager is not None:
+            for message in batching.manager.drain():
+                messages_by_queue[message.queue_name].append(message)
+
         for queue_name, messages in messages_by_queue.items():
             try:
                 self.consumers[queue_name].requeue_messages(messages)
@@ -191,11 +197,16 @@ class Worker:
         """Wait for this worker to complete its work in progress.
         This method is useful when testing code.
         """
+        batching = get_batching_middleware(self.broker)
+        batch_manager = batching.manager if batching is not None else None
         while True:
             for consumer in self.consumers.values():
                 consumer.delay_queue.join()
 
             self.work_queue.join()
+
+            if batch_manager is not None:
+                batch_manager.join()
 
             # If nothing got put on the delay queues while we were
             # joining on the work queue then it should be safe to exit.
@@ -205,6 +216,8 @@ class Worker:
                     break
             else:
                 if self.work_queue.unfinished_tasks:
+                    continue
+                if batch_manager is not None and not batch_manager.idle:
                     continue
                 return
 
@@ -546,17 +559,28 @@ class WorkerThread(Thread):
         by the stub broker to provide a nicer testing experience. Also used by the
         results middleware to pass exceptions into results.
 
+        Messages that belong to batch actors are handed off to the
+        batch manager, which takes over their post processing.
+
         Parameters:
           message(MessageProxy)
         """
         actor = None
+        handed_to_batch_manager = False
         try:
             self.logger.debug("Received message %s with id %r.", message, message.message_id)
+            if not message.failed:
+                actor = self.broker.get_actor(message.actor_name)
+                batching = get_batching_middleware(self.broker)
+                if batching is not None and batching.manager is not None and batching.manager.is_batch_actor(actor):
+                    batching.manager.submit(actor, message)
+                    handed_to_batch_manager = True
+                    return
+
             self.broker.emit_before("process_message", message)
 
             res = None
-            if not message.failed:
-                actor = self.broker.get_actor(message.actor_name)
+            if not message.failed and actor is not None:
                 res = actor(*message.args, **message.kwargs)
                 if (
                     res is not None
@@ -604,7 +628,8 @@ class WorkerThread(Thread):
             # processed must have come off of a consumer.  Therefore,
             # there has to be a consumer for that message's queue so
             # this is safe.  Probably.
-            self.consumers[message.queue_name].post_process_message(message)
+            if not handed_to_batch_manager:
+                self.consumers[message.queue_name].post_process_message(message)
             self.work_queue.task_done()
 
             # See discussion #351.  Keeping a reference to the
@@ -635,6 +660,14 @@ class WorkerThread(Thread):
 @lru_cache(maxsize=128)
 def has_results_middleware(broker: Broker) -> bool:
     return any(type(m) is Results for m in broker.middleware)
+
+
+@lru_cache(maxsize=128)
+def get_batching_middleware(broker: Broker) -> Optional[Batching]:
+    for middleware in broker.middleware:
+        if type(middleware) is Batching:
+            return middleware
+    return None
 
 
 _ConsumerThread = ConsumerThread

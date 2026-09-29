@@ -8,6 +8,16 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 -------------
 
+Added
+^^^^^
+
+* Added batch actors: actors declared with the ``max_batch_size`` actor
+  option buffer their messages and process them in batches, flushed by
+  batch size or by ``batch_max_wait_ms``.  Batch functions receive a
+  list of ``(args, kwargs)`` inputs and return one result per input;
+  failed items are retried individually while successful items are
+  acknowledged on their own.  See :ref:`batch-actors`.
+
 
 `2.2.1`_ -- 2026-09-01
 ----------------------

@@ -215,6 +215,13 @@ class _StubConsumer(Consumer):
         self.dead_letters.append(message)
         self.prefetch_semaphore.release()
 
+    def requeue(self, messages):
+        for message in messages:
+            self.queue.put(message.encode())
+            # Balance the put so the message keeps exactly one
+            # outstanding task on the queue it came from.
+            self.queue.task_done()
+
     def __next__(self):
         # Reserve a prefetch 'slot' for the message being fetched.
         if not self.prefetch_semaphore.acquire(timeout=self.timeout / 1000):
