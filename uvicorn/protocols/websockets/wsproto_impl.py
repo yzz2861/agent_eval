@@ -19,6 +19,7 @@ from uvicorn._types import (
     ASGI3Application,
     ASGISendEvent,
     WebSocketEvent,
+    WebSocketPingEvent,
     WebSocketReceiveEvent,
     WebSocketScope,
 )
@@ -121,6 +122,9 @@ class WSProtocol(asyncio.Protocol):
         self.ping_sent_at: float = 0.0
         self.last_ping_rtt: float = 0.0
 
+        # Application ping/pong probes ('websocket.pingpong' extension), keyed by payload.
+        self.pending_pings: dict[bytes, asyncio.Future[None]] = {}
+
         # Buffer
         self.buffer = WebsocketBuffer(self.config.ws_max_size)
 
@@ -139,6 +143,7 @@ class WSProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         self.stop_keepalive()
+        self.fail_pending_pings()
         code = 1005 if self.handshake_complete else 1006
         self.queue.put_nowait({"type": "websocket.disconnect", "code": code})
         self.connections.remove(self)
@@ -245,7 +250,7 @@ class WSProtocol(asyncio.Protocol):
             "headers": headers,
             "subprotocols": event.subprotocols,
             "state": self.app_state.copy(),
-            "extensions": {"websocket.http.response": {}},
+            "extensions": {"websocket.http.response": {}, "websocket.pingpong": {}},
         }
         self.queue.put_nowait({"type": "websocket.connect"})
         task = self.loop.create_task(self.run_asgi())
@@ -287,10 +292,17 @@ class WSProtocol(asyncio.Protocol):
         self.transport.write(self.conn.send(event.response()))
 
     def handle_pong(self, event: events.Pong) -> None:
-        # Ignore unsolicited pongs and stale pongs whose payload doesn't match the ping currently in flight.
-        if self.pending_ping_payload is None or bytes(event.payload) != self.pending_ping_payload:
-            return  # pragma: no cover
+        payload = bytes(event.payload)
+        if self.pending_ping_payload is not None and payload == self.pending_ping_payload:
+            self.handle_keepalive_pong()
+            return
+        # An application probe ('websocket.pingpong' extension) matches on the ping payload.
+        future = self.pending_pings.get(payload)
+        if future is not None and not future.done():
+            future.set_result(None)
+        # Unsolicited pongs are dropped here; they never reach the application.
 
+    def handle_keepalive_pong(self) -> None:
         self.last_ping_rtt = self.loop.time() - self.ping_sent_at
         self.pending_ping_payload = None
         # The peer answered in time; cancel the pong deadline and chain the next ping. This `schedule_ping()` call is
@@ -300,6 +312,32 @@ class WSProtocol(asyncio.Protocol):
             self.pong_timer.cancel()
             self.pong_timer = None
             self.schedule_ping()
+
+    def fail_pending_pings(self) -> None:
+        # The connection is gone: no pong will arrive, so end every in-flight application probe.
+        for future in self.pending_pings.values():
+            if not future.done():
+                future.set_exception(ClientDisconnected())
+        self.pending_pings.clear()
+
+    async def send_ping(self, message: WebSocketPingEvent) -> None:
+        payload = message.get("bytes") or b""
+        timeout = message.get("timeout", self.ping_timeout)
+        if len(payload) > 125:
+            raise ValueError("Ping payloads cannot exceed 125 bytes.")
+        if payload in self.pending_pings:
+            # Payloads match pongs to pings, so a duplicate payload would be ambiguous.
+            raise RuntimeError(f"A ping with payload {payload!r} is already awaiting its pong.")
+        future: asyncio.Future[None] = self.loop.create_future()
+        self.pending_pings[payload] = future
+        try:
+            self.transport.write(self.conn.send(wsproto.events.Ping(payload=payload)))
+            if timeout is None:
+                await future
+            else:
+                await asyncio.wait_for(future, timeout)
+        finally:
+            self.pending_pings.pop(payload, None)
 
     def start_keepalive(self) -> None:
         if self.ping_interval is not None and self.ping_interval > 0:
@@ -454,6 +492,9 @@ class WSProtocol(asyncio.Protocol):
                     output = self.conn.send(wsproto.events.Message(data=data))  # type: ignore
                     if not self.transport.is_closing():
                         self.transport.write(output)
+
+                elif message["type"] == "websocket.ping":
+                    await self.send_ping(message)
 
                 elif message["type"] == "websocket.close":
                     self.close_sent = True

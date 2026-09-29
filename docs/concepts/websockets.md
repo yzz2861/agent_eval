@@ -105,3 +105,30 @@ You can choose this protocol by setting the `--ws` option to `websockets-sansio`
 
 !!! note
     The SansIO implementation was released in Uvicorn version 0.35.0 in June 2025.
+
+## Ping/Pong Extension
+
+The `wsproto` and `websockets-sansio` implementations declare the `websocket.pingpong` extension in the
+ASGI scope (`scope["extensions"]`), which lets an application actively probe whether a client is still
+alive, instead of relying on the server's automatic keepalive or on business messages:
+
+```python
+async def app(scope, receive, send):
+    ...
+    # Send a WebSocket ping and suspend until the matching pong arrives.
+    await send({"type": "websocket.ping", "bytes": b"probe-1", "timeout": 5.0})
+```
+
+- `bytes` (optional): the ping payload, at most 125 bytes. Pongs are matched to pings by payload,
+  so several probes may be in flight at once, but reusing a payload that is still in flight raises
+  `RuntimeError`.
+- `timeout` (optional): seconds to wait for the matching pong before raising `TimeoutError`.
+  Defaults to the `ws_ping_timeout` setting; pass `None` to wait indefinitely.
+- If the connection closes while waiting, `ClientDisconnected` is raised. Cancelling the `send()`
+  call ends the probe and cleans it up.
+
+The extension is independent of the automatic keepalive pings configured with `ws_ping_interval`:
+keepalive pongs and probe pongs are matched to their own pings. Client-initiated pings are still
+answered automatically at the protocol level, and unsolicited pongs are never delivered to the
+application as messages. The legacy `websockets` implementation does not support this extension and
+does not declare it.

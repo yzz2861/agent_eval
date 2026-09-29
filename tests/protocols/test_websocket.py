@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
+import struct
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, TypeAlias, TypedDict
 
@@ -30,6 +33,7 @@ from uvicorn._types import (
     WebSocketResponseStartEvent,
 )
 from uvicorn.config import Config
+from uvicorn.protocols.utils import ClientDisconnected
 from uvicorn.protocols.websockets.websockets_sansio_impl import WebSocketsSansIOProtocol
 from uvicorn.server import ServerState
 
@@ -1846,3 +1850,239 @@ async def test_server_keepalive_disabled(
             protocol = list(server.server_state.connections)[0]
             assert isinstance(protocol, (_WSProtocol, WebSocketsSansIOProtocol))
             assert protocol.ping_timer is None
+
+
+class RawWebSocketClient:
+    """A WebSocket client over a real TCP socket with full control over the frames.
+
+    Unlike the `websockets` client, nothing is answered automatically, so tests can
+    reply to pings out of order, drop pongs, or close the connection abruptly.
+    """
+
+    def __init__(self) -> None:
+        self.reader: asyncio.StreamReader
+        self.writer: asyncio.StreamWriter
+
+    async def connect(self, port: int) -> None:
+        self.reader, self.writer = await asyncio.open_connection("127.0.0.1", port)
+        key = base64.b64encode(b"0123456789abcdef").decode("ascii")
+        request = (
+            "GET / HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        self.writer.write(request.encode("ascii"))
+        status_line = (await self.reader.readuntil(b"\r\n\r\n")).split(b"\r\n", 1)[0]
+        assert b" 101 " in status_line
+
+    async def read_frame(self) -> tuple[int, bytes]:
+        """Read a single (unmasked) server frame, returning (opcode, payload)."""
+        first, second = await self.reader.readexactly(2)
+        length = second & 0x7F
+        if length == 126:
+            (length,) = struct.unpack("!H", await self.reader.readexactly(2))
+        elif length == 127:
+            (length,) = struct.unpack("!Q", await self.reader.readexactly(8))
+        payload = await self.reader.readexactly(length)
+        return first & 0x0F, payload
+
+    def send_frame(self, opcode: int, payload: bytes = b"") -> None:
+        mask = b"\x01\x02\x03\x04"
+        length = len(payload)
+        header = bytes([0x80 | opcode])
+        if length < 126:
+            header += bytes([0x80 | length])
+        elif length < 65536:
+            header += bytes([0x80 | 126]) + struct.pack("!H", length)
+        else:
+            header += bytes([0x80 | 127]) + struct.pack("!Q", length)
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        self.writer.write(header + mask + masked)
+
+    def send_ping(self, payload: bytes = b"") -> None:
+        self.send_frame(0x9, payload)
+
+    def send_pong(self, payload: bytes = b"") -> None:
+        self.send_frame(0xA, payload)
+
+    def send_close(self, code: int = 1000) -> None:
+        self.send_frame(0x8, struct.pack("!H", code))
+
+    async def close(self) -> None:
+        self.writer.close()
+        with contextlib.suppress(ConnectionError):
+            await self.writer.wait_closed()
+
+
+async def test_websocket_pingpong_extension(
+    ws_protocol_cls: WSProtocol, http_protocol_cls: HTTPProtocol, unused_tcp_port: int
+):
+    """Each application probe gets its own terminal state: out-of-order pongs resolve
+    their own waiter, a dropped pong times its waiter out, and closing the connection
+    disconnects the probes still in flight."""
+    results: dict[str, str] = {}
+    unexpected: list[Any] = []
+    app_done = asyncio.Event()
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
+        assert "extensions" in scope and scope["extensions"]["websocket.pingpong"] == {}
+        probes: list[asyncio.Task[None]] = []
+
+        async def probe(name: str, payload: bytes, timeout: float) -> None:
+            try:
+                await send({"type": "websocket.ping", "bytes": payload, "timeout": timeout})
+            except TimeoutError:
+                results[name] = "timeout"
+            except ClientDisconnected:
+                results[name] = "disconnected"
+            else:
+                results[name] = "pong"
+
+        while True:
+            message = await receive()
+            if message["type"] == "websocket.connect":
+                await send({"type": "websocket.accept"})
+                probes = [
+                    asyncio.create_task(probe("a", b"probe-a", 5.0)),
+                    asyncio.create_task(probe("b", b"probe-b", 0.2)),
+                    asyncio.create_task(probe("c", b"probe-c", 5.0)),
+                    asyncio.create_task(probe("d", b"probe-d", 30.0)),
+                ]
+            elif message["type"] == "websocket.disconnect":
+                await asyncio.gather(*probes)
+                break
+            else:
+                unexpected.append(message)
+        app_done.set()
+
+    config = Config(app=app, ws=ws_protocol_cls, http=http_protocol_cls, lifespan="off", port=unused_tcp_port)
+    async with run_server(config):
+        client = RawWebSocketClient()
+        await client.connect(unused_tcp_port)
+
+        # The application starts four probes; collect their ping frames.
+        pings: set[bytes] = set()
+        while len(pings) < 4:
+            opcode, payload = await asyncio.wait_for(client.read_frame(), timeout=5)
+            assert opcode == 0x9
+            pings.add(payload)
+        assert pings == {b"probe-a", b"probe-b", b"probe-c", b"probe-d"}
+
+        # An unsolicited pong must not reach the application as a message.
+        client.send_pong(b"unsolicited")
+
+        # A client-initiated ping is answered at the protocol level.
+        client.send_ping(b"client-ping")
+        opcode, payload = await asyncio.wait_for(client.read_frame(), timeout=5)
+        assert (opcode, payload) == (0xA, b"client-ping")
+
+        # Answer out of order; 'probe-b' is dropped and times out, 'probe-d' is
+        # dropped and the connection closes while it is still in flight.
+        client.send_pong(b"probe-c")
+        client.send_pong(b"probe-a")
+        await asyncio.sleep(0.5)
+        client.send_close()
+        opcode, _ = await asyncio.wait_for(client.read_frame(), timeout=5)
+        assert opcode == 0x8
+        await client.close()
+
+        await asyncio.wait_for(app_done.wait(), timeout=5)
+    assert results == {"a": "pong", "b": "timeout", "c": "pong", "d": "disconnected"}
+    assert unexpected == []
+
+
+async def test_websocket_pingpong_duplicate_payload_and_cancellation(
+    ws_protocol_cls: WSProtocol, http_protocol_cls: HTTPProtocol, unused_tcp_port: int
+):
+    """A duplicate in-flight payload is rejected, cancellation ends the waiter, and
+    no probe futures are leaked once everything settles."""
+    outcomes: dict[str, str] = {}
+    app_done = asyncio.Event()
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
+        while True:
+            message = await receive()
+            if message["type"] == "websocket.connect":
+                await send({"type": "websocket.accept"})
+
+                async def ping(payload: bytes) -> None:
+                    await send({"type": "websocket.ping", "bytes": payload, "timeout": 30.0})
+
+                first = asyncio.create_task(ping(b"dup"))
+                await asyncio.sleep(0.01)
+                try:
+                    await send({"type": "websocket.ping", "bytes": b"dup", "timeout": 30.0})
+                except RuntimeError:
+                    outcomes["duplicate"] = "rejected"
+                probe = asyncio.create_task(ping(b"cancel-me"))
+                await asyncio.sleep(0.01)
+                probe.cancel()
+                try:
+                    await probe
+                except asyncio.CancelledError:
+                    outcomes["cancelled"] = "cancelled"
+                first.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await first
+                try:
+                    await send({"type": "websocket.ping", "bytes": b"x" * 126, "timeout": 1.0})
+                except ValueError:
+                    outcomes["oversized"] = "rejected"
+                # A probe without a timeout still resolves when the pong arrives.
+                await send({"type": "websocket.ping", "bytes": b"no-timeout", "timeout": None})
+                outcomes["no-timeout"] = "pong"
+            elif message["type"] == "websocket.disconnect":
+                break
+        app_done.set()
+
+    config = Config(app=app, ws=ws_protocol_cls, http=http_protocol_cls, lifespan="off", port=unused_tcp_port)
+    async with run_server(config) as server:
+        client = RawWebSocketClient()
+        await client.connect(unused_tcp_port)
+        protocol = list(server.server_state.connections)[0]
+        assert isinstance(protocol, (_WSProtocol, WebSocketsSansIOProtocol))
+
+        frames = [await asyncio.wait_for(client.read_frame(), timeout=5) for _ in range(3)]
+        assert {payload for opcode, payload in frames if opcode == 0x9} == {b"dup", b"cancel-me", b"no-timeout"}
+        client.send_pong(b"no-timeout")
+        client.send_close()
+        await asyncio.wait_for(app_done.wait(), timeout=5)
+        assert protocol.pending_pings == {}
+        await client.close()
+    assert outcomes == {
+        "duplicate": "rejected",
+        "cancelled": "cancelled",
+        "oversized": "rejected",
+        "no-timeout": "pong",
+    }
+
+
+@pytest.mark.filterwarnings("ignore: websockets.legacy is deprecated.*:DeprecationWarning")
+async def test_websocket_pingpong_extension_not_advertised_by_websockets_impl(
+    http_protocol_cls: HTTPProtocol, unused_tcp_port: int
+):
+    """The legacy `websockets` implementation does not support the extension and
+    must not declare it in the ASGI scope."""
+    from uvicorn.protocols.websockets.websockets_impl import WebSocketProtocol
+
+    extensions: dict[str, Any] = {}
+
+    async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
+        assert "extensions" in scope
+        extensions.update(scope["extensions"])
+        while True:
+            message = await receive()
+            if message["type"] == "websocket.connect":
+                await send({"type": "websocket.accept"})
+            elif message["type"] == "websocket.disconnect":
+                break
+
+    config = Config(app=app, ws=WebSocketProtocol, http=http_protocol_cls, lifespan="off", port=unused_tcp_port)
+    async with run_server(config):
+        async with connect(f"ws://127.0.0.1:{unused_tcp_port}", ping_interval=None):
+            pass
+    assert "websocket.pingpong" not in extensions

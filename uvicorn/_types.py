@@ -206,6 +206,12 @@ class WebSocketCloseEvent(TypedDict):
     reason: NotRequired[str | None]
 
 
+class WebSocketPingEvent(TypedDict):
+    type: Literal["websocket.ping"]
+    bytes: NotRequired[bytes | None]
+    timeout: NotRequired[float | None]
+
+
 class LifespanStartupEvent(TypedDict):
     type: Literal["lifespan.startup"]
 
@@ -258,6 +264,7 @@ ASGISendEvent = (
     | WebSocketResponseStartEvent
     | WebSocketResponseBodyEvent
     | WebSocketCloseEvent
+    | WebSocketPingEvent
     | LifespanStartupCompleteEvent
     | LifespanStartupFailedEvent
     | LifespanShutdownCompleteEvent

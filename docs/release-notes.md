@@ -2,6 +2,13 @@
 toc_depth: 2
 ---
 
+## Unreleased
+
+### Added
+
+* Add `websocket.pingpong` ASGI extension on the `wsproto` and `websockets-sansio` implementations,
+  allowing applications to send pings with a payload and await the matching pong
+
 ## 0.54.0 (September 24, 2026)
 
 HTTP/2 support remains experimental. Install `zttp>=0.0.34` and enable it with `--http zttp --http2`.
