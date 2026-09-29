@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from inspect import isawaitable
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from sanic_routing import BaseRouter, Route, RouteGroup
 from sanic_routing.exceptions import NotFound
@@ -305,6 +305,165 @@ class SignalRouter(BaseRouter):
         task = asyncio.get_running_loop().create_task(dispatch)
         await asyncio.sleep(0)
         return task
+
+    async def collect(
+        self,
+        event: str | Enum,
+        *,
+        context: dict[str, Any] | None = None,
+        condition: dict[str, str] | None = None,
+        fail_not_found: bool = True,
+        reverse: bool = False,
+        max_concurrency: int | None = None,
+        on_failure: Literal["aggregate", "cancel"] = "aggregate",
+    ) -> list[Any]:
+        """Dispatch a signal and collect the return value of every handler
+
+        Unlike :meth:`dispatch`, which stops at the first truthy return
+        value, ``collect`` awaits every matched handler and returns all of
+        their results. Each matched handler is assigned a stable result
+        slot up front, so the returned list is always ordered by the
+        subscription snapshot (honoring ``reverse``), regardless of the
+        order in which handlers complete. ``False`` and ``None`` are
+        treated as real results.
+
+        Args:
+            event (str): The event to dispatch
+            context (Optional[Dict[str, Any]], optional): A dictionary of
+                context to pass to the handlers. Defaults to `None`.
+            condition (Optional[Dict[str, str]], optional): A dictionary of
+                conditions to match against the handlers. Defaults to `None`.
+            fail_not_found (bool, optional): Whether to raise an exception
+                if no handlers are found. Defaults to `True`.
+            reverse (bool, optional): Whether to reverse the handler order.
+                Defaults to `False`.
+            max_concurrency (Optional[int], optional): Maximum number of
+                handlers running at the same time. `None` means no limit.
+                Defaults to `None`.
+            on_failure (str, optional): How to handle a handler raising an
+                exception. `"aggregate"` places the exception in the
+                handler's result slot and keeps running the remaining
+                handlers. `"cancel"` cancels the remaining handlers and
+                re-raises the first exception. Defaults to `"aggregate"`.
+
+        Returns:
+            List[Any]: The results of the handlers, in slot order
+
+        Raises:
+            ValueError: If `on_failure` or `max_concurrency` is invalid
+            NotFound: If no handlers are found and `fail_not_found` is `True`
+        """  # noqa: E501
+        if on_failure not in ("aggregate", "cancel"):
+            raise ValueError(
+                "on_failure must be 'aggregate' or 'cancel', "
+                f"not {on_failure!r}"
+            )
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
+
+        event = self.format_event(event)
+        try:
+            group, _, params = self.get(event, condition=condition)
+        except NotFound as e:
+            is_reserved = event.split(".", 1)[0] in RESERVED_NAMESPACES
+            if fail_not_found and (not is_reserved or self.allow_fail_builtin):
+                raise e
+            if self.ctx.app.debug and self.ctx.app.state.verbosity >= 1:
+                error_logger.warning(str(e))
+            return []
+
+        if context:
+            params.update(context)
+        params.pop("__trigger__", None)
+
+        # Fixed snapshot of the subscriptions for this call. Handlers that
+        # add/remove signals or dispatch again cannot mutate this list or
+        # the per-call result state.
+        signals = list(group.routes)
+        if not reverse:
+            signals = signals[::-1]
+
+        for signal in signals:
+            for waiter in signal.ctx.waiters:
+                if waiter.matches(event, condition):
+                    waiter.future.set_result(dict(params))
+
+        selected = [
+            signal
+            for signal in signals
+            if (
+                (
+                    (condition is None and signal.ctx.exclusive is False)
+                    or (condition is None and not signal.extra.requirements)
+                    or (condition == signal.extra.requirements)
+                )
+                and (signal.ctx.trigger or event == signal.ctx.definition)
+            )
+        ]
+
+        results: list[Any] = [None] * len(selected)
+        semaphore = (
+            asyncio.Semaphore(max_concurrency) if max_concurrency else None
+        )
+
+        async def _invoke(signal: Signal) -> Any:
+            maybe_coroutine = signal.handler(**params)
+            if isawaitable(maybe_coroutine):
+                return await maybe_coroutine
+            return maybe_coroutine
+
+        async def _run(index: int, signal: Signal) -> None:
+            try:
+                if semaphore:
+                    async with semaphore:
+                        results[index] = await _invoke(signal)
+                else:
+                    results[index] = await _invoke(signal)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if on_failure == "aggregate":
+                    results[index] = e
+                else:
+                    raise
+
+        tasks = [
+            asyncio.ensure_future(_run(index, signal))
+            for index, signal in enumerate(selected)
+        ]
+        if not tasks:
+            return results
+
+        try:
+            if on_failure == "cancel":
+                done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_EXCEPTION
+                )
+                failure = next(
+                    (
+                        task.exception()
+                        for task in done
+                        if not task.cancelled()
+                        and task.exception() is not None
+                    ),
+                    None,
+                )
+                if failure is not None:
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise failure
+            else:
+                await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            # External cancellation: always wait for every started handler
+            # to exit before propagating, and consume their outcomes so no
+            # background exception is left unretrieved.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return results
 
     def get_waiter(
         self,

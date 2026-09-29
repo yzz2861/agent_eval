@@ -718,6 +718,54 @@ class Sanic(
             fail_not_found=fail_not_found,
         )
 
+    def collect(
+        self,
+        event: str,
+        *,
+        condition: dict[str, str] | None = None,
+        context: dict[str, Any] | None = None,
+        fail_not_found: bool = True,
+        reverse: bool = False,
+        max_concurrency: int | None = None,
+        on_failure: Literal["aggregate", "cancel"] = "aggregate",
+    ) -> Coroutine[Any, Any, list[Any]]:
+        """Dispatch an event and collect every handler's result.
+
+        Unlike :meth:`dispatch`, this does not stop at the first truthy
+        return value. It awaits all matched handlers and returns their
+        results in a stable slot order. See
+        :meth:`SignalRouter.collect` for details.
+
+        Args:
+            event (str): Name of the event to dispatch.
+            condition (Optional[Dict[str, str]]): Condition for the
+                event dispatch.
+            context (Optional[Dict[str, Any]]): Context for the event
+                dispatch.
+            fail_not_found (bool): Whether to fail if the event is not
+                found. Default is `True`.
+            reverse (bool): Whether to reverse the handler order.
+                Default is `False`.
+            max_concurrency (Optional[int]): Maximum number of handlers
+                running at the same time. Default is `None` (no limit).
+            on_failure (str): `"aggregate"` to place exceptions in the
+                result slots, or `"cancel"` to cancel the remaining
+                handlers and re-raise. Default is `"aggregate"`.
+
+        Returns:
+            Coroutine[Any, Any, Awaitable[List[Any]]]: An awaitable that
+                returns the list of handler results in slot order.
+        """
+        return self.signal_router.collect(
+            event,
+            context=context,
+            condition=condition,
+            fail_not_found=fail_not_found,
+            reverse=reverse,
+            max_concurrency=max_concurrency,
+            on_failure=on_failure,
+        )
+
     async def event(
         self,
         event: str | Enum,
