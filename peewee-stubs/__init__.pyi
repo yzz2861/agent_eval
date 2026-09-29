@@ -2006,7 +2006,7 @@ class BaseModelSelect(_ModelQueryHelper):
     def __iter__(self): ...
     def prefetch(self, *subqueries, prefetch_type: int = ...): ...
     def with_related(
-        self, *loads: Load | ForeignKeyField[Any] | BackrefAccessor
+        self, *loads: Load | ForeignKeyField[Any] | BackrefAccessor | ManyToManyField
     ) -> Self: ...
     def iterator(self, database: _DatabaseType | None = ...) -> Iterator[Any]: ...
     def get(self, database: _DatabaseType | None = None): ...
@@ -2124,13 +2124,18 @@ class PrefetchQuery(_PrefetchQuery):
 
 def prefetch(sq, *subqueries, prefetch_type: int = ...): ...
 
+class M2MRelation(NamedTuple):
+    target: Any
+    through: Any
+
 class Load(Node):
     def __init__(
         self,
-        rel: ForeignKeyField[Any] | BackrefAccessor,
+        rel: ForeignKeyField[Any] | BackrefAccessor | ManyToManyField,
         query: ModelSelect[Any] | None = ...,
         strategy: int = ...,
         per_parent: int | None = ...,
+        with_through: bool = ...,
     ) -> None: ...
     def then(
         self, *children: Load | ForeignKeyField[Any] | BackrefAccessor
@@ -2188,6 +2193,7 @@ __all__ = [
     "JOIN",
     "JSONField",
     "Load",
+    "M2MRelation",
     "ManyToManyField",
     "Model",
     "ModelIndex",

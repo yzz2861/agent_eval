@@ -1036,7 +1036,8 @@ is first executed:
    # carol
 
 ``Load`` accepts a back-reference (``Load(User.tweets)``, the one-to-many
-direction) or a foreign key (``Load(Tweet.user)``, the many-to-one direction).
+direction), a foreign key (``Load(Tweet.user)``, the many-to-one direction) or
+a many-to-many field (``Load(User.tags)``).
 The rows are loaded once, when the query is first executed, whether by
 iteration, ``get()``, ``first()``, indexing or ``len()``.
 
@@ -1139,6 +1140,63 @@ relation query's ``order_by``:
 A plain ``query.limit(n)`` instead applies one ``LIMIT`` to the whole relation,
 returning ``n`` rows in total (the same as :func:`prefetch`). Per-parent limits
 require window-function support (SQLite 3.25+, PostgreSQL, MySQL 8).
+
+Many-to-many with through data
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A many-to-many through table often carries data of its own -- a role, an
+ordering, a timestamp -- in addition to the two foreign keys. Loading a
+many-to-many field with ``with_through=True`` pairs each target with the
+through row that links it to the parent:
+
+.. code-block:: python
+
+   class User(Model):
+       username = CharField()
+
+   class Group(Model):
+       name = CharField()
+
+   class Membership(Model):
+       user = ForeignKeyField(User, backref='+')
+       group = ForeignKeyField(Group, backref='+')
+       role = CharField()
+       ordering = IntegerField(default=0)
+
+   User.groups = ManyToManyField(Group, through_model=Membership,
+                                 backref='members')
+
+   # The relation query selects from the through model, so filters and
+   # ordering on the relationship data are preserved:
+   memberships = (Membership
+                  .select()
+                  .where(Membership.role != 'banned')
+                  .order_by(Membership.ordering))
+   query = User.select().with_related(
+       Load(User.groups, memberships, with_through=True))
+
+   for user in query:
+       for rel in user.groups:  # rel is an M2MRelation(target, through).
+           print(user.username, rel.target.name, rel.through.role)
+
+Each ``user.groups`` entry is an :class:`M2MRelation` namedtuple of
+``(target, through)``. The whole traversal costs three queries (users,
+memberships, groups) no matter how many relations exist. Targets shared by
+several parents resolve to the same instance, while every through row stays a
+distinct object, so per-edge data never leaks between relations. Duplicate
+edges (two rows linking the same pair) are kept as separate entries.
+
+Without ``with_through``, the same load resolves to plain target instances:
+
+.. code-block:: python
+
+   query = User.select().with_related(Load(User.groups, memberships))
+   for user in query:
+       print(user.username, [group.name for group in user.groups])
+
+Both forms work from either side of the relation (``Load(Group.members)``),
+with self-referential relations, and with foreign keys to non-primary-key
+columns. ``per_parent`` is not supported for many-to-many loads.
 
 .. _prefetch-strategy:
 

@@ -122,6 +122,7 @@ __all__ = [
     'JOIN',
     'JSONField',
     'Load',
+    'M2MRelation',
     'ManyToManyField',
     'Model',
     'ModelIndex',
@@ -6857,6 +6858,10 @@ class ManyToManyFieldAccessor(FieldAccessor):
 
     def __get__(self, instance, instance_type=None):
         if instance is not None:
+            # A relation preloaded via with_related()/Load() is stashed in
+            # the instance's relation cache under the field's name.
+            if self.name in instance.__rel__:
+                return instance.__rel__[self.name]
             if self.src_fk.backref not in ('+', '!'):
                 backref = getattr(instance, self.src_fk.backref)
                 if isinstance(backref, list):
@@ -9522,12 +9527,61 @@ def _bucket(field, is_backref, children, parents):
                 parent.__rel__[name] = id_map[key]
 
 
+class M2MRelation(collections.namedtuple('M2MRelation', ('target', 'through'))):
+    # A single many-to-many edge: the target instance paired with the
+    # through-model row that links it to the parent. Produced by
+    # Load(..., with_through=True).
+    __slots__ = ()
+
+
+def _m2m_through_fks(field):
+    # Resolve the (source, destination) foreign-keys on the through model
+    # for a many-to-many field. For a self-referential relation both keys
+    # point at the same model, so they are disambiguated by definition
+    # order: the forward field relates first-to-second, its backref
+    # second-to-first.
+    through_model = field.through_model
+    src_fks = through_model._meta.model_refs[field.model]
+    dest_fks = through_model._meta.model_refs[field.rel_model]
+    if not src_fks:
+        raise ValueError('Cannot find foreign-key to "%s" on "%s" model.' %
+                         (field.model, through_model))
+    elif not dest_fks:
+        raise ValueError('Cannot find foreign-key to "%s" on "%s" model.' %
+                         (field.rel_model, through_model))
+    if field.model is field.rel_model:
+        if len(src_fks) < 2:
+            raise ValueError('Self-referential many-to-many "%s" requires '
+                             'two foreign-keys on "%s".' % (field,
+                                                            through_model))
+        if field._is_backref:
+            return src_fks[1], src_fks[0]
+        return src_fks[0], src_fks[1]
+    return src_fks[0], dest_fks[0]
+
+
 class Load(Node):
     def __init__(self, rel, query=None, strategy=PREFETCH_TYPE.WHERE,
-                 per_parent=None):
+                 per_parent=None, with_through=False):
         self._field, self._is_backref = self._resolve(rel)
-        rel_model = (self._field.model if self._is_backref
-                     else self._field.rel_model)
+        self._is_m2m = isinstance(self._field, ManyToManyField)
+        if self._is_m2m:
+            through_model = self._field.through_model
+            if not is_model(through_model):
+                raise ValueError('Load() many-to-many through model is not '
+                                 'bound to a model yet.')
+            if per_parent is not None:
+                raise ValueError('per_parent is not supported for '
+                                 'many-to-many loads.')
+            # The relation query selects from the through model, so that
+            # filters and ordering on the relationship data are preserved.
+            rel_model = through_model
+        else:
+            if with_through:
+                raise ValueError('with_through is only supported for '
+                                 'many-to-many loads.')
+            rel_model = (self._field.model if self._is_backref
+                         else self._field.rel_model)
         if query is not None and query.model is not rel_model:
             raise ValueError('Load() query must select from %s, got %s.' %
                              (rel_model, query.model))
@@ -9539,6 +9593,7 @@ class Load(Node):
         self._query = query
         self._strategy = strategy
         self._per_parent = per_parent
+        self._with_through = with_through
         self._children = ()
 
     @staticmethod
@@ -9549,8 +9604,10 @@ class Load(Node):
             return rel.field, True
         elif isinstance(rel, ForeignKeyField):
             return rel, False
-        raise ValueError('Load() expects a foreign-key or backref reference, '
-                         'got %r.' % rel)
+        elif isinstance(rel, ManyToManyField):
+            return rel, False
+        raise ValueError('Load() expects a foreign-key, backref or '
+                         'many-to-many reference, got %r.' % rel)
 
     @Node.copy
     def then(self, *children):
@@ -9595,6 +9652,8 @@ class Load(Node):
 
     def _run(self, parents, parent_query, depth=0, database=None):
         field = self._field
+        if self._is_m2m:
+            return self._run_m2m(parents, parent_query, database)
         if self._is_backref:
             if self._per_parent is not None:
                 child_query = self._windowed(parent_query, parents, depth)
@@ -9608,6 +9667,55 @@ class Load(Node):
         children = list(child_query.execute(database))
         _bucket(field, self._is_backref, children, parents)
         return children, child_query
+
+    def _run_m2m(self, parents, parent_query, database=None):
+        # Two queries regardless of the number of relations: one for the
+        # through rows (carrying any user-supplied filters and ordering),
+        # one for the deduplicated target instances they point at.
+        field = self._field
+        src_fk, dest_fk = _m2m_through_fks(field)
+        rel_field = src_fk.rel_field
+        base = self._base(field.through_model)
+        if self._strategy == PREFETCH_TYPE.MATERIALIZE:
+            keys = self._distinct(parents,
+                                  lambda p: getattr(p, rel_field.name))
+            through_query = base.where(src_fk << keys)
+        else:
+            pk = getattr(parent_query.model, rel_field.name)
+            through_query = _relate(base, parent_query, [(src_fk, pk)],
+                                    self._strategy)
+        through_rows = list(through_query.execute(database))
+
+        dest_rel = dest_fk.rel_field
+        dest_ids = self._distinct(through_rows,
+                                  lambda t: t.__data__[dest_fk.name])
+        target_query = field.rel_model.select().where(dest_rel << dest_ids)
+        targets = list(target_query.execute(database))
+        id_map = {}
+        for target in targets:
+            id_map[target.__data__[dest_rel.name]] = target
+
+        buckets = {}
+        for row in through_rows:
+            buckets.setdefault(row.__data__[src_fk.name], []).append(row)
+
+        # Target instances are shared across parents and edges; each through
+        # row stays a distinct object so per-edge data never leaks between
+        # relations. Duplicate edges are kept as separate rows.
+        for parent in parents:
+            edges = buckets.get(parent.__data__[rel_field.name], [])
+            accum = []
+            for edge in edges:
+                edge.__rel__[src_fk.name] = parent
+                target = id_map.get(edge.__data__[dest_fk.name])
+                if target is not None:
+                    edge.__rel__[dest_fk.name] = target
+                if self._with_through:
+                    accum.append(M2MRelation(target, edge))
+                else:
+                    accum.append(target)
+            parent.__rel__[field.name] = accum
+        return targets, target_query
 
     @staticmethod
     def _rank_term(term, pks, field):

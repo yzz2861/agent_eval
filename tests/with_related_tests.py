@@ -55,6 +55,78 @@ class Tag(TestModel):
         primary_key = CompositeKey('group', 'name')
 
 
+# ---------------------------------------------------------------------------
+# Many-to-many models: the through table carries relation data (role and
+# ordering) in addition to the two foreign-keys.
+# ---------------------------------------------------------------------------
+
+class Label(TestModel):
+    name = CharField()
+    owner = ForeignKeyField(User, backref='+', null=True)
+
+
+class Article(TestModel):
+    title = CharField()
+
+
+class ArticleLabel(TestModel):
+    article = ForeignKeyField(Article, backref='+')
+    label = ForeignKeyField(Label, backref='+')
+    role = CharField(default='')
+    ordering = IntegerField(default=0)
+
+
+Article._meta.add_field('labels', ManyToManyField(
+    Label, through_model=ArticleLabel, backref='articles'))
+
+
+# Self-referential many-to-many through an explicit through model.
+class Person(TestModel):
+    name = CharField()
+
+
+class Follow(TestModel):
+    from_person = ForeignKeyField(Person, backref='+')
+    to_person = ForeignKeyField(Person, backref='+')
+    role = CharField(default='')
+
+
+Person._meta.add_field('following', ManyToManyField(
+    Person, through_model=Follow, backref='followers'))
+
+
+# Many-to-many over foreign-keys to non-pk columns.
+class Machine(TestModel):
+    serial = CharField(unique=True)
+
+
+class Part(TestModel):
+    sku = CharField(unique=True)
+
+
+class MachinePart(TestModel):
+    machine = ForeignKeyField(Machine, field='serial', backref='+')
+    part = ForeignKeyField(Part, field='sku', backref='+')
+    slot = IntegerField(default=0)
+
+
+Machine._meta.add_field('parts', ManyToManyField(
+    Part, through_model=MachinePart, backref='machines'))
+
+
+# Many-to-many with an auto-created through model.
+class City(TestModel):
+    name = CharField()
+
+
+class Driver(TestModel):
+    name = CharField()
+    cities = ManyToManyField(City, backref='drivers')
+
+
+DriverCityThrough = Driver.cities.get_through_model()
+
+
 class TestWithRelated(ModelTestCase):
     requires = [User, Reaction, Tweet, Favorite]
 
@@ -1326,3 +1398,248 @@ class TestWithRelatedNonPKFK(ModelTestCase):
                 ('a', '101'), ('a', '104'),
                 ('b', '101'), ('b', '104'),
                 ('c', '104')])
+
+
+class TestWithRelatedM2M(ModelTestCase):
+    requires = [User, Label, Article, ArticleLabel, Person, Follow,
+                Machine, Part, MachinePart, City, Driver, DriverCityThrough]
+
+    def setUp(self):
+        super(TestWithRelatedM2M, self).setUp()
+        self.a1 = Article.create(title='a1')
+        self.a2 = Article.create(title='a2')
+        self.a3 = Article.create(title='a3')
+        self.red = Label.create(name='red')
+        self.green = Label.create(name='green')
+        self.blue = Label.create(name='blue')
+        ArticleLabel.create(article=self.a1, label=self.red,
+                            role='primary', ordering=2)
+        ArticleLabel.create(article=self.a1, label=self.green,
+                            role='secondary', ordering=1)
+        ArticleLabel.create(article=self.a2, label=self.red,
+                            role='primary', ordering=1)
+        # Duplicate edge: same article and label, distinct through row.
+        ArticleLabel.create(article=self.a1, label=self.red,
+                            role='review', ordering=3)
+
+    def _load_articles(self, pt, with_through=True, query=None):
+        if query is None:
+            query = ArticleLabel.select().order_by(ArticleLabel.ordering)
+        return (Article
+                .select()
+                .order_by(Article.title)
+                .with_related(Load(Article.labels, query,
+                                   with_through=with_through, strategy=pt)))
+
+    def test_m2m_with_through(self):
+        # Each parent yields (target, through-row) pairs; the through
+        # query's ordering is preserved and duplicate edges are kept.
+        for pt in PREFETCH_TYPE.values():
+            with self.assertQueryCount(3):
+                accum = [(a.title, [(r.target.name, r.through.role)
+                                    for r in a.labels])
+                         for a in self._load_articles(pt)]
+            self.assertEqual(accum, [
+                ('a1', [('green', 'secondary'),
+                        ('red', 'primary'),
+                        ('red', 'review')]),
+                ('a2', [('red', 'primary')]),
+                ('a3', [])])
+
+    def test_m2m_plain_form(self):
+        # Without with_through the relation resolves to target instances.
+        for pt in PREFETCH_TYPE.values():
+            with self.assertQueryCount(3):
+                accum = [(a.title, [label.name for label in a.labels])
+                         for a in self._load_articles(pt, with_through=False)]
+            self.assertEqual(accum, [
+                ('a1', ['green', 'red', 'red']),
+                ('a2', ['red']),
+                ('a3', [])])
+
+    def test_m2m_through_filtering(self):
+        # Filters on the through query restrict which edges are loaded.
+        query = (ArticleLabel
+                 .select()
+                 .where(ArticleLabel.role != 'review')
+                 .order_by(ArticleLabel.ordering))
+        for pt in PREFETCH_TYPE.values():
+            with self.assertQueryCount(3):
+                accum = [(a.title, [(r.target.name, r.through.role)
+                                    for r in a.labels])
+                         for a in self._load_articles(pt, query=query)]
+            self.assertEqual(accum, [
+                ('a1', [('green', 'secondary'), ('red', 'primary')]),
+                ('a2', [('red', 'primary')]),
+                ('a3', [])])
+
+    def test_m2m_duplicate_edges_kept(self):
+        # The two a1/red edges are real rows: both appear, each with its
+        # own through instance.
+        with self.assertQueryCount(3):
+            article = next(iter(self._load_articles(PREFETCH_TYPE.WHERE)))
+        reds = [r for r in article.labels if r.target.name == 'red']
+        self.assertEqual(len(reds), 2)
+        self.assertEqual(sorted(r.through.role for r in reds),
+                         ['primary', 'review'])
+        self.assertIsNot(reds[0].through, reds[1].through)
+        self.assertNotEqual(reds[0].through.id, reds[1].through.id)
+        # Both edges resolve to the same shared target instance.
+        self.assertIs(reds[0].target, reds[1].target)
+
+    def test_m2m_shared_target_distinct_through(self):
+        # A target related to several parents is one shared instance, but
+        # the relation data never leaks across edges.
+        with self.assertQueryCount(3):
+            a1, a2, a3 = list(self._load_articles(PREFETCH_TYPE.WHERE))
+        red_a1 = [r for r in a1.labels if r.through.role == 'primary'][0]
+        red_a2 = a2.labels[0]
+        self.assertIs(red_a1.target, red_a2.target)
+        self.assertIsNot(red_a1.through, red_a2.through)
+        # The through rows point back at their own parents without querying.
+        with self.assertQueryCount(0):
+            self.assertEqual(red_a1.through.article.title, 'a1')
+            self.assertEqual(red_a2.through.article.title, 'a2')
+            self.assertEqual(red_a1.through.label.name, 'red')
+
+    def test_m2m_backref_with_through(self):
+        query = ArticleLabel.select().order_by(ArticleLabel.ordering)
+        for pt in PREFETCH_TYPE.values():
+            with self.assertQueryCount(3):
+                labels = (Label
+                          .select()
+                          .order_by(Label.name)
+                          .with_related(Load(Label.articles, query,
+                                             with_through=True, strategy=pt)))
+                accum = [(label.name, [(r.target.title, r.through.role)
+                                       for r in label.articles])
+                         for label in labels]
+            self.assertEqual(accum, [
+                ('blue', []),
+                ('green', [('a1', 'secondary')]),
+                ('red', [('a2', 'primary'),
+                         ('a1', 'primary'),
+                         ('a1', 'review')])])
+
+    def test_m2m_no_n_plus_1_on_growth(self):
+        # Traversing every edge's target and through data is a constant
+        # number of queries no matter how many relations exist.
+        for i in range(20):
+            label = Label.create(name='extra-%d' % i)
+            ArticleLabel.create(article=self.a1, label=label,
+                                role='bulk', ordering=10 + i)
+        self.reset_sql_history()
+        with self.assertQueryCount(3):
+            accum = [(r.target.name, r.through.role)
+                     for a in self._load_articles(PREFETCH_TYPE.WHERE)
+                     for r in a.labels]
+        self.assertEqual(len(accum), 24)  # 4 original + 20 new edges.
+
+    def test_m2m_self_referential(self):
+        p1 = Person.create(name='p1')
+        p2 = Person.create(name='p2')
+        p3 = Person.create(name='p3')
+        Follow.create(from_person=p1, to_person=p2, role='friend')
+        Follow.create(from_person=p3, to_person=p2, role='fan')
+        Follow.create(from_person=p2, to_person=p1, role='mentor')
+
+        ordered = Follow.select().order_by(Follow.id)
+        for pt in PREFETCH_TYPE.values():
+            with self.assertQueryCount(5):
+                people = (Person
+                          .select()
+                          .order_by(Person.name)
+                          .with_related(
+                              Load(Person.following, ordered,
+                                   with_through=True, strategy=pt),
+                              Load(Person.followers, ordered.clone(),
+                                   with_through=True, strategy=pt)))
+                accum = [(p.name,
+                          [(r.target.name, r.through.role)
+                           for r in p.following],
+                          [(r.target.name, r.through.role)
+                           for r in p.followers])
+                         for p in people]
+            self.assertEqual(accum, [
+                ('p1', [('p2', 'friend')], [('p2', 'mentor')]),
+                ('p2', [('p1', 'mentor')], [('p1', 'friend'), ('p3', 'fan')]),
+                ('p3', [('p2', 'fan')], [])])
+
+    def test_m2m_custom_pk(self):
+        m1 = Machine.create(serial='m1')
+        m2 = Machine.create(serial='m2')
+        p1 = Part.create(sku='p1')
+        p2 = Part.create(sku='p2')
+        MachinePart.create(machine='m1', part='p1', slot=2)
+        MachinePart.create(machine='m1', part='p2', slot=1)
+        MachinePart.create(machine='m2', part='p1', slot=1)
+
+        query = MachinePart.select().order_by(MachinePart.slot)
+        for pt in PREFETCH_TYPE.values():
+            with self.assertQueryCount(3):
+                machines = (Machine
+                            .select()
+                            .order_by(Machine.serial)
+                            .with_related(Load(Machine.parts, query,
+                                               with_through=True,
+                                               strategy=pt)))
+                accum = [(m.serial, [(r.target.sku, r.through.slot)
+                                     for r in m.parts])
+                         for m in machines]
+            self.assertEqual(accum, [
+                ('m1', [('p2', 1), ('p1', 2)]),
+                ('m2', [('p1', 1)])])
+
+    def test_m2m_auto_through_model(self):
+        d1 = Driver.create(name='d1')
+        d2 = Driver.create(name='d2')
+        c1 = City.create(name='c1')
+        c2 = City.create(name='c2')
+        d1.cities.add([c1, c2])
+        d2.cities.add([c1])
+
+        for pt in PREFETCH_TYPE.values():
+            with self.assertQueryCount(3):
+                drivers = (Driver
+                           .select()
+                           .order_by(Driver.name)
+                           .with_related(Load(Driver.cities,
+                                              with_through=True, strategy=pt)))
+                accum = [(d.name, [(r.target.name, r.through.id is not None)
+                                   for r in d.cities])
+                         for d in drivers]
+            self.assertEqual(accum, [
+                ('d1', [('c1', True), ('c2', True)]),
+                ('d2', [('c1', True)])])
+
+    def test_m2m_then_nested(self):
+        huey = User.create(username='huey')
+        Label.update(owner=huey).where(Label.name == 'red').execute()
+        # Nested loads hang off the shared target instances: one extra
+        # query for the relation below the many-to-many.
+        with self.assertQueryCount(4):
+            articles = (Article
+                        .select()
+                        .order_by(Article.title)
+                        .with_related(Load(Article.labels)
+                                      .then(Load(Label.owner))))
+            accum = [(a.title, sorted((label.name,
+                                       label.owner.username
+                                       if label.owner else None)
+                                      for label in a.labels))
+                     for a in articles]
+        red = ('red', 'huey')
+        self.assertEqual(accum, [
+            ('a1', sorted([red, red, ('green', None)])),
+            ('a2', [red]),
+            ('a3', [])])
+
+    def test_m2m_load_validation(self):
+        # with_through only makes sense for many-to-many relations.
+        self.assertRaises(ValueError, Load, User.tweets, with_through=True)
+        # per_parent is not supported for many-to-many loads.
+        self.assertRaises(ValueError, Load, Article.labels, per_parent=2)
+        # The relation query selects from the through model.
+        self.assertRaises(ValueError, Load, Article.labels, Label.select())
+        self.assertRaises(ValueError, Load, Article.labels,
+                          ArticleLabel.select().tuples())
