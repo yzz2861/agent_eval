@@ -505,6 +505,30 @@ As explained in the previous section, the starting
 deadline is *misfire grace time*
 affects the newly queued job.
 
+Limiting backlog processing
+---------------------------
+
+If a schedule has been unable to run for a long time (for example because the
+scheduler was stopped), it may have accumulated a very large backlog of due run
+times. With ``coalesce=CoalescePolicy.all``, processing such a backlog in one go
+would queue an enormous number of jobs at once and keep other schedules waiting.
+To avoid this, you can cap the number of due run times a schedule may process in
+a single scheduler iteration with the ``max_backlog_fire_times`` scheduler
+option::
+
+    scheduler = Scheduler(data_store=..., max_backlog_fire_times=100)
+
+When the limit is reached, the remaining backlog is carried over to the next
+processing round. The next run time of the schedule, persisted in the data store
+along with the trigger state, doubles as a cursor, so the backlog is drained in
+batches without skipping or repeating any run times – even if the scheduler is
+restarted or another scheduler takes over the schedule in between. The
+``coalesce`` policy, misfire grace time and jitter of each queued job are still
+determined from its original scheduled run time, exactly as if the backlog had
+been processed in one go. Since every round is bounded, other schedules get
+their due run times processed in a timely manner even while a large backlog is
+being worked through.
+
 Running tasks without scheduling
 ================================
 

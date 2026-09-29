@@ -614,6 +614,272 @@ class TestAsyncScheduler:
                 receive.receive_nowait()
 
     @pytest.mark.parametrize(
+        "coalesce, expected_batch_sizes, expected_offsets",
+        [
+            pytest.param(
+                CoalescePolicy.all,
+                [4, 4, 2],
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+                id="all",
+            ),
+            pytest.param(
+                CoalescePolicy.earliest, [1, 1, 1], [0, 4, 8], id="earliest"
+            ),
+            pytest.param(
+                CoalescePolicy.latest, [1, 1, 1], [3, 7, 9], id="latest"
+            ),
+        ],
+    )
+    async def test_max_backlog_fire_times(
+        self,
+        coalesce: CoalescePolicy,
+        expected_batch_sizes: list[int],
+        expected_offsets: list[int],
+        raw_datastore: DataStore,
+        timezone: ZoneInfo,
+    ) -> None:
+        now = datetime.now(timezone)
+        start_time = now - timedelta(minutes=9, seconds=30)
+        trigger = IntervalTrigger(minutes=1, start_time=start_time)
+        final_fire_time = start_time + timedelta(minutes=10)
+        send, receive = create_memory_object_stream[Event](50)
+        with send, receive:
+            async with AsyncScheduler(
+                data_store=raw_datastore,
+                role=SchedulerRole.scheduler,
+                cleanup_interval=None,
+                max_backlog_fire_times=4,
+            ) as scheduler:
+                await scheduler.add_schedule(
+                    dummy_async_job, trigger, id="foo", coalesce=coalesce
+                )
+                scheduler.subscribe(send.send)
+                await scheduler.start_in_background()
+
+                # The backlog should be processed in batches, with the next fire
+                # time of the schedule acting as the cursor between rounds
+                batch_sizes: list[int] = []
+                current_batch_size = 0
+                with fail_after(10):
+                    while True:
+                        event = await receive.receive()
+                        if isinstance(event, JobAdded):
+                            assert event.schedule_id == "foo"
+                            current_batch_size += 1
+                        elif isinstance(event, ScheduleUpdated):
+                            batch_sizes.append(current_batch_size)
+                            current_batch_size = 0
+                            if event.next_fire_time == final_fire_time:
+                                break
+
+                            # The persisted cursor must point to the first
+                            # unprocessed (still due) fire time
+                            assert event.next_fire_time is not None
+                            assert event.next_fire_time < now
+
+                assert batch_sizes == expected_batch_sizes
+
+                # The jobs must retain their original scheduled fire times
+                jobs = await scheduler.get_jobs()
+                assert len(jobs) == len(expected_offsets)
+                expected_fire_times = [
+                    start_time + timedelta(minutes=offset)
+                    for offset in expected_offsets
+                ]
+                for job, expected_fire_time in zip(
+                    sorted(jobs, key=lambda job: job.scheduled_fire_time),
+                    expected_fire_times,
+                    strict=True,
+                ):
+                    assert job.scheduled_fire_time == expected_fire_time
+                    assert job.scheduled_fire_time < now
+
+            # The scheduler was stopped
+            event = await receive.receive()
+            assert isinstance(event, SchedulerStopped)
+
+            # There should be no more events on the list
+            with pytest.raises(WouldBlock):
+                receive.receive_nowait()
+
+    async def test_max_backlog_fire_times_invalid(self) -> None:
+        with pytest.raises(ValueError):
+            AsyncScheduler(max_backlog_fire_times=0)
+
+    async def test_backlog_cursor_survives_restart(
+        self, raw_datastore: DataStore, timezone: ZoneInfo
+    ) -> None:
+        now = datetime.now(timezone)
+        start_time = now - timedelta(minutes=9, seconds=30)
+        trigger = IntervalTrigger(minutes=1, start_time=start_time)
+        final_fire_time = start_time + timedelta(minutes=10)
+
+        # Phase 1: process the first batch of the backlog, then stop the
+        # scheduler in the middle of the backlog
+        send, receive = create_memory_object_stream[Event](50)
+        with send, receive:
+            async with AsyncScheduler(
+                data_store=raw_datastore,
+                role=SchedulerRole.scheduler,
+                cleanup_interval=None,
+                lease_duration=timedelta(seconds=1),
+                max_backlog_fire_times=3,
+            ) as scheduler:
+                await scheduler.add_schedule(
+                    dummy_async_job, trigger, id="foo", coalesce=CoalescePolicy.all
+                )
+                scheduler.subscribe(send.send)
+                await scheduler.start_in_background()
+
+                # Wait for the first batch to be processed and the cursor to be
+                # persisted, then stop the scheduler
+                with fail_after(10):
+                    while True:
+                        event = await receive.receive()
+                        if isinstance(event, ScheduleUpdated):
+                            assert event.next_fire_time == (
+                                start_time + timedelta(minutes=3)
+                            )
+                            break
+
+                    await scheduler.stop()
+                    while not isinstance(event, SchedulerStopped):
+                        event = await receive.receive()
+
+            # Only complete batches (3 jobs each) may have been persisted
+            jobs = await raw_datastore.get_jobs()
+            assert 0 < len(jobs) <= 10
+            assert len(jobs) % 3 == 0
+
+        # Phase 2: a new scheduler (with a new identity, as after a restart or a
+        # lease transfer) must resume the backlog from the persisted cursor,
+        # without skipping or repeating any fire times
+        send, receive = create_memory_object_stream[Event](50)
+        with send, receive:
+            async with AsyncScheduler(
+                data_store=raw_datastore,
+                role=SchedulerRole.scheduler,
+                cleanup_interval=None,
+                lease_duration=timedelta(seconds=1),
+                max_backlog_fire_times=3,
+            ) as scheduler:
+                scheduler.subscribe(send.send)
+                await scheduler.start_in_background()
+
+                with fail_after(10):
+                    while True:
+                        event = await receive.receive()
+                        if (
+                            isinstance(event, ScheduleUpdated)
+                            and event.next_fire_time == final_fire_time
+                        ):
+                            break
+
+                # The backlog must have produced exactly one job per due fire
+                # time – no more, no less
+                jobs = await scheduler.get_jobs()
+                assert len(jobs) == 10
+                for index, job in enumerate(
+                    sorted(jobs, key=lambda job: job.scheduled_fire_time)
+                ):
+                    assert job.scheduled_fire_time == (
+                        start_time + timedelta(minutes=index)
+                    )
+
+    async def test_backlog_does_not_starve_other_schedules(
+        self, raw_datastore: DataStore, timezone: ZoneInfo
+    ) -> None:
+        now = datetime.now(timezone)
+        backlog_trigger = IntervalTrigger(
+            seconds=1, start_time=now - timedelta(seconds=2000)
+        )
+        async with AsyncScheduler(
+            data_store=raw_datastore,
+            role=SchedulerRole.scheduler,
+            cleanup_interval=None,
+            max_backlog_fire_times=5,
+        ) as scheduler:
+            await scheduler.add_schedule(
+                dummy_async_job,
+                backlog_trigger,
+                id="backlog",
+                coalesce=CoalescePolicy.all,
+            )
+            await scheduler.add_schedule(
+                dummy_async_job,
+                DateTrigger(now + timedelta(milliseconds=500)),
+                id="normal",
+            )
+            await scheduler.start_in_background()
+
+            # The normal schedule must get its job added in a timely manner,
+            # even though the other schedule still has a large backlog to work
+            # through
+            with fail_after(10):
+                while True:
+                    jobs = await scheduler.get_jobs()
+                    if any(job.schedule_id == "normal" for job in jobs):
+                        break
+
+                    await sleep(0.05)
+
+    async def test_backlog_jitter_and_misfire_grace_time(
+        self,
+        mocker: MockerFixture,
+        raw_datastore: DataStore,
+        timezone: ZoneInfo,
+    ) -> None:
+        jitter_seconds = 5.0
+        mocker.patch("random.uniform", return_value=jitter_seconds)
+        now = datetime.now(timezone)
+        start_time = now - timedelta(minutes=3, seconds=30)
+        trigger = IntervalTrigger(minutes=1, start_time=start_time)
+        send, receive = create_memory_object_stream[Event](10)
+        with send, receive:
+            async with AsyncScheduler(
+                data_store=raw_datastore,
+                role=SchedulerRole.scheduler,
+                cleanup_interval=None,
+                max_backlog_fire_times=2,
+            ) as scheduler:
+                await scheduler.add_schedule(
+                    dummy_async_job,
+                    trigger,
+                    id="foo",
+                    coalesce=CoalescePolicy.all,
+                    max_jitter=timedelta(seconds=10),
+                    misfire_grace_time=timedelta(minutes=5),
+                )
+                scheduler.subscribe(send.send)
+                await scheduler.start_in_background()
+
+                with fail_after(10):
+                    while True:
+                        event = await receive.receive()
+                        if isinstance(event, ScheduleUpdated) and (
+                            event.next_fire_time is None
+                            or event.next_fire_time > now
+                        ):
+                            break
+
+                # Jitter and the misfire grace time must be computed against the
+                # original scheduled fire times, not the time the backlog was
+                # actually processed
+                jobs = await scheduler.get_jobs()
+                assert len(jobs) == 4
+                for index, job in enumerate(
+                    sorted(jobs, key=lambda job: job.scheduled_fire_time)
+                ):
+                    original_fire_time = start_time + timedelta(minutes=index)
+                    assert job.jitter == timedelta(seconds=jitter_seconds)
+                    assert job.scheduled_fire_time == (
+                        original_fire_time + job.jitter
+                    )
+                    assert job.start_deadline == (
+                        original_fire_time + job.jitter + timedelta(minutes=5)
+                    )
+
+    @pytest.mark.parametrize(
         "max_jitter, expected_upper_bound",
         [pytest.param(2, 2, id="within"), pytest.param(4, 2.999999, id="exceed")],
     )
@@ -1350,6 +1616,10 @@ class TestSyncScheduler:
             )
             assert isinstance(scheduler.task_defaults, TaskDefaults)
             assert scheduler.state is RunState.stopped
+
+    def test_max_backlog_fire_times(self) -> None:
+        scheduler = Scheduler(max_backlog_fire_times=5)
+        assert scheduler.max_backlog_fire_times == 5
 
     def test_use_without_contextmanager(self, mocker: MockFixture) -> None:
         fake_atexit_register = mocker.patch("atexit.register")
