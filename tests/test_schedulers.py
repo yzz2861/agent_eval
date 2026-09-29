@@ -613,6 +613,279 @@ class TestAsyncScheduler:
             with pytest.raises(WouldBlock):
                 receive.receive_nowait()
 
+    async def test_catchup_batch_size(
+        self, raw_datastore: DataStore, timezone: ZoneInfo
+    ) -> None:
+        """
+        Test that with coalesce policy "all", the scheduler queues at most
+        ``max_catchup_batch_size`` jobs per processing round, and persists the rest
+        of the backlog as a cursor (the schedule's next fire time).
+
+        """
+        now = datetime.now(timezone)
+        start_time = now - timedelta(minutes=10, seconds=30)
+        trigger = IntervalTrigger(minutes=1, start_time=start_time)
+        send, receive = create_memory_object_stream[Event](20)
+        with send, receive:
+            async with AsyncScheduler(
+                data_store=raw_datastore,
+                role=SchedulerRole.scheduler,
+                cleanup_interval=None,
+                max_catchup_batch_size=4,
+            ) as scheduler:
+                await scheduler.add_schedule(
+                    dummy_async_job,
+                    trigger,
+                    id="foo",
+                    coalesce=CoalescePolicy.all,
+                    misfire_grace_time=timedelta(minutes=5),
+                )
+                scheduler.subscribe(send.send, {JobAdded, ScheduleUpdated})
+                await scheduler.start_in_background()
+
+                # The first round should only queue one batch of jobs and save the
+                # first unprocessed fire time as the schedule's new next fire time
+                with fail_after(10):
+                    for _ in range(4):
+                        event = await receive.receive()
+                        assert isinstance(event, JobAdded)
+                        assert event.schedule_id == "foo"
+
+                    event = await receive.receive()
+                    assert isinstance(event, ScheduleUpdated)
+                    assert event.schedule_id == "foo"
+
+                assert event.next_fire_time == start_time + timedelta(minutes=4)
+
+                # Wait for the rest of the backlog to be processed in the following
+                # rounds
+                with fail_after(10):
+                    while True:
+                        event = await receive.receive()
+                        if (
+                            isinstance(event, ScheduleUpdated)
+                            and event.next_fire_time is not None
+                            and event.next_fire_time > now
+                        ):
+                            break
+
+                # All 11 due fire times must have been turned into jobs, keeping
+                # their original scheduled fire times, with the start deadlines
+                # computed from those times rather than the current time
+                expected_fire_time = start_time
+                jobs = await scheduler.get_jobs()
+                assert len(jobs) == 11
+                for job in sorted(jobs, key=lambda job: job.scheduled_fire_time):
+                    assert job.scheduled_fire_time == expected_fire_time
+                    assert job.start_deadline == expected_fire_time + timedelta(
+                        minutes=5
+                    )
+                    expected_fire_time += timedelta(minutes=1)
+
+    @pytest.mark.parametrize(
+        "coalesce, expected_fire_time_delta",
+        [
+            pytest.param(
+                CoalescePolicy.earliest,
+                timedelta(minutes=3, seconds=30),
+                id="earliest",
+            ),
+            pytest.param(CoalescePolicy.latest, timedelta(seconds=30), id="latest"),
+        ],
+    )
+    async def test_catchup_batch_size_other_coalesce_policies(
+        self,
+        coalesce: CoalescePolicy,
+        expected_fire_time_delta: timedelta,
+        raw_datastore: DataStore,
+        timezone: ZoneInfo,
+    ) -> None:
+        """
+        Test that the catch-up batch size limit does not change the behavior of the
+        "earliest" and "latest" coalesce policies.
+
+        """
+        now = datetime.now(timezone)
+        start_time = now - timedelta(minutes=3, seconds=30)
+        trigger = IntervalTrigger(minutes=1, start_time=start_time)
+        send, receive = create_memory_object_stream[Event](4)
+        with send, receive:
+            async with AsyncScheduler(
+                data_store=raw_datastore,
+                role=SchedulerRole.scheduler,
+                cleanup_interval=None,
+                max_catchup_batch_size=1,
+            ) as scheduler:
+                await scheduler.add_schedule(
+                    dummy_async_job, trigger, id="foo", coalesce=coalesce
+                )
+                scheduler.subscribe(send.send, {JobAdded, ScheduleUpdated})
+                await scheduler.start_in_background()
+
+                # Exactly one job should be queued, and the schedule should skip
+                # past the rest of the backlog
+                with fail_after(10):
+                    event = await receive.receive()
+                    assert isinstance(event, JobAdded)
+                    assert event.schedule_id == "foo"
+
+                    event = await receive.receive()
+                    assert isinstance(event, ScheduleUpdated)
+                    assert event.next_fire_time == start_time + timedelta(minutes=4)
+
+                jobs = await scheduler.get_jobs()
+                assert len(jobs) == 1
+                assert jobs[0].scheduled_fire_time == now - expected_fire_time_delta
+
+    async def test_catchup_batch_resume_after_restart(
+        self, raw_datastore: DataStore, timezone: ZoneInfo
+    ) -> None:
+        """
+        Test that when the scheduler is stopped in the middle of working through a
+        backlog, the in-flight batch is completed and the cursor is saved, so that
+        the next scheduler (after a restart or lease transfer) resumes the backlog
+        without losing or duplicating any jobs.
+
+        """
+        original_add_job = raw_datastore.add_job
+        add_job_calls = 0
+        batch_started = anyio.Event()
+        finish_batch = anyio.Event()
+
+        async def gated_add_job(job: Job) -> None:
+            nonlocal add_job_calls
+            add_job_calls += 1
+            if add_job_calls == 7:
+                # Block in the middle of the third catch-up batch
+                batch_started.set()
+                await finish_batch.wait()
+
+            await original_add_job(job)
+
+        now = datetime.now(timezone)
+        start_time = now - timedelta(minutes=20, seconds=30)
+        expected_fire_times = [
+            start_time + timedelta(minutes=index) for index in range(21)
+        ]
+        trigger = IntervalTrigger(minutes=1, start_time=start_time)
+        with patch.object(raw_datastore, "add_job", gated_add_job):
+            async with AsyncScheduler(
+                data_store=raw_datastore,
+                role=SchedulerRole.scheduler,
+                cleanup_interval=None,
+                max_catchup_batch_size=3,
+            ) as scheduler:
+                await scheduler.add_schedule(
+                    dummy_async_job, trigger, id="foo", coalesce=CoalescePolicy.all
+                )
+                await scheduler.start_in_background()
+
+                # Wait for the scheduler to get stuck in the middle of the third
+                # batch, then ask it to stop
+                with fail_after(10):
+                    await batch_started.wait()
+
+                await scheduler.stop()
+
+                # The in-flight batch must be allowed to finish even though the
+                # scheduler is stopping
+                finish_batch.set()
+
+        # The in-flight batch must have been completed and the cursor (the next
+        # fire time) saved
+        jobs = await raw_datastore.get_jobs()
+        assert len(jobs) == 9
+        schedules = await raw_datastore.get_schedules()
+        assert len(schedules) == 1
+        assert schedules[0].next_fire_time == start_time + timedelta(minutes=9)
+
+        # A new scheduler (simulating a restart or another scheduler taking over
+        # the lease) must resume the backlog from the saved cursor
+        send, receive = create_memory_object_stream[Event](30)
+        with send, receive:
+            async with AsyncScheduler(
+                data_store=raw_datastore,
+                role=SchedulerRole.scheduler,
+                cleanup_interval=None,
+                max_catchup_batch_size=3,
+            ) as scheduler2:
+                scheduler2.subscribe(send.send, {ScheduleUpdated})
+                await scheduler2.start_in_background()
+                with fail_after(10):
+                    while True:
+                        event = await receive.receive()
+                        if (
+                            isinstance(event, ScheduleUpdated)
+                            and event.next_fire_time is not None
+                            and event.next_fire_time > now
+                        ):
+                            break
+
+        # In the end, every missed fire time must have produced exactly one job
+        jobs = await raw_datastore.get_jobs()
+        assert len(jobs) == 21
+        fire_times = sorted(job.scheduled_fire_time for job in jobs)
+        assert fire_times == expected_fire_times
+
+    async def test_catchup_batch_fairness(
+        self, raw_datastore: DataStore, timezone: ZoneInfo
+    ) -> None:
+        """
+        Test that a schedule working through a large backlog does not starve other
+        schedules: a schedule added in the middle of the backlog processing must
+        get its jobs queued before the backlog has been fully worked through.
+
+        """
+        now = datetime.now(timezone)
+        start_time = now - timedelta(seconds=1200)
+        backlog_trigger = IntervalTrigger(seconds=1, start_time=start_time)
+        send, receive = create_memory_object_stream[Event](1500)
+        with send, receive:
+            async with AsyncScheduler(
+                data_store=raw_datastore,
+                role=SchedulerRole.scheduler,
+                cleanup_interval=None,
+                max_catchup_batch_size=20,
+            ) as scheduler:
+                await scheduler.add_schedule(
+                    dummy_async_job,
+                    backlog_trigger,
+                    id="backlog",
+                    coalesce=CoalescePolicy.all,
+                )
+                scheduler.subscribe(send.send, {JobAdded, ScheduleUpdated})
+                await scheduler.start_in_background()
+
+                # Wait for the first batch of the backlog to be processed
+                backlog_jobs = 0
+                with fail_after(10):
+                    while True:
+                        event = await receive.receive()
+                        if isinstance(event, JobAdded):
+                            backlog_jobs += 1
+                        elif isinstance(event, ScheduleUpdated):
+                            break
+
+                assert backlog_jobs == 20
+
+                # Insert a normal schedule in the middle of the backlog processing
+                await scheduler.add_schedule(
+                    dummy_async_job, DateTrigger(now), id="normal"
+                )
+
+                # The normal schedule must get its job queued before the backlog
+                # schedule has been fully processed
+                with fail_after(10):
+                    while True:
+                        event = await receive.receive()
+                        if isinstance(event, JobAdded):
+                            if event.schedule_id == "normal":
+                                break
+
+                            backlog_jobs += 1
+
+                assert backlog_jobs < 1200
+
     @pytest.mark.parametrize(
         "max_jitter, expected_upper_bound",
         [pytest.param(2, 2, id="within"), pytest.param(4, 2.999999, id="exceed")],

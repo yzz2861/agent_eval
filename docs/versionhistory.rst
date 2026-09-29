@@ -6,6 +6,13 @@ APScheduler, see the :doc:`migration section <migration>`.
 
 **UNRELEASED**
 
+- Added the ``max_catchup_batch_size`` scheduler option which limits the number of
+  missed fire times turned into jobs per schedule processing round when the coalesce
+  policy is ``all``. The rest of the backlog is processed in subsequent rounds,
+  resuming from a cursor persisted in the data store, so a large backlog no longer
+  blocks other schedules from being processed, and catching up continues without
+  losing or duplicating jobs when the scheduler is restarted or the schedule's lease
+  is transferred to another scheduler
 - **BREAKING** Switched the MongoDB data store to use the asynchronous API in
   ``pymongo`` and bumped the minimum ``pymongo`` version to v4.13.0
 - Bumped up the CBOR serializer's ``cbor2`` dependency to v6.0+

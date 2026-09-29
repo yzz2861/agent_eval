@@ -57,6 +57,7 @@ class Scheduler:
         max_concurrent_jobs: int = 100,
         cleanup_interval: float | timedelta | None = timedelta(minutes=15),
         lease_duration: timedelta = timedelta(seconds=30),
+        max_catchup_batch_size: int = 100,
         job_executors: MutableMapping[str, JobExecutor] | None = None,
         task_defaults: TaskDefaults | None = None,
         logger: Logger | None = None,
@@ -85,6 +86,7 @@ class Scheduler:
             job_executors=job_executors or {},
             cleanup_interval=cleanup_interval,
             lease_duration=lease_duration,
+            max_catchup_batch_size=max_catchup_batch_size,
             **kwargs,
         )
         self.__attrs_init__(async_scheduler=async_scheduler)
@@ -120,6 +122,10 @@ class Scheduler:
     @property
     def lease_duration(self) -> timedelta:
         return self._async_scheduler.lease_duration
+
+    @property
+    def max_catchup_batch_size(self) -> int:
+        return self._async_scheduler.max_catchup_batch_size
 
     @property
     def job_executors(self) -> MutableMapping[str, JobExecutor]:

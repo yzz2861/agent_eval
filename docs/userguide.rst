@@ -505,6 +505,23 @@ As explained in the previous section, the starting
 deadline is *misfire grace time*
 affects the newly queued job.
 
+Catching up on large backlogs in batches
+-----------------------------------------
+
+With :data:`~CoalescePolicy.all`, a schedule that has not been processed for a long
+time (for example because the scheduler was stopped) can have a very large number of
+missed run times to catch up on. To prevent such a backlog from being turned into
+jobs all at once and blocking the processing of other schedules, the scheduler only
+queues jobs for a limited number of missed run times in each processing round. This
+limit can be tuned with the ``max_catchup_batch_size`` scheduler option (100 by
+default).
+
+The remaining backlog is tracked with a cursor (the schedule's next run time) which
+is persisted in the data store after every round, so the catch-up continues where it
+left off even if the scheduler is restarted or another scheduler takes over the
+schedule. Jobs queued from the backlog always keep their original scheduled run
+times, and their starting deadlines are computed from those times as usual.
+
 Running tasks without scheduling
 ================================
 
