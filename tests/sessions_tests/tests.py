@@ -3,6 +3,7 @@ import os
 import shutil
 import string
 import tempfile
+import time
 import unittest
 from datetime import timedelta
 from http import cookies
@@ -18,7 +19,11 @@ from django.contrib.sessions.backends.file import SessionStore as FileSession
 from django.contrib.sessions.backends.signed_cookies import (
     SessionStore as CookieSession,
 )
-from django.contrib.sessions.exceptions import InvalidSessionKey, SessionInterrupted
+from django.contrib.sessions.exceptions import (
+    InvalidSessionKey,
+    SessionDataTooLarge,
+    SessionInterrupted,
+)
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.contrib.sessions.models import Session
 from django.contrib.sessions.serializers import JSONSerializer
@@ -36,6 +41,7 @@ from django.test import (
     override_settings,
 )
 from django.utils import timezone
+from django.utils.crypto import get_random_string
 
 from .models import SessionStore as CustomDatabaseSession
 
@@ -1350,6 +1356,278 @@ class CookieSessionTests(SessionTestsMixin, SimpleTestCase):
         self,
     ):
         pass
+
+
+@override_settings(
+    SESSION_ENGINE="django.contrib.sessions.backends.signed_cookies",
+    SESSION_COOKIE_CHUNKED=True,
+    SESSION_COOKIE_CHUNK_SIZE=200,
+    SESSION_COOKIE_MAX_CHUNKS=4,
+)
+class ChunkedCookieSessionTests(SimpleTestCase):
+    """
+    Tests for splitting signed-cookie session data across multiple cookies.
+    """
+
+    request_factory = RequestFactory()
+    cookie_name = settings.SESSION_COOKIE_NAME
+
+    @staticmethod
+    def view_setting_session(data):
+        def view(request):
+            request.session["data"] = data
+            return HttpResponse("Session test")
+
+        return view
+
+    @staticmethod
+    def view_reading_session(request):
+        return HttpResponse(request.session.get("data", ""))
+
+    @staticmethod
+    def view_flushing_session(request):
+        request.session.flush()
+        return HttpResponse("Session test")
+
+    def run_request(self, jar=None, view=None):
+        if view is None:
+            view = lambda request: HttpResponse("Session test")  # noqa: E731
+        request = self.request_factory.get("/")
+        if jar:
+            request.COOKIES.update(jar)
+        response = SessionMiddleware(view)(request)
+        return request, response
+
+    @staticmethod
+    def update_jar(jar, response):
+        """Apply a response's Set-Cookie headers to a browser-like jar."""
+        for name, morsel in response.cookies.items():
+            if morsel.value == "":
+                jar.pop(name, None)
+            else:
+                jar[name] = morsel.value
+        return jar
+
+    def make_chunked_jar(self, data):
+        """Run a request storing data and return the resulting cookie jar."""
+        _, response = self.run_request(view=self.view_setting_session(data))
+        jar = self.update_jar({}, response)
+        self.assertTrue(jar[self.cookie_name].startswith("chunked:"))
+        return jar
+
+    def chunk_names(self, jar):
+        prefix = self.cookie_name + "."
+        return sorted(name for name in jar if name.startswith(prefix))
+
+    def test_small_session_uses_single_cookie(self):
+        _, response = self.run_request(view=self.view_setting_session("small"))
+        self.assertEqual(list(response.cookies), [self.cookie_name])
+        cookie = response.cookies[self.cookie_name].value
+        self.assertFalse(cookie.startswith("chunked:"))
+        session = CookieSession.from_cookies({self.cookie_name: cookie})
+        self.assertEqual(session["data"], "small")
+
+    def test_large_session_roundtrips_through_chunks(self):
+        data = get_random_string(300)
+        jar = self.make_chunked_jar(data)
+        chunks = self.chunk_names(jar)
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertLessEqual(len(chunks), 4)
+        # The manifest declares the chunk count and a digest.
+        _, count, digest = jar[self.cookie_name].split(":")
+        self.assertEqual(int(count), len(chunks))
+        self.assertEqual(len(digest), 64)
+        # The next request reassembles the full session.
+        _, response = self.run_request(jar=jar, view=self.view_reading_session)
+        self.assertEqual(response.content.decode(), data)
+
+    def test_chunking_disabled_by_default(self):
+        session = CookieSession()
+        session["data"] = get_random_string(1000)
+        session.save()
+        with self.settings(SESSION_COOKIE_CHUNKED=False):
+            cookies = session.get_set_cookies()
+        self.assertEqual(list(cookies), [self.cookie_name])
+
+    def test_session_data_too_large(self):
+        # 4 chunks of 200 bytes can't hold this much signed data.
+        msg = "exceeds the session cookie budget of 800 bytes"
+        with self.assertRaisesMessage(SessionDataTooLarge, msg):
+            self.run_request(view=self.view_setting_session(get_random_string(1000)))
+
+    def test_invalid_chunk_settings(self):
+        msg = "SESSION_COOKIE_CHUNK_SIZE and SESSION_COOKIE_MAX_CHUNKS"
+        with (
+            self.settings(SESSION_COOKIE_CHUNK_SIZE=0),
+            self.assertRaisesMessage(ImproperlyConfigured, msg),
+        ):
+            self.run_request(view=self.view_setting_session(get_random_string(300)))
+
+    def test_missing_chunk_is_invalid(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        jar.pop(self.chunk_names(jar)[0])
+        session = CookieSession.from_cookies(jar)
+        self.assertIsNone(session.get("data"))
+
+    def test_duplicate_chunk_is_invalid(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        chunks = self.chunk_names(jar)
+        jar[chunks[1]] = jar[chunks[0]]
+        session = CookieSession.from_cookies(jar)
+        self.assertIsNone(session.get("data"))
+
+    def test_tampered_chunk_is_invalid(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        name = self.chunk_names(jar)[0]
+        jar[name] = ("A" if jar[name][0] != "A" else "B") + jar[name][1:]
+        session = CookieSession.from_cookies(jar)
+        self.assertIsNone(session.get("data"))
+
+    def test_tampered_manifest_is_invalid(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        prefix, count, digest = jar[self.cookie_name].split(":")
+        digest = ("0" if digest[0] != "0" else "1") + digest[1:]
+        jar[self.cookie_name] = "%s:%s:%s" % (prefix, count, digest)
+        session = CookieSession.from_cookies(jar)
+        self.assertIsNone(session.get("data"))
+
+    def test_manifest_with_excessive_chunk_count_is_invalid(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        jar[self.cookie_name] = "chunked:99:" + "0" * 64
+        session = CookieSession.from_cookies(jar)
+        self.assertIsNone(session.get("data"))
+
+    def test_chunks_from_different_responses_cannot_be_mixed(self):
+        jar_a = self.make_chunked_jar(get_random_string(300))
+        jar_b = self.make_chunked_jar(get_random_string(300))
+        # The manifest from one response with the chunks of another.
+        jar = dict(jar_b)
+        jar[self.cookie_name] = jar_a[self.cookie_name]
+        session = CookieSession.from_cookies(jar)
+        self.assertIsNone(session.get("data"))
+
+    def test_expired_chunked_session_is_invalid(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        with (
+            self.settings(SESSION_COOKIE_AGE=3600),
+            mock.patch("time.time", return_value=time.time() + 7200),
+        ):
+            session = CookieSession.from_cookies(jar)
+            self.assertIsNone(session.get("data"))
+
+    def test_legacy_single_cookie_still_loads(self):
+        legacy = CookieSession()
+        legacy["data"] = "legacy"
+        legacy.save()
+        session = CookieSession.from_cookies({self.cookie_name: legacy.session_key})
+        self.assertEqual(session["data"], "legacy")
+
+    def test_shrinking_session_deletes_stale_chunks(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        chunks = self.chunk_names(jar)
+        _, response = self.run_request(
+            jar=jar, view=self.view_setting_session("small")
+        )
+        # The session now fits in a single cookie.
+        self.assertFalse(
+            response.cookies[self.cookie_name].value.startswith("chunked:")
+        )
+        # All leftover chunk cookies are deleted with matching attributes.
+        for name in chunks:
+            morsel = response.cookies[name]
+            self.assertEqual(morsel.value, "")
+            self.assertEqual(str(morsel["max-age"]), "0")
+            self.assertEqual(morsel["path"], settings.SESSION_COOKIE_PATH)
+            self.assertEqual(morsel["samesite"], settings.SESSION_COOKIE_SAMESITE)
+        # The jar ends up with a working single-cookie session.
+        self.update_jar(jar, response)
+        self.assertEqual(self.chunk_names(jar), [])
+        _, response = self.run_request(jar=jar, view=self.view_reading_session)
+        self.assertEqual(response.content.decode(), "small")
+
+    def test_flush_deletes_all_session_cookies(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        chunks = self.chunk_names(jar)
+        _, response = self.run_request(jar=jar, view=self.view_flushing_session)
+        for name in [self.cookie_name, *chunks]:
+            self.assertEqual(response.cookies[name].value, "")
+            self.assertEqual(str(response.cookies[name]["max-age"]), "0")
+        self.assertEqual(self.update_jar(jar, response), {})
+
+    def test_disabling_chunking_cleans_up_leftover_chunks(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        chunks = self.chunk_names(jar)
+        with self.settings(SESSION_COOKIE_CHUNKED=False):
+            # The chunked session is still read, but saved back as a single
+            # cookie and the chunk cookies are deleted.
+            request, response = self.run_request(
+                jar=jar, view=self.view_setting_session("back to single")
+            )
+        self.assertFalse(
+            response.cookies[self.cookie_name].value.startswith("chunked:")
+        )
+        for name in chunks:
+            self.assertEqual(response.cookies[name].value, "")
+        self.assertEqual(self.chunk_names(self.update_jar(jar, response)), [])
+
+    @override_settings(
+        SESSION_COOKIE_DOMAIN=".example.local",
+        SESSION_COOKIE_PATH="/example/",
+        SESSION_COOKIE_SAMESITE="Strict",
+    )
+    def test_chunk_cookies_share_cookie_attributes(self):
+        jar = self.make_chunked_jar(get_random_string(300))
+        _, response = self.run_request(
+            jar=jar, view=self.view_setting_session(get_random_string(300))
+        )
+        for morsel in response.cookies.values():
+            self.assertEqual(morsel["domain"], ".example.local")
+            self.assertEqual(morsel["path"], "/example/")
+            self.assertEqual(morsel["samesite"], "Strict")
+        # Deletions use the same attributes so browsers match the cookies.
+        _, response = self.run_request(jar=jar, view=self.view_flushing_session)
+        for morsel in response.cookies.values():
+            self.assertEqual(morsel["domain"], ".example.local")
+            self.assertEqual(morsel["path"], "/example/")
+            self.assertEqual(morsel["samesite"], "Strict")
+
+    def test_interleaved_responses_never_produce_a_mixed_session(self):
+        big = get_random_string(300)
+        small = "small"
+        # Both responses answer concurrent requests that started from the
+        # same chunked session cookie jar.
+        jar0 = self.make_chunked_jar(get_random_string(300))
+        _, response_a = self.run_request(jar=jar0, view=self.view_setting_session(big))
+        _, response_b = self.run_request(
+            jar=jar0, view=self.view_setting_session(small)
+        )
+
+        # The browser applies A, then B: B's single cookie and its chunk
+        # deletions win.
+        jar = self.update_jar(self.update_jar({}, response_a), response_b)
+        session = CookieSession.from_cookies(jar)
+        self.assertEqual(session.get("data"), small)
+
+        # The browser applies B, then A: A's manifest and chunks win.
+        jar = self.update_jar(self.update_jar({}, response_b), response_a)
+        session = CookieSession.from_cookies(jar)
+        self.assertEqual(session.get("data"), big)
+
+        # The browser applies A, then only B's chunk deletions: the
+        # remaining manifest is incomplete and the session is invalid.
+        jar = self.update_jar({}, response_a)
+        for name, morsel in response_b.cookies.items():
+            if morsel.value == "":
+                jar.pop(name, None)
+        session = CookieSession.from_cookies(jar)
+        self.assertIsNone(session.get("data"))
+
+        # The browser applies A's chunks but B's main cookie: the
+        # single-cookie session loads and the stray chunks are ignored.
+        jar = self.update_jar({}, response_a)
+        jar[self.cookie_name] = response_b.cookies[self.cookie_name].value
+        session = CookieSession.from_cookies(jar)
+        self.assertEqual(session.get("data"), small)
 
 
 class ClearSessionsCommandTests(SimpleTestCase):

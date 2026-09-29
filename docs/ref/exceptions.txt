@@ -329,6 +329,18 @@ Sessions exceptions are defined in ``django.contrib.sessions.exceptions``.
     concurrent request. It's a subclass of
     :exc:`~django.core.exceptions.BadRequest`.
 
+``SessionDataTooLarge``
+-----------------------
+
+.. exception:: SessionDataTooLarge
+
+    :exc:`SessionDataTooLarge` is raised when the signed cookies session
+    backend can't fit the session data in the configured session cookie
+    budget. See :setting:`SESSION_COOKIE_CHUNK_SIZE` and
+    :setting:`SESSION_COOKIE_MAX_CHUNKS`.
+
+    .. versionadded:: 6.2
+
 Transaction Exceptions
 ======================
 

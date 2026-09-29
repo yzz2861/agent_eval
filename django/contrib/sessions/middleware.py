@@ -18,8 +18,13 @@ class SessionMiddleware(MiddlewareMixin):
         self.SessionStore = engine.SessionStore
 
     def process_request(self, request):
-        session_key = request.COOKIES.get(settings.SESSION_COOKIE_NAME)
-        request.session = self.SessionStore(session_key)
+        if hasattr(self.SessionStore, "from_cookies"):
+            # The backend stores session data in the cookies themselves and
+            # may split it across multiple cookies.
+            request.session = self.SessionStore.from_cookies(request.COOKIES)
+        else:
+            session_key = request.COOKIES.get(settings.SESSION_COOKIE_NAME)
+            request.session = self.SessionStore(session_key)
 
     def process_response(self, request, response):
         """
@@ -33,15 +38,24 @@ class SessionMiddleware(MiddlewareMixin):
             empty = request.session.is_empty()
         except AttributeError:
             return response
+        # Session backends that store data in the cookies may use several
+        # cookies and know which ones must be deleted.
+        if hasattr(request.session, "get_delete_cookie_names"):
+            delete_cookie_names = request.session.get_delete_cookie_names()
+        elif settings.SESSION_COOKIE_NAME in request.COOKIES:
+            delete_cookie_names = [settings.SESSION_COOKIE_NAME]
+        else:
+            delete_cookie_names = []
         # First check if we need to delete this cookie.
         # The session should be deleted only if the session is entirely empty.
-        if settings.SESSION_COOKIE_NAME in request.COOKIES and empty:
-            response.delete_cookie(
-                settings.SESSION_COOKIE_NAME,
-                path=settings.SESSION_COOKIE_PATH,
-                domain=settings.SESSION_COOKIE_DOMAIN,
-                samesite=settings.SESSION_COOKIE_SAMESITE,
-            )
+        if delete_cookie_names and empty:
+            for cookie_name in delete_cookie_names:
+                response.delete_cookie(
+                    cookie_name,
+                    path=settings.SESSION_COOKIE_PATH,
+                    domain=settings.SESSION_COOKIE_DOMAIN,
+                    samesite=settings.SESSION_COOKIE_SAMESITE,
+                )
             need_vary_cookie = True
         else:
             # If the session was accessed, it must be varied on, regardless of
@@ -66,17 +80,37 @@ class SessionMiddleware(MiddlewareMixin):
                             "request completed. The user may have logged "
                             "out in a concurrent request, for example."
                         )
-                    response.set_cookie(
-                        settings.SESSION_COOKIE_NAME,
-                        request.session.session_key,
-                        max_age=max_age,
-                        expires=expires,
-                        domain=settings.SESSION_COOKIE_DOMAIN,
-                        path=settings.SESSION_COOKIE_PATH,
-                        secure=settings.SESSION_COOKIE_SECURE or None,
-                        httponly=settings.SESSION_COOKIE_HTTPONLY or None,
-                        samesite=settings.SESSION_COOKIE_SAMESITE,
-                    )
+                    if hasattr(request.session, "get_set_cookies"):
+                        set_cookies = request.session.get_set_cookies()
+                        stale_cookie_names = request.session.get_stale_cookie_names()
+                    else:
+                        set_cookies = {
+                            settings.SESSION_COOKIE_NAME: (
+                                request.session.session_key
+                            ),
+                        }
+                        stale_cookie_names = ()
+                    for cookie_name, cookie_value in set_cookies.items():
+                        response.set_cookie(
+                            cookie_name,
+                            cookie_value,
+                            max_age=max_age,
+                            expires=expires,
+                            domain=settings.SESSION_COOKIE_DOMAIN,
+                            path=settings.SESSION_COOKIE_PATH,
+                            secure=settings.SESSION_COOKIE_SECURE or None,
+                            httponly=settings.SESSION_COOKIE_HTTPONLY or None,
+                            samesite=settings.SESSION_COOKIE_SAMESITE,
+                        )
+                    # Remove cookies left over from a previous, larger
+                    # session representation (e.g. old chunks).
+                    for cookie_name in stale_cookie_names:
+                        response.delete_cookie(
+                            cookie_name,
+                            path=settings.SESSION_COOKIE_PATH,
+                            domain=settings.SESSION_COOKIE_DOMAIN,
+                            samesite=settings.SESSION_COOKIE_SAMESITE,
+                        )
                     # With a session cookie set, it must be varied on.
                     need_vary_cookie = True
         if need_vary_cookie:

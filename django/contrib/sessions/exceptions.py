@@ -17,3 +17,9 @@ class SessionInterrupted(BadRequest):
     """The session was interrupted."""
 
     pass
+
+
+class SessionDataTooLarge(Exception):
+    """The session data exceeds the configured session cookie budget."""
+
+    pass

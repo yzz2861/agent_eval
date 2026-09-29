@@ -129,6 +129,20 @@ and the :setting:`SECRET_KEY` setting.
     It's recommended to leave the :setting:`SESSION_COOKIE_HTTPONLY` setting
     on ``True`` to prevent access to the stored data from JavaScript.
 
+.. versionadded:: 6.2
+
+    If the signed session data doesn't fit in a single cookie, you can set
+    :setting:`SESSION_COOKIE_CHUNKED` to ``True`` to split it across
+    multiple chunk cookies. The main cookie then holds a manifest that
+    binds the chunks together, so chunks that are missing, duplicated,
+    tampered with, expired, or mixed from different responses are rejected
+    and the session is reset. The total size is limited to
+    :setting:`SESSION_COOKIE_CHUNK_SIZE` multiplied by
+    :setting:`SESSION_COOKIE_MAX_CHUNKS`; larger sessions raise
+    :exc:`django.contrib.sessions.exceptions.SessionDataTooLarge` when
+    saved. When a session shrinks, is flushed, or chunking is disabled
+    again, leftover chunk cookies are deleted from the client.
+
 .. warning::
 
     **The session data is signed but not encrypted**

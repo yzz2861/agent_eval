@@ -3621,6 +3621,48 @@ Default: ``1209600`` (2 weeks, in seconds)
 
 The age of session cookies, in seconds.
 
+.. setting:: SESSION_COOKIE_CHUNKED
+
+``SESSION_COOKIE_CHUNKED``
+--------------------------
+
+Default: ``False``
+
+Whether the :ref:`signed cookies session backend <cookie-session-backend>`
+may split session data that doesn't fit in a single cookie across multiple
+chunk cookies. See :setting:`SESSION_COOKIE_CHUNK_SIZE` and
+:setting:`SESSION_COOKIE_MAX_CHUNKS`.
+
+.. versionadded:: 6.2
+
+.. setting:: SESSION_COOKIE_CHUNK_SIZE
+
+``SESSION_COOKIE_CHUNK_SIZE``
+-----------------------------
+
+Default: ``3000``
+
+The maximum number of bytes of signed session data stored in a single
+cookie when :setting:`SESSION_COOKIE_CHUNKED` is enabled. Session data
+exceeding this budget is split across chunk cookies.
+
+.. versionadded:: 6.2
+
+.. setting:: SESSION_COOKIE_MAX_CHUNKS
+
+``SESSION_COOKIE_MAX_CHUNKS``
+-----------------------------
+
+Default: ``8``
+
+The maximum number of chunk cookies used to store a single session when
+:setting:`SESSION_COOKIE_CHUNKED` is enabled. The total session cookie
+budget is :setting:`SESSION_COOKIE_CHUNK_SIZE` multiplied by
+``SESSION_COOKIE_MAX_CHUNKS``; sessions exceeding it raise
+:exc:`django.contrib.sessions.exceptions.SessionDataTooLarge` when saved.
+
+.. versionadded:: 6.2
+
 .. setting:: SESSION_COOKIE_DOMAIN
 
 ``SESSION_COOKIE_DOMAIN``

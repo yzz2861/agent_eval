@@ -90,7 +90,13 @@ Minor features
 :mod:`django.contrib.sessions`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* ...
+* The :ref:`signed cookies session backend <cookie-session-backend>` can
+  now split session data that doesn't fit in a single cookie across multiple
+  chunk cookies. Set the new :setting:`SESSION_COOKIE_CHUNKED` setting to
+  ``True`` to enable this, and use the new
+  :setting:`SESSION_COOKIE_CHUNK_SIZE` and
+  :setting:`SESSION_COOKIE_MAX_CHUNKS` settings to control the per-cookie
+  budget and the total number of chunks.
 
 :mod:`django.contrib.sitemaps`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
