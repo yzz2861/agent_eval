@@ -14,6 +14,7 @@ from werkzeug.routing import MapAdapter
 
 from .globals import _cv_app
 from .helpers import _CollectErrors
+from .resources import RequestResources
 from .sessions import SessionMixin  # noqa
 from .signals import appcontext_popped
 from .signals import appcontext_pushed
@@ -47,6 +48,7 @@ class AppContext:
         self._flashes: list[tuple[str, str]] | None = None
         self._after_request_functions: list[AfterRequestCallable] = []
         self._after_websocket_functions: list[AfterWebsocketCallable] = []
+        self.resources = RequestResources()
 
         try:
             self.url_adapter = app.create_url_adapter(self._request_websocket)
@@ -226,6 +228,12 @@ class AppContext:
         if self._websocket is not None:
             with collect_errors:
                 await self.app.do_teardown_websocket(self, exc)
+
+        if not self.resources.detached:
+            # Detached resources are closed when the streaming
+            # response they were attached to finishes.
+            with collect_errors:
+                await self.resources.aclose()
 
         with collect_errors:
             await self.app.do_teardown_appcontext(self, exc)

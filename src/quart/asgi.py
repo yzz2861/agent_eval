@@ -28,6 +28,7 @@ from werkzeug.datastructures import Headers
 from werkzeug.wrappers import Response as WerkzeugResponse
 
 from .debug import traceback_response
+from .resources import ResourceResponseBody
 from .signals import websocket_received
 from .signals import websocket_sent
 from .typing import ResponseTypes
@@ -115,6 +116,12 @@ class ASGIHTTPConnection:
             await asyncio.wait_for(self._send_response(send, response), timeout=timeout)
         except TimeoutError:
             pass
+        finally:
+            # Ensure resources attached to the response are released
+            # even if the body was never (or only partly) sent.
+            body = getattr(response, "response", None)
+            if isinstance(body, ResourceResponseBody):
+                await body.resources.aclose()
 
     async def _send_response(
         self, send: ASGISendCallable, response: ResponseTypes

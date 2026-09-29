@@ -1471,14 +1471,18 @@ class Quart(App):
     async def handle_request(self, request: Request) -> ResponseTypes:
         async with self.request_context(request) as ctx:
             try:
-                return await self.full_dispatch_request(ctx)
+                response = await self.full_dispatch_request(ctx)
             except asyncio.CancelledError:
                 raise  # CancelledErrors should be handled by serving code.
             except Exception as error:
-                return await self.handle_exception(ctx, error)
+                response = await self.handle_exception(ctx, error)
             finally:
                 if request.scope.get("_quart._preserve_context", False):
                     self._preserved_context = ctx.copy()
+            # Defer resource cleanup until the response has finished
+            # streaming, so the body can keep using the resources.
+            ctx.resources.attach_to(response)
+            return response
 
     async def handle_websocket(self, websocket: Websocket) -> ResponseTypes | None:
         async with self.websocket_context(websocket) as ctx:

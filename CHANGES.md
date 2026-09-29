@@ -1,3 +1,15 @@
+## Unreleased
+
+- Add request scoped asynchronous resources via the
+  `quart.resources` proxy and `RequestResources`. Resources are
+  registered with an async factory and optional cleanup, created
+  lazily on first use, shared within the request, and released in
+  reverse creation order once the request or a streaming response
+  (including client disconnects) has finished. Concurrent first
+  access shares a single initialisation, circular dependencies raise
+  `CircularResourceError` with the full chain, and failed creations
+  roll back whatever they already opened.
+
 ## Version 0.23.1
 
 Released 2026-08-29

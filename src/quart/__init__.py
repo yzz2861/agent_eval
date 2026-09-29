@@ -16,6 +16,7 @@ from .ctx import has_websocket_context as has_websocket_context
 from .globals import current_app as current_app
 from .globals import g as g
 from .globals import request as request
+from .globals import resources as resources
 from .globals import session as session
 from .globals import websocket as websocket
 from .helpers import abort as abort
@@ -30,6 +31,9 @@ from .helpers import send_from_directory as send_from_directory
 from .helpers import stream_with_context as stream_with_context
 from .helpers import url_for as url_for
 from .json import jsonify as jsonify
+from .resources import CircularResourceError as CircularResourceError
+from .resources import RequestResources as RequestResources
+from .resources import ResourceClosedError as ResourceClosedError
 from .signals import appcontext_popped as appcontext_popped
 from .signals import appcontext_pushed as appcontext_pushed
 from .signals import appcontext_tearing_down as appcontext_tearing_down
