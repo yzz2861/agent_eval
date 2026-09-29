@@ -178,6 +178,145 @@ class pipeline:
             yield message.get_result(backend=backend, block=block, timeout=timeout)
 
 
+class compensating_pipeline:
+    """Chain actors together like a pipeline, but roll the completed
+    steps back when one of them fails permanently.
+
+    Each step may declare an optional compensation actor.  When a
+    step's retries have been exhausted, the compensations of the
+    steps that already succeeded are run in reverse order, each
+    receiving the result of the step it undoes.  Compensations may
+    themselves be retried; if one fails permanently, the run stops
+    and keeps its position so that it can be resumed later with the
+    resume method.
+
+    This functionality is dependent upon the Compensations
+    middleware: add it to your broker (before the Retries
+    middleware) with a compensation state backend.
+
+    Parameters:
+      steps(Iterable[Message|tuple[Message, Message|None]]): The
+        steps of the pipeline.  Each step is either a message or a
+        (message, compensation) pair where compensation is an
+        optional message for the actor that undoes the step.
+      broker(Broker): The broker to run the pipeline on.  Defaults to
+        the current global broker.
+    """
+
+    def __init__(self, steps, *, broker=None):
+        self.broker = broker or get_broker()
+        self.messages = []
+        self.compensations = []
+        self.run_id = None
+
+        for step in steps:
+            if isinstance(step, tuple):
+                message, compensation = step
+            else:
+                message, compensation = step, None
+
+            self.messages.append(message.copy())
+            self.compensations.append(compensation.copy() if compensation is not None else None)
+
+    def __len__(self):
+        """Returns the length of the pipeline."""
+        return len(self.messages)
+
+    def __str__(self):  # pragma: no cover
+        return "compensating_pipeline([%s])" % ", ".join(str(m) for m in self.messages)
+
+    @property
+    def completed(self):
+        """Returns True when all the steps in the pipeline have been
+        completed without any of them failing permanently.
+        """
+        state = self.get_state()
+        return state is not None and state["status"] == "completed"
+
+    @property
+    def compensated(self):
+        """Returns True when the pipeline failed permanently and all
+        of its completed steps have been compensated.
+        """
+        state = self.get_state()
+        return state is not None and state["status"] == "compensated"
+
+    def run(self, *, delay=None):
+        """Run this pipeline.
+
+        Parameters:
+          delay(int): The minimum amount of time, in milliseconds, the
+            pipeline should be delayed by. If both pipeline's delay and
+            first message's delay are provided, the bigger value will
+            be used.
+
+        Returns:
+          compensating_pipeline: Itself.
+        """
+        middleware = self._get_compensations_middleware()
+
+        run_id = str(uuid4())
+        for index, message in enumerate(self.messages):
+            message.options.update({
+                "comp_run_id": run_id,
+                "comp_step": index,
+                "comp_mode": "forward",
+            })
+
+        for message, next_message in zip(self.messages, self.messages[1:]):
+            message.options["comp_next"] = next_message.asdict()
+
+        steps = [
+            {"compensation": compensation.asdict() if compensation is not None else None}
+            for compensation in self.compensations
+        ]
+        middleware.state_backend.create_run(run_id, steps=steps, ttl=middleware.ttl)
+        self.run_id = run_id
+
+        delay = max(delay or 0, self.messages[0].options.get("delay") or 0) or None
+        self.broker.enqueue(self.messages[0], delay=delay)
+        return self
+
+    def get_state(self):
+        """Get the current state of this pipeline's latest run.
+
+        Returns:
+          dict|None: The run state, or None if the pipeline hasn't
+            been run yet or its state has expired.
+        """
+        if self.run_id is None:
+            return None
+
+        middleware = self._get_compensations_middleware()
+        return middleware.state_backend.get_run(self.run_id)
+
+    def resume(self):
+        """Resume compensating this pipeline after one of its
+        compensations failed permanently.
+
+        Returns:
+          bool: True if the pipeline was resumed.
+        """
+        if self.run_id is None:
+            raise RuntimeError("This pipeline hasn't been run yet.")
+
+        middleware = self._get_compensations_middleware()
+        return middleware.resume(self.broker, self.run_id)
+
+    def _get_compensations_middleware(self):
+        from .middleware.compensations import Compensations
+
+        for middleware in self.broker.middleware:
+            if isinstance(middleware, Compensations):
+                return middleware
+
+        raise RuntimeError(
+            "Compensations middleware not found! Did you forget to "
+            "set it up? It is required if you want to use "
+            "compensating pipelines."
+        )
+
+
 class group:
     """Run a group of actors in parallel.
 

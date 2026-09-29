@@ -37,6 +37,8 @@ Message Composition
    :members:
 .. autoclass:: pipeline
    :members:
+.. autoclass:: compensating_pipeline
+   :members:
 
 Message Encoders
 ^^^^^^^^^^^^^^^^
@@ -107,11 +109,20 @@ Optional Middleware
 The following middleware classes are available, but not enabled by default.
 
 .. autoclass:: dramatiq.middleware.AsyncIO
+.. autoclass:: dramatiq.middleware.Compensations
 .. autoclass:: dramatiq.middleware.CurrentMessage
    :members: get_current_message
    :member-order: bysource
 .. autoclass:: dramatiq.middleware.GroupCallbacks
 .. autoclass:: dramatiq.middleware.prometheus.Prometheus
+
+Compensation State Backends
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: dramatiq.compensation.CompensationStateBackend
+   :members:
+.. autoclass:: dramatiq.compensation.backends.StubBackend
+   :show-inheritance:
 
 .. py:class:: dramatiq.results.Results
    :no-index:
