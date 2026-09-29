@@ -9,6 +9,7 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import AsyncIterator, Generator, Iterable
+from contextvars import ContextVar
 from functools import partial
 from pathlib import Path
 from queue import Empty, Queue, SimpleQueue
@@ -19,7 +20,7 @@ from warnings import warn
 from .context import contextmanager
 from .cursor import Cursor
 
-__all__ = ["connect", "Connection", "Cursor"]
+__all__ = ["connect", "Connection", "Cursor", "Transaction"]
 
 AuthorizerCallback = Callable[[int, str, str, str, str], int]
 
@@ -88,12 +89,27 @@ class Connection:
         self._tx: _TxQueue = SimpleQueue()
         self._iter_chunk_size = iter_chunk_size
         self._thread = Thread(target=_connection_worker_thread, args=(self._tx,))
+        self._tx_owner: Optional["Transaction"] = None
+        self._tx_depth = 0
+        self._tx_idle: Optional[asyncio.Event] = None
+        self._tx_context: ContextVar[bool] = ContextVar(
+            f"aiosqlite_transaction_{id(self)}", default=False
+        )
 
         if loop is not None:
             warn(
                 "aiosqlite.Connection no longer uses the `loop` parameter",
                 DeprecationWarning,
             )
+
+    @property
+    def _tx_idle_event(self) -> asyncio.Event:
+        # Created lazily because asyncio.Event binds to the running loop
+        # at creation time on older Python versions.
+        if self._tx_idle is None:
+            self._tx_idle = asyncio.Event()
+            self._tx_idle.set()
+        return self._tx_idle
 
     def __del__(self):
         if self._connection is None:
@@ -147,7 +163,7 @@ class Connection:
         cursor = self._conn.execute(sql, parameters)
         return cursor.fetchall()
 
-    async def _execute(self, fn, *args, **kwargs):
+    async def _execute_impl(self, fn, *args, **kwargs):
         """Queue a function with the given arguments for execution."""
         if not self._running or not self._connection:
             raise ValueError("Connection closed")
@@ -158,6 +174,39 @@ class Connection:
         self._tx.put_nowait((future, function))
 
         return await future
+
+    async def _execute(self, fn, *args, **kwargs):
+        """
+        Queue a function for execution, waiting for any active transaction()
+        context owned by another task to finish first.
+        """
+        while self._tx_owner is not None and not self._tx_context.get():
+            await self._tx_idle_event.wait()
+
+        # No await between the ownership check above and queueing the
+        # function, so a new transaction cannot interleave in between.
+        return await self._execute_impl(fn, *args, **kwargs)
+
+    async def _execute_shielded(self, fn, *args, **kwargs):
+        """
+        Execute a function on the shared thread, guaranteeing that it runs
+        to completion even if the awaiting task is cancelled. Used for
+        transaction finalization so that commit/rollback always finish
+        before the transaction lock is released.
+        """
+        task = asyncio.ensure_future(self._execute_impl(fn, *args, **kwargs))
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.done():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
 
     async def _connect(self) -> "Connection":
         """Connect to the actual sqlite database."""
@@ -189,18 +238,94 @@ class Connection:
         return Cursor(self, await self._execute(self._conn.cursor))
 
     async def commit(self) -> None:
-        """Commit the current transaction."""
+        """
+        Commit the current transaction.
+
+        Raises ``sqlite3.ProgrammingError`` if called while a
+        :meth:`transaction` context is active on this connection; exit the
+        context (or use a nested context) to commit instead.
+        """
+        if self._tx_owner is not None:
+            raise sqlite3.ProgrammingError(
+                "cannot commit() while a transaction() context is active; "
+                "exit the context to commit, or use a nested transaction() "
+                "for savepoints"
+            )
         await self._execute(self._conn.commit)
 
     async def rollback(self) -> None:
-        """Roll back the current transaction."""
+        """
+        Roll back the current transaction.
+
+        Raises ``sqlite3.ProgrammingError`` if called while a
+        :meth:`transaction` context is active on this connection; raise an
+        exception inside the context to roll back instead.
+        """
+        if self._tx_owner is not None:
+            raise sqlite3.ProgrammingError(
+                "cannot rollback() while a transaction() context is active; "
+                "raise an exception inside the context to roll back"
+            )
         await self._execute(self._conn.rollback)
 
+    def transaction(self) -> "Transaction":
+        """
+        Create an explicit transaction context manager for this connection.
+
+        The transaction is owned by the current task, including any child
+        tasks spawned inside the context. While the transaction is active:
+
+        - Operations (``execute``, ``executemany``, ``cursor``, etc.) issued
+          from unrelated tasks wait until the transaction has finished, so
+          their statements can never be mixed into the owner's commit scope.
+        - Nested ``transaction()`` contexts in the same task use SAVEPOINT;
+          an exception in an inner context rolls back only that savepoint.
+        - ``commit()`` and ``rollback()`` raise ``sqlite3.ProgrammingError``.
+        - ``executescript()`` raises ``sqlite3.ProgrammingError`` when
+          called from inside the transaction, because sqlite3 would
+          silently commit first.
+        - ``close()`` raises ``sqlite3.ProgrammingError`` when called from
+          inside the transaction; calls from other tasks wait for the
+          transaction to finish first.
+        - Cancelling the owning task still completes the rollback and
+          releases the transaction before the cancellation propagates.
+
+        On clean exit the transaction is committed; on exception it is
+        rolled back. Connections that never use ``transaction()`` behave
+        exactly as before.
+
+        Example::
+
+            async with db.transaction():
+                await db.execute("insert into foo values (1)")
+                async with db.transaction():  # savepoint
+                    await db.execute("insert into foo values (2)")
+        """
+        return Transaction(self)
+
+    def _begin_statement(self) -> str:
+        """BEGIN statement honoring the configured isolation level."""
+        level = self._conn.isolation_level
+        if level in ("IMMEDIATE", "EXCLUSIVE"):
+            return f"BEGIN {level}"
+        return "BEGIN"
+
     async def close(self) -> None:
-        """Complete queued queries/cursors and close the connection."""
+        """
+        Complete queued queries/cursors and close the connection.
+
+        If a :meth:`transaction` context is active, calling this from inside
+        the transaction raises ``sqlite3.ProgrammingError``; calls from other
+        tasks wait until the transaction has finished.
+        """
 
         if self._connection is None:
             return
+        if self._tx_context.get():
+            raise sqlite3.ProgrammingError(
+                "cannot close() from inside an active transaction() context; "
+                "exit the context first"
+            )
 
         try:
             await self._execute(self._conn.close)
@@ -251,7 +376,19 @@ class Connection:
 
     @contextmanager
     async def executescript(self, sql_script: str) -> Cursor:
-        """Helper to create a cursor and execute a user script."""
+        """
+        Helper to create a cursor and execute a user script.
+
+        sqlite3 implicitly commits any pending transaction before running a
+        script, so calling this from inside a :meth:`transaction` context
+        raises ``sqlite3.ProgrammingError``. Calls from other tasks wait
+        until the active transaction has finished.
+        """
+        if self._tx_context.get():
+            raise sqlite3.ProgrammingError(
+                "cannot executescript() inside a transaction() context; "
+                "sqlite3 would silently commit the transaction first"
+            )
         cursor = await self._execute(self._conn.executescript, sql_script)
         return Cursor(self, cursor)
 
@@ -438,6 +575,110 @@ class Connection:
             name=name,
             sleep=sleep,
         )
+
+
+class Transaction:
+    """
+    Async context manager managing an explicit transaction on a
+    :class:`Connection`. Returned by :meth:`Connection.transaction`; see
+    that method for the full set of rules.
+
+    Entering the context begins a transaction owned by the current task.
+    While owned, operations from unrelated tasks wait until the context
+    exits. Nested entry from the same task issues a SAVEPOINT instead, so
+    an exception in an inner context only rolls back to that savepoint.
+    Exiting the outermost context commits on success and rolls back on
+    exception; finalization always completes, even if the owning task is
+    cancelled while exiting.
+    """
+
+    def __init__(self, connection: "Connection") -> None:
+        self._connection = connection
+        self._savepoint: Optional[str] = None
+        self._token: Optional["object"] = None
+        self._active = False
+
+    async def __aenter__(self) -> "Transaction":
+        connection = self._connection
+        if self._active:
+            raise RuntimeError("transaction context is already active")
+
+        if connection._tx_context.get():
+            # nested inside a transaction owned by this task: use a savepoint
+            connection._tx_depth += 1
+            savepoint = f"aiosqlite_sp_{connection._tx_depth}"
+            try:
+                await connection._execute_impl(
+                    connection._conn.execute, f"SAVEPOINT {savepoint}"
+                )
+            except BaseException:
+                connection._tx_depth -= 1
+                raise
+            self._savepoint = savepoint
+        else:
+            # wait for any transaction owned by another task to finish
+            while connection._tx_owner is not None:
+                await connection._tx_idle_event.wait()
+
+            # No await between the check above and claiming ownership, so
+            # two tasks cannot both acquire the transaction.
+            connection._tx_owner = self
+            connection._tx_idle_event.clear()
+            connection._tx_depth = 1
+            self._token = connection._tx_context.set(True)
+            try:
+                await connection._execute_impl(
+                    connection._conn.execute, connection._begin_statement()
+                )
+            except BaseException:
+                connection._tx_context.reset(self._token)
+                self._token = None
+                connection._tx_owner = None
+                connection._tx_depth = 0
+                connection._tx_idle_event.set()
+                raise
+            self._savepoint = None
+
+        self._active = True
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        connection = self._connection
+        self._active = False
+
+        if self._savepoint is not None:
+            savepoint = self._savepoint
+            self._savepoint = None
+            try:
+                if exc_type is None:
+                    await connection._execute_shielded(
+                        connection._conn.execute, f"RELEASE SAVEPOINT {savepoint}"
+                    )
+                else:
+                    await connection._execute_shielded(
+                        connection._conn.execute,
+                        f"ROLLBACK TO SAVEPOINT {savepoint}",
+                    )
+                    await connection._execute_shielded(
+                        connection._conn.execute, f"RELEASE SAVEPOINT {savepoint}"
+                    )
+            finally:
+                connection._tx_depth -= 1
+        else:
+            try:
+                if exc_type is None:
+                    await connection._execute_shielded(connection._conn.commit)
+                else:
+                    await connection._execute_shielded(connection._conn.rollback)
+            finally:
+                if self._token is not None:
+                    connection._tx_context.reset(self._token)
+                    self._token = None
+                connection._tx_owner = None
+                connection._tx_depth = 0
+                connection._tx_idle_event.set()
+
+        return None
 
 
 def connect(
