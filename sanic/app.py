@@ -718,6 +718,56 @@ class Sanic(
             fail_not_found=fail_not_found,
         )
 
+    async def collect(
+        self,
+        event: str | Enum,
+        *,
+        condition: dict[str, str] | None = None,
+        context: dict[str, Any] | None = None,
+        fail_not_found: bool = True,
+        reverse: bool = False,
+        max_concurrency: int | None = None,
+        cancel_on_error: bool = False,
+    ) -> list[Any]:
+        """Collect the results of every signal handler matching an event.
+
+        Unlike ``dispatch``, which stops at the first handler returning a
+        truthy value, ``collect`` runs every matching handler and returns
+        all of their results in a stable order.
+
+        Args:
+            event (str): Name of the event to collect.
+            condition (Optional[Dict[str, str]]): Condition for the
+                event dispatch.
+            context (Optional[Dict[str, Any]]): Context for the event
+                dispatch.
+            fail_not_found (bool): Whether to fail if the event is not
+                found. Default is `True`.
+            reverse (bool): Whether to reverse the handler order.
+                Default is `False`.
+            max_concurrency (Optional[int]): The maximum number of
+                handlers allowed to run concurrently. Default is `None`
+                (no limit).
+            cancel_on_error (bool): If `True`, the first handler failure
+                cancels the remaining handlers and the original exception
+                is raised. If `False` (the default), all handlers run to
+                completion and failures are raised together as a
+                `SignalCollectError`.
+
+        Returns:
+            List[Any]: The handler return values in a stable slot order
+                that follows the matched handler order.
+        """
+        return await self.signal_router.collect(
+            event,
+            context=context,
+            condition=condition,
+            fail_not_found=fail_not_found,
+            reverse=reverse,
+            max_concurrency=max_concurrency,
+            cancel_on_error=cancel_on_error,
+        )
+
     async def event(
         self,
         event: str | Enum,

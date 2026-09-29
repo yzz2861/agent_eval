@@ -671,6 +671,21 @@ class InvalidSignal(SanicException):
     """Exception raised when an invalid signal is sent."""
 
 
+class SignalCollectError(SanicException):
+    """Exception raised when one or more signal handlers fail while
+    collecting signal results.
+
+    The individual handler exceptions are available on ``exceptions``,
+    in the same stable slot order as the collected results.
+    """
+
+    quiet = True
+
+    def __init__(self, message: str, exceptions: list[BaseException]) -> None:
+        super().__init__(message)
+        self.exceptions = exceptions
+
+
 class WebsocketClosed(SanicException):
     """Exception raised when a websocket is closed."""
 
