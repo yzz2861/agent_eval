@@ -6,4 +6,4 @@ For released versions, see the [Releases](https://github.com/mirumee/ariadne/rel
 
 ## Unreleased
 
-
+- Added `FederatedObjectType.batch_reference_resolver` for resolving multiple entity representations of the same type in a single call, with optional deduplication of identical representations.

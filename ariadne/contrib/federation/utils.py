@@ -1,3 +1,4 @@
+import json
 from inspect import isawaitable
 from typing import Any, cast
 
@@ -78,9 +79,16 @@ def purge_schema_directives(joined_type_defs: str) -> str:
 def resolve_entities(_: Any, info: GraphQLResolveInfo, **kwargs) -> Any:
     representations = list(kwargs.get("representations", []))
 
-    result = []
-    for reference in representations:
-        __typename = reference["__typename"]
+    grouped_representations: dict[str, list[tuple[int, Any]]] = {}
+    for index, reference in enumerate(representations):
+        grouped_representations.setdefault(reference["__typename"], []).append(
+            (index, reference)
+        )
+
+    results: list[Any] = [None] * len(representations)
+    pending_batches: list[tuple[Any, str, list, list]] = []
+
+    for __typename, group in grouped_representations.items():
         type_object = info.schema.get_type(__typename)
 
         if not type_object or not isinstance(type_object, GraphQLObjectType):
@@ -90,20 +98,109 @@ def resolve_entities(_: Any, info: GraphQLResolveInfo, **kwargs) -> Any:
                 f" was found in the schema",
             )
 
+        resolve_references = type_get_extension(
+            type_object,
+            "__resolve_references__",
+            None,
+        )
+
+        if callable(resolve_references):
+            references = [reference for _, reference in group]
+            if type_get_extension(
+                type_object, "__resolve_references_deduplicate__", False
+            ):
+                call_references, slots = deduplicate_entity_references(references)
+            else:
+                call_references = references
+                slots = [[position] for position in range(len(references))]
+
+            batch = resolve_references(type_object, info, call_references)
+            if isawaitable(batch):
+                pending_batches.append((batch, __typename, group, slots))
+            else:
+                place_batch_results(results, group, slots, batch, __typename)
+            continue
+
         resolve_reference = type_get_extension(
             type_object,
             "__resolve_reference__",
-            lambda o, i, r: reference,
+            lambda o, i, r: r,
         )
 
-        representation = resolve_reference(type_object, info, reference)
+        for index, reference in group:
+            representation = resolve_reference(type_object, info, reference)
 
-        if isawaitable(representation):
-            result.append(add_typename_to_async_return(representation, __typename))
+            if isawaitable(representation):
+                results[index] = add_typename_to_async_return(
+                    representation, __typename
+                )
+            else:
+                results[index] = add_typename_to_possible_return(
+                    representation, __typename
+                )
+
+    if pending_batches:
+        return resolve_pending_entity_batches(results, pending_batches)
+    return results
+
+
+async def resolve_pending_entity_batches(
+    results: list,
+    pending_batches: list,
+) -> list:
+    for batch, __typename, group, slots in pending_batches:
+        place_batch_results(results, group, slots, await batch, __typename)
+    return results
+
+
+def place_batch_results(
+    results: list,
+    group: list,
+    slots: list,
+    batch_results: Any,
+    __typename: str,
+) -> None:
+    if not isinstance(batch_results, (list, tuple)):
+        raise ValueError(
+            f'Batch reference resolver for type "{__typename}" should return'
+            f" a list of {len(slots)} results,"
+            f" got {type(batch_results).__name__} instead."
+        )
+
+    if len(batch_results) != len(slots):
+        raise ValueError(
+            f'Batch reference resolver for type "{__typename}" returned'
+            f" {len(batch_results)} results for {len(slots)} representations."
+        )
+
+    for slot_position, representation in enumerate(batch_results):
+        for group_position in slots[slot_position]:
+            index = group[group_position][0]
+            if isinstance(representation, Exception):
+                # Pass exceptions through so graphql-core reports them
+                # as errors located at the original representation index.
+                results[index] = representation
+            else:
+                results[index] = add_typename_to_possible_return(
+                    representation, __typename
+                )
+
+
+def deduplicate_entity_references(references: list) -> tuple[list, list]:
+    unique_references: list = []
+    slots: list = []
+    seen: dict[str, int] = {}
+
+    for position, reference in enumerate(references):
+        key = json.dumps(reference, sort_keys=True, default=str)
+        if key in seen:
+            slots[seen[key]].append(position)
         else:
-            result.append(add_typename_to_possible_return(representation, __typename))
+            seen[key] = len(unique_references)
+            unique_references.append(reference)
+            slots.append([position])
 
-    return result
+    return unique_references, slots
 
 
 async def add_typename_to_async_return(obj: Any, typename: str) -> Any:

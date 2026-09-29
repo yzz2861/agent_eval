@@ -135,6 +135,52 @@ def resolve_product_reference(_, _info, representation):
     return get_product_by_upc(representation["upc"])
 ```
 
+### Batch reference resolvers
+
+Gateways often request dozens of entities of the same type in a single
+`_entities` query. To avoid fetching them one by one, a federated type can
+register a batch reference resolver with the `batch_reference_resolver`
+decorator. It is called once per type with the list of representations of
+that type (in their original request order) and must return a list with one
+result per representation:
+
+```python
+# service_products.py
+from ariadne.contrib.federation import FederatedObjectType
+
+
+product = FederatedObjectType("Product")
+
+@product.batch_reference_resolver
+def resolve_product_references(_, _info, representations):
+    upcs = [representation["upc"] for representation in representations]
+    return get_products_by_upcs(upcs)
+```
+
+Representations are grouped by type, so types without a batch reference
+resolver keep using their single-entity `reference_resolver`. Batch
+reference resolvers can also be `async` functions.
+
+Returning `None` for a position resolves that entity to `null`, and
+returning an `Exception` instance for a position raises it as a field error
+pointing at that entity's index in the original request, without affecting
+other results. If the returned list doesn't have exactly one result per
+representation, an explicit error is raised.
+
+By default every representation is passed to the batch resolver, including
+duplicates. Pass `deduplicate=True` to merge identical representations
+before the call; their results are then placed back at all original
+positions:
+
+```python
+@product.batch_reference_resolver(deduplicate=True)
+def resolve_product_references(_, _info, representations):
+    ...
+```
+
+Representations are always passed to resolvers as-is, so entities with
+composite or nested keys receive their full key structure.
+
 
 
 ```python
