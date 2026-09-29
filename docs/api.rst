@@ -34,6 +34,14 @@ API Reference
     :class-doc-from: init
     :members:
 
+.. autoclass:: ValidationProfile
+    :class-doc-from: class
+    :members:
+
+.. autoclass:: ProfileRegistry
+    :class-doc-from: class
+    :members:
+
 .. note:: TODO: Finish documenting PyJWS class
 .. module:: jwt.api_jws
 

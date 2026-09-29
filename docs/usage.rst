@@ -473,6 +473,55 @@ If you wish to require one or more claims to be present in the claimset, you can
     ...
     Token is missing the "exp" claim
 
+Validating Tokens from Multiple Issuers with Profiles
+-----------------------------------------------------
+
+Services that accept JWTs from several issuers usually need a different
+audience, algorithm set, required claims, and key set per issuer.
+``ValidationProfile`` bundles all of these into one immutable configuration,
+and ``ProfileRegistry`` selects the right profile based on the token's
+``iss`` claim:
+
+.. code-block:: pycon
+
+    >>> import jwt
+    >>> profile = jwt.ValidationProfile(
+    ...     issuer="https://issuer-a.example.com",
+    ...     algorithms=["RS256"],
+    ...     audience="my-api",
+    ...     keys={"key-2026-01": "public-key-or-secret"},
+    ...     required_claims=["exp", "iat", "sub"],
+    ...     typ="JWT",
+    ...     max_age=3600,  # reject tokens older than one hour
+    ...     leeway=30,  # clock skew tolerance for time-based checks
+    ... )
+    >>> registry = jwt.ProfileRegistry([profile])
+    >>> registry.decode(token)  # doctest: +SKIP
+    {'iss': 'https://issuer-a.example.com', ...}
+
+The registry reads the *unverified* ``iss`` claim only to look up an
+already-registered profile. It never downloads keys or relaxes algorithms
+based on unverified token data: signature and claim validation run in a
+single ``decode`` against the profile's pinned configuration. Tokens from
+unknown issuers are rejected with ``UnknownIssuerError`` (a subclass of
+``TrustDomainError``), which is distinct from failures *within* a known
+trust domain such as ``InvalidSignatureError`` or ``ExpiredSignatureError``:
+
+.. code-block:: python
+
+    try:
+        payload = registry.decode(token)
+    except jwt.TrustDomainError:
+        ...  # issuer not registered at all
+    except jwt.InvalidTokenError:
+        ...  # known issuer, but the token failed validation
+
+Key ids (``kid``) are resolved only within the selected profile, so the
+same ``kid`` under different issuers stays fully isolated. Profiles are
+immutable and registry updates are copy-on-write, so a request that is
+mid-validation always sees one complete version of its profile even while
+another thread registers a replacement.
+
 Retrieve RSA signing keys from a JWKS endpoint
 ----------------------------------------------
 

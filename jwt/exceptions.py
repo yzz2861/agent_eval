@@ -111,3 +111,42 @@ class InvalidJTIError(InvalidTokenError):
     """Raised when a token's ``jti`` claim is not a string"""
 
     pass
+
+
+class TrustDomainError(InvalidTokenError):
+    """Base exception for trust-domain mismatches.
+
+    Raised when a token cannot be associated with a configured trust
+    domain (validation profile) at all, as opposed to tokens that belong
+    to a known domain but fail validation within it.
+    """
+
+    pass
+
+
+class UnknownIssuerError(TrustDomainError):
+    """Raised when a token's ``iss`` claim does not match any registered
+    validation profile, so no trust domain can be selected for it"""
+
+    pass
+
+
+class UnknownKeyError(InvalidTokenError):
+    """Raised when a token's ``kid`` header does not match any key
+    configured in the selected validation profile"""
+
+    pass
+
+
+class InvalidTypError(InvalidTokenError):
+    """Raised when a token's ``typ`` header does not match the value
+    required by the selected validation profile"""
+
+    pass
+
+
+class TokenTooOldError(InvalidTokenError):
+    """Raised when a token's age (based on its ``iat`` claim) exceeds the
+    maximum age allowed by the selected validation profile"""
+
+    pass

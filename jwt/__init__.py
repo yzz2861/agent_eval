@@ -18,14 +18,20 @@ from .exceptions import (
     InvalidKeyError,
     InvalidSignatureError,
     InvalidTokenError,
+    InvalidTypError,
     MissingRequiredClaimError,
     PyJWKClientConnectionError,
     PyJWKClientError,
     PyJWKError,
     PyJWKSetError,
     PyJWTError,
+    TokenTooOldError,
+    TrustDomainError,
+    UnknownIssuerError,
+    UnknownKeyError,
 )
 from .jwks_client import PyJWKClient
+from .profiles import ProfileRegistry, ValidationProfile
 from .warnings import InsecureKeyLengthWarning
 
 __version__ = "2.15.0"
@@ -49,6 +55,8 @@ __all__ = [
     "PyJWKClient",
     "PyJWK",
     "PyJWKSet",
+    "ProfileRegistry",
+    "ValidationProfile",
     "decode",
     "decode_complete",
     "encode",
@@ -69,10 +77,15 @@ __all__ = [
     "InvalidKeyError",
     "InvalidSignatureError",
     "InvalidTokenError",
+    "InvalidTypError",
     "MissingRequiredClaimError",
     "PyJWKClientConnectionError",
     "PyJWKClientError",
     "PyJWKError",
     "PyJWKSetError",
     "PyJWTError",
+    "TokenTooOldError",
+    "TrustDomainError",
+    "UnknownIssuerError",
+    "UnknownKeyError",
 ]
