@@ -34,6 +34,18 @@ API Reference
     :class-doc-from: init
     :members:
 
+.. autoclass:: IssuerProfile
+    :class-doc-from: init
+    :members:
+
+.. autoclass:: IssuerProfileRegistry
+    :class-doc-from: init
+    :members:
+
+.. autoclass:: IssuerProfileDecoder
+    :class-doc-from: init
+    :members:
+
 .. note:: TODO: Finish documenting PyJWS class
 .. module:: jwt.api_jws
 

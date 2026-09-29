@@ -17,6 +17,7 @@ from .exceptions import (
     InvalidIssuerError,
     InvalidKeyError,
     InvalidSignatureError,
+    InvalidTokenTypeError,
     InvalidTokenError,
     MissingRequiredClaimError,
     PyJWKClientConnectionError,
@@ -24,7 +25,10 @@ from .exceptions import (
     PyJWKError,
     PyJWKSetError,
     PyJWTError,
+    TokenTooOldError,
+    UnknownIssuerError,
 )
+from .issuer_profiles import IssuerProfile, IssuerProfileDecoder, IssuerProfileRegistry
 from .jwks_client import PyJWKClient
 from .warnings import InsecureKeyLengthWarning
 
@@ -68,11 +72,17 @@ __all__ = [
     "InvalidIssuerError",
     "InvalidKeyError",
     "InvalidSignatureError",
+    "InvalidTokenTypeError",
     "InvalidTokenError",
+    "IssuerProfile",
+    "IssuerProfileDecoder",
+    "IssuerProfileRegistry",
     "MissingRequiredClaimError",
     "PyJWKClientConnectionError",
     "PyJWKClientError",
     "PyJWKError",
     "PyJWKSetError",
     "PyJWTError",
+    "TokenTooOldError",
+    "UnknownIssuerError",
 ]

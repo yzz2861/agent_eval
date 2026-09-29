@@ -473,6 +473,62 @@ If you wish to require one or more claims to be present in the claimset, you can
     ...
     Token is missing the "exp" claim
 
+Validating tokens from multiple issuers with profiles
+-----------------------------------------------------
+
+When a service accepts JWTs from several issuers, each with its own
+audience, algorithms, required claims, and keys, you can describe every
+issuer with an immutable :class:`~jwt.IssuerProfile`, register the profiles
+in an :class:`~jwt.IssuerProfileRegistry`, and validate tokens with an
+:class:`~jwt.IssuerProfileDecoder`:
+
+.. code-block:: python
+
+    from jwt import IssuerProfile, IssuerProfileDecoder, IssuerProfileRegistry
+
+    registry = IssuerProfileRegistry(
+        [
+            IssuerProfile(
+                issuer="https://idp-a.example.com",
+                algorithms=("RS256",),
+                audience="my-api",
+                keys={"key-2026-01": idp_a_public_key},
+                required_claims=("exp", "iat", "sub"),
+                typ=("JWT", "at+jwt"),
+                max_token_age=300,
+                leeway=10,
+            ),
+            IssuerProfile(
+                issuer="https://idp-b.example.com",
+                algorithms=("ES256",),
+                audience="my-api",
+                keys={"key-1": idp_b_public_key},
+            ),
+        ]
+    )
+    decoder = IssuerProfileDecoder(registry)
+
+    claims = decoder.decode(token)
+
+The decoder reads the unverified ``iss`` claim only to select an
+already-registered profile. The verification key, allowed algorithms, and
+all other validation parameters come exclusively from that static profile:
+they are never derived from the token and never fetched from a location
+named by token data. Key IDs (``kid``) are scoped per profile, so the same
+``kid`` under two issuers refers to two fully isolated keys. A single
+``decode()`` call verifies the signature and all claims.
+
+Tokens from issuers that are not registered are rejected with
+``jwt.exceptions.UnknownIssuerError`` (a trust-domain mismatch), while
+tokens from a registered issuer that fail validation raise the usual
+``jwt.exceptions.InvalidTokenError`` subclasses, such as
+``InvalidAudienceError``, ``InvalidTokenTypeError``, or ``TokenTooOldError``.
+
+Profiles are immutable, and the registry applies updates copy-on-write:
+``register()`` atomically replaces a profile, so a request that is already
+validating keeps seeing one complete, consistent version of the
+configuration.
+
 Retrieve RSA signing keys from a JWKS endpoint
 ----------------------------------------------
 

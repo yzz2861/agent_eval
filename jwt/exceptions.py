@@ -111,3 +111,29 @@ class InvalidJTIError(InvalidTokenError):
     """Raised when a token's ``jti`` claim is not a string"""
 
     pass
+
+
+class UnknownIssuerError(InvalidTokenError):
+    """Raised when a token's 'iss' claim is missing or does not match any
+    registered issuer profile.
+
+    This signals a trust-domain mismatch: the token does not belong to any
+    issuer the application has explicitly configured, as opposed to a token
+    from a known issuer that failed validation within that issuer's domain.
+    """
+
+    pass
+
+
+class InvalidTokenTypeError(InvalidTokenError):
+    """Raised when a token's 'typ' header does not match the token types
+    allowed by the issuer profile"""
+
+    pass
+
+
+class TokenTooOldError(InvalidTokenError):
+    """Raised when a token's 'iat' claim is older than the maximum token
+    age allowed by the issuer profile"""
+
+    pass
