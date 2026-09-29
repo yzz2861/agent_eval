@@ -15,6 +15,12 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.AsyncSink`: an output logger that forwards events to a wrapped sink from a background thread through a bounded buffer with an explicit lifecycle (`start()` / `flush()` / `close()`).
+  When the buffer is full, `structlog.FullPolicy` selects between blocking the caller, dropping the event, or raising `structlog.exceptions.BufferFullError`.
+  `flush()` waits only for events received before the call, the producer's `contextvars` context is captured on the calling thread, and sink failures are reported with their receive sequence numbers via `structlog.exceptions.SinkDeliveryError`.
+
 
 ## [26.1.0](https://github.com/hynek/structlog/compare/25.5.0...26.1.0) - 2026-06-06
 

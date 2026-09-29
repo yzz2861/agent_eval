@@ -64,7 +64,17 @@ API Reference
 
 .. autoclass:: BytesLoggerFactory
 
+.. autoclass:: AsyncSink
+   :members: start, flush, close, dropped, pending
+
+.. autoclass:: FullPolicy
+   :members:
+
 .. autoexception:: DropEvent
+
+.. autoexception:: BufferFullError
+
+.. autoexception:: SinkDeliveryError
 
 .. autoclass:: BoundLoggerBase
    :members: new, bind, unbind, try_unbind, _logger, _process_event, _proxy_to_logger
