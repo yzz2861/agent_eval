@@ -1,16 +1,20 @@
 # ruff: noqa: I001
 # The import order below is intentional: httpx compatibility must be loaded
 # before anyio so import errors refer to httpx.
+import time
 import typing
 from contextlib import asynccontextmanager
 
 from ._compat import httpx2
-from anyio import Lock # Import after httpx so import errors refer to httpx
+from anyio import Lock, sleep  # Import after httpx so import errors refer to httpx
 
 from authlib.common.urls import url_decode
 from authlib.oauth2.auth import ClientAuth
 from authlib.oauth2.auth import TokenAuth
 from authlib.oauth2.client import OAuth2Client as _OAuth2Client
+from authlib.oauth2.token_store import RefreshCoordinationTimeout
+from authlib.oauth2.token_store import TokenPersistenceError
+from authlib.oauth2.token_store import read_fresh_record
 
 from ..base_client import InvalidTokenError
 from ..base_client import MissingTokenError
@@ -140,6 +144,9 @@ class AsyncOAuth2Client(_OAuth2Client, httpx2.AsyncClient):
     async def ensure_active_token(self, token):
         async with self._token_refresh_lock:
             if self.token.is_expired(leeway=self.leeway):
+                if self.token_store is not None:
+                    await self._ensure_active_token_with_store()
+                    return
                 refresh_token = token.get("refresh_token")
                 url = self.metadata.get("token_endpoint")
                 if refresh_token and url:
@@ -153,6 +160,67 @@ class AsyncOAuth2Client(_OAuth2Client, httpx2.AsyncClient):
                         await self.update_token(new_token, access_token=access_token)
                 else:
                     raise InvalidTokenError()
+
+    async def _ensure_active_token_with_store(self):
+        # shares the exact same storage rules as the sync client; only
+        # the HTTP call and the waiting loop are asynchronous
+        store = self.token_store
+        deadline = time.monotonic() + self.token_store_wait_timeout
+        while True:
+            record = read_fresh_record(store, self.leeway)
+            if record is not None:
+                # another instance may have refreshed already; adopt the
+                # shared token instead of refreshing with a stale one
+                self.token = record.token
+                return
+            record = store.read()
+            version = record.version if record else 0
+            lease = store.acquire_refresh_lease(version, ttl=self.token_store_lease_ttl)
+            if lease is not None:
+                break
+            # another instance is refreshing right now: poll the store
+            # until it publishes the new token; if its lease expires
+            # (coordinator crash), the next loop iteration takes over
+            if time.monotonic() >= deadline:
+                raise RefreshCoordinationTimeout(
+                    "Timed out waiting for another instance to publish a fresh token"
+                )
+            await sleep(self.token_store_poll_interval)
+
+        try:
+            # always refresh with the store's current refresh token,
+            # never with a stale in-memory one
+            url = self.metadata.get("token_endpoint")
+            if record is not None:
+                refresh_token = record.token.get("refresh_token")
+            elif self.token:
+                # the store is empty; seed it from the in-memory token
+                refresh_token = self.token.get("refresh_token")
+            else:
+                refresh_token = None
+            if not refresh_token or not url:
+                raise InvalidTokenError()
+            await self.refresh_token(url, refresh_token=refresh_token)
+        except Exception:
+            store.release_refresh_lease(lease)
+            raise
+
+        # the refresh request succeeded; failing to persist now means the
+        # shared state is uncertain, so report it instead of retrying
+        try:
+            saved = store.save_token(
+                dict(self.token), expected_version=version, lease=lease
+            )
+        except Exception as error:
+            raise TokenPersistenceError(
+                "Token refresh succeeded but persisting to the shared store"
+                " failed; the shared token state is uncertain"
+            ) from error
+        if not saved:
+            raise TokenPersistenceError(
+                "Token refresh succeeded but the shared store changed"
+                " underneath; the shared token state is uncertain"
+            )
 
     async def _fetch_token(
         self,

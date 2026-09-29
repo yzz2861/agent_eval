@@ -1,3 +1,5 @@
+import time
+
 from authlib.common.security import generate_token
 from authlib.common.urls import url_decode
 
@@ -10,6 +12,12 @@ from .rfc6749.parameters import prepare_grant_uri
 from .rfc6749.parameters import prepare_token_request
 from .rfc7009 import prepare_revoke_token_request
 from .rfc7636 import create_s256_code_challenge
+from .token_store import DEFAULT_LEASE_TTL
+from .token_store import DEFAULT_POLL_INTERVAL
+from .token_store import DEFAULT_WAIT_TIMEOUT
+from .token_store import RefreshCoordinationTimeout
+from .token_store import TokenPersistenceError
+from .token_store import read_fresh_record
 
 DEFAULT_HEADERS = {
     "Accept": "application/json",
@@ -41,6 +49,16 @@ class OAuth2Client:
     :param leeway: Time window in seconds before the actual expiration of the
         authentication token, that the token is considered expired and will
         be refreshed.
+    :param token_store: An optional :class:`SharedTokenStore` used to
+        coordinate refresh token rotation across multiple client instances.
+        When omitted, the client keeps its previous single-instance behavior.
+    :param token_store_lease_ttl: Seconds a refresh coordination lease stays
+        valid before another instance may take over (crash recovery).
+    :param token_store_wait_timeout: Seconds to wait for another instance to
+        publish a fresh token before raising
+        :class:`RefreshCoordinationTimeout`.
+    :param token_store_poll_interval: Seconds between store re-reads while
+        waiting for another instance to finish refreshing.
     """
 
     client_auth_class = ClientAuth
@@ -65,6 +83,10 @@ class OAuth2Client:
         token_placement="header",
         update_token=None,
         leeway=60,
+        token_store=None,
+        token_store_lease_ttl=DEFAULT_LEASE_TTL,
+        token_store_wait_timeout=DEFAULT_WAIT_TIMEOUT,
+        token_store_poll_interval=DEFAULT_POLL_INTERVAL,
         **metadata,
     ):
         self.session = session
@@ -113,6 +135,10 @@ class OAuth2Client:
         self._auth_methods = {}
 
         self.leeway = leeway
+        self.token_store = token_store
+        self.token_store_lease_ttl = token_store_lease_ttl
+        self.token_store_wait_timeout = token_store_wait_timeout
+        self.token_store_poll_interval = token_store_poll_interval
 
     def register_client_auth_method(self, auth):
         """Extend client authenticate for token endpoint.
@@ -303,6 +329,8 @@ class OAuth2Client:
             token = self.token
         if not token.is_expired(leeway=self.leeway):
             return True
+        if self.token_store is not None:
+            return self._ensure_active_token_with_store()
         refresh_token = token.get("refresh_token")
         url = self.metadata.get("token_endpoint")
         if refresh_token and url:
@@ -314,6 +342,70 @@ class OAuth2Client:
             if self.update_token:
                 self.update_token(new_token, access_token=access_token)
             return True
+
+    def _ensure_active_token_with_store(self):
+        store = self.token_store
+        deadline = time.monotonic() + self.token_store_wait_timeout
+        while True:
+            record = read_fresh_record(store, self.leeway)
+            if record is not None:
+                # another instance may have refreshed already; adopt the
+                # shared token instead of refreshing with a stale one
+                self.token = record.token
+                return True
+            record = store.read()
+            version = record.version if record else 0
+            lease = store.acquire_refresh_lease(version, ttl=self.token_store_lease_ttl)
+            if lease is not None:
+                break
+            # another instance is refreshing right now: poll the store
+            # until it publishes the new token; if its lease expires
+            # (coordinator crash), the next loop iteration takes over
+            if time.monotonic() >= deadline:
+                raise RefreshCoordinationTimeout(
+                    "Timed out waiting for another instance to publish a fresh token"
+                )
+            time.sleep(self.token_store_poll_interval)
+
+        try:
+            new_token = self._refresh_as_coordinator(record)
+        except Exception:
+            store.release_refresh_lease(lease)
+            raise
+        if new_token is None:
+            store.release_refresh_lease(lease)
+            return False
+
+        # the refresh request succeeded; failing to persist now means the
+        # shared state is uncertain, so report it instead of retrying
+        try:
+            saved = store.save_token(
+                dict(new_token), expected_version=version, lease=lease
+            )
+        except Exception as error:
+            raise TokenPersistenceError(
+                "Token refresh succeeded but persisting to the shared store"
+                " failed; the shared token state is uncertain"
+            ) from error
+        if not saved:
+            raise TokenPersistenceError(
+                "Token refresh succeeded but the shared store changed"
+                " underneath; the shared token state is uncertain"
+            )
+        return True
+
+    def _refresh_as_coordinator(self, record):
+        # always refresh with the store's current refresh token, never
+        # with a stale in-memory one
+        url = self.metadata.get("token_endpoint")
+        if record is not None:
+            refresh_token = record.token.get("refresh_token")
+        else:
+            # the store is empty; seed it from the in-memory token
+            refresh_token = self.token.get("refresh_token") if self.token else None
+        if not refresh_token or not url:
+            return None
+        return self.refresh_token(url, refresh_token=refresh_token)
 
     def revoke_token(
         self,
