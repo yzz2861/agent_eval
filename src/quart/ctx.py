@@ -14,6 +14,7 @@ from werkzeug.routing import MapAdapter
 
 from .globals import _cv_app
 from .helpers import _CollectErrors
+from .resources import RequestResources
 from .sessions import SessionMixin  # noqa
 from .signals import appcontext_popped
 from .signals import appcontext_pushed
@@ -47,6 +48,7 @@ class AppContext:
         self._flashes: list[tuple[str, str]] | None = None
         self._after_request_functions: list[AfterRequestCallable] = []
         self._after_websocket_functions: list[AfterWebsocketCallable] = []
+        self._resources: RequestResources | None = None
 
         try:
             self.url_adapter = app.create_url_adapter(self._request_websocket)
@@ -131,6 +133,19 @@ class AppContext:
         """
         self._session.accessed = True
         return self._session
+
+    @property
+    def resources(self) -> RequestResources:
+        """The request-scoped async resources for this context.
+
+        Accessed through the quart.resources proxy. Resources are
+        created lazily on first use and cleaned up once the request
+        (including any streaming response) has finished.
+        """
+        if self._resources is None:
+            self._resources = RequestResources(self.app)
+
+        return self._resources
 
     def match_request(self) -> None:
         """Apply routing to the current request, storing either the matched
@@ -229,6 +244,10 @@ class AppContext:
 
         with collect_errors:
             await self.app.do_teardown_appcontext(self, exc)
+
+        if self._resources is not None:
+            with collect_errors:
+                await self._resources.close()
 
         _cv_app.reset(self._cv_token)
         self._cv_token = None

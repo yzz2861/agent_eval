@@ -1,3 +1,14 @@
+## Unreleased
+
+- Add request-scoped async resources, registered via
+  ``Quart.register_resource`` (or ``resources.register`` within a
+  request) and acquired via the ``quart.resources`` proxy. Resources
+  are created lazily on first acquisition, shared within the request,
+  support dependencies between resources (with circular dependency
+  detection and rollback on failure), and are cleaned up in reverse
+  creation order once the request - including any streaming response -
+  has finished, even if the client disconnects.
+
 ## Version 0.23.1
 
 Released 2026-08-29

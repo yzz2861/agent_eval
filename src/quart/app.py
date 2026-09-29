@@ -62,6 +62,8 @@ from .helpers import _CollectErrors
 from .helpers import get_debug_flag
 from .helpers import get_flashed_messages
 from .helpers import send_from_directory
+from .resources import RequestResources
+from .resources import ResourceDefinition
 from .routing import QuartMap
 from .routing import QuartRule
 from .sessions import SecureCookieSessionInterface
@@ -318,6 +320,7 @@ class Quart(App):
         self.before_websocket_funcs: dict[
             AppOrBlueprintKey, list[BeforeWebsocketCallable]
         ] = defaultdict(list)
+        self.resource_definitions: dict[str, ResourceDefinition] = {}
         self.teardown_websocket_funcs: dict[
             AppOrBlueprintKey, list[TeardownCallable]
         ] = defaultdict(list)
@@ -1468,6 +1471,42 @@ class Quart(App):
 
         return response
 
+    def register_resource(
+        self,
+        name: str,
+        factory: Callable[[RequestResources], Any] | None = None,
+        *,
+        cleanup: Callable[[Any], Any] | None = None,
+    ) -> Callable:
+        """Register a request-scoped resource factory.
+
+        The resource is created the first time it is acquired via the
+        quart.resources proxy within a request, shared by every
+        acquirer in that request, and cleaned up once the request
+        (including any streaming response) has finished. Can be used
+        directly or as a decorator,
+
+        .. code-block:: python
+
+            @app.register_resource("db")
+            async def create_db(resources):
+                connection = await connect()
+                yield connection
+                await connection.close()
+
+        The factory is called with the request's
+        RequestResources registry and may be a sync or async function
+        returning the resource, or an async generator that yields the
+        resource once - any code after the yield acts as the cleanup.
+        Alternatively a separate cleanup callable may be given, which
+        is called with the created resource.
+        """
+        if factory is None:
+            return lambda func: self.register_resource(name, func, cleanup=cleanup)
+
+        self.resource_definitions[name] = ResourceDefinition(factory, cleanup)
+        return factory
+
     async def handle_request(self, request: Request) -> ResponseTypes:
         async with self.request_context(request) as ctx:
             try:
@@ -1479,6 +1518,12 @@ class Quart(App):
             finally:
                 if request.scope.get("_quart._preserve_context", False):
                     self._preserved_context = ctx.copy()
+                if ctx._resources is not None:
+                    # Hand the resources to the serving code, which
+                    # closes them once the response (including any
+                    # streaming body) has been fully sent.
+                    request.scope["_quart._resources"] = ctx._resources
+                    ctx._resources = None
 
     async def handle_websocket(self, websocket: Websocket) -> ResponseTypes | None:
         async with self.websocket_context(websocket) as ctx:

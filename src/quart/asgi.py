@@ -101,20 +101,37 @@ class ASGIHTTPConnection:
 
     async def handle_request(self, request: Request, send: ASGISendCallable) -> None:
         try:
-            response = await self.app.handle_request(request)
-        except ClientDisconnectedError:
-            return
-        except Exception as error:
-            response = await _handle_exception(self.app, error)
+            try:
+                response = await self.app.handle_request(request)
+            except ClientDisconnectedError:
+                return
+            except Exception as error:
+                response = await _handle_exception(self.app, error)
 
-        if isinstance(response, Response) and response.timeout != Ellipsis:
-            timeout = cast(float | None, response.timeout)
-        else:
-            timeout = self.app.config["RESPONSE_TIMEOUT"]
+            if isinstance(response, Response) and response.timeout != Ellipsis:
+                timeout = cast(float | None, response.timeout)
+            else:
+                timeout = self.app.config["RESPONSE_TIMEOUT"]
+            try:
+                await asyncio.wait_for(
+                    self._send_response(send, response), timeout=timeout
+                )
+            except TimeoutError:
+                pass
+        finally:
+            await self._close_resources(request)
+
+    async def _close_resources(self, request: Request) -> None:
+        resources = request.scope.get("_quart._resources")
+        if resources is None:
+            return
+
         try:
-            await asyncio.wait_for(self._send_response(send, response), timeout=timeout)
-        except TimeoutError:
-            pass
+            # Shielded so that a (re-)cancellation, e.g. on client
+            # disconnect, does not prevent the resources being closed.
+            await asyncio.shield(resources.close())
+        except Exception:
+            self.app.logger.exception("Error whilst closing request resources")
 
     async def _send_response(
         self, send: ASGISendCallable, response: ResponseTypes
