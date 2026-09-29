@@ -28,6 +28,8 @@ from structlog.processors import (
     EventRenamer,
     ExceptionPrettyPrinter,
     JSONRenderer,
+    PathRedactor,
+    RedactionRule,
     StackInfoRenderer,
     UnicodeDecoder,
     UnicodeEncoder,
@@ -762,3 +764,392 @@ class TestRenameKey:
         assert {"msg": "hi", "foo": "bar"} == EventRenamer("msg", "missing")(
             None, None, {"event": "hi", "foo": "bar"}
         )
+
+
+class TestPathRedactor:
+    def test_exact_path_replace(self):
+        """
+        An exact path rule replaces only the value at that path.
+        """
+        redactor = PathRedactor([RedactionRule.at("user", "password")])
+
+        assert {
+            "event": "login",
+            "user": {"name": "jane", "password": "***"},
+        } == redactor(
+            None,
+            None,
+            {
+                "event": "login",
+                "user": {"name": "jane", "password": "hunter2"},
+            },
+        )
+
+    def test_wildcard_matches_list_positions(self):
+        """
+        ANY matches any sequence index, so secrets hiding in dicts within
+        lists are redacted too.
+        """
+        redactor = PathRedactor(
+            [RedactionRule.at("items", PathRedactor.ANY, "secret")]
+        )
+
+        assert {
+            "items": [{"secret": "***", "n": 1}, {"secret": "***", "n": 2}],
+        } == redactor(
+            None,
+            None,
+            {"items": [{"secret": "a", "n": 1}, {"secret": "b", "n": 2}]},
+        )
+
+    def test_wildcard_matches_dict_keys(self):
+        """
+        ANY also matches any dict key at its position.
+        """
+        redactor = PathRedactor(
+            [RedactionRule.at("users", PathRedactor.ANY, "token")]
+        )
+
+        assert {
+            "users": {"a": {"token": "***"}, "b": {"token": "***"}},
+        } == redactor(
+            None,
+            None,
+            {"users": {"a": {"token": "t1"}, "b": {"token": "t2"}}},
+        )
+
+    def test_named_rule_matches_anywhere(self):
+        """
+        Field-name rules match a key no matter how deeply it is nested.
+        """
+        redactor = PathRedactor([RedactionRule.named("password")])
+
+        assert {
+            "password": "***",
+            "deep": {"deeper": [{"password": "***"}]},
+        } == redactor(
+            None,
+            None,
+            {"password": "x", "deep": {"deeper": [{"password": "y"}]}},
+        )
+
+    def test_delete_dict_key(self):
+        """
+        The DELETE action removes a matched dict key entirely.
+        """
+        redactor = PathRedactor(
+            [RedactionRule.named("secret", action=PathRedactor.DELETE)]
+        )
+
+        assert {"a": 1, "nested": {}} == redactor(
+            None, None, {"a": 1, "secret": "x", "nested": {"secret": "y"}}
+        )
+
+    def test_delete_list_element(self):
+        """
+        The DELETE action removes matched sequence elements.
+        """
+        redactor = PathRedactor(
+            [RedactionRule.at("items", 1, action=PathRedactor.DELETE)]
+        )
+
+        assert {"items": ["a", "c"]} == redactor(
+            None, None, {"items": ["a", "b", "c"]}
+        )
+
+    def test_transform_callable(self):
+        """
+        A callable action transforms the matched value.
+        """
+        redactor = PathRedactor(
+            [RedactionRule.named("token", action=lambda v: v[:2] + "...")]
+        )
+
+        assert {"token": "ab..."} == redactor(None, None, {"token": "abcdef"})
+
+    def test_transform_exception_falls_back_to_replacement(self):
+        """
+        If a transform callable raises, the safe replacement is used instead
+        of leaking the value.
+        """
+
+        def boom(_):
+            raise ValueError("nope")
+
+        redactor = PathRedactor([RedactionRule.named("token", action=boom)])
+
+        assert {"token": "***"} == redactor(None, None, {"token": "abcdef"})
+
+    def test_custom_replacement(self):
+        """
+        The default replacement is configurable.
+        """
+        redactor = PathRedactor(
+            [RedactionRule.named("pw")], replacement="<redacted>"
+        )
+
+        assert {"pw": "<redacted>"} == redactor(None, None, {"pw": "x"})
+
+    def test_fixed_replacement_value(self):
+        """
+        A non-callable action replaces the value as-is.
+        """
+        redactor = PathRedactor([RedactionRule.named("pw", action=0)])
+
+        assert {"pw": 0} == redactor(None, None, {"pw": "x"})
+
+    def test_rule_priority_exact_wildcard_named(self):
+        """
+        Exact path rules beat wildcard rules, which beat field-name rules.
+        """
+        redactor = PathRedactor(
+            [
+                RedactionRule.named("secret", action="named"),
+                RedactionRule.at("a", PathRedactor.ANY, action="wild"),
+                RedactionRule.at("a", 0, action="exact"),
+            ]
+        )
+
+        assert {
+            "a": ["exact", "wild"],
+            "b": {"secret": "named"},
+        } == redactor(None, None, {"a": ["x", "y"], "b": {"secret": "z"}})
+
+    def test_first_rule_wins_within_tier(self):
+        """
+        Within one priority tier, the rule defined first wins.
+        """
+        redactor = PathRedactor(
+            [
+                RedactionRule.named("secret", action="first"),
+                RedactionRule.named("secret", action="second"),
+            ]
+        )
+
+        assert {"secret": "first"} == redactor(None, None, {"secret": "x"})
+
+    def test_does_not_mutate_input(self):
+        """
+        The original event dict and all of its values are left untouched.
+        """
+        inner = {"password": "hunter2", "name": "jane"}
+        items = [{"secret": "s3cr3t"}]
+        event_dict = {"event": "login", "user": inner, "items": items}
+
+        redactor = PathRedactor(
+            [
+                RedactionRule.named("password"),
+                RedactionRule.at("items", PathRedactor.ANY, "secret"),
+            ]
+        )
+        result = redactor(None, None, event_dict)
+
+        assert {"password": "hunter2", "name": "jane"} == inner
+        assert [{"secret": "s3cr3t"}] == items
+        assert event_dict["user"] is inner
+        assert event_dict["items"] is items
+        assert result is not event_dict
+
+    def test_untouched_values_keep_identity(self):
+        """
+        Values that are not affected by any rule are returned as the same
+        object, preserving their type and identity.
+        """
+        payload = {"a": [1, 2], "b": {"c": "d"}}
+        redactor = PathRedactor([RedactionRule.named("password")])
+
+        result = redactor(None, None, {"payload": payload, "n": 42})
+
+        assert result["payload"] is payload
+        assert 42 == result["n"]
+        assert isinstance(result["n"], int)
+
+    def test_shared_subobject_processed_once(self):
+        """
+        A shared sub-object is redacted once and stays shared (identical) in
+        the result.
+        """
+        shared = {"password": "hunter2"}
+        redactor = PathRedactor([RedactionRule.named("password")])
+
+        result = redactor(None, None, {"a": shared, "b": shared})
+
+        assert {"password": "***"} == result["a"]
+        assert result["a"] is result["b"]
+
+    def test_cycle_does_not_recurse_forever(self):
+        """
+        Cyclic references are replaced by a placeholder instead of causing
+        infinite recursion.
+        """
+        event_dict = {"event": "x"}
+        event_dict["self"] = event_dict
+        inner = {"password": "hunter2"}
+        inner["loop"] = inner
+        event_dict["inner"] = inner
+
+        redactor = PathRedactor([RedactionRule.named("password")])
+        result = redactor(None, None, event_dict)
+
+        assert "<cycle>" == result["self"]
+        assert {"password": "***", "loop": "<cycle>"} == result["inner"]
+
+    def test_max_depth_omits_without_repr(self):
+        """
+        Once the depth budget is exhausted, the remaining content is replaced
+        by a placeholder -- never by a full repr.
+        """
+        redactor = PathRedactor([], max_depth=2)
+
+        result = redactor(None, None, {"a": {"b": {"c": {"d": "secret"}}}})
+
+        assert {"a": {"b": {"c": "<omitted>"}}} == result
+        assert "secret" not in repr(result)
+
+    def test_max_nodes_omits_without_repr(self):
+        """
+        Once the node budget is exhausted, remaining containers are replaced
+        by a placeholder -- never by a full repr.
+        """
+        redactor = PathRedactor([], max_nodes=3)
+
+        result = redactor(
+            None, None, {"a": {"x": 1}, "b": {"y": 2}, "c": {"z": "secret"}}
+        )
+
+        assert "<omitted>" == result["c"]
+        assert "secret" not in repr(result)
+
+    def test_types_preserved(self):
+        """
+        Values that don't match a rule keep their original types.
+        """
+        redactor = PathRedactor([RedactionRule.named("password")])
+
+        result = redactor(
+            None,
+            None,
+            {
+                "int": 1,
+                "float": 1.5,
+                "bool": True,
+                "none": None,
+                "tuple": (1, 2),
+                "password": "x",
+            },
+        )
+
+        assert isinstance(result["int"], int)
+        assert isinstance(result["float"], float)
+        assert isinstance(result["bool"], bool)
+        assert result["none"] is None
+        assert (1, 2) == result["tuple"]
+        assert isinstance(result["tuple"], tuple)
+
+    def test_tuple_type_preserved_on_change(self):
+        """
+        Tuples that require redaction are rebuilt as tuples.
+        """
+        redactor = PathRedactor([RedactionRule.named("password")])
+
+        result = redactor(None, None, {"t": (1, {"password": "x"})})
+
+        assert (1, {"password": "***"}) == result["t"]
+        assert isinstance(result["t"], tuple)
+
+    def test_exception_locals_redacted(self):
+        """
+        Secrets in structured exception locals (as produced by
+        ExceptionRenderer with ExceptionDictTransformer) are redacted.
+        """
+        from structlog.tracebacks import ExceptionDictTransformer
+
+        chain = [
+            structlog.processors.ExceptionRenderer(
+                ExceptionDictTransformer(show_locals=True, use_rich=False)
+            ),
+            PathRedactor([RedactionRule.named("password")]),
+            JSONRenderer(),
+        ]
+
+        def run():
+            password = "hunter2"  # noqa: F841
+            raise ValueError("boom")
+
+        event_dict = {"event": "failed"}
+        try:
+            run()
+        except ValueError:
+            event_dict["exc_info"] = sys.exc_info()
+
+        for processor in chain:
+            event_dict = processor(None, None, event_dict)
+
+        rendered = json.loads(event_dict)
+        assert "hunter2" not in event_dict
+
+        locals_ = rendered["exception"][0]["frames"][-1]["locals"]
+        assert "***" == locals_["password"]
+
+    def test_json_renderer_and_stdlib_bridge_agree(self, sio):
+        """
+        The same redactor in a native structlog chain and in a
+        ProcessorFormatter foreign pre-chain produces the same redacted
+        output.
+        """
+        redactor = PathRedactor(
+            [
+                RedactionRule.at("user", "password"),
+                RedactionRule.at("items", PathRedactor.ANY, "secret"),
+            ]
+        )
+        payload = {
+            "user": {"name": "jane", "password": "hunter2"},
+            "items": [{"secret": "s3cr3t", "n": 1}],
+        }
+
+        structlog.configure(
+            processors=[
+                redactor,
+                structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+            ],
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            cache_logger_on_first_use=True,
+        )
+        formatter = structlog.stdlib.ProcessorFormatter(
+            foreign_pre_chain=[structlog.stdlib.ExtraAdder(), redactor],
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                JSONRenderer(),
+            ],
+        )
+        handler = logging.StreamHandler(sio)
+        handler.setFormatter(formatter)
+        stdlib_logger = logging.getLogger("test_redactor_bridge")
+        stdlib_logger.addHandler(handler)
+        stdlib_logger.setLevel(logging.INFO)
+        stdlib_logger.propagate = False
+
+        structlog.get_logger("test_redactor_bridge").info("hello", **payload)
+        stdlib_logger.info("hello", extra=payload)
+
+        native_line, foreign_line = sio.getvalue().splitlines()
+        native = json.loads(native_line)
+        foreign = json.loads(foreign_line)
+
+        for rendered in (native, foreign):
+            assert "hunter2" not in native_line
+            assert "s3cr3t" not in foreign_line
+            assert {"name": "jane", "password": "***"} == rendered["user"]
+            assert [{"secret": "***", "n": 1}] == rendered["items"]
+
+    def test_invalid_rule_raises(self):
+        """
+        Rules without a path or name -- or with both -- are rejected.
+        """
+        with pytest.raises(ValueError, match="path or a name"):
+            PathRedactor([RedactionRule()])
+
+        with pytest.raises(ValueError, match="not both"):
+            PathRedactor([RedactionRule(path=("a",), name="a")])

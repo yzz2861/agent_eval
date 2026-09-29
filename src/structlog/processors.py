@@ -9,6 +9,7 @@ Processors useful regardless of the logging framework.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import enum
 import json
@@ -56,6 +57,8 @@ __all__ = [
     "JSONRenderer",
     "KeyValueRenderer",
     "LogfmtRenderer",
+    "PathRedactor",
+    "RedactionRule",
     "StackInfoRenderer",
     "TimeStamper",
     "UnicodeDecoder",
@@ -1003,3 +1006,352 @@ class EventRenamer:
                 event_dict["event"] = replace_by
 
         return event_dict
+
+
+class _AnySegment:
+    """
+    Type of `PathRedactor.ANY`, the wildcard path segment.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "ANY"
+
+    def __copy__(self) -> _AnySegment:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _AnySegment:
+        return self
+
+
+_ANY: Final = _AnySegment()
+
+
+class _RuleAction(enum.Enum):
+    """
+    Special actions for `RedactionRule`.
+    """
+
+    DELETE = "delete"
+    USE_DEFAULT = "use-default"
+
+
+_NO_MATCH: Final = object()
+
+
+class RedactionRule(NamedTuple):
+    """
+    A single redaction rule for `PathRedactor`.
+
+    Don't instantiate directly; use `at()` for path-based rules and
+    `named()` for field-name-based rules.
+
+    The *action* of a rule decides what happens to a matched value:
+
+    - `PathRedactor.DELETE` removes the key (or sequence element) entirely.
+    - A callable is called with the current value and its return value is
+      used instead. If it raises an exception, the value is replaced by the
+      redactor's *replacement* as a safe fallback.
+    - Any other value replaces the matched value as-is.
+    - If omitted, the redactor's *replacement* is used.
+
+    .. versionadded:: 26.2.0
+    """
+
+    path: tuple[Any, ...] | None = None
+    name: Any = None
+    action: Any = _RuleAction.USE_DEFAULT
+
+    @classmethod
+    def at(
+        cls, *path: Any, action: Any = _RuleAction.USE_DEFAULT
+    ) -> RedactionRule:
+        """
+        Match the value at exactly *path*, starting at the event dict's root.
+
+        Path segments are dict keys or sequence indices. The segment
+        `PathRedactor.ANY` matches any single key or index, which allows
+        redacting, for example, a key in every dict within a list.
+        """
+        return cls(path=path, action=action)
+
+    @classmethod
+    def named(
+        cls, name: Any, action: Any = _RuleAction.USE_DEFAULT
+    ) -> RedactionRule:
+        """
+        Match any dict key called *name*, no matter where it appears.
+        """
+        return cls(name=name, action=action)
+
+
+class _RedactionState:
+    """
+    Per-call bookkeeping for `PathRedactor`.
+    """
+
+    __slots__ = ("active", "memo", "nodes")
+
+    def __init__(self) -> None:
+        # id(obj) -> redacted obj, for containers that finished processing.
+        self.memo: dict[int, Any] = {}
+        # ids of containers currently on the recursion stack (cycles).
+        self.active: set[int] = set()
+        self.nodes = 0
+
+
+class PathRedactor:
+    r"""
+    Redact sensitive values anywhere in an event dict, no matter how deeply
+    they are nested -- including dicts within lists or structured exception
+    locals as produced by `ExceptionRenderer` together with
+    :class:`structlog.tracebacks.ExceptionDictTransformer`.
+
+    Rules are `RedactionRule`\ s and come in three flavors with a fixed
+    priority (first match wins):
+
+    1. Exact path rules without wildcards.
+    2. Path rules containing `PathRedactor.ANY` wildcards.
+    3. Field-name rules matching a dict key anywhere.
+
+    Within each tier, rules defined earlier win.
+
+    The event dict and the values it contains are **never mutated**; redacted
+    copies are created only where something actually changed (copy-on-write).
+    Shared sub-objects are processed only once and stay shared in the result.
+    Cyclic references are replaced by the `"<cycle>"` placeholder instead of
+    recursing forever.
+
+    To keep pathological payloads from exhausting resources, traversal is
+    bounded by *max_depth* and *max_nodes*. Once a budget is exhausted, the
+    remaining content is replaced by the `"<omitted>"` placeholder -- it is
+    never rendered in full (for example via `repr()`).
+
+    Args:
+        rules: The `RedactionRule`\ s to apply.
+
+        replacement:
+            Default replacement for matched values and fallback for failing
+            transform callables.
+
+        max_depth: Maximum nesting depth before content is omitted.
+
+        max_nodes: Maximum number of containers visited before the rest is
+            omitted.
+
+    .. versionadded:: 26.2.0
+    """
+
+    ANY: ClassVar = _ANY
+    DELETE: ClassVar = _RuleAction.DELETE
+
+    _OMITTED: ClassVar = "<omitted>"
+    _CYCLE: ClassVar = "<cycle>"
+
+    def __init__(
+        self,
+        rules: Sequence[RedactionRule],
+        *,
+        replacement: Any = "***",
+        max_depth: int = 32,
+        max_nodes: int = 10_000,
+    ) -> None:
+        self.replacement = replacement
+        self.max_depth = max_depth
+        self.max_nodes = max_nodes
+
+        exact: dict[tuple[Any, ...], Any] = {}
+        wild: list[tuple[tuple[Any, ...], Any]] = []
+        named: dict[Any, Any] = {}
+        for rule in rules:
+            if rule.path is not None and rule.name is not None:
+                msg = f"rule must have either a path or a name, not both: {rule!r}"
+                raise ValueError(msg)
+            if rule.path is not None:
+                if any(segment is _ANY for segment in rule.path):
+                    wild.append((rule.path, rule.action))
+                else:
+                    exact.setdefault(rule.path, rule.action)
+            elif rule.name is not None:
+                named.setdefault(rule.name, rule.action)
+            else:
+                msg = f"rule needs a path or a name: {rule!r}"
+                raise ValueError(msg)
+
+        self._exact = exact
+        self._wild = wild
+        self._named = named
+
+    def __call__(
+        self, logger: WrappedLogger, name: str, event_dict: EventDict
+    ) -> EventDict:
+        return cast(
+            EventDict, self._walk(event_dict, (), 0, _RedactionState())
+        )
+
+    def _match(self, path: tuple[Any, ...], key: Any) -> Any:
+        action = self._exact.get(path, _NO_MATCH)
+        if action is not _NO_MATCH:
+            return action
+
+        for wild_path, action in self._wild:
+            if len(wild_path) == len(path) and all(
+                segment is _ANY or segment == part
+                for segment, part in zip(wild_path, path, strict=True)
+            ):
+                return action
+
+        return self._named.get(key, _NO_MATCH)
+
+    def _apply(self, action: Any, value: Any) -> Any:
+        if action is _RuleAction.USE_DEFAULT:
+            return self.replacement
+
+        if callable(action):
+            try:
+                return action(value)
+            except Exception:  # noqa: BLE001
+                return self.replacement
+
+        return action
+
+    def _walk(
+        self,
+        value: Any,
+        path: tuple[Any, ...],
+        depth: int,
+        state: _RedactionState,
+    ) -> Any:
+        if depth > self.max_depth:
+            return self._OMITTED
+
+        if isinstance(value, dict):
+            return self._walk_dict(value, path, depth, state)
+
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return self._walk_sequence(value, path, depth, state)
+
+        return value
+
+    def _enter(self, value: Any, state: _RedactionState) -> Any:
+        """
+        Handle memoization, cycles, and the node budget for a container.
+
+        Return the memoized or placeholder value if *value* must not be
+        walked, else None.
+        """
+        oid = id(value)
+        cached = state.memo.get(oid, _NO_MATCH)
+        if cached is not _NO_MATCH:
+            return cached
+
+        if oid in state.active:
+            return self._CYCLE
+
+        state.nodes += 1
+        if state.nodes > self.max_nodes:
+            return self._OMITTED
+
+        state.active.add(oid)
+
+        return None
+
+    def _walk_dict(
+        self,
+        value: dict[Any, Any],
+        path: tuple[Any, ...],
+        depth: int,
+        state: _RedactionState,
+    ) -> Any:
+        entered = self._enter(value, state)
+        if entered is not None:
+            return entered
+
+        changed = False
+        new: dict[Any, Any] = {}
+        for key, item in value.items():
+            child_path = (*path, key)
+            action = self._match(child_path, key)
+            if action is _RuleAction.DELETE:
+                changed = True
+                continue
+
+            if action is not _NO_MATCH:
+                new[key] = self._apply(action, item)
+                changed = True
+                continue
+
+            new_item = self._walk(item, child_path, depth + 1, state)
+            if new_item is not item:
+                changed = True
+            new[key] = new_item
+
+        state.active.discard(id(value))
+        state.memo[id(value)] = new if changed else value
+
+        return state.memo[id(value)]
+
+    def _walk_sequence(
+        self,
+        value: list[Any] | tuple[Any, ...] | set[Any] | frozenset[Any],
+        path: tuple[Any, ...],
+        depth: int,
+        state: _RedactionState,
+    ) -> Any:
+        entered = self._enter(value, state)
+        if entered is not None:
+            return entered
+
+        changed = False
+        items = []
+        for index, item in enumerate(value):
+            child_path = (*path, index)
+            action = self._match(child_path, index)
+            if action is _RuleAction.DELETE:
+                changed = True
+                continue
+
+            if action is not _NO_MATCH:
+                items.append(self._apply(action, item))
+                changed = True
+                continue
+
+            new_item = self._walk(item, child_path, depth + 1, state)
+            if new_item is not item:
+                changed = True
+            items.append(new_item)
+
+        state.active.discard(id(value))
+
+        if not changed:
+            state.memo[id(value)] = value
+            return value
+
+        result = self._rebuild_sequence(value, items)
+        state.memo[id(value)] = result
+
+        return result
+
+    @staticmethod
+    def _rebuild_sequence(
+        value: list[Any] | tuple[Any, ...] | set[Any] | frozenset[Any],
+        items: list[Any],
+    ) -> Any:
+        """
+        Rebuild a changed sequence, preserving its type where possible.
+        """
+        if isinstance(value, list):
+            return items
+
+        if isinstance(value, tuple):
+            if hasattr(value, "_fields"):  # namedtuple
+                with contextlib.suppress(Exception):
+                    return type(value)(*items)
+
+            return tuple(items)
+
+        if isinstance(value, frozenset):
+            return frozenset(items)
+
+        return set(items)

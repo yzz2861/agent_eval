@@ -15,6 +15,12 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.processors.PathRedactor` together with `structlog.processors.RedactionRule`: a processor that redacts sensitive values anywhere in an event dict -- including dicts nested in lists and structured exception locals -- using exact path rules, `PathRedactor.ANY` wildcard path rules, and field-name rules (in that fixed priority).
+  Matched values can be replaced, deleted (`PathRedactor.DELETE`), or transformed by a callable.
+  The original event dict is never mutated, shared sub-objects stay shared, cyclic references become `"<cycle>"`, and content beyond the *max_depth*/*max_nodes* budgets is safely omitted as `"<omitted>"` instead of being rendered in full.
+
 
 ## [26.1.0](https://github.com/hynek/structlog/compare/25.5.0...26.1.0) - 2026-06-06
 

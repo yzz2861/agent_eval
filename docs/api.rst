@@ -229,6 +229,27 @@ API Reference
 
 .. autoclass:: EventRenamer
 
+.. autoclass:: PathRedactor
+
+   .. doctest::
+
+      >>> from structlog.processors import PathRedactor, RedactionRule
+      >>> redactor = PathRedactor([
+      ...     RedactionRule.at("user", "password"),
+      ...     RedactionRule.at("items", PathRedactor.ANY, "secret"),
+      ...     RedactionRule.named("token", action=PathRedactor.DELETE),
+      ... ])
+      >>> event_dict = {
+      ...     "user": {"name": "jane", "password": "hunter2"},
+      ...     "items": [{"secret": "s3cr3t", "n": 1}],
+      ...     "token": "abc123",
+      ... }
+      >>> redactor(None, "", event_dict)
+      {'user': {'name': 'jane', 'password': '***'}, 'items': [{'secret': '***', 'n': 1}]}
+
+.. autoclass:: RedactionRule
+   :members: at, named
+
 .. autofunction:: add_log_level
 
 .. autoclass:: UnicodeDecoder
