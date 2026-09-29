@@ -49,6 +49,7 @@ from .result import FrozenResult as FrozenResult
 from .result import IteratorResult as IteratorResult
 from .result import MappingResult as MappingResult
 from .result import MergedResult as MergedResult
+from .result import OrderedMergedResult as OrderedMergedResult
 from .result import Result as Result
 from .result import result_tuple as result_tuple
 from .result import ScalarResult as ScalarResult

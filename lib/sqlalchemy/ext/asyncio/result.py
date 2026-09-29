@@ -9,6 +9,7 @@ from __future__ import annotations
 import operator
 from typing import Any
 from typing import AsyncIterator
+from typing import Callable
 from typing import Literal
 from typing import Optional
 from typing import overload
@@ -510,6 +511,38 @@ class AsyncResult(_WithKeys, AsyncCommon[Row[Unpack[_Ts]]]):
         """
 
         return AsyncMappingResult(self._real_result)
+
+    def merge_ordered(
+        self,
+        *others: AsyncResult[Unpack[TupleAny]],
+        key: Optional[Callable[[Any], Any]] = None,
+        columns: Optional[Sequence[_KeyIndexType]] = None,
+        ascending: bool = True,
+        nulls: str = "last",
+    ) -> AsyncResult[Unpack[_Ts]]:
+        """Merge this :class:`_asyncio.AsyncResult` with other compatible
+        result objects, each of which is already sorted by the same key,
+        into a single new :class:`_asyncio.AsyncResult` that yields rows
+        in overall sorted order.
+
+        This is the asyncio counterpart of
+        :meth:`_engine.Result.merge_ordered`; refer to that method for a
+        complete behavioral description.  The returned
+        :class:`_asyncio.AsyncResult` consumes the underlying results
+        through the usual asyncio greenlet bridge, so no synchronous
+        blocking reads are performed in the event loop.
+
+        .. versionadded:: 2.1
+
+        """
+        real_result = self._real_result.merge_ordered(
+            *(other._real_result for other in others),
+            key=key,
+            columns=columns,
+            ascending=ascending,
+            nulls=nulls,
+        )
+        return AsyncResult(real_result)
 
 
 class AsyncScalarResult(AsyncCommon[_R]):

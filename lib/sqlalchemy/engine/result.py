@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import functools
+import heapq
 import itertools
 import operator
 import typing
@@ -1186,6 +1187,87 @@ class Result(_WithKeys, ResultInternal[Row[Unpack[_Ts]]]):
         """
         return MergedResult(self._metadata, (self,) + others)
 
+    def merge_ordered(
+        self,
+        *others: Result[Unpack[TupleAny]],
+        key: Optional[Callable[[Any], Any]] = None,
+        columns: Optional[Sequence[_KeyIndexType]] = None,
+        ascending: bool = True,
+        nulls: str = "last",
+    ) -> OrderedMergedResult[Unpack[TupleAny]]:
+        """Merge this :class:`_engine.Result` with other compatible result
+        objects, each of which is already sorted by the same key, into a
+        single result that yields rows in overall sorted order.
+
+        The object returned is an instance of
+        :class:`_engine.OrderedMergedResult`, which performs a lazy k-way
+        merge over the given result objects.  Rows are pulled from the
+        source results one at a time as they are consumed, holding only a
+        single lookahead row per source, so consuming only the first few
+        rows of the merged result will not consume the source results in
+        full.
+
+        In contrast to :meth:`_engine.Result.merge`, which simply
+        concatenates rows, this method assumes each source result already
+        yields rows sorted by the merge key and interleaves them so that
+        the merged stream is sorted as well.  Rows that compare equal are
+        yielded in the order of the source results they came from, e.g.
+        the merge is stable.
+
+        The new result will use the metadata from this result object.
+        All given result objects must be against an identical set of
+        result columns, otherwise :class:`.ArgumentError` is raised
+        before any row is produced.
+
+        :param others: additional :class:`_engine.Result` objects to be
+         merged with this one.
+
+        :param key: a callable that accepts a raw row, as a tuple, and
+         returns the sort key for that row.   Mutually exclusive with the
+         ``columns`` parameter.
+
+        :param columns: a sequence of column keys, e.g. string names or
+         integer positions, against which each row is compared.
+         Mutually exclusive with the ``key`` parameter.  If neither
+         ``key`` nor ``columns`` is given, rows are compared as a
+         whole.
+
+        :param ascending: if False, rows are merged in descending order.
+         Defaults to True.
+
+        :param nulls: ``"first"`` or ``"last"``, indicating where
+         rows whose sort key is NULL should be ordered relative to
+         non-NULL keys.  Defaults to ``"last"``.
+
+        .. seealso::
+
+            :meth:`_engine.Result.merge`
+
+        """
+        if key is not None and columns is not None:
+            raise exc.ArgumentError(
+                "The 'key' and 'columns' arguments to "
+                "merge_ordered() are mutually exclusive."
+            )
+        if columns is not None:
+            key_fn: Optional[Callable[[Any], Any]] = (
+                tuplegetter(
+                    *[
+                        cast(int, self._metadata._index_for_key(key, True))
+                        for key in columns
+                    ]
+                )
+            )
+        else:
+            key_fn = key
+        return OrderedMergedResult(
+            self._metadata,
+            (self,) + others,
+            key_fn=key_fn,
+            ascending=ascending,
+            nulls=nulls,
+        )
+
 
 class FilterResult(ResultInternal[_R]):
     """A wrapper for a :class:`_engine.Result` that returns objects other than
@@ -2010,3 +2092,153 @@ class MergedResult(IteratorResult[Unpack[_Ts]]):
             r._soft_close(hard=hard, **kw)
         if hard:
             self.closed = True
+
+
+def _compare_merge_values(
+    value: Any, other: Any, ascending: bool, nulls_first: bool
+) -> int:
+    """Compare two merge key values in output order.
+
+    Returns a negative integer if ``value`` is yielded before ``other``,
+    zero if they are equivalent, and a positive integer otherwise.  None
+    values are ordered first or last as indicated by ``nulls_first``,
+    regardless of the sort direction; non-None values are ordered
+    according to ``ascending``.  Tuple keys are compared element by
+    element.
+
+    """
+    if value is None:
+        return 0 if other is None else (-1 if nulls_first else 1)
+    elif other is None:
+        return 1 if nulls_first else -1
+    elif isinstance(value, tuple) and isinstance(other, tuple):
+        for value_item, other_item in zip(value, other):
+            compared = _compare_merge_values(
+                value_item, other_item, ascending, nulls_first
+            )
+            if compared:
+                return compared
+        return 0
+    elif value == other:
+        return 0
+    elif (value < other) == ascending:
+        return -1
+    else:
+        return 1
+
+
+class _MergeSortKey:
+    """Heap-comparable wrapper around a merge key value."""
+
+    __slots__ = ("value", "ascending", "nulls_first")
+
+    def __init__(self, value: Any, ascending: bool, nulls_first: bool):
+        self.value = value
+        self.ascending = ascending
+        self.nulls_first = nulls_first
+
+    def __eq__(self, other: Any) -> bool:
+        return (
+            isinstance(other, _MergeSortKey)
+            and _compare_merge_values(
+                self.value, other.value, self.ascending, self.nulls_first
+            )
+            == 0
+        )
+
+    def __lt__(self, other: Any) -> bool:
+        return (
+            _compare_merge_values(
+                self.value, other.value, self.ascending, self.nulls_first
+            )
+            < 0
+        )
+
+
+class OrderedMergedResult(IteratorResult[Unpack[_Ts]]):
+    """A :class:`_engine.Result` that merges any number of pre-sorted
+    :class:`_engine.Result` objects into a single ordered result.
+
+    Each source result is assumed to already yield rows sorted by the
+    merge key; the sources are interleaved lazily, holding only one
+    lookahead row per source, so that the merged result yields rows in
+    overall sorted order without first consuming the sources in full.
+
+    Returned by the :meth:`_engine.Result.merge_ordered` method.
+
+    .. versionadded:: 2.1
+
+    """
+
+    def __init__(
+        self,
+        cursor_metadata: ResultMetaData,
+        results: Sequence[Result[Unpack[_Ts]]],
+        key_fn: Optional[Callable[[Any], Any]] = None,
+        ascending: bool = True,
+        nulls: str = "last",
+    ):
+        if nulls not in ("first", "last"):
+            raise exc.ArgumentError(
+                "The 'nulls' argument to merge_ordered() must be "
+                "'first' or 'last'."
+            )
+
+        # validate structural compatibility of all sources up front, so
+        # that the error is raised before any row is produced
+        first_keys = list(cursor_metadata.keys)
+        for source in results:
+            if list(source._metadata.keys) != first_keys:
+                raise exc.ArgumentError(
+                    "Can't merge ordered results with incompatible "
+                    "result columns; expected columns "
+                    "%s, got %s" % (first_keys, list(source._metadata.keys))
+                )
+
+        self._results = results
+        self._key_fn = key_fn
+        self._ascending = ascending
+        self._nulls_first = nulls == "first"
+        super().__init__(cursor_metadata, self._ordered_merge_iterator())
+
+        self._unique_filter_state = results[0]._unique_filter_state
+        self._yield_per = results[0]._yield_per
+        self._source_supports_scalars = results[0]._source_supports_scalars
+
+        self._attributes = self._attributes.merge_with(
+            *[r._attributes for r in results]
+        )
+
+    def _sort_key(self, row: Any) -> _MergeSortKey:
+        value = self._key_fn(row) if self._key_fn is not None else row
+        return _MergeSortKey(value, self._ascending, self._nulls_first)
+
+    def _close_sources(self, hard: bool = False) -> None:
+        for source in self._results:
+            source._soft_close(hard=hard)
+
+    def _ordered_merge_iterator(self) -> Iterator[Any]:
+        sources = self._results
+        heap: List[Tuple[_MergeSortKey, int, Any]] = []
+        try:
+            for index, source in enumerate(sources):
+                row = source._fetchone_impl()
+                if row is not None:
+                    heapq.heappush(heap, (self._sort_key(row), index, row))
+            while heap:
+                sort_key, index, row = heapq.heappop(heap)
+                yield row
+                next_row = sources[index]._fetchone_impl()
+                if next_row is not None:
+                    heapq.heappush(
+                        heap, (self._sort_key(next_row), index, next_row)
+                    )
+        except BaseException:
+            # a source failed to produce a row, or the iterator was
+            # closed early; release all the sources we took over
+            self._close_sources()
+            raise
+
+    def _soft_close(self, hard: bool = False, **kw: Any) -> None:
+        self._close_sources(hard=hard)
+        super()._soft_close(hard=hard, **kw)

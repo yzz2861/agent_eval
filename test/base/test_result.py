@@ -1122,6 +1122,289 @@ class MergeResultTest(fixtures.TestBase):
         eq_(result.scalars("y").all(), [2, 1, 3])
 
 
+class _CountingIteratorResult(result.IteratorResult):
+    """IteratorResult that records how many row fetches were performed."""
+
+    def __init__(self, *arg, **kw):
+        super().__init__(*arg, **kw)
+        self.read_count = 0
+
+    def _fetchone_impl(self, hard_close=False):
+        self.read_count += 1
+        return super()._fetchone_impl(hard_close=hard_close)
+
+
+class OrderedMergeResultTest(fixtures.TestBase):
+    def _fixture(self, *datas, keys=("user_id", "user_name")):
+        return [
+            _CountingIteratorResult(
+                result.SimpleResultMetaData(keys), iter(data)
+            )
+            for data in datas
+        ]
+
+    def test_merge_ordered_ascending(self):
+        r1, r2, r3 = self._fixture(
+            [(1, "u1"), (4, "u4"), (7, "u7")],
+            [(2, "u2"), (5, "u5")],
+            [(3, "u3"), (6, "u6")],
+        )
+
+        merged = r1.merge_ordered(r2, r3, columns=["user_id"])
+
+        eq_(merged.keys(), ["user_id", "user_name"])
+        eq_(
+            merged.all(),
+            [
+                (1, "u1"),
+                (2, "u2"),
+                (3, "u3"),
+                (4, "u4"),
+                (5, "u5"),
+                (6, "u6"),
+                (7, "u7"),
+            ],
+        )
+
+    def test_merge_ordered_descending(self):
+        r1, r2 = self._fixture(
+            [(7, "u7"), (4, "u4"), (1, "u1")],
+            [(5, "u5"), (2, "u2")],
+        )
+
+        merged = r1.merge_ordered(
+            r2, columns=["user_id"], ascending=False
+        )
+
+        eq_(
+            merged.all(),
+            [
+                (7, "u7"),
+                (5, "u5"),
+                (4, "u4"),
+                (2, "u2"),
+                (1, "u1"),
+            ],
+        )
+
+    def test_merge_ordered_stable(self):
+        r1, r2, r3 = self._fixture(
+            [(1, "r1a"), (2, "r1b")],
+            [(1, "r2a"), (2, "r2b")],
+            [(1, "r3a"), (2, "r3b")],
+        )
+
+        merged = r1.merge_ordered(r2, r3, columns=["user_id"])
+
+        # equal keys are yielded in source order
+        eq_(
+            merged.all(),
+            [
+                (1, "r1a"),
+                (1, "r2a"),
+                (1, "r3a"),
+                (2, "r1b"),
+                (2, "r2b"),
+                (2, "r3b"),
+            ],
+        )
+
+    @testing.combinations(
+        (True, "last", [(1, "u1"), (3, "u3"), (None, "u4"), (None, "u5")]),
+        (True, "first", [(None, "u4"), (None, "u5"), (1, "u1"), (3, "u3")]),
+        (False, "last", [(3, "u3"), (1, "u1"), (None, "u4"), (None, "u5")]),
+        (False, "first", [(None, "u4"), (None, "u5"), (3, "u3"), (1, "u1")]),
+        argnames="ascending,nulls,expected",
+    )
+    def test_merge_ordered_nulls(self, ascending, nulls, expected):
+        # sources are pre-sorted according to the given ordering
+        if nulls == "first":
+            d1 = [(None, "u4"), (1, "u1")]
+            d2 = [(None, "u5"), (3, "u3")]
+        else:
+            d1 = [(1, "u1"), (None, "u4")]
+            d2 = [(3, "u3"), (None, "u5")]
+        r1, r2 = self._fixture(d1, d2)
+
+        merged = r1.merge_ordered(
+            r2, columns=["user_id"], ascending=ascending, nulls=nulls
+        )
+
+        eq_(merged.all(), expected)
+
+    def test_merge_ordered_key_function(self):
+        r1, r2 = self._fixture(
+            [(1, "b"), (3, "d")],
+            [(2, "a"), (4, "c")],
+        )
+
+        merged = r1.merge_ordered(r2, key=lambda row: row[1])
+
+        eq_(merged.all(), [(2, "a"), (1, "b"), (4, "c"), (3, "d")])
+
+    def test_merge_ordered_default_key(self):
+        r1, r2 = self._fixture(
+            [(1, "b"), (3, "a")],
+            [(1, "c"), (2, "a")],
+        )
+
+        # no key or columns: rows compare as a whole
+        merged = r1.merge_ordered(r2)
+
+        eq_(
+            merged.all(),
+            [(1, "b"), (1, "c"), (2, "a"), (3, "a")],
+        )
+
+    def test_merge_ordered_column_position(self):
+        r1, r2 = self._fixture(
+            [("b", 1), ("d", 3)],
+            [("a", 2), ("c", 4)],
+        )
+
+        merged = r1.merge_ordered(r2, columns=[0])
+
+        eq_(
+            merged.all(),
+            [("a", 2), ("b", 1), ("c", 4), ("d", 3)],
+        )
+
+    def test_merge_ordered_empty_sources(self):
+        r1, r2 = self._fixture([], [])
+
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+
+        eq_(merged.all(), [])
+
+    def test_key_and_columns_are_exclusive(self):
+        r1, r2 = self._fixture([(1, "u1")], [(2, "u2")])
+
+        assert_raises_message(
+            exc.ArgumentError,
+            "are mutually exclusive",
+            r1.merge_ordered,
+            r2,
+            key=lambda row: row[0],
+            columns=["user_id"],
+        )
+
+    def test_invalid_nulls(self):
+        r1, r2 = self._fixture([(1, "u1")], [(2, "u2")])
+
+        assert_raises_message(
+            exc.ArgumentError,
+            "must be 'first' or 'last'",
+            r1.merge_ordered,
+            r2,
+            columns=["user_id"],
+            nulls="bogus",
+        )
+
+    def test_incompatible_columns_raise_before_first_row(self):
+        r1, = self._fixture([(1, "u1")])
+        r2, = self._fixture([(2, "u2")], keys=("user_id", "email"))
+
+        assert_raises_message(
+            exc.ArgumentError,
+            "incompatible result columns",
+            r1.merge_ordered,
+            r2,
+            columns=["user_id"],
+        )
+
+        # the error is raised eagerly, before any row is read
+        eq_(r1.read_count, 0)
+        eq_(r2.read_count, 0)
+
+    def test_views(self):
+        r1, r2 = self._fixture(
+            [(1, "u1"), (3, "u3")], [(2, "u2")]
+        )
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+        eq_(
+            merged.mappings().all(),
+            [
+                {"user_id": 1, "user_name": "u1"},
+                {"user_id": 2, "user_name": "u2"},
+                {"user_id": 3, "user_name": "u3"},
+            ],
+        )
+
+        r1, r2 = self._fixture(
+            [(1, "u1"), (3, "u3")], [(2, "u2")]
+        )
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+        eq_(merged.scalars().all(), [1, 2, 3])
+
+        r1, r2 = self._fixture(
+            [(1, "u1"), (3, "u3")], [(2, "u2")]
+        )
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+        eq_(
+            list(merged.partitions(2)),
+            [[(1, "u1"), (2, "u2")], [(3, "u3")]],
+        )
+
+    def test_close_closes_sources(self):
+        r1, r2 = self._fixture(
+            [(1, "u1"), (3, "u3")], [(2, "u2"), (4, "u4")]
+        )
+
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+        eq_(merged.fetchone(), (1, "u1"))
+
+        merged.close()
+
+        is_true(merged.closed)
+        for source in (r1, r2):
+            is_true(source._soft_closed)
+
+        assert_raises(exc.ResourceClosedError, merged.fetchone)
+
+    def test_source_error_closes_sources(self):
+        def broken_iterator():
+            yield (2, "u2")
+            raise ValueError("source failed")
+
+        r1, = self._fixture([(1, "u1"), (3, "u3")])
+        r2 = _CountingIteratorResult(
+            result.SimpleResultMetaData(["user_id", "user_name"]),
+            broken_iterator(),
+        )
+
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+
+        assert_raises_message(
+            ValueError, "source failed", merged.all
+        )
+
+        for source in (r1, r2):
+            is_true(source._soft_closed)
+
+    def test_partial_consumption_does_not_exhaust_sources(self):
+        r1, r2, r3 = self._fixture(
+            *[
+                [(i * 3 + k, "u%s" % (i * 3 + k)) for i in range(100)]
+                for k in range(3)
+            ]
+        )
+
+        merged = r1.merge_ordered(r2, r3, columns=["user_id"])
+
+        first_ten = merged.fetchmany(10)
+        eq_([row[0] for row in first_ten], list(range(10)))
+
+        # read counts are observable on the sources, and only the
+        # necessary lookahead rows were read: ten yielded rows plus at
+        # most one in-flight row per source
+        total_reads = r1.read_count + r2.read_count + r3.read_count
+        assert total_reads <= 13, total_reads
+
+        merged.close()
+        for source in (r1, r2, r3):
+            is_true(source._soft_closed)
+
+
 class OnlyScalarsTest(fixtures.TestBase):
     """the chunkediterator supports "non tuple mode", where we bypass
     the expense of generating rows when we have only scalar values.

@@ -24,10 +24,12 @@ from sqlalchemy import text
 from sqlalchemy import true
 from sqlalchemy import union_all
 from sqlalchemy.engine import cursor as _cursor
+from sqlalchemy.engine import result as _result
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.ext.asyncio import create_async_pool_from_url
 from sqlalchemy.ext.asyncio import engine as _async_engine
+from sqlalchemy.ext.asyncio.result import AsyncResult
 from sqlalchemy.ext.asyncio import exc as async_exc
 from sqlalchemy.ext.asyncio import exc as asyncio_exc
 from sqlalchemy.ext.asyncio.base import ReversibleProxy
@@ -1697,3 +1699,90 @@ class PoolRegenTest(EngineFixture):
 
         tasks = [thing(engine) for _ in range(10)]
         await asyncio.gather(*tasks)
+
+
+class AsyncOrderedMergeResultTest(fixtures.TestBase):
+    def _async_fixture(self, *datas):
+        return [
+            AsyncResult(
+                _result.IteratorResult(
+                    _result.SimpleResultMetaData(["user_id", "user_name"]),
+                    iter(data),
+                )
+            )
+            for data in datas
+        ]
+
+    @async_test
+    async def test_merge_ordered_async_iteration(self):
+        r1, r2 = self._async_fixture(
+            [(1, "u1"), (3, "u3")], [(2, "u2"), (4, "u4")]
+        )
+
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+
+        eq_(
+            [row async for row in merged],
+            [(1, "u1"), (2, "u2"), (3, "u3"), (4, "u4")],
+        )
+
+    @async_test
+    async def test_merge_ordered_descending(self):
+        r1, r2 = self._async_fixture(
+            [(4, "u4"), (2, "u2")], [(3, "u3"), (1, "u1")]
+        )
+
+        merged = r1.merge_ordered(
+            r2, columns=["user_id"], ascending=False
+        )
+
+        eq_(
+            [row async for row in merged],
+            [(4, "u4"), (3, "u3"), (2, "u2"), (1, "u1")],
+        )
+
+    @async_test
+    async def test_merge_ordered_views(self):
+        r1, r2 = self._async_fixture([(1, "u1"), (3, "u3")], [(2, "u2")])
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+        eq_(await merged.scalars().all(), [1, 2, 3])
+
+        r1, r2 = self._async_fixture([(1, "u1"), (3, "u3")], [(2, "u2")])
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+        eq_(
+            [dict(row) for row in await merged.mappings().all()],
+            [
+                {"user_id": 1, "user_name": "u1"},
+                {"user_id": 2, "user_name": "u2"},
+                {"user_id": 3, "user_name": "u3"},
+            ],
+        )
+
+        r1, r2 = self._async_fixture([(1, "u1"), (3, "u3")], [(2, "u2")])
+        merged = r1.merge_ordered(r2, columns=["user_id"])
+        eq_(
+            [partition async for partition in merged.partitions(2)],
+            [[(1, "u1"), (2, "u2")], [(3, "u3")]],
+        )
+
+    @async_test
+    async def test_merge_ordered_close_closes_sources(self):
+        s1 = _result.IteratorResult(
+            _result.SimpleResultMetaData(["user_id", "user_name"]),
+            iter([(1, "u1"), (3, "u3")]),
+        )
+        s2 = _result.IteratorResult(
+            _result.SimpleResultMetaData(["user_id", "user_name"]),
+            iter([(2, "u2")]),
+        )
+
+        merged = AsyncResult(s1).merge_ordered(
+            AsyncResult(s2), columns=["user_id"]
+        )
+
+        eq_(await merged.fetchone(), (1, "u1"))
+
+        await merged.close()
+
+        is_true(s1._soft_closed)
+        is_true(s2._soft_closed)

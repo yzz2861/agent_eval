@@ -2800,6 +2800,9 @@ Result Set API
 .. autoclass:: MergedResult
     :members:
 
+.. autoclass:: OrderedMergedResult
+    :members:
+
 .. autoclass:: Result
     :members:
     :inherited-members:
