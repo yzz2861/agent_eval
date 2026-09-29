@@ -1520,6 +1520,111 @@ class AsyncResultTest(EngineFixture):
             eq_(u1, 1)
 
 
+class AsyncOrderedMergeResultTest(EngineFixture):
+    __backend__ = True
+    __requires__ = ("server_side_cursors", "async_dialect")
+
+    async def _shard(self, conn, users, id_list, descending=False):
+        direction = users.c.user_id.desc() if descending else users.c.user_id
+        return await conn.stream(
+            select(users)
+            .where(users.c.user_id.in_(id_list))
+            .order_by(direction)
+        )
+
+    @async_test
+    async def test_ordered_merge_fetchall(self, async_engine):
+        users = self.tables.users
+        async with async_engine.connect() as conn:
+            r1 = await self._shard(conn, users, [1, 4, 7])
+            r2 = await self._shard(conn, users, [2, 5, 8])
+            r3 = await self._shard(conn, users, [3, 6, 9])
+
+            merged = r1.ordered_merge(r2, r3, key="user_id")
+
+            eq_(
+                await merged.fetchall(),
+                [(i, "name%d" % i) for i in range(1, 10)],
+            )
+
+    @async_test
+    async def test_ordered_merge_descending(self, async_engine):
+        users = self.tables.users
+        async with async_engine.connect() as conn:
+            r1 = await self._shard(conn, users, [1, 4, 7], descending=True)
+            r2 = await self._shard(conn, users, [2, 5, 8], descending=True)
+
+            merged = r1.ordered_merge(r2, key=0, descending=True)
+
+            eq_(await merged.scalars(0).fetchall(), [8, 7, 5, 4, 2, 1])
+
+    @async_test
+    async def test_ordered_merge_aiter_and_close(self, async_engine):
+        users = self.tables.users
+        async with async_engine.connect() as conn:
+            r1 = await self._shard(conn, users, [1, 3, 5])
+            r2 = await self._shard(conn, users, [2, 4, 6])
+
+            merged = r1.ordered_merge(r2)
+
+            rows = []
+            async for row in merged:
+                rows.append(row[0])
+                if len(rows) == 3:
+                    break
+            eq_(rows, [1, 2, 3])
+
+            await merged.close()
+            assert merged.closed
+            assert r1.closed
+            assert r2.closed
+
+    @async_test
+    async def test_ordered_merge_mappings(self, async_engine):
+        users = self.tables.users
+        async with async_engine.connect() as conn:
+            r1 = await self._shard(conn, users, [1, 3])
+            r2 = await self._shard(conn, users, [2, 4])
+
+            merged = r1.ordered_merge(r2)
+
+            eq_(
+                await merged.mappings().fetchall(),
+                [
+                    {"user_id": i, "user_name": "name%d" % i}
+                    for i in range(1, 5)
+                ],
+            )
+
+    @async_test
+    async def test_ordered_merge_partitions(self, async_engine):
+        users = self.tables.users
+        async with async_engine.connect() as conn:
+            r1 = await self._shard(conn, users, [1, 3, 5])
+            r2 = await self._shard(conn, users, [2, 4, 6])
+
+            merged = r1.ordered_merge(r2)
+
+            partitions = [
+                [row[0] for row in partition]
+                async for partition in merged.partitions(4)
+            ]
+            eq_(partitions, [[1, 2, 3, 4], [5, 6]])
+
+    @async_test
+    async def test_ordered_merge_incompatible_columns(self, async_engine):
+        users = self.tables.users
+        async with async_engine.connect() as conn:
+            r1 = await self._shard(conn, users, [1, 2])
+            other = await conn.stream(select(users.c.user_id))
+
+            with expect_raises_message(
+                exc.ArgumentError,
+                "all results must return identical column keys",
+            ):
+                r1.ordered_merge(other)
+
+
 class TextSyncDBAPI(fixtures.TestBase):
     __requires__ = ("asyncio",)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import operator
 from typing import Any
 from typing import AsyncIterator
+from typing import Callable
 from typing import Literal
 from typing import Optional
 from typing import overload
@@ -16,6 +17,7 @@ from typing import Sequence
 from typing import Tuple
 from typing import TYPE_CHECKING
 from typing import TypeVar
+from typing import Union
 
 from . import exc as async_exc
 from ... import util
@@ -466,6 +468,43 @@ class AsyncResult(_WithKeys, AsyncCommon[Row[Unpack[_Ts]]]):
         """
 
         return await greenlet_spawn(FrozenResult, self)
+
+    def ordered_merge(
+        self,
+        *others: AsyncResult[Unpack[TupleAny]],
+        key: Union[_KeyIndexType, Callable[[Any], Any], None] = None,
+        descending: bool = False,
+        nulls_first: Optional[bool] = None,
+    ) -> AsyncResult[Unpack[_Ts]]:
+        """Merge this :class:`_asyncio.AsyncResult` with other
+        compatible result objects, interleaving rows so that the merged
+        stream remains ordered by a common sort key.
+
+        This is the asyncio counterpart of
+        :meth:`_engine.Result.ordered_merge`; refer to that method
+        for a complete behavioral description.
+
+        The returned :class:`_asyncio.AsyncResult` is consumed using
+        the usual asynchronous accessors, e.g. ``async for``,
+        :meth:`_asyncio.AsyncResult.fetchone`,
+        :meth:`_asyncio.AsyncResult.partitions`,
+        :meth:`_asyncio.AsyncResult.scalars` and
+        :meth:`_asyncio.AsyncResult.mappings`.  Rows are pulled
+        lazily from each source result, one row of lookahead per source,
+        as the merged stream is awaited; no synchronous blocking reads
+        are performed in the asyncio event loop.
+
+        .. versionadded:: 2.1
+
+        """
+        return AsyncResult(
+            self._real_result.ordered_merge(
+                *(other._real_result for other in others),
+                key=key,
+                descending=descending,
+                nulls_first=nulls_first,
+            )
+        )
 
     @overload
     def scalars(

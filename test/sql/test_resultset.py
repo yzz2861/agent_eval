@@ -1,6 +1,7 @@
 from collections import defaultdict
 import collections.abc as collections_abc
 from contextlib import contextmanager
+from contextlib import ExitStack
 import csv
 from io import StringIO
 import operator
@@ -3794,6 +3795,313 @@ class MergeCursorResultTest(fixtures.TablesTest):
             [("u1",), ("u2",), ("u3",), ("u4",)],
         )
         result.close()
+
+
+class OrderedMergeCursorResultTest(fixtures.TablesTest):
+    __sparse_driver_backend__ = True
+
+    __requires__ = ("independent_cursors",)
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "users",
+            metadata,
+            Column("user_id", INT, primary_key=True, autoincrement=False),
+            Column("user_name", VARCHAR(20)),
+            Column("score", Integer, nullable=True),
+            test_needs_acid=True,
+        )
+
+    @classmethod
+    def insert_data(cls, connection):
+        users = cls.tables.users
+
+        connection.execute(
+            users.insert(),
+            [
+                {"user_id": 7, "user_name": "u1", "score": 10},
+                {"user_id": 8, "user_name": "u2", "score": 20},
+                {"user_id": 9, "user_name": "u3", "score": 15},
+                {"user_id": 10, "user_name": "u4", "score": 10},
+                {"user_id": 11, "user_name": "u5", "score": None},
+                {"user_id": 12, "user_name": "u6", "score": None},
+            ],
+        )
+
+    @testing.fixture
+    def id_merge_fixture(self):
+        users = self.tables.users
+
+        def results(connection, descending=False):
+            direction = (
+                users.c.user_id.desc() if descending else users.c.user_id
+            )
+            return tuple(
+                connection.execute(
+                    users.select()
+                    .where(users.c.user_id.in_(id_list))
+                    .order_by(direction)
+                )
+                for id_list in ([7, 8], [9], [10, 11], [12])
+            )
+
+        return results
+
+    @testing.fixture
+    def score_merge_fixture(self):
+        users = self.tables.users
+
+        def results(connection, descending=False, nulls_first=False):
+            if descending:
+                direction = users.c.score.desc()
+            else:
+                direction = users.c.score.asc()
+            direction = (
+                direction.nulls_first() if nulls_first
+                else direction.nulls_last()
+            )
+            return tuple(
+                connection.execute(
+                    users.select()
+                    .where(users.c.user_id.in_(id_list))
+                    .order_by(direction)
+                )
+                for id_list in ([7, 8], [9], [10, 11], [12])
+            )
+
+        return results
+
+    def test_ordered_merge_results(self, connection, id_merge_fixture):
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+
+        result = r1.ordered_merge(r2, r3, r4)
+
+        eq_(result.keys(), ["user_id", "user_name", "score"])
+        eq_(result.fetchall(), [(7, "u1", 10), (8, "u2", 20), (9, "u3", 15),
+                                (10, "u4", 10), (11, "u5", None),
+                                (12, "u6", None)])
+
+    def test_ordered_merge_interleaves(self, connection):
+        users = self.tables.users
+
+        r1 = connection.execute(
+            users.select().where(users.c.user_id.in_([7, 10])).order_by(
+                users.c.user_id
+            )
+        )
+        r2 = connection.execute(
+            users.select().where(users.c.user_id.in_([8, 9])).order_by(
+                users.c.user_id
+            )
+        )
+
+        result = r1.ordered_merge(r2)
+        eq_(result.scalars(0).all(), [7, 8, 9, 10])
+
+    def test_ordered_merge_descending(self, connection, id_merge_fixture):
+        r1, r2, r3, r4 = id_merge_fixture(connection, descending=True)
+
+        result = r1.ordered_merge(r2, r3, r4, descending=True)
+        eq_(result.scalars(0).all(), [12, 11, 10, 9, 8, 7])
+
+    def test_ordered_merge_stable(self, connection, score_merge_fixture):
+        r1, r2, r3, r4 = score_merge_fixture(connection)
+
+        result = r1.ordered_merge(r2, r3, r4, key="score")
+        # equal keys are returned in source order; within a source,
+        # original order is preserved
+        eq_(result.scalars(0).all(), [7, 10, 9, 8, 11, 12])
+
+    def test_ordered_merge_nulls_last(
+        self, connection, score_merge_fixture
+    ):
+        r1, r2, r3, r4 = score_merge_fixture(connection)
+
+        result = r1.ordered_merge(
+            r2, r3, r4, key="score", nulls_first=False
+        )
+        eq_(result.scalars(0).all(), [7, 10, 9, 8, 11, 12])
+
+    def test_ordered_merge_nulls_first(
+        self, connection, score_merge_fixture
+    ):
+        r1, r2, r3, r4 = score_merge_fixture(connection, nulls_first=True)
+
+        result = r1.ordered_merge(
+            r2, r3, r4, key="score", nulls_first=True
+        )
+        eq_(result.scalars(0).all(), [11, 12, 7, 10, 9, 8])
+
+    def test_ordered_merge_descending_nulls_first_default(
+        self, connection, score_merge_fixture
+    ):
+        r1, r2, r3, r4 = score_merge_fixture(
+            connection, descending=True, nulls_first=True
+        )
+
+        # when nulls_first is not given, NULL values sort first for
+        # descending sorts
+        result = r1.ordered_merge(r2, r3, r4, key="score", descending=True)
+        eq_(result.scalars(0).all(), [11, 12, 8, 9, 7, 10])
+
+    @testing.combinations(
+        ("name",), ("index",), ("column",), ("callable",),
+        argnames="key_style",
+    )
+    def test_ordered_merge_key_styles(
+        self, connection, id_merge_fixture, key_style
+    ):
+        users = self.tables.users
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+
+        if key_style == "name":
+            key = "user_id"
+        elif key_style == "index":
+            key = 0
+        elif key_style == "column":
+            key = users.c.user_id
+        else:
+            key = lambda row: row[0]  # noqa: E731
+
+        result = r1.ordered_merge(r2, r3, r4, key=key)
+        eq_(result.scalars(0).all(), [7, 8, 9, 10, 11, 12])
+
+    def test_ordered_merge_empty_source(self, connection, id_merge_fixture):
+        users = self.tables.users
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+        empty = connection.execute(
+            users.select().where(users.c.user_id == -1)
+        )
+
+        result = r1.ordered_merge(empty, r2, r3, r4)
+        eq_(result.scalars(0).all(), [7, 8, 9, 10, 11, 12])
+
+    def test_incompatible_columns(self, connection, id_merge_fixture):
+        users = self.tables.users
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+        other = connection.execute(select(users.c.user_id))
+
+        with expect_raises_message(
+            sa_exc.ArgumentError,
+            "all results must return identical column keys",
+        ):
+            r1.ordered_merge(other)
+
+    def test_mappings_view(self, connection, id_merge_fixture):
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+
+        result = r1.ordered_merge(r2, r3, r4)
+        eq_(
+            result.mappings().fetchall(),
+            [
+                {"user_id": 7, "user_name": "u1", "score": 10},
+                {"user_id": 8, "user_name": "u2", "score": 20},
+                {"user_id": 9, "user_name": "u3", "score": 15},
+                {"user_id": 10, "user_name": "u4", "score": 10},
+                {"user_id": 11, "user_name": "u5", "score": None},
+                {"user_id": 12, "user_name": "u6", "score": None},
+            ],
+        )
+
+    def test_partitions_view(self, connection, id_merge_fixture):
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+
+        result = r1.ordered_merge(r2, r3, r4)
+        eq_(
+            [list(partition) for partition in result.partitions(4)],
+            [
+                [(7, "u1", 10), (8, "u2", 20), (9, "u3", 15),
+                 (10, "u4", 10)],
+                [(11, "u5", None), (12, "u6", None)],
+            ],
+        )
+
+    def test_columns_view(self, connection, id_merge_fixture):
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+
+        result = r1.ordered_merge(r2, r3, r4)
+        eq_(
+            result.columns("user_name").fetchall(),
+            [("u1",), ("u2",), ("u3",), ("u4",), ("u5",), ("u6",)],
+        )
+
+    def test_close(self, connection, id_merge_fixture):
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+
+        result = r1.ordered_merge(r2, r3, r4)
+
+        for r in [result, r1, r2, r3, r4]:
+            assert not r.closed
+
+        result.close()
+        for r in [result, r1, r2, r3, r4]:
+            assert r.closed
+
+    def test_first(self, connection, id_merge_fixture):
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+
+        result = r1.ordered_merge(r2, r3, r4)
+        eq_(result.first(), (7, "u1", 10))
+        for r in [r1, r2, r3, r4]:
+            assert r.closed
+
+    def test_source_error_closes_all(self, connection, id_merge_fixture):
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+
+        def failing_iterator():
+            yield (9, "u3", 15)
+            raise IOError("random read failure")
+
+        with mock.patch.object(
+            r2, "_raw_row_iterator", lambda: failing_iterator()
+        ):
+            result = r1.ordered_merge(r2, r3, r4)
+
+            with expect_raises_message(IOError, "random read failure"):
+                result.fetchall()
+
+        for r in [result, r1, r2, r3, r4]:
+            assert r.closed
+
+    def test_partial_fetch_does_not_consume_sources(
+        self, connection, id_merge_fixture
+    ):
+        r1, r2, r3, r4 = id_merge_fixture(connection)
+
+        counts = defaultdict(int)
+
+        def counting_iterator(result, index):
+            orig = result._raw_row_iterator
+
+            def gen():
+                for row in orig():
+                    counts[index] += 1
+                    yield row
+
+            return gen
+
+        results = [r1, r2, r3, r4]
+        with ExitStack() as stack:
+            for index, r in enumerate(results):
+                stack.enter_context(
+                    mock.patch.object(
+                        r, "_raw_row_iterator", counting_iterator(r, index)
+                    )
+                )
+
+            result = r1.ordered_merge(r2, r3, r4)
+
+            eq_(result.fetchone(), (7, "u1", 10))
+            eq_(result.fetchone(), (8, "u2", 20))
+
+            # one lookahead row per source, plus one refill for the row
+            # that was consumed from the first source; the remaining rows
+            # are not pulled from any source
+            eq_(sum(counts.values()), 5)
+            le_(max(counts.values()), 2)
+
+            result.close()
 
 
 class GenerativeResultTest(fixtures.TablesTest):
