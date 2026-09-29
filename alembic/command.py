@@ -13,10 +13,32 @@ from .script import ScriptDirectory
 from .util import compat
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from alembic.config import Config
     from alembic.script.base import Script
     from alembic.script.revision import _RevIdType
     from .runtime.environment import ProcessRevisionDirectiveFn
+
+
+def _revision_digest_opts(config: Config) -> dict[str, Any]:
+    """Read revision digest verification options from the config.
+
+    These are passed through to the :class:`.MigrationContext` so that
+    revision digest verification can be enabled from the configuration
+    file, e.g.::
+
+        [alembic]
+        verify_revision_digests = true
+
+    """
+    opts: dict[str, Any] = {}
+    if util.asbool(config.get_alembic_option("verify_revision_digests")):
+        opts["verify_revision_digests"] = True
+    digest_table = config.get_alembic_option("revision_digest_table")
+    if digest_table:
+        opts["revision_digest_table"] = digest_table
+    return opts
 
 
 def list_templates(config: Config) -> None:
@@ -483,6 +505,7 @@ def upgrade(
         starting_rev=starting_rev,
         destination_rev=revision,
         tag=tag,
+        **_revision_digest_opts(config),
     ):
         script.run_env()
 
@@ -530,6 +553,7 @@ def downgrade(
         starting_rev=starting_rev,
         destination_rev=revision,
         tag=tag,
+        **_revision_digest_opts(config),
     ):
         script.run_env()
 
@@ -789,6 +813,7 @@ def stamp(
         destination_rev=util.to_tuple(destination_revs),
         tag=tag,
         purge=purge,
+        **_revision_digest_opts(config),
     ):
         script.run_env()
 
@@ -850,3 +875,73 @@ def ensure_version(config: Config, sql: bool = False) -> None:
         as_sql=sql,
     ):
         script.run_env()
+
+
+def baseline(config: Config) -> None:
+    """Record the current revision files as the trusted digest baseline.
+
+    This is the explicit trust-on-first-use step for revision digest
+    verification: content digests and graph signatures of the revision
+    files are recorded for every revision currently applied to the
+    database, so that subsequent upgrades can detect changes to the
+    already-applied history.  Run this once when enabling revision
+    digest verification on a database that already has migrations
+    applied, and again whenever an intentional change to an applied
+    revision file should be accepted.
+
+    :param config: a :class:`.Config` instance.
+
+    """
+
+    script = ScriptDirectory.from_config(config)
+
+    recorded: list[int] = []
+
+    def do_baseline(rev, context):
+        recorded.append(context.baseline_revision_digests())
+        return []
+
+    # the baseline command itself must be able to run before any
+    # baseline exists, so eager verification is suppressed here
+    digest_opts = _revision_digest_opts(config)
+    digest_opts["verify_revision_digests"] = False
+
+    with EnvironmentContext(config, script, fn=do_baseline, **digest_opts):
+        script.run_env()
+
+    config.print_stdout(
+        "Recorded digest baseline for %d applied revision(s).",
+        recorded[0] if recorded else 0,
+    )
+
+
+def verify(config: Config) -> None:
+    """Verify applied revisions against their recorded digest baseline.
+
+    Checks every revision applied to the database - expanded along the
+    ancestor graph of all current database heads, including merges and
+    depends_on dependencies - against the digests recorded when the
+    revisions were applied or baselined.  Missing revision files,
+    changed revision contents, and revision graph structure changes
+    are reported as separate categories; no migration is run.
+
+    :param config: a :class:`.Config` instance.
+
+    """
+
+    script = ScriptDirectory.from_config(config)
+
+    def do_verify(rev, context):
+        context.verify_revision_digests()
+        return []
+
+    with EnvironmentContext(
+        config,
+        script,
+        fn=do_verify,
+        dont_mutate=True,
+        **_revision_digest_opts(config),
+    ):
+        script.run_env()
+
+    config.print_stdout("Revision digest verification OK")

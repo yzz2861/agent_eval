@@ -23,6 +23,7 @@ from sqlalchemy.engine import url as sqla_url
 from sqlalchemy.engine.strategies import MockEngineStrategy
 from typing_extensions import ContextManager
 
+from . import integrity
 from .. import ddl
 from .. import util
 from ..util import sqla_compat
@@ -200,6 +201,20 @@ class MigrationContext:
             version_table=version_table,
             version_table_schema=version_table_schema,
             version_table_pk=opts.get("version_table_pk", True),
+        )
+
+        self.revision_digest_verification = bool(
+            opts.get("verify_revision_digests", False)
+        )
+        """True if revision digest verification/recording is enabled."""
+
+        self.revision_digest_table = opts.get(
+            "revision_digest_table", integrity.DEFAULT_DIGEST_TABLE
+        )
+        """Name of the table used to store revision digests."""
+
+        self._revision_digests = integrity.revision_digest_table(
+            self.revision_digest_table, version_table_schema
         )
 
         log.info("Context impl %s.", self.impl.__class__.__name__)
@@ -545,6 +560,99 @@ class MigrationContext:
             self.connection, self.version_table, self.version_table_schema
         )
 
+    def _ensure_revision_digest_table(self) -> None:
+        assert self.connection is not None
+        integrity.create_digest_table(self.connection, self._revision_digests)
+
+    def _has_revision_digest_table(self) -> bool:
+        assert self.connection is not None
+        return integrity.has_digest_table(
+            self.connection, self._revision_digests
+        )
+
+    def _purge_revision_digests(self) -> None:
+        if self._has_revision_digest_table():
+            assert self.connection is not None
+            self.connection.execute(self._revision_digests.delete())
+
+    def _sync_revision_digests(self, heads: tuple[str, ...]) -> None:
+        assert self.connection is not None
+        assert self.script is not None
+        self._ensure_revision_digest_table()
+        integrity.sync_revision_digests(
+            self.connection, self.script, self._revision_digests, heads
+        )
+
+    def _verify_revision_digests(self, heads: tuple[str, ...]) -> None:
+        if self.script is None:
+            raise util.CommandError(
+                "Revision digest verification requires a script directory."
+            )
+        assert self.connection is not None
+        integrity.verify_revision_digests(
+            self.connection, self.script, self._revision_digests, heads
+        )
+
+    def verify_revision_digests(self) -> None:
+        """Verify applied revisions against their recorded digests.
+
+        The verification scope is the full ancestor graph of the current
+        database heads, expanded along ``down_revision`` and
+        ``depends_on`` edges, including merges.  Missing revision
+        files, changed revision contents, and revision graph structure
+        changes are reported as separate categories.  No migration
+        script is executed in order to perform the check.
+
+        Raises :class:`~alembic.util.CommandError` if no digest baseline
+        has been recorded yet, and
+        :class:`~alembic.runtime.integrity.RevisionIntegrityError` if any
+        applied revision fails verification.
+
+        .. seealso::
+
+            :meth:`.MigrationContext.baseline_revision_digests`
+
+        """
+        if self.as_sql:
+            raise util.CommandError(
+                "Revision digest verification requires an online "
+                "database connection; it is not available in "
+                "offline '--sql' mode."
+            )
+        self._verify_revision_digests(self.get_current_heads())
+
+    def baseline_revision_digests(self) -> int:
+        """Record the current revision files as the trusted digest
+        baseline for all revisions currently applied to the database.
+
+        This is the explicit trust-on-first-use step for revision digest
+        verification: the current contents of the revision files are
+        recorded as the baseline against which later upgrades verify
+        the applied history.  Returns the number of applied revisions
+        for which digests were recorded.
+
+        """
+        if self.as_sql:
+            raise util.CommandError(
+                "Recording a revision digest baseline requires an online "
+                "database connection; it is not available in "
+                "offline '--sql' mode."
+            )
+        if self.script is None:
+            raise util.CommandError(
+                "Recording a revision digest baseline requires a script "
+                "directory."
+            )
+        assert self.connection is not None
+        with self.begin_transaction(_per_migration=True):
+            self._ensure_revision_digest_table()
+            return integrity.sync_revision_digests(
+                self.connection,
+                self.script,
+                self._revision_digests,
+                self.get_current_heads(),
+            )
+
     def stamp(self, script_directory: ScriptDirectory, revision: str) -> None:
         """Stamp the version table with a specific revision.
 
@@ -560,6 +668,9 @@ class MigrationContext:
         head_maintainer = HeadMaintainer(self, heads)
         for step in script_directory._stamp_revs(revision, heads):
             head_maintainer.update_to_step(step)
+        if self.revision_digest_verification and not self.as_sql:
+            with self.begin_transaction(_per_migration=True):
+                self._sync_revision_digests(tuple(head_maintainer.heads))
 
     def run_migrations(self, **kw: Any) -> None:
         r"""Run the migration scripts established for this
@@ -585,15 +696,17 @@ class MigrationContext:
         self.impl.start_migrations()
 
         heads: tuple[str, ...]
+        dont_mutate = self.opts.get("dont_mutate", False)
         if self.purge:
             if self.as_sql:
                 raise util.CommandError("Can't use --purge with --sql mode")
             self._ensure_version_table(purge=True)
+            if self.revision_digest_verification:
+                with self.begin_transaction(_per_migration=True):
+                    self._purge_revision_digests()
             heads = ()
         else:
             heads = self.get_current_heads()
-
-            dont_mutate = self.opts.get("dont_mutate", False)
 
             if not self.as_sql and not heads and not dont_mutate:
                 self._ensure_version_table()
@@ -601,6 +714,16 @@ class MigrationContext:
         head_maintainer = HeadMaintainer(self, heads)
 
         assert self._migrations_fn is not None
+        record_digests = (
+            self.revision_digest_verification
+            and not self.as_sql
+            and not dont_mutate
+        )
+        if record_digests and heads:
+            # verify that previously applied revisions have not been
+            # altered before running any pending migrations
+            self._verify_revision_digests(heads)
+
         for step in self._migrations_fn(heads, self):
             with self.begin_transaction(_per_migration=True):
                 if self.as_sql and not head_maintainer.heads:
@@ -621,6 +744,8 @@ class MigrationContext:
                 # and row-targeted updates and deletes, it's simpler for now
                 # just to run the operations on every version
                 head_maintainer.update_to_step(step)
+                if record_digests:
+                    self._sync_revision_digests(tuple(head_maintainer.heads))
                 for callback in self.on_version_apply_callbacks:
                     callback(
                         ctx=self,
