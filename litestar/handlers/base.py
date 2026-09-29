@@ -11,6 +11,7 @@ from litestar.di import Provide
 from litestar.dto import DTOData
 from litestar.exceptions import ImproperlyConfiguredException, LitestarException
 from litestar.middleware.constraints import check_middleware_constraints
+from litestar.middleware.ordering import get_middleware_execution_order
 from litestar.serialization import default_deserializer, default_serializer
 from litestar.types import (
     Dependencies,
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from litestar.app import Litestar
     from litestar.connection import ASGIConnection
     from litestar.dto import AbstractDTO
+    from litestar.middleware.ordering import MiddlewareExecutionOrder
     from litestar.router import Router
     from litestar.routes import BaseRoute
     from litestar.types import AsyncAnyCallable
@@ -391,6 +393,17 @@ class BaseRouteHandler:
         """Return registered middlewares"""
 
         return self.middleware
+
+    @property
+    def middleware_execution_order(self) -> MiddlewareExecutionOrder:
+        """The order in which the middleware of this handler is entered and exited
+        when handling a request, after all name-based ordering constraints have been
+        resolved.
+
+        Middleware is listed by its stable 'name' if it declares one, otherwise by
+        its fully qualified name.
+        """
+        return get_middleware_execution_order(self.middleware)
 
     @deprecated("3.0", removal_in="4.0", alternative=".exception_handlers attribute")
     def resolve_exception_handlers(self) -> ExceptionHandlersMap:

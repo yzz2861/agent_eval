@@ -82,15 +82,25 @@ class _ResolvedMiddlewareConstraints:
 class MiddlewareConstraints:
     """Constraints for a middleware."""
 
-    before: tuple["MiddlewareForwardRef | Middleware | MiddlewareFactory", ...] = ()
+    before: tuple["MiddlewareForwardRef | Middleware | MiddlewareFactory | str", ...] = ()
     """
     Tuple of middlewares that, if present, need to appear *before* the middleware this
     constraint is applied to (i.e. closer to the application)
+
+    Middlewares can be referenced by type, by a 'MiddlewareForwardRef', or - as a
+    plain string - by the stable 'name' another middleware declares. Name references
+    are *strong* references: They are resolved to an ordering at application startup,
+    and raise an error if no middleware with the referenced name is registered.
     """
-    after: tuple["MiddlewareForwardRef | Middleware | MiddlewareFactory", ...] = ()
+    after: tuple["MiddlewareForwardRef | Middleware | MiddlewareFactory | str", ...] = ()
     """
     Tuple of middlewares that, if present, need to appear *after* the middleware this
     constraint is applied to (i.e. closer to the handler)
+
+    Middlewares can be referenced by type, by a 'MiddlewareForwardRef', or - as a
+    plain string - by the stable 'name' another middleware declares. Name references
+    are *strong* references: They are resolved to an ordering at application startup,
+    and raise an error if no middleware with the referenced name is registered.
     """
     first: bool = False
     """
@@ -176,12 +186,35 @@ class MiddlewareConstraints:
 
         return dataclasses.replace(self, after=(*self.after, other))
 
+    def apply_before_name(self, name: str) -> Self:
+        """Return a new constraint with 'name' added to the 'before' constraints.
+
+        :param name: The stable 'name' of the middleware this middleware needs to be
+            applied before. This is a *strong* reference; if no middleware declares
+            'name', an error is raised when the application is initialized
+        """
+        return dataclasses.replace(self, before=(*self.before, name))
+
+    def apply_after_name(self, name: str) -> Self:
+        """Return a new constraint with 'name' added to the 'after' constraints.
+
+        :param name: The stable 'name' of the middleware this middleware needs to be
+            applied after. This is a *strong* reference; if no middleware declares
+            'name', an error is raised when the application is initialized
+        """
+        return dataclasses.replace(self, after=(*self.after, name))
+
     @staticmethod
     def _resolve_middleware(
-        middlewares: tuple["Middleware | MiddlewareFactory | MiddlewareForwardRef", ...],
+        middlewares: tuple["Middleware | MiddlewareFactory | MiddlewareForwardRef | str", ...],
     ) -> tuple["Middleware | MiddlewareFactory", ...]:
         resolved = []
         for middleware in middlewares:
+            if isinstance(middleware, str):
+                # plain strings are stable name references. they are not resolved to
+                # concrete middleware here, but handled by the ordering resolver in
+                # 'litestar.middleware.ordering'
+                continue
             if isinstance(middleware, MiddlewareForwardRef):
                 if (resolved_middleware := middleware.resolve()) is None:
                     continue

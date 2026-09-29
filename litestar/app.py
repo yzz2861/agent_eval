@@ -38,6 +38,7 @@ from litestar.exceptions import (
 from litestar.handlers import ASGIRouteHandler, BaseRouteHandler, HTTPRouteHandler, WebsocketRouteHandler
 from litestar.handlers.http_handlers._options import create_options_handler
 from litestar.middleware._internal.cors import CORSMiddleware
+from litestar.middleware.ordering import middleware_layer_label, resolve_middleware_order
 from litestar.openapi.config import OpenAPIConfig
 from litestar.plugins import (
     CLIPlugin,
@@ -65,6 +66,7 @@ if TYPE_CHECKING:
     from litestar.datastructures import CacheControlHeader, ETag
     from litestar.dto import AbstractDTO
     from litestar.events.listener import EventListener
+    from litestar.middleware.ordering import MiddlewareExecutionOrder
     from litestar.openapi.spec import SecurityRequirement
     from litestar.openapi.spec.open_api import OpenAPI
     from litestar.plugins.opentelemetry import OpenTelemetryPlugin
@@ -774,7 +776,21 @@ class Litestar(Router):
                 pass
         """
         for handler, bases in self._iter_handlers(handlers, bases=[self]):
-            yield handler.merge(*bases)
+            merged_handler = handler.merge(*bases)
+            # resolve the final middleware order across all layers. middleware
+            # declaring name-based ordering constraints are sorted accordingly;
+            # middleware without constraints keeps its relative order, and no
+            # middleware is moved across layer boundaries
+            layered_middleware: list[tuple[str, Middleware]] = []
+            for owner in reversed(bases):
+                layered_middleware.extend(
+                    (middleware_layer_label(owner), middleware) for middleware in owner.middleware
+                )
+            layered_middleware.extend(
+                (f"route handler {handler.handler_name!r}", middleware) for middleware in handler.middleware
+            )
+            merged_handler.middleware = resolve_middleware_order(layered_middleware)
+            yield merged_handler
 
     def _validate_registration_value(self, value: ControllerRouterHandler) -> RouteHandlerType | Router:
         """Ensure values passed to the register method are supported."""
@@ -939,6 +955,21 @@ class Litestar(Router):
 
         return join_paths(output)
 
+    def get_middleware_execution_order(self) -> dict[str, MiddlewareExecutionOrder]:
+        """Return the resolved middleware execution order for every route handler
+        registered on the application.
+
+        The returned mapping is keyed by the handler's name (or its fully qualified
+        identifier if no explicit name was set). Each value describes the order in
+        which the handler's middleware is entered and exited when handling a request,
+        after all name-based ordering constraints have been resolved.
+        """
+        orders: dict[str, MiddlewareExecutionOrder] = {}
+        for route in self.routes:
+            for handler in get_route_handlers(route):
+                orders[handler.name or str(handler)] = handler.middleware_execution_order
+        return orders
+
     def _create_asgi_handler(self) -> ASGIApp:
         """Create an ASGIApp that wraps the ASGI router inside an exception handler.
 
@@ -1017,5 +1048,13 @@ def _maybe_add_options_handler(
     if "OPTIONS" not in handler_methods:
         options_handler = create_options_handler(path=path, allow_methods={*handler_methods, "OPTIONS"})  # pyright: ignore[reportArgumentType]
         options_handler = options_handler.merge(root)
+        if root.middleware:
+            # keep the order of the application layer middleware consistent with the
+            # order resolved for the other handlers of the route. constraints
+            # referencing middleware of layers not present here are ignored
+            options_handler.middleware = resolve_middleware_order(
+                [(middleware_layer_label(root), middleware) for middleware in root.middleware],
+                strict=False,
+            )
         return [*http_handlers, options_handler]
     return http_handlers

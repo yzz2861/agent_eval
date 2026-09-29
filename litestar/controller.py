@@ -207,7 +207,7 @@ class Controller:
     def as_router(self) -> Router:
         from litestar.router import Router
 
-        return Router(
+        router = Router(
             path=self.path,
             route_handlers=self.get_route_handlers(),  # type: ignore[arg-type]
             after_request=self.after_request,
@@ -237,6 +237,11 @@ class Controller:
             websocket_class=self.websocket_class,
             request_max_body_size=self.request_max_body_size,
         )
+        # keep a reference to the controller the router was created from, so the
+        # controller can be identified as a distinct layer e.g. when resolving
+        # middleware ordering constraints
+        router._controller = self
+        return router
 
     def get_route_handlers(self) -> list[BaseRouteHandler]:
         """Get a controller's route handlers

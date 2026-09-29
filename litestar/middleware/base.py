@@ -288,6 +288,18 @@ class ASGIMiddleware(abc.ABC):
     .. versionadded:: 3.0
     """
     constraints: MiddlewareConstraints | None = None
+    name: str | None = None
+    """
+    A stable, unique name identifying this middleware.
+
+    Names allow middleware to declare ordering constraints on each other without
+    needing to import the referenced middleware, by using plain strings in the
+    'constraints' 'before' / 'after' tuples. At application startup, the declared
+    constraints are resolved into a concrete middleware ordering.
+
+    A name must be unique across all middleware registered on an application;
+    duplicate names raise an error at startup.
+    """
 
     def should_bypass_for_handler(self, handler: RouteHandlerType) -> bool:
         """Return ``True`` if this middleware should be bypassed for ``handler``, according

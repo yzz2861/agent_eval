@@ -130,6 +130,51 @@ be the *last* middleware on the *last* layer (i.e. the route handler).
         ]
     )
 
+Named middleware and automatic order resolution
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Middleware can declare a stable :attr:`~litestar.middleware.ASGIMiddleware.name`,
+which other middleware can reference in the ``before`` and ``after`` constraints
+using plain strings, without needing to import the referenced middleware:
+
+.. literalinclude:: /examples/middleware/ordering.py
+    :language: python
+
+When the application is initialized, the declared constraints are resolved into a
+concrete execution order:
+
+* Middleware without constraints keeps its original relative order
+* Name references are *strong* references: If no middleware with the referenced
+  name is registered, a
+  :class:`~litestar.middleware.ordering.MissingMiddlewareError` is raised
+* Registering multiple middleware with the same name raises a
+  :class:`~litestar.middleware.ordering.DuplicateMiddlewareNameError`
+* Constraints that would require moving a middleware across a layer (application,
+  router, controller or handler) raise a
+  :class:`~litestar.middleware.ordering.MiddlewareLayerError`; middleware is
+  only reordered within its own layer
+* Circular constraints raise a
+  :class:`~litestar.middleware.ordering.MiddlewareCycleError`
+
+All of these errors are raised when the application is initialized, and include
+the full chain of the conflicting constraints.
+
+The resolved order can be inspected at runtime, via
+:attr:`~litestar.handlers.BaseRouteHandler.middleware_execution_order` for
+individual route handlers, or
+:meth:`~litestar.Litestar.get_middleware_execution_order` for all handlers
+of an application. Both describe the order in which middleware is entered and
+exited when handling a request:
+
+.. code-block:: python
+
+    route_handler = app.routes[0].route_handlers[0]
+    route_handler.middleware_execution_order.enter
+    # ('session', 'authentication')
+    route_handler.middleware_execution_order.exit
+    # ('authentication', 'session')
+
+
 Constraints and plugins
 ~~~~~~~~~~~~~~~~~~~~~~~
 

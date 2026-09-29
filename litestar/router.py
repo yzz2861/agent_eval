@@ -46,6 +46,7 @@ class Router:
     """
 
     __slots__ = (
+        "_controller",
         "after_request",
         "after_response",
         "before_request",
