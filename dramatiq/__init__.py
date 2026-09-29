@@ -21,6 +21,7 @@ import warnings
 
 from .actor import Actor, actor
 from .broker import Broker, Consumer, MessageProxy, get_broker, set_broker
+from .compensation import LocalCompensationBackend, compensating_pipeline
 from .composition import group, pipeline
 from .encoder import Encoder, JSONEncoder, PickleEncoder
 from .errors import (
@@ -56,6 +57,8 @@ __all__ = [
     # Composition
     "group",
     "pipeline",
+    "compensating_pipeline",
+    "LocalCompensationBackend",
     # Encoding
     "Encoder",
     "JSONEncoder",

@@ -80,6 +80,7 @@ setup(
     packages=[
         "dramatiq",
         "dramatiq.brokers",
+        "dramatiq.compensation",
         "dramatiq.middleware",
         "dramatiq.rate_limits",
         "dramatiq.rate_limits.backends",
