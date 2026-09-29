@@ -502,6 +502,15 @@ SESSION_COOKIE_HTTPONLY = True
 # Whether to set the flag restricting cookie leaks on cross-site requests.
 # This can be 'Lax', 'Strict', 'None', or False to disable the flag.
 SESSION_COOKIE_SAMESITE = "Lax"
+# Whether to split session data that's too large for a single cookie across
+# multiple chunk cookies.
+SESSION_COOKIE_CHUNKED = False
+# Maximum number of bytes of the signed session data stored in each chunk
+# cookie. The total size is limited to SESSION_COOKIE_CHUNK_SIZE *
+# SESSION_COOKIE_MAX_CHUNKS bytes.
+SESSION_COOKIE_CHUNK_SIZE = 3800
+# Maximum number of chunk cookies used to store a single session.
+SESSION_COOKIE_MAX_CHUNKS = 8
 # Whether to save the session data on every request.
 SESSION_SAVE_EVERY_REQUEST = False
 # Whether a user's session cookie expires when the web browser is closed.

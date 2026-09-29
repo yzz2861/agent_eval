@@ -219,6 +219,16 @@ Security
 
 * ...
 
+Sessions
+~~~~~~~~~
+
+* The new :setting:`SESSION_COOKIE_CHUNKED` setting allows the
+  :ref:`signed cookies session backend <cookie-session-backend>` to split
+  session data that doesn't fit in a single cookie across multiple chunk
+  cookies. The chunk size and count are limited by the new
+  :setting:`SESSION_COOKIE_CHUNK_SIZE` and :setting:`SESSION_COOKIE_MAX_CHUNKS`
+  settings.
+
 Serialization
 ~~~~~~~~~~~~~
 

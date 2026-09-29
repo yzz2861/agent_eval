@@ -3621,6 +3621,41 @@ Default: ``1209600`` (2 weeks, in seconds)
 
 The age of session cookies, in seconds.
 
+.. setting:: SESSION_COOKIE_CHUNKED
+
+``SESSION_COOKIE_CHUNKED``
+--------------------------
+
+Default: ``False``
+
+Whether to split session data that doesn't fit in a single cookie across
+multiple chunk cookies. This is only useful with the
+:ref:`signed cookies session backend <cookie-session-backend>`, where the
+session data is stored in the cookie itself and may exceed the browser's
+per-cookie size limit.
+
+The chunk cookies are named ``<SESSION_COOKIE_NAME>.0``,
+``<SESSION_COOKIE_NAME>.1``, etc. Each chunk is stamped with a nonce that's
+generated on every save, so chunks written by different responses can't be
+combined into a valid session. Missing, duplicated, or tampered chunks are
+treated as an invalid session.
+
+The size of each chunk and the number of chunks are limited by
+:setting:`SESSION_COOKIE_CHUNK_SIZE` and :setting:`SESSION_COOKIE_MAX_CHUNKS`.
+If the session data doesn't fit within those limits, saving the session
+raises :exc:`django.contrib.sessions.exceptions.SessionDataTooLarge`.
+
+.. setting:: SESSION_COOKIE_CHUNK_SIZE
+
+``SESSION_COOKIE_CHUNK_SIZE``
+-----------------------------
+
+Default: ``3800``
+
+The maximum number of bytes of the signed session data stored in each chunk
+cookie when :setting:`SESSION_COOKIE_CHUNKED` is enabled. Session data that
+fits in a single cookie of this size is not split.
+
 .. setting:: SESSION_COOKIE_DOMAIN
 
 ``SESSION_COOKIE_DOMAIN``
@@ -3665,6 +3700,19 @@ reasons for turning this off. Your code shouldn't read session cookies from
 JavaScript.
 
 .. _HttpOnly: https://owasp.org/www-community/HttpOnly
+
+.. setting:: SESSION_COOKIE_MAX_CHUNKS
+
+``SESSION_COOKIE_MAX_CHUNKS``
+-----------------------------
+
+Default: ``8``
+
+The maximum number of chunk cookies used to store a single session when
+:setting:`SESSION_COOKIE_CHUNKED` is enabled. Together with
+:setting:`SESSION_COOKIE_CHUNK_SIZE`, this limits the total size of the
+session data to ``SESSION_COOKIE_CHUNK_SIZE * SESSION_COOKIE_MAX_CHUNKS``
+bytes.
 
 .. setting:: SESSION_COOKIE_NAME
 

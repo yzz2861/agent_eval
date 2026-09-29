@@ -164,6 +164,19 @@ and the :setting:`SECRET_KEY` setting.
 
 .. _`replay attacks`: https://en.wikipedia.org/wiki/Replay_attack
 
+.. versionadded:: 6.2
+
+    Support for splitting large session data across multiple cookies was
+    added.
+
+If the session data exceeds the browser's per-cookie size limit, you can set
+:setting:`SESSION_COOKIE_CHUNKED` to ``True`` to split it across multiple
+chunk cookies. The chunks are reassembled on the next request. The size of
+each chunk and the total number of chunks are limited by
+:setting:`SESSION_COOKIE_CHUNK_SIZE` and :setting:`SESSION_COOKIE_MAX_CHUNKS`;
+if the session data doesn't fit within those limits, saving the session
+raises :exc:`django.contrib.sessions.exceptions.SessionDataTooLarge`.
+
 Using sessions in views
 =======================
 
