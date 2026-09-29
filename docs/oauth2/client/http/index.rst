@@ -322,6 +322,64 @@ call this our defined ``update_token`` to save the new token::
     # if the token is expired, this GET request will update token
     client.get('https://openidconnect.googleapis.com/v1/userinfo')
 
+.. _shared_token_store:
+
+Coordinating Refreshes Across Instances
+---------------------------------------
+
+When several client instances (processes, workers, or machines) share one
+account whose authorization server **rotates refresh tokens**, the
+per-instance locks of the clients cannot stop them from refreshing the same
+refresh token at the same time. A second refresh with an already-consumed
+refresh token is usually rejected, and some providers even invalidate the
+whole token family on refresh-token reuse.
+
+Pass a shared token store to coordinate the refresh across instances::
+
+    from authlib.integrations.requests_client import OAuth2Session
+
+    client = OAuth2Session(
+        client_id, client_secret,
+        token=token,
+        token_endpoint=token_endpoint,
+        token_store=my_store,  # see below
+    )
+
+The store implements a small protocol defined in
+:mod:`authlib.oauth2.token_store`:
+
+* ``read()`` returns the stored token together with a monotonically
+  increasing ``version``.
+* ``acquire_lease(owner, ttl)`` elects a single refresh coordinator. The
+  lease expires after ``ttl`` seconds, so a crashed coordinator is
+  fenced out automatically and another instance takes over. Tune it with
+  the client's ``token_store_lease_ttl`` parameter.
+* ``wait_for_update(version, timeout)`` lets non-coordinators wait for
+  the coordinator to publish; on timeout they retry acquiring the lease
+  (client parameter ``token_store_wait_timeout``).
+* ``save(token, expected_version)`` is a compare-and-swap: the new token
+  is persisted only if the store is still at the version the coordinator
+  read.
+
+The rules are the same for sync and async clients
+(:class:`~authlib.oauth2.token_store.SharedTokenStore` and
+:class:`~authlib.oauth2.token_store.AsyncSharedTokenStore` are
+method-for-method mirrors):
+
+* A client always re-reads the store before refreshing; if the store
+  already holds a usable token, the client adopts it and never sends its
+  stale refresh token.
+* Only the lease holder refreshes, always with the freshest refresh token
+  known to the store, and saves the result with compare-and-swap.
+* If the refresh request succeeded but saving failed, a
+  :class:`~authlib.oauth2.token_store.TokenPersistenceUncertainError` is
+  raised and the refresh is **not** retried automatically; the fresh token
+  is available on the error's ``token`` attribute for manual recovery.
+
+A complete example with two clients and a local SQLite store lives in
+``examples/shared_token_store/`` in the source tree. Without a
+``token_store``, the clients behave exactly as before.
+
 Revoke and Introspect Token
 ---------------------------
 

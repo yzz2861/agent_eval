@@ -1,5 +1,6 @@
 from authlib.common.security import generate_token
 from authlib.common.urls import url_decode
+from authlib.common.urls import url_encode
 
 from .auth import ClientAuth
 from .auth import TokenAuth
@@ -10,6 +11,9 @@ from .rfc6749.parameters import prepare_grant_uri
 from .rfc6749.parameters import prepare_token_request
 from .rfc7009 import prepare_revoke_token_request
 from .rfc7636 import create_s256_code_challenge
+from .token_store import DEFAULT_LEASE_TTL
+from .token_store import DEFAULT_WAIT_TIMEOUT
+from .token_store import coordinated_token_refresh
 
 DEFAULT_HEADERS = {
     "Accept": "application/json",
@@ -38,6 +42,16 @@ class OAuth2Client:
         values: "header", "body", "uri".
     :param update_token: A function for you to update token. It accept a
         :class:`OAuth2Token` as parameter.
+    :param token_store: An optional :class:`authlib.oauth2.token_store.SharedTokenStore`
+        implementation. When several client instances share one account with
+        a rotating refresh token, the store coordinates the refresh so that
+        only one instance performs it and the others adopt the stored result.
+    :param token_store_lease_ttl: Lifetime in seconds of the refresh
+        coordination lease. If the coordinating instance crashes, the lease
+        expires after this delay and another instance takes over.
+    :param token_store_wait_timeout: Time in seconds a non-coordinating
+        instance waits for the coordinator to publish a new token before
+        trying to acquire the lease itself.
     :param leeway: Time window in seconds before the actual expiration of the
         authentication token, that the token is considered expired and will
         be refreshed.
@@ -64,6 +78,9 @@ class OAuth2Client:
         token=None,
         token_placement="header",
         update_token=None,
+        token_store=None,
+        token_store_lease_ttl=DEFAULT_LEASE_TTL,
+        token_store_wait_timeout=DEFAULT_WAIT_TIMEOUT,
         leeway=60,
         **metadata,
     ):
@@ -94,6 +111,9 @@ class OAuth2Client:
 
         self.token_auth = self.token_auth_class(token, token_placement, self)
         self.update_token = update_token
+        self.token_store = token_store
+        self.token_store_lease_ttl = token_store_lease_ttl
+        self.token_store_wait_timeout = token_store_wait_timeout
 
         token_updater = metadata.pop("token_updater", None)
         if token_updater:
@@ -447,6 +467,16 @@ class OAuth2Client:
     def _refresh_token(
         self, url, refresh_token=None, body="", headers=None, auth=None, **kwargs
     ):
+        if self.token_store is not None:
+            return self._refresh_token_with_store(
+                url,
+                refresh_token=refresh_token,
+                body=body,
+                headers=headers,
+                auth=auth,
+                **kwargs,
+            )
+
         resp = self._http_post(url, body=body, auth=auth, headers=headers, **kwargs)
 
         for hook in self.compliance_hook["refresh_token_response"]:
@@ -458,6 +488,48 @@ class OAuth2Client:
 
         if callable(self.update_token):
             self.update_token(self.token, refresh_token=refresh_token)
+
+        return self.token
+
+    def _refresh_token_with_store(
+        self, url, refresh_token=None, body="", headers=None, auth=None, **kwargs
+    ):
+        previous_refresh_token = self.token.get("refresh_token") if self.token else None
+
+        def do_refresh(fresh_refresh_token):
+            actual_body = body
+            if fresh_refresh_token != refresh_token:
+                # The store knows a fresher refresh token than the one this
+                # instance was about to use; rebuild the request body with
+                # it so the stale one is never sent.
+                params = dict(url_decode(body))
+                params["refresh_token"] = fresh_refresh_token
+                actual_body = url_encode(params.items())
+
+            resp = self._http_post(
+                url, body=actual_body, auth=auth, headers=headers, **kwargs
+            )
+
+            for hook in self.compliance_hook["refresh_token_response"]:
+                resp = hook(resp)
+
+            token = self.parse_response_token(resp)
+            if "refresh_token" not in token:
+                token["refresh_token"] = fresh_refresh_token
+            return token
+
+        token = coordinated_token_refresh(
+            self.token_store,
+            self.token,
+            self.leeway,
+            do_refresh,
+            lease_ttl=self.token_store_lease_ttl,
+            wait_timeout=self.token_store_wait_timeout,
+        )
+        self.token = token
+
+        if callable(self.update_token):
+            self.update_token(self.token, refresh_token=previous_refresh_token)
 
         return self.token
 

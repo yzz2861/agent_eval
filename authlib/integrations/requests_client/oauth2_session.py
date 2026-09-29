@@ -4,6 +4,8 @@ from requests.auth import AuthBase
 from authlib.oauth2.auth import ClientAuth
 from authlib.oauth2.auth import TokenAuth
 from authlib.oauth2.client import OAuth2Client
+from authlib.oauth2.token_store import DEFAULT_LEASE_TTL
+from authlib.oauth2.token_store import DEFAULT_WAIT_TIMEOUT
 
 from ..base_client import InvalidTokenError
 from ..base_client import MissingTokenError
@@ -66,6 +68,13 @@ class OAuth2Session(OAuth2Client, Session):
         values: "header", "body", "uri".
     :param update_token: A function for you to update token. It accept a
         :class:`OAuth2Token` as parameter.
+    :param token_store: An optional
+        :class:`authlib.oauth2.token_store.SharedTokenStore` implementation
+        used to coordinate token refreshes across multiple client instances.
+    :param token_store_lease_ttl: Lifetime in seconds of the refresh
+        coordination lease.
+    :param token_store_wait_timeout: Time in seconds a non-coordinating
+        instance waits for a new token before trying to refresh itself.
     :param leeway: Time window in seconds before the actual expiration of the
         authentication token, that the token is considered expired and will
         be refreshed.
@@ -100,6 +109,9 @@ class OAuth2Session(OAuth2Client, Session):
         token=None,
         token_placement="header",
         update_token=None,
+        token_store=None,
+        token_store_lease_ttl=DEFAULT_LEASE_TTL,
+        token_store_wait_timeout=DEFAULT_WAIT_TIMEOUT,
         leeway=60,
         default_timeout=None,
         **kwargs,
@@ -121,6 +133,9 @@ class OAuth2Session(OAuth2Client, Session):
             token=token,
             token_placement=token_placement,
             update_token=update_token,
+            token_store=token_store,
+            token_store_lease_ttl=token_store_lease_ttl,
+            token_store_wait_timeout=token_store_wait_timeout,
             leeway=leeway,
             **kwargs,
         )

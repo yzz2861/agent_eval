@@ -59,5 +59,25 @@ HTTPX2 OAuth 2.0
         introspect_token,
         register_compliance_hook
 
+Shared Token Store
+------------------
+
+.. module:: authlib.oauth2.token_store
+   :no-index:
+
+.. autoclass:: SharedTokenStore
+    :no-index:
+    :members:
+
+.. autoclass:: AsyncSharedTokenStore
+    :no-index:
+    :members:
+
+.. autoclass:: StoredToken
+    :no-index:
+
+.. autoclass:: TokenPersistenceUncertainError
+    :no-index:
+
 .. autoclass:: AsyncAssertionClient
     :no-index:

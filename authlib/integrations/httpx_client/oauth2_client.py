@@ -5,12 +5,16 @@ import typing
 from contextlib import asynccontextmanager
 
 from ._compat import httpx2
-from anyio import Lock # Import after httpx so import errors refer to httpx
+from anyio import Lock  # Import after httpx so import errors refer to httpx
 
 from authlib.common.urls import url_decode
+from authlib.common.urls import url_encode
 from authlib.oauth2.auth import ClientAuth
 from authlib.oauth2.auth import TokenAuth
 from authlib.oauth2.client import OAuth2Client as _OAuth2Client
+from authlib.oauth2.token_store import DEFAULT_LEASE_TTL
+from authlib.oauth2.token_store import DEFAULT_WAIT_TIMEOUT
+from authlib.oauth2.token_store import async_coordinated_token_refresh
 
 from ..base_client import InvalidTokenError
 from ..base_client import MissingTokenError
@@ -82,6 +86,9 @@ class AsyncOAuth2Client(_OAuth2Client, httpx2.AsyncClient):
         token=None,
         token_placement="header",
         update_token=None,
+        token_store=None,
+        token_store_lease_ttl=DEFAULT_LEASE_TTL,
+        token_store_wait_timeout=DEFAULT_WAIT_TIMEOUT,
         leeway=60,
         **kwargs,
     ):
@@ -105,6 +112,9 @@ class AsyncOAuth2Client(_OAuth2Client, httpx2.AsyncClient):
             token=token,
             token_placement=token_placement,
             update_token=update_token,
+            token_store=token_store,
+            token_store_lease_ttl=token_store_lease_ttl,
+            token_store_wait_timeout=token_store_wait_timeout,
             leeway=leeway,
             **kwargs,
         )
@@ -188,6 +198,16 @@ class AsyncOAuth2Client(_OAuth2Client, httpx2.AsyncClient):
         auth=USE_CLIENT_DEFAULT,
         **kwargs,
     ):
+        if self.token_store is not None:
+            return await self._refresh_token_with_store(
+                url,
+                refresh_token=refresh_token,
+                body=body,
+                headers=headers,
+                auth=auth,
+                **kwargs,
+            )
+
         resp = await self.post(
             url, data=dict(url_decode(body)), headers=headers, auth=auth, **kwargs
         )
@@ -201,6 +221,58 @@ class AsyncOAuth2Client(_OAuth2Client, httpx2.AsyncClient):
 
         if self.update_token:
             await self.update_token(self.token, refresh_token=refresh_token)
+
+        return self.token
+
+    async def _refresh_token_with_store(
+        self,
+        url,
+        refresh_token=None,
+        body="",
+        headers=None,
+        auth=USE_CLIENT_DEFAULT,
+        **kwargs,
+    ):
+        previous_refresh_token = self.token.get("refresh_token") if self.token else None
+
+        async def do_refresh(fresh_refresh_token):
+            actual_body = body
+            if fresh_refresh_token != refresh_token:
+                # The store knows a fresher refresh token than the one this
+                # instance was about to use; rebuild the request body with
+                # it so the stale one is never sent.
+                params = dict(url_decode(body))
+                params["refresh_token"] = fresh_refresh_token
+                actual_body = url_encode(params.items())
+
+            resp = await self.post(
+                url,
+                data=dict(url_decode(actual_body)),
+                headers=headers,
+                auth=auth,
+                **kwargs,
+            )
+
+            for hook in self.compliance_hook["refresh_token_response"]:
+                resp = hook(resp)
+
+            token = self.parse_response_token(resp)
+            if "refresh_token" not in token:
+                token["refresh_token"] = fresh_refresh_token
+            return token
+
+        token = await async_coordinated_token_refresh(
+            self.token_store,
+            self.token,
+            self.leeway,
+            do_refresh,
+            lease_ttl=self.token_store_lease_ttl,
+            wait_timeout=self.token_store_wait_timeout,
+        )
+        self.token = token
+
+        if self.update_token:
+            await self.update_token(self.token, refresh_token=previous_refresh_token)
 
         return self.token
 
@@ -230,6 +302,9 @@ class OAuth2Client(_OAuth2Client, httpx2.Client):
         token=None,
         token_placement="header",
         update_token=None,
+        token_store=None,
+        token_store_lease_ttl=DEFAULT_LEASE_TTL,
+        token_store_wait_timeout=DEFAULT_WAIT_TIMEOUT,
         **kwargs,
     ):
         # extract httpx2.Client kwargs
@@ -248,6 +323,9 @@ class OAuth2Client(_OAuth2Client, httpx2.Client):
             token=token,
             token_placement=token_placement,
             update_token=update_token,
+            token_store=token_store,
+            token_store_lease_ttl=token_store_lease_ttl,
+            token_store_wait_timeout=token_store_wait_timeout,
             **kwargs,
         )
 
