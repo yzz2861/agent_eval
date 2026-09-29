@@ -99,15 +99,44 @@ implemented in a similar manner to the one above.
 Content-Type Negotiation
 ------------------------
 
-Falcon currently only supports partial negotiation out of the box. By default,
-when the ``get_media()`` method or the ``media`` attribute is used, the
-framework attempts to (de)serialize based on the ``Content-Type`` header value.
-The missing link that Falcon doesn't provide is the connection between the
-``Accept`` header provided by a user and the ``Content-Type`` header set on the
-response.
+Falcon can negotiate the response media type declaratively on your behalf.
+Decorate a resource class or an individual responder with
+:func:`falcon.produces` to declare the media types it can produce::
 
-If you do need full negotiation, it is very easy to bridge the gap using
-middleware. Here is an example of how this can be done:
+    import falcon
+
+    class ThingsResource:
+        @falcon.produces('application/json', 'application/msgpack')
+        def on_get(self, req, resp):
+            resp.media = {'things': []}
+
+When ``resp.media`` is set and no explicit ``resp.content_type`` was
+assigned, the framework matches the declared types (restricted to those
+with a handler registered in
+:attr:`~falcon.ResponseOptions.media_handlers`) against the request's
+``Accept`` header, taking quality factors, wildcards, and media type
+parameters into account. Media ranges with ``q=0`` exclude the
+corresponding type, and ties are broken by declaration order. The
+selected handler is then the only one invoked to serialize
+``resp.media``, and ``Accept`` is merged into the response's ``Vary``
+header.
+
+If the client does not accept any of the declared types,
+``406 Not Acceptable`` is raised instead of silently falling back to a
+default representation. Error responses (including the ``406`` itself)
+are exempt from ``produces`` negotiation; they are rendered by the
+configured error serializer (see
+:meth:`~falcon.App.set_error_serializer`). Should the error
+representation also fail to satisfy the ``Accept`` header, the response
+is sent without a body, avoiding recursive negotiation failures.
+
+An explicitly assigned ``resp.content_type`` always takes precedence, in
+which case no negotiation is performed:
+
+.. autofunction:: falcon.produces
+
+For fully custom negotiation logic, you can also bridge the gap using
+middleware:
 
 .. tab-set::
 

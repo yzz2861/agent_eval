@@ -32,6 +32,7 @@ from typing import (
 import warnings
 
 from falcon import constants
+from falcon import negotiation
 from falcon import responders
 from falcon import routing
 from falcon._typing import _AReqT as _ReqT
@@ -519,6 +520,9 @@ class App(falcon.app.App[_ReqT, _RespT]):
         resp = self._response_type(options=self.resp_options)
 
         resource: Resource | None = None
+        # NOTE: The responder is only None when routing did not complete,
+        #   in which case it is never invoked.
+        responder: AsgiResponderCallable = None  # type: ignore[assignment]
         params: dict[str, Any] = {}
 
         dependent_mw_resp_stack: list[Any] = []
@@ -558,7 +562,6 @@ class App(falcon.app.App[_ReqT, _RespT]):
                 # next-hop child resource. In that case, the object
                 # being asked to dispatch to its child will raise an
                 # HTTP exception signaling the problem, e.g. a 404.
-                responder: AsgiResponderCallable
                 responder, params, resource, req.uri_template = self._get_responder(req)  # type: ignore[assignment]
 
         except Exception as ex:
@@ -600,6 +603,17 @@ class App(falcon.app.App[_ReqT, _RespT]):
                     raise
 
                 req_succeeded = False
+
+        # NOTE: Negotiate the response media type for resources or
+        #   responders decorated with @falcon.produces. This must happen
+        #   after all middleware has run, but before the body is rendered.
+        try:
+            negotiation.negotiate_content(req, resp, resource, responder)
+        except Exception as ex:
+            if not await self._handle_exception(req, resp, ex, params):
+                raise
+
+            req_succeeded = False
 
         data: bytes | None = b''
 

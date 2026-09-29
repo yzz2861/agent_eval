@@ -45,6 +45,7 @@ __all__ = (
     'RequestOptions',
     'Response',
     'ResponseOptions',
+    'produces',
     # Public constants
     'HTTP_METHODS',
     'WEBDAV_METHODS',
@@ -414,6 +415,7 @@ from falcon.hooks import before
 from falcon.http_error import HTTPError
 from falcon.http_status import HTTPStatus
 from falcon.middleware import CORSMiddleware
+from falcon.negotiation import produces
 from falcon.redirects import HTTPFound
 from falcon.redirects import HTTPMovedPermanently
 from falcon.redirects import HTTPPermanentRedirect

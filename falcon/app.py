@@ -36,6 +36,7 @@ import warnings
 
 from falcon import app_helpers as helpers
 from falcon import constants
+from falcon import negotiation
 from falcon import responders
 from falcon import routing
 from falcon._typing import _ExcT
@@ -426,6 +427,9 @@ class App(Generic[_ReqT, _RespT]):
         req = self._request_type(env, options=self.req_options)
         resp = self._response_type(options=self.resp_options)
         resource: object | None = None
+        # NOTE: The responder is only None when routing did not complete,
+        #   in which case it is never invoked.
+        responder: ResponderCallable = None  # type: ignore[assignment]
         params: dict[str, Any] = {}
 
         dependent_mw_resp_stack: list[ProcessResponseMethod] = []
@@ -463,7 +467,6 @@ class App(Generic[_ReqT, _RespT]):
                 # next-hop child resource. In that case, the object
                 # being asked to dispatch to its child will raise an
                 # HTTP exception signalling the problem, e.g. a 404.
-                responder: ResponderCallable
                 responder, params, resource, req.uri_template = self._get_responder(req)  # type: ignore[assignment]
         except Exception as ex:
             if not self._handle_exception(req, resp, ex, params):
@@ -500,6 +503,17 @@ class App(Generic[_ReqT, _RespT]):
                     raise
 
                 req_succeeded = False
+
+        # NOTE: Negotiate the response media type for resources or
+        #   responders decorated with @falcon.produces. This must happen
+        #   after all middleware has run, but before the body is rendered.
+        try:
+            negotiation.negotiate_content(req, resp, resource, responder)
+        except Exception as ex:
+            if not self._handle_exception(req, resp, ex, params):
+                raise
+
+            req_succeeded = False
 
         body: Iterable[bytes]
         length: int | None
