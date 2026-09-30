@@ -5,6 +5,9 @@ from markupsafe import Markup as Markup
 
 from .app import Quart as Quart
 from .blueprints import Blueprint as Blueprint
+from .calls import WebsocketCallClosedError as WebsocketCallClosedError
+from .calls import WebsocketCallConnection as WebsocketCallConnection
+from .calls import WebsocketCallDispatcher as WebsocketCallDispatcher
 from .config import Config as Config
 from .ctx import after_this_request as after_this_request
 from .ctx import copy_current_app_context as copy_current_app_context
