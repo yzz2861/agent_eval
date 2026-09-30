@@ -19,7 +19,8 @@ import sys
 import threading
 import time
 
-from collections.abc import Callable, Collection, Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Collection, Mapping, Sequence, Set
 from types import FrameType, TracebackType
 from typing import (
     Any,
@@ -38,6 +39,7 @@ from ._frames import (
 from ._log_levels import NAME_TO_LEVEL, add_log_level
 from ._utils import get_processname
 from .contextvars import _ASYNC_CALLING_THREAD
+from .exceptions import DropEvent
 from .tracebacks import ExceptionDictTransformer
 from .typing import (
     EventDict,
@@ -51,6 +53,8 @@ __all__ = [
     "NAME_TO_LEVEL",  # some people rely on it being here
     "CallsiteParameter",
     "CallsiteParameterAdder",
+    "EventAggregator",
+    "EventDeduplicator",
     "EventRenamer",
     "ExceptionPrettyPrinter",
     "JSONRenderer",
@@ -606,6 +610,348 @@ class MaybeTimeStamper:
             return self.stamper(logger, name, event_dict)
 
         return event_dict
+
+
+_AGGREGATED_MARKER = "_structlog_aggregated"
+_MISSING = object()
+
+
+class _AggregatedEvent:
+    __slots__ = (
+        "count",
+        "deadline",
+        "first_event",
+        "first_seen",
+        "method_name",
+    )
+
+    def __init__(
+        self,
+        first_event: EventDict,
+        method_name: str,
+        first_seen: float,
+        window: float,
+    ) -> None:
+        self.first_event = first_event
+        self.method_name = method_name
+        self.first_seen = first_seen
+        self.deadline = first_seen + window
+        self.count = 1
+
+
+def _freeze_identity_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return tuple(
+            (key, _freeze_identity_value(value[key]))
+            for key in sorted(value, key=repr)
+        )
+    if isinstance(value, Set):
+        return frozenset(_freeze_identity_value(item) for item in value)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        return value
+    return tuple(_freeze_identity_value(item) for item in value)
+
+
+class EventAggregator:
+    """
+    Merge repeated log events during a fixed time window.
+
+    The first event in a window passes through immediately. Later matching
+    events are counted and dropped.
+
+    Window expiry is checked when subsequent events are processed. Pass an
+    emit callback if those summaries should re-enter a configured processor
+    chain, or call flush explicitly.
+
+    Summary events carry an internal marker while they pass through the same
+    processor and are therefore never counted again.
+
+    Args:
+        window: Window duration in units returned by clock.
+        group_by: Selected event-dict keys used for event identity.
+        request_key: Key that distinguishes requests, if supplied.
+        include_exception_type: Group by exception type from exc_info.
+        include_log_method: Group by the wrapped logger method name.
+        max_groups: Maximum number of concurrently tracked groups.
+        clock: Injectable monotonic clock.
+        emit: Optional callback for automatic and explicit summaries.
+        count_key: Total events represented by a summary.
+        suppressed_count_key: Events that were suppressed.
+        reason_key: Why the summary was emitted.
+    """
+
+    def __init__(
+        self,
+        window: float = 60.0,
+        group_by: str | Collection[str] = ("event",),
+        *,
+        request_key: str | None = None,
+        include_exception_type: bool = True,
+        include_log_method: bool = False,
+        max_groups: int = 1024,
+        clock: Callable[[], float] = time.monotonic,
+        emit: Callable[[WrappedLogger, str, EventDict], None] | None = None,
+        count_key: str = "count",
+        suppressed_count_key: str = "suppressed_count",
+        reason_key: str = "aggregation_reason",
+    ) -> None:
+        if window <= 0:
+            raise ValueError("window must be greater than zero")
+        if max_groups <= 0:
+            raise ValueError("max_groups must be greater than zero")
+
+        self.window = float(window)
+        self.group_by = (
+            (group_by,)
+            if isinstance(group_by, str)
+            else tuple(sorted(group_by))
+        )
+        self.request_key = (
+            None
+            if request_key in self.group_by
+            else request_key
+        )
+        self.include_exception_type = include_exception_type
+        self.include_log_method = include_log_method
+        self.max_groups = max_groups
+        self.clock = clock
+        self.emit = emit
+        self.count_key = count_key
+        self.suppressed_count_key = suppressed_count_key
+        self.reason_key = reason_key
+        self._lock = threading.RLock()
+        self._groups: OrderedDict[Any, _AggregatedEvent] = OrderedDict()
+        self._pending_summaries: list[tuple[str, EventDict]] = []
+        self._closed = False
+        self._last_logger: WrappedLogger | None = None
+        self._last_method_name = "info"
+
+    def __call__(
+        self, logger: WrappedLogger, method_name: str, event_dict: EventDict
+    ) -> EventDict:
+        if event_dict.get(_AGGREGATED_MARKER):
+            event_dict.pop(_AGGREGATED_MARKER, None)
+            return event_dict
+
+        now = self.clock()
+        queued: list[tuple[str, EventDict]] = []
+        result: EventDict | None
+        emit = self.emit
+        with self._lock:
+            if self._closed:
+                return event_dict
+            self._normalize_exc_info(event_dict)
+            self._last_logger = logger
+            self._last_method_name = method_name
+            queued.extend(self._take_expired(now))
+            identity = self._identity(method_name, event_dict)
+            group = self._groups.get(identity)
+            if group is None:
+                self._evict(queued, now)
+                self._groups[identity] = _AggregatedEvent(
+                    dict(event_dict), method_name, now, self.window
+                )
+                result = event_dict
+            else:
+                group.count += 1
+                self._groups.move_to_end(identity)
+                result = None
+
+            if emit is None:
+                self._queue_pending(queued)
+                queued = []
+
+        for queued_method_name, summary in queued:
+            emit(logger, queued_method_name, summary)
+
+        if result is None:
+            raise DropEvent
+        return result
+
+    def flush(
+        self,
+        logger: WrappedLogger | None = None,
+        method_name: str = "info",
+    ) -> list[EventDict]:
+        """End all windows and return or emit unreported summaries."""
+        emit = self.emit
+        with self._lock:
+            (
+                queued,
+                summaries,
+                flush_logger,
+                flush_method_name,
+            ) = self._collect("flush", logger, method_name)
+        if emit is not None:
+            for queued_method_name, summary in queued:
+                emit(
+                    flush_logger,
+                    queued_method_name or flush_method_name,
+                    summary,
+                )
+        return summaries
+
+    def close(
+        self,
+        logger: WrappedLogger | None = None,
+        method_name: str = "info",
+    ) -> list[EventDict]:
+        """Flush outstanding summaries and stop aggregating events."""
+        emit = self.emit
+        with self._lock:
+            (
+                queued,
+                summaries,
+                close_logger,
+                close_method_name,
+            ) = self._collect(
+                "close",
+                logger if logger is not None else self._last_logger,
+                method_name,
+            )
+        if emit is not None:
+            for queued_method_name, summary in queued:
+                emit(
+                    close_logger,
+                    queued_method_name or close_method_name,
+                    summary,
+                )
+        return summaries
+
+    def __enter__(self) -> EventAggregator:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+    def _identity(
+        self, method_name: str, event_dict: EventDict
+    ) -> tuple[Any, ...]:
+        identity: list[Any] = []
+        if self.include_log_method:
+            identity.append(method_name)
+        if self.include_exception_type:
+            identity.append(self._exception_type_name(event_dict))
+        for key in self.group_by:
+            identity.append((key, self._identity_value(event_dict, key)))
+        if self.request_key is not None:
+            identity.append(
+                (
+                    self.request_key,
+                    self._identity_value(event_dict, self.request_key),
+                )
+            )
+        return tuple(identity)
+
+    def _identity_value(self, event_dict: EventDict, key: str) -> Any:
+        value = event_dict.get(key, _MISSING)
+        if value is _MISSING:
+            return _MISSING
+        return _freeze_identity_value(value)
+
+    def _normalize_exc_info(self, event_dict: EventDict) -> None:
+        if "exc_info" not in event_dict:
+            return
+        exc_info = _figure_out_exc_info(event_dict["exc_info"])
+        if exc_info is None:
+            event_dict.pop("exc_info", None)
+        else:
+            event_dict["exc_info"] = exc_info
+
+    def _exception_type_name(self, event_dict: EventDict) -> str | None:
+        if "exc_info" in event_dict:
+            exc_info_raw = event_dict["exc_info"]
+            exc_info = (
+                cast(ExcInfo, exc_info_raw)
+                if isinstance(exc_info_raw, tuple)
+                else _figure_out_exc_info(exc_info_raw)
+            )
+        elif isinstance(event_dict.get("exception"), list):
+            stacks = event_dict["exception"]
+            if stacks and isinstance(stacks[0], Mapping):
+                exc_type_name = stacks[0].get("exc_type")
+                if isinstance(exc_type_name, str):
+                    return exc_type_name
+            return None
+        else:
+            exc_info = None
+        if exc_info is None:
+            return None
+        exc_type = exc_info[0]
+        return f"{exc_type.__module__}.{exc_type.__qualname__}"
+
+    def _take_expired(self, now: float) -> list[tuple[str, EventDict]]:
+        expired: list[tuple[str, EventDict]] = []
+        for identity, group in list(self._groups.items()):
+            if now < group.deadline:
+                continue
+            expired_group = self._groups.pop(identity)
+            summary = self._summary(expired_group, "window", now)
+            if summary is not None:
+                expired.append((expired_group.method_name, summary))
+        return expired
+
+    def _evict(
+        self, queued: list[tuple[str, EventDict]], now: float
+    ) -> None:
+        while len(self._groups) >= self.max_groups:
+            _, group = self._groups.popitem(last=False)
+            summary = self._summary(group, "evicted", now)
+            if summary is not None:
+                queued.append((group.method_name, summary))
+
+    def _queue_pending(
+        self, queued: list[tuple[str, EventDict]]
+    ) -> None:
+        self._pending_summaries.extend(queued)
+        queued.clear()
+
+    def _collect(
+        self,
+        reason: str,
+        logger: WrappedLogger | None,
+        fallback_method_name: str,
+    ) -> tuple[
+        list[tuple[str, EventDict]],
+        list[EventDict],
+        WrappedLogger | None,
+        str,
+    ]:
+        now = self.clock()
+        queued = [*self._pending_summaries]
+        summaries = [summary for _, summary in queued]
+        self._pending_summaries.clear()
+        groups = list(self._groups.values())
+        self._groups.clear()
+        if reason == "close":
+            self._closed = True
+        for group in groups:
+            summary = self._summary(group, reason, now)
+            if summary is None:
+                continue
+            method_name = group.method_name or fallback_method_name
+            queued.append((method_name, summary))
+            summaries.append(summary)
+        return queued, summaries, logger, fallback_method_name
+
+    def _summary(
+        self, group: _AggregatedEvent, reason: str, now: float
+    ) -> EventDict | None:
+        if group.count <= 1:
+            return None
+
+        summary = dict(group.first_event)
+        summary[self.count_key] = group.count
+        summary[self.suppressed_count_key] = group.count - 1
+        summary[self.reason_key] = reason
+        summary["first_seen"] = group.first_seen
+        summary["last_seen"] = now
+        summary[_AGGREGATED_MARKER] = True
+
+        return summary
+
+
+EventDeduplicator = EventAggregator
 
 
 def _figure_out_exc_info(v: Any) -> ExcInfo | None:

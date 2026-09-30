@@ -285,6 +285,12 @@ API Reference
       >>> MaybeTimeStamper()(None, "", {"timestamp": 42})
       {'timestamp': 42}
 
+.. autoclass:: EventAggregator
+   :members: flush, close
+
+.. autoclass:: EventDeduplicator
+   :members: flush, close
+
 .. autoclass:: CallsiteParameter
    :members:
 

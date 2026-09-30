@@ -15,6 +15,16 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- structlog.processors.EventAggregator (also available as
+  EventDeduplicator) merges repeated events during configurable windows.
+  The first event is emitted immediately and matching events are suppressed.
+  A conserved summary is emitted when the window ends, the processor is
+  flushed or closed, or the active-group limit evicts a group.
+  Identities use selected fields and exception types by default;
+  request-scoped merging is explicitly configurable.
+
 
 ## [26.1.0](https://github.com/hynek/structlog/compare/25.5.0...26.1.0) - 2026-06-06
 
