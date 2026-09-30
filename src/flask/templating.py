@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import posixpath
 import typing as t
 
 from jinja2 import BaseLoader
@@ -45,6 +46,24 @@ class Environment(BaseEnvironment):
         BaseEnvironment.__init__(self, **options)
         self.app = app
 
+    def join_path(self, template: str, parent: str) -> str:
+        blueprint_name, separator, parent_name = parent.partition(":")
+
+        if not separator or blueprint_name not in self.app.blueprints:
+            return template
+
+        if not (template.startswith("./") or template.startswith("../")):
+            return template
+
+        name = posixpath.normpath(
+            posixpath.join(posixpath.dirname(parent_name), template)
+        )
+
+        if name == ".." or name.startswith("../"):
+            return f"{blueprint_name}:{name}"
+
+        return f"{blueprint_name}:{name}"
+
 
 class DispatchingJinjaLoader(BaseLoader):
     """A loader that looks for templates in the application and all
@@ -68,9 +87,9 @@ class DispatchingJinjaLoader(BaseLoader):
         rv: tuple[str, str | None, t.Callable[[], bool] | None] | None
         trv: None | (tuple[str, str | None, t.Callable[[], bool] | None]) = None
 
-        for srcobj, loader in self._iter_loaders(template):
+        for srcobj, loader, name in self._iter_loaders(template):
             try:
-                rv = loader.get_source(environment, template)
+                rv = loader.get_source(environment, name)
                 if trv is None:
                     trv = rv
             except TemplateNotFound:
@@ -88,22 +107,35 @@ class DispatchingJinjaLoader(BaseLoader):
     def _get_source_fast(
         self, environment: BaseEnvironment, template: str
     ) -> tuple[str, str | None, t.Callable[[], bool] | None]:
-        for _srcobj, loader in self._iter_loaders(template):
+        for _srcobj, loader, name in self._iter_loaders(template):
             try:
-                return loader.get_source(environment, template)
+                return loader.get_source(environment, name)
             except TemplateNotFound:
                 continue
         raise TemplateNotFound(template)
 
-    def _iter_loaders(self, template: str) -> t.Iterator[tuple[Scaffold, BaseLoader]]:
+    def _iter_loaders(
+        self, template: str
+    ) -> t.Iterator[tuple[Scaffold, BaseLoader, str]]:
+        blueprint_name, separator, name = template.partition(":")
+
+        if separator and blueprint_name in self.app.blueprints:
+            blueprint = self.app.blueprints[blueprint_name]
+            loader = blueprint.jinja_loader
+
+            if loader is not None:
+                yield blueprint, loader, name
+
+            return
+
         loader = self.app.jinja_loader
         if loader is not None:
-            yield self.app, loader
+            yield self.app, loader, template
 
         for blueprint in self.app.iter_blueprints():
             loader = blueprint.jinja_loader
             if loader is not None:
-                yield blueprint, loader
+                yield blueprint, loader, template
 
     def list_templates(self) -> list[str]:
         result = set()

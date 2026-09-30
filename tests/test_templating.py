@@ -1,5 +1,6 @@
 import logging
 
+import jinja2
 import pytest
 import werkzeug.serving
 from jinja2 import TemplateNotFound
@@ -418,6 +419,122 @@ def test_custom_template_loader(client):
     c = app.test_client()
     rv = c.get("/")
     assert rv.data == b"Hello Custom World!"
+
+
+def test_qualified_blueprint_templates(tmp_path):
+    def create_app(blueprints):
+        app = flask.Flask(
+            __name__, root_path=tmp_path, template_folder="application_templates"
+        )
+
+        for blueprint in blueprints:
+            app.register_blueprint(blueprint)
+
+        return app
+
+    first = flask.Blueprint(
+        "first",
+        __name__,
+        root_path=tmp_path,
+        template_folder="first_templates",
+    )
+    second = flask.Blueprint(
+        "second",
+        __name__,
+        root_path=tmp_path,
+        template_folder="second_templates",
+    )
+    shared = flask.Blueprint(
+        "shared",
+        __name__,
+        root_path=tmp_path,
+        template_folder="shared_templates",
+    )
+
+    tmp_path.joinpath("application_templates").mkdir()
+    tmp_path.joinpath("first_templates").mkdir()
+    tmp_path.joinpath("second_templates").mkdir()
+    tmp_path.joinpath("first_templates", "nested").mkdir()
+    tmp_path.joinpath("second_templates", "nested").mkdir()
+    tmp_path.joinpath("shared_templates").mkdir()
+    tmp_path.joinpath("application_templates", "base.html").write_text("app")
+    tmp_path.joinpath("first_templates", "base.html").write_text(
+        "first base|{% block content %}default{% endblock %}"
+    )
+    tmp_path.joinpath("second_templates", "base.html").write_text(
+        "second base|{% block content %}default{% endblock %}"
+    )
+    tmp_path.joinpath("first_templates", "child.html").write_text(
+        '{% extends "./base.html" %}{% block content %}first child{% endblock %}'
+    )
+    tmp_path.joinpath("second_templates", "child.html").write_text(
+        '{% extends "./base.html" %}{% block content %}second child{% endblock %}'
+    )
+    tmp_path.joinpath("first_templates", "nested", "child.html").write_text(
+        '{% extends "../base.html" %}{% block content %}first nested{% endblock %}'
+    )
+    tmp_path.joinpath("second_templates", "nested", "child.html").write_text(
+        '{% extends "../base.html" %}{% block content %}second nested{% endblock %}'
+    )
+    tmp_path.joinpath("first_templates", "included.html").write_text("first include")
+    tmp_path.joinpath("second_templates", "included.html").write_text("second include")
+    tmp_path.joinpath("first_templates", "macros.html").write_text(
+        "{% macro greeting() %}first macro{% endmacro %}"
+    )
+    tmp_path.joinpath("second_templates", "macros.html").write_text(
+        "{% macro greeting() %}second macro{% endmacro %}"
+    )
+    tmp_path.joinpath("first_templates", "page.html").write_text(
+        '{% from "./macros.html" import greeting %}'
+        '{{ greeting() }}{% include "./included.html" %}'
+    )
+    tmp_path.joinpath("second_templates", "page.html").write_text(
+        '{% from "./macros.html" import greeting %}'
+        '{{ greeting() }}{% include "./included.html" %}'
+    )
+    tmp_path.joinpath("shared_templates", "base.html").write_text("shared")
+
+    for blueprints in ((first, second), (second, first)):
+        app = create_app(blueprints)
+        app.register_blueprint(shared)
+        app.register_blueprint(shared, name="other")
+
+        with app.app_context():
+            assert flask.render_template("base.html") == "app"
+            assert flask.render_template("first:child.html") == (
+                "first base|first child"
+            )
+            assert flask.render_template("first:nested/child.html") == (
+                "first base|first nested"
+            )
+            assert flask.render_template("second:child.html") == (
+                "second base|second child"
+            )
+            assert flask.render_template("second:nested/child.html") == (
+                "second base|second nested"
+            )
+            assert flask.render_template("first:page.html") == (
+                "first macrofirst include"
+            )
+            assert flask.render_template("second:page.html") == (
+                "second macrosecond include"
+            )
+            assert flask.render_template("shared:base.html") == "shared"
+            assert flask.render_template("other:base.html") == "shared"
+
+            cached_names = {key[1] for key in app.jinja_env.cache}
+            assert "first:base.html" in cached_names
+            assert "second:base.html" in cached_names
+            assert "shared:base.html" in cached_names
+            assert "other:base.html" in cached_names
+
+            with pytest.raises(TemplateNotFound) as exc_info:
+                flask.render_template("first:missing.html")
+
+            assert exc_info.value.name == "first:missing.html"
+
+            app.jinja_loader = jinja2.DictLoader({"weird:name.html": "colon"})
+            assert flask.render_template("weird:name.html") == "colon"
 
 
 def test_iterable_loader(app, client):

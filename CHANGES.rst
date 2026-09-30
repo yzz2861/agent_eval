@@ -30,6 +30,9 @@ Unreleased
     of only lower case file extensions. :pr:`6012`
 -   Fix parsing IPv6 with port in ``run`` and the test client. :pr:`6096`
 -   Add ``app.query`` route decorator for the HTTP QUERY method.
+-   Templates can be looked up from a specific blueprint with
+    ``blueprint_name:template_name``. Relative references in such a template
+    stay in that blueprint's namespace.
 
 
 Version 3.1.3

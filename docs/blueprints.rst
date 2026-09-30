@@ -235,6 +235,22 @@ overridden, make sure that no other blueprint or actual application template
 has the same relative path. When multiple blueprints provide the same relative
 template path the first blueprint registered takes precedence over the others.
 
+To refer to a blueprint template without using the search order, prefix the
+template name with the registered blueprint name and a colon::
+
+    render_template("admin:index.html")
+
+This only searches the ``admin`` blueprint's template folder, so an
+application template with the same name does not override it. The unqualified
+name still follows the application-first and registration-order rules above.
+If the same blueprint is registered multiple times with different names, each
+registered name can be used independently.
+
+Inside a qualified template, relative ``extends``, ``include``, and ``import``
+names beginning with ``./`` or ``../`` remain relative to that template inside
+the same blueprint namespace. For example, ``admin:pages/page.html`` can use
+``{% extends "../base.html" %}`` to extend ``admin:base.html``.
+
 
 So if you have a blueprint in the folder ``yourapplication/admin`` and you
 want to render the template ``'admin/index.html'`` and you have provided
