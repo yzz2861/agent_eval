@@ -3,9 +3,11 @@ import contextlib
 import datetime
 import functools
 import socket
+import struct
 import traceback
 import typing
 import unittest
+import zlib
 
 from tornado import gen
 from tornado.concurrent import Future
@@ -36,9 +38,12 @@ except ImportError:
     raise
 
 from tornado.websocket import (
+    _PerMessageDeflateCompressor,
+    _WebSocketParams,
     WebSocketClosedError,
     WebSocketError,
     WebSocketHandler,
+    WebSocketProtocol13,
     websocket_connect,
 )
 
@@ -166,6 +171,63 @@ class RenderMessageHandler(TestWebSocketHandler):
         self.write_message(self.render_string("message.html", message=message))
 
 
+class MessageStreamHandler(TestWebSocketHandler):
+    def initialize(self, close_future=None, compression_options=None):
+        super().initialize(
+            close_future=close_future, compression_options=compression_options
+        )
+        self.start_event = Event()
+        self.release_event = Event()
+        self.pong_event = Event()
+        self.stream_future = None
+
+    async def on_message(self, message):
+        if message == "start":
+            self.start_event.set()
+            self.stream_future = asyncio.ensure_future(
+                self.write_message_stream(self.stream_chunks())
+            )
+        elif message == "empty":
+
+            class EmptyChunks:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    raise StopAsyncIteration
+
+            await self.write_message_stream(EmptyChunks())
+        elif message == "fail":
+
+            async def failing_chunks():
+                yield b"partial"
+                raise RuntimeError("stream failed")
+
+            try:
+                await self.write_message_stream(failing_chunks(), binary=True)
+            except RuntimeError:
+                pass
+        elif message == "ping":
+            self.ping(b"streaming")
+        elif message == "release":
+            await self.pong_event.wait()
+            self.release_event.set()
+            await self.stream_future
+        elif message == "queued":
+            self.write_message("queued")
+
+    def on_pong(self, data):
+        self.pong_event.set()
+
+    async def stream_chunks(self):
+        await self.start_event.wait()
+        yield b"hello "
+        yield "\u00e9".encode("utf-8")[:1]
+        await self.release_event.wait()
+        yield "\u00e9".encode("utf-8")[1:]
+        yield b"world"
+
+
 class SubprotocolHandler(TestWebSocketHandler):
     def initialize(self, **kwargs):  # type: ignore[override]
         super().initialize(**kwargs)
@@ -218,6 +280,44 @@ class NoDelayHandler(TestWebSocketHandler):
     def open(self):
         self.set_nodelay(True)
         self.write_message("hello")
+
+
+class _FakeStream:
+    def __init__(self):
+        self.frames = []
+        self.closed_value = False
+        self.timeout = None
+        self.io_loop = self
+
+    def time(self):
+        return 0
+
+    def add_timeout(self, deadline, callback):
+        self.timeout = callback
+        return callback
+
+    def remove_timeout(self, timeout):
+        self.timeout = None
+
+    def write(self, frame):
+        self.frames.append(frame)
+        fut = Future()
+        fut.set_result(None)
+        return fut
+
+    def close(self):
+        self.closed_value = True
+
+    def closed(self):
+        return self.closed_value
+
+    def set_nodelay(self, value):
+        pass
+
+
+class _FakeHandler:
+    def on_ping(self, data):
+        pass
 
 
 class WebSocketBaseTestCase(AsyncHTTPTestCase):
@@ -279,6 +379,11 @@ class WebSocketTest(WebSocketBaseTestCase):
                     dict(close_future=self.close_future),
                 ),
                 ("/render", RenderMessageHandler, dict(close_future=self.close_future)),
+                (
+                    "/stream",
+                    MessageStreamHandler,
+                    dict(close_future=self.close_future),
+                ),
                 (
                     "/subprotocol",
                     SubprotocolHandler,
@@ -365,6 +470,51 @@ class WebSocketTest(WebSocketBaseTestCase):
         ws.write_message("hello \u00e9")
         response = yield ws.read_message()
         self.assertEqual(response, "hello \u00e9")
+
+    @gen_test
+    def test_stream_message(self):
+        ws = yield self.ws_connect("/stream")
+        ws.write_message("start")
+        ws.write_message("ping")
+        ws.write_message("release")
+        response = yield ws.read_message()
+        self.assertEqual(response, "hello \u00e9world")
+
+    @gen_test
+    def test_stream_empty_message(self):
+        ws = yield self.ws_connect("/stream")
+        ws.write_message("empty")
+        response = yield ws.read_message()
+        self.assertEqual(response, "")
+
+    @gen_test
+    def test_stream_queued_message(self):
+        ws = yield self.ws_connect("/stream")
+        ws.write_message("start")
+        ws.write_message("ping")
+        ws.write_message("queued")
+        ws.write_message("release")
+        self.assertEqual((yield ws.read_message()), "hello \u00e9world")
+        self.assertEqual((yield ws.read_message()), "queued")
+
+    @gen_test
+    def test_stream_error_closes_message(self):
+        ws = yield self.ws_connect("/stream")
+        ws.write_message("fail")
+        self.assertIsNone((yield ws.read_message()))
+        self.assertEqual(ws.close_code, 1011)
+
+    @gen_test
+    def test_client_stream_message(self):
+        ws = yield self.ws_connect("/echo")
+
+        async def chunks():
+            yield b"hello "
+            yield "\u00e9"
+            yield b" world"
+
+        yield ws.write_message_stream(chunks(), binary=True)
+        self.assertEqual((yield ws.read_message()), b"hello \xc3\xa9 world")
 
     @gen_test
     def test_error_in_closed_client_write_message(self):
@@ -997,3 +1147,228 @@ class MaxMessageSizeTest(WebSocketBaseTestCase):
         self.assertEqual(ws.close_reason, "message too big")
         # TODO: Needs tests of messages split over multiple
         # continuation frames.
+
+
+class ProtocolStreamWriteTest(TestCase):
+    def make_protocol(self, compression=False):
+        stream = _FakeStream()
+        params = _WebSocketParams(compression_options={} if compression else None)
+        protocol = WebSocketProtocol13(_FakeHandler(), False, params)
+        protocol.stream = stream
+        if compression:
+            compressor = _PerMessageDeflateCompressor(
+                persistent=True, max_wbits=None, compression_options={}
+            )
+            protocol._compressor = compressor
+        return protocol, stream
+
+    def parse_frames(self, frames, compressed=False):
+        parsed = []
+        payload = b""
+        decompressor = zlib.decompressobj(-15) if compressed else None
+        for frame in frames:
+            first, second = frame[0], frame[1]
+            length = second & 0x7F
+            offset = 2
+            if length == 126:
+                length = struct.unpack("!H", frame[2:4])[0]
+                offset = 4
+            elif length == 127:
+                length = struct.unpack("!Q", frame[2:10])[0]
+                offset = 10
+            parsed.append(
+                (
+                    bool(first & 0x80),
+                    first & 0x0F,
+                    bool(first & 0x40),
+                    frame[offset : offset + length],
+                )
+            )
+            frame_payload = frame[offset : offset + length]
+            if decompressor is not None:
+                if first & 0x80:
+                    frame_payload += b"\x00\x00\xff\xff"
+                payload += decompressor.decompress(frame_payload)
+            else:
+                payload += frame_payload
+        return parsed, payload
+
+    def test_stream_frames_utf8_split_and_empty(self):
+        protocol, stream = self.make_protocol()
+
+        async def chunks():
+            yield b"hello "
+            yield "\u00e9".encode("utf-8")[:1]
+            yield "\u00e9".encode("utf-8")[1:]
+            yield b"world"
+
+        asyncio.run(protocol.write_message_stream(chunks()))
+        frames, payload = self.parse_frames(stream.frames)
+        self.assertEqual(
+            [frame[:3] for frame in frames],
+            [
+                (False, 0x1, False),
+                (False, 0, False),
+                (False, 0, False),
+                (False, 0, False),
+                (True, 0, False),
+            ],
+        )
+        self.assertEqual(payload, "hello \u00e9world".encode("utf-8"))
+
+        class EmptyChunks:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        stream.frames.clear()
+        asyncio.run(protocol.write_message_stream(EmptyChunks()))
+        frames, payload = self.parse_frames(stream.frames)
+        self.assertEqual(frames, [(True, 0x1, False, b"")])
+        self.assertEqual(payload, b"")
+
+    def test_stream_compression_is_whole_message(self):
+        protocol, stream = self.make_protocol(compression=True)
+
+        async def chunks():
+            yield b"a" * 64
+            yield b"a" * 64
+
+        asyncio.run(protocol.write_message_stream(chunks()))
+        frames, payload = self.parse_frames(stream.frames, compressed=True)
+        self.assertEqual(
+            [frame[:3] for frame in frames],
+            [
+                (False, 0x1, True),
+                (False, 0, False),
+                (True, 0, False),
+            ],
+        )
+        self.assertEqual(payload, b"a" * 128)
+
+    def test_stream_compression_without_context_takeover(self):
+        stream = _FakeStream()
+        params = _WebSocketParams(compression_options={})
+        protocol = WebSocketProtocol13(_FakeHandler(), False, params)
+        protocol.stream = stream
+        protocol._compressor = _PerMessageDeflateCompressor(
+            persistent=False, max_wbits=None, compression_options={}
+        )
+
+        async def chunks():
+            yield b"first"
+            yield b"second"
+
+        asyncio.run(protocol.write_message_stream(chunks()))
+        frames, payload = self.parse_frames(stream.frames, compressed=True)
+        self.assertEqual(payload, b"firstsecond")
+        self.assertEqual(
+            [frame[:3] for frame in frames],
+            [(False, 0x1, True), (False, 0, False), (True, 0, False)],
+        )
+
+    def test_stream_error_after_frame_closes_connection(self):
+        protocol, stream = self.make_protocol()
+
+        async def chunks():
+            yield b"partial"
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(protocol.write_message_stream(chunks()))
+        self.assertTrue(protocol.server_terminated)
+        self.assertEqual(stream.frames[-1][0] & 0x0F, 0x8)
+
+    def test_stream_cancelled_before_first_frame_stays_open(self):
+        protocol, stream = self.make_protocol()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def chunks():
+            started.set()
+            await release.wait()
+            yield b"never"
+
+        async def main():
+            task = asyncio.ensure_future(protocol.write_message_stream(chunks()))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertFalse(protocol.server_terminated)
+            self.assertEqual(stream.frames, [])
+
+        asyncio.run(main())
+
+    def test_stream_cancelled_after_frame_closes_connection(self):
+        protocol, stream = self.make_protocol()
+        release = asyncio.Event()
+
+        async def chunks():
+            yield b"partial"
+            await release.wait()
+            yield b"never"
+
+        async def main():
+            task = asyncio.ensure_future(protocol.write_message_stream(chunks()))
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(protocol.server_terminated)
+            self.assertEqual(stream.frames[-1][0] & 0x0F, 0x8)
+
+        asyncio.run(main())
+
+    def test_write_message_waits_for_stream_boundary(self):
+        protocol, stream = self.make_protocol()
+        release = asyncio.Event()
+
+        async def chunks():
+            yield b"one"
+            await release.wait()
+            yield b"two"
+
+        async def main():
+            stream_task = asyncio.ensure_future(protocol.write_message_stream(chunks()))
+            await asyncio.sleep(0)
+            queued = protocol.write_message("queued")
+            protocol.write_ping(b"p")
+            await asyncio.sleep(0)
+            self.assertEqual(len(stream.frames), 2)
+            self.assertEqual(stream.frames[1][0] & 0x0F, 0x9)
+            release.set()
+            await stream_task
+            await queued
+
+        asyncio.run(main())
+        frames, _ = self.parse_frames(stream.frames)
+        self.assertEqual(
+            [frame[:3] for frame in frames[2:]],
+            [
+                (False, 0, False),
+                (True, 0, False),
+                (True, 0x1, False),
+            ],
+        )
+
+    def test_remote_ping_during_stream_gets_pong(self):
+        protocol, stream = self.make_protocol()
+        release = asyncio.Event()
+
+        async def chunks():
+            yield b"one"
+            await release.wait()
+            yield b"two"
+
+        async def main():
+            stream_task = asyncio.ensure_future(protocol.write_message_stream(chunks()))
+            await asyncio.sleep(0)
+            protocol._handle_message(0x9, b"ping")
+            self.assertEqual(stream.frames[-1][0] & 0x0F, 0xA)
+            release.set()
+            await stream_task
+
+        asyncio.run(main())

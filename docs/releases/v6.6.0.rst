@@ -68,6 +68,13 @@ Type annotation changes
 
 - The default ``SSLContext`` objects are now lazily created on first use rather than at import time.
 
+`tornado.websocket`
+~~~~~~~~~~~~~~~~~~~
+
+- `.WebSocketHandler.write_message_stream` and
+  `.WebSocketClientConnection.write_message_stream` can send an asynchronous iterable as fragmented
+  frames of one WebSocket message.
+
 `tornado.platform.asyncio`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -86,4 +93,4 @@ Type annotation changes
 - A ``timeout`` value of zero will either return or raise immediately. Previously, zero was
   treated as equivalent to ``None`` (wait forever). This affects `.Queue.get`, `.Queue.put`, and
   `.Queue.join`.
- 
+
