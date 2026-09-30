@@ -87,7 +87,7 @@ class StrawberryField(dataclasses.Field):
     type_annotation: StrawberryAnnotation | None
     default_resolver: Callable[[Any, str], object] = getattr
 
-    def __init__(  # noqa: PLR0917
+    def __init__(
         self,
         python_name: str | None = None,
         graphql_name: str | None = None,
@@ -103,6 +103,7 @@ class StrawberryField(dataclasses.Field):
         deprecation_reason: str | None = None,
         directives: Sequence[object] = (),
         extensions: list[FieldExtension] = (),  # type: ignore
+        event_context_getter: Callable[..., Any] | None = None,
     ) -> None:
         # basic fields are fields with no provided resolver
         is_basic_field = not base_resolver
@@ -159,6 +160,7 @@ class StrawberryField(dataclasses.Field):
         self.permission_classes: list[type[BasePermission]] = list(permission_classes)
         self.directives = list(directives)
         self.extensions: list[FieldExtension] = list(extensions)
+        self.event_context_getter = event_context_getter
 
         # Automatically add the permissions extension
         if len(self.permission_classes):
@@ -191,6 +193,7 @@ class StrawberryField(dataclasses.Field):
             deprecation_reason=self.deprecation_reason,
             directives=self.directives[:] if self.directives is not None else [],
             extensions=self.extensions[:] if self.extensions is not None else [],
+            event_context_getter=self.event_context_getter,
         )
         new_field.permission_classes = (
             self.permission_classes[:] if self.permission_classes is not None else []

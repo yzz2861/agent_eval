@@ -12,7 +12,7 @@ except ImportError:
     _execution_context_class_arg = "executor_class"
 
 from graphql.execution import ExecutionResult as OriginalGraphQLExecutionResult
-from graphql.execution import execute, subscribe
+from graphql.execution import create_source_event_stream, execute, subscribe
 
 from strawberry.types import ExecutionResult
 
@@ -90,6 +90,7 @@ __all__ = [
     "InitialIncrementalExecutionResult",
     "ResultType",
     "SubsequentIncrementalExecutionResult",
+    "create_source_event_stream",
     "execute",
     "execution_context_class_kwargs",
     "experimental_execute_incrementally",

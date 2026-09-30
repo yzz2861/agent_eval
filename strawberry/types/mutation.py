@@ -203,6 +203,7 @@ def subscription(
     directives: Sequence[object] | None = (),
     extensions: list[FieldExtension] | None = None,
     graphql_type: Any | None = None,
+    event_context_getter: Callable[..., Any] | None = None,
 ) -> T: ...
 
 
@@ -221,6 +222,7 @@ def subscription(
     directives: Sequence[object] | None = (),
     extensions: list[FieldExtension] | None = None,
     graphql_type: Any | None = None,
+    event_context_getter: Callable[..., Any] | None = None,
 ) -> T: ...
 
 
@@ -238,6 +240,7 @@ def subscription(
     directives: Sequence[object] | None = (),
     extensions: list[FieldExtension] | None = None,
     graphql_type: Any | None = None,
+    event_context_getter: Callable[..., Any] | None = None,
 ) -> Any: ...
 
 
@@ -255,6 +258,7 @@ def subscription(
     directives: Sequence[object] | None = (),
     extensions: list[FieldExtension] | None = None,
     graphql_type: Any | None = None,
+    event_context_getter: Callable[..., Any] | None = None,
 ) -> StrawberryField: ...
 
 
@@ -272,6 +276,7 @@ def subscription(
     directives: Sequence[object] | None = (),
     extensions: list[FieldExtension] | None = None,
     graphql_type: Any | None = None,
+    event_context_getter: Callable[..., Any] | None = None,
 ) -> StrawberryField: ...
 
 
@@ -288,6 +293,7 @@ def subscription(
     directives: Sequence[object] | None = (),
     extensions: list[FieldExtension] | None = None,
     graphql_type: Any | None = None,
+    event_context_getter: Callable[..., Any] | None = None,
     init: Literal[True, False] | None = None,
 ) -> Any:
     """Annotates a method or property as a GraphQL subscription.
@@ -305,6 +311,8 @@ def subscription(
         extensions: The extensions for the field.
         graphql_type: The GraphQL type for the field, useful when you want to use a
             different type in the resolver than the one in the schema.
+        event_context_getter: A sync or async context manager factory invoked for
+            each event yielded by the subscription.
         init: This parameter is used by PyRight to determine whether this field is
             added in the constructor or not. It is not used to change any behavior at
             the moment.
@@ -326,7 +334,7 @@ def subscription(
 
     it can be used both as decorator and as a normal function.
     """
-    return field(
+    subscription_field = field(
         resolver=resolver,  # type: ignore
         name=name,
         description=description,
@@ -340,6 +348,8 @@ def subscription(
         extensions=extensions,
         graphql_type=graphql_type,
     )
+    subscription_field.event_context_getter = event_context_getter
+    return subscription_field
 
 
 __all__ = ["mutation", "subscription"]

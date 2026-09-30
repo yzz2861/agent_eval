@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import typing
+from collections.abc import AsyncIterable
 from functools import partial, reduce
 from typing import (
     TYPE_CHECKING,
@@ -58,6 +59,7 @@ from strawberry.schema.types.scalar import (
     DEFAULT_SCALAR_REGISTRY,
     _make_scalar_type,
 )
+from strawberry.subscriptions.event_context import EventContextAsyncIterable
 from strawberry.types.arguments import StrawberryArgument, convert_arguments
 from strawberry.types.base import (
     StrawberryList,
@@ -1073,15 +1075,25 @@ class GraphQLCoreConverter:
             strawberry_info = _strawberry_info_from_graphql(info)
 
             if not field_exception_handlers:
-                return await await_maybe(
+                result = await await_maybe(
                     _get_result_with_extensions(
                         _source,
                         strawberry_info,
                         **kwargs,
                     )
                 )
+                if field.event_context_getter is not None and isinstance(
+                    result, AsyncIterable
+                ):
+                    event_stream = EventContextAsyncIterable(
+                        result,
+                        factory=field.event_context_getter,
+                    )
+                    event_stream.set_info(strawberry_info)
+                    return event_stream
+                return result
 
-            return await await_maybe(
+            result = await await_maybe(
                 _call_with_exception_handling(
                     strawberry_info,
                     lambda: _get_result_with_extensions(
@@ -1091,6 +1103,16 @@ class GraphQLCoreConverter:
                     ),
                 )
             )
+            if field.event_context_getter is not None and isinstance(
+                result, AsyncIterable
+            ):
+                event_stream = EventContextAsyncIterable(
+                    result,
+                    factory=field.event_context_getter,
+                )
+                event_stream.set_info(strawberry_info)
+                return event_stream
+            return result
 
         if field.is_async:
             _async_resolver._is_default = not field.base_resolver  # type: ignore

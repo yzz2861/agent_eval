@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import warnings
 from asyncio import ensure_future
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    AsyncExitStack,
+)
 from functools import lru_cache
 from inspect import isawaitable
 from typing import (
@@ -52,6 +58,11 @@ from strawberry.printer import print_schema
 from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.schema.validation_rules.maybe_null import MaybeNullValidationRule
 from strawberry.schema.validation_rules.one_of import OneOfInputValidationRule
+from strawberry.subscriptions.event_context import (
+    EventContextEvent,
+    get_event_context,
+    merge_event_context,
+)
 from strawberry.types.base import (
     StrawberryObjectDefinition,
     WithStrawberryObjectDefinition,
@@ -73,11 +84,11 @@ from ._graphql_core import (
     GraphQLIncrementalExecutionResults,
     GraphQLIncrementalResult,
     ResultType,
+    create_source_event_stream,
     execute,
     execution_context_class_kwargs,
     experimental_execute_incrementally,
     incremental_execution_directives,
-    subscribe,
 )
 from .base import BaseSchema
 from .config import StrawberryConfig
@@ -117,6 +128,7 @@ StreamResult: TypeAlias = AsyncGenerator[
 OriginSubscriptionResult: TypeAlias = (
     OriginalExecutionResult | AsyncIterator[OriginalExecutionResult]
 )
+OriginSubscriptionSourceResult: TypeAlias = OriginalExecutionResult | AsyncIterator[Any]
 
 
 DEFAULT_ALLOWED_OPERATION_TYPES = {
@@ -308,7 +320,7 @@ class StrawberryGraphQLCoreExecutionContext(GraphQLExecutionContext):
 
 
 class Schema(BaseSchema):
-    def __init__(  # noqa: PLR0917
+    def __init__(
         self,
         # TODO: can we make sure we only allow to pass
         # something that has been decorated?
@@ -609,7 +621,7 @@ class Schema(BaseSchema):
             *(ext for ext in extensions if ext._implements_resolve())
         )
 
-    def _create_execution_context(  # noqa: PLR0917
+    def _create_execution_context(
         self,
         query: str | None,
         allowed_operation_types: Iterable[OperationType],
@@ -846,7 +858,7 @@ class Schema(BaseSchema):
 
         return result
 
-    async def execute(  # noqa: PLR0917
+    async def execute(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
@@ -920,7 +932,7 @@ class Schema(BaseSchema):
             execution_context, result, extensions_runner, skip_process_errors=True
         )
 
-    def execute_sync(  # noqa: PLR0917
+    def execute_sync(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
@@ -1081,24 +1093,30 @@ class Schema(BaseSchema):
 
             try:
                 async with extensions_runner.executing():
-                    gql_33_kwargs = {
+                    source_gql_33_kwargs = {
                         "middleware": middleware_manager,
                         "operation_extensions": operation_extensions,
                         **execution_context_class_kwargs(execution_context_class),
                     }
                     try:
                         # Might not be awaitable for pre-execution errors.
-                        aiter_or_result: OriginSubscriptionResult = await await_maybe(
-                            subscribe(
-                                self._schema,
-                                execution_context.graphql_document,
-                                root_value=execution_context.root_value,
-                                variable_values=execution_context.variables,
-                                operation_name=execution_context.operation_name,
-                                context_value=execution_context.context,
-                                **{} if IS_GQL_32 else gql_33_kwargs,
+                        source_or_result: OriginSubscriptionSourceResult = (
+                            await await_maybe(
+                                cast(
+                                    "Awaitable[OriginSubscriptionSourceResult]",
+                                    create_source_event_stream(
+                                        self._schema,
+                                        execution_context.graphql_document,
+                                        root_value=execution_context.root_value,
+                                        variable_values=execution_context.variables,
+                                        operation_name=execution_context.operation_name,
+                                        context_value=execution_context.context,
+                                        **{} if IS_GQL_32 else source_gql_33_kwargs,
+                                    ),
+                                )
                             )
                         )
+                        aiter_or_result = source_or_result
                     # graphql-core 3.2 doesn't handle some of the pre-execution errors.
                     # see `test_subscription_immediate_error`
                     except Exception as exc:  # noqa: BLE001
@@ -1116,25 +1134,134 @@ class Schema(BaseSchema):
                     async with extensions_runner.on_stream_result(execution_result):
                         yield execution_result
                 else:
-                    try:
-                        async with aclosing(aiter_or_result):
-                            async for result in aiter_or_result:
-                                extension_result = await self._handle_execution_result(
-                                    execution_context,
-                                    result,
-                                    extensions_runner,
+                    event_gql_33_kwargs = {
+                        "middleware": middleware_manager,
+                        "operation_extensions": operation_extensions,
+                        **execution_context_class_kwargs(execution_context_class),
+                    }
+
+                    async def process_event(raw_event: Any) -> StreamResult:
+                        connection_context = execution_context.context
+                        event = raw_event
+                        event_context = connection_context
+                        context_factory = None
+                        event_info: Any = None
+
+                        if isinstance(raw_event, EventContextEvent):
+                            event = raw_event.event
+                            event_info = raw_event.info
+                            context_factory = raw_event.factory
+
+                        event_exit_stack = AsyncExitStack()
+                        event_context_closed = False
+                        try:
+                            await event_exit_stack.__aenter__()
+                            if context_factory is not None:
+                                context_manager: Any = await await_maybe(
+                                    get_event_context(
+                                        context_factory,
+                                        event=event,
+                                        info=event_info,
+                                    )
+                                )
+                                if isinstance(
+                                    context_manager, AbstractAsyncContextManager
+                                ):
+                                    event_context_value = (
+                                        await event_exit_stack.enter_async_context(
+                                            context_manager
+                                        )
+                                    )
+                                elif isinstance(
+                                    context_manager, AbstractContextManager
+                                ):
+                                    event_context_value = (
+                                        event_exit_stack.enter_context(context_manager)
+                                    )
+                                else:
+                                    raise TypeError(
+                                        "Subscription event context getter must "
+                                        "return a context manager"
+                                    )
+                                event_context = merge_event_context(
+                                    connection_context,
+                                    event_context_value,
                                 )
 
+                            raw_result: OriginalExecutionResult = await await_maybe(
+                                execute(
+                                    self._schema,
+                                    cast(
+                                        "DocumentNode",
+                                        execution_context.graphql_document,
+                                    ),
+                                    root_value=event,
+                                    context_value=event_context,
+                                    variable_values=execution_context.variables,
+                                    operation_name=execution_context.operation_name,
+                                    **{} if IS_GQL_32 else event_gql_33_kwargs,
+                                )
+                            )
+                            extension_result = await self._handle_execution_result(
+                                execution_context,
+                                raw_result,
+                                extensions_runner,
+                            )
+                            result_error = (
+                                raw_result.errors[0] if raw_result.errors else None
+                            )
+                            try:
                                 async with extensions_runner.on_stream_result(
                                     extension_result
                                 ):
                                     yield extension_result
-                    # graphql-core doesn't handle exceptions raised while executing.
+                            except BaseException:
+                                await event_exit_stack.__aexit__(*sys.exc_info())
+                                event_context_closed = True
+                                raise
+
+                            if result_error is not None:
+                                await event_exit_stack.__aexit__(
+                                    type(result_error),
+                                    result_error,
+                                    result_error.__traceback__,
+                                )
+                            else:
+                                await event_exit_stack.__aexit__(None, None, None)
+                            event_context_closed = True
+                        finally:
+                            if not event_context_closed:
+                                await event_exit_stack.__aexit__(*sys.exc_info())
+
+                    source_iterator = aiter_or_result.__aiter__()
+                    source_error: Exception | None = None
+                    try:
+                        while True:
+                            try:
+                                raw_event = await source_iterator.__anext__()
+                            except StopAsyncIteration:
+                                break
+
+                            results = process_event(raw_event)
+                            try:
+                                async for result in results:
+                                    yield result
+                            except BaseException:
+                                await results.aclose()
+                                raise
+                            await results.aclose()
                     except Exception as exc:  # noqa: BLE001
+                        source_error = exc
+                    finally:
+                        source_close = getattr(source_iterator, "aclose", None)
+                        if source_close is not None:
+                            await source_close()
+
+                    if source_error is not None:
                         execution_result = await self._handle_execution_result(
                             execution_context,
                             OriginalExecutionResult(
-                                data=None, errors=[_coerce_error(exc)]
+                                data=None, errors=[_coerce_error(source_error)]
                             ),
                             extensions_runner,
                         )
@@ -1211,7 +1338,7 @@ class Schema(BaseSchema):
             execution_context, result, extensions_runner, skip_process_errors=True
         )
 
-    async def subscribe(  # noqa: PLR0917
+    async def subscribe(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
@@ -1241,7 +1368,7 @@ class Schema(BaseSchema):
             ),
         )
 
-    async def stream(  # noqa: PLR0917
+    async def stream(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,

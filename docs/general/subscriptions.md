@@ -66,6 +66,62 @@ This is a very short example of what is possible. Like with queries and
 mutations the subscription can return any GraphQL type, not only scalars as
 demonstrated here.
 
+## Per-event context
+
+A subscription connection can live for hours, but resources such as database
+transactions and DataLoaders should usually only live for one delivered event.
+Pass `event_context_getter` to `@strawberry.subscription` to create a sync or
+async context manager for each event yielded by the subscription:
+
+```python
+import contextlib
+from typing import AsyncGenerator
+
+import strawberry
+
+
+@contextlib.asynccontextmanager
+async def event_context(event, info):
+    async with database.transaction() as transaction:
+        yield {"transaction": transaction}
+
+
+@strawberry.type
+class Subscription:
+    @strawberry.subscription(event_context_getter=event_context)
+    async def events(self) -> AsyncGenerator[Event, None]:
+        async for event in event_source():
+            yield event
+```
+
+The context manager is entered after the event is yielded by the source and
+before that event's field resolvers run. It exits after the result is delivered
+to the transport and before the next event is consumed. Consequently, a slow
+first event cannot open contexts for later events, and adjacent events do not
+share transactions or DataLoaders.
+
+The getter receives the source event and the subscription's `strawberry.Info`.
+When both the connection context and the value yielded by the event context
+manager are mappings, event resolvers receive a layered mapping where event
+keys take precedence. The original connection mapping is not modified, while
+its values remain available:
+
+```python
+@contextlib.asynccontextmanager
+async def event_context(event, info):
+    connection = info.context
+    async with database.transaction() as transaction:
+        yield {
+            "request": connection["request"],
+            "transaction": transaction,
+        }
+```
+
+If cancellation, an early stream close, a field error, or context entry fails,
+Strawberry closes the event context and source using the normal context-manager
+exception protocol. Context entry errors are delivered as GraphQL errors for
+that event when the source remains usable.
+
 ## Authenticating Subscriptions
 
 Without going into detail on [why](https://github.com/websockets/ws/issues/467),
