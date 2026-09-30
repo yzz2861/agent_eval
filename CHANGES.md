@@ -1,3 +1,10 @@
+## Unreleased
+
+- Add `quart.iter_json_seq` to stream `application/json-seq` (RFC
+  7464) request bodies record by record, without buffering the whole
+  body. Supports per-record size limits, abort or skip-and-report error
+  strategies, and prompt termination on client disconnect.
+
 ## Version 0.23.1
 
 Released 2026-08-29

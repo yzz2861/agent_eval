@@ -30,6 +30,11 @@ from .helpers import send_from_directory as send_from_directory
 from .helpers import stream_with_context as stream_with_context
 from .helpers import url_for as url_for
 from .json import jsonify as jsonify
+from .json_seq import iter_json_seq as iter_json_seq
+from .json_seq import JSONSeqDecodeError as JSONSeqDecodeError
+from .json_seq import JSONSeqError as JSONSeqError
+from .json_seq import JSONSeqRecordTooLargeError as JSONSeqRecordTooLargeError
+from .json_seq import JSONSeqTruncatedError as JSONSeqTruncatedError
 from .signals import appcontext_popped as appcontext_popped
 from .signals import appcontext_pushed as appcontext_pushed
 from .signals import appcontext_tearing_down as appcontext_tearing_down
