@@ -5,17 +5,23 @@ import socket
 import ssl
 import sys
 import tempfile
+import threading
 from email.errors import HeaderWriteError
 from email.message import EmailMessage as PyEmailMessage
 from io import StringIO
 from pathlib import Path
 from smtplib import SMTPException
+from socketserver import StreamRequestHandler, ThreadingTCPServer
 from ssl import SSLError
-from unittest import mock, skipIf, skipUnless
+from unittest import SkipTest, mock, skipIf, skipUnless
 
 from django.core import mail
 from django.core.exceptions import ImproperlyConfigured
-from django.core.mail import EmailMessage, InvalidMailer
+from django.core.mail import (
+    EmailMessage,
+    InvalidMailer,
+    StreamingEmailAttachment,
+)
 from django.core.mail.backends import console, dummy, filebased, locmem, smtp
 from django.core.mail.backends.base import BaseEmailBackend
 from django.test import SimpleTestCase, ignore_warnings, override_settings
@@ -317,6 +323,13 @@ class LocmemBackendTests(SharedEmailBackendTests, SimpleTestCase):
         self.assertEqual(mail.outbox[0].sent_using, "custom")
         self.assertIsNone(mail.outbox[1].sent_using)
 
+    def test_streaming_attachments_are_unsupported(self):
+        email = EmailMessage(to=["to@example.com"])
+        email.attach_stream("file.bin", StreamingBinaryFile(b"content"))
+
+        with self.assertRaisesMessage(TypeError, "does not support streaming"):
+            self.create_backend().send_messages([email])
+
 
 @ignore_warnings(
     category=RemovedInDjango2028Warning,
@@ -595,6 +608,260 @@ class SMTPHandler:
     def flush_mailbox(self):
         self.mailbox[:] = []
         self.smtp_envelopes[:] = []
+
+
+class SMTPTestHandler(StreamRequestHandler):
+    def handle(self):
+        self.received = []
+        self.wfile.write(b"220 localhost SMTP\r\n")
+        recipients = []
+        sender = None
+        while True:
+            line = self.rfile.readline()
+            if not line:
+                return
+            command, _, argument = line.partition(b" ")
+            command = command.upper()
+            argument = argument.strip()
+            if command in (b"EHLO", b"HELO"):
+                self.wfile.write(b"250-localhost\r\n250 AUTH PLAIN\r\n")
+            elif command == b"MAIL":
+                sender = argument
+                self.wfile.write(b"250 OK\r\n")
+            elif command == b"RCPT":
+                recipients.append(argument)
+                self.wfile.write(b"250 OK\r\n")
+            elif command == b"DATA":
+                self.wfile.write(b"354 Start mail input\r\n")
+                data = bytearray()
+                while True:
+                    line = self.rfile.readline()
+                    if not line:
+                        return
+                    if line == b".\r\n":
+                        break
+                    if line.startswith(b".."):
+                        line = line[1:]
+                    data.extend(line)
+                message = message_from_bytes(bytes(data).replace(b"\r\n", b"\n"))
+                self.server.messages.append(
+                    {
+                        "message": message,
+                        "raw": bytes(data),
+                        "sender": sender,
+                        "recipients": recipients.copy(),
+                    }
+                )
+                recipients.clear()
+                sender = None
+                self.wfile.write(b"250 OK\r\n")
+            elif command == b"RSET":
+                recipients.clear()
+                sender = None
+                self.wfile.write(b"250 OK\r\n")
+            elif command == b"QUIT":
+                self.wfile.write(b"221 Bye\r\n")
+                return
+            else:
+                self.wfile.write(b"500 Command not recognized\r\n")
+
+
+class SMTPTestServer(ThreadingTCPServer):
+    allow_reuse_address = True
+
+    def __init__(self, address):
+        self.messages = []
+        super().__init__(address, SMTPTestHandler)
+
+
+class StreamingBinaryFile:
+    def __init__(self, content):
+        self.content = memoryview(content)
+        self.closed = False
+        self.reads = []
+
+    def read(self, size=-1):
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
+        self.reads.append(size)
+        if size is None or size < 0:
+            raise AssertionError(
+                "Streaming attachments must not be read without a bounded size."
+            )
+        chunk = bytes(self.content[:size])
+        self.content = self.content[size:]
+        return chunk
+
+    def close(self):
+        self.closed = True
+
+
+class StreamingSMTPTests(SimpleTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        try:
+            cls.server = SMTPTestServer(("127.0.0.1", 0))
+        except PermissionError:
+            raise SkipTest("SMTP server sockets are not permitted.")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.addClassCleanup(cls.stop_server)
+
+    @classmethod
+    def stop_server(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+
+    def setUp(self):
+        super().setUp()
+        self.server.messages.clear()
+
+    def backend(self):
+        return smtp.EmailBackend(
+            alias="streaming",
+            host="127.0.0.1",
+            port=self.server.server_address[1],
+        )
+
+    def test_stream_attachment_via_smtp(self):
+        chunks = [b"binary content", b"x" * 200_000]
+        content = b"".join(chunks)
+        stream = StreamingBinaryFile(content)
+        email = EmailMessage(
+            "流式主题",
+            ".body\r\n",
+            "from@example.com",
+            ["to@example.com"],
+        )
+        email.attach_stream("附件.bin", stream, "application/octet-stream")
+
+        with self.backend() as backend:
+            self.assertEqual(backend.send_messages([email]), 1)
+
+        self.assertEqual(len(self.server.messages), 1)
+        received = self.server.messages[0]
+        attachment = next(received["message"].iter_attachments())
+        self.assertEqual(attachment.get_filename(), "附件.bin")
+        self.assertEqual(attachment.get_payload(decode=True), content)
+        self.assertTrue(stream.reads)
+        self.assertEqual(max(stream.reads), 57 * 1024)
+        base64_lines = [line for line in received["raw"].splitlines() if len(line) > 76]
+        self.assertEqual(base64_lines, [])
+        self.assertIn(b"\r\n..body\r\n", received["raw"])
+
+    def test_attach_file_stream_can_be_sent_again(self):
+        path = Path(__file__).parent / "attachments" / "file.png"
+        email = EmailMessage(to=["to@example.com"], from_email="from@example.com")
+        email.attach_file_stream(path)
+
+        with self.backend() as backend:
+            self.assertEqual(backend.send_messages([email]), 1)
+            self.assertEqual(backend.send_messages([email]), 1)
+
+        self.assertEqual(len(self.server.messages), 2)
+        expected = path.read_bytes()
+        for received in self.server.messages:
+            attachment = next(received["message"].iter_attachments())
+            self.assertEqual(attachment.get_filename(), "file.png")
+            self.assertEqual(attachment.get_payload(decode=True), expected)
+
+    def test_consumed_stream_cannot_be_resent(self):
+        stream = StreamingBinaryFile(b"content")
+        email = EmailMessage(to=["to@example.com"], from_email="from@example.com")
+        email.attachments = [
+            StreamingEmailAttachment("file.bin", stream, "application/octet-stream")
+        ]
+
+        with self.backend() as backend:
+            self.assertEqual(backend.send_messages([email]), 1)
+            with self.assertRaisesMessage(RuntimeError, "already been consumed"):
+                backend.send_messages([email])
+
+        self.assertEqual(len(self.server.messages), 1)
+
+
+class StreamingSMTPMockTests(SimpleTestCase):
+    def backend(self):
+        backend = smtp.EmailBackend(alias="streaming", host="127.0.0.1")
+        backend.connection = mock.Mock()
+        backend.connection.mail.return_value = (250, b"OK")
+        backend.connection.rcpt.return_value = (250, b"OK")
+        backend.connection.getreply.side_effect = [(354, b"Start"), (250, b"OK")]
+        return backend
+
+    def sent_data(self, backend):
+        return b"".join(
+            call.args[0] for call in backend.connection.send.call_args_list if call.args
+        )
+
+    def test_streaming_send_quotes_body_dots_and_closes_stream(self):
+        stream = StreamingBinaryFile(b"attachment")
+        stream.close = mock.Mock()
+        backend = self.backend()
+        email = EmailMessage(
+            "Subject",
+            ".text body\r\n",
+            "from@example.com",
+            ["to@example.com"],
+        )
+        email.attach_stream(
+            "file.bin",
+            stream,
+            "application/octet-stream",
+            close_stream=True,
+        )
+
+        self.assertIs(backend._send(email), True)
+
+        sent_data = self.sent_data(backend)
+        self.assertIn(b"\r\n...text body\r\n", sent_data)
+        self.assertTrue(sent_data.endswith(b".\r\n"))
+        stream.close.assert_called_once_with()
+
+    def test_streaming_send_failure_does_not_replay_stream(self):
+        stream = StreamingBinaryFile(b"attachment")
+        backend = self.backend()
+        backend.connection.getreply.side_effect = [
+            (354, b"Start"),
+            (550, b"Failure"),
+        ]
+        email = EmailMessage(to=["to@example.com"], from_email="from@example.com")
+        email.attach_stream("file.bin", stream, "application/octet-stream")
+
+        with self.assertRaises(SMTPException):
+            backend._send(email)
+        with self.assertRaisesMessage(RuntimeError, "already been consumed"):
+            list(email.iter_bytes())
+
+    def test_streaming_data_rejection_does_not_consume_stream(self):
+        stream = StreamingBinaryFile(b"attachment")
+        backend = self.backend()
+        backend.connection.getreply.side_effect = [(451, b"Try later")]
+        email = EmailMessage(to=["to@example.com"], from_email="from@example.com")
+        email.attach_stream("file.bin", stream, "application/octet-stream")
+
+        with self.assertRaises(SMTPException):
+            backend._send(email)
+        self.assertEqual(stream.reads, [])
+
+    def test_streaming_read_error_closes_stream(self):
+        stream = mock.Mock()
+        stream.read.side_effect = OSError("read failed")
+        stream.close = mock.Mock()
+        backend = self.backend()
+        email = EmailMessage(to=["to@example.com"], from_email="from@example.com")
+        email.attach_stream(
+            "file.bin",
+            stream,
+            "application/octet-stream",
+            close_stream=True,
+        )
+
+        with self.assertRaises(OSError):
+            backend._send(email)
+        stream.close.assert_called_once_with()
 
 
 @skipUnless(HAS_AIOSMTPD, "No aiosmtpd library detected.")

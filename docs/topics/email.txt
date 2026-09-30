@@ -693,6 +693,26 @@ email backend API :ref:`provides an alternative
         For MIME types starting with :mimetype:`text/`, binary data is handled
         as in :meth:`attach`.
 
+    .. method:: attach_stream(filename, stream, mimetype=None,
+                              *, close_stream=False)
+
+        Attaches a binary file-like object without reading it into memory. The
+        SMTP backend base64-encodes and sends the contents as they are read.
+        Set ``close_stream`` to ``True`` when Django should close the stream
+        after it is consumed.
+
+        A stream is consumed once. If sending fails after reading starts, use a
+        new stream to resend the message.
+
+    .. method:: attach_file_stream(path, mimetype=None)
+
+        Attaches a file lazily from the filesystem. Django opens and closes it
+        while sending, and the message can be sent again by reopening the
+        file.
+
+        The locmem, console and file backends do not support streaming
+        attachments; use :meth:`attach_file` with those backends.
+
 .. class:: EmailAttachment
 
     A named tuple to store attachments to an email.
@@ -702,6 +722,17 @@ email backend API :ref:`provides an alternative
     * ``filename``
     * ``content``
     * ``mimetype``
+
+.. class:: StreamingEmailAttachment(filename, stream, mimetype=None,
+                                    *, close_stream=False)
+
+    Stores a binary stream attachment. Pass an instance in ``attachments`` or
+    create one with :meth:`EmailMessage.attach_stream`.
+
+.. class:: StreamingFileEmailAttachment(path, mimetype=None)
+
+    Stores a lazily opened file attachment. Create one with
+    :meth:`EmailMessage.attach_file_stream`.
 
 Sending alternative content types
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

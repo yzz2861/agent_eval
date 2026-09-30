@@ -1,6 +1,7 @@
 """SMTP email backend class."""
 
 import email.policy
+import re
 import smtplib
 import ssl
 import threading
@@ -13,6 +14,8 @@ from django.core.mail.utils import DNS_NAME
 from django.utils.deprecation import RemovedInDjango2028Warning, warn_about_external_use
 from django.utils.encoding import force_str, punycode
 from django.utils.functional import cached_property
+
+DOT_AT_LINE_START = re.compile(rb"(?m)(?=^\.)")
 
 
 class EmailBackend(BaseEmailBackend):
@@ -210,14 +213,71 @@ class EmailBackend(BaseEmailBackend):
             return False
         from_email = self.prep_address(email_message.from_email)
         recipients = [self.prep_address(addr) for addr in email_message.recipients()]
-        message = email_message.message(policy=email.policy.SMTP)
         try:
-            self.connection.sendmail(from_email, recipients, message.as_bytes())
+            if email_message.has_streaming_attachments():
+                self._send_streaming(email_message, from_email, recipients)
+            else:
+                message = email_message.message(policy=email.policy.SMTP)
+                self.connection.sendmail(from_email, recipients, message.as_bytes())
         except smtplib.SMTPException:
             if not self.fail_silently:
                 raise
             return False
         return True
+
+    def _send_streaming(self, email_message, from_email, recipients):
+        connection = self.connection
+        connection.ehlo_or_helo_if_needed()
+        code, response = connection.mail(smtplib.quoteaddr(from_email))
+        if code != 250:
+            if code == 421:
+                connection.close()
+            else:
+                connection._rset()
+            raise smtplib.SMTPSenderRefused(code, response, from_email)
+
+        refused = {}
+        for recipient in recipients:
+            code, response = connection.rcpt(smtplib.quoteaddr(recipient))
+            if code not in (250, 251):
+                refused[recipient] = (code, response)
+            if code == 421:
+                connection.close()
+                raise smtplib.SMTPRecipientsRefused(refused)
+        if len(refused) == len(recipients):
+            connection._rset()
+            raise smtplib.SMTPRecipientsRefused(refused)
+
+        connection.putcmd("data")
+        code, response = connection.getreply()
+        if code != 354:
+            if code == 421:
+                connection.close()
+            else:
+                connection._rset()
+            raise smtplib.SMTPDataError(code, response)
+
+        chunks = email_message.iter_bytes(policy=email.policy.SMTP)
+        try:
+            for chunk in chunks:
+                connection.send(self._quote_data(chunk))
+            connection.send(b".\r\n")
+        except Exception:
+            connection.close()
+            raise
+        finally:
+            chunks.close()
+
+        code, response = connection.getreply()
+        if code != 250:
+            if code == 421:
+                connection.close()
+            else:
+                connection._rset()
+            raise smtplib.SMTPDataError(code, response)
+
+    def _quote_data(self, data):
+        return DOT_AT_LINE_START.sub(b"..", data)
 
     def prep_address(self, address, force_ascii=True):
         """

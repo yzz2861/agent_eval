@@ -29,6 +29,11 @@ class EmailBackend(BaseEmailBackend):
         """Redirect messages to the dummy outbox"""
         msg_count = 0
         for message in messages:
+            if message.has_streaming_attachments():
+                raise TypeError(
+                    "The locmem email backend does not support streaming "
+                    "attachments."
+                )
             message.message()  # Trigger header validation.
             msg_copy = copy.deepcopy(message)
             msg_copy.sent_using = self.alias

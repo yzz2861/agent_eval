@@ -19,6 +19,8 @@ from django.core.mail.message import (
     EmailAttachment,
     EmailMessage,
     EmailMultiAlternatives,
+    StreamingEmailAttachment,
+    StreamingFileEmailAttachment,
     forbid_multi_line_headers,
     make_msgid,
 )
@@ -56,6 +58,8 @@ __all__ = [
     "mail_managers",
     "EmailAlternative",
     "EmailAttachment",
+    "StreamingEmailAttachment",
+    "StreamingFileEmailAttachment",
     # RemovedInDjango2028Warning: When the deprecation ends, remove the last
     # entries.
     "BadHeaderError",

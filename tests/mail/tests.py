@@ -12,6 +12,7 @@ from email.message import Message as PyMessage
 from email.message import MIMEPart
 from email.mime.image import MIMEImage
 from email.mime.text import MIMEText
+from io import BytesIO
 from pathlib import Path
 from textwrap import dedent
 from unittest import mock
@@ -31,6 +32,7 @@ from django.core.mail import (
     mailers,
     send_mail,
     send_mass_mail,
+    StreamingEmailAttachment,
 )
 from django.core.mail.backends import console, dummy, filebased, locmem, smtp
 from django.core.mail.deprecation import (
@@ -1042,6 +1044,107 @@ class EmailMessageTests(MailTestsMixin, SimpleTestCase):
                     actual = attachments[0]
                     self.assertEqual(actual.filename, basename)
                     self.assertEqual(actual.mimetype, expected_mimetype)
+
+    def test_attach_stream_iter_bytes(self):
+        content = b"binary\ncontent" + b"x" * 200_000
+        stream = BytesIO(content)
+        email = EmailMessage(body="Body")
+        email.attach_stream("附件.bin", stream, "application/octet-stream")
+
+        raw = b"".join(email.iter_bytes(chunk_size=3))
+        message = message_from_bytes(raw)
+        attachment = next(message.iter_attachments())
+        self.assertEqual(attachment.get_filename(), "附件.bin")
+        self.assertEqual(attachment.get_payload(decode=True), content)
+        self.assertEqual([line for line in raw.splitlines() if len(line) > 76], [])
+
+    def test_mixed_stream_and_regular_attachments(self):
+        email = EmailMultiAlternatives(body="Body")
+        email.attach_alternative("<p>Body</p>", "text/html")
+        email.attach("regular.txt", "regular", "text/plain")
+        email.attach_stream(
+            "stream.bin", BytesIO(b"stream"), "application/octet-stream"
+        )
+
+        message = message_from_bytes(b"".join(email.iter_bytes()))
+        attachments = message.iter_attachments()
+        regular = next(attachments)
+        streamed = next(attachments)
+        self.assertEqual(regular.get_filename(), "regular.txt")
+        self.assertEqual(regular.get_content(), "regular")
+        self.assertEqual(streamed.get_filename(), "stream.bin")
+        self.assertEqual(streamed.get_payload(decode=True), b"stream")
+
+    def test_attach_stream_does_not_read_entire_file(self):
+        class UnboundedReadStream:
+            def __init__(self):
+                self.remaining = b"x" * 100
+                self.content = self.remaining
+                self.max_read = 0
+
+            def read(self, size=-1):
+                if size is None or size < 0:
+                    raise AssertionError("read() must use a bounded size")
+                chunk = self.remaining[:size]
+                self.remaining = self.remaining[size:]
+                self.max_read = max(self.max_read, len(chunk))
+                return chunk
+
+            def close(self):
+                pass
+
+        email = EmailMessage()
+        stream = UnboundedReadStream()
+        email.attach_stream(
+            "file.bin",
+            stream,
+            "application/octet-stream",
+        )
+        b"".join(email.iter_bytes(chunk_size=76))
+        self.assertEqual(stream.max_read, 57)
+        self.assertLess(stream.max_read, len(stream.content))
+
+    def test_attach_stream_cannot_be_consumed_twice(self):
+        stream = BytesIO(b"content")
+        email = EmailMessage()
+        email.attachments = [
+            StreamingEmailAttachment("file.bin", stream, "application/octet-stream")
+        ]
+
+        self.assertEqual(
+            message_from_bytes(b"".join(email.iter_bytes()))
+            .iter_attachments()
+            .__next__()
+            .get_payload(decode=True),
+            b"content",
+        )
+        with self.assertRaisesMessage(RuntimeError, "already been consumed"):
+            b"".join(email.iter_bytes())
+
+    def test_attach_stream_close_stream(self):
+        stream = BytesIO(b"content")
+        email = EmailMessage()
+        email.attach_stream(
+            "file.bin",
+            stream,
+            "application/octet-stream",
+            close_stream=True,
+        )
+
+        b"".join(email.iter_bytes())
+        self.assertTrue(stream.closed)
+
+    def test_attach_file_stream_can_be_sent_again(self):
+        path = Path(__file__).parent / "attachments" / "file.png"
+        expected = path.read_bytes()
+        email = EmailMessage()
+        email.attach_file_stream(path)
+
+        for _ in range(2):
+            message = message_from_bytes(b"".join(email.iter_bytes()))
+            attachment = next(message.iter_attachments())
+            self.assertEqual(attachment.get_filename(), "file.png")
+            self.assertEqual(attachment.get_payload(decode=True), expected)
 
     def test_attach_text_as_bytes(self):
         """
