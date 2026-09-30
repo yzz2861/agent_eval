@@ -70,6 +70,60 @@ Postgres
 .. automodule:: tortoise.contrib.postgres.fields
     :members: TSVectorField
 
+Encrypted Fields
+----------------
+
+The :class:`~tortoise.fields.EncryptedTextField` stores ciphertext in a ``TEXT``
+column while the application keeps reading and writing ordinary ``str`` values.
+Tortoise does not implement any cryptography itself: the application provides a
+provider that performs the actual encryption and decryption, and registers it
+at startup:
+
+.. code-block:: python3
+
+    from tortoise import fields, Model
+    from tortoise.fields import register_encryption_provider
+
+    class KMSProvider:
+        provider_id = "myapp.kms"
+        current_key_id = "2026-01"
+
+        def encrypt(self, plaintext: str, *, key_id: str | None = None) -> str:
+            # Call your KMS / crypto library here. Return ciphertext as a string.
+            ...
+
+        def decrypt(self, ciphertext: str, *, key_id: str) -> str:
+            # The key_id comes from the stored value, so rotated keys still work.
+            ...
+
+    register_encryption_provider(KMSProvider())
+
+    class Account(Model):
+        id = fields.IntField(primary_key=True)
+        ssn = fields.EncryptedTextField("myapp.kms")
+
+Stored values carry an envelope version and the id of the key that produced
+them (``enc::v1::<key_id>::<ciphertext>``). On read the field asks the provider
+to decrypt with the **key id embedded in that row**; rows written with an old
+key keep working after rotation as long as the provider can still decrypt with
+that key. Every new write (``save``, queryset ``update``, ``bulk_create``)
+uses the provider's ``current_key_id``. Values that already carry the envelope
+are passed through unchanged, so raw database values are never encrypted a
+second time.
+
+Because the ciphertext is randomized, content-based queries cannot be answered
+against the plaintext. Ordering, ``contains``/``startswith``/``endswith``,
+case-insensitive match, range comparisons (``gt``/``gte``/``lt``/``lte``/
+``range``), exact match (``=``) and ``in`` raise ``FieldError`` while the query
+is being built instead of returning misleading results; only ``__isnull`` is
+available. Look encrypted rows up through a separate non-encrypted identifier.
+
+Migrations only record the provider identifier (``provider="myapp.kms"``),
+never keys or key material.
+
+.. automodule:: tortoise.fields.encrypted
+    :members:
+
 Extending A Field
 =================
 

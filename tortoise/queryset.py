@@ -286,6 +286,12 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
 
                 if not field_object:
                     raise FieldError(f"Unknown field {field_name} for model {model.__name__}")
+                if not field_object.supports_plaintext_lookups:
+                    raise FieldError(
+                        f"Ordering by {field_object.__class__.__name__} field "
+                        f"'{field_name}' is not supported: stored values are randomized and "
+                        "do not follow plaintext order"
+                    )
                 field_name = field_object.source_field or field_name
                 field = table[field_name]
 

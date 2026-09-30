@@ -19,6 +19,7 @@ from pypika_tortoise.terms import (
 )
 
 from tortoise.contrib.postgres.fields import ArrayField, TSVectorField
+from tortoise.exceptions import FieldError
 from tortoise.fields import Field, JSONField
 from tortoise.fields.relational import BackwardFKRelation, ManyToManyFieldInstance
 
@@ -476,7 +477,7 @@ def get_filters_for_field(
     actual_field_name = field_name
     if field_name == "pk" and field:
         actual_field_name = field.model_field_name
-    return {
+    filters = {
         field_name: {
             "field": actual_field_name,
             "source_field": source_field,
@@ -644,3 +645,71 @@ def get_filters_for_field(
             "operator": extract_microsecond_equal,
         },
     }
+    if field is not None and not field.supports_plaintext_lookups:
+        reject_lookups(
+            filters,
+            {
+                "",
+                "not",
+                "in",
+                "not_in",
+                "gte",
+                "lte",
+                "gt",
+                "lt",
+                "range",
+                "contains",
+                "startswith",
+                "endswith",
+                "iexact",
+                "icontains",
+                "istartswith",
+                "iendswith",
+                "search",
+                "posix_regex",
+                "iposix_regex",
+                "year",
+                "quarter",
+                "month",
+                "week",
+                "day",
+                "hour",
+                "minute",
+                "second",
+                "microsecond",
+            },
+            field_name=field_name,
+            field=field,
+        )
+    return filters
+
+
+def reject_lookups(
+    filters: dict[str, FilterInfoDict],
+    suffixes: set[str],
+    *,
+    field_name: str,
+    field: Field,
+) -> None:
+    """Replace operators for *suffixes* with a constructor-time rejection.
+
+    Used for fields whose stored representation is randomized/opaque (encrypted
+    fields), where range, pattern and ordering predicates cannot be evaluated
+    against the plaintext.
+    """
+
+    for suffix in suffixes:
+        filters_key = field_name if suffix == "" else f"{field_name}__{suffix}"
+        if filters_key not in filters:
+            continue
+        info = dict(filters[filters_key])
+
+        def _reject(field_term: Term, value: Any, _key: str = filters_key) -> Criterion:
+            raise FieldError(
+                f"Lookup '{_key}' is not supported on {field.__class__.__name__} "
+                f"field '{field_name}': stored values are randomized and cannot be used for "
+                "ordering, pattern matching or range comparisons"
+            )
+
+        info["operator"] = _reject
+        filters[filters_key] = info

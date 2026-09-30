@@ -194,6 +194,13 @@ class Field(Generic[VALUE], metaclass=_FieldMeta):
     # Field_type is a readonly property for the instance, it is set by _FieldMeta
     field_type: type[Any] = None  # type: ignore
     indexable: bool = True
+    # Do raw DB values preserve plaintext semantics (equality, ordering, pattern
+    # matching and range comparisons)? Randomized/opaque values (e.g. encrypted
+    # ciphertext) set this False so content-based lookups are rejected while
+    # queries are built instead of silently returning misleading results.
+    # Null checks stay available regardless. Fields that set this False control
+    # the exact list of rejected lookups in filters.get_filters_for_field().
+    supports_plaintext_lookups: bool = True
     has_db_field: bool = True
     skip_to_python_if_native: bool = False
     allows_generated: bool = False

@@ -50,3 +50,16 @@ async def db_subclass_fields():
         connection_label="models",
     ) as ctx:
         yield ctx
+
+
+@pytest_asyncio.fixture(scope="function")
+async def db_encrypted_fields():
+    """In-memory DB using the encrypted-field test models."""
+    db_url = os.getenv("TORTOISE_TEST_DB", "sqlite://:memory:")
+    async with tortoise_test_context(
+        modules=["tests.fields.encrypted_support"],
+        db_url=db_url,
+        app_label="models",
+        connection_label="models",
+    ) as ctx:
+        yield ctx
