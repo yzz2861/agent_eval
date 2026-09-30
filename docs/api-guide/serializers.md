@@ -443,6 +443,31 @@ You can provide arbitrary additional context by passing a `context` argument whe
 
 The context dictionary can be used within any serializer field logic, such as a custom `.to_representation()` method, by accessing the `self.context` attribute.
 
+### Serializing object graphs
+
+Nested serializers work well for tree-shaped data, but object graphs that contain shared nodes or reference cycles either duplicate their output or recurse forever. Passing `graph=True` when instantiating a root serializer enables graph serialization, which emits each object in full the first time it is encountered and emits only a reference for any subsequent occurrence:
+
+    serializer = PersonSerializer(alice, graph=True)
+    serializer.data
+    # {'$id': 'ref-1', 'name': 'alice',
+    #  'best_friend': {'$id': 'ref-2', 'name': 'bob', 'best_friend': {'$ref': 'ref-1'}}}
+
+The first occurrence of an object includes a `$id` key alongside its regular fields. Any later occurrence of the same object is emitted as `{'$ref': ...}` only, so reference cycles and self-loops terminate instead of recursing, and no fields are ever backfilled through a reference. Field selection and permissions are unchanged: the expanded form is exactly the representation the serializer would normally produce, and reference-only forms expose no fields at all.
+
+Requiring an explicit opt-in keeps regular serializers unaffected. The reference space is shared across the whole serialization run, including every root object of a `many=True` serialization:
+
+    serializer = PersonSerializer([alice, bob], many=True, graph=True)
+
+Reference identifiers are only stable within a single serialization run. They are intentionally not derived from primary keys alone, because primary keys collide across models, across databases, and for unsaved instances. Saved model instances are identified by model, database and primary key, so the same row fetched twice collapses onto a single node, while identical primary keys on different models still receive distinct identifiers.
+
+The size of the emitted graph can be bounded with `max_depth` and `max_nodes`. Root objects sit at depth 0. When a limit is exceeded, the node is replaced by an explicit truncation marker instead of its content:
+
+    serializer = PersonSerializer(alice, graph={'max_depth': 10, 'max_nodes': 1000})
+    # Nodes beyond the limits are emitted as {'$truncated': 'max_depth'}
+    # or {'$truncated': 'max_nodes'}.
+
+Objects that have already been emitted are still referenced, not truncated, when a limit is reached. A pre-built `rest_framework.graph.GraphSerializationState` instance may also be passed as the `graph` argument if you need to inspect the resulting reference space.
+
 ---
 
 ## ModelSerializer

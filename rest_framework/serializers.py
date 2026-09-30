@@ -31,6 +31,7 @@ from rest_framework.compat import postgres_fields
 from rest_framework.deprecation import RemovedInDRF320Warning
 from rest_framework.exceptions import ErrorDetail, ValidationError
 from rest_framework.fields import get_error_detail
+from rest_framework.graph import coerce_graph_state
 from rest_framework.settings import api_settings
 from rest_framework.utils import html, model_meta, representation
 from rest_framework.utils.field_mapping import (
@@ -76,7 +77,7 @@ LIST_SERIALIZER_KWARGS = (
     'read_only', 'write_only', 'required', 'default', 'initial', 'source',
     'label', 'help_text', 'style', 'error_messages', 'allow_empty',
     'instance', 'data', 'partial', 'context', 'allow_null',
-    'max_length', 'min_length'
+    'max_length', 'min_length', 'graph'
 )
 LIST_SERIALIZER_KWARGS_REMOVE = ('allow_empty', 'min_length', 'max_length')
 
@@ -118,6 +119,7 @@ class BaseSerializer(Field):
         self.partial = kwargs.pop('partial', False)
         self._context = kwargs.pop('context', {})
         kwargs.pop('many', None)
+        self._graph_options = kwargs.pop('graph', None)
         super().__init__(**kwargs)
 
     def __new__(cls, *args, **kwargs):
@@ -167,6 +169,28 @@ class BaseSerializer(Field):
 
     def to_representation(self, instance):
         raise NotImplementedError('`to_representation()` must be implemented.')
+
+    def _get_graph_state(self):
+        """
+        Return the `GraphSerializationState` shared by the current
+        serialization run, or `None` if graph serialization is not enabled.
+
+        The state is created lazily by the root serializer when it is
+        passed a `graph=` argument, and is then shared by every nested
+        serializer, including all the root objects of a `many=True`
+        serialization.
+        """
+        root = self.root
+        if not isinstance(root, BaseSerializer):
+            return None
+        state = getattr(root, '_graph_state', None)
+        if state is None:
+            options = getattr(root, '_graph_options', None)
+            if options is None or options is False:
+                return None
+            state = coerce_graph_state(options)
+            root._graph_state = state
+        return state
 
     def update(self, instance, validated_data):
         raise NotImplementedError('`update()` must be implemented.')
@@ -530,6 +554,21 @@ class Serializer(BaseSerializer, metaclass=SerializerMetaclass):
     def to_representation(self, instance):
         """
         Object instance -> Dict of primitive datatypes.
+        """
+        graph_state = self._get_graph_state()
+        if graph_state is not None:
+            return graph_state.serialize_node(
+                instance, lambda: self._to_representation(instance)
+            )
+        return self._to_representation(instance)
+
+    def _to_representation(self, instance):
+        """
+        Object instance -> Dict of primitive datatypes.
+
+        This performs the regular field-by-field serialization, and is
+        invoked exactly once per object when graph serialization is
+        enabled on the root serializer.
         """
         ret = {}
         fields = self._readable_fields
