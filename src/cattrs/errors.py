@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from enum import Enum
 from typing import Any, Optional, Union
 
 from typing_extensions import Self
@@ -8,6 +9,59 @@ from cattrs._compat import ExceptionGroup
 
 class CattrsError(Exception):
     """Base ``cattrs`` exception."""
+
+
+class KeyCollisionStrategy(Enum):
+    """How mapping hooks handle collisions between converted keys."""
+
+    LAST_WINS = "last-wins"
+    RAISE = "raise"
+
+    @classmethod
+    def _missing_(cls, value: object) -> Optional["KeyCollisionStrategy"]:
+        aliases = {
+            "strict": cls.RAISE,
+            "error": cls.RAISE,
+            "legacy": cls.LAST_WINS,
+            "overwrite": cls.LAST_WINS,
+        }
+        return aliases.get(value)
+
+    STRICT = RAISE
+    LEGACY = LAST_WINS
+
+
+class MappingKeyCollisionError(CattrsError):
+    """Two source mapping keys converted to the same target key."""
+
+    def __init__(
+        self,
+        mapping_type: Any,
+        target_key: Any,
+        existing_source_key: Any,
+        conflicting_source_key: Any,
+    ) -> None:
+        self.mapping_type = mapping_type
+        self.target_key = target_key
+        self.existing_source_key = existing_source_key
+        self.conflicting_source_key = conflicting_source_key
+        self.source_keys = (existing_source_key, conflicting_source_key)
+
+        message = (
+            f"Key collision while converting {mapping_type!r}: source keys "
+            f"{existing_source_key!r} and {conflicting_source_key!r} both "
+            f"convert to {target_key!r}"
+        )
+        super().__init__(
+            message,
+            mapping_type,
+            target_key,
+            existing_source_key,
+            conflicting_source_key,
+        )
+
+    def __str__(self) -> str:
+        return self.args[0]
 
 
 class StructureHandlerNotFoundError(CattrsError):

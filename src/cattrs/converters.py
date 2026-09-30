@@ -87,6 +87,8 @@ from .errors import (
     CattrsError,
     IterableValidationError,
     IterableValidationNote,
+    KeyCollisionStrategy,
+    MappingKeyCollisionError,
     StructureHandlerNotFoundError,
 )
 from .fns import Predicate, identity, raise_error
@@ -111,7 +113,13 @@ from .typealiases import (
 )
 from .types import SimpleStructureHook
 
-__all__ = ["BaseConverter", "Converter", "GenConverter", "UnstructureStrategy"]
+__all__ = [
+    "BaseConverter",
+    "Converter",
+    "GenConverter",
+    "KeyCollisionStrategy",
+    "UnstructureStrategy",
+]
 
 T = TypeVar("T")
 V = TypeVar("V")
@@ -189,6 +197,7 @@ class BaseConverter:
         "_unstructure_attrs",
         "_unstructure_func",
         "detailed_validation",
+        "key_collision_strategy",
     )
 
     def __init__(
@@ -201,10 +210,14 @@ class BaseConverter:
         structure_fallback_factory: HookFactory[StructureHook] = lambda t: raise_error(
             None, t
         ),
+        key_collision_strategy: KeyCollisionStrategy
+        | str = KeyCollisionStrategy.LAST_WINS,
     ) -> None:
         """
         :param detailed_validation: Whether to use a slightly slower mode for detailed
             validation errors.
+        :param key_collision_strategy: Whether converted mapping keys silently
+            overwrite each other or raise a collision error.
         :param unstructure_fallback_factory: A hook factory to be called when no
             registered unstructuring hooks match.
         :param structure_fallback_factory: A hook factory to be called when no
@@ -220,6 +233,7 @@ class BaseConverter:
         self._prefer_attrib_converters = prefer_attrib_converters
 
         self.detailed_validation = detailed_validation
+        self.key_collision_strategy = KeyCollisionStrategy(key_collision_strategy)
         self._union_struct_registry: dict[Any, Callable[[Any, type[T]], T]] = {}
 
         # Create a per-instance cache.
@@ -654,6 +668,21 @@ class BaseConverter:
         # We can reuse the mapping class, so dicts stay dicts and OrderedDicts
         # stay OrderedDicts.
         dispatch = self._unstructure_func.dispatch
+        if self.key_collision_strategy is KeyCollisionStrategy.RAISE:
+            res = {}
+            converted_keys = {}
+            for k, v in mapping.items():
+                converted_key = dispatch(k.__class__)(k)
+                if converted_key in converted_keys:
+                    raise MappingKeyCollisionError(
+                        mapping.__class__,
+                        converted_key,
+                        converted_keys[converted_key],
+                        k,
+                    )
+                converted_keys[converted_key] = k
+                res[converted_key] = dispatch(v.__class__)(v)
+            return mapping.__class__(res)
         return mapping.__class__(
             (dispatch(k.__class__)(k), dispatch(v.__class__)(v))
             for k, v in mapping.items()
@@ -861,8 +890,9 @@ class BaseConverter:
         if is_bare(cl) or cl.__args__ == (Any, Any):
             return dict(obj)
         key_type, val_type = cl.__args__
+        strict_keys = self.key_collision_strategy is KeyCollisionStrategy.RAISE
 
-        if self.detailed_validation:
+        if self.detailed_validation and not strict_keys:
             key_handler = self._structure_func.dispatch(key_type)
             val_handler = self._structure_func.dispatch(val_type)
             errors = []
@@ -878,7 +908,6 @@ class BaseConverter:
                     exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
                     errors.append(exc)
                     continue
-
                 try:
                     key = key_handler(k, key_type)
                     res[key] = value
@@ -888,8 +917,56 @@ class BaseConverter:
                     )
                     exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
                     errors.append(exc)
+                    continue
 
             if errors:
+                raise IterableValidationError(f"While structuring {cl!r}", errors, cl)
+            return res
+
+        if strict_keys:
+            key_handler = self._structure_func.dispatch(key_type)
+            val_handler = self._structure_func.dispatch(val_type)
+            res = {}
+            converted_keys = {}
+            errors = []
+            for k, v in obj.items():
+                collision = None
+                try:
+                    key = key_handler(k, key_type)
+                    if key in converted_keys:
+                        collision = MappingKeyCollisionError(
+                            cl, key, converted_keys[key], k
+                        )
+                    else:
+                        converted_keys[key] = k
+                except Exception as exc:
+                    if not self.detailed_validation:
+                        raise
+                    msg = IterableValidationNote(
+                        f"Structuring mapping key @ key {k!r}", k, key_type
+                    )
+                    exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
+                    errors.append(exc)
+                    continue
+
+                if collision is not None:
+                    if not self.detailed_validation:
+                        raise collision
+                    errors.append(collision)
+                    continue
+
+                try:
+                    res[key] = val_handler(v, val_type)
+                except Exception as exc:
+                    if not self.detailed_validation:
+                        raise
+                    msg = IterableValidationNote(
+                        f"Structuring mapping value @ key {k!r}", k, val_type
+                    )
+                    exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
+                    errors.append(exc)
+
+            if self.detailed_validation and errors:
                 raise IterableValidationError(f"While structuring {cl!r}", errors, cl)
             return res
 
@@ -1020,11 +1097,14 @@ class BaseConverter:
         unstruct_strat: UnstructureStrategy | None = None,
         prefer_attrib_converters: bool | None = None,
         detailed_validation: bool | None = None,
+        key_collision_strategy: KeyCollisionStrategy | str | None = None,
     ) -> Self:
         """Create a copy of the converter, keeping all existing custom hooks.
 
         :param detailed_validation: Whether to use a slightly slower mode for detailed
             validation errors.
+        :param key_collision_strategy: Whether converted mapping keys silently
+            overwrite each other or raise a collision error.
         """
         res = self.__class__(
             dict_factory if dict_factory is not None else self._dict_factory,
@@ -1046,6 +1126,11 @@ class BaseConverter:
                 detailed_validation
                 if detailed_validation is not None
                 else self.detailed_validation
+            ),
+            key_collision_strategy=(
+                KeyCollisionStrategy(key_collision_strategy)
+                if key_collision_strategy is not None
+                else self.key_collision_strategy
             ),
         )
 
@@ -1081,6 +1166,8 @@ class Converter(BaseConverter):
             None, t
         ),
         use_alias: bool = False,
+        key_collision_strategy: KeyCollisionStrategy
+        | str = KeyCollisionStrategy.LAST_WINS,
     ):
         """
         :param detailed_validation: Whether to use a slightly slower mode for detailed
@@ -1104,6 +1191,7 @@ class Converter(BaseConverter):
             unstruct_strat=unstruct_strat,
             prefer_attrib_converters=prefer_attrib_converters,
             detailed_validation=detailed_validation,
+            key_collision_strategy=key_collision_strategy,
             unstructure_fallback_factory=unstructure_fallback_factory,
             structure_fallback_factory=structure_fallback_factory,
         )
@@ -1377,12 +1465,21 @@ class Converter(BaseConverter):
         cl: Any,
         unstructure_to: Any = None,
         key_handler: Callable[[Any, Any | None], Any] | None = None,
+        key_collision_strategy: KeyCollisionStrategy | str | None = None,
     ) -> MappingUnstructureFn:
         unstructure_to = self._unstruct_collection_overrides.get(
             get_origin(cl) or cl, unstructure_to or dict
         )
         h = mapping_unstructure_factory(
-            cl, self, unstructure_to=unstructure_to, key_handler=key_handler
+            cl,
+            self,
+            unstructure_to=unstructure_to,
+            key_handler=key_handler,
+            key_collision_strategy=(
+                self.key_collision_strategy
+                if key_collision_strategy is None
+                else key_collision_strategy
+            ),
         )
         self._unstructure_func.register_cls_list([(cl, h)], direct=True)
         return h
@@ -1396,6 +1493,7 @@ class Converter(BaseConverter):
             structure_to=Counter,
             val_type=int,
             detailed_validation=self.detailed_validation,
+            key_collision_strategy=self.key_collision_strategy,
         )
         self._structure_func.register_cls_list([(cl, h)], direct=True)
         return h
@@ -1412,7 +1510,11 @@ class Converter(BaseConverter):
         ):  # These default to dicts
             structure_to = dict
         h = mapping_structure_factory(
-            cl, self, structure_to, detailed_validation=self.detailed_validation
+            cl,
+            self,
+            structure_to,
+            detailed_validation=self.detailed_validation,
+            key_collision_strategy=self.key_collision_strategy,
         )
         self._structure_func.register_cls_list([(cl, h)], direct=True)
         return h
@@ -1428,6 +1530,7 @@ class Converter(BaseConverter):
         prefer_attrib_converters: bool | None = None,
         detailed_validation: bool | None = None,
         use_alias: bool | None = None,
+        key_collision_strategy: KeyCollisionStrategy | str | None = None,
     ) -> Self:
         """Create a copy of the converter, keeping all existing custom hooks.
 
@@ -1468,6 +1571,11 @@ class Converter(BaseConverter):
                 else self.detailed_validation
             ),
             use_alias=(use_alias if use_alias is not None else self.use_alias),
+            key_collision_strategy=(
+                KeyCollisionStrategy(key_collision_strategy)
+                if key_collision_strategy is not None
+                else self.key_collision_strategy
+            ),
         )
 
         self._unstructure_func.copy_to(
