@@ -46,6 +46,16 @@ Then you can reset your overrides (remove them) by setting `app.dependency_overr
 app.dependency_overrides = {}
 ```
 
+You can also use `app.dependency_overrides_context()` to override dependencies
+only for the current context. Overrides in inner contexts take precedence, and
+dependencies that are not overridden there continue using outer contexts and
+`app.dependency_overrides`.
+
+```Python
+with app.dependency_overrides_context({common_parameters: override_dependency}):
+    response = client.get("/users/")
+```
+
 /// tip
 
 If you want to override a dependency only during some tests, you can set the override at the beginning of the test (inside the test function) and reset it at the end (at the end of the test function).

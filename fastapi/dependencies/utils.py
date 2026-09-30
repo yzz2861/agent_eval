@@ -64,6 +64,8 @@ from fastapi.dependencies.models import (
     _is_gen_callable,
     _UsesScopesCache,
 )
+from fastapi.dependencies.overrides import get_dependency_overrides
+from fastapi.dependencies.overrides import preserve_dependency_overrides_context
 from fastapi.exceptions import DependencyScopeError
 from fastapi.logger import logger
 from fastapi.security.oauth2 import SecurityScopes
@@ -564,13 +566,18 @@ def add_param_to_fields(*, field: ModelField, dependant: Dependant) -> None:
 
 
 async def _solve_generator(
-    *, dependant: Dependant, stack: AsyncExitStack, sub_values: dict[str, Any]
+    *,
+    dependant: Dependant,
+    stack: AsyncExitStack,
+    sub_values: dict[str, Any],
+    dependency_overrides_provider: Any,
 ) -> Any:
     assert dependant.call
     if _is_async_gen_callable(dependant.call):
         cm = asynccontextmanager(dependant.call)(**sub_values)
     elif _is_gen_callable(dependant.call):
         cm = contextmanager_in_threadpool(contextmanager(dependant.call)(**sub_values))
+    cm = preserve_dependency_overrides_context(dependency_overrides_provider, cm)
     return await stack.enter_async_context(cm)
 
 
@@ -620,22 +627,19 @@ async def solve_dependencies(
         sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
         call = sub_dependant.call
         use_sub_dependant = sub_dependant
-        if (
-            dependency_overrides_provider
-            and dependency_overrides_provider.dependency_overrides
-        ):
+        if dependency_overrides_provider is not None:
             original_call = sub_dependant.call
-            call = getattr(
-                dependency_overrides_provider, "dependency_overrides", {}
-            ).get(original_call, original_call)
-            use_path: str = sub_dependant.path  # type: ignore
-            use_sub_dependant = get_dependant(
-                path=use_path,
-                call=call,
-                name=sub_dependant.name,
-                parent_oauth_scopes=_get_oauth_scopes(dependant=sub_dependant),
-                scope=sub_dependant.scope,
-            )
+            overrides = get_dependency_overrides(dependency_overrides_provider)
+            call = overrides.get(original_call, original_call)
+            if call is not original_call:
+                use_path: str = sub_dependant.path  # type: ignore
+                use_sub_dependant = get_dependant(
+                    path=use_path,
+                    call=call,
+                    name=sub_dependant.name,
+                    parent_oauth_scopes=_get_oauth_scopes(dependant=sub_dependant),
+                    scope=sub_dependant.scope,
+                )
 
         solved_result = await solve_dependencies(
             request=request,
@@ -669,6 +673,7 @@ async def solve_dependencies(
                 dependant=use_sub_dependant,
                 stack=use_astack,
                 sub_values=solved_result.values,
+                dependency_overrides_provider=dependency_overrides_provider,
             )
         elif _is_coroutine_callable(use_sub_dependant.call):
             solved = await call(**solved_result.values)
