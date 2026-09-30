@@ -141,7 +141,7 @@ async def test_caches_by_id(mocker: MockerFixture):
     a = loader.load(1)
     b = loader.load(1)
 
-    assert a == b
+    assert a is not b
 
     assert await a == 1
     assert await b == 1
@@ -158,7 +158,7 @@ async def test_caches_by_id_when_loading_many(mocker: MockerFixture):
     a = loader.load(1)
     b = loader.load(1)
 
-    assert a == b
+    assert a is not b
 
     assert await asyncio.gather(a, b) == [1, 1]
 
@@ -400,12 +400,13 @@ async def test_cancelled_future_with_failing_loader():
     with pytest.raises(asyncio.CancelledError):
         future_a.result()
 
-    # The non-cancelled futures should have received the loader's exception
+    # The non-cancelled futures should receive the loader's exception
     # (without the fix, dispatch_batch crashes on future_a before reaching these)
-    with pytest.raises(RuntimeError, match="executor is broken"):
-        future_b.result()
-    with pytest.raises(RuntimeError, match="executor is broken"):
-        future_c.result()
+    results = await asyncio.gather(future_b, future_c, return_exceptions=True)
+    assert all(
+        isinstance(result, RuntimeError) and result.args == ("executor is broken",)
+        for result in results
+    )
 
 
 @pytest.mark.asyncio
@@ -471,10 +472,10 @@ async def test_cancelled_futures_cancel_dispatch_task(cache: bool):
     future_a.cancel()
     future_b.cancel()
 
-    # Give the event loop a chance to run _on_future_done callbacks
-    # and propagate CancelledError to the dispatch task
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    # Wait for the internal futures' cancellation callbacks to propagate
+    # CancelledError to the dispatch task.
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(dispatch_task, timeout=1)
 
     assert dispatch_task.cancelled()
 
@@ -513,13 +514,12 @@ async def test_cancelled_futures_cancel_running_dispatch(cache: bool):
     future_a.cancel()
     future_b.cancel()
 
-    # Give the event loop a chance to propagate cancellation
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(dispatch_task, timeout=1)
 
     assert future_a.cancelled()
     assert future_b.cancelled()
-    assert dispatch_task.done()
+    assert dispatch_task.cancelled()
 
 
 @pytest.mark.asyncio
@@ -544,13 +544,12 @@ async def test_partial_cancellation_still_dispatches(cache: bool):
     # Cancel only one future
     future_b.cancel()
 
-    # Let the batch dispatch
+    # Let the batch dispatch and propagate results to caller futures
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    assert future_a.result() == 1
+    assert await asyncio.gather(future_a, future_c) == [1, 3]
     assert future_b.cancelled()
-    assert future_c.result() == 3
     assert call_count == 1, "load_fn should still be called for non-cancelled futures"
 
 
@@ -726,3 +725,237 @@ async def test_partial_cancellation_during_load(cache: bool):
     # A cancelled cached future must be replaced on the next load.
     assert await asyncio.wait_for(loader.load(1), timeout=1) == 1
     assert calls == [[1, 2], [1]]
+
+
+@pytest.mark.asyncio
+async def test_result_ttl_uses_completion_time_with_injected_clock():
+    current_time = 100.0
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    calls: list[list[int]] = []
+
+    async def load(keys: list[int]) -> list[int]:
+        calls.append(keys)
+        started.set()
+        await finish.wait()
+        return keys
+
+    loader = DataLoader(
+        load_fn=load,
+        result_ttl=5,
+        time_fn=lambda: current_time,
+    )
+
+    pending = loader.load(1)
+    await started.wait()
+
+    current_time = 200.0
+    finish.set()
+    assert await pending == 1
+    assert calls == [[1]]
+
+    current_time = 204.0
+    assert await loader.load(1) == 1
+    assert calls == [[1]]
+
+    current_time = 205.0
+    assert await loader.load(1) == 1
+    assert calls == [[1], [1]]
+
+
+@pytest.mark.asyncio
+async def test_max_cache_size_evicts_completed_results_only():
+    pending_started = asyncio.Event()
+    release_pending = asyncio.Event()
+    calls: list[list[int]] = []
+
+    async def load(keys: list[int]) -> list[int]:
+        calls.append(keys)
+        if 3 in keys:
+            pending_started.set()
+            await release_pending.wait()
+        return keys
+
+    loader = DataLoader(load_fn=load, max_cache_size=2)
+    pending = loader.load(3)
+    await pending_started.wait()
+
+    assert await loader.load_many([1, 2]) == [1, 2]
+
+    assert await loader.load(1) == 1
+    assert await loader.load(2) == 2
+
+    release_pending.set()
+    assert await pending == 3
+
+    assert await loader.load(3) == 3
+    assert calls == [[3], [1, 2]]
+    assert await loader.load(1) == 1
+    assert calls == [[3], [1, 2], [1]]
+
+
+@pytest.mark.asyncio
+async def test_max_cache_size_uses_lru_order(mocker: MockerFixture):
+    mock_loader = mocker.Mock(side_effect=idx)
+    loader = DataLoader(load_fn=cast("IDXType", mock_loader), max_cache_size=2)
+
+    assert await loader.load_many([1, 2, 3]) == [1, 2, 3]
+    mock_loader.reset_mock()
+
+    assert await loader.load(2) == 2
+    assert await loader.load(3) == 3
+    assert await loader.load(1) == 1
+
+    mock_loader.assert_called_once_with([1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_exceptions", [False, True])
+async def test_cache_exceptions_configuration(cache_exceptions: bool):
+    calls = 0
+
+    async def load(keys: list[int]) -> list[int | ValueError]:
+        nonlocal calls
+        calls += 1
+        return [ValueError("missing") for _ in keys]
+
+    loader = DataLoader(load_fn=load, cache_exceptions=cache_exceptions)
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match="missing"):
+            await loader.load(1)
+
+    if cache_exceptions:
+        assert calls == 1
+    else:
+        assert calls == 2
+
+
+@pytest.mark.parametrize(
+    ("result_ttl", "max_cache_size"),
+    [(-1, None), (None, -1)],
+)
+def test_invalid_cache_options(result_ttl: int | None, max_cache_size: int | None):
+    with pytest.raises(ValueError):
+        DataLoader(
+            load_fn=idx,
+            result_ttl=result_ttl,
+            max_cache_size=max_cache_size,
+        )
+
+
+@pytest.mark.asyncio
+async def test_clear_takes_precedence_over_late_batch_result():
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    calls: list[list[int]] = []
+
+    async def load(keys: list[int]) -> list[int]:
+        calls.append(keys)
+        started.set()
+        await finish.wait()
+        return keys
+
+    loader = DataLoader(load_fn=load)
+    first = loader.load(1)
+    await started.wait()
+    loader.clear(1)
+    finish.set()
+
+    assert await first == 1
+
+    assert await loader.load(1) == 1
+    assert calls == [[1], [1]]
+
+
+@pytest.mark.asyncio
+async def test_force_prime_takes_precedence_over_late_batch_result():
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    calls: list[list[int]] = []
+
+    async def load(keys: list[int]) -> list[int]:
+        calls.append(keys)
+        started.set()
+        await finish.wait()
+        return keys
+
+    loader = DataLoader(load_fn=load)
+    first = loader.load(1)
+    await started.wait()
+    loader.prime(1, 10, force=True)
+    finish.set()
+
+    assert await first == 10
+    assert await loader.load(1) == 10
+    assert calls == [[1]]
+
+
+@pytest.mark.asyncio
+async def test_force_prime_takes_precedence_over_old_dispatched_batch():
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls: list[list[int]] = []
+
+    async def load(keys: list[int]) -> list[int]:
+        calls.append(keys)
+        if 1 in keys:
+            first_started.set()
+            await release_first.wait()
+        return keys
+
+    loader = DataLoader(load_fn=load, max_batch_size=1)
+    first = loader.load(1)
+    await first_started.wait()
+
+    second = loader.load(2)
+    loader.prime(1, 10, force=True)
+    release_first.set()
+
+    assert await first == 10
+    assert await second == 2
+    assert await loader.load(1) == 10
+    assert calls == [[1], [2]]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_caller_does_not_cancel_other_waiters():
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    calls: list[list[int]] = []
+
+    async def load(keys: list[int]) -> list[int]:
+        calls.append(keys)
+        started.set()
+        await finish.wait()
+        return keys
+
+    loader = DataLoader(load_fn=load)
+    first = cast("Future[Any]", loader.load(1))
+    second = loader.load(1)
+    await started.wait()
+
+    first.cancel()
+    await asyncio.sleep(0)
+
+    assert first.cancelled()
+    assert not second.done()
+
+    finish.set()
+    assert await second == 1
+    assert calls == [[1]]
+
+
+@pytest.mark.asyncio
+async def test_same_key_is_merged_in_one_batch():
+    calls: list[list[int]] = []
+
+    async def load(keys: list[int]) -> list[int]:
+        calls.append(keys)
+        return keys
+
+    loader = DataLoader(load_fn=load)
+    results = await asyncio.gather(loader.load(1), loader.load(1))
+
+    assert results == [1, 1]
+    assert calls == [[1]]

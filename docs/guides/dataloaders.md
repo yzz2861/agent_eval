@@ -184,6 +184,56 @@ these ways:
 - Specifying several keys with `loader.clear_many([id1, id2, id3, ...])`,
 - Invalidating the whole cache with `loader.clear_all()`
 
+### Expiring and limiting cached results
+
+For long-lived DataLoaders, the default cache keeps successful results until
+they are explicitly cleared. You can limit how long a result is retained with
+`result_ttl`. The TTL is measured in seconds and starts when the result has
+finished loading; requests that are still in progress are never evicted as
+ordinary LRU entries.
+
+```python
+loader = DataLoader(load_fn=load_users, result_ttl=60)
+```
+
+`max_cache_size` limits the number of completed results retained by the built-
+in cache and evicts the least recently used result when the limit is exceeded.
+Loading requests do not count towards this limit until they complete.
+
+```python
+loader = DataLoader(load_fn=load_users, max_cache_size=1000)
+```
+
+Errors returned from the loader are cached by default. Pass
+`cache_exceptions=False` to always retry failed keys. Both successful values
+and cached errors respect `result_ttl`.
+
+```python
+loader = DataLoader(
+    load_fn=load_users,
+    result_ttl=60,
+    cache_exceptions=False,
+)
+```
+
+The built-in cache uses `time.monotonic` to measure TTLs. In tests, pass
+`time_fn` to inject a clock and advance it without waiting for real time.
+
+```python
+current_time = 0
+
+loader = DataLoader(
+    load_fn=load_users,
+    result_ttl=60,
+    time_fn=lambda: current_time,
+)
+
+current_time = 61
+```
+
+These options configure the built-in cache. When using a custom `cache_map`,
+that cache is responsible for TTL expiration and capacity eviction.
+
 ### Importing data into cache
 
 While dataloaders are powerful and efficient, they do not support complex
