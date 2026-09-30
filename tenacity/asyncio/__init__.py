@@ -164,9 +164,20 @@ class AsyncRetrying(BaseRetrying):
     @override
     async def _run_stop(self, retry_state: "RetryCallState") -> None:  # type: ignore[override]
         self.statistics["delay_since_first_attempt"] = retry_state.seconds_since_start
-        self.iter_state.stop_run_result = await _utils.wrap_to_async_func(self.stop)(
-            retry_state
+        configured_stop = await _utils.wrap_to_async_func(self.stop)(retry_state)
+        self.iter_state.stop_run_result = (
+            configured_stop or retry_state.wait_decision_stop_requested
         )
+
+    @override
+    async def _run_wait_decision(  # type: ignore[override]
+        self, retry_state: "RetryCallState"
+    ) -> None:
+        decision = self._resolve_wait_decision(retry_state)
+        if retry_state.wait_decision_hook is not None and decision is not None:
+            await _utils.wrap_to_async_func(retry_state.wait_decision_hook)(
+                retry_state, decision
+            )
 
     @override
     async def iter(self, retry_state: "RetryCallState") -> DoAttempt | DoSleep | t.Any:

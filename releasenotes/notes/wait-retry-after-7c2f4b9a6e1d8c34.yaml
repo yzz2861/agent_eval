@@ -1,0 +1,14 @@
+---
+features:
+  - |
+    Adds ``wait_retry_after`` for result-driven handling of HTTP
+    ``Retry-After`` headers. The caller supplies an extractor, so the
+    strategy has no dependency on a particular HTTP client. It supports
+    delta-seconds and HTTP-date values, response-date based clock offset
+    correction, configurable clock-skew tolerance, and configurable handling
+    of malformed, duplicate, and expired values.
+  - |
+    Adds ``RetryAfterDecision`` metadata and an ``on_decision`` callback so
+    callers can inspect the server recommendation, local backoff, final wait,
+    and final stop/wait action consistently in synchronous and asynchronous
+    retry paths.

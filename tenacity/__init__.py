@@ -17,6 +17,7 @@
 # limitations under the License.
 import dataclasses
 import functools
+import inspect
 import sys
 import threading
 import time
@@ -71,6 +72,13 @@ from .stop import (
 
 # Import all built-in wait strategies for easier usage.
 from .wait import (
+    RetryAfterAction,
+    RetryAfterDecision,
+    RetryAfterDuplicatePolicy,
+    RetryAfterError,
+    RetryAfterHeader,
+    RetryAfterInvalidPolicy,
+    RetryAfterStalePolicy,
     wait_chain,
     wait_combine,
     wait_exception,
@@ -81,6 +89,7 @@ from .wait import (
     wait_none,
     wait_random,
     wait_random_exponential,
+    wait_retry_after,
 )
 from .wait import wait_random_exponential as wait_full_jitter
 
@@ -108,6 +117,7 @@ if t.TYPE_CHECKING:
     from . import asyncio as tasyncio
     from .retry import RetryBaseT
     from .stop import StopBaseT
+    from .wait import RetryAfterDecision as WaitDecisionT
     from .wait import WaitBaseT
 
 
@@ -429,7 +439,43 @@ class BaseRetrying(ABC):
 
     def _run_stop(self, retry_state: "RetryCallState") -> None:
         self.statistics["delay_since_first_attempt"] = retry_state.seconds_since_start
-        self.iter_state.stop_run_result = self.stop(retry_state)
+        configured_stop = self.stop(retry_state)
+        self.iter_state.stop_run_result = (
+            configured_stop or retry_state.wait_decision_stop_requested
+        )
+
+    def _resolve_wait_decision(
+        self, retry_state: "RetryCallState"
+    ) -> "WaitDecisionT | None":
+        decision = retry_state.wait_decision
+        if decision is None:
+            return None
+
+        if (
+            self.iter_state.stop_run_result
+            and decision.action is not RetryAfterAction.STOP
+        ):
+            decision = dataclasses.replace(
+                decision,
+                action=RetryAfterAction.STOP,
+                stop_reason="a configured stop condition was reached",
+            )
+            retry_state.wait_decision = decision
+
+        retry_state.wait_decision_stop_requested = self.iter_state.stop_run_result
+        return decision
+
+    def _run_wait_decision(self, retry_state: "RetryCallState") -> None:
+        decision = self._resolve_wait_decision(retry_state)
+        if retry_state.wait_decision_hook is not None and decision is not None:
+            hook_result = retry_state.wait_decision_hook(retry_state, decision)
+            if inspect.isawaitable(hook_result):
+                close = getattr(hook_result, "close", None)
+                if callable(close):
+                    close()
+                raise TypeError(
+                    "async Retry-After decision hooks require AsyncRetrying"
+                )
 
     def iter(self, retry_state: "RetryCallState") -> DoAttempt | DoSleep | t.Any:
         self._begin_iter(retry_state)
@@ -465,6 +511,7 @@ class BaseRetrying(ABC):
 
         self._add_action_func(self._run_wait)
         self._add_action_func(self._run_stop)
+        self._add_action_func(self._run_wait_decision)
         self._add_action_func(self._post_stop_check_actions)
 
     def _post_stop_check_actions(self, retry_state: "RetryCallState") -> None:
@@ -618,6 +665,14 @@ class RetryCallState:
         self.next_action: RetryAction | None = None
         #: Next sleep time as decided by the retry manager.
         self.upcoming_sleep: float = 0.0
+        #: Retry-After wait decision, when a result-driven wait strategy sets one.
+        self.wait_decision: WaitDecisionT | None = None
+        #: Optional callback receiving the final Retry-After wait decision.
+        self.wait_decision_hook: (
+            t.Callable[[RetryCallState, WaitDecisionT], None] | None
+        ) = None
+        #: Whether the wait decision itself asks the retry manager to stop.
+        self.wait_decision_stop_requested: bool = False
 
     def get_fn_name(self) -> str:
         """Get the name of the function being retried.
@@ -641,6 +696,9 @@ class RetryCallState:
         self.outcome_timestamp = None
         self.attempt_number += 1
         self.next_action = None
+        self.wait_decision = None
+        self.wait_decision_hook = None
+        self.wait_decision_stop_requested = False
 
     def set_result(self, val: t.Any) -> None:
         ts = time.monotonic()
@@ -821,6 +879,13 @@ __all__ = [
     "DoSleep",
     "Future",
     "RetryAction",
+    "RetryAfterAction",
+    "RetryAfterDecision",
+    "RetryAfterDuplicatePolicy",
+    "RetryAfterError",
+    "RetryAfterHeader",
+    "RetryAfterInvalidPolicy",
+    "RetryAfterStalePolicy",
     "RetryCallState",
     "RetryError",
     "Retrying",
@@ -867,4 +932,5 @@ __all__ = [
     "wait_none",
     "wait_random",
     "wait_random_exponential",
+    "wait_retry_after",
 ]

@@ -212,6 +212,43 @@ Sometimes it's necessary to build a chain of backoffs.
         print("Wait 3s for 3 attempts, 7s for the next 2 attempts and 9s for all attempts thereafter")
         raise Exception
 
+A server can provide a ``Retry-After`` header as either seconds or an
+HTTP-date. The extractor receives the retry state, so the same strategy works
+for returned response objects or exceptions carrying a response. It does not
+depend on ``requests`` or ``httpx``.
+
+.. testcode::
+
+    def retry_after_headers(retry_state):
+        response = retry_state.outcome.result()
+        return RetryAfterHeader(
+            retry_after=response.headers["Retry-After"],
+            date=response.headers.get("Date"),
+        )
+
+    @retry(
+        stop=stop_before_delay(30),
+        wait=wait_retry_after(
+            retry_after_headers,
+            local_wait=wait_exponential(min=1, max=10),
+        ),
+    )
+    def call_rate_limited_api():
+        """Call an API and return its response."""
+
+The server recommendation is a lower bound: when local backoff is later, the
+later time is used. When the response includes ``Date``, an HTTP-date is
+measured against that server timestamp, avoiding early retries caused by
+local/server clock offset. Use ``clock_skew_tolerance`` for absolute dates
+received without ``Date``.
+
+Pass local backoff as ``local_wait``; the regular ``+`` wait combinator adds
+waits and therefore would not represent the later of the two recommendations.
+
+Malformed, duplicate, and expired values each have configurable policies.
+If the full server-mandated wait does not fit before ``stop_before_delay``,
+Tenacity stops instead of sleeping for a shorter, invalid interval.
+
 Whether to retry
 ~~~~~~~~~~~~~~~~
 
