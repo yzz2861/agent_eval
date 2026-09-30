@@ -13,6 +13,7 @@ import sys
 from typing import Any
 from typing import Callable
 from typing import cast
+from typing import NamedTuple
 from typing import Optional
 from typing import TYPE_CHECKING
 
@@ -698,6 +699,80 @@ class MigrationContext:
             return None
 
 
+class VersionTableMutation(NamedTuple):
+    """A single mutation of the Alembic version table.
+
+    .. versionadded:: 1.21.0
+
+    """
+
+    action: str
+    """One of ``"insert"``, ``"update"`` or ``"delete"``."""
+
+    from_revision: str | None
+    """Version removed from the table, for ``"update"``/``"delete"``."""
+
+    to_revision: str | None
+    """Version added to the table, for ``"insert"``/``"update"``."""
+
+
+def _step_version_table_mutations(
+    step: RevisionStep | StampStep, heads: set[str]
+) -> tuple[str, list[VersionTableMutation]]:
+    """Compute the version table mutations for a single migration step.
+
+    Returns a tuple of a string "branch action" and the ordered list of
+    :class:`.VersionTableMutation` objects that applying ``step`` would
+    perform against the given set of current heads.  The branch action
+    is one of ``"create_branch"``, ``"delete_branch"``,
+    ``"merge_branches"``, ``"unmerge_branches"`` or ``"update"``.
+
+    This is the same logic used by :class:`.HeadMaintainer` when
+    migrations are actually run, and is also used by the migration
+    planner in :mod:`alembic.plan` to predict version table changes
+    without running any migrations.
+
+    """
+    if step.should_delete_branch(heads):
+        return "delete_branch", [
+            VersionTableMutation("delete", step.delete_version_num, None)
+        ]
+    elif step.should_create_branch(heads):
+        return "create_branch", [
+            VersionTableMutation("insert", None, step.insert_version_num)
+        ]
+    elif step.should_merge_branches(heads):
+        # delete revs, update from rev, update to rev
+        (
+            delete_revs,
+            update_from_rev,
+            update_to_rev,
+        ) = step.merge_branch_idents(heads)
+        return "merge_branches", [
+            *[
+                VersionTableMutation("delete", delrev, None)
+                for delrev in delete_revs
+            ],
+            VersionTableMutation("update", update_from_rev, update_to_rev),
+        ]
+    elif step.should_unmerge_branches(heads):
+        (
+            update_from_rev,
+            update_to_rev,
+            insert_revs,
+        ) = step.unmerge_branch_idents(heads)
+        return "unmerge_branches", [
+            *[
+                VersionTableMutation("insert", None, insrev)
+                for insrev in insert_revs
+            ],
+            VersionTableMutation("update", update_from_rev, update_to_rev),
+        ]
+    else:
+        from_, to_ = step.update_version_num(heads)
+        return "update", [VersionTableMutation("update", from_, to_)]
+
+
 class HeadMaintainer:
     def __init__(self, context: MigrationContext, heads: Any) -> None:
         self.context = context
@@ -764,49 +839,23 @@ class HeadMaintainer:
             )
 
     def update_to_step(self, step: RevisionStep | StampStep) -> None:
-        if step.should_delete_branch(self.heads):
-            vers = step.delete_version_num
-            log.debug("branch delete %s", vers)
-            self._delete_version(vers)
-        elif step.should_create_branch(self.heads):
-            vers = step.insert_version_num
-            log.debug("new branch insert %s", vers)
-            self._insert_version(vers)
-        elif step.should_merge_branches(self.heads):
-            # delete revs, update from rev, update to rev
-            (
-                delete_revs,
-                update_from_rev,
-                update_to_rev,
-            ) = step.merge_branch_idents(self.heads)
-            log.debug(
-                "merge, delete %s, update %s to %s",
-                delete_revs,
-                update_from_rev,
-                update_to_rev,
-            )
-            for delrev in delete_revs:
-                self._delete_version(delrev)
-            self._update_version(update_from_rev, update_to_rev)
-        elif step.should_unmerge_branches(self.heads):
-            (
-                update_from_rev,
-                update_to_rev,
-                insert_revs,
-            ) = step.unmerge_branch_idents(self.heads)
-            log.debug(
-                "unmerge, insert %s, update %s to %s",
-                insert_revs,
-                update_from_rev,
-                update_to_rev,
-            )
-            for insrev in insert_revs:
-                self._insert_version(insrev)
-            self._update_version(update_from_rev, update_to_rev)
-        else:
-            from_, to_ = step.update_version_num(self.heads)
-            log.debug("update %s to %s", from_, to_)
-            self._update_version(from_, to_)
+        branch_action, mutations = _step_version_table_mutations(
+            step, self.heads
+        )
+        log.debug("%s: %s", branch_action, mutations)
+        for mutation in mutations:
+            if mutation.action == "insert":
+                assert mutation.to_revision is not None
+                self._insert_version(mutation.to_revision)
+            elif mutation.action == "delete":
+                assert mutation.from_revision is not None
+                self._delete_version(mutation.from_revision)
+            else:
+                assert mutation.from_revision is not None
+                assert mutation.to_revision is not None
+                self._update_version(
+                    mutation.from_revision, mutation.to_revision
+                )
 
 
 class MigrationInfo:

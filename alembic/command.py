@@ -7,6 +7,7 @@ import pathlib
 from typing import TYPE_CHECKING
 
 from . import autogenerate as autogen
+from . import plan as plan_module
 from . import util
 from .runtime.environment import EnvironmentContext
 from .script import ScriptDirectory
@@ -532,6 +533,76 @@ def downgrade(
         tag=tag,
     ):
         script.run_env()
+
+
+def plan(
+    config: Config,
+    revision: str,
+    direction: str = "upgrade",
+    current_heads: str | None = None,
+    verbose: bool = False,
+) -> None:
+    """Compute and display the migration plan for a target revision.
+
+    Shows which migrations would run, in which order, and how the
+    version table would change when moving the database from its
+    current state to the target revision, without executing any
+    migration functions.
+
+    :param config: a :class:`.Config` instance.
+
+    :param revision: string revision target.  May be ``"heads"``,
+     a branch label such as ``mybranch@head``, or a
+     relative target such as ``+2`` or
+     ``-1``.
+
+    :param direction: ``"upgrade"`` (the default) or
+     ``"downgrade"``.
+
+    :param current_heads: optional comma-separated revision identifiers
+     to use as the current database heads, allowing the plan to be
+     computed entirely offline without a database connection.  When
+     omitted, the current heads are read from the database with a
+     read-only query; the version table is never created by this
+     command.
+
+    :param verbose: output in verbose mode.
+
+    .. versionadded:: 1.21.0
+
+    """
+
+    if ":" in revision:
+        raise util.CommandError("Range revision not allowed")
+
+    script = ScriptDirectory.from_config(config)
+
+    if current_heads is not None:
+        heads = tuple(
+            head.strip() for head in current_heads.split(",") if head.strip()
+        )
+        migration_plan = plan_module.build_plan(
+            script, revision, current_heads=heads, direction=direction
+        )
+    else:
+        plans = []
+
+        def compute_plan(rev, context):
+            plans.append(
+                plan_module.build_plan(
+                    script, revision, current_heads=rev, direction=direction
+                )
+            )
+            return []
+
+        with EnvironmentContext(
+            config, script, fn=compute_plan, dont_mutate=True
+        ):
+            script.run_env()
+
+        migration_plan = plans[0]
+
+    config.print_stdout(migration_plan.render(verbose=verbose))
 
 
 def show(config: Config, rev: str) -> None:

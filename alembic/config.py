@@ -767,6 +767,25 @@ class CommandLine:
             "--verbose",
             dict(action="store_true", help="Use more verbose output"),
         ),
+        "direction": (
+            "--direction",
+            dict(
+                type=str,
+                choices=["upgrade", "downgrade"],
+                default="upgrade",
+                help="Direction of the migration plan: 'upgrade' "
+                "(default) or 'downgrade'.",
+            ),
+        ),
+        "current_heads": (
+            "--current-heads",
+            dict(
+                type=str,
+                help="Comma-separated revision identifiers to use as the "
+                "current database heads for offline planning, instead of "
+                "querying the database.",
+            ),
+        ),
         "resolve_dependencies": (
             "--resolve-dependencies",
             dict(

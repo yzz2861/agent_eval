@@ -25,10 +25,10 @@ to run commands programmatically, as discussed in the section :doc:`/api/command
    runtime
    config
    commands
+   plan
    operations
    autogenerate
    script
    ddl
    plugins
    exceptions
-
