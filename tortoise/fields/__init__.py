@@ -27,6 +27,7 @@ from tortoise.fields.data import (
     UUIDField,
 )
 from tortoise.fields.db_defaults import Now, RandomHex, SqlDefault
+from tortoise.fields.encrypted import EncryptedField, EncryptionProvider
 from tortoise.fields.relational import (
     BackwardFKRelation,
     BackwardOneToOneRelation,
@@ -61,6 +62,8 @@ __all__ = [
     "DatetimeField",
     "TimeField",
     "DecimalField",
+    "EncryptedField",
+    "EncryptionProvider",
     "FloatField",
     "IntEnumField",
     "IntField",

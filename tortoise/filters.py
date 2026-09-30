@@ -20,6 +20,7 @@ from pypika_tortoise.terms import (
 
 from tortoise.contrib.postgres.fields import ArrayField, TSVectorField
 from tortoise.fields import Field, JSONField
+from tortoise.fields.encrypted import EncryptedField
 from tortoise.fields.relational import BackwardFKRelation, ManyToManyFieldInstance
 
 if sys.version_info >= (3, 11):  # pragma：nocoverage
@@ -460,6 +461,52 @@ def get_array_filter(
     }
 
 
+def get_encrypted_filters(field_name: str, source_field: str) -> dict[str, FilterInfoDict]:
+    """Filters available on encrypted fields.
+
+    Randomized ciphertext only supports exact matches and null checks.
+    Ordering, fuzzy matching and range comparisons are deliberately absent
+    here so that using them raises ``FieldError`` when the query is
+    constructed instead of silently returning misleading results.
+    """
+    return {
+        field_name: {
+            "field": field_name,
+            "source_field": source_field,
+            "operator": operator.eq,
+        },
+        f"{field_name}__not": {
+            "field": field_name,
+            "source_field": source_field,
+            "operator": not_equal,
+        },
+        f"{field_name}__in": {
+            "field": field_name,
+            "source_field": source_field,
+            "operator": is_in,
+            "value_encoder": list_encoder,
+        },
+        f"{field_name}__not_in": {
+            "field": field_name,
+            "source_field": source_field,
+            "operator": not_in,
+            "value_encoder": list_encoder,
+        },
+        f"{field_name}__isnull": {
+            "field": field_name,
+            "source_field": source_field,
+            "operator": is_null,
+            "value_encoder": bool_encoder,
+        },
+        f"{field_name}__not_isnull": {
+            "field": field_name,
+            "source_field": source_field,
+            "operator": not_null,
+            "value_encoder": bool_encoder,
+        },
+    }
+
+
 def get_filters_for_field(
     field_name: str, field: Field | None, source_field: str
 ) -> dict[str, FilterInfoDict]:
@@ -468,6 +515,8 @@ def get_filters_for_field(
             return get_m2m_filters(field_name, field)
         if isinstance(field, BackwardFKRelation):
             return get_backward_fk_filters(field_name, field)
+        if isinstance(field, EncryptedField):
+            return get_encrypted_filters(field_name, source_field)
         if isinstance(field, JSONField):
             return get_json_filter(field_name, source_field)
         if isinstance(field, ArrayField):

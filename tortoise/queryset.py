@@ -24,6 +24,7 @@ from tortoise.exceptions import (
 )
 from tortoise.expressions import Expression, Q, RawSQL, ResolveContext, ResolveResult, Value
 from tortoise.fields.base import DatabaseDefault
+from tortoise.fields.encrypted import EncryptedField
 from tortoise.fields.relational import (
     ForeignKeyFieldInstance,
     OneToOneFieldInstance,
@@ -286,6 +287,11 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
 
                 if not field_object:
                     raise FieldError(f"Unknown field {field_name} for model {model.__name__}")
+                if isinstance(field_object, EncryptedField):
+                    raise FieldError(
+                        f"Ordering by encrypted field {field_name!r} of model "
+                        f"{model.__name__} is not supported: ciphertext is not orderable"
+                    )
                 field_name = field_object.source_field or field_name
                 field = table[field_name]
 
@@ -489,6 +495,13 @@ class QuerySet(AwaitableQuery[MODEL]):
                 or field_name in self._annotations
             ):
                 raise FieldError(f"Unknown field {field_name} for model {self.model.__name__}")
+            if "__" not in field_name and isinstance(
+                self.model._meta.fields_map.get(field_name), EncryptedField
+            ):
+                raise FieldError(
+                    f"Ordering by encrypted field {field_name!r} of model "
+                    f"{self.model.__name__} is not supported: ciphertext is not orderable"
+                )
             new_ordering.append((field_name, order_type))
         return new_ordering
 

@@ -13,6 +13,15 @@ Changelog
 
 Added
 ^^^^^
+- ``EncryptedField``: transparent encryption-at-rest for text fields. Encryption is
+  delegated to an application-provided ``EncryptionProvider`` (the framework never
+  implements cryptographic algorithms itself); stored values carry an envelope with
+  format version and key id, so old rows stay readable after key rotation while new
+  writes always use the current key. Instance save, ``QuerySet.update()``,
+  ``bulk_create()`` and read paths all go through the same protocol, raw database
+  values are never encrypted twice, and ordering/fuzzy/range queries on encrypted
+  fields are rejected with ``FieldError`` at query construction time. Migration
+  deconstruct records only the provider identifier, never key material.
 - ``Q.__bool__()`` so ``Q`` objects with no filters/children (including nested empty ``Q`` children) are falsy. (#2227)
 - PostgreSQL ``password`` credential now accepts a sync or async callable, resolved once per new connection, to support short-lived credentials such as AWS RDS/Aurora IAM tokens and Azure Entra ID tokens. (#2261)
 

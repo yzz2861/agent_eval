@@ -49,6 +49,43 @@ Relational Fields
     :members: ForeignKeyField, OneToOneField, ManyToManyField
     :exclude-members: to_db_value, to_python_value
 
+Encrypted Fields
+----------------
+
+.. automodule:: tortoise.fields.encrypted
+    :members:
+    :exclude-members: to_db_value, to_python_value
+
+``EncryptedField`` stores text transparently encrypted at rest. The application
+reads and writes plain ``str`` values, while encryption and decryption are
+delegated to an application-provided object implementing the
+``EncryptionProvider`` protocol. Tortoise itself never implements any
+cryptographic algorithm; it only defines the stored envelope
+``enc:v<version>:<key_id>:<base64-ciphertext>`` so every value carries the
+format version and the key id it was encrypted with.
+
+.. code-block:: python3
+
+    from tortoise import fields
+    from tortoise.models import Model
+
+    class Secret(Model):
+        id = fields.IntField(primary_key=True)
+        # reference the provider by importable identifier:
+        payload = fields.EncryptedField(provider="myapp.crypto:provider")
+
+The provider is resolved lazily from the identifier, and migrations record only
+that identifier - never any key material. Key rotation is handled by the
+provider: new writes always use ``current_key_id``, while old rows are decrypted
+with the key id stored in their own envelope, so old keys must remain available
+for decryption.
+
+Because randomized ciphertext is not orderable or searchable, ordering,
+range comparisons (``gte``/``lt``/...) and fuzzy matching
+(``contains``/``startswith``/...) on encrypted fields are rejected with
+``FieldError`` when the query is constructed. Only exact matches and null
+checks are available as filters.
+
 DB Default Expressions
 ----------------------
 
