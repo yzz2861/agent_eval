@@ -1,0 +1,9 @@
+---
+features:
+  - |
+    Added RetryBudget, a context manager that shares a pool of additional
+    retry attempts and a total deadline across nested synchronous,
+    asynchronous, and Tornado retry controllers. Concurrent retries reserve
+    attempts atomically, budgets can be cancelled, and RetryError.reason
+    distinguishes local policy, attempt-limit, deadline, and cancellation
+    stops.

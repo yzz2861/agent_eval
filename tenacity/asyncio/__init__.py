@@ -123,22 +123,61 @@ class AsyncRetrying(BaseRetrying):
 
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
         while True:
-            do = await self.iter(retry_state=retry_state)
+            reservation = retry_state.budget_reservation
+            try:
+                do = await self.iter(retry_state=retry_state)
+            except BaseException:
+                if reservation is not None:
+                    reservation.release()
+                raise
             if isinstance(do, DoAttempt):
+                budget_lease: tenacity._RetryBudgetAttempt | None = None
+                budget = retry_state.budget
+                if budget is not None and not retry_state.budget_attempt_started:
+                    reservation = retry_state.budget_reservation
+                    retry_state.budget_reservation = None
+                    try:
+                        budget_lease = budget.begin_attempt(retry_state, reservation)
+                        retry_state.budget_attempt_started = True
+                    except tenacity.RetryBudgetError as exc:
+                        retry_state.stop_reason = exc.reason
+                        if reservation is not None and reservation.active:
+                            reservation.release()
+                        raise
+                    reservation = None
                 try:
-                    if is_async:
-                        result = await fn(*args, **kwargs)
+                    try:
+                        if is_async:
+                            result = await fn(*args, **kwargs)
+                        else:
+                            result = fn(*args, **kwargs)
+                    except BaseException:
+                        retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
                     else:
-                        result = fn(*args, **kwargs)
-                except BaseException:
-                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
-                else:
-                    retry_state.set_result(result)
+                        retry_state.set_result(result)
+                finally:
+                    if budget_lease is not None:
+                        budget.end_attempt(budget_lease)
+                    retry_state.budget_attempt_started = False
             elif isinstance(do, DoSleep):
+                reservation = retry_state.budget_reservation
                 retry_state.prepare_for_next_attempt()
-                await self.sleep(do)  # type: ignore[misc]
+                retry_state.budget_attempt_started = False
+                try:
+                    await self._sleep(do, retry_state.budget)
+                except BaseException:
+                    if reservation is not None:
+                        reservation.release()
+                    raise
+                reservation = None
             else:
                 return do  # type: ignore[no-any-return]
+
+    async def _sleep(self, seconds: float, budget: tenacity.RetryBudget | None) -> None:
+        if budget is not None:
+            await budget.async_sleep(float(seconds))
+        else:
+            await self.sleep(seconds)  # type: ignore[misc]
 
     @override
     def _add_action_func(self, fn: t.Callable[..., t.Any]) -> None:
@@ -201,14 +240,27 @@ class AsyncRetrying(BaseRetrying):
             return AttemptManager(retry_state=self._retry_state)
 
         while True:
-            do = await self.iter(retry_state=self._retry_state)
+            reservation = self._retry_state.budget_reservation
+            try:
+                do = await self.iter(retry_state=self._retry_state)
+            except BaseException:
+                if reservation is not None:
+                    reservation.release()
+                raise
             if do is None:
                 raise StopAsyncIteration
             if isinstance(do, DoAttempt):
                 return AttemptManager(retry_state=self._retry_state)
             if isinstance(do, DoSleep):
+                reservation = self._retry_state.budget_reservation
                 self._retry_state.prepare_for_next_attempt()
-                await self.sleep(do)  # type: ignore[misc]
+                self._retry_state.budget_attempt_started = False
+                try:
+                    await self._sleep(do, self._retry_state.budget)
+                except BaseException:
+                    if reservation is not None:
+                        reservation.release()
+                    raise
             else:
                 raise StopAsyncIteration
 

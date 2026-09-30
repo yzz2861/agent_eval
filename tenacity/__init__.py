@@ -15,7 +15,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import contextlib
+import contextvars
 import dataclasses
+import enum
 import functools
 import sys
 import threading
@@ -190,11 +193,18 @@ def _first_set(first: t.Any | object, second: t.Any) -> t.Any:
 class RetryError(Exception):
     """Encapsulates the last attempt instance right before giving up."""
 
-    def __init__(self, last_attempt: "Future") -> None:
+    def __init__(
+        self,
+        last_attempt: "Future | None",
+        reason: "RetryStopReason | None" = None,
+    ) -> None:
         self.last_attempt = last_attempt
+        self.reason = reason or RetryStopReason.LOCAL_POLICY
         super().__init__(last_attempt)
 
     def reraise(self) -> t.NoReturn:
+        if self.last_attempt is None:
+            raise self
         if self.last_attempt.failed:
             exc = self.last_attempt.exception()
             # When the user explicitly raises TryAgain (typically from within
@@ -212,6 +222,68 @@ class RetryError(Exception):
         return f"{self.__class__.__name__}[{self.last_attempt}]"
 
 
+class RetryStopReason(str, enum.Enum):
+    """Reason why a retry controller stopped."""
+
+    LOCAL_POLICY = "local_policy"
+    ATTEMPT_LIMIT = "attempt_limit"
+    DEADLINE = "deadline"
+    CANCELLED = "cancelled"
+
+
+class RetryBudgetError(RetryError):
+    """Base class for shared retry budget failures."""
+
+
+class RetryBudgetExceeded(RetryBudgetError):
+    """Base class for exhausted attempt and time budgets."""
+
+
+class RetryBudgetAttemptsExceeded(RetryBudgetExceeded):
+    """Raised when no shared additional attempt remains."""
+
+    reason = RetryStopReason.ATTEMPT_LIMIT
+
+
+class RetryBudgetDeadlineExceeded(RetryBudgetExceeded):
+    """Raised when the shared deadline is reached."""
+
+    reason = RetryStopReason.DEADLINE
+
+
+class RetryBudgetCancelled(RetryBudgetError):
+    """Raised when the shared budget is cancelled."""
+
+    reason = RetryStopReason.CANCELLED
+
+
+@dataclasses.dataclass(slots=True)
+class _RetryBudgetReservation:
+    budget: "RetryBudget"
+    active: bool = True
+
+    def release(self) -> None:
+        self.budget.release_reservation(self)
+
+
+@dataclasses.dataclass(slots=True)
+class _RetryBudgetAttempt:
+    budget: "RetryBudget"
+    parent: "_RetryBudgetAttempt | None"
+    is_root: bool
+    child_claimed: bool = False
+    token: object | None = None
+    id: int = 0
+
+
+_budget_context: contextvars.ContextVar["RetryBudget | None"] = contextvars.ContextVar(
+    "tenacity_retry_budget", default=None
+)
+_budget_attempt_context: contextvars.ContextVar["_RetryBudgetAttempt | None"] = (
+    contextvars.ContextVar("tenacity_retry_budget_attempt", default=None)
+)
+
+
 class AttemptManager:
     """Manage attempt context."""
 
@@ -219,7 +291,18 @@ class AttemptManager:
         self.retry_state = retry_state
 
     def __enter__(self) -> None:
-        pass
+        self._budget_cm: contextlib.AbstractContextManager[object] | None = None
+        budget = self.retry_state.budget
+        if budget is not None and not self.retry_state.budget_attempt_started:
+            reservation = self.retry_state.budget_reservation
+            self.retry_state.budget_reservation = None
+            try:
+                self._budget_cm = budget.attempt(self.retry_state, reservation)
+                self._budget_cm.__enter__()
+            except RetryBudgetError as exc:
+                self.retry_state.stop_reason = exc.reason
+                raise
+            self.retry_state.budget_attempt_started = True
 
     def __exit__(
         self,
@@ -227,15 +310,20 @@ class AttemptManager:
         exc_value: BaseException | None,
         traceback: "types.TracebackType | None",
     ) -> bool | None:
-        if exc_type is not None and exc_value is not None:
-            self.retry_state.set_exception((exc_type, exc_value, traceback))
-            return True  # Swallow exception.
-        # We don't have the result, actually.
-        self.retry_state.set_result(None)
-        return None
+        try:
+            if exc_type is not None and exc_value is not None:
+                self.retry_state.set_exception((exc_type, exc_value, traceback))
+                return True  # Swallow exception.
+            # We don't have the result, actually.
+            self.retry_state.set_result(None)
+            return None
+        finally:
+            if self._budget_cm is not None:
+                self._budget_cm.__exit__(exc_type, exc_value, traceback)
+                self._budget_cm = None
 
     async def __aenter__(self) -> None:
-        pass
+        self.__enter__()
 
     async def __aexit__(
         self,
@@ -244,6 +332,346 @@ class AttemptManager:
         traceback: "types.TracebackType | None",
     ) -> bool | None:
         return self.__exit__(exc_type, exc_value, traceback)
+
+
+class RetryBudget:
+    """Shared additional-attempt and deadline budget for nested retries."""
+
+    def __init__(
+        self,
+        max_extra_attempts: int | None = None,
+        max_delay: _utils.time_unit_type | None = None,
+        *,
+        clock: t.Callable[[], float] | None = None,
+        sleep: t.Callable[[float], t.Any] | None = None,
+        deadline: _utils.time_unit_type | None = None,
+        max_attempts: int | None = None,
+        max_retries: int | None = None,
+        extra_attempts: int | None = None,
+        timeout: _utils.time_unit_type | None = None,
+    ) -> None:
+        attempt_aliases = (
+            max_extra_attempts is not None,
+            max_retries is not None,
+            extra_attempts is not None,
+        )
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if max_extra_attempts is not None and max_extra_attempts < 0:
+            raise ValueError("max_extra_attempts must be non-negative")
+        if extra_attempts is not None and extra_attempts < 0:
+            raise ValueError("extra_attempts must be non-negative")
+        if max_retries is not None and max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        if max_attempts is not None and any(attempt_aliases):
+            raise TypeError("attempt limit aliases cannot be combined")
+        if sum(attempt_aliases) > 1:
+            raise TypeError("attempt limit aliases cannot be combined")
+
+        delay_args = (
+            max_delay is not None,
+            deadline is not None,
+            timeout is not None,
+        )
+        if sum(delay_args) > 1:
+            raise TypeError("max_delay, deadline, and timeout are mutually exclusive")
+
+        if max_attempts is not None:
+            max_extra_attempts = max_attempts - 1
+        elif extra_attempts is not None:
+            max_extra_attempts = extra_attempts
+        elif max_retries is not None:
+            max_extra_attempts = max_retries
+
+        relative_delay = (
+            max_delay
+            if max_delay is not None
+            else deadline
+            if deadline is not None
+            else timeout
+        )
+
+        self.max_extra_attempts = max_extra_attempts
+        self.clock = clock or time.monotonic
+        self.sleep_func = sleep
+        self._relative_delay: float | None = (
+            None if relative_delay is None else _utils.to_seconds(relative_delay)
+        )
+        if self._relative_delay is not None and self._relative_delay < 0:
+            raise ValueError("deadline must be non-negative")
+        self._deadline: float | None = None
+        self._condition = threading.Condition()
+        self._cancel_event = threading.Event()
+        self._async_events: set[t.Any] = set()
+        self.start_time = 0.0
+        self.extra_attempts = 0
+        self.reserved_attempts = 0
+        self.root_started = False
+        self._active_attempts: dict[int, _RetryBudgetAttempt] = {}
+        self._next_attempt_id = 0
+        self._active = 0
+        self._cancelled = False
+
+    def __enter__(self) -> "Self":
+        previous_budget = _budget_context.get()
+        with self._condition:
+            if self._active == 0:
+                self.extra_attempts = 0
+                self.reserved_attempts = 0
+                self.root_started = False
+                self._active_attempts = {}
+                self._next_attempt_id = 0
+                self._cancelled = False
+                self._cancel_event.clear()
+                self._async_events.clear()
+                self.start_time = self.clock()
+                self._deadline = (
+                    self.start_time + self._relative_delay
+                    if self._relative_delay is not None
+                    else None
+                )
+            self._active += 1
+
+        self._budget_token = _budget_context.set(self)
+        self._attempt_token: object | None = None
+        if previous_budget is not self:
+            self._attempt_token = _budget_attempt_context.set(None)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        _budget_context.reset(
+            t.cast("contextvars.Token[RetryBudget | None]", self._budget_token)
+        )
+        if self._attempt_token is not None:
+            _budget_attempt_context.reset(
+                t.cast(
+                    "contextvars.Token[_RetryBudgetAttempt | None]",
+                    self._attempt_token,
+                )
+            )
+        with self._condition:
+            self._active -= 1
+
+    async def __aenter__(self) -> "Self":
+        return self.__enter__()
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.__exit__(*exc)
+
+    @property
+    def cancelled(self) -> bool:
+        with self._condition:
+            return self._cancelled
+
+    @property
+    def remaining_attempts(self) -> int | None:
+        with self._condition:
+            if self.max_extra_attempts is None:
+                return None
+            return max(
+                0,
+                self.max_extra_attempts - self.extra_attempts - self.reserved_attempts,
+            )
+
+    @property
+    def remaining_time(self) -> float | None:
+        if self._deadline is None:
+            return None
+        return max(0.0, self._deadline - self.clock())
+
+    def cancel(self) -> None:
+        with self._condition:
+            self._cancelled = True
+            events = list(self._async_events)
+            self._cancel_event.set()
+        for event in events:
+            event.set()
+
+    def _expired(self, now: float) -> bool:
+        return self._deadline is not None and now >= self._deadline
+
+    def _stopped(self, now: float | None = None) -> RetryStopReason | None:
+        if self._cancelled:
+            return RetryStopReason.CANCELLED
+        current_time = self.clock() if now is None else now
+        if self._expired(current_time):
+            return RetryStopReason.DEADLINE
+        if (
+            self.max_extra_attempts is not None
+            and self.extra_attempts + self.reserved_attempts >= self.max_extra_attempts
+        ):
+            return RetryStopReason.ATTEMPT_LIMIT
+        return None
+
+    def _error(
+        self, reason: RetryStopReason, last_attempt: "Future | None"
+    ) -> RetryBudgetError:
+        if reason is RetryStopReason.CANCELLED:
+            return RetryBudgetCancelled(last_attempt, reason)
+        if reason is RetryStopReason.DEADLINE:
+            return RetryBudgetDeadlineExceeded(last_attempt, reason)
+        return RetryBudgetAttemptsExceeded(last_attempt, reason)
+
+    def reserve(self, retry_state: "RetryCallState") -> _RetryBudgetReservation:
+        with self._condition:
+            reason = self._stopped(self.clock())
+            if reason is not None:
+                raise self._error(reason, retry_state.outcome)
+            reservation = _RetryBudgetReservation(budget=self)
+            self.reserved_attempts += 1
+
+        remaining = self.remaining_time
+        if remaining is not None:
+            retry_state.upcoming_sleep = max(
+                0.0, min(float(retry_state.upcoming_sleep), remaining)
+            )
+        return reservation
+
+    def release_reservation(self, reservation: _RetryBudgetReservation) -> None:
+        with self._condition:
+            if reservation.active:
+                reservation.active = False
+                self.reserved_attempts -= 1
+
+    @contextlib.contextmanager
+    def attempt(
+        self,
+        retry_state: "RetryCallState",
+        reservation: _RetryBudgetReservation | None = None,
+    ) -> t.Iterator[_RetryBudgetAttempt]:
+        lease = self.begin_attempt(retry_state, reservation)
+        try:
+            yield lease
+        finally:
+            self.end_attempt(lease)
+
+    def begin_attempt(
+        self,
+        retry_state: "RetryCallState",
+        reservation: _RetryBudgetReservation | None = None,
+    ) -> _RetryBudgetAttempt:
+        parent_id: int | None = None
+        lease_id: int
+
+        with self._condition:
+            if reservation is not None:
+                if reservation.budget is not self:
+                    raise RuntimeError("reservation belongs to a different budget")
+                if reservation.active:
+                    reservation.active = False
+                    self.reserved_attempts -= 1
+
+            reason = self._stopped(self.clock())
+            if reason is not None:
+                raise self._error(reason, retry_state.outcome)
+
+            current_lease = _budget_attempt_context.get()
+            if current_lease is not None and current_lease.budget is self:
+                parent_id = current_lease.id
+            parent = (
+                self._active_attempts.get(parent_id) if parent_id is not None else None
+            )
+
+            if reservation is not None:
+                is_additional = True
+            elif parent_id is None:
+                is_additional = self.root_started
+                self.root_started = True
+            else:
+                if parent is None:
+                    parent_id = None
+                    is_additional = True
+                else:
+                    is_additional = parent.child_claimed
+                    parent.child_claimed = True
+
+            if (
+                is_additional
+                and self.max_extra_attempts is not None
+                and self.extra_attempts + self.reserved_attempts
+                >= self.max_extra_attempts
+            ):
+                raise self._error(RetryStopReason.ATTEMPT_LIMIT, retry_state.outcome)
+
+            if is_additional:
+                self.extra_attempts += 1
+
+            lease_id = self._next_attempt_id
+            self._next_attempt_id += 1
+            lease = _RetryBudgetAttempt(
+                budget=self,
+                parent=parent,
+                is_root=parent_id is None,
+                id=lease_id,
+            )
+            self._active_attempts[lease_id] = lease
+
+        lease.token = _budget_attempt_context.set(lease)
+        return lease
+
+    def end_attempt(self, lease: _RetryBudgetAttempt) -> None:
+        token = lease.token
+        with self._condition:
+            self._active_attempts.pop(lease.id, None)
+        _budget_attempt_context.reset(
+            t.cast("contextvars.Token[_RetryBudgetAttempt | None]", token)
+        )
+
+    def sync_sleep(self, seconds: float) -> None:
+        remaining = self.remaining_time
+        timeout = seconds if remaining is None else min(seconds, remaining)
+        timeout = max(0.0, timeout)
+        if self.sleep_func is not None and not _utils.is_coroutine_callable(
+            self.sleep_func
+        ):
+            self.sleep_func(timeout)
+        else:
+            self._cancel_event.wait(timeout)
+
+    async def async_sleep(self, seconds: float) -> None:
+        remaining = self.remaining_time
+        timeout = seconds if remaining is None else min(seconds, remaining)
+        timeout = max(0.0, timeout)
+
+        if self.sleep_func is not None and _utils.is_coroutine_callable(
+            self.sleep_func
+        ):
+            await self.sleep_func(timeout)
+            return
+
+        if "trio" in sys.modules:
+            import sniffio
+            import trio
+
+            if sniffio.current_async_library() == "trio":
+                event = trio.Event()
+                with self._condition:
+                    if self._cancelled:
+                        event.set()
+                    else:
+                        self._async_events.add(event)
+                try:
+                    with trio.move_on_after(timeout):
+                        await event.wait()
+                finally:
+                    with self._condition:
+                        self._async_events.discard(event)
+                return
+
+        import asyncio
+
+        event = asyncio.Event()
+        with self._condition:
+            if self._cancelled:
+                event.set()
+            else:
+                self._async_events.add(event)
+        try:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+        finally:
+            with self._condition:
+                self._async_events.discard(event)
 
 
 class BaseRetrying(ABC):
@@ -275,6 +703,7 @@ class BaseRetrying(ABC):
         self.retry_error_callback = retry_error_callback
         self._name = name
         self.enabled = enabled
+        self._budget: RetryBudget | None = None
 
     def copy(
         self,
@@ -405,8 +834,10 @@ class BaseRetrying(ABC):
         return t.cast("_RetryDecorated[P, R]", wrapped_f)
 
     def begin(self) -> None:
+        self._budget = _budget_context.get()
+        clock = self._budget.clock if self._budget is not None else time.monotonic
         self.statistics.clear()
-        self.statistics["start_time"] = time.monotonic()
+        self.statistics["start_time"] = clock()
         self.statistics["attempt_number"] = 1
         self.statistics["idle_for"] = 0
         self.statistics["delay_since_first_attempt"] = 0
@@ -465,16 +896,32 @@ class BaseRetrying(ABC):
 
         self._add_action_func(self._run_wait)
         self._add_action_func(self._run_stop)
+        self._add_action_func(self._post_stop_actions)
+
+    def _post_stop_actions(self, retry_state: "RetryCallState") -> None:
+        budget = retry_state.budget
+        if budget is not None and not self.iter_state.stop_run_result:
+            self._add_action_func(self._reserve_budget_attempt)
         self._add_action_func(self._post_stop_check_actions)
+
+    def _reserve_budget_attempt(self, retry_state: "RetryCallState") -> None:
+        budget = t.cast("RetryBudget", retry_state.budget)
+        try:
+            retry_state.budget_reservation = budget.reserve(retry_state)
+        except RetryBudgetError as exc:
+            retry_state.stop_reason = exc.reason
+            raise
 
     def _post_stop_check_actions(self, retry_state: "RetryCallState") -> None:
         if self.iter_state.stop_run_result:
+            retry_state.stop_reason = RetryStopReason.LOCAL_POLICY
             if self.retry_error_callback:
                 self._add_action_func(self.retry_error_callback)
                 return
 
             def exc_check(rs: "RetryCallState") -> None:
                 fut = t.cast("Future", rs.outcome)
+                rs.stop_reason = RetryStopReason.LOCAL_POLICY
                 retry_exc = self.retry_error_cls(fut)
                 if self.reraise:
                     retry_exc.reraise()
@@ -509,12 +956,24 @@ class BaseRetrying(ABC):
 
         retry_state = RetryCallState(self, fn=None, args=(), kwargs={})
         while True:
-            do = self.iter(retry_state=retry_state)
+            reservation = retry_state.budget_reservation
+            try:
+                do = self.iter(retry_state=retry_state)
+            except BaseException:
+                if reservation is not None:
+                    reservation.release()
+                raise
             if isinstance(do, DoAttempt):
                 yield AttemptManager(retry_state=retry_state)
             elif isinstance(do, DoSleep):
                 retry_state.prepare_for_next_attempt()
-                self.sleep(do)
+                retry_state.budget_attempt_started = False
+                try:
+                    self._sleep(do, retry_state.budget)
+                except BaseException:
+                    if reservation is not None:
+                        reservation.release()
+                    raise
             else:
                 break
 
@@ -545,19 +1004,59 @@ class Retrying(BaseRetrying):
 
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
         while True:
-            do = self.iter(retry_state=retry_state)
+            reservation = retry_state.budget_reservation
+            try:
+                do = self.iter(retry_state=retry_state)
+            except BaseException:
+                if reservation is not None:
+                    reservation.release()
+                raise
             if isinstance(do, DoAttempt):
+                budget_lease: _RetryBudgetAttempt | None = None
+                budget = retry_state.budget
+                if budget is not None and not retry_state.budget_attempt_started:
+                    try:
+                        budget_lease = budget.begin_attempt(
+                            retry_state, retry_state.budget_reservation
+                        )
+                        retry_state.budget_reservation = None
+                        retry_state.budget_attempt_started = True
+                    except RetryBudgetError as exc:
+                        retry_state.stop_reason = exc.reason
+                        if retry_state.budget_reservation is not None:
+                            retry_state.budget_reservation.release()
+                            retry_state.budget_reservation = None
+                        raise
+                reservation = None
                 try:
-                    result = fn(*args, **kwargs)
-                except BaseException:
-                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
-                else:
-                    retry_state.set_result(result)
+                    try:
+                        result = fn(*args, **kwargs)
+                    except BaseException:
+                        retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    else:
+                        retry_state.set_result(result)
+                finally:
+                    if budget_lease is not None:
+                        budget.end_attempt(budget_lease)
+                    retry_state.budget_attempt_started = False
             elif isinstance(do, DoSleep):
+                reservation = retry_state.budget_reservation
                 retry_state.prepare_for_next_attempt()
-                self.sleep(do)
+                retry_state.budget_attempt_started = False
+                try:
+                    self._sleep(do, retry_state.budget)
+                except BaseException:
+                    if reservation is not None:
+                        reservation.release()
+                    raise
             else:
                 return do  # type: ignore[no-any-return]
+
+    def _sleep(self, seconds: float, budget: RetryBudget | None) -> None:
+        if budget is not None:
+            budget.sync_sleep(float(seconds))
+        else:
+            self.sleep(seconds)
 
 
 class Future(futures.Future[t.Any]):
@@ -596,7 +1095,11 @@ class RetryCallState:
         kwargs: t.Any,
     ) -> None:
         #: Retry call start timestamp
-        self.start_time = time.monotonic()
+        self.budget = _budget_context.get()
+        self.time_func = (
+            self.budget.clock if self.budget is not None else time.monotonic
+        )
+        self.start_time = self.time_func()
         #: Retry manager object
         self.retry_object = retry_object
         #: Function wrapped by this retry call
@@ -618,6 +1121,13 @@ class RetryCallState:
         self.next_action: RetryAction | None = None
         #: Next sleep time as decided by the retry manager.
         self.upcoming_sleep: float = 0.0
+
+        #: Shared-budget reservation for the next physical attempt.
+        self.budget_reservation: _RetryBudgetReservation | None = None
+        #: Whether the shared-budget attempt lease is active.
+        self.budget_attempt_started = False
+        #: Reason this retry controller is stopping.
+        self.stop_reason: RetryStopReason | None = None
 
     def get_fn_name(self) -> str:
         """Get the name of the function being retried.
@@ -643,7 +1153,7 @@ class RetryCallState:
         self.next_action = None
 
     def set_result(self, val: t.Any) -> None:
-        ts = time.monotonic()
+        ts = self.time_func()
         fut = Future(self.attempt_number)
         fut.set_result(val)
         self.outcome, self.outcome_timestamp = fut, ts
@@ -654,7 +1164,7 @@ class RetryCallState:
             type[BaseException], BaseException, "types.TracebackType | None"
         ],
     ) -> None:
-        ts = time.monotonic()
+        ts = self.time_func()
         fut = Future(self.attempt_number)
         fut.set_exception(exc_info[1])
         self.outcome, self.outcome_timestamp = fut, ts
@@ -821,8 +1331,15 @@ __all__ = [
     "DoSleep",
     "Future",
     "RetryAction",
+    "RetryBudget",
+    "RetryBudgetAttemptsExceeded",
+    "RetryBudgetCancelled",
+    "RetryBudgetDeadlineExceeded",
+    "RetryBudgetError",
+    "RetryBudgetExceeded",
     "RetryCallState",
     "RetryError",
+    "RetryStopReason",
     "Retrying",
     "TryAgain",
     "WrappedFn",

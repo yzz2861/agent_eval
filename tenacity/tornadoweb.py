@@ -17,7 +17,14 @@ import typing
 
 from tornado import gen
 
-from tenacity import BaseRetrying, DoAttempt, DoSleep, RetryCallState
+import tenacity
+from tenacity import (
+    BaseRetrying,
+    DoAttempt,
+    DoSleep,
+    RetryBudgetError,
+    RetryCallState,
+)
 from tenacity._utils import override
 
 if typing.TYPE_CHECKING:
@@ -49,16 +56,53 @@ class TornadoRetrying(BaseRetrying):
 
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
         while True:
-            do = self.iter(retry_state=retry_state)
+            reservation = retry_state.budget_reservation
+            try:
+                do = self.iter(retry_state=retry_state)
+            except BaseException:
+                if reservation is not None:
+                    reservation.release()
+                raise
             if isinstance(do, DoAttempt):
+                budget_lease: tenacity._RetryBudgetAttempt | None = None
+                retry_budget = retry_state.budget
+                if retry_budget is not None and not retry_state.budget_attempt_started:
+                    reservation = retry_state.budget_reservation
+                    retry_state.budget_reservation = None
+                    try:
+                        budget_lease = retry_budget.begin_attempt(
+                            retry_state, reservation
+                        )
+                        retry_state.budget_attempt_started = True
+                    except RetryBudgetError as exc:
+                        retry_state.stop_reason = exc.reason
+                        if reservation is not None and reservation.active:
+                            reservation.release()
+                        raise
+                    reservation = None
                 try:
-                    result = yield fn(*args, **kwargs)
-                except BaseException:
-                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
-                else:
-                    retry_state.set_result(result)
+                    try:
+                        result = yield fn(*args, **kwargs)
+                    except BaseException:
+                        retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    else:
+                        retry_state.set_result(result)
+                finally:
+                    if budget_lease is not None:
+                        retry_budget.end_attempt(budget_lease)
+                    retry_state.budget_attempt_started = False
             elif isinstance(do, DoSleep):
+                reservation = retry_state.budget_reservation
                 retry_state.prepare_for_next_attempt()
-                yield self.sleep(do)
+                retry_state.budget_attempt_started = False
+                try:
+                    if retry_state.budget is not None:
+                        retry_state.budget.sync_sleep(float(do))
+                    else:
+                        yield self.sleep(do)
+                except BaseException:
+                    if reservation is not None:
+                        reservation.release()
+                    raise
             else:
                 raise gen.Return(do)

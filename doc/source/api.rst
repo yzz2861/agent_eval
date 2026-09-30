@@ -14,6 +14,12 @@ Retry Main API
 .. autoclass:: tenacity.AsyncRetrying
    :members:
 
+.. autoclass:: tenacity.RetryBudget
+   :members:
+
+.. autoclass:: tenacity.RetryStopReason
+   :members:
+
 .. autoclass:: tenacity.tornadoweb.TornadoRetrying
    :members:
 

@@ -671,6 +671,38 @@ context. The trick is to combine a for loop and a context manager.
 You can configure every details of retry policy by configuring the Retrying
 object.
 
+Shared retry budget
+~~~~~~~~~~~~~~~~~~~
+
+Nested retry controllers normally maintain independent attempt and time
+limits. Use the ``RetryBudget`` context manager to make nested Retrying and
+AsyncRetrying controllers consume one shared pool of additional attempts.
+The initial physical call does not consume the pool; an attempt is reserved
+before a retry starts, so concurrent child calls cannot overspend the budget.
+
+Local stop rules remain effective, but they cannot exceed the enclosing
+budget. RetryError.reason distinguishes a local policy stop from attempt,
+deadline, and cancellation budget failures.
+
+.. testcode::
+
+   import contextlib
+
+   from tenacity import RetryBudget, Retrying, stop_after_attempt, wait_none
+
+   budget = RetryBudget(max_extra_attempts=2)
+   with budget, contextlib.suppress(Exception):
+       for outer_attempt in Retrying(stop=stop_after_attempt(10), wait=wait_none()):
+           with outer_attempt:
+               for inner_attempt in Retrying(stop=stop_after_attempt(10),
+                                             wait=wait_none()):
+                   with inner_attempt:
+                       raise Exception("shared budget")
+
+The budget also exposes one shared deadline. Inject clock to control time in
+tests and call cancel() to interrupt the default budget waits. Exiting the
+context resets the budget for the next top-level request.
+
 With async code you can use AsyncRetrying.
 
 .. testcode::
