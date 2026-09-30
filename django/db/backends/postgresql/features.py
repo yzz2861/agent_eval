@@ -61,6 +61,8 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     only_supports_unbounded_with_preceding_and_following = True
     supports_aggregate_filter_clause = True
     supports_aggregate_order_by_clause = True
+    supports_select_intersection_all = True
+    supports_select_difference_all = True
     supported_explain_formats = {"JSON", "TEXT", "XML", "YAML"}
     supports_deferrable_unique_constraints = True
     has_json_operators = True

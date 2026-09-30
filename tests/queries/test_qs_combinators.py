@@ -65,6 +65,73 @@ class QuerySetSetOperationTests(TestCase):
         reserved_name = qs1.intersection(qs1).values_list("name", "order", "id").get()
         self.assertEqual(reserved_name[:2], ("a", 2))
 
+    @skipUnlessDBFeature("supports_select_intersection")
+    def test_intersection_all(self):
+        rows = [
+            (100, None, None),
+            (100, None, None),
+            (100, None, None),
+            (101, None, None),
+            (101, None, None),
+            (102, 1, None),
+        ]
+        created = Number.objects.bulk_create(
+            Number(num=num, other_num=other_num, another_num=another_num)
+            for num, other_num, another_num in rows
+        )
+        qs1 = Number.objects.filter(num__gte=100)
+        right_ids = [created[0].pk, created[1].pk, created[3].pk]
+        qs2 = Number.objects.filter(pk__in=right_ids)
+        qs3 = Number.objects.filter(pk=created[2].pk)
+        combined = qs1.intersection(qs2, qs3, all=True).values_list(
+            "num", "other_num", "another_num"
+        )
+        combined_values = qs1.intersection(qs2, qs3, all=True).values(
+            "num", "other_num", "another_num"
+        )
+        self.assertCountEqual(
+            combined,
+            [(100, None, None)],
+        )
+        self.assertCountEqual(
+            combined_values,
+            [{"num": 100, "other_num": None, "another_num": None}],
+        )
+        self.assertSequenceEqual(
+            combined.order_by("num", "other_num", "another_num"),
+            [(100, None, None)],
+        )
+        self.assertSequenceEqual(
+            combined.order_by("num", "other_num", "another_num")[:1],
+            [(100, None, None)],
+        )
+        self.assertSequenceEqual(
+            qs1.intersection(Number.objects.filter(pk__in=[]), all=True).values_list(
+                "num", "other_num", "another_num"
+            ),
+            [],
+        )
+        self.assertEqual(combined.count(), 1)
+        self.assertTrue(combined.exists())
+        intersection_all = qs1.intersection(qs2, all=True)
+        self.assertNumbersEqual(intersection_all.order_by("num"), [100, 100, 101])
+        self.assertEqual(Number.objects.filter(pk__in=intersection_all).count(), 3)
+        projected = ("num", "other_num", "another_num")
+        nested_right = qs2.values_list(*projected).union(
+            qs3.values_list(*projected), all=True
+        )
+        self.assertSequenceEqual(
+            qs1.values_list(*projected)
+            .intersection(nested_right, all=True)
+            .order_by("num"),
+            [
+                (100, None, None),
+                (100, None, None),
+                (100, None, None),
+                (101, None, None),
+            ],
+        )
+
     @skipUnlessDBFeature("supports_select_difference")
     def test_simple_difference(self):
         qs1 = Number.objects.filter(num__lte=5)
@@ -211,6 +278,70 @@ class QuerySetSetOperationTests(TestCase):
         self.assertEqual(reserved_name["order"], 2)
         reserved_name = qs1.difference(qs2).values_list("name", "order", "id").get()
         self.assertEqual(reserved_name[:2], ("a", 2))
+
+    @skipUnlessDBFeature("supports_select_difference")
+    def test_difference_all(self):
+        rows = [
+            (100, None, None),
+            (100, None, None),
+            (100, None, None),
+            (101, None, None),
+            (101, None, None),
+            (102, 1, None),
+        ]
+        created = Number.objects.bulk_create(
+            Number(num=num, other_num=other_num, another_num=another_num)
+            for num, other_num, another_num in rows
+        )
+        qs1 = Number.objects.filter(num__gte=100)
+        right_ids = [created[0].pk, created[1].pk, created[3].pk]
+        qs2 = Number.objects.filter(pk__in=right_ids)
+        qs3 = Number.objects.filter(pk=created[4].pk)
+        combined = qs1.difference(qs2, qs3, all=True).values_list(
+            "num", "other_num", "another_num"
+        )
+        combined_values = qs1.difference(qs2, qs3, all=True).values(
+            "num", "other_num", "another_num"
+        )
+        self.assertCountEqual(
+            combined,
+            [(100, None, None), (102, 1, None)],
+        )
+        self.assertCountEqual(
+            combined_values,
+            [
+                {"num": 100, "other_num": None, "another_num": None},
+                {"num": 102, "other_num": 1, "another_num": None},
+            ],
+        )
+        self.assertSequenceEqual(
+            combined.order_by("num", "other_num", "another_num"),
+            [(100, None, None), (102, 1, None)],
+        )
+        self.assertSequenceEqual(
+            combined.order_by("num", "other_num", "another_num")[:2],
+            [(100, None, None), (102, 1, None)],
+        )
+        self.assertEqual(
+            qs1.difference(Number.objects.filter(pk__in=[]), all=True)
+            .values_list("num", flat=True)
+            .count(),
+            6,
+        )
+        self.assertTrue(combined.exists())
+        difference_all = qs1.difference(qs2, all=True)
+        self.assertNumbersEqual(difference_all.order_by("num"), [100, 101, 102])
+        self.assertEqual(Number.objects.filter(pk__in=difference_all).count(), 3)
+        projected = ("num", "other_num", "another_num")
+        nested_right = qs2.values_list(*projected).union(
+            qs3.values_list(*projected), all=True
+        )
+        self.assertSequenceEqual(
+            qs1.values_list(*projected)
+            .difference(nested_right, all=True)
+            .order_by("num"),
+            [(100, None, None), (102, 1, None)],
+        )
 
     def test_union_with_empty_qs(self):
         qs1 = Number.objects.all()

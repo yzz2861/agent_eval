@@ -207,7 +207,8 @@ Migrations
 Models
 ~~~~~~
 
-* ...
+* :meth:`.QuerySet.intersection` and :meth:`.QuerySet.difference` now support
+  ``all=True`` to preserve duplicate rows.
 
 Requests and Responses
 ~~~~~~~~~~~~~~~~~~~~~~

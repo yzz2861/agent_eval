@@ -74,6 +74,8 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     supports_alter_generated_column_data_type = False
     can_rename_index = True
     supports_slicing_ordering_in_compound = True
+    supports_select_intersection_all = False
+    supports_select_difference_all = False
     requires_compound_order_by_subquery = True
     allows_multiple_constraints_on_same_fields = False
     supports_json_field_contains = False

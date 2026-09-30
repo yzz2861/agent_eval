@@ -600,6 +600,15 @@ class SQLCompiler:
 
     def get_combinator_sql(self, combinator, all):
         features = self.connection.features
+        if all:
+            if combinator == "union":
+                supports_all = features.supports_select_union
+            else:
+                supports_all = getattr(
+                    features, f"supports_select_{combinator}_all", False
+                )
+            if not supports_all:
+                return self.get_multiset_combinator_sql(combinator)
         compilers = [
             query.get_compiler(self.using, self.connection, self.elide_empty)
             for query in self.query.combined_queries
@@ -637,7 +646,7 @@ class SQLCompiler:
             empty_compiler.elide_empty = False
             parts.append(self._get_combinator_part_sql(empty_compiler))
         combinator_sql = self.connection.ops.set_operators[combinator]
-        if all and combinator == "union":
+        if all:
             combinator_sql += " ALL"
         braces = "{}"
         if not self.query.subquery and features.supports_slicing_ordering_in_compound:
@@ -651,7 +660,138 @@ class SQLCompiler:
             params.extend(part)
         return result, params
 
-    def _get_combinator_part_sql(self, compiler):
+    def get_multiset_combinator_sql(self, combinator):
+        if not self.connection.features.supports_over_clause:
+            raise NotSupportedError(
+                f"{combinator} ALL is not supported on this database backend."
+            )
+        compilers = [
+            query.get_compiler(self.using, self.connection, self.elide_empty)
+            for query in self.query.combined_queries
+        ]
+        if not self.connection.features.supports_slicing_ordering_in_compound:
+            for compiler in compilers:
+                if compiler.query.is_sliced:
+                    raise DatabaseError(
+                        "LIMIT/OFFSET not allowed in subqueries of compound statements."
+                    )
+                if compiler.get_order_by():
+                    raise DatabaseError(
+                        "ORDER BY not allowed in subqueries of compound statements."
+                    )
+
+        parts = []
+        for compiler in compilers:
+            try:
+                parts.append(self._get_combinator_part_sql(compiler, True))
+            except EmptyResultSet:
+                if combinator == "difference" and parts:
+                    continue
+                raise
+        if not parts:
+            raise EmptyResultSet
+
+        left_sql, left_params = parts[0]
+        column_count = self.col_count
+        row_number_alias = self.quote_name("__combinator_row_number")
+        left_alias = self.quote_name("__combinator_left")
+        left_part_alias = self.quote_name("__combinator_left_part")
+        column_names = [
+            self.quote_name(f"col{i}") for i in range(1, column_count + 1)
+        ]
+        result_sql = (
+            "SELECT *, ROW_NUMBER() OVER (PARTITION BY "
+            f"{', '.join(column_names)}) AS {row_number_alias} "
+            f"FROM ({left_sql}) {left_part_alias}"
+        )
+
+        result_params = list(left_params)
+        conditions = []
+        result_alias = left_alias
+        for index, (right_sql, right_params) in enumerate(parts[1:], start=1):
+            right_alias = self.quote_name(f"__combinator_right_{index}")
+            right_columns = [f"{right_alias}.{name}" for name in column_names]
+            result_columns = [f"{result_alias}.{name}" for name in column_names]
+            match_conditions = [
+                f"({left} = {right} OR ({left} IS NULL AND {right} IS NULL))"
+                for left, right in zip(result_columns, right_columns)
+            ]
+            match_condition = " AND ".join(match_conditions)
+            if combinator == "intersection":
+                right_count_sql = (
+                    f"SELECT COUNT(*) FROM ({right_sql}) {right_alias} "
+                    f"WHERE {match_condition}"
+                )
+                conditions.append(
+                    f"COALESCE(({right_count_sql}), 0) >= "
+                    f"{result_alias}.{row_number_alias}"
+                )
+                result_params.extend(right_params)
+                continue
+
+            filtered_alias = self.quote_name(f"__combinator_difference_{index}")
+            renumbered_alias = self.quote_name(f"__combinator_difference_rn_{index}")
+            filtered_columns = [
+                f"{filtered_alias}.{name}" for name in column_names
+            ]
+            filtered_match_conditions = [
+                f"({left} = {right} OR ({left} IS NULL AND {right} IS NULL))"
+                for left, right in zip(filtered_columns, right_columns)
+            ]
+            filtered_match_condition = " AND ".join(filtered_match_conditions)
+            right_count_sql = (
+                f"SELECT COUNT(*) FROM ({right_sql}) {right_alias} "
+                f"WHERE {filtered_match_condition}"
+            )
+            next_columns = ", ".join(
+                f"{filtered_alias}.{name} AS {name}" for name in column_names
+            )
+            inner_columns = ", ".join(
+                f"{result_alias}.{name} AS {name}" for name in column_names
+            )
+            result_sql = (
+                f"SELECT {next_columns}, {filtered_alias}.{row_number_alias} "
+                f"FROM (SELECT {renumbered_alias}.* FROM ("
+                f"SELECT {inner_columns}, ROW_NUMBER() OVER "
+                f"(PARTITION BY {', '.join(column_names)}) AS {row_number_alias} "
+                f"FROM ({result_sql}) {result_alias}) {renumbered_alias}) "
+                f"{filtered_alias} WHERE COALESCE(({right_count_sql}), 0) "
+                f"< {filtered_alias}.{row_number_alias}"
+            )
+            result_alias = filtered_alias
+            result_params.extend(right_params)
+
+        outer_columns = []
+        column_index = 1
+        for expression, _, alias in self.select:
+            expressions = (
+                expression.get_cols()
+                if isinstance(expression, ColPairs)
+                else [expression]
+            )
+            for expression in expressions:
+                source_name = self.quote_name(f"col{column_index}")
+                output_name = self.quote_name(
+                    alias
+                    if alias and len(expressions) == 1
+                    else expression.target.column
+                )
+                outer_columns.append(f"{result_alias}.{source_name} AS {output_name}")
+                column_index += 1
+
+        if combinator == "intersection":
+            result_sql = (
+                f"SELECT {', '.join(outer_columns)} FROM ({result_sql}) {result_alias} "
+                f"WHERE {' AND '.join(conditions)}"
+            )
+        else:
+            result_sql = (
+                f"SELECT {', '.join(outer_columns)} "
+                f"FROM ({result_sql}) {result_alias}"
+            )
+        return [result_sql], result_params
+
+    def _get_combinator_part_sql(self, compiler, positional_aliases=False):
         features = self.connection.features
         # If the columns list is limited, then all combined queries
         # must have the same columns list. Set the selects defined on
@@ -661,13 +801,11 @@ class SQLCompiler:
             compiler.query = compiler.query.clone()
             compiler.query.set_values(selected)
         part_sql, part_args = compiler.as_sql(with_col_aliases=True)
+        wrapped_compound = False
         if compiler.query.combinator:
-            # Wrap in a subquery if wrapping in parentheses isn't
-            # supported.
             if not features.supports_parentheses_in_compound:
                 part_sql = "SELECT * FROM ({})".format(part_sql)
-            # Add parentheses when combining with compound query if not
-            # already added for all compound queries.
+                wrapped_compound = True
             elif (
                 self.query.subquery
                 or not features.supports_slicing_ordering_in_compound
@@ -675,6 +813,31 @@ class SQLCompiler:
                 part_sql = "({})".format(part_sql)
         elif self.query.subquery and features.supports_slicing_ordering_in_compound:
             part_sql = "({})".format(part_sql)
+        if positional_aliases:
+            columns = []
+            column_index = 1
+            for expression, _, alias in compiler.select:
+                expressions = (
+                    expression.get_cols()
+                    if isinstance(expression, ColPairs)
+                    else [expression]
+                )
+                for column_expression in expressions:
+                    source_name = (
+                        alias
+                        if alias and len(expressions) == 1
+                        else column_expression.target.column
+                    )
+                    target_name = self.quote_name(f"col{column_index}")
+                    columns.append(f"{self.quote_name(source_name)} AS {target_name}")
+                    column_index += 1
+            part_alias = self.quote_name("__combinator_part")
+            compound_sql = (
+                f"({part_sql})"
+                if wrapped_compound or not features.supports_parentheses_in_compound
+                else part_sql
+            )
+            part_sql = f"SELECT {', '.join(columns)} FROM {compound_sql} {part_alias}"
         return part_sql, part_args
 
     def get_qualify_sql(self):
