@@ -1,10 +1,17 @@
-from .converters import BaseConverter, Converter, GenConverter, UnstructureStrategy
+from .converters import (
+    BaseConverter,
+    Converter,
+    GenConverter,
+    KeyCollisionPolicy,
+    UnstructureStrategy,
+)
 from .gen import override
 
 __all__ = (
     "BaseConverter",
     "Converter",
     "GenConverter",
+    "KeyCollisionPolicy",
     "UnstructureStrategy",
     "global_converter",
     "override",

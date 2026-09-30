@@ -1,6 +1,12 @@
 from typing import Final
 
-from .converters import BaseConverter, Converter, GenConverter, UnstructureStrategy
+from .converters import (
+    BaseConverter,
+    Converter,
+    GenConverter,
+    KeyCollisionPolicy,
+    UnstructureStrategy,
+)
 from .errors import (
     AttributeValidationNote,
     BaseValidationError,
@@ -8,6 +14,7 @@ from .errors import (
     ForbiddenExtraKeysError,
     IterableValidationError,
     IterableValidationNote,
+    KeyCollisionError,
     StructureHandlerNotFoundError,
 )
 from .gen import override
@@ -24,6 +31,8 @@ __all__ = [
     "GenConverter",
     "IterableValidationError",
     "IterableValidationNote",
+    "KeyCollisionError",
+    "KeyCollisionPolicy",
     "SimpleStructureHook",
     "StructureHandlerNotFoundError",
     "UnstructureStrategy",

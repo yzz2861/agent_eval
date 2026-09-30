@@ -76,6 +76,22 @@ class IterableValidationError(BaseValidationError):
         return excs_with_notes, other_excs
 
 
+class KeyCollisionError(CattrsError):
+    """Raised when converted mapping keys collide."""
+
+    def __init__(self, source_key: Any, colliding_key: Any, target_key: Any) -> None:
+        self.source_key = source_key
+        self.colliding_key = colliding_key
+        self.target_key = target_key
+        super().__init__(source_key, colliding_key, target_key)
+
+    def __str__(self) -> str:
+        return (
+            f"Converted mapping keys {self.source_key!r} and "
+            f"{self.colliding_key!r} collide at {self.target_key!r}"
+        )
+
+
 class AttributeValidationNote(str):
     """Attached as a note to an exception when an attribute fails structuring."""
 

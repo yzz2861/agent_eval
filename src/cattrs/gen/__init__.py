@@ -26,6 +26,7 @@ from ..errors import (
     ForbiddenExtraKeysError,
     IterableValidationError,
     IterableValidationNote,
+    KeyCollisionError,
     StructureHandlerNotFoundError,
 )
 from ..fns import identity
@@ -36,7 +37,7 @@ from ._lc import generate_unique_filename
 from ._shared import _annotated_override_or_default, find_structure_handler
 
 if TYPE_CHECKING:
-    from ..converters import BaseConverter
+    from ..converters import BaseConverter, KeyCollisionPolicy
 
 __all__ = [
     "make_dict_structure_fn",
@@ -1011,12 +1012,19 @@ def mapping_unstructure_factory(
     converter: BaseConverter,
     unstructure_to: Any = None,
     key_handler: Callable[[Any, Any | None], Any] | None = None,
+    key_collision_policy: KeyCollisionPolicy | Literal["from_converter"] = (
+        "from_converter"
+    ),
 ) -> MappingUnstructureFn:
     """Generate a specialized unstructure function for a mapping.
 
     :param unstructure_to: The class to unstructure to; defaults to the
         same class as the mapping being unstructured.
+    :param key_collision_policy: The policy to use when converted keys collide.
     """
+    if key_collision_policy == "from_converter":
+        key_collision_policy = converter.key_collision_policy
+
     kh = key_handler or converter.unstructure
     val_handler = converter.unstructure
 
@@ -1049,19 +1057,38 @@ def mapping_unstructure_factory(
 
     lines = [f"def {fn_name}(mapping):"]
 
-    if unstructure_to is dict or (unstructure_to is None and origin is dict):
-        if kh is None and val_handler is None:
-            # Simplest path.
-            return dict
-
-        lines.append(f"    return {{{k_u}: {v_u} for k, v in mapping.items()}}")
-    else:
-        globs["__cattr_mapping_cl"] = unstructure_to or cl
+    if key_collision_policy.value == "raise":
+        globs["KeyCollisionError"] = KeyCollisionError
+        lines.append("    converted_keys = {}")
+        lines.append("    res = {}")
+        lines.append("    for k, v in mapping.items():")
+        lines.append(f"        converted_key = {k_u}")
+        lines.append("        if converted_key in converted_keys:")
         lines.append(
-            f"    res = __cattr_mapping_cl(({k_u}, {v_u}) for k, v in mapping.items())"
+            "            raise KeyCollisionError(converted_keys[converted_key], k, converted_key)"
         )
+        lines.append("        converted_keys[converted_key] = k")
+        lines.append(f"        res[converted_key] = {v_u}")
+        if not (unstructure_to is dict or (unstructure_to is None and origin is dict)):
+            globs["__cattr_mapping_cl"] = unstructure_to or cl
+            lines.append("    res = __cattr_mapping_cl(res)")
+    else:
+        if unstructure_to is dict or (unstructure_to is None and origin is dict):
+            if kh is None and val_handler is None:
+                # Simplest path.
+                return dict
 
-        lines = [*lines, "    return res"]
+            lines.append(f"    return {{{k_u}: {v_u} for k, v in mapping.items()}}")
+        else:
+            globs["__cattr_mapping_cl"] = unstructure_to or cl
+            lines.append(
+                f"    res = __cattr_mapping_cl(({k_u}, {v_u}) for k, v in mapping.items())"
+            )
+
+            lines = [*lines, "    return res"]
+
+    if key_collision_policy.value == "raise":
+        lines.append("    return res")
 
     eval(compile("\n".join(lines), "", "exec"), globs)
 
@@ -1079,12 +1106,20 @@ def mapping_structure_factory(
     key_type=NOTHING,
     val_type=NOTHING,
     detailed_validation: bool | Literal["from_converter"] = "from_converter",
+    key_collision_policy: KeyCollisionPolicy | Literal["from_converter"] = (
+        "from_converter"
+    ),
 ) -> SimpleStructureHook[Mapping[Any, Any], T]:
-    """Generate a specialized structure function for a mapping."""
+    """Generate a specialized structure function for a mapping.
+
+    :param key_collision_policy: The policy to use when converted keys collide.
+    """
     fn_name = "structure_mapping"
 
     if detailed_validation == "from_converter":
         detailed_validation = converter.detailed_validation
+    if key_collision_policy == "from_converter":
+        key_collision_policy = converter.key_collision_policy
 
     globs: dict[str, type] = {"__cattr_mapping_cl": structure_to}
 
@@ -1140,7 +1175,17 @@ def mapping_structure_factory(
 
     if is_bare_dict:
         # No args, it's a bare dict.
-        lines.append("  res = dict(mapping)")
+        if key_collision_policy.value == "raise":
+            globs["KeyCollisionError"] = KeyCollisionError
+            lines.append("  converted_keys = {}")
+            lines.append("  res = {}")
+            lines.append("  for k, v in mapping.items():")
+            lines.append("    if k in converted_keys:")
+            lines.append("      raise KeyCollisionError(converted_keys[k], k, k)")
+            lines.append("    converted_keys[k] = k")
+            lines.append("    res[k] = v")
+        else:
+            lines.append("  res = dict(mapping)")
     else:
         if detailed_validation:
             internal_arg_parts["IterableValidationError"] = IterableValidationError
@@ -1153,30 +1198,74 @@ def mapping_structure_factory(
             )
             globs["enumerate"] = enumerate
 
-            lines.append("  res = {}; errors = []")
+            globs["KeyCollisionError"] = KeyCollisionError
+            lines.append("  converted_keys = {}; res = {}; errors = []")
             lines.append("  for k, v in mapping.items():")
-            lines.append("    try:")
-            lines.append(f"      value = {v_s}")
-            lines.append("    except Exception as e:")
-            lines.append(
-                "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping value @ key {k!r}', k, val_type)]"
-            )
-            lines.append("      errors.append(e)")
-            lines.append("      continue")
-            lines.append("    try:")
-            lines.append(f"      key = {k_s}")
-            lines.append("      res[key] = value")
-            lines.append("    except Exception as e:")
-            lines.append(
-                "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping key @ key {k!r}', k, key_type)]"
-            )
-            lines.append("      errors.append(e)")
+            if key_collision_policy.value == "raise":
+                lines.append("    try:")
+                lines.append(f"      key = {k_s}")
+                lines.append("      key_collides = key in converted_keys")
+                lines.append("    except Exception as e:")
+                lines.append(
+                    "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping key @ key {k!r}', k, key_type)]"
+                )
+                lines.append("      errors.append(e)")
+                lines.append("      continue")
+                lines.append("    if key_collides:")
+                lines.append(
+                    "      collision = KeyCollisionError(converted_keys[key], k, key)"
+                )
+                lines.append(
+                    "      collision.__notes__ = getattr(collision, '__notes__', []) + [IterableValidationNote(f'Structuring mapping key @ key {k!r}', k, key_type)]"
+                )
+                lines.append("      errors.append(collision)")
+                lines.append("      continue")
+                lines.append("    converted_keys[key] = k")
+                lines.append("    try:")
+                lines.append(f"      value = {v_s}")
+                lines.append("    except Exception as e:")
+                lines.append(
+                    "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping value @ key {k!r}', k, val_type)]"
+                )
+                lines.append("      errors.append(e)")
+                lines.append("      continue")
+                lines.append("    res[key] = value")
+            else:
+                lines.append("    try:")
+                lines.append(f"      value = {v_s}")
+                lines.append("    except Exception as e:")
+                lines.append(
+                    "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping value @ key {k!r}', k, val_type)]"
+                )
+                lines.append("      errors.append(e)")
+                lines.append("      continue")
+                lines.append("    try:")
+                lines.append(f"      key = {k_s}")
+                lines.append("      res[key] = value")
+                lines.append("    except Exception as e:")
+                lines.append(
+                    "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping key @ key {k!r}', k, key_type)]"
+                )
+                lines.append("      errors.append(e)")
             lines.append("  if errors:")
             lines.append(
                 f"    raise IterableValidationError('While structuring ' + {repr(cl)!r}, errors, __cattr_mapping_cl)"
             )
         else:
-            lines.append(f"  res = {{{k_s}: {v_s} for k, v in mapping.items()}}")
+            if key_collision_policy.value == "raise":
+                globs["KeyCollisionError"] = KeyCollisionError
+                lines.append("  converted_keys = {}")
+                lines.append("  res = {}")
+                lines.append("  for k, v in mapping.items():")
+                lines.append(f"    key = {k_s}")
+                lines.append("    if key in converted_keys:")
+                lines.append(
+                    "      raise KeyCollisionError(converted_keys[key], k, key)"
+                )
+                lines.append("    converted_keys[key] = k")
+                lines.append(f"    res[key] = {v_s}")
+            else:
+                lines.append(f"  res = {{{k_s}: {v_s} for k, v in mapping.items()}}")
     if structure_to is not dict:
         lines.append("  res = __cattr_mapping_cl(res)")
 

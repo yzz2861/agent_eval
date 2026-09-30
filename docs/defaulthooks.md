@@ -210,6 +210,24 @@ Both keys and values are converted.
 {'1': None, '2': 2}
 ```
 
+Converting keys can make two distinct source keys point at the same target key; for example,
+`{'1': 'a', '01': 'b'}` structured into `dict[int, str]` has one target key, `1`.
+Converters keep the last value by default, matching the historical behavior.
+Use `KeyCollisionPolicy.RAISE` to make such collisions an error instead:
+
+```python
+from cattrs import Converter
+from cattrs import KeyCollisionPolicy
+
+converter = Converter(key_collision_policy=KeyCollisionPolicy.RAISE)
+converter.structure({'1': 'a', '01': 'b'}, dict[int, str])
+# KeyCollisionError: Converted mapping keys '1' and '01' collide at 1
+```
+
+The same policy applies to unstructuring mappings, nested mappings, custom key hooks, and to both
+the regular and generated hooks. The exception includes `source_key`, `colliding_key`, and
+`target_key`, so the discarded source key does not need to be inferred from the resulting mapping.
+
 ### defaultdicts
 
 [`defaultdicts`](https://docs.python.org/3/library/collections.html#collections.defaultdict)
