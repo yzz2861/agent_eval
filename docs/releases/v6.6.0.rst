@@ -86,4 +86,10 @@ Type annotation changes
 - A ``timeout`` value of zero will either return or raise immediately. Previously, zero was
   treated as equivalent to ``None`` (wait forever). This affects `.Queue.get`, `.Queue.put`, and
   `.Queue.join`.
+
+`tornado.websocket`
+~~~~~~~~~~~~~~~~~~~
+
+- `WebSocketHandler.write_message_stream` and `WebSocketClientConnection.write_message_stream`
+  can stream an async iterable as the WebSocket fragments of one logical message.
  

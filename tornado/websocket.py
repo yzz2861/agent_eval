@@ -14,6 +14,8 @@ defined in `RFC 6455 <http://tools.ietf.org/html/rfc6455>`_.
 import abc
 import asyncio
 import base64
+import codecs
+import contextlib
 import functools
 import hashlib
 import logging
@@ -22,7 +24,7 @@ import struct
 import sys
 import warnings
 import zlib
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, Awaitable, Callable
 from types import TracebackType
 from typing import (
     Any,
@@ -114,6 +116,40 @@ class WebSocketClosedError(WebSocketError):
 
 class _DecompressTooLargeError(Exception):
     pass
+
+
+WebSocketMessage = Union[str, bytes, dict[str, Any]]
+WebSocketMessageChunks = AsyncIterable[Union[str, bytes]]
+
+
+def _encode_utf8_chunk(pending: str, chunk: str) -> tuple[bytes, str]:
+    result = bytearray()
+    position = 0
+    if pending and not chunk:
+        return b"", pending
+    elif pending:
+        if 0xDC00 <= ord(chunk[0]) <= 0xDFFF:
+            code_point = 0x10000 + (ord(pending) - 0xD800) * 0x400
+            code_point += ord(chunk[0]) - 0xDC00
+            result.extend(
+                [
+                    0xF0 | (code_point >> 18),
+                    0x80 | ((code_point >> 12) & 0x3F),
+                    0x80 | ((code_point >> 6) & 0x3F),
+                    0x80 | (code_point & 0x3F),
+                ]
+            )
+            position = 1
+        else:
+            pending.encode("utf-8")
+
+    if position < len(chunk) and 0xD800 <= ord(chunk[-1]) <= 0xDBFF:
+        result.extend(chunk[position:-1].encode("utf-8"))
+        pending = chunk[-1]
+    else:
+        result.extend(chunk[position:].encode("utf-8"))
+        pending = ""
+    return bytes(result), pending
 
 
 class _WebSocketParams:
@@ -329,7 +365,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
         )
 
     def write_message(
-        self, message: bytes | str | dict[str, Any], binary: bool = False
+        self, message: WebSocketMessage, binary: bool = False
     ) -> "Future[None]":
         """Sends the given message to the client of this Web Socket.
 
@@ -357,6 +393,23 @@ class WebSocketHandler(tornado.web.RequestHandler):
         if isinstance(message, dict):
             message = tornado.escape.json_encode(message)
         return self.ws_connection.write_message(message, binary=binary)
+
+    def write_message_stream(
+        self, chunks: WebSocketMessageChunks, binary: bool = False
+    ) -> "Future[None]":
+        """Stream an iterable of chunks as one fragmented WebSocket message.
+
+        Chunks may be strings or bytes. Text chunks are encoded as one UTF-8
+        message, so multi-byte sequences may span chunks. Bytes chunks are
+        only encoded for binary messages; they are validated as UTF-8 for
+        text messages. Frames are sent as chunks are produced, but they
+        remain one logical message to the receiving application. If chunk
+        production fails or is cancelled after data has started, the
+        connection is aborted rather than leaving an unfinished fragment.
+        """
+        if self.ws_connection is None or self.ws_connection.is_closing():
+            raise WebSocketClosedError()
+        return self.ws_connection.write_message_stream(chunks, binary=binary)
 
     def select_subprotocol(self, subprotocols: list[str]) -> str | None:
         """Override to implement subprotocol negotiation.
@@ -691,7 +744,13 @@ class WebSocketProtocol(abc.ABC):
 
     @abc.abstractmethod
     def write_message(
-        self, message: str | bytes | dict[str, Any], binary: bool = False
+        self, message: WebSocketMessage, binary: bool = False
+    ) -> "Future[None]":
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def write_message_stream(
+        self, chunks: WebSocketMessageChunks, binary: bool = False
     ) -> "Future[None]":
         raise NotImplementedError()
 
@@ -757,7 +816,7 @@ class _PerMessageDeflateCompressor:
             self._mem_level = 8
         else:
             self._mem_level = compression_options["mem_level"]
-
+        self._persistent = persistent
         if persistent:
             self._compressor: _Compressor | None = self._create_compressor()
         else:
@@ -768,11 +827,27 @@ class _PerMessageDeflateCompressor:
             self._compression_level, zlib.DEFLATED, -self._max_wbits, self._mem_level
         )
 
+    def begin_message(self) -> "_Compressor":
+        if self._persistent:
+            assert self._compressor is not None
+            return self._compressor
+        self._compressor = self._create_compressor()
+        return self._compressor
+
+    def compress_fragment(
+        self, compressor: "_Compressor", data: bytes, final: bool
+    ) -> bytes:
+        flush_mode = zlib.Z_SYNC_FLUSH if final else zlib.Z_PARTIAL_FLUSH
+        data = compressor.compress(data) + compressor.flush(flush_mode)
+        if final:
+            assert data.endswith(b"\x00\x00\xff\xff")
+            data = data[:-4]
+            if not self._persistent:
+                self._compressor = None
+        return data
+
     def compress(self, data: bytes) -> bytes:
-        compressor = self._compressor or self._create_compressor()
-        data = compressor.compress(data) + compressor.flush(zlib.Z_SYNC_FLUSH)
-        assert data.endswith(b"\x00\x00\xff\xff")
-        return data[:-4]
+        return self.compress_fragment(self.begin_message(), data, True)
 
 
 class _PerMessageDeflateDecompressor:
@@ -862,6 +937,7 @@ class WebSocketProtocol13(WebSocketProtocol):
         self.close_code: int | None = None
         self.close_reason: str | None = None
         self._ping_coroutine: asyncio.Task | None = None
+        self._write_message_lock = asyncio.Lock()
 
     # Use a property for this to satisfy the abc.
     @property
@@ -1078,39 +1154,146 @@ class WebSocketProtocol13(WebSocketProtocol):
         return self.stream.write(frame)
 
     def write_message(
-        self, message: str | bytes | dict[str, Any], binary: bool = False
+        self, message: WebSocketMessage, binary: bool = False
     ) -> "Future[None]":
         """Sends the given message to the client of this Web Socket."""
-        if binary:
-            opcode = 0x2
-        else:
-            opcode = 0x1
         if isinstance(message, dict):
             message = tornado.escape.json_encode(message)
         message = tornado.escape.utf8(message)
         assert isinstance(message, bytes)
-        self._message_bytes_out += len(message)
-        flags = 0
-        if self._compressor:
-            message = self._compressor.compress(message)
-            flags |= self.RSV1
-        # For historical reasons, write methods in Tornado operate in a semi-synchronous
-        # mode in which awaiting the Future they return is optional (But errors can
-        # still be raised). This requires us to go through an awkward dance here
-        # to transform the errors that may be returned while presenting the same
-        # semi-synchronous interface.
-        try:
-            fut = self._write_frame(True, opcode, message, flags=flags)
-        except StreamClosedError:
+        if self.is_closing():
             raise WebSocketClosedError()
+        return asyncio.ensure_future(self._write_message(message, binary))
 
-        async def wrapper() -> None:
+    def write_message_stream(
+        self, chunks: WebSocketMessageChunks, binary: bool = False
+    ) -> "Future[None]":
+        if self.is_closing():
+            raise WebSocketClosedError()
+        return asyncio.ensure_future(self._write_message_stream(chunks, binary))
+
+    async def _write_message(self, message: bytes, binary: bool) -> None:
+        async with self._write_message_lock:
             try:
-                await fut
+                await self._write_message_fragment(
+                    message, 0x2 if binary else 0x1, True, True
+                )
             except StreamClosedError:
+                if not self.server_terminated and not self.client_terminated:
+                    self._abort()
                 raise WebSocketClosedError()
+            except asyncio.CancelledError:
+                self._abort()
+                raise
 
-        return asyncio.ensure_future(wrapper())
+    async def _write_message_stream(
+        self, chunks: WebSocketMessageChunks, binary: bool
+    ) -> None:
+        opcode = 0x2 if binary else 0x1
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        pending_surrogate = ""
+        started = False
+        compressor: _Compressor | None = None
+        frame_opcode = opcode
+        async with self._write_message_lock:
+            try:
+                async with contextlib.aclosing(chunks.__aiter__()) as iterator:
+                    while True:
+                        try:
+                            chunk = await iterator.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        if isinstance(chunk, str):
+                            if binary:
+                                raise TypeError("binary messages require bytes chunks")
+                            data, pending_surrogate = _encode_utf8_chunk(
+                                pending_surrogate, chunk
+                            )
+                        else:
+                            if pending_surrogate:
+                                raise UnicodeEncodeError(
+                                    "utf-8",
+                                    pending_surrogate,
+                                    0,
+                                    1,
+                                    "unpaired surrogate",
+                                )
+                            data = bytes(chunk)
+                        if not binary:
+                            decoder.decode(data, False)
+
+                        if not data:
+                            continue
+
+                        final = False
+                        flags = 0
+                        payload = data
+                        if self._compressor is not None:
+                            if not started:
+                                compressor = self._compressor.begin_message()
+                                flags |= self.RSV1
+                            assert compressor is not None
+                            payload = self._compressor.compress_fragment(
+                                compressor, data, final
+                            )
+                        self._message_bytes_out += len(data)
+                        started = True
+                        await self._write_frame_safely(
+                            final, frame_opcode, payload, flags
+                        )
+                        frame_opcode = 0
+
+                if not binary:
+                    decoder.decode(b"", True)
+                    if pending_surrogate:
+                        raise UnicodeEncodeError(
+                            "utf-8",
+                            pending_surrogate,
+                            0,
+                            1,
+                            "unpaired surrogate",
+                        )
+
+                flags = 0
+                payload = b""
+                if self._compressor is not None and started:
+                    assert compressor is not None
+                    payload = self._compressor.compress_fragment(compressor, b"", True)
+                await self._write_frame_safely(True, frame_opcode, payload, flags)
+            except StreamClosedError:
+                if (
+                    started
+                    and not self.server_terminated
+                    and not self.client_terminated
+                ):
+                    self._abort()
+                raise WebSocketClosedError()
+            except asyncio.CancelledError:
+                if started:
+                    self._abort()
+                raise
+            except Exception:
+                if started:
+                    self._abort()
+                raise
+
+    async def _write_frame_safely(
+        self, fin: bool, opcode: int, data: bytes, flags: int = 0
+    ) -> None:
+        if self.is_closing():
+            raise StreamClosedError()
+        await self._write_frame(fin, opcode, data, flags=flags)
+
+    async def _write_message_fragment(
+        self, data: bytes, opcode: int, first: bool, final: bool
+    ) -> None:
+        self._message_bytes_out += len(data)
+        flags = 0
+        payload = data
+        if self._compressor is not None and data:
+            flags |= self.RSV1
+            payload = self._compressor.compress(data)
+        await self._write_frame_safely(final, opcode if first else 0, payload, flags)
 
     def write_ping(self, data: bytes) -> None:
         """Send ping frame."""
@@ -1531,7 +1714,7 @@ class WebSocketClientConnection(simple_httpclient._HTTPConnection):
         future_set_result_unless_cancelled(self.connect_future, self)
 
     def write_message(
-        self, message: str | bytes | dict[str, Any], binary: bool = False
+        self, message: WebSocketMessage, binary: bool = False
     ) -> "Future[None]":
         """Sends a message to the WebSocket server.
 
@@ -1542,9 +1725,21 @@ class WebSocketClientConnection(simple_httpclient._HTTPConnection):
            Exception raised on a closed stream changed from `.StreamClosedError`
            to `WebSocketClosedError`.
         """
-        if self.protocol is None:
+        if self.protocol is None or self.protocol.is_closing():
             raise WebSocketClosedError("Client connection has been closed")
         return self.protocol.write_message(message, binary=binary)
+
+    def write_message_stream(
+        self, chunks: WebSocketMessageChunks, binary: bool = False
+    ) -> "Future[None]":
+        """Stream an iterable of chunks as one fragmented WebSocket message.
+
+        See `WebSocketHandler.write_message_stream` for the semantics of chunk
+        types, UTF-8 validation, fragmentation, and failure handling.
+        """
+        if self.protocol is None or self.protocol.is_closing():
+            raise WebSocketClosedError("Client connection has been closed")
+        return self.protocol.write_message_stream(chunks, binary=binary)
 
     def read_message(
         self,

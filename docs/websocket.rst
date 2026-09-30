@@ -23,6 +23,7 @@
    ------
 
    .. automethod:: WebSocketHandler.write_message
+   .. automethod:: WebSocketHandler.write_message_stream
    .. automethod:: WebSocketHandler.close
 
    Configuration
