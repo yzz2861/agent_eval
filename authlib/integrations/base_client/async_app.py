@@ -1,6 +1,7 @@
 import logging
 import time
 
+from authlib.common.security import generate_token
 from authlib.common.urls import urlparse
 
 from .errors import MissingRequestTokenError
@@ -90,7 +91,12 @@ class AsyncOAuth2Mixin(OAuth2Base):
         async with self._get_oauth_client(**metadata) as session:
             return await _http_request(self, session, method, url, token, kwargs)
 
-    async def create_authorization_url(self, redirect_uri=None, **kwargs):
+    async def create_authorization_url(
+        self,
+        redirect_uri=None,
+        pushed_authorization_request_endpoint=None,
+        **kwargs,
+    ):
         """Generate the authorization url and state for HTTP redirect.
 
         :param redirect_uri: Callback or redirect URI for authorization.
@@ -101,6 +107,10 @@ class AsyncOAuth2Mixin(OAuth2Base):
         authorization_endpoint = self.authorize_url or metadata.get(
             "authorization_endpoint"
         )
+        if pushed_authorization_request_endpoint is None:
+            pushed_authorization_request_endpoint = metadata.get(
+                "pushed_authorization_request_endpoint"
+            )
         if not authorization_endpoint:
             raise RuntimeError('Missing "authorize_url" value')
 
@@ -109,8 +119,13 @@ class AsyncOAuth2Mixin(OAuth2Base):
 
         async with self._get_oauth_client(**metadata) as client:
             client.redirect_uri = redirect_uri
-            return self._create_oauth2_authorization_url(
-                client, authorization_endpoint, **kwargs
+            return await _create_async_oauth2_authorization_url(
+                client,
+                authorization_endpoint,
+                pushed_authorization_request_endpoint=(
+                    pushed_authorization_request_endpoint
+                ),
+                **kwargs,
             )
 
     async def fetch_access_token(self, redirect_uri=None, **kwargs):
@@ -150,3 +165,46 @@ async def _http_request(ctx, session, method, url, token, kwargs):
 
     session.token = token
     return await session.request(method, url, **kwargs)
+
+
+async def _create_async_oauth2_authorization_url(
+    client,
+    authorization_endpoint,
+    pushed_authorization_request_endpoint=None,
+    **kwargs,
+):
+    rv = {}
+    if client.code_challenge_method:
+        code_verifier = kwargs.get("code_verifier")
+        if not code_verifier:
+            code_verifier = generate_token(48)
+            kwargs["code_verifier"] = code_verifier
+        rv["code_verifier"] = code_verifier
+
+    scope = kwargs.get("scope", client.scope)
+    scope = (
+        (scope if isinstance(scope, (list, tuple)) else scope.split())
+        if scope
+        else None
+    )
+    if scope and "openid" in scope:
+        nonce = kwargs.get("nonce")
+        if not nonce:
+            nonce = generate_token(20)
+            kwargs["nonce"] = nonce
+        rv["nonce"] = nonce
+
+    if pushed_authorization_request_endpoint:
+        rv.update(
+            await client.create_pushed_authorization_url(
+                authorization_endpoint,
+                pushed_authorization_request_endpoint,
+                **kwargs,
+            )
+        )
+        return rv
+
+    url, state = client.create_authorization_url(authorization_endpoint, **kwargs)
+    rv["url"] = url
+    rv["state"] = state
+    return rv

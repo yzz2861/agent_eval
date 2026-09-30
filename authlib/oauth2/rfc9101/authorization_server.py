@@ -88,6 +88,10 @@ class JWTAuthenticationRequest:
     def parse_authorization_request(
         self, authorization_server: AuthorizationServer, request: OAuth2Request
     ):
+        if hasattr(request, "pushed_authorization_request"):
+            if "request" not in request.payload.data:
+                return
+
         client_id = request.payload.client_id
         if client_id is None:
             raise InvalidClientError(

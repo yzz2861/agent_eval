@@ -22,6 +22,7 @@ class AuthorizationServerMetadata(dict):
     REGISTRY_KEYS = [
         "issuer",
         "authorization_endpoint",
+        "pushed_authorization_request_endpoint",
         "token_endpoint",
         "jwks_uri",
         "registration_endpoint",
@@ -99,6 +100,13 @@ class AuthorizationServerMetadata(dict):
 
         if not is_secure_transport(url):
             raise ValueError('"token_endpoint" MUST use "https" scheme')
+
+    def validate_pushed_authorization_request_endpoint(self):
+        url = self.get("pushed_authorization_request_endpoint")
+        if url and not is_secure_transport(url):
+            raise ValueError(
+                '"pushed_authorization_request_endpoint" MUST use "https" scheme'
+            )
 
     def validate_jwks_uri(self):
         """OPTIONAL.  URL of the authorization server's JWK Set [JWK]

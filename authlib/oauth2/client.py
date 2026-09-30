@@ -1,5 +1,6 @@
 from authlib.common.security import generate_token
 from authlib.common.urls import url_decode
+from authlib.common.urls import url_encode
 
 from .auth import ClientAuth
 from .auth import TokenAuth
@@ -10,6 +11,7 @@ from .rfc6749.parameters import prepare_grant_uri
 from .rfc6749.parameters import prepare_token_request
 from .rfc7009 import prepare_revoke_token_request
 from .rfc7636 import create_s256_code_challenge
+from .rfc9126 import prepare_pushed_authorization_grant_uri
 
 DEFAULT_HEADERS = {
     "Accept": "application/json",
@@ -154,6 +156,25 @@ class OAuth2Client:
         if state is None:
             state = generate_token()
 
+        params = self._build_authorization_request_parameters(
+            state=state, code_verifier=code_verifier, **kwargs
+        )
+
+        request_uri = params.pop("request_uri", None)
+        if request_uri is not None:
+            return (
+                prepare_pushed_authorization_grant_uri(
+                    url,
+                    request_uri=request_uri,
+                ),
+                state,
+            )
+
+        return prepare_grant_uri(url, **params), state
+
+    def _build_authorization_request_parameters(
+        self, state=None, code_verifier=None, **kwargs
+    ):
         response_type = self.metadata.get("response_type", "code")
         response_type = kwargs.pop("response_type", response_type)
         if "redirect_uri" not in kwargs:
@@ -173,14 +194,85 @@ class OAuth2Client:
             if k not in kwargs and k in self.metadata:
                 kwargs[k] = self.metadata[k]
 
-        uri = prepare_grant_uri(
+        params = {
+            "client_id": self.client_id,
+            "response_type": response_type,
+            "state": state,
+        }
+        params.update(kwargs)
+        return params
+
+    def push_authorization_request(
+        self,
+        url=None,
+        state=None,
+        code_verifier=None,
+        headers=None,
+        **kwargs,
+    ):
+        """Push authorization parameters to a PAR endpoint."""
+        if state is None:
+            state = generate_token()
+        if url is None:
+            url = self.metadata.get("pushed_authorization_request_endpoint")
+
+        params = self._build_authorization_request_parameters(
+            state=state, code_verifier=code_verifier, **kwargs
+        )
+        if self.token_endpoint_auth_method == "client_secret_basic":
+            params.pop("client_id", None)
+        if headers is None:
+            headers = DEFAULT_HEADERS
+
+        body_params = [
+            (key, value) for key, value in params.items() if value is not None
+        ]
+        resp = self._http_post(
             url,
-            client_id=self.client_id,
-            response_type=response_type,
+            body=url_encode(body_params),
+            auth=self.client_auth(self.token_endpoint_auth_method),
+            headers=headers,
+        )
+        for hook in self.compliance_hook["access_token_response"]:
+            resp = hook(resp)
+        return self.parse_response_token(resp)
+
+    def create_pushed_authorization_url(
+        self,
+        authorization_endpoint=None,
+        pushed_authorization_request_endpoint=None,
+        state=None,
+        code_verifier=None,
+        **kwargs,
+    ):
+        """Push authorization parameters and return the short authorization URL."""
+        if state is None:
+            state = generate_token()
+        response = self.push_authorization_request(
+            pushed_authorization_request_endpoint,
             state=state,
+            code_verifier=code_verifier,
             **kwargs,
         )
-        return uri, state
+        url, state = self.create_authorization_url(
+            authorization_endpoint,
+            state=state,
+            code_verifier=code_verifier,
+            request_uri=response["request_uri"],
+        )
+        return self._build_pushed_authorization_result(
+            response, state, code_verifier, url
+        )
+
+    def _build_pushed_authorization_result(
+        self, response, state, code_verifier, url=None
+    ):
+        result = {"state": state, "response": response}
+        if code_verifier:
+            result["code_verifier"] = code_verifier
+        if url is not None:
+            result["url"] = url
+        return result
 
     def fetch_token(
         self,

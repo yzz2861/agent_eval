@@ -4,6 +4,7 @@ from authlib.common.encoding import to_bytes
 from authlib.common.encoding import to_native
 from authlib.common.urls import add_params_to_qs
 from authlib.common.urls import add_params_to_uri
+from authlib.common.urls import url_decode
 
 from .rfc6749 import OAuth2Token
 from .rfc6750 import add_bearer_token
@@ -17,13 +18,13 @@ def encode_client_secret_basic(client, method, uri, headers, body):
 
 
 def encode_client_secret_post(client, method, uri, headers, body):
-    body = add_params_to_qs(
-        body or "",
-        [
-            ("client_id", client.client_id),
-            ("client_secret", client.client_secret or ""),
-        ],
-    )
+    values = url_decode(body or "")
+    params = []
+    if not any(key == "client_id" for key, _value in values):
+        params.append(("client_id", client.client_id))
+    if not any(key == "client_secret" for key, _value in values):
+        params.append(("client_secret", client.client_secret or ""))
+    body = add_params_to_qs(body or "", params)
     if "Content-Length" in headers:
         headers["Content-Length"] = str(len(body))
     return uri, headers, body
@@ -32,6 +33,8 @@ def encode_client_secret_post(client, method, uri, headers, body):
 def encode_none(client, method, uri, headers, body):
     if method == "GET":
         uri = add_params_to_uri(uri, [("client_id", client.client_id)])
+        return uri, headers, body
+    if any(key == "client_id" for key, _value in url_decode(body or "")):
         return uri, headers, body
     body = add_params_to_qs(body, [("client_id", client.client_id)])
     if "Content-Length" in headers:

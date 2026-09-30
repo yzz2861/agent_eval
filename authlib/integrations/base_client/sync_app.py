@@ -274,7 +274,12 @@ class OAuth2Base:
         return params
 
     @staticmethod
-    def _create_oauth2_authorization_url(client, authorization_endpoint, **kwargs):
+    def _create_oauth2_authorization_url(
+        client,
+        authorization_endpoint,
+        pushed_authorization_request_endpoint=None,
+        **kwargs,
+    ):
         rv = {}
         if client.code_challenge_method:
             code_verifier = kwargs.get("code_verifier")
@@ -297,6 +302,16 @@ class OAuth2Base:
                 nonce = generate_token(20)
                 kwargs["nonce"] = nonce
             rv["nonce"] = nonce
+
+        if pushed_authorization_request_endpoint:
+            rv.update(
+                client.create_pushed_authorization_url(
+                    authorization_endpoint,
+                    pushed_authorization_request_endpoint,
+                    **kwargs,
+                )
+            )
+            return rv
 
         url, state = client.create_authorization_url(authorization_endpoint, **kwargs)
         rv["url"] = url
@@ -336,7 +351,12 @@ class OAuth2Mixin(_RequestMixin, OAuth2Base):
             self.server_metadata.update(metadata)
         return self.server_metadata
 
-    def create_authorization_url(self, redirect_uri=None, **kwargs):
+    def create_authorization_url(
+        self,
+        redirect_uri=None,
+        pushed_authorization_request_endpoint=None,
+        **kwargs,
+    ):
         """Generate the authorization url and state for HTTP redirect.
 
         :param redirect_uri: Callback or redirect URI for authorization.
@@ -347,6 +367,10 @@ class OAuth2Mixin(_RequestMixin, OAuth2Base):
         authorization_endpoint = self.authorize_url or metadata.get(
             "authorization_endpoint"
         )
+        if pushed_authorization_request_endpoint is None:
+            pushed_authorization_request_endpoint = metadata.get(
+                "pushed_authorization_request_endpoint"
+            )
 
         if not authorization_endpoint:
             raise RuntimeError('Missing "authorize_url" value')
@@ -358,7 +382,12 @@ class OAuth2Mixin(_RequestMixin, OAuth2Base):
             if redirect_uri is not None:
                 client.redirect_uri = redirect_uri
             return self._create_oauth2_authorization_url(
-                client, authorization_endpoint, **kwargs
+                client,
+                authorization_endpoint,
+                pushed_authorization_request_endpoint=(
+                    pushed_authorization_request_endpoint
+                ),
+                **kwargs,
             )
 
     def fetch_access_token(self, redirect_uri=None, **kwargs):

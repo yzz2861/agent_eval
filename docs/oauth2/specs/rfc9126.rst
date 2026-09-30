@@ -1,0 +1,49 @@
+.. _specs/rfc9126:
+
+RFC9126: OAuth 2.0 Pushed Authorization Requests
+================================================
+
+This section contains the generic implementation of RFC9126_. A client pushes
+the complete authorization request to the PAR endpoint, receives a
+``request_uri``, and sends only that reference to the authorization endpoint.
+
+Configure storage and register the endpoint::
+
+    from authlib.oauth2.rfc9126 import LocalPushedAuthorizationRequestStorage
+    from authlib.oauth2.rfc9126 import PushedAuthorizationRequestEndpoint
+
+    storage = LocalPushedAuthorizationRequestStorage()
+    authorization_server.register_endpoint(
+        PushedAuthorizationRequestEndpoint(storage=storage)
+    )
+
+Then expose it through a framework route::
+
+    @app.route("/oauth/par", methods=["POST"])
+    def pushed_authorization_request():
+        return authorization_server.create_endpoint_response(
+            "pushed_authorization_request"
+        )
+
+For durable deployments, implement
+:class:`PushedAuthorizationRequestStorage` with atomic compare-and-delete
+semantics for ``consume``.
+
+API Reference
+-------------
+
+.. module:: authlib.oauth2.rfc9126
+
+.. autoclass:: PushedAuthorizationRequestEndpoint
+    :member-order: bysource
+    :members:
+
+.. autoclass:: PushedAuthorizationRequestStorage
+    :member-order: bysource
+    :members:
+
+.. autoclass:: LocalPushedAuthorizationRequestStorage
+    :member-order: bysource
+    :members:
+
+.. _RFC9126: https://www.rfc-editor.org/rfc/rfc9126

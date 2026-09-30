@@ -5,8 +5,9 @@ import typing
 from contextlib import asynccontextmanager
 
 from ._compat import httpx2
-from anyio import Lock # Import after httpx so import errors refer to httpx
+from anyio import Lock  # Import after httpx so import errors refer to httpx
 
+from authlib.common.security import generate_token
 from authlib.common.urls import url_decode
 from authlib.oauth2.auth import ClientAuth
 from authlib.oauth2.auth import TokenAuth
@@ -203,6 +204,78 @@ class AsyncOAuth2Client(_OAuth2Client, httpx2.AsyncClient):
             await self.update_token(self.token, refresh_token=refresh_token)
 
         return self.token
+
+    async def _http_post(
+        self, url, body=None, auth=USE_CLIENT_DEFAULT, headers=None, **kwargs
+    ):
+        return await self.post(
+            url, data=dict(url_decode(body)), headers=headers, auth=auth, **kwargs
+        )
+
+    async def push_authorization_request(
+        self,
+        url=None,
+        state=None,
+        code_verifier=None,
+        headers=None,
+        **kwargs,
+    ):
+        from authlib.common.urls import url_encode
+
+        if state is None:
+            state = generate_token()
+        if url is None:
+            url = self.metadata.get("pushed_authorization_request_endpoint")
+
+        params = self._build_authorization_request_parameters(
+            state=state, code_verifier=code_verifier, **kwargs
+        )
+        if self.token_endpoint_auth_method == "client_secret_basic":
+            params.pop("client_id", None)
+        body_params = [
+            (key, value) for key, value in params.items() if value is not None
+        ]
+        if headers is None:
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            }
+
+        resp = await self._http_post(
+            url,
+            body=url_encode(body_params),
+            auth=self.client_auth(self.token_endpoint_auth_method),
+            headers=headers,
+        )
+        for hook in self.compliance_hook["access_token_response"]:
+            resp = hook(resp)
+        return self.parse_response_token(resp)
+
+    async def create_pushed_authorization_url(
+        self,
+        authorization_endpoint=None,
+        pushed_authorization_request_endpoint=None,
+        state=None,
+        code_verifier=None,
+        **kwargs,
+    ):
+        if state is None:
+            state = generate_token()
+        response = await self.push_authorization_request(
+            pushed_authorization_request_endpoint,
+            state=state,
+            code_verifier=code_verifier,
+            **kwargs,
+        )
+        url, state = self.create_authorization_url(
+            authorization_endpoint,
+            state=state,
+            code_verifier=code_verifier,
+            request_uri=response["request_uri"],
+        )
+        return self._build_pushed_authorization_result(
+            response, state, code_verifier, url
+        )
 
     def _http_post(
         self, url, body=None, auth=USE_CLIENT_DEFAULT, headers=None, **kwargs

@@ -10,6 +10,8 @@ from authlib.integrations.flask_oauth2 import AuthorizationServer
 from authlib.integrations.sqla_oauth2 import create_query_client_func
 from authlib.integrations.sqla_oauth2 import create_save_token_func
 from authlib.oauth2 import OAuth2Error
+from authlib.oauth2.rfc9126 import LocalPushedAuthorizationRequestStorage
+from authlib.oauth2.rfc9126 import PushedAuthorizationRequestEndpoint
 
 from .models import Client
 from .models import Token
@@ -55,6 +57,18 @@ def create_authorization_server(app, lazy=False):
     @app.route("/oauth/token", methods=["GET", "POST"])
     def issue_token():
         return server.create_token_response()
+
+    if app.config.get("OAUTH2_ENABLE_PAR"):
+        pushed_request_storage = LocalPushedAuthorizationRequestStorage()
+        server.register_endpoint(
+            PushedAuthorizationRequestEndpoint(storage=pushed_request_storage)
+        )
+
+        @app.route("/oauth/par", methods=["POST"])
+        def pushed_authorization_request():
+            return server.create_endpoint_response(
+                PushedAuthorizationRequestEndpoint.ENDPOINT_NAME
+            )
 
     return server
 

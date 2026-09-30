@@ -232,8 +232,17 @@ class AuthorizationServer(Hookable):
         endpoints = self._endpoints.setdefault(endpoint.ENDPOINT_NAME, [])
         endpoints.append(endpoint)
 
-    @hooked
     def get_authorization_grant(self, request):
+        """Resolve authorization request extensions and find the grant."""
+        for endpoint in self._endpoints.get("pushed_authorization_request", []):
+            endpoint.resolve_authorization_request(request)
+        return self._get_authorization_grant(request)
+
+    @hooked(
+        before="before_get_authorization_grant",
+        after="after_get_authorization_grant",
+    )
+    def _get_authorization_grant(self, request):
         """Find the authorization grant for current request.
 
         :param request: OAuth2Request instance.
