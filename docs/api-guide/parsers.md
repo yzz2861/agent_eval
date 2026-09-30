@@ -74,6 +74,12 @@ Parses `JSON` request content. `request.data` will be populated with a dictionar
 
 **.media_type**: `application/json`
 
+### JSONPatchParser
+
+Parses RFC 6902 JSON Patch request content. `request.data` will be populated with a list of patch operations.
+
+**.media_type**: `application/json-patch+json`
+
 ### FormParser
 
 Parses HTML form content.  `request.data` will be populated with a `QueryDict` of data.

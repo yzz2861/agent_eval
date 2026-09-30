@@ -262,6 +262,23 @@ If an object is updated this returns a `200 OK` response, with a serialized repr
 
 If the request data provided for updating the object was invalid, a `400 Bad Request` response will be returned, with the error details as the body of the response.
 
+### JSONPatchUpdateModelMixin
+
+Provides a `.patch(request, *args, **kwargs)` method that accepts RFC 6902 JSON Patch requests with `Content-Type: application/json-patch+json`. Patch paths use serializer field names, including nested serializer paths, and read-only and `source` mapped fields are handled through the serializer rather than by direct attribute access.
+
+The mixin requires the view to accept `JSONPatchParser`. For example:
+
+    from rest_framework import generics, mixins
+    from rest_framework.parsers import JSONPatchParser
+
+    class ExampleDetailView(mixins.JSONPatchUpdateModelMixin,
+                            generics.RetrieveUpdateDestroyAPIView):
+        queryset = Example.objects.all()
+        serializer_class = ExampleSerializer
+        parser_classes = (JSONPatchParser,)
+
+The complete patch is applied to a serialized copy of the object, validated with the serializer, and saved only when every operation is valid.
+
 ### DestroyModelMixin
 
 Provides a `.destroy(request, *args, **kwargs)` method, that implements deletion of an existing model instance.

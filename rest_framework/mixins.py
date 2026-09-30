@@ -5,6 +5,7 @@ We don't bind behavior to http method handlers yet,
 which allows mixin classes to be composed in interesting ways.
 """
 from rest_framework import status
+from rest_framework.json_patch import apply_json_patch, is_json_patch_request
 from rest_framework.response import Response
 from rest_framework.settings import api_settings
 
@@ -80,6 +81,27 @@ class UpdateModelMixin:
     def partial_update(self, request, *args, **kwargs):
         kwargs['partial'] = True
         return self.update(request, *args, **kwargs)
+
+
+class JSONPatchUpdateModelMixin:
+    """
+    Adds RFC 6902 JSON Patch support to a generic update view.
+    """
+    def json_patch_update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
+        serializer = apply_json_patch(serializer, request.data, save=True)
+
+        if getattr(instance, '_prefetched_objects_cache', None):
+            instance._prefetched_objects_cache = {}
+
+        return Response(serializer.data)
+
+    def patch(self, request, *args, **kwargs):
+        if is_json_patch_request(request):
+            return self.json_patch_update(request, *args, **kwargs)
+        kwargs['partial'] = True
+        return UpdateModelMixin.partial_update(self, request, *args, **kwargs)
 
 
 class DestroyModelMixin:

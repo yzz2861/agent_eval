@@ -69,6 +69,19 @@ class JSONParser(BaseParser):
             raise ParseError('JSON parse error - %s' % str(exc))
 
 
+class JSONPatchParser(JSONParser):
+    """
+    Parses JSON-serialized RFC 6902 JSON Patch data.
+    """
+    media_type = 'application/json-patch+json'
+
+    def parse(self, stream, media_type=None, parser_context=None):
+        data = super().parse(stream, media_type=media_type, parser_context=parser_context)
+        if not isinstance(data, list):
+            raise ParseError('JSON Patch must be a list of operations.')
+        return data
+
+
 class FormParser(BaseParser):
     """
     Parser for form data.
