@@ -7,6 +7,13 @@ This project adheres to `Semantic Versioning <https://semver.org/>`__.
 `Unreleased <https://github.com/jpadilla/pyjwt/compare/2.15.0...HEAD>`__
 -------------------------------------------------------------------------
 
+Added
+~~~~~
+
+- Add ``AsyncPyJWKClient`` with an injectable asynchronous transport,
+  concurrent fetch coalescing, unknown-key refresh cooldowns, and explicit
+  close semantics.
+
 `v2.15.0 <https://github.com/jpadilla/pyjwt/compare/2.14.0...2.15.0>`__
 -----------------------------------------------------------------------
 

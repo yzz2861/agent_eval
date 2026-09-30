@@ -518,6 +518,34 @@ an error.
 requests. See :class:`~jwt.PyJWKClient` in the API reference for details on
 the caching parameters.
 
+Asynchronous applications can use ``AsyncPyJWKClient``. Its lookup methods are
+coroutines with the same names as ``PyJWKClient``. Pass an object implementing
+the :class:`~jwt.AsyncJWKSTransport` protocol to integrate with an asynchronous
+HTTP client. If no transport is supplied, PyJWT uses its non-blocking
+``AsyncIOJWKSTransport``.
+
+.. code-block:: python
+
+    import jwt
+    from jwt import AsyncPyJWKClient
+
+    jwks_client = AsyncPyJWKClient(url)
+
+    async def authorize(token: str) -> dict[str, object]:
+        signing_key = await jwks_client.get_signing_key_from_jwt(token)
+        return jwt.decode(
+            token,
+            signing_key,
+            algorithms=["RS256"],
+            audience="https://expenses-api",
+        )
+
+    # Later, during application shutdown.
+    await jwks_client.aclose()
+
+Closing an ``AsyncPyJWKClient`` releases only a transport that the client
+created. A transport passed to the constructor remains owned by the caller.
+
 OIDC Login Flow
 ---------------
 
