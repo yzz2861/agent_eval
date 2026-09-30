@@ -3,6 +3,7 @@
 __all__ = ()
 
 import functools
+import threading
 import warnings
 import weakref
 
@@ -25,6 +26,127 @@ def _warn_instance_dict(msg, stacklevel):
 
 def _none(_):
     return None
+
+
+class _WeakMethodState:
+    def __init__(self, token):
+        self.token = token
+        self.hits = 0
+        self.misses = 0
+        self.pending = set()
+        self.lock = threading.RLock()
+        self.entries = {}
+        self.locks = {}
+
+    def register(self, instance_cache, instance_lock, instance_key):
+        cache_id = id(instance_cache)
+        with self.lock:
+            entry = self.entries.get(cache_id)
+            if entry is None or _weak_deref(entry[0]) is None:
+                entry = (_weak_ref_or_value(instance_cache), weakref.WeakSet())
+                self.entries[cache_id] = entry
+            entry[1].add(instance_key)
+            if instance_lock is not None:
+                try:
+                    self.locks[cache_id] = weakref.ref(instance_lock)
+                except TypeError:
+                    self.locks[cache_id] = None
+
+    def purge(self):
+        with self.lock:
+            entries = list(self.entries.values())
+            locks = dict(self.locks)
+
+        token = self.token
+        for cache_ref, registered_keys in entries:
+            instance_cache = _weak_deref(cache_ref)
+            if instance_cache is None:
+                continue
+            instance_lock = _weak_deref(locks.get(id(instance_cache)))
+            keys_to_remove = [
+                registered_key
+                for registered_key in tuple(registered_keys)
+                if registered_key._token is token
+            ]
+            if instance_lock is not None:
+                with instance_lock:
+                    for instance_key in keys_to_remove:
+                        try:
+                            del instance_cache[instance_key]
+                        except KeyError:
+                            pass
+            else:
+                for instance_key in keys_to_remove:
+                    try:
+                        del instance_cache[instance_key]
+                    except KeyError:
+                        pass
+
+
+class _WeakMethodKey:
+    """Cache key identifying an instance by identity, not equality."""
+
+    __slots__ = ("_token", "_key", "_hash", "__weakref__")
+
+    def __init__(self, token, key):
+        self._token = token
+        self._key = key
+        self._hash = hash(key)
+
+    def __eq__(self, other):
+        if type(self) is not type(other) or self._token is not other._token:
+            return False
+        return self._key == other._key
+
+    def __ne__(self, other):
+        return not self == other
+
+    def __hash__(self):
+        return self._hash
+
+
+def _weak_ref(obj, message):
+    try:
+        return weakref.ref(obj)
+    except TypeError:
+        raise TypeError(message) from None
+
+
+def _weak_deref(value):
+    if value is None:
+        return None
+    return value() if isinstance(value, weakref.ref) else value._value()
+
+
+class _StrongRef:
+    __slots__ = "_strong_value"
+
+    def __init__(self, value):
+        self._strong_value = value
+
+    def _value(self):
+        return self._strong_value
+
+
+def _weak_proxy(obj, message):
+    try:
+        return weakref.proxy(obj)
+    except TypeError:
+        raise TypeError(message) from None
+
+
+def _resolve_weak(objref):
+    obj = objref()
+    if obj is None:
+        raise ReferenceError("weakly referenced instance has been garbage collected")
+    return obj
+
+
+def _weak_ref_or_value(value):
+    try:
+        return weakref.ref(value)
+    except TypeError:
+        return _StrongRef(value)
 
 
 class _WrapperBase:
@@ -137,6 +259,194 @@ class _DeprecatedDescriptorBase(_DescriptorBase):
     def cache_clear(self, objtype):
         _warn_classmethod(stacklevel=3)
         return self.__cache_clear(objtype)
+
+
+def _weak_method_wrapper(method, cache, key, lock=None, cond=None, info=None):
+    descriptor_lock = threading.RLock()
+    states = {}
+
+    def cache_lock(obj):
+        if lock is not None:
+            return lock(obj)
+        if cond is not None:
+            return cond(obj)
+        return None
+
+    def cleanup(obj_id, state):
+        with descriptor_lock:
+            if states.get(obj_id) is state:
+                del states[obj_id]
+        state.purge()
+
+    def get_state(obj, token):
+        obj_id = id(obj)
+        with descriptor_lock:
+            state = states.get(obj_id)
+            if state is None or state.token() is not obj:
+                state = _WeakMethodState(token)
+                states[obj_id] = state
+                weakref.finalize(obj, cleanup, obj_id, state)
+            return state
+
+    class Descriptor:
+        def __get__(self, obj, objtype=None):
+            if obj is None:
+                return self
+            return self.Wrapper(obj)
+
+        class Wrapper:
+            def __init__(self, obj):
+                message = (
+                    "cannot create weak reference to "
+                    f"{type(obj).__name__!r} instance; weak=True requires "
+                    "weak-referenceable instances"
+                )
+                instance_ref = _weak_ref(obj, message)
+                if instance_ref() is not obj:
+                    raise TypeError(message)
+                self._instance_ref = instance_ref
+                self._state = get_state(obj, instance_ref)
+                functools.update_wrapper(self, method)
+
+            def _instance(self):
+                return _resolve_weak(self._instance_ref)
+
+            def _make_key(self, instance, args, kwargs):
+                proxy = _weak_proxy(
+                    instance,
+                    "cannot create weak reference to bound method instance",
+                )
+                user_key = key(proxy, *args, **kwargs)
+                return _WeakMethodKey(self._state.token, user_key)
+
+            def __call__(self, *args, **kwargs):
+                instance = self._instance()
+                state = self._state
+                instance_cache = cache(instance)
+                instance_lock = cache_lock(instance)
+                instance_cond = cond(instance) if cond is not None else None
+                instance_key = self._make_key(instance, args, kwargs)
+
+                if instance_cond is not None:
+                    with instance_lock:
+                        instance_cond.wait_for(
+                            lambda instance_key=instance_key: (
+                                instance_key not in state.pending
+                            )
+                        )
+                        try:
+                            result = instance_cache[instance_key]
+                            if info is not None:
+                                state.hits += 1
+                            return result
+                        except KeyError:
+                            state.pending.add(instance_key)
+                            if info is not None:
+                                state.misses += 1
+                    try:
+                        value = method(instance, *args, **kwargs)
+                        with instance_lock:
+                            try:
+                                instance_cache[instance_key] = value
+                                state.register(
+                                    instance_cache, instance_lock, instance_key
+                                )
+                            except ValueError:
+                                pass
+                            return value
+                    finally:
+                        with instance_lock:
+                            state.pending.discard(instance_key)
+                            instance_cond.notify_all()
+
+                if instance_lock is not None:
+                    with instance_lock:
+                        try:
+                            result = instance_cache[instance_key]
+                            if info is not None:
+                                state.hits += 1
+                            return result
+                        except KeyError:
+                            if info is not None:
+                                state.misses += 1
+                    value = method(instance, *args, **kwargs)
+                    with instance_lock:
+                        try:
+                            result = instance_cache.setdefault(instance_key, value)
+                        except ValueError:
+                            result = value
+                        else:
+                            state.register(instance_cache, instance_lock, instance_key)
+                        return result
+
+                try:
+                    result = instance_cache[instance_key]
+                    if info is not None:
+                        state.hits += 1
+                    return result
+                except KeyError:
+                    if info is not None:
+                        state.misses += 1
+                value = method(instance, *args, **kwargs)
+                try:
+                    instance_cache[instance_key] = value
+                    state.register(instance_cache, None, instance_key)
+                except ValueError:
+                    pass
+                return value
+
+            def cache_clear(self):
+                instance = self._instance()
+                instance_cache = cache(instance)
+                instance_lock = cache_lock(instance)
+                if instance_lock is not None:
+                    with instance_lock:
+                        instance_cache.clear()
+                        self._state.hits = self._state.misses = 0
+                else:
+                    instance_cache.clear()
+                    self._state.hits = self._state.misses = 0
+
+            def cache_info(self):
+                if info is None:
+                    raise TypeError("cache_info() not supported")
+                instance = self._instance()
+                instance_cache = cache(instance)
+                instance_lock = cache_lock(instance)
+                if instance_lock is not None:
+                    with instance_lock:
+                        return info(
+                            instance_cache, self._state.hits, self._state.misses
+                        )
+                return info(instance_cache, self._state.hits, self._state.misses)
+
+            @property
+            def cache(self):
+                return cache(self._instance())
+
+            @property
+            def cache_key(self):
+                instance_ref = self._instance_ref
+
+                def make_key(*args, **kwargs):
+                    instance = _resolve_weak(instance_ref)
+                    proxy = _weak_proxy(instance, "bound method instance is dead")
+                    return _WeakMethodKey(
+                        self._state.token, key(proxy, *args, **kwargs)
+                    )
+
+                return make_key
+
+            @property
+            def cache_lock(self):
+                return cache_lock(self._instance())
+
+            @property
+            def cache_condition(self):
+                instance = self._instance()
+                return cond(instance) if cond is not None else None
+
+    return functools.update_wrapper(Descriptor(), method)
 
 
 # At least for now, the implementation prefers clarity and performance
@@ -390,7 +700,9 @@ def _unlocked(method, cache, key):
     return Descriptor(wrapper, cache_clear)
 
 
-def _wrapper(method, cache, key, lock=None, cond=None, info=None):
+def _wrapper(method, cache, key, lock=None, cond=None, info=None, weak=False):
+    if weak:
+        return _weak_method_wrapper(method, cache, key, lock, cond, info)
     if info is not None:
         if cond is not None and lock is not None:
             wrapper = _condition_info(method, cache, key, lock, cond, info)

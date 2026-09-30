@@ -1,6 +1,8 @@
+import builtins
 import unittest
 import unittest.mock
 import warnings
+import weakref
 
 from cachetools import Cache, cachedmethod, keys
 
@@ -639,6 +641,233 @@ class DictMethodTest(unittest.TestCase, MethodDecoratorTestMixin):
 
 
 class WeakRefMethodTest(unittest.TestCase):
+    def test_weak_identity_isolation(self):
+        import gc
+
+        shared_cache = Cache(10)
+
+        class WeakCached:
+            def __eq__(self, other):
+                return isinstance(other, WeakCached)
+
+            def __hash__(self):
+                return 1
+
+            def __init__(self):
+                self.cache = shared_cache
+                self.calls = 0
+
+            @cachedmethod(lambda self: self.cache, weak=True)
+            def get(self, value):
+                self.calls += 1
+                return self.calls
+
+        first = WeakCached()
+        second = WeakCached()
+        self.assertEqual(first.get(1), 1)
+        self.assertEqual(second.get(1), 1)
+        self.assertEqual(first.get(1), 1)
+        self.assertEqual(second.get(1), 1)
+        self.assertEqual(len(shared_cache), 2)
+
+        first_ref = weakref.ref(first)
+        del first
+        gc.collect()
+        self.assertIsNone(first_ref())
+        self.assertEqual(len(shared_cache), 1)
+        self.assertEqual(second.get(1), 1)
+
+    def test_weak_finalizer_id_reuse_does_not_remove_new_entry(self):
+        shared_cache = Cache(10)
+
+        class WeakCached:
+            cache = shared_cache
+            next_value = 100
+
+            @cachedmethod(lambda self: self.cache, weak=True)
+            def get(self, value):
+                WeakCached.next_value += 1
+                return WeakCached.next_value
+
+        finalizers = []
+
+        def capture_finalizer(obj, callback, *args):
+            finalizers.append((callback, args))
+
+        with (
+            unittest.mock.patch.object(
+                weakref, "finalize", side_effect=capture_finalizer
+            ),
+            unittest.mock.patch.object(builtins, "id", return_value=1),
+        ):
+            first = WeakCached()
+            second = WeakCached()
+            self.assertEqual(first.get(1), 101)
+            self.assertEqual(second.get(1), 102)
+            self.assertEqual(len(shared_cache), 2)
+
+            old_callback, old_args = finalizers[0]
+            old_callback(*old_args)
+
+            self.assertEqual(len(shared_cache), 1)
+            self.assertEqual(second.get(1), 102)
+
+    def test_weak_external_wrapper_does_not_keep_instance_alive(self):
+        import gc
+
+        shared_cache = Cache(10)
+
+        class WeakCached:
+            cache = shared_cache
+
+            @cachedmethod(lambda self: self.cache, weak=True)
+            def get(self, value):
+                return value
+
+        instance = WeakCached()
+        wrapper = instance.get
+        self.assertEqual(wrapper(1), 1)
+        instance_ref = weakref.ref(instance)
+        del instance
+        gc.collect()
+        self.assertIsNone(instance_ref())
+        with self.assertRaisesRegex(ReferenceError, "garbage collected"):
+            wrapper(1)
+
+    def test_weak_cache_key_does_not_keep_instance_alive(self):
+        import gc
+
+        shared_cache = Cache(10)
+
+        class WeakCached:
+            cache = shared_cache
+
+            @cachedmethod(lambda self: self.cache, weak=True)
+            def get(self, value):
+                return value
+
+        instance = WeakCached()
+        cache_key = instance.get.cache_key
+        self.assertEqual(instance.get(1), 1)
+        key = cache_key(1)
+        self.assertIn(key, shared_cache)
+        instance_ref = weakref.ref(instance)
+        del instance
+        gc.collect()
+        self.assertIsNone(instance_ref())
+        with self.assertRaisesRegex(ReferenceError, "garbage collected"):
+            cache_key(1)
+
+    def test_weak_cache_with_unweakrefable_callable_mapping(self):
+        import gc
+
+        class CallableDict(dict):
+            def __call__(self):
+                return self
+
+        shared_cache = CallableDict()
+
+        class WeakCached:
+            cache = shared_cache
+
+            @cachedmethod(lambda self: self.cache, weak=True)
+            def get(self, value):
+                return value
+
+        instance = WeakCached()
+        self.assertEqual(instance.get(1), 1)
+        instance_ref = weakref.ref(instance)
+        del instance
+        gc.collect()
+        self.assertIsNone(instance_ref())
+        self.assertEqual(len(shared_cache), 0)
+
+    def test_weak_return_value_may_keep_instance_alive(self):
+        import gc
+
+        shared_cache = Cache(10)
+
+        class WeakCached:
+            cache = shared_cache
+
+            @cachedmethod(lambda self: self.cache, weak=True)
+            def self_value(self):
+                return self
+
+        instance = WeakCached()
+        retained = instance.self_value()
+        instance_ref = weakref.ref(instance)
+        del instance
+        gc.collect()
+        self.assertIs(instance_ref(), retained)
+        self.assertEqual(len(shared_cache), 1)
+
+    def test_weak_slots_does_not_require_instance_dict(self):
+        shared_cache = Cache(10)
+
+        class WeakCached:
+            __slots__ = ("cache", "__weakref__")
+
+            def __init__(self):
+                self.cache = shared_cache
+
+            @cachedmethod(lambda self: self.cache, weak=True)
+            def get(self, value):
+                return value
+
+        instance = WeakCached()
+        self.assertEqual(instance.get(1), 1)
+        self.assertEqual(instance.get(1), 1)
+        self.assertEqual(len(shared_cache), 1)
+
+    def test_weak_unweakrefable_instance(self):
+        class WeakCached:
+            __slots__ = ()
+
+            @cachedmethod(lambda self: Cache(10), weak=True)
+            def get(self, value):
+                return value
+
+        with self.assertRaisesRegex(TypeError, "weak-referenceable instances"):
+            WeakCached().get(1)
+
+    def test_weak_info_lock_and_condition(self):
+        shared_cache = Cache(10)
+
+        class WeakCached:
+            def __init__(self):
+                self.cache = shared_cache
+                self.lock = CountedLock()
+                self.cond = CountedCondition()
+                self.calls = 0
+
+            @cachedmethod(
+                lambda self: self.cache, lock=lambda self: self.lock, weak=True
+            )
+            def locked(self, value):
+                self.calls += 1
+                return self.calls
+
+            @cachedmethod(
+                lambda self: self.cache,
+                condition=lambda self: self.cond,
+                info=True,
+                weak=True,
+            )
+            def conditioned(self, value):
+                self.calls += 1
+                return self.calls
+
+        instance = WeakCached()
+        self.assertEqual(instance.locked(1), 1)
+        self.assertEqual(instance.locked(1), 1)
+        self.assertGreaterEqual(instance.lock.count, 3)
+        self.assertEqual(instance.conditioned(2), 2)
+        self.assertEqual(instance.conditioned(2), 2)
+        self.assertEqual(instance.conditioned.cache_info().hits, 1)
+        self.assertEqual(instance.conditioned.cache_info().misses, 1)
+        self.assertGreaterEqual(instance.cond.wait_count, 1)
+
     def test_weakref(self):
         import fractions
         import gc

@@ -527,7 +527,7 @@ often called with the same arguments:
       longer supports returning :const:`None` from `cache(self)`.
 
 
-.. decorator:: cachedmethod(cache, key=cachetools.keys.methodkey, lock=None, condition=None, info=False)
+.. decorator:: cachedmethod(cache, key=cachetools.keys.methodkey, lock=None, condition=None, info=False, weak=False)
 
    Decorator to wrap an instance method with a memoizing callable that
    saves results in a cache.
@@ -653,6 +653,17 @@ often called with the same arguments:
    Note how keyword arguments are used with :func:`functools.partial`
    to create distinct cache keys, to avoid issues with
    :func:`methodkey` skipping its initial `self` argument.
+
+   Set `weak=True` to use one shared cache with many short-lived
+   instances.  Cache entries identify instances by identity rather than
+   equality, even if instances compare equal or reuse an :func:`id()`
+   value.  The decorator and cache keys retain only weak references to
+   instances, so entries for a garbage-collected instance are removed
+   automatically.  A bound wrapper retained outside the instance raises
+   :class:`ReferenceError` after that instance has been collected.
+   This mode requires weak-referenceable instances and continues to use
+   `lock(self)` and `condition(self)`.  Return values are not weakened,
+   so a return value that retains the caller's instance keeps it alive.
 
    .. versionchanged:: 7.0
 

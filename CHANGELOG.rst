@@ -1,6 +1,10 @@
 v7.2.0 (2026-09-16)
 ===================
 
+- Add an optional ``weak`` parameter to the ``@cachedmethod`` decorator
+  for shared caches with weak-referenced instances and identity-based
+  cache keys.
+
 - Deprecate use of ``cache=None`` to suppress caching with the
   ``@cached`` decorator.
 
