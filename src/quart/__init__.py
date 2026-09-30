@@ -51,6 +51,7 @@ from .templating import stream_template as stream_template
 from .templating import stream_template_string as stream_template_string
 from .typing import ResponseReturnValue as ResponseReturnValue
 from .wrappers import ClientDisconnectedError as ClientDisconnectedError
+from .wrappers import JSONSeqError as JSONSeqError
 from .wrappers import Request as Request
 from .wrappers import Response as Response
 from .wrappers import Websocket as Websocket

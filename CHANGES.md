@@ -1,3 +1,9 @@
+## Unreleased
+
+- Add ``Request.iter_json_seq`` to stream and parse
+  ``application/json-seq`` (RFC 7464) request bodies record by
+  record, with per-record size limits and raise/skip error strategies.
+
 ## Version 0.23.1
 
 Released 2026-08-29

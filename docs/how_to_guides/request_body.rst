@@ -55,6 +55,50 @@ provides methods to iterate over the body,
     Iterating over the body consumes the data, so any further usage of
     the data is not possible unless it is saved during the iteration.
 
+JSON text sequences
+-------------------
+
+If the body is a JSON text sequence (``application/json-seq``, RFC
+7464) each record can be parsed and processed as it arrives, without
+loading the whole body into memory,
+
+.. code-block:: python
+
+    @app.route('/', methods=['POST'])
+    async def index():
+        async for record in request.iter_json_seq(max_record_size=1_000_000):
+            ...
+
+Records are delimited by a record separator (``0x1E``) and may span
+multiple lines; each record is yielded as parsed JSON once the next
+record separator or the end of the body is received. Empty records are
+ignored, and a truncated final record is reported as an error. Only a
+single record is buffered at a time, and nothing further is read once
+the iteration stops.
+
+By default the first invalid record raises a
+:class:`~quart.JSONSeqError` (a 400 error) ending the iteration.
+Alternatively ``on_error="skip"`` reports invalid records via
+``request.json_seq_errors`` (including their byte offset) and resumes
+at the next record separator,
+
+.. code-block:: python
+
+    async for record in request.iter_json_seq(on_error="skip"):
+        ...
+    for error in request.json_seq_errors:
+        app.logger.warning("Bad record at byte %d", error.offset)
+
+.. note::
+
+   :meth:`~quart.wrappers.request.Request.iter_json_seq` consumes the
+   body stream, so it must be used before
+   :meth:`~quart.wrappers.request.Request.get_data`,
+   :meth:`~quart.wrappers.request.Request.get_json` or form parsing
+   (which will otherwise raise a ``RuntimeError``). Afterwards
+   ``get_data`` returns any remaining (unread) data and
+   ``get_json`` will fail to parse it.
+
 Testing
 -------
 

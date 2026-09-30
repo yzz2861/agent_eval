@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Generator
@@ -135,6 +136,127 @@ class Body:
         self._data = b""
 
 
+class JSONSeqError(BadRequest):
+    """An error parsing a single record of a JSON text sequence.
+
+    Attributes:
+        offset: The byte offset within the request body at which the
+            offending record (or data) starts. For records this is the
+            offset of the leading record separator (``0x1E``).
+    """
+
+    def __init__(self, message: str, offset: int) -> None:
+        super().__init__(message)
+        self.offset = offset
+
+
+class _JSONSeqParser:
+    """Incrementally parse a JSON text sequence (RFC 7464) byte stream.
+
+    Records are delimited by a leading record separator (``0x1E``); a
+    record is emitted when the next record separator or the end of the
+    stream is reached. Parsing is byte based, so UTF-8 sequences and
+    JSON string escapes split across chunks are handled correctly, and
+    records may themselves span multiple lines.
+
+    The feed and finish methods return a list of events, each either a
+    parsed record or a :class:`JSONSeqError`.
+    """
+
+    def __init__(
+        self, loads: Callable[[str], Any], max_record_size: int | None
+    ) -> None:
+        self._loads = loads
+        self._max_record_size = max_record_size
+        self._absolute = 0  # Bytes consumed from the stream so far.
+        self._record = bytearray()
+        self._record_open = False
+        self._record_offset = 0
+        self._record_too_large = False
+        self._garbage = bytearray()
+        self._garbage_offset = 0
+
+    def feed(self, data: bytes) -> list[Any]:
+        """Feed a chunk, returning any parsed records and errors."""
+        events: list[Any] = []
+        start = 0
+        while start < len(data):
+            index = data.find(b"\x1e", start)
+            end = len(data) if index == -1 else index
+            if end > start:
+                self._append(data[start:end], events)
+            self._absolute += end - start
+            if index == -1:
+                break
+            events.extend(self._close_record(final=False))
+            self._record_open = True
+            self._record_offset = self._absolute
+            self._absolute += 1
+            start = index + 1
+        return events
+
+    def finish(self) -> list[Any]:
+        """Flush the final record at the end of the stream."""
+        return self._close_record(final=True)
+
+    def _append(self, data: bytes, events: list[Any]) -> None:
+        if self._record_open:
+            if self._record_too_large:
+                return  # Discard the remainder of the poisoned record.
+            self._record.extend(data)
+            if (
+                self._max_record_size is not None
+                and len(self._record) > self._max_record_size
+            ):
+                self._record_too_large = True
+                events.append(
+                    JSONSeqError(
+                        "Record exceeds the maximum size of "
+                        f"{self._max_record_size} bytes",
+                        self._record_offset,
+                    )
+                )
+        else:
+            if not self._garbage:
+                self._garbage_offset = self._absolute
+            self._garbage.extend(data)
+
+    def _close_record(self, final: bool) -> list[Any]:
+        events: list[Any] = []
+        if self._garbage:
+            events.append(
+                JSONSeqError(
+                    "Data received before the first record separator",
+                    self._garbage_offset,
+                )
+            )
+            self._garbage.clear()
+        if self._record_open:
+            self._record_open = False
+            if not self._record_too_large:
+                events.extend(self._parse_record(final))
+            self._record.clear()
+            self._record_too_large = False
+        return events
+
+    def _parse_record(self, final: bool) -> list[Any]:
+        data = bytes(self._record).strip()
+        if not data:
+            return []  # Empty records are valid and ignored (RFC 7464).
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return [JSONSeqError("Record is not valid UTF-8", self._record_offset)]
+        try:
+            return [self._loads(text)]
+        except ValueError:
+            if final:
+                message = "Final record is truncated or not valid JSON"
+            else:
+                message = "Record is not valid JSON"
+            return [JSONSeqError(message, self._record_offset)]
+
+
 class Request(BaseRequestWebsocket):
     """This class represents a request.
 
@@ -197,10 +319,12 @@ class Request(BaseRequestWebsocket):
         self.body_timeout = body_timeout
         self.body = self.body_class(self.content_length, max_content_length)
         self._cached_json: dict[bool, Any] = {False: Ellipsis, True: Ellipsis}
+        self._body_consumed = False
         self._form: MultiDict | None = None
         self._files: MultiDict | None = None
         self._parsing_lock = self.lock_class()
         self._send_push_promise = send_push_promise
+        self.json_seq_errors: list[JSONSeqError] = []
 
     @property
     def max_content_length(self) -> int | None:
@@ -289,6 +413,7 @@ class Request(BaseRequestWebsocket):
         except TimeoutError as e:
             raise RequestTimeout() from e
         else:
+            self._body_consumed = True
             if not cache:
                 self.body.clear()
 
@@ -360,6 +485,8 @@ class Request(BaseRequestWebsocket):
                     )
                 except TimeoutError as e:
                     raise RequestTimeout() from e
+                else:
+                    self._body_consumed = True
 
     @property
     async def json(self) -> Any:
@@ -397,6 +524,82 @@ class Request(BaseRequestWebsocket):
             self._cached_json[silent] = result
 
         return result
+
+    def iter_json_seq(
+        self,
+        *,
+        max_record_size: int | None = None,
+        on_error: Literal["raise", "skip"] = "raise",
+    ) -> AsyncIterator[Any]:
+        """Iterate over the records of a JSON text sequence body.
+
+        Parses an ``application/json-seq`` (RFC 7464) body record by
+        record as the data arrives, without loading the whole body into
+        memory. Records are delimited by a record separator
+        (``0x1E``) and may span multiple lines; each record is
+        yielded (as parsed JSON) once the next record separator or the
+        end of the body is received. Only a single record is buffered
+        at a time, and no further data is read once the caller stops
+        iterating.
+
+        Empty records are ignored, as allowed by RFC 7464. A final
+        record that is not valid JSON (for example because the
+        connection was lost mid-record) is reported as truncated.
+
+        Arguments:
+            max_record_size: The maximum size in bytes of a single
+                record, or None for no limit. Larger records are
+                reported as errors.
+            on_error: If ``"raise"`` (the default) the first invalid
+                record raises a :class:`JSONSeqError` and ends the
+                iteration. If ``"skip"`` invalid records are appended
+                to :attr:`json_seq_errors` (with their byte offset) and
+                iteration resumes at the next record separator.
+
+        Raises:
+            ClientDisconnectedError: If the client disconnects whilst
+                iterating.
+            JSONSeqError: If ``on_error="raise"`` and a record is
+                invalid.
+            RuntimeError: If the body has already been consumed, for
+                example by :meth:`get_data` or :meth:`get_json`.
+
+        Note: This consumes the body stream, so it must be used before
+        :meth:`get_data`, :meth:`get_json` or form parsing.
+        Afterwards :meth:`get_data` returns any remaining (unread)
+        data, ``b""`` if the iteration completed, and
+        :meth:`get_json` will fail to parse it.
+        """
+        if on_error not in ("raise", "skip"):
+            raise ValueError("on_error must be 'raise' or 'skip'")
+        if self._body_consumed:
+            raise RuntimeError(
+                "The request body has already been consumed, iter_json_seq() "
+                "must be used before get_data(), get_json() or form parsing"
+            )
+        return self._iter_json_seq(max_record_size, on_error)
+
+    async def _iter_json_seq(
+        self, max_record_size: int | None, on_error: Literal["raise", "skip"]
+    ) -> AsyncIterator[Any]:
+        self.json_seq_errors = []
+        parser = _JSONSeqParser(self.json_module.loads, max_record_size)
+        async for chunk in self.body:
+            for event in parser.feed(chunk):
+                if isinstance(event, JSONSeqError):
+                    if on_error == "raise":
+                        raise event
+                    self.json_seq_errors.append(event)
+                else:
+                    yield event
+        for event in parser.finish():
+            if isinstance(event, JSONSeqError):
+                if on_error == "raise":
+                    raise event
+                self.json_seq_errors.append(event)
+            else:
+                yield event
+        self._body_consumed = True
 
     def on_json_loading_failed(self, error: Exception) -> Any:
         """Handle a JSON parsing error.
