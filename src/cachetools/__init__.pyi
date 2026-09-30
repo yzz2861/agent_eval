@@ -221,6 +221,8 @@ def cachedmethod(
     lock: Callable[[Any], AbstractContextManager[Any]] | None = None,
     condition: Callable[[Any], _AbstractCondition] | None = None,
     info: Literal[False] = ...,
+    *,
+    weak: bool = ...,
 ) -> Callable[[Callable[Concatenate[Any, _P], _R]], _cachedmethod_wrapper[_P, _R]]: ...
 @overload
 def cachedmethod(
@@ -230,6 +232,7 @@ def cachedmethod(
     condition: Callable[[Any], _AbstractCondition] | None = None,
     *,
     info: Literal[True],
+    weak: bool = ...,
 ) -> Callable[
     [Callable[Concatenate[Any, _P], _R]], _cachedmethod_wrapper_info[_P, _R]
 ]: ...
@@ -240,6 +243,8 @@ def cachedmethod(
     lock: Callable[[Any], AbstractContextManager[Any]] | None,
     condition: Callable[[Any], _AbstractCondition] | None,
     info: Literal[True],
+    *,
+    weak: bool = ...,
 ) -> Callable[
     [Callable[Concatenate[Any, _P], _R]], _cachedmethod_wrapper_info[_P, _R]
 ]: ...

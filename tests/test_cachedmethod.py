@@ -1,3 +1,5 @@
+import gc
+import weakref
 import unittest
 import unittest.mock
 import warnings
@@ -669,6 +671,247 @@ class WeakRefMethodTest(unittest.TestCase):
 
         cached.cache.clear()
         self.assertEqual(cached.get(1), 6)
+
+
+class WeakInstanceMethodTest(unittest.TestCase):
+    class Model:
+        next_value = 0
+
+        def __init__(self, cache):
+            self.cache = cache
+            self.lock = CountedLock()
+            self.cond = CountedCondition()
+
+        @cachedmethod(lambda self: self.cache, weak=True, info=True)
+        def get(self, value):
+            type(self).next_value += 1
+            return type(self).next_value
+
+        @cachedmethod(
+            lambda self: self.cache,
+            lock=lambda self: self.lock,
+            weak=True,
+            info=True,
+        )
+        def get_locked(self, value):
+            type(self).next_value += 1
+            return type(self).next_value
+
+        @cachedmethod(
+            lambda self: self.cache,
+            condition=lambda self: self.cond,
+            weak=True,
+            info=True,
+        )
+        def get_condition(self, value):
+            type(self).next_value += 1
+            return type(self).next_value
+
+        @cachedmethod(
+            lambda self: self.cache,
+            condition=lambda self: self.cond,
+            weak=True,
+        )
+        def get_condition_error(self, _value):
+            raise ValueError("test error")
+
+    class SlotsModel:
+        __slots__ = ("cache", "count", "__weakref__")
+
+        def __init__(self, cache):
+            self.cache = cache
+            self.count = 0
+
+        @cachedmethod(lambda self: self.cache, weak=True)
+        def get(self, value):
+            self.count += 1
+            return self.count
+
+    class UnhashableModel(Model):
+        def __eq__(self, other):
+            return True
+
+        def __hash__(self):
+            raise TypeError("unhashable type")
+
+    class EqualModel(Model):
+        def __eq__(self, other):
+            return True
+
+        def __hash__(self):
+            return 1
+
+    def test_equal_instances_use_separate_cache_entries(self):
+        cache = Cache(4)
+        first = self.Model(cache)
+        second = self.Model(cache)
+        self.Model.next_value = 0
+
+        self.assertEqual(first.get(1), 1)
+        self.assertEqual(second.get(1), 2)
+        self.assertEqual(first.get(1), 1)
+        self.assertEqual(second.get(1), 2)
+        self.assertEqual(len(cache), 2)
+        self.assertEqual(first.get.cache_key(1), first.get.cache_key(1))
+        self.assertNotEqual(
+            first.get.cache_key(1),
+            second.get.cache_key(1),
+        )
+
+    def test_does_not_store_wrapper_or_instance_in_cache_key(self):
+        cache = Cache(2)
+        model = self.Model(cache)
+
+        wrapper = model.get
+        key = wrapper.cache_key(1)
+        self.assertNotIn("get", model.__dict__)
+
+        ref = weakref.ref(model)
+        del model
+        gc.collect()
+        self.assertIsNone(ref())
+
+        with self.assertRaises(ReferenceError):
+            wrapper(1)
+        with self.assertRaises(ReferenceError):
+            wrapper.cache_key(1)
+        with self.assertRaises(ReferenceError):
+            wrapper.cache_clear()
+        with self.assertRaises(ReferenceError):
+            _ = wrapper.cache
+        with self.assertRaises(ReferenceError):
+            wrapper.cache_info()
+        self.assertEqual(key.state.ref(), None)
+
+    def test_instance_reclamation_removes_only_its_cache_entries(self):
+        cache = Cache(4)
+        self.Model.next_value = 0
+        model = self.Model(cache)
+        other = self.Model(cache)
+
+        self.assertEqual(model.get(1), 1)
+        self.assertEqual(model.get_locked(2), 2)
+        self.assertEqual(model.get_condition(3), 3)
+        self.assertEqual(other.get(1), 4)
+        self.assertEqual(len(cache), 4)
+
+        model_state = model.get.state
+        ref = weakref.ref(model)
+        del model
+        gc.collect()
+        self.assertIsNone(ref())
+        self.assertEqual(len(cache), 1)
+        self.assertEqual(other.get(1), 4)
+
+        replacement = self.Model(cache)
+        self.assertEqual(replacement.get(1), 5)
+        registry = type(other).get.registry
+
+        # Simulate a stale callback for an object whose id was reused.
+        model_state.obj_id = id(replacement)
+        model_state.caches = {id(cache): (cache, None)}
+        registry.discard(model_state, model_state.ref)
+        self.assertEqual(replacement.get(1), 5)
+        self.assertEqual(len(cache), 2)
+
+    def test_condition_error_does_not_leave_pending_key(self):
+        cache = Cache(2)
+        model = self.Model(cache)
+
+        with self.assertRaises(ValueError):
+            model.get_condition_error(1)
+        with self.assertRaises(ValueError):
+            model.get_condition_error(1)
+
+    def test_cache_clear_removes_only_current_instance(self):
+        cache = Cache(4)
+        first = self.Model(cache)
+        second = self.Model(cache)
+        self.Model.next_value = 0
+
+        first.get(1)
+        second.get(1)
+        self.assertEqual(len(cache), 2)
+
+        first.get.cache_clear()
+        self.assertEqual(len(cache), 1)
+        self.assertEqual(second.get(1), 2)
+        self.assertEqual(first.get(1), 3)
+
+    def test_slots_instances_are_supported(self):
+        cache = Cache(2)
+        model = self.SlotsModel(cache)
+
+        self.assertEqual(model.get(1), 1)
+        self.assertEqual(model.get(1), 1)
+
+    def test_unhashable_instances_are_isolated(self):
+        cache = Cache(4)
+        first = self.UnhashableModel(cache)
+        second = self.UnhashableModel(cache)
+        self.Model.next_value = 0
+
+        self.assertEqual(first.get(1), 1)
+        self.assertEqual(second.get(1), 2)
+        self.assertEqual(first.get(1), 1)
+        self.assertEqual(second.get(1), 2)
+        self.assertEqual(len(cache), 2)
+
+    def test_equal_hashable_instances_are_isolated(self):
+        cache = Cache(4)
+        first = self.EqualModel(cache)
+        second = self.EqualModel(cache)
+        self.Model.next_value = 0
+
+        self.assertEqual(first, second)
+        self.assertEqual(hash(first), hash(second))
+        self.assertEqual(first.get(1), 1)
+        self.assertEqual(second.get(1), 2)
+        self.assertEqual(first.get(1), 1)
+        self.assertEqual(second.get(1), 2)
+
+    def test_custom_key_cannot_keep_instance_alive(self):
+        class CustomKeyModel:
+            def __init__(self, cache):
+                self.cache = cache
+
+            @cachedmethod(
+                lambda self: self.cache,
+                key=lambda self, value: keys.hashkey(value),
+                weak=True,
+            )
+            def get(self, value):
+                return value
+
+        cache = Cache(2)
+        model = CustomKeyModel(cache)
+        self.assertEqual(model.get(1), 1)
+        self.assertEqual(len(cache), 1)
+        ref = weakref.ref(model)
+        del model
+        gc.collect()
+        self.assertIsNone(ref())
+        self.assertEqual(len(cache), 0)
+
+    def test_unweakreferenceable_instance_raises_clear_error(self):
+        class Integer(int):
+            __slots__ = ()
+
+        descriptor = cachedmethod(lambda self: self.cache, weak=True)(
+            lambda self, value: value
+        )
+
+        with self.assertRaisesRegex(TypeError, "weak-referenceable.*Integer"):
+            descriptor.__get__(Integer(1), Integer)(1)
+
+    def test_class_method_usage_is_rejected(self):
+        class Model:
+            @cachedmethod(lambda self: self.cache, weak=True)
+            def get(self, value):
+                return value
+
+        with self.assertRaisesRegex(TypeError, "class methods"):
+            Model.get(None, 1)
 
 
 class NoneMethodTest(unittest.TestCase):

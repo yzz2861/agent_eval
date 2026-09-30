@@ -527,7 +527,7 @@ often called with the same arguments:
       longer supports returning :const:`None` from `cache(self)`.
 
 
-.. decorator:: cachedmethod(cache, key=cachetools.keys.methodkey, lock=None, condition=None, info=False)
+.. decorator:: cachedmethod(cache, key=cachetools.keys.methodkey, lock=None, condition=None, info=False, weak=False)
 
    Decorator to wrap an instance method with a memoizing callable that
    saves results in a cache.
@@ -608,6 +608,21 @@ often called with the same arguments:
    You may provide a different `key` function,
    e.g. :func:`cachetools.keys.hashkey`, if you need :const:`self` to
    be part of the cache key.
+
+   Pass ``weak=True`` to use one shared cache with short-lived
+   instances without keeping those instances alive.  Cache entries are
+   then automatically isolated by instance identity rather than by
+   object equality, so two instances that compare equal do not share
+   results.  When an instance is garbage collected, only that
+   instance's entries are removed from the cache.
+
+   This mode requires instances to support weak references.  Bound
+   method wrappers stored by callers keep instances alive only for the
+   duration of a call; calling such a wrapper after the instance has
+   been collected raises :class:`ReferenceError`.  The custom `key`
+   function receives an internal sentinel rather than the instance, since
+   instance identity is already represented by the decorator.  Return values that
+   themselves hold the instance are not modified.
 
    When using a shared cache for multiple methods, be aware that
    different cache keys must be created for each method even when

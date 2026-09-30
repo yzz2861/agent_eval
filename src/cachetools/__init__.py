@@ -766,7 +766,15 @@ def cached(cache, key=keys.hashkey, lock=None, condition=None, info=False):
     return decorator
 
 
-def cachedmethod(cache, key=keys.methodkey, lock=None, condition=None, info=False):
+def cachedmethod(
+    cache,
+    key=keys.methodkey,
+    lock=None,
+    condition=None,
+    info=False,
+    *,
+    weak=False,
+):
     """Decorator to wrap a method with a memoizing callable that saves
     results in a cache.
 
@@ -784,8 +792,10 @@ def cachedmethod(cache, key=keys.methodkey, lock=None, condition=None, info=Fals
                 else:
                     raise TypeError("cache(self) must return a mutable mapping")
 
-            return _wrapper(method, cache, key, lock, condition, info=make_info)
+            return _wrapper(
+                method, cache, key, lock, condition, info=make_info, weak=weak
+            )
         else:
-            return _wrapper(method, cache, key, lock, condition)
+            return _wrapper(method, cache, key, lock, condition, weak=weak)
 
     return decorator

@@ -1,3 +1,12 @@
+vNext
+=====
+
+- Add an optional ``weak`` parameter to ``@cachedmethod`` for caching
+  short-lived instances in a shared cache without keeping the instances
+  alive.  Cache entries are isolated by instance identity and removed
+  when the instance is garbage collected.
+
+
 v7.2.0 (2026-09-16)
 ===================
 
