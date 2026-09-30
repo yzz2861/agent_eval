@@ -825,6 +825,29 @@ class CommandLine:
                 ),
             ),
         ),
+        "downgrade": (
+            "--downgrade",
+            dict(
+                action="store_true",
+                help="Plan migrations in the downgrade direction.",
+            ),
+        ),
+        "json": (
+            "--json",
+            dict(
+                action="store_true",
+                dest="json",
+                help="Output the migration plan as JSON.",
+            ),
+        ),
+        "current": (
+            "--current",
+            dict(
+                action="append",
+                help="Explicit current revision for offline planning; "
+                "may be repeated for multiple heads.",
+            ),
+        ),
     }
     _POSITIONAL_OPTS = {
         "directory": dict(help="location of scripts directory"),

@@ -38,3 +38,15 @@ not exposed to the end-user, except when the
 
 .. automodule:: alembic.runtime.migration
     :members: MigrationContext
+
+.. _alembic.runtime.plan.toplevel:
+
+Migration Planning
+==================
+
+The :class:`.MigrationPlan` object describes the ordered migrations and
+simulated version-table changes produced by :func:`.command.plan` without
+executing migration scripts.
+
+.. automodule:: alembic.runtime.plan
+    :members: MigrationPlan, PlanStep, VersionTableAction, build_migration_plan

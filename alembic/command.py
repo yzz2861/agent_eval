@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json as json_lib
 import os
 import pathlib
 from typing import TYPE_CHECKING
@@ -9,6 +10,8 @@ from typing import TYPE_CHECKING
 from . import autogenerate as autogen
 from . import util
 from .runtime.environment import EnvironmentContext
+from .runtime.plan import build_migration_plan
+from .runtime.plan import MigrationPlan
 from .script import ScriptDirectory
 from .util import compat
 
@@ -17,6 +20,7 @@ if TYPE_CHECKING:
     from alembic.script.base import Script
     from alembic.script.revision import _RevIdType
     from .runtime.environment import ProcessRevisionDirectiveFn
+    from .runtime.plan import VersionTableAction
 
 
 def list_templates(config: Config) -> None:
@@ -532,6 +536,112 @@ def downgrade(
         tag=tag,
     ):
         script.run_env()
+
+
+def plan(
+    config: Config,
+    revision: str,
+    current: list[str] | None = None,
+    downgrade: bool = False,
+    json: bool = False,
+) -> MigrationPlan:
+    """Describe upgrade or downgrade migrations without executing them.
+
+    :param config: a :class:`.Config` instance.
+
+    :param revision: target revision, branch-relative revision, or symbolic
+     revision such as ``heads`` or ``base``.
+
+    :param current: explicit current heads for offline planning. When
+     omitted, the current version table is queried read-only.
+
+    :param downgrade: when True, plan a downgrade instead of an upgrade.
+
+    :param json: print the structured plan as JSON.
+
+    """
+
+    script = ScriptDirectory.from_config(config)
+    direction = "downgrade" if downgrade else "upgrade"
+
+    if current is not None:
+        migration_plan = build_migration_plan(
+            script, revision, current=current, direction=direction
+        )
+    else:
+
+        def build_plan(rev, context):
+            config.attributes["_migration_plan"] = build_migration_plan(
+                script, revision, current=rev, direction=direction
+            )
+            return []
+
+        with EnvironmentContext(
+            config,
+            script,
+            fn=build_plan,
+            dont_mutate=True,
+            destination_rev=revision,
+        ):
+            script.run_env()
+        migration_plan = config.attributes.pop("_migration_plan", None)
+        if migration_plan is None:
+            raise util.CommandError(
+                "Migration environment did not request a migration plan; "
+                "ensure env.py calls context.run_migrations()"
+            )
+
+    if json:
+        config.print_stdout(
+            json_lib.dumps(migration_plan.to_dict(), indent=2, sort_keys=True)
+        )
+    else:
+        config.print_stdout(
+            "%s %s -> %s"
+            % (
+                migration_plan.direction,
+                _format_plan_revisions(migration_plan.current_revisions),
+                revision,
+            )
+        )
+        for index, step in enumerate(migration_plan.steps, start=1):
+            config.print_stdout(
+                "%d. %s %s: %s -> %s"
+                % (
+                    index,
+                    step.direction,
+                    "%s [%s]" % (step.revision_id, step.kind),
+                    _format_plan_revisions(step.source_revisions),
+                    _format_plan_revisions(step.destination_revisions),
+                )
+            )
+            config.print_stdout(
+                "   revisions: %s -> %s"
+                % (
+                    _format_plan_revisions(step.from_revision_ids),
+                    _format_plan_revisions(step.to_revision_ids),
+                )
+            )
+            for action in step.version_table_actions:
+                config.print_stdout("   %s" % _format_plan_action(action))
+
+    return migration_plan
+
+
+def _format_plan_revisions(revisions: tuple[str, ...]) -> str:
+    return "(%s)" % ", ".join(revisions) if revisions else "base"
+
+
+def _format_plan_action(action: VersionTableAction) -> str:
+    if action.operation == "insert":
+        return "INSERT %s" % action.to_revision
+    elif action.operation == "delete":
+        return "DELETE %s" % action.from_revision
+    else:
+        return "UPDATE %s -> %s" % (
+            action.from_revision,
+            action.to_revision,
+        )
 
 
 def show(config: Config, rev: str) -> None:
