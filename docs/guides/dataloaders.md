@@ -184,6 +184,45 @@ these ways:
 - Specifying several keys with `loader.clear_many([id1, id2, id3, ...])`,
 - Invalidating the whole cache with `loader.clear_all()`
 
+### Cache expiration and capacity
+
+For long-lived DataLoaders, cached results can be kept for only a limited time
+with `cache_ttl`. The duration starts when a result finishes, while a result that
+is still loading is never expired or evicted:
+
+```python
+loader = DataLoader(load_fn=load_users, cache_ttl=60)
+```
+
+To limit how many completed results the default cache retains, use
+`cache_max_entries`. Completed entries are evicted least-recently-used first;
+in-flight entries are protected so duplicate loads still share one batch request:
+
+```python
+loader = DataLoader(load_fn=load_users, cache_max_entries=1000)
+```
+
+Exceptions are cached like successful results for backwards compatibility. Pass
+`cache_exceptions=False` to remove a failed result from the cache as soon as it
+completes, so the next load retries that key:
+
+```python
+loader = DataLoader(load_fn=load_users, cache_exceptions=False)
+```
+
+For tests or applications with a custom clock, pass a zero-argument callable as
+`time_func`. TTL checks are lazy and use this clock, so tests can advance time
+without sleeping:
+
+```python
+current_time = 0.0
+loader = DataLoader(
+    load_fn=load_users,
+    cache_ttl=60,
+    time_func=lambda: current_time,
+)
+```
+
 ### Importing data into cache
 
 While dataloaders are powerful and efficient, they do not support complex
