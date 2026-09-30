@@ -48,6 +48,7 @@ from fastapi._compat import (
     Undefined,
     lenient_issubclass,
 )
+from fastapi.body_decoders import get_default_request_body_decoders
 from fastapi.datastructures import Default, DefaultPlaceholder
 from fastapi.dependencies.models import (
     Dependant,
@@ -60,6 +61,7 @@ from fastapi.dependencies.utils import (
     _get_body_field,
     _get_flat_body_params,
     _should_embed_body_fields,
+    get_body_content_fields,
     get_dependant,
     get_parameterless_sub_dependant,
     get_stream_item_type,
@@ -88,7 +90,7 @@ from fastapi.utils import (
     get_value_or_default,
     is_body_allowed_for_status_code,
 )
-from starlette import routing
+from starlette import concurrency, routing
 from starlette._exception_handler import wrap_app_handling_exceptions
 from starlette._utils import get_route_path, is_async_callable
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
@@ -402,6 +404,9 @@ def get_request_handler(
         actual_strict_content_type: bool = strict_content_type.value
     else:
         actual_strict_content_type = strict_content_type
+    body_content_fields = _get_request_body_content_fields(
+        [body_field] if body_field else []
+    )
 
     async def app(request: Request) -> Response:
         response: Response | None = None
@@ -425,29 +430,74 @@ def get_request_handler(
         # Read body and auto-close files
         try:
             body: Any = None
+            body_media_type: str | None = None
             if body_field:
                 if is_body_form:
                     body = await request.form()
                     file_stack.push_async_callback(body.close)
                 else:
+                    content_type_value = request.headers.get("content-type")
+                    content_fields = (
+                        next(iter(body_content_fields.values()))
+                        if body_content_fields
+                        else None
+                    )
+                    media_type_params: Mapping[str, str] = {}
+                    if content_fields is not None and content_type_value:
+                        parsed_content_type = _parse_content_type(content_type_value)
+                        if parsed_content_type is None:
+                            raise HTTPException(status_code=415)
+                        body_media_type, media_type_params = parsed_content_type
+                        if body_media_type not in content_fields:
+                            raise HTTPException(status_code=415)
                     body_bytes = await request.body()
                     if body_bytes:
-                        json_body: Any = Undefined
-                        content_type_value = request.headers.get("content-type")
-                        if not content_type_value:
-                            if not actual_strict_content_type:
-                                json_body = await request.json()
+                        if content_fields is not None:
+                            if not content_type_value:
+                                if (
+                                    not actual_strict_content_type
+                                    and "application/json" in content_fields
+                                ):
+                                    body_media_type = "application/json"
+                                else:
+                                    raise HTTPException(status_code=415)
+                            decoders = _get_request_body_decoders(
+                                dependency_overrides_provider
+                            )
+                            decoder = (
+                                decoders.get(body_media_type)
+                                if body_media_type
+                                else None
+                            )
+                            if decoder is None:
+                                raise FastAPIError(
+                                    "No request body decoder registered for media type"
+                                    f" {body_media_type!r}"
+                                )
+                            body = await _decode_request_body(
+                                decoder,
+                                body_bytes,
+                                cast(str, body_media_type),
+                                media_type_params,
+                            )
                         else:
-                            message = email.message.Message()
-                            message["content-type"] = content_type_value
-                            if message.get_content_maintype() == "application":
-                                subtype = message.get_content_subtype()
-                                if subtype == "json" or subtype.endswith("+json"):
+                            json_body: Any = Undefined
+                            if not content_type_value:
+                                if not actual_strict_content_type:
                                     json_body = await request.json()
-                        if json_body != Undefined:
-                            body = json_body
-                        else:
-                            body = body_bytes
+                                    body_media_type = "application/json"
+                            else:
+                                message = email.message.Message()
+                                message["content-type"] = content_type_value
+                                if message.get_content_maintype() == "application":
+                                    subtype = message.get_content_subtype()
+                                    if subtype == "json" or subtype.endswith("+json"):
+                                        json_body = await request.json()
+                                        body_media_type = f"application/{subtype}"
+                            if json_body != Undefined:
+                                body = json_body
+                            else:
+                                body = body_bytes
         except json.JSONDecodeError as e:
             validation_error = RequestValidationError(
                 [
@@ -465,6 +515,10 @@ def get_request_handler(
             raise validation_error from e
         except HTTPException:
             # If a middleware raises an HTTPException, it should be raised again
+            raise
+        except RequestValidationError:
+            raise
+        except FastAPIError:
             raise
         except Exception as e:
             http_error = HTTPException(
@@ -485,6 +539,7 @@ def get_request_handler(
             dependency_overrides_provider=dependency_overrides_provider,
             async_exit_stack=async_exit_stack,
             embed_body_fields=embed_body_fields,
+            body_media_type=body_media_type,
         )
         errors = solved_result.errors
         assert dependant.call  # For types
@@ -866,7 +921,64 @@ def _build_dependant_with_parameterless_dependencies(
         )
     body_params = _get_flat_body_params(dependant)
     embed_body_fields = _should_embed_body_fields(body_params)
+    for body_param in body_params:
+        if embed_body_fields and get_body_content_fields(body_param):
+            raise FastAPIError(
+                "Body 'content' alternatives can only be declared on a single,"
+                " non-embedded request body parameter."
+            )
     return dependant, body_params, embed_body_fields
+
+
+def _parse_content_type(value: str) -> tuple[str, Mapping[str, str]] | None:
+    raw_media_type, _separator, _raw_parameters = value.partition(";")
+    maintype, slash, subtype = raw_media_type.partition("/")
+    maintype = maintype.strip()
+    subtype = subtype.strip()
+    if not slash or not maintype or not subtype:
+        return None
+    try:
+        message = email.message.Message()
+        message["content-type"] = value
+        media_type_params = {
+            key.lower(): value for key, value in message.get_params()[1:] if key
+        }
+    except Exception:
+        return None
+    return f"{maintype.lower()}/{subtype.lower()}", media_type_params
+
+
+def _get_request_body_content_fields(
+    body_params: Sequence[ModelField],
+) -> dict[str, dict[str, ModelField]]:
+    return {
+        field.name: content_fields
+        for field in body_params
+        if (content_fields := get_body_content_fields(field))
+    }
+
+
+async def _decode_request_body(
+    decoder: Any,
+    body: bytes,
+    media_type: str,
+    media_type_params: Mapping[str, str],
+) -> Any:
+    if _is_coroutine_callable(decoder):
+        return await decoder(body, media_type, media_type_params)
+    decoded = await concurrency.run_in_thread_pool(
+        decoder, body, media_type, media_type_params
+    )
+    if inspect.isawaitable(decoded):
+        return await decoded
+    return decoded
+
+
+def _get_request_body_decoders(provider: Any) -> Mapping[str, Any]:
+    decoders = getattr(provider, "request_body_decoders", None)
+    if decoders is not None:
+        return decoders
+    return get_default_request_body_decoders()
 
 
 class _RouteWithPath(Protocol):

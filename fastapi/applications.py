@@ -5,6 +5,10 @@ from typing import Annotated, Any, Literal, TypeVar
 
 from annotated_doc import Doc
 from fastapi import routing
+from fastapi.body_decoders import (
+    RequestBodyDecoder,
+    get_default_request_body_decoders,
+)
 from fastapi.datastructures import Default, DefaultPlaceholder
 from fastapi.exception_handlers import (
     http_exception_handler,
@@ -981,6 +985,9 @@ class FastAPI(Starlette):
                 """
             ),
         ] = {}
+        self.request_body_decoders: dict[str, RequestBodyDecoder] = (
+            get_default_request_body_decoders()
+        )
         self.router: routing.APIRouter = routing.APIRouter(
             routes=routes,
             redirect_slashes=redirect_slashes,
@@ -1156,6 +1163,16 @@ class FastAPI(Starlette):
                 )
 
             self.add_route(self.redoc_url, redoc_html, include_in_schema=False)
+
+    def add_body_decoder(self, media_type: str, decoder: RequestBodyDecoder) -> None:
+        self.request_body_decoders[media_type.partition(";")[0].strip().lower()] = (
+            decoder
+        )
+
+    def add_request_body_decoder(
+        self, media_type: str, decoder: RequestBodyDecoder
+    ) -> None:
+        self.add_body_decoder(media_type, decoder)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if self.root_path:

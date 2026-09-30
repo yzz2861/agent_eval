@@ -1,5 +1,5 @@
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, Literal
@@ -475,6 +475,7 @@ class Body(FieldInfo):  # type: ignore[misc]  # ty: ignore[subclass-of-final-cla
         annotation: Any | None = None,
         embed: bool | None = None,
         media_type: str = "application/json",
+        content: Mapping[str, Any] | None = None,
         alias: str | None = None,
         alias_priority: int | None = _Unset,
         validation_alias: str | AliasPath | AliasChoices | None = None,
@@ -516,6 +517,14 @@ class Body(FieldInfo):  # type: ignore[misc]  # ty: ignore[subclass-of-final-cla
     ):
         self.embed = embed
         self.media_type = media_type
+        self.content = (
+            {
+                media_type.partition(";")[0].strip().lower(): model
+                for media_type, model in content.items()
+            }
+            if content is not None
+            else None
+        )
         if example is not _Unset:
             warnings.warn(
                 "`example` has been deprecated, please use `examples` instead",

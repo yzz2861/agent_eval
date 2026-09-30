@@ -15,6 +15,7 @@ from collections.abc import (
 from contextlib import AsyncExitStack, contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import (
     Annotated,
     Any,
@@ -596,6 +597,7 @@ async def solve_dependencies(
     # people might be monkey patching this function (although that's not supported)
     async_exit_stack: AsyncExitStack,
     embed_body_fields: bool,
+    body_media_type: str | None = None,
     _uses_scopes_cache: _UsesScopesCache | None = None,
 ) -> SolvedDependency:
     request_astack = request.scope.get("fastapi_inner_astack")
@@ -647,6 +649,7 @@ async def solve_dependencies(
             dependency_cache=dependency_cache,
             async_exit_stack=async_exit_stack,
             embed_body_fields=embed_body_fields,
+            body_media_type=body_media_type,
             _uses_scopes_cache=_uses_scopes_cache,
         )
         background_tasks = solved_result.background_tasks
@@ -703,6 +706,7 @@ async def solve_dependencies(
             body_fields=dependant.body_params,
             received_body=body,
             embed_body_fields=embed_body_fields,
+            body_media_type=body_media_type,
         )
         values.update(body_values)
         errors.extend(body_errors)
@@ -952,12 +956,18 @@ async def request_body_to_args(
     body_fields: list[ModelField],
     received_body: dict[str, Any] | FormData | bytes | None,
     embed_body_fields: bool,
+    body_media_type: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     values: dict[str, Any] = {}
     errors: list[dict[str, Any]] = []
     assert body_fields, "request_body_to_args() should be called with fields"
     single_not_embedded_field = len(body_fields) == 1 and not embed_body_fields
     first_field = body_fields[0]
+    if single_not_embedded_field and body_media_type:
+        content_field = get_body_content_fields(first_field).get(body_media_type)
+        if content_field is not None:
+            first_field = content_field
+            body_fields = [content_field]
     body_to_process = received_body
 
     fields_to_extract: list[ModelField] = body_fields
@@ -979,6 +989,10 @@ async def request_body_to_args(
         )
         return {first_field.name: v_}, errors_
     for field in body_fields:
+        if body_media_type and not isinstance(body_to_process, FormData):
+            content_field = get_body_content_fields(field).get(body_media_type)
+            if content_field is not None:
+                field = content_field
         loc = ("body", get_validation_alias(field))
         value: Any | None = None
         if body_to_process is not None and not isinstance(body_to_process, bytes):
@@ -1051,3 +1065,28 @@ def _get_body_field(
 def get_validation_alias(field: ModelField) -> str:
     va = getattr(field, "validation_alias", None)
     return va or field.alias
+
+
+@lru_cache(maxsize=4096)
+def get_body_content_fields(field: ModelField) -> dict[str, ModelField]:
+    field_info = field.field_info
+    content = getattr(field_info, "content", None)
+    if not content:
+        return {}
+
+    content_fields: dict[str, ModelField] = {}
+    for media_type, annotation in content.items():
+        content_field_info = copy_field_info(
+            field_info=field_info,
+            annotation=annotation,
+        )
+        content_field_info.media_type = media_type
+        content_field_info.content = None
+        content_fields[media_type] = create_model_field(
+            name=field.name,
+            type_=annotation,
+            default=field.field_info.default,
+            alias=field.alias,
+            field_info=content_field_info,
+        )
+    return content_fields

@@ -26,6 +26,7 @@ from fastapi.dependencies.models import (
 )
 from fastapi.dependencies.utils import (
     _get_flat_fields_from_params,
+    get_body_content_fields,
     get_flat_params,
     get_validation_alias,
 )
@@ -240,26 +241,39 @@ def get_openapi_operation_request_body(
     if not body_field:
         return None
     assert isinstance(body_field, ModelField)
-    body_schema = get_schema_from_model_field(
-        field=body_field,
-        model_name_map=model_name_map,
-        field_mapping=field_mapping,
-        separate_input_output_schemas=separate_input_output_schemas,
-    )
     field_info = cast(Body, body_field.field_info)
-    request_media_type = field_info.media_type
     required = body_field.field_info.is_required()
     request_body_oai: dict[str, Any] = {}
     if required:
         request_body_oai["required"] = required
-    request_media_content: dict[str, Any] = {"schema": body_schema}
-    if field_info.openapi_examples:
-        request_media_content["examples"] = jsonable_encoder(
-            field_info.openapi_examples
+    body_content_fields = get_body_content_fields(body_field)
+    if body_content_fields:
+        request_body_oai["content"] = {
+            media_type: {
+                "schema": get_schema_from_model_field(
+                    field=content_field,
+                    model_name_map=model_name_map,
+                    field_mapping=field_mapping,
+                    separate_input_output_schemas=separate_input_output_schemas,
+                )
+            }
+            for media_type, content_field in body_content_fields.items()
+        }
+    else:
+        body_schema = get_schema_from_model_field(
+            field=body_field,
+            model_name_map=model_name_map,
+            field_mapping=field_mapping,
+            separate_input_output_schemas=separate_input_output_schemas,
         )
-    elif field_info.example is not _Unset:
-        request_media_content["example"] = jsonable_encoder(field_info.example)
-    request_body_oai["content"] = {request_media_type: request_media_content}
+        request_media_content: dict[str, Any] = {"schema": body_schema}
+        if field_info.openapi_examples:
+            request_media_content["examples"] = jsonable_encoder(
+                field_info.openapi_examples
+            )
+        elif field_info.example is not _Unset:
+            request_media_content["example"] = jsonable_encoder(field_info.example)
+        request_body_oai["content"] = {field_info.media_type: request_media_content}
     return request_body_oai
 
 
@@ -565,6 +579,9 @@ def get_fields_from_routes(
                     "A request body must be a Pydantic Field"
                 )
                 body_fields_from_routes.append(api_route.body_field)
+                body_fields_from_routes.extend(
+                    get_body_content_fields(api_route.body_field).values()
+                )
             if api_route.response_field:
                 responses_from_routes.append(api_route.response_field)
             if api_route.response_fields:

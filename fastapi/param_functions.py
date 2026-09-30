@@ -1,4 +1,4 @@
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 from annotated_doc import Doc
@@ -1364,6 +1364,15 @@ def Body(  # noqa: N802
             """
         ),
     ] = "application/json",
+    content: Annotated[
+        Mapping[str, Any] | None,
+        Doc(
+            """
+            Alternative request body schemas keyed by media type. FastAPI uses the
+            request's Content-Type to select the corresponding decoder and schema.
+            """
+        ),
+    ] = None,
     alias: Annotated[
         str | None,
         Doc(
@@ -1620,6 +1629,7 @@ def Body(  # noqa: N802
         default_factory=default_factory,
         embed=embed,
         media_type=media_type,
+        content=content,
         alias=alias,
         alias_priority=alias_priority,
         validation_alias=validation_alias,
