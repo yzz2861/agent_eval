@@ -379,6 +379,52 @@ the :class:`~playhouse.shortcuts.ThreadSafeDatabaseMetadata`.
 The database can now be swapped safely while running in a multi-threaded
 environment using :meth:`Database.bind` or :meth:`Database.bind_ctx`.
 
+.. _bind_local:
+
+Context-local binding
+^^^^^^^^^^^^^^^^^^^^^
+
+For applications that need to bind the *same* models to different databases
+on a per-request basis (for example, multi-tenant applications), mutating
+the model metadata with :meth:`Database.bind_ctx` is not safe, because the
+change is visible process-wide. For this scenario peewee provides
+:meth:`Database.bind_local` and :meth:`Model.bind_local`, which store the
+binding in a :class:`contextvars.ContextVar` instead of the model metadata:
+
+.. code-block:: python
+
+   # Bind User and Tweet to the tenant database for the current
+   # thread / asyncio task only:
+   with tenant_db.bind_local([User, Tweet]):
+       User.create(username='huey')  # Runs against tenant_db.
+
+The rules for context-local bindings are:
+
+* The binding is resolved when a query is **executed**, so a query that was
+  constructed before entering the context will still run against the bound
+  database. A query explicitly bound with :meth:`Query.bind` (or executed
+  with an explicit database) is not affected.
+* Nested contexts are supported; when a context exits, the previous
+  bindings are restored.
+* Bindings are isolated across threads and asyncio tasks - entering a
+  context in one does not affect the others.
+* Related models are bound according to the ``bind_refs`` and
+  ``bind_backrefs`` arguments, exactly as with :meth:`Database.bind_ctx`,
+  so foreign-key traversals and backref accessors resolve to the bound
+  database.
+* Connections (including pooled connections) always come from the bound
+  database, and queries executed inside a transaction remain on the
+  transaction's connection. Consequently, changing the binding while a
+  transaction is open in the current context is rejected with an
+  ``InterfaceError`` - enter the binding context *before* starting the
+  transaction:
+
+  .. code-block:: python
+
+     with tenant_db.bind_local([User, Tweet]):
+         with tenant_db.atomic():
+             User.create(username='huey')
+
 Connecting via URL
 ------------------
 

@@ -762,6 +762,38 @@ Database
                    # ... models are bound to test database ...
                    pass
 
+   .. method:: bind_local(models, bind_refs=True, bind_backrefs=True)
+
+       :param list models: List of models to bind to the database.
+       :param bool bind_refs: Bind models that are referenced using
+           foreign-keys.
+       :param bool bind_backrefs: Bind models that reference the given model
+           with a foreign-key.
+
+       Create a context-manager or decorator that binds the given models to
+       the database for the **current execution context only**. Unlike
+       :meth:`Database.bind_ctx`, the binding is stored in a
+       :class:`contextvars.ContextVar` rather than being
+       written to the models' metadata, so it is isolated across
+       threads and asyncio tasks, and nested contexts restore the previous
+       bindings on exit.
+
+       The binding is resolved when a query is *executed*, which means a
+       query constructed before entering the context will still run against
+       the bound database (unless the query was explicitly bound with
+       :meth:`Query.bind`). Changing the binding while a
+       transaction is open in the current context raises an
+       ``InterfaceError``.
+
+       .. code-block:: python
+
+           with tenant_db.bind_local([User, Tweet]):
+               # Queries on User and Tweet run against tenant_db here,
+               # without affecting other threads or asyncio tasks.
+               User.create(username='huey')
+
+       See :ref:`bind_local` for more details.
+
    .. method:: extract_date(date_part, date_field)
 
       :param str date_part: date part to extract, e.g. 'year'.
@@ -2181,6 +2213,13 @@ Model
               assert User._meta.database is test_db
 
       See also: :meth:`Database.bind_ctx`.
+
+   .. classmethod:: bind_local(database, bind_refs=True, bind_backrefs=True)
+
+      Like :meth:`~Model.bind_ctx`, but the binding is stored in a
+      :class:`contextvars.ContextVar` and resolved when queries are
+      executed, making it safe to use concurrently across threads and
+      asyncio tasks. See :meth:`Database.bind_local` and :ref:`bind_local`.
 
    .. classmethod:: table_exists()
 

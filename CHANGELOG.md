@@ -7,6 +7,11 @@ https://github.com/coleifer/peewee/releases
 
 ## master
 
+* Add `Database.bind_local()` / `Model.bind_local()`, a context-local
+  alternative to `bind_ctx()` that stores model-to-database bindings in a
+  `contextvars.ContextVar` and resolves them when queries are executed.
+  Bindings are isolated across threads and asyncio tasks, nest cleanly, and
+  cannot be changed while a transaction is open in the current context.
 * Don't cache ``None`` on unselected FK join trees, see #3083.
 * Some fixes for edge-cases around non-unique aliases and unicode aliases,
   see #3081 and #3078.

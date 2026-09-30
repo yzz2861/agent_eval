@@ -10,6 +10,7 @@ from functools import wraps
 from inspect import isclass
 import calendar
 import collections
+import contextvars
 import datetime
 import decimal
 import hashlib
@@ -2125,7 +2126,7 @@ class OnConflict(Node):
 def database_required(method):
     @wraps(method)
     def inner(self, database=None, *args, **kwargs):
-        database = self._database if database is None else database
+        database = self._get_database(database)
         if not database:
             raise InterfaceError('Query must be bound to a database in order '
                                  'to call "%s".' % method.__name__)
@@ -2147,6 +2148,14 @@ class BaseQuery(Node):
     def bind(self, database=None):
         self._database = database
         return self
+
+    def _get_database(self, database=None):
+        # Resolve the database a query will be executed against. Called at
+        # execution-time so that context-local bindings (see bind_local())
+        # are picked up even by queries constructed beforehand.
+        if database is None:
+            database = self._database
+        return database
 
     def clone(self):
         query = super(BaseQuery, self).clone()
@@ -2199,7 +2208,7 @@ class BaseQuery(Node):
         return self._execute(database)
 
     async def aexecute(self, database=None):
-        database = self._database if database is None else database
+        database = self._get_database(database)
         if not database:
             raise InterfaceError('Query must be bound to a database in order '
                                  'to call "aexecute".')
@@ -3692,6 +3701,20 @@ QueryEvent = collections.namedtuple(
     'QueryEvent', ('sql', 'params', 'duration', 'exception'))
 
 
+# Context-local storage for model-to-database bindings, used by
+# Database.bind_local() and Model.bind_local(). Because the bindings are held
+# in a ContextVar, they are isolated across threads and asyncio tasks, and
+# nested contexts automatically restore the previous bindings on exit. The
+# value is an immutable-by-convention dict mapping model class to database.
+_model_context_binding = contextvars.ContextVar('peewee_model_context_binding')
+
+
+def _get_context_database(model):
+    bindings = _model_context_binding.get(None)
+    if bindings is not None:
+        return bindings.get(model)
+
+
 class _ConnectionState(object):
     def __init__(self, **kwargs):
         super(_ConnectionState, self).__init__(**kwargs)
@@ -4183,6 +4206,9 @@ class Database(_callable_context_manager):
 
     def bind_ctx(self, models, bind_refs=True, bind_backrefs=True):
         return _BoundModelsContext(models, self, bind_refs, bind_backrefs)
+
+    def bind_local(self, models, bind_refs=True, bind_backrefs=True):
+        return _ContextBoundModels(models, self, bind_refs, bind_backrefs)
 
     def get_noop_select(self, ctx):
         return ctx.literal('SELECT 0 WHERE 0')
@@ -7580,6 +7606,19 @@ class Metadata(object):
 
         return indexes
 
+    @property
+    def database(self):
+        # An active context-local binding (see Database.bind_local()) takes
+        # precedence over the database the model is statically bound to.
+        bound = _get_context_database(self.model)
+        if bound is not None:
+            return bound
+        return self._database
+
+    @database.setter
+    def database(self, value):
+        self._database = value
+
     def set_database(self, database):
         self.database = database
         self.model._schema.database = database
@@ -7773,6 +7812,79 @@ class _BoundModelsContext(_callable_context_manager):
         for model, db in zip(self.models, self._orig_database):
             model.bind(db, self.bind_refs, self.bind_backrefs,
                        _exclude=set(self.models))
+
+
+class _ContextBoundModels(_callable_context_manager):
+    """Context-local alternative to _BoundModelsContext.
+
+    Rather than mutating model metadata (which is process-global and unsafe
+    for concurrent use), the binding is stored in a ContextVar and resolved
+    when queries are executed. Bindings are therefore isolated across
+    threads and asyncio tasks, and nested contexts restore the previous
+    bindings when they exit.
+    """
+    def __init__(self, models, database, bind_refs, bind_backrefs):
+        self.models = models
+        self.database = database
+        self.bind_refs = bind_refs
+        self.bind_backrefs = bind_backrefs
+
+    def _build_ctx(self):
+        return type(self)(self.models, self.database, self.bind_refs,
+                          self.bind_backrefs)
+
+    def _get_models(self):
+        # Expand the model list to include related models, mirroring the
+        # semantics of Model.bind() / bind_ctx().
+        accum, seen = [], set()
+        for model in self.models:
+            if model not in seen:
+                accum.append(model)
+                seen.add(model)
+            if self.bind_refs or self.bind_backrefs:
+                graph = model._meta.model_graph(refs=self.bind_refs,
+                                                backrefs=self.bind_backrefs)
+                for _, related, _ in graph:
+                    if related not in seen:
+                        accum.append(related)
+                        seen.add(related)
+        return accum
+
+    def _check_transactions(self, models, new_database):
+        # Refuse to switch a model's binding when either its current or its
+        # new database has an open transaction in this execution context.
+        # Queries that have entered a transaction must remain on the
+        # transaction's connection for the duration of the transaction.
+        for model in models:
+            current = model._meta.database
+            if current is new_database:
+                continue
+            for db in (current, new_database):
+                if db is not None and db.in_transaction():
+                    raise InterfaceError(
+                        'Cannot change binding for %s to %r while %r has an '
+                        'open transaction in this context.' %
+                        (model.__name__, new_database, db))
+
+    def __enter__(self):
+        models = self._get_models()
+        self._check_transactions(models, self.database)
+        bindings = _model_context_binding.get(None)
+        bindings = dict(bindings) if bindings is not None else {}
+        for model in models:
+            bindings[model] = self.database
+        self._token = _model_context_binding.set(bindings)
+        return self.models
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Exiting while the bound database still has an open transaction in
+        # this context would change the binding out from under the
+        # transaction, so it is rejected.
+        if self.database.in_transaction():
+            raise InterfaceError(
+                'Cannot exit the binding context for %r while it has an '
+                'open transaction in this context.' % (self.database,))
+        _model_context_binding.reset(self._token)
 
 
 class Model(Node, metaclass=ModelBase):
@@ -8190,6 +8302,10 @@ class Model(Node, metaclass=ModelBase):
         return _BoundModelsContext((cls,), database, bind_refs, bind_backrefs)
 
     @classmethod
+    def bind_local(cls, database, bind_refs=True, bind_backrefs=True):
+        return _ContextBoundModels((cls,), database, bind_refs, bind_backrefs)
+
+    @classmethod
     def table_exists(cls):
         M = cls._meta
         return cls._schema.database.table_exists(M.table.__name__, M.schema)
@@ -8343,8 +8459,28 @@ class _ModelQueryHelper(object):
 
     def __init__(self, *args, **kwargs):
         super(_ModelQueryHelper, self).__init__(*args, **kwargs)
+        self._explicit_bind = bool(self._database)
         if not self._database:
             self._database = self.model._meta.database
+
+    def bind(self, database=None):
+        self._explicit_bind = database is not None
+        return super(_ModelQueryHelper, self).bind(database)
+
+    def _get_database(self, database=None):
+        # Unless the query was explicitly bound to a database, an active
+        # context-local binding (see Database.bind_local()) takes precedence
+        # over the database captured when the query was constructed. This
+        # allows queries built outside a binding context to be executed
+        # against the context's database.
+        if database is None and not self._explicit_bind:
+            model = self.model
+            if isinstance(model, ModelAlias):
+                model = model.model
+            bound = _get_context_database(model)
+            if bound is not None:
+                return bound
+        return super(_ModelQueryHelper, self)._get_database(database)
 
     @Node.copy
     def objects(self, constructor=None):

@@ -409,6 +409,214 @@ class TestDatabase(DatabaseTestCase):
         self.assertTrue(db2.is_closed())
 
 
+class TestBindLocal(DatabaseTestCase):
+    def setUp(self):
+        super(TestBindLocal, self).setUp()
+        self.db1 = get_in_memory_db()
+        self.db2 = get_in_memory_db()
+
+        db1, db2 = self.db1, self.db2
+
+        class U(Model):
+            name = TextField()
+            class Meta:
+                database = db1
+
+        class T(Model):
+            user = ForeignKeyField(U, backref='tweets')
+            content = TextField()
+            class Meta:
+                database = db1
+
+        self.U, self.T = U, T
+        self.db1.create_tables([U, T])
+        # DDL is routed through the context-local binding as well.
+        with db2.bind_local([U, T]):
+            U.create_table()
+            T.create_table()
+
+    def tearDown(self):
+        self.db1.close()
+        self.db2.close()
+        super(TestBindLocal, self).tearDown()
+
+    def test_resolution_and_restore(self):
+        U = self.U
+        self.assertTrue(U._meta.database is self.db1)
+        with self.db2.bind_local([U]):
+            self.assertTrue(U._meta.database is self.db2)
+            with self.db2.bind_local([U]):
+                self.assertTrue(U._meta.database is self.db2)
+            self.assertTrue(U._meta.database is self.db2)
+        self.assertTrue(U._meta.database is self.db1)
+
+    def test_nested_scopes_restore(self):
+        U = self.U
+        db3 = get_in_memory_db()
+        with self.db2.bind_local([U]):
+            self.assertTrue(U._meta.database is self.db2)
+            with db3.bind_local([U]):
+                self.assertTrue(U._meta.database is db3)
+            self.assertTrue(U._meta.database is self.db2)
+        self.assertTrue(U._meta.database is self.db1)
+
+    def test_refs_and_backrefs_bound(self):
+        U, T = self.U, self.T
+        # Binding U also binds T (backref), and vice-versa (ref).
+        with self.db2.bind_local([U]):
+            self.assertTrue(T._meta.database is self.db2)
+        with self.db2.bind_local([T]):
+            self.assertTrue(U._meta.database is self.db2)
+        with self.db2.bind_local([U], bind_backrefs=False):
+            self.assertTrue(U._meta.database is self.db2)
+            self.assertTrue(T._meta.database is self.db1)
+        with self.db2.bind_local([T], bind_refs=False):
+            self.assertTrue(T._meta.database is self.db2)
+            self.assertTrue(U._meta.database is self.db1)
+
+    def test_preconstructed_query_uses_current_binding(self):
+        U = self.U
+        U.create(name='main')
+        query = U.select().where(U.name == 'scoped')
+        with self.db2.bind_local([U]):
+            U.create(name='scoped')
+            # Query constructed outside the context resolves the binding at
+            # execution-time.
+            self.assertEqual([u.name for u in query.execute()], ['scoped'])
+            self.assertEqual(U.select().count(), 1)
+        # Outside the context the same query finds nothing in db1.
+        self.assertEqual(list(query.clone().execute()), [])
+        self.assertEqual(U.select().count(), 1)
+
+    def test_explicit_bind_takes_precedence(self):
+        U = self.U
+        U.create(name='main')
+        query = U.select().bind(self.db1)
+        with self.db2.bind_local([U]):
+            self.assertEqual([u.name for u in query.execute()], ['main'])
+            # An explicit database argument also wins over the context.
+            q2 = U.select()
+            self.assertEqual(
+                [u.name for u in q2.execute(self.db1)], ['main'])
+
+    def test_crud_and_relations(self):
+        U, T = self.U, self.T
+        with self.db2.bind_local([U]):
+            u = U.create(name='huey')
+            T.create(user=u, content='hello')
+            u.name = 'renamed'
+            u.save()
+            self.assertEqual(U.get().name, 'renamed')
+            # Backref accessor queries run against the bound database.
+            self.assertEqual([t.content for t in u.tweets], ['hello'])
+            # get_or_create() opens its transaction on the bound database.
+            _, created = U.get_or_create(name='renamed')
+            self.assertFalse(created)
+
+        self.assertEqual(U.select().count(), 0)
+        self.assertEqual(T.select().count(), 0)
+
+    def test_transaction_guard(self):
+        U = self.U
+        # Entering a binding context mid-transaction is rejected.
+        with self.db2.atomic():
+            self.assertRaises(
+                InterfaceError, self.db2.bind_local([U]).__enter__)
+        # ...whether the transaction is on the current database...
+        with self.db1.atomic():
+            self.assertRaises(
+                InterfaceError, self.db2.bind_local([U]).__enter__)
+        # ...but binding first, then starting a transaction, works.
+        with self.db2.bind_local([U]):
+            with self.db2.atomic():
+                U.create(name='txn')
+            self.assertEqual(U.select().count(), 1)
+        self.assertEqual(U.select().count(), 0)
+
+    def test_exit_with_open_transaction_rejected(self):
+        U = self.U
+        ctx = self.db2.bind_local([U])
+        ctx.__enter__()
+        txn = self.db2.atomic()
+        txn.__enter__()
+        try:
+            self.assertRaises(InterfaceError, ctx.__exit__, None, None, None)
+        finally:
+            txn.__exit__(None, None, None)
+        ctx.__exit__(None, None, None)
+        self.assertTrue(U._meta.database is self.db1)
+
+    def test_bind_local_as_decorator(self):
+        U = self.U
+        calls = []
+
+        @self.db2.bind_local([U])
+        def in_context():
+            calls.append(U._meta.database)
+            return U._meta.database
+
+        for _ in range(2):
+            self.assertTrue(in_context() is self.db2)
+            self.assertTrue(U._meta.database is self.db1)
+        self.assertEqual(calls, [self.db2, self.db2])
+
+    def test_model_bind_local(self):
+        U, T = self.U, self.T
+        with U.bind_local(self.db2) as (bound,):
+            self.assertTrue(bound is U)
+            self.assertTrue(U._meta.database is self.db2)
+            self.assertTrue(T._meta.database is self.db2)
+        self.assertTrue(U._meta.database is self.db1)
+
+    def test_thread_isolation(self):
+        U = self.U
+        barrier = threading.Barrier(2)
+        results = {}
+        errors = []
+
+        def worker(key, db):
+            try:
+                with db.bind_local([U]):
+                    barrier.wait(timeout=5)
+                    # The other thread's binding must not be visible here.
+                    results[key] = U._meta.database
+                    barrier.wait(timeout=5)
+            except Exception as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker, args=('a', self.db1))
+        t2 = threading.Thread(target=worker, args=('b', self.db2))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        self.assertEqual(errors, [])
+        self.assertTrue(results['a'] is self.db1)
+        self.assertTrue(results['b'] is self.db2)
+        self.assertTrue(U._meta.database is self.db1)
+
+    def test_asyncio_task_isolation(self):
+        import asyncio
+        U = self.U
+
+        async def task(db, results, key):
+            with db.bind_local([U]):
+                await asyncio.sleep(0)
+                results[key] = U._meta.database
+
+        async def main():
+            results = {}
+            await asyncio.gather(
+                task(self.db1, results, 'a'),
+                task(self.db2, results, 'b'))
+            return results
+
+        results = asyncio.run(main())
+        self.assertTrue(results['a'] is self.db1)
+        self.assertTrue(results['b'] is self.db2)
+        self.assertTrue(U._meta.database is self.db1)
+
+
 class TestQueryHooks(ModelTestCase):
     # event.sql text and the error class both differ per backend.
     database = get_in_memory_db()
