@@ -1,5 +1,6 @@
 import dataclasses
 import inspect
+import json
 import sys
 from collections.abc import (
     AsyncGenerator,
@@ -746,6 +747,69 @@ def _is_json_field(field: ModelField) -> bool:
     return any(type(item) is Json for item in field.field_info.metadata)
 
 
+def _is_multipart_json_body_field(field: ModelField) -> bool:
+    field_info = field.field_info
+    if not isinstance(field_info, params.Body) or isinstance(field_info, params.Form):
+        return False
+    media_type = field_info.media_type.split(";", 1)[0].lower()
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def _get_multipart_json_field_error(
+    field: ModelField, message: str, value: Any
+) -> dict[str, Any]:
+    return {
+        "type": "value_error",
+        "loc": ("body", get_validation_alias(field)),
+        "msg": f"Value error, {message}",
+        "input": value,
+        "ctx": {"error": message},
+    }
+
+
+def _get_multipart_json_invalid_error(
+    field: ModelField, exc: json.JSONDecodeError, value: Any
+) -> dict[str, Any]:
+    return {
+        "type": "json_invalid",
+        "loc": ("body", get_validation_alias(field)),
+        "msg": f"Invalid JSON: {exc.msg} at line {exc.lineno} column {exc.colno}",
+        "input": value,
+        "ctx": {"error": f"{exc.msg} at line {exc.lineno} column {exc.colno}"},
+    }
+
+
+async def _parse_multipart_json_field(
+    field: ModelField, value: Any
+) -> tuple[Any, dict[str, Any] | None]:
+    if isinstance(value, UploadFile):
+        raw_value = await value.read()
+        await value.seek(0)
+        try:
+            return json.loads(raw_value.decode("utf-8")), None
+        except UnicodeDecodeError as exc:
+            return None, _get_multipart_json_field_error(field, str(exc), raw_value)
+        except json.JSONDecodeError as exc:
+            return None, _get_multipart_json_invalid_error(
+                field, exc, raw_value.decode("utf-8", "replace")
+            )
+    if isinstance(value, bytes):
+        try:
+            return json.loads(value.decode("utf-8")), None
+        except UnicodeDecodeError as exc:
+            return None, _get_multipart_json_field_error(field, str(exc), value)
+        except json.JSONDecodeError as exc:
+            return None, _get_multipart_json_invalid_error(
+                field, exc, value.decode("utf-8", "replace")
+            )
+    try:
+        return json.loads(value), None
+    except json.JSONDecodeError as exc:
+        return None, _get_multipart_json_invalid_error(field, exc, value)
+    except TypeError as exc:
+        return None, _get_multipart_json_field_error(field, str(exc), value)
+
+
 def _get_multidict_value(
     field: ModelField, values: Mapping[str, Any], alias: str | None = None
 ) -> Any:
@@ -912,12 +976,32 @@ def _should_embed_body_fields(fields: list[ModelField]) -> bool:
 async def _extract_form_body(
     body_fields: list[ModelField],
     received_body: FormData,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     values = {}
+    errors: list[dict[str, Any]] = []
 
     for field in body_fields:
-        value = _get_multidict_value(field, received_body)
         field_info = field.field_info
+        alias = get_validation_alias(field)
+        if _is_multipart_json_body_field(field):
+            received_values = received_body.getlist(alias)
+            if len(received_values) > 1:
+                errors.append(
+                    _get_multipart_json_field_error(
+                        field, "Duplicate JSON part", received_values
+                    )
+                )
+                continue
+            if not received_values:
+                continue
+            value, error = await _parse_multipart_json_field(field, received_values[0])
+            if error is not None:
+                errors.append(error)
+                continue
+            values[alias] = value
+            continue
+
+        value = _get_multidict_value(field, received_body)
         if (
             isinstance(field_info, params.File)
             and is_bytes_or_nonable_bytes_annotation(field.field_info.annotation)
@@ -936,7 +1020,7 @@ async def _extract_form_body(
                 results.append(await sub_value.read())
             value = serialize_sequence_value(field=field, value=results)
         if value is not None:
-            values[get_validation_alias(field)] = value
+            values[alias] = value
     field_aliases = {get_validation_alias(field) for field in body_fields}
     for key in received_body.keys():
         if key not in field_aliases:
@@ -945,7 +1029,7 @@ async def _extract_form_body(
                 values[key] = param_values[0]
             else:
                 values[key] = param_values
-    return values
+    return values, errors
 
 
 async def request_body_to_args(
@@ -970,7 +1054,15 @@ async def request_body_to_args(
         fields_to_extract = get_cached_model_fields(first_field.field_info.annotation)
 
     if isinstance(received_body, FormData):
-        body_to_process = await _extract_form_body(fields_to_extract, received_body)
+        body_to_process, form_errors = await _extract_form_body(
+            fields_to_extract, received_body
+        )
+        errors.extend(form_errors)
+        form_error_fields = {
+            error.get("loc", ())[-1] for error in form_errors if error.get("loc")
+        }
+    else:
+        form_error_fields = set()
 
     if single_not_embedded_field:
         loc: tuple[str, ...] = ("body",)
@@ -980,6 +1072,8 @@ async def request_body_to_args(
         return {first_field.name: v_}, errors_
     for field in body_fields:
         loc = ("body", get_validation_alias(field))
+        if get_validation_alias(field) in form_error_fields:
+            continue
         value: Any | None = None
         if body_to_process is not None and not isinstance(body_to_process, bytes):
             try:
@@ -988,9 +1082,17 @@ async def request_body_to_args(
             except AttributeError:
                 errors.append(get_missing_field_error(loc))
                 continue
-        v_, errors_ = _validate_value_with_model_field(
-            field=field, value=value, values=values, loc=loc
-        )
+        if (
+            value is None
+            and isinstance(received_body, FormData)
+            and _is_multipart_json_body_field(field)
+            and get_validation_alias(field) in body_to_process
+        ):
+            v_, errors_ = field.validate(value, values, loc=loc)
+        else:
+            v_, errors_ = _validate_value_with_model_field(
+                field=field, value=value, values=values, loc=loc
+            )
         if errors_:
             errors.extend(errors_)
         else:

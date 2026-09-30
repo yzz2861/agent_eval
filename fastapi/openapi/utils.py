@@ -25,6 +25,7 @@ from fastapi.dependencies.models import (
     _UsesScopesCache,
 )
 from fastapi.dependencies.utils import (
+    _get_flat_body_params,
     _get_flat_fields_from_params,
     get_flat_params,
     get_validation_alias,
@@ -231,6 +232,7 @@ def _get_openapi_operation_parameters(
 def get_openapi_operation_request_body(
     *,
     body_field: ModelField | None,
+    body_fields: Sequence[ModelField] | None = None,
     model_name_map: ModelNameMap,
     field_mapping: dict[
         tuple[ModelField, Literal["validation", "serialization"]], dict[str, Any]
@@ -259,6 +261,14 @@ def get_openapi_operation_request_body(
         )
     elif field_info.example is not _Unset:
         request_media_content["example"] = jsonable_encoder(field_info.example)
+    if request_media_type == "multipart/form-data":
+        encoding = {
+            field.alias: {"contentType": field.field_info.media_type}
+            for field in (body_fields or ())
+            if type(field.field_info) is Body
+        }
+        if encoding:
+            request_media_content["encoding"] = encoding
     request_body_oai["content"] = {request_media_type: request_media_content}
     return request_body_oai
 
@@ -377,6 +387,7 @@ def get_openapi_path(
             if method in METHODS_WITH_BODY:
                 request_body_oai = get_openapi_operation_request_body(
                     body_field=route.body_field,
+                    body_fields=_get_flat_body_params(route.dependant),
                     model_name_map=model_name_map,
                     field_mapping=field_mapping,
                     separate_input_output_schemas=separate_input_output_schemas,
