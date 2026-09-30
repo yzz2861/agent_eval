@@ -257,6 +257,8 @@ class BaseDatabaseFeatures:
     supports_select_union = True
     supports_select_intersection = True
     supports_select_difference = True
+    supports_select_intersection_all = False
+    supports_select_difference_all = False
     supports_slicing_ordering_in_compound = False
     supports_parentheses_in_compound = True
     requires_compound_order_by_subquery = False

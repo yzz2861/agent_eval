@@ -1798,20 +1798,20 @@ class QuerySet(AltersData):
             return self
         return self._combinator_query("union", *other_qs, all=all)
 
-    def intersection(self, *other_qs):
+    def intersection(self, *other_qs, all=False):
         # If any query is an EmptyQuerySet, return it.
         if isinstance(self, EmptyQuerySet):
             return self
         for other in other_qs:
             if isinstance(other, EmptyQuerySet):
                 return other
-        return self._combinator_query("intersection", *other_qs)
+        return self._combinator_query("intersection", *other_qs, all=all)
 
-    def difference(self, *other_qs):
+    def difference(self, *other_qs, all=False):
         # If the query is an EmptyQuerySet, return it.
         if isinstance(self, EmptyQuerySet):
             return self
-        return self._combinator_query("difference", *other_qs)
+        return self._combinator_query("difference", *other_qs, all=all)
 
     def select_for_update(self, nowait=False, skip_locked=False, of=(), no_key=False):
         """

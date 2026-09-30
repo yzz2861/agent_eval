@@ -618,7 +618,15 @@ class SQLCompiler:
         empty_compiler = None
         for compiler in compilers:
             try:
-                parts.append(self._get_combinator_part_sql(compiler))
+                part_sql, part_args, part_compiler = (
+                    self._get_combinator_part_sql(compiler)
+                )
+                source_aliases = self.get_multiset_source_aliases(part_compiler)
+                aliases = tuple(
+                    f"col{index}"
+                    for index in range(1, len(source_aliases) + 1)
+                )
+                parts.append((part_sql, part_args, aliases, source_aliases))
             except EmptyResultSet:
                 # Omit the empty queryset with UNION and with DIFFERENCE if the
                 # first queryset is nonempty.
@@ -635,21 +643,276 @@ class SQLCompiler:
             # happening by always including an empty resultset query to force
             # the creation of an union.
             empty_compiler.elide_empty = False
-            parts.append(self._get_combinator_part_sql(empty_compiler))
+            part_sql, part_args, part_compiler = (
+                self._get_combinator_part_sql(empty_compiler)
+            )
+            source_aliases = self.get_multiset_source_aliases(part_compiler)
+            aliases = tuple(
+                f"col{index}"
+                for index in range(1, len(source_aliases) + 1)
+            )
+            parts.append(
+                (part_sql, part_args, aliases, source_aliases)
+            )
+        if (
+            all
+            and combinator != "union"
+            and not getattr(
+                features, f"supports_select_{combinator}_all", False
+            )
+        ):
+            if any(
+                isinstance(expression, ColPairs)
+                for expression, _, _ in self.select
+            ):
+                expanded_select = []
+                index = 1
+                for expression, _, _ in self.select:
+                    source_expressions = (
+                        expression.get_source_expressions()
+                        if isinstance(expression, ColPairs)
+                        else (expression,)
+                    )
+                    for col_expression in source_expressions:
+                        expanded_select.append(
+                            (col_expression, None, f"col{index}")
+                        )
+                        index += 1
+                self.select = expanded_select
+            return self.get_multiset_combinator_sql(combinator, parts)
         combinator_sql = self.connection.ops.set_operators[combinator]
-        if all and combinator == "union":
+        if all:
             combinator_sql += " ALL"
         braces = "{}"
         if not self.query.subquery and features.supports_slicing_ordering_in_compound:
             braces = "({})"
         sql_parts, args_parts = zip(
-            *((braces.format(sql), args) for sql, args in parts)
+            *((braces.format(sql), args) for sql, args, _, _ in parts)
         )
         result = [" {} ".format(combinator_sql).join(sql_parts)]
         params = []
         for part in args_parts:
             params.extend(part)
         return result, params
+
+    def get_multiset_combinator_sql(self, combinator, parts):
+        features = self.connection.features
+        if len(parts) == 1:
+            sql, part_params, _, _ = parts[0]
+            return [sql], list(part_params)
+
+        if not features.supports_over_clause:
+            raise NotSupportedError(
+                f"{combinator} with all=True is not supported on this database "
+                "backend."
+            )
+
+        column_aliases = [
+            self.quote_name(f"col{index}")
+            for index in range(1, len(parts[0][2]) + 1)
+        ]
+        row_number_alias = self.quote_name("__multiset_row_number")
+        if combinator == "intersection":
+            return self.get_intersection_all_sql(
+                parts, column_aliases, row_number_alias
+            )
+        return self.get_difference_all_sql(parts, column_aliases, row_number_alias)
+
+    def get_qualified_columns(self, alias, column_aliases):
+        quoted_alias = self.quote_name(alias)
+        return [f"{quoted_alias}.{alias_name}" for alias_name in column_aliases]
+
+    def get_row_number_part_sql(self, part, alias, column_aliases, row_number_alias):
+        part_sql, params, _, _ = part
+        source_sql, source_alias = self.get_standardized_part_sql(part, alias)
+        source_columns = self.get_qualified_columns(source_alias, column_aliases)
+        partition_columns = ", ".join(source_columns)
+        select = ", ".join(
+            [
+                *source_columns,
+                (
+                    f"ROW_NUMBER() OVER (PARTITION BY {partition_columns} "
+                    f"ORDER BY {partition_columns}) AS {row_number_alias}"
+                ),
+            ]
+        )
+        return (
+            f"SELECT {select} FROM ({source_sql}) {self.quote_name(source_alias)}",
+            params,
+        )
+
+    def get_multiset_join_conditions(
+        self, left_alias, right_alias, column_aliases, row_number_alias
+    ):
+        conditions = []
+        for column_alias in column_aliases:
+            lhs = f"{self.quote_name(left_alias)}.{column_alias}"
+            rhs = f"{self.quote_name(right_alias)}.{column_alias}"
+            conditions.append(f"({lhs} = {rhs} OR ({lhs} IS NULL AND {rhs} IS NULL))")
+        conditions.append(
+            f"{self.quote_name(left_alias)}.{row_number_alias} = "
+            f"{self.quote_name(right_alias)}.{row_number_alias}"
+        )
+        return " AND ".join(conditions)
+
+    def get_intersection_all_sql(self, parts, column_aliases, row_number_alias):
+        left_alias = "multiset_lhs"
+        result_sql, params = self.get_row_number_part_sql(
+            parts[0], left_alias, column_aliases, row_number_alias
+        )
+        params = list(params)
+        previous_alias = left_alias
+        for index, part in enumerate(parts[1:], start=1):
+            right_alias = f"multiset_rhs_{index}"
+            right_sql, right_params = self.get_row_number_part_sql(
+                part, right_alias, column_aliases, row_number_alias
+            )
+            result_sql = (
+                "SELECT {columns}, {right_alias}.{row_number_alias} "
+                "FROM ({result_sql}) {previous_alias} "
+                "JOIN ({right_sql}) {right_alias} ON {conditions}"
+            ).format(
+                columns=", ".join(
+                    self.get_qualified_columns(right_alias, column_aliases)
+                ),
+                right_alias=self.quote_name(right_alias),
+                row_number_alias=row_number_alias,
+                result_sql=result_sql,
+                previous_alias=self.quote_name(previous_alias),
+                right_sql=right_sql,
+                conditions=self.get_multiset_join_conditions(
+                    previous_alias,
+                    right_alias,
+                    column_aliases,
+                    row_number_alias,
+                ),
+            )
+            params.extend(right_params)
+            previous_alias = right_alias
+        result_sql = "SELECT {columns} FROM ({result_sql}) {alias}".format(
+            columns=", ".join(column_aliases),
+            result_sql=result_sql,
+            alias=self.quote_name("multiset_result"),
+        )
+        return [result_sql], params
+
+    def get_difference_all_sql(self, parts, column_aliases, row_number_alias):
+        left_alias = "multiset_lhs"
+        left_sql, params = self.get_row_number_part_sql(
+            parts[0], left_alias, column_aliases, row_number_alias
+        )
+        params = list(params)
+
+        right_parts = []
+        for index, part in enumerate(parts[1:], start=1):
+            right_alias = f"multiset_rhs_{index}"
+            right_parts.append(
+                self.get_standardized_part_sql(part, right_alias)[0]
+            )
+            params.extend(part[1])
+
+        right_union_alias = "multiset_rhs_union"
+        right_columns = self.get_qualified_columns(
+            right_union_alias, column_aliases
+        )
+        right_columns_sql = ", ".join(right_columns)
+        right_sql = (
+            "SELECT {columns}, ROW_NUMBER() OVER ("
+            "PARTITION BY {columns} ORDER BY {columns}"
+            f") AS {row_number_alias} FROM ({{right_union}}) {{alias}}"
+        ).format(
+            columns=right_columns_sql,
+            row_number_alias=row_number_alias,
+            right_union=" UNION ALL ".join(right_parts),
+            alias=self.quote_name(right_union_alias),
+        )
+        right_alias = "multiset_rhs"
+        result_sql = (
+            "SELECT {left_columns} FROM ({left_sql}) {left_alias} "
+            "LEFT OUTER JOIN ({right_sql}) {right_alias} ON {conditions} "
+            "WHERE {right_alias}.{row_number_alias} IS NULL"
+        ).format(
+            left_columns=", ".join(
+                self.get_qualified_columns(left_alias, column_aliases)
+            ),
+            left_sql=left_sql,
+            left_alias=self.quote_name(left_alias),
+            right_sql=right_sql,
+            right_alias=self.quote_name(right_alias),
+            conditions=self.get_multiset_join_conditions(
+                left_alias, right_alias, column_aliases, row_number_alias
+            ),
+            row_number_alias=row_number_alias,
+        )
+        result_sql = "SELECT {columns} FROM ({result_sql}) {alias}".format(
+            columns=", ".join(column_aliases),
+            result_sql=result_sql,
+            alias=self.quote_name("multiset_result"),
+        )
+        return [result_sql], params
+
+    def get_multiset_source_aliases(self, compiler):
+        aliases = []
+        index = 1
+        for expression, _, alias in compiler.select:
+            if isinstance(expression, ColPairs):
+                aliases.extend(
+                    f"col{index + offset}"
+                    for offset in range(len(expression))
+                )
+                index += len(expression)
+            else:
+                aliases.append(alias or f"col{index}")
+                index += 1
+        return tuple(aliases)
+
+    def get_standardized_part_sql(self, part, alias):
+        source_alias = f"{alias}_source"
+        inner_alias = f"{alias}_part"
+        target_aliases = part[2]
+        source_aliases = part[3]
+        columns = ", ".join(
+            f"{self.quote_name(inner_alias)}."
+            f"{self.quote_name(source_alias_name)} AS {target_alias_name}"
+            for source_alias_name, target_alias_name in zip(
+                source_aliases, target_aliases
+            )
+        )
+        part_sql = part[0]
+        return (
+            f"SELECT {columns} FROM ({part_sql}) {self.quote_name(inner_alias)}",
+            source_alias,
+        )
+
+    def get_expanded_multiset_part_compiler(self, compiler):
+        expanded_select = []
+        for expression, _, alias in compiler.select:
+            if isinstance(expression, ColPairs):
+                expanded_select.extend(
+                    (col_expression, None, f"col{len(expanded_select) + 1 + offset}")
+                    for offset, col_expression in enumerate(
+                        expression.get_source_expressions()
+                    )
+                )
+            else:
+                expanded_select.append((expression, None, alias))
+
+        part_query = compiler.query.clone()
+        part_query.select = tuple(
+            expression for expression, _, _ in expanded_select
+        )
+        part_query.default_cols = False
+        part_query.values_select = ()
+        part_query.selected = {
+            f"col{index}": expression
+            for index, (expression, _, _) in enumerate(expanded_select, start=1)
+        }
+        part_compiler = part_query.get_compiler(
+            self.using, self.connection, self.elide_empty
+        )
+        part_compiler.setup_query(with_col_aliases=True)
+        part_compiler.select = expanded_select
+        return part_compiler
 
     def _get_combinator_part_sql(self, compiler):
         features = self.connection.features
@@ -660,6 +923,13 @@ class SQLCompiler:
         if selected is not None and compiler.query.selected is None:
             compiler.query = compiler.query.clone()
             compiler.query.set_values(selected)
+        compiler.setup_query(with_col_aliases=True)
+        if self.query.combinator_all and self.query.combinator != "union":
+            if any(
+                isinstance(expression, ColPairs)
+                for expression, _, _ in compiler.select
+            ):
+                compiler = self.get_expanded_multiset_part_compiler(compiler)
         part_sql, part_args = compiler.as_sql(with_col_aliases=True)
         if compiler.query.combinator:
             # Wrap in a subquery if wrapping in parentheses isn't
@@ -675,7 +945,7 @@ class SQLCompiler:
                 part_sql = "({})".format(part_sql)
         elif self.query.subquery and features.supports_slicing_ordering_in_compound:
             part_sql = "({})".format(part_sql)
-        return part_sql, part_args
+        return part_sql, part_args, compiler
 
     def get_qualify_sql(self):
         where_parts = []

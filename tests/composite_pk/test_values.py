@@ -224,3 +224,15 @@ class CompositePKValuesTests(TestCase):
                     values[0]["user"], (self.user_1.tenant_id, self.user_1.id)
                 )
                 self.assertEqual(values[0]["integer"], 42)
+
+    def test_set_operations_all_with_composite_pk(self):
+        User.objects.create(tenant=self.tenant_1, id=10, email="token@example.com")
+        users = User.objects.filter(pk=(self.tenant_1.id, 10)).values_list(
+            "tenant_id", "id"
+        )
+        tokens = User.objects.filter(pk=(self.tenant_1.id, 10)).values_list("pk")
+
+        self.assertEqual(
+            list(tokens.intersection(users, all=True)),
+            [(self.tenant_1.id, 10)],
+        )

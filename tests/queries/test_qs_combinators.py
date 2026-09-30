@@ -65,6 +65,114 @@ class QuerySetSetOperationTests(TestCase):
         reserved_name = qs1.intersection(qs1).values_list("name", "order", "id").get()
         self.assertEqual(reserved_name[:2], ("a", 2))
 
+    @skipUnlessDBFeature("supports_select_intersection")
+    def test_intersection_all(self):
+        Number.objects.bulk_create(
+            [Number(num=1, other_num=9), Number(num=1, other_num=9)]
+        )
+        pks = list(
+            Number.objects.filter(num=1, other_num=9)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        self.assertEqual(len(pks), 3)
+        qs1 = Number.objects.filter(pk__in=pks).values("num", "other_num")
+        qs2 = Number.objects.filter(pk__in=pks[:2]).values("num", "other_num")
+        qs3 = Number.objects.filter(pk__in=pks[:1]).values("num", "other_num")
+        model_qs1 = Number.objects.filter(pk__in=pks)
+        model_qs2 = Number.objects.filter(pk__in=pks[:2])
+
+        self.assertEqual(
+            list(qs1.intersection(qs2, all=True).order_by("num", "other_num")),
+            [{"num": 1, "other_num": 9}, {"num": 1, "other_num": 9}],
+        )
+        self.assertEqual(
+            list(qs1.intersection(qs2, qs3, all=True)),
+            [{"num": 1, "other_num": 9}],
+        )
+        self.assertEqual(
+            list(qs1.intersection(qs2).values_list("num", flat=True)),
+            [1],
+        )
+        self.assertEqual(
+            list(
+                model_qs1.intersection(model_qs2, all=True)
+                .order_by("pk")
+                .values_list("num", flat=True)
+            ),
+            [1, 1],
+        )
+        self.assertEqual(
+            model_qs1.intersection(model_qs2, all=True).order_by("pk").count(),
+            2,
+        )
+        self.assertNumbersEqual(
+            model_qs1.intersection(model_qs2, all=True).order_by("pk"),
+            [1, 1],
+        )
+        self.assertEqual(
+            list(qs1.intersection(qs2, all=True).values_list("num", flat=True)),
+            [1, 1],
+        )
+        self.assertEqual(
+            list(qs3.intersection(qs1.difference(qs2), all=True)),
+            [],
+        )
+        self.assertEqual(qs1.intersection(qs2, all=True).count(), 2)
+        self.assertEqual(
+            list(
+                qs1.intersection(qs2, all=True)
+                .order_by("num", "other_num")[:1]
+            ),
+            [{"num": 1, "other_num": 9}],
+        )
+
+    @skipUnlessDBFeature("supports_select_intersection")
+    def test_intersection_all_with_nulls(self):
+        Number.objects.bulk_create(
+            [
+                Number(num=100, other_num=None),
+                Number(num=100, other_num=None),
+                Number(num=100, other_num=None),
+            ]
+        )
+        pks = list(
+            Number.objects.filter(num=100, other_num__isnull=True)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        qs1 = Number.objects.filter(pk__in=pks).values_list("num", "other_num")
+        qs2 = Number.objects.filter(pk__in=pks[:2]).values_list(
+            "num", "other_num"
+        )
+
+        self.assertEqual(
+            list(qs1.intersection(qs2, all=True).order_by("num", "other_num")),
+            [(100, None), (100, None)],
+        )
+
+    @skipUnlessDBFeature("supports_select_intersection")
+    def test_intersection_all_with_different_models(self):
+        ReservedName.objects.create(name="a", order=1)
+        ReservedName.objects.create(name="b", order=3)
+        numbers = Number.objects.filter(num__in=[1, 1, 2]).values_list(
+            "num", flat=True
+        )
+        names = ReservedName.objects.values_list("order", flat=True)
+
+        self.assertEqual(
+            list(numbers.intersection(names, all=True).order_by("num")),
+            [1],
+        )
+        self.assertEqual(
+            list(
+                numbers.difference(names, all=True)
+                .order_by("num")
+                .values_list("num", flat=True)[:1]
+            ),
+            [2],
+        )
+
     @skipUnlessDBFeature("supports_select_difference")
     def test_simple_difference(self):
         qs1 = Number.objects.filter(num__lte=5)
@@ -211,6 +319,97 @@ class QuerySetSetOperationTests(TestCase):
         self.assertEqual(reserved_name["order"], 2)
         reserved_name = qs1.difference(qs2).values_list("name", "order", "id").get()
         self.assertEqual(reserved_name[:2], ("a", 2))
+
+    @skipUnlessDBFeature("supports_select_difference")
+    def test_difference_all(self):
+        Number.objects.bulk_create(
+            [Number(num=1, other_num=9), Number(num=1, other_num=9)]
+        )
+        pks = list(
+            Number.objects.filter(num=1, other_num=9)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        self.assertEqual(len(pks), 3)
+        qs1 = Number.objects.filter(pk__in=pks).values("num", "other_num")
+        qs2 = Number.objects.filter(pk__in=pks[:2]).values("num", "other_num")
+        qs3 = Number.objects.filter(pk__in=pks[:1]).values("num", "other_num")
+        empty = Number.objects.filter(pk__in=[]).values("num", "other_num")
+        model_qs1 = Number.objects.filter(pk__in=pks)
+        model_qs2 = Number.objects.filter(pk__in=pks[:2])
+
+        self.assertEqual(
+            list(qs1.difference(qs2, all=True)),
+            [{"num": 1, "other_num": 9}],
+        )
+        self.assertEqual(
+            list(qs1.difference(qs3, qs3, all=True)),
+            [{"num": 1, "other_num": 9}],
+        )
+        self.assertEqual(
+            list(qs1.difference(empty, all=True).order_by("num", "other_num")),
+            [
+                {"num": 1, "other_num": 9},
+                {"num": 1, "other_num": 9},
+                {"num": 1, "other_num": 9},
+            ],
+        )
+        self.assertEqual(
+            list(qs1.difference(qs2).values_list("num", flat=True)),
+            [],
+        )
+        self.assertEqual(
+            list(
+                model_qs1.difference(model_qs2, all=True)
+                .order_by("pk")
+                .values_list("num", flat=True)
+            ),
+            [1],
+        )
+        self.assertEqual(
+            model_qs1.difference(model_qs2, all=True).order_by("pk").count(),
+            1,
+        )
+        self.assertNumbersEqual(
+            model_qs1.difference(model_qs2, all=True).order_by("pk"),
+            [1],
+        )
+        self.assertEqual(
+            list(qs1.difference(qs1, all=True).values_list("num", flat=True)),
+            [],
+        )
+        self.assertEqual(qs1.difference(qs2, all=True).count(), 1)
+        self.assertEqual(
+            list(
+                qs1.difference(qs2, all=True)
+                .order_by("num", "other_num")[:1]
+            ),
+            [{"num": 1, "other_num": 9}],
+        )
+
+    @skipUnlessDBFeature("supports_select_difference")
+    def test_difference_all_with_nulls(self):
+        Number.objects.bulk_create(
+            [
+                Number(num=100, other_num=None),
+                Number(num=100, other_num=None),
+                Number(num=100, other_num=None),
+            ]
+        )
+        pks = list(
+            Number.objects.filter(num=100, other_num__isnull=True)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        qs1 = Number.objects.filter(pk__in=pks).values_list("num", "other_num")
+        qs2 = Number.objects.filter(pk__in=pks[:2]).values_list(
+            "num", "other_num"
+        )
+
+        self.assertEqual(
+            list(qs1.difference(qs2, all=True).order_by("num", "other_num")),
+            [(100, None)],
+        )
 
     def test_union_with_empty_qs(self):
         qs1 = Number.objects.all()

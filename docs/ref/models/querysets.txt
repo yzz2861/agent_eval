@@ -1014,7 +1014,7 @@ databases don't allow ``LIMIT`` or ``OFFSET`` in the combined queries.
 ``intersection()``
 ~~~~~~~~~~~~~~~~~~
 
-.. method:: intersection(*other_qs)
+.. method:: intersection(*other_qs, all=False)
 
 Uses SQL's ``INTERSECT`` operator to return the shared elements of two or more
 ``QuerySet``\s. For example:
@@ -1023,12 +1023,15 @@ Uses SQL's ``INTERSECT`` operator to return the shared elements of two or more
 
     >>> qs1.intersection(qs2, qs3)
 
+The ``INTERSECT`` operator selects only distinct values by default. To preserve
+duplicate rows, use the ``all=True`` argument.
+
 See :meth:`union` for some restrictions.
 
 ``difference()``
 ~~~~~~~~~~~~~~~~
 
-.. method:: difference(*other_qs)
+.. method:: difference(*other_qs, all=False)
 
 Uses SQL's ``EXCEPT`` operator to keep only elements present in the
 ``QuerySet`` but not in some other ``QuerySet``\s. For example:
@@ -1036,6 +1039,9 @@ Uses SQL's ``EXCEPT`` operator to keep only elements present in the
 .. code-block:: pycon
 
     >>> qs1.difference(qs2, qs3)
+
+The ``EXCEPT`` operator selects only distinct values by default. To preserve
+duplicate rows, use the ``all=True`` argument.
 
 See :meth:`union` for some restrictions.
 

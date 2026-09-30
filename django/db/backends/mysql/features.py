@@ -24,6 +24,8 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     supports_comments_inline = True
     supports_temporal_subtraction = True
     supports_slicing_ordering_in_compound = True
+    supports_select_intersection_all = True
+    supports_select_difference_all = True
     supports_index_on_text_field = False
     supports_over_clause = True
     supports_frame_range_fixed_distance = True
