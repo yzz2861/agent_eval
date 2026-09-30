@@ -1,0 +1,13 @@
+---
+features:
+  - |
+    Added ``tenacity.RetryBudget``, a context manager that gives nested
+    ``Retrying``/``AsyncRetrying`` controllers one shared pool of
+    extra attempts and one shared deadline, so nesting retry loops no
+    longer multiplies the total number of calls. The first attempt of each
+    call is free; quota is only debited when an extra attempt actually
+    starts, concurrent consumers cannot overspend, and local ``stop``
+    strategies keep applying on top of the budget. Budget exhaustion raises
+    ``RetryBudgetAttemptsExhausted`` or ``RetryBudgetDeadlineExceeded``
+    (distinct from the ``RetryError`` raised by local stop strategies),
+    and the deadline is computed from an injectable clock.

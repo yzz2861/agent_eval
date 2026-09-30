@@ -37,6 +37,15 @@ from .before import before_log, before_nothing
 # Import all built-in before sleep strategies for easier usage.
 from .before_sleep import before_sleep_log, before_sleep_nothing
 
+# Import the shared retry budget context.
+from .budget import (
+    RetryBudget,
+    RetryBudgetAttemptsExhausted,
+    RetryBudgetDeadlineExceeded,
+    RetryBudgetExceeded,
+    current_budget,
+)
+
 # Import all nap strategies for easier usage.
 from .nap import sleep, sleep_using_event
 
@@ -443,6 +452,13 @@ class BaseRetrying(ABC):
 
         fut = retry_state.outcome
         if fut is None:
+            if retry_state.attempt_number > 1:
+                # The first attempt of a call is always free; an extra
+                # attempt only starts (and is only charged) here, so nested
+                # controllers racing for the shared budget cannot overspend.
+                budget = current_budget()
+                if budget is not None:
+                    budget.acquire(retry_state)
             if self.before is not None:
                 self._add_action_func(self.before)
             self._add_action_func(lambda rs: DoAttempt())
@@ -484,6 +500,11 @@ class BaseRetrying(ABC):
             return
 
         def next_action(rs: "RetryCallState") -> None:
+            budget = current_budget()
+            if budget is not None:
+                # Never sleep past the shared deadline: the wait is cut
+                # short and the next attempt is denied by the budget.
+                rs.upcoming_sleep = budget.clamp_sleep(rs.upcoming_sleep)
             sleep = rs.upcoming_sleep
             rs.next_action = RetryAction(sleep)
             rs.idle_for += sleep
@@ -821,6 +842,10 @@ __all__ = [
     "DoSleep",
     "Future",
     "RetryAction",
+    "RetryBudget",
+    "RetryBudgetAttemptsExhausted",
+    "RetryBudgetDeadlineExceeded",
+    "RetryBudgetExceeded",
     "RetryCallState",
     "RetryError",
     "Retrying",
@@ -832,6 +857,7 @@ __all__ = [
     "before_nothing",
     "before_sleep_log",
     "before_sleep_nothing",
+    "current_budget",
     "retry",
     "retry_all",
     "retry_always",

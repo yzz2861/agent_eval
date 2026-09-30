@@ -56,6 +56,15 @@ Those functions can be used as the `sleep` keyword argument of
 .. automodule:: tenacity.nap
    :members:
 
+Shared Retry Budget
+-------------------
+
+A `tenacity.RetryBudget` context bounds the total retry effort of every
+(possibly nested) retry controller running inside it.
+
+.. automodule:: tenacity.budget
+   :members:
+
 Retry Functions
 ---------------
 
