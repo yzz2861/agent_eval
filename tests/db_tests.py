@@ -15,6 +15,7 @@ import warnings
 from peewee import *
 from peewee import Database
 from peewee import FIELD
+from peewee import _ModelDatabaseBindings
 from peewee import attrdict
 from peewee import sort_models
 
@@ -301,6 +302,199 @@ class TestDatabase(DatabaseTestCase):
 
         self.assertTrue(C._meta.database is None)
         self.assertTrue(A._meta.database is None)
+
+    def test_bind_context_isolation_and_relations(self):
+        db1 = get_in_memory_db()
+        db2 = get_in_memory_db()
+
+        class Base(Model):
+            class Meta:
+                database = db1
+
+        class Parent(Base):
+            name = TextField()
+        class Child(Base):
+            parent = ForeignKeyField(Parent, backref='children')
+            name = TextField()
+
+        db1.create_tables([Parent, Child])
+        with db2.bind_context([Parent, Child]):
+            Parent.create_table()
+            Child.create_table()
+            self.assertIs(Parent._meta._database, db1)
+            self.assertIs(Child._meta._database, db1)
+
+            parent = Parent.create(name='p2')
+            Child.create(parent=parent, name='c2')
+            self.assertEqual(Parent.select().count(), 1)
+            self.assertEqual(parent.children[0].name, 'c2')
+
+        self.assertEqual(Parent.select().count(), 0)
+        self.assertEqual(Child.select().count(), 0)
+
+        Parent.create(name='p1')
+        with db2.bind_context([Parent, Child]):
+            self.assertEqual(Parent.select().count(), 1)
+
+        with db2.bind_context([Parent]):
+            self.assertIs(Child._meta._database, db1)
+            parent = Parent.create(name='p2')
+            self.assertEqual(parent.children.count(), 0)
+
+        with db1.bind_context([Parent, Child]):
+            self.assertEqual(Child.select().count(), 0)
+
+    def test_bind_context_manytomany(self):
+        db1 = get_in_memory_db()
+        db2 = get_in_memory_db()
+
+        class Base(Model):
+            class Meta:
+                database = db1
+
+        class Tag(Base):
+            name = TextField()
+        class Article(Base):
+            name = TextField()
+            tags = ManyToManyField(Tag)
+
+        ArticleTag = Article.tags.through_model
+        db1.create_tables([Tag, Article, ArticleTag])
+        with db2.bind_context([Article]):
+            self.assertIs(Tag._meta.database, db2)
+            self.assertIs(ArticleTag._meta.database, db2)
+            Tag.create_table()
+            Article.create_table()
+            ArticleTag.create_table()
+            article = Article.create(name='a')
+            tag = Tag.create(name='t')
+            article.tags.add(tag)
+            self.assertEqual([item.name for item in article.tags], ['t'])
+
+        self.assertEqual(Tag.select().count(), 0)
+        self.assertEqual(Article.select().count(), 0)
+        self.assertEqual(ArticleTag.select().count(), 0)
+
+    def test_bind_context_preconstructed_and_nested(self):
+        db1 = get_in_memory_db()
+        db2 = get_in_memory_db()
+        db3 = get_in_memory_db()
+
+        class M(Model):
+            name = TextField()
+            class Meta:
+                database = db1
+
+        for index, database in enumerate((db2, db3)):
+            with database.bind_context([M]):
+                M.create_table()
+                M.create(name='db%s' % (index + 2))
+
+        query = M.select().order_by(M.name)
+        with db2.bind_context([M]):
+            self.assertEqual([row.name for row in query.clone()], ['db2'])
+            with db3.bind_context([M]):
+                self.assertEqual([row.name for row in query.clone()], ['db3'])
+            self.assertEqual([row.name for row in query.clone()], ['db2'])
+        M.create_table()
+        with self.assertRaises(M.DoesNotExist):
+            query.get()
+
+        query = M.select().order_by(M.name)
+        query.bind(db3)
+        with db2.bind_context([M]):
+            self.assertEqual([row.name for row in query.clone()], ['db3'])
+
+    def test_bind_context_explicit_bind_is_sticky(self):
+        db1 = get_in_memory_db()
+        db2 = get_in_memory_db()
+
+        class M(Model):
+            name = TextField()
+            class Meta:
+                database = db1
+
+        with db2.bind_context([M]):
+            M.create_table()
+            M.create(name='db2')
+
+        query = M.select()
+        query.bind(db2)
+        with db1.bind_context([M]):
+            self.assertEqual(query.count(), 1)
+
+    def test_bind_context_thread_isolation(self):
+        db1 = get_in_memory_db()
+        db2 = get_in_memory_db()
+
+        class M(Model):
+            name = TextField()
+            class Meta:
+                database = db1
+
+        db1.create_tables([M])
+        with db2.bind_context([M]):
+            M.create_table()
+            ready = threading.Event()
+            results = []
+
+            def check_other_thread():
+                results.append(_ModelDatabaseBindings.current())
+                results.append(M._meta.database)
+                ready.set()
+                ready.wait(timeout=2)
+                # In-memory SQLite connections are thread-local; this only
+                # verifies that the context binding is not inherited.
+                try:
+                    results.append(M.select().count())
+                except OperationalError:
+                    results.append(0)
+
+            thread = threading.Thread(target=check_other_thread)
+            thread.start()
+            ready.wait(timeout=2)
+            M.create(name='db2')
+            ready.set()
+            thread.join(timeout=2)
+
+            self.assertIsNone(results[0])
+            self.assertIs(results[1], db1)
+            self.assertEqual(results[2], 0)
+            self.assertEqual(M.select().count(), 1)
+
+    def test_bind_context_rejects_switch_mid_transaction(self):
+        db1 = get_in_memory_db()
+        db2 = get_in_memory_db()
+
+        class M(Model):
+            name = TextField()
+            class Meta:
+                database = db1
+
+        with db1.bind_context([M]):
+            M.create_table()
+        with db2.bind_context([M]):
+            M.create_table()
+
+        with db1.atomic():
+            with self.assertRaises(OperationalError):
+                with db2.bind_context([M]):
+                    pass
+            M.create(name='committed-db1')
+
+        with db1.bind_context([M]):
+            self.assertEqual(M.select().count(), 1)
+        with db2.bind_context([M]):
+            self.assertEqual(M.select().count(), 0)
+
+        with db1.atomic():
+            pending = M.select()
+            self.assertEqual(pending.count(), 1)
+            with self.assertRaises(OperationalError):
+                with db2.bind_context([M]):
+                    pending.execute()
+            self.assertRaises(OperationalError,
+                              M.select().execute, db2)
 
     def test_batch_commit(self):
         class PatchCommitDatabase(SqliteDatabase):

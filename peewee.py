@@ -3,6 +3,7 @@ from bisect import bisect_right
 from collections.abc import Callable
 from collections.abc import Mapping
 from contextlib import contextmanager
+import contextvars
 from copy import deepcopy
 from functools import partial
 from functools import reduce
@@ -486,6 +487,88 @@ def chunked(it, n):
         while group and group[-1] is marker:
             group.pop()
         yield group
+
+
+_model_database_context = contextvars.ContextVar('model_database_context')
+_model_database_active = set()
+_model_database_depth = {}
+_model_database_lock = threading.Lock()
+
+
+def _current_model_database_bindings():
+    thread_id = threading.get_ident()
+    if thread_id not in _model_database_active:
+        return None
+    return _model_database_context.get(None)
+
+
+class _ModelDatabaseBindings(object):
+    def __init__(self, mapping, parent=None):
+        self.mapping = mapping
+        self.parent = parent
+
+    @classmethod
+    def current(cls):
+        return _current_model_database_bindings()
+
+    @classmethod
+    def push(cls, models, database, bind_refs=True, bind_backrefs=True):
+        current = cls.current()
+        thread_id = threading.get_ident()
+        mapping = {}
+
+        for model in models:
+            mapping[model] = database
+            for field in model._meta.manytomany.values():
+                mapping.setdefault(field.through_model, database)
+            if bind_refs or bind_backrefs:
+                graph = model._meta.model_graph(refs=bind_refs,
+                                                 backrefs=bind_backrefs)
+                for _, related, _ in graph[1:]:
+                    mapping.setdefault(related, database)
+
+        with _model_database_lock:
+            if thread_id not in _model_database_active:
+                _model_database_active.add(thread_id)
+                _model_database_depth[thread_id] = 0
+        bindings = cls(mapping, current)
+        token = _model_database_context.set(bindings)
+        with _model_database_lock:
+            _model_database_depth[thread_id] += 1
+        return bindings, token
+
+    @classmethod
+    def pop(cls, token):
+        _model_database_context.reset(token)
+        thread_id = threading.get_ident()
+        with _model_database_lock:
+            _model_database_depth[thread_id] -= 1
+            if _model_database_depth[thread_id] == 0:
+                _model_database_active.discard(thread_id)
+                del _model_database_depth[thread_id]
+
+    def get(self, model):
+        if model in self.mapping:
+            return self.mapping[model]
+        if self.parent is not None:
+            return self.parent.get(model)
+
+
+def _resolve_model_database(model):
+    bindings = _ModelDatabaseBindings.current()
+    if bindings is not None:
+        database = bindings.get(model)
+        if database is not None:
+            return database
+    return model._meta._database
+
+
+def _resolve_database(database):
+    if database is None:
+        return None
+    if isinstance(database, Proxy):
+        return database.obj if database.obj is not None else None
+    return database
 
 
 class _callable_context_manager(object):
@@ -2125,7 +2208,10 @@ class OnConflict(Node):
 def database_required(method):
     @wraps(method)
     def inner(self, database=None, *args, **kwargs):
-        database = self._database if database is None else database
+        if database is None and hasattr(self, '_get_database'):
+            database = self._get_database()
+        else:
+            database = self._database if database is None else database
         if not database:
             raise InterfaceError('Query must be bound to a database in order '
                                  'to call "%s".' % method.__name__)
@@ -2139,6 +2225,7 @@ class BaseQuery(Node):
 
     def __init__(self, _database=None, **kwargs):
         self._database = _database
+        self._database_bound = _database is not None
         self._cursor_wrapper = None
         self._row_type = None
         self._constructor = None
@@ -2146,6 +2233,7 @@ class BaseQuery(Node):
 
     def bind(self, database=None):
         self._database = database
+        self._database_bound = database is not None
         return self
 
     def clone(self):
@@ -2188,18 +2276,77 @@ class BaseQuery(Node):
         raise NotImplementedError
 
     def sql(self):
-        if self._database:
-            context = self._database.get_sql_context()
+        database = self._get_database()
+        if database:
+            context = database.get_sql_context()
         else:
             context = Context()
         return context.parse(self)
 
+    def _iter_model_nodes(self):
+        accum = []
+        seen_models = set()
+        seen_nodes = set()
+
+        def visit(value):
+            if is_model(value):
+                if value not in seen_models:
+                    seen_models.add(value)
+                    accum.append(value)
+            elif isinstance(value, ModelAlias):
+                visit(value.model)
+            elif isinstance(value, Node):
+                node_id = id(value)
+                if node_id not in seen_nodes:
+                    seen_nodes.add(node_id)
+                    visit(value.__dict__)
+            elif isinstance(value, dict):
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, (list, tuple, set, frozenset)):
+                for child in value:
+                    visit(child)
+
+        visit(self)
+        return accum
+
+    def _get_context_database(self):
+        databases = []
+        for model in self._iter_model_nodes():
+            database = _resolve_model_database(model)
+            database = _resolve_database(database)
+            if database is not None and database not in databases:
+                databases.append(database)
+        if len(databases) > 1:
+            raise ValueError('Query references models bound to multiple '
+                             'databases.')
+        return databases[0] if databases else None
+
+    def _get_database(self, database=None):
+        if database is not None:
+            return _resolve_database(database)
+        if self._database_bound:
+            return self._database
+        return self._get_context_database()
+
+    def _validate_database(self, database):
+        database = _resolve_database(database)
+        for model in self._iter_model_nodes():
+            current = _resolve_database(_resolve_model_database(model))
+            if current is not None and current is not database and \
+                    current.in_transaction():
+                raise OperationalError(
+                    'Cannot execute a query for %s on a different database '
+                    'while a transaction is open.' % model.__name__)
+
     @database_required
-    def execute(self, database):
+    def execute(self, database=None):
+        database = self._get_database(database)
+        self._validate_database(database)
         return self._execute(database)
 
     async def aexecute(self, database=None):
-        database = self._database if database is None else database
+        database = self._get_database(database)
         if not database:
             raise InterfaceError('Query must be bound to a database in order '
                                  'to call "aexecute".')
@@ -2216,7 +2363,7 @@ class BaseQuery(Node):
 
     def _ensure_execution(self):
         if self._cursor_wrapper is None:
-            if not self._database:
+            if not self._get_database():
                 raise ValueError('Query has not been executed.')
             self.execute()
 
@@ -4181,8 +4328,14 @@ class Database(_callable_context_manager):
         for model in models:
             model.bind(self, bind_refs=bind_refs, bind_backrefs=bind_backrefs)
 
-    def bind_ctx(self, models, bind_refs=True, bind_backrefs=True):
-        return _BoundModelsContext(models, self, bind_refs, bind_backrefs)
+    def bind_ctx(self, models, bind_refs=True, bind_backrefs=True,
+                 context=False):
+        return _BoundModelsContext(models, self, bind_refs, bind_backrefs,
+                                   context=context)
+
+    def bind_context(self, models, bind_refs=True, bind_backrefs=True):
+        return self.bind_ctx(models, bind_refs=bind_refs,
+                             bind_backrefs=bind_backrefs, context=True)
 
     def get_noop_select(self, ctx):
         return ctx.literal('SELECT 0 WHERE 0')
@@ -6927,7 +7080,7 @@ class ManyToManyField(MetaField):
         tables = [model._meta.table_name for model in (lhs, rhs)]
 
         class Meta:
-            database = self.model._meta.database
+            database = self.model._meta._database
             schema = self.model._meta.schema
             table_name = '%s_%s_through' % tuple(tables)
             indexes = (
@@ -7329,7 +7482,7 @@ class Metadata(object):
                            '"table_name" for Models.')
             table_name = db_table
         self.model = model
-        self.database = database
+        self._database = database
 
         self.fields = {}
         self.columns = {}
@@ -7581,7 +7734,7 @@ class Metadata(object):
         return indexes
 
     def set_database(self, database):
-        self.database = database
+        self._database = database
         self.model._schema.database = database
         del self.table
 
@@ -7598,12 +7751,20 @@ class Metadata(object):
         del self.table
 
     def get_database_instance(self):
-        db = self.database
+        db = _resolve_model_database(self.model)
         if db is None:
             return
         if isinstance(db, Proxy):
             return db.obj if db.obj is not None else None
         return db
+
+    @property
+    def database(self):
+        return _resolve_model_database(self.model)
+
+    @database.setter
+    def database(self, database):
+        self.set_database(database)
 
 
 class SubclassAwareMetadata(Metadata):
@@ -7751,17 +7912,51 @@ class ModelBase(type):
 
 
 class _BoundModelsContext(_callable_context_manager):
-    def __init__(self, models, database, bind_refs, bind_backrefs):
+    def __init__(self, models, database, bind_refs, bind_backrefs,
+                 context=False):
         self.models = models
         self.database = database
         self.bind_refs = bind_refs
         self.bind_backrefs = bind_backrefs
+        self.context = context
 
     def _build_ctx(self):
         return type(self)(self.models, self.database, self.bind_refs,
-                          self.bind_backrefs)
+                          self.bind_backrefs, self.context)
+
+    def _validate_transactions(self):
+        if not self.context:
+            return
+        target = _resolve_database(self.database)
+        explicit = set(self.models)
+        for model in self.models:
+            related_models = {model}
+            for field in model._meta.manytomany.values():
+                related_models.add(field.through_model)
+            if self.bind_refs or self.bind_backrefs:
+                graph = model._meta.model_graph(refs=self.bind_refs,
+                                                 backrefs=self.bind_backrefs)
+                for _, related_model, _ in graph[1:]:
+                    related_models.add(related_model)
+            for related_model in related_models:
+                if related_model in explicit and related_model is not model:
+                    continue
+                current_database = _resolve_database(
+                    _resolve_model_database(related_model))
+                if current_database is not None and \
+                        current_database is not target and \
+                        current_database.in_transaction():
+                    raise OperationalError(
+                        'Cannot bind %s to a different database while a '
+                        'transaction is open.' % related_model.__name__)
 
     def __enter__(self):
+        self._validate_transactions()
+        if self.context:
+            self._bindings, self._token = _ModelDatabaseBindings.push(
+                self.models, self.database, self.bind_refs,
+                self.bind_backrefs)
+            return self.models
         self._orig_database = []
         for model in self.models:
             self._orig_database.append(model._meta.database)
@@ -7770,6 +7965,12 @@ class _BoundModelsContext(_callable_context_manager):
         return self.models
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.context:
+            try:
+                _ModelDatabaseBindings.pop(self._token)
+            finally:
+                self._token = None
+            return False
         for model, db in zip(self.models, self._orig_database):
             model.bind(db, self.bind_refs, self.bind_backrefs,
                        _exclude=set(self.models))
@@ -7887,7 +8088,7 @@ class Model(Node, metaclass=ModelBase):
             pk_name = cls._meta.primary_key.name
             field_names.remove(pk_name)
 
-        if cls._meta.database.returning_clause and \
+        if cls._meta.get_database_instance().returning_clause and \
            cls._meta.primary_key is not False:
             pk_fields = cls._meta.get_primary_keys()
         else:
@@ -8173,7 +8374,7 @@ class Model(Node, metaclass=ModelBase):
 
     @classmethod
     def bind(cls, database, bind_refs=True, bind_backrefs=True, _exclude=None):
-        is_different = cls._meta.database is not database
+        is_different = cls._meta._database is not database
         cls._meta.set_database(database)
         if bind_refs or bind_backrefs:
             if _exclude is None:
@@ -8186,8 +8387,15 @@ class Model(Node, metaclass=ModelBase):
         return is_different
 
     @classmethod
-    def bind_ctx(cls, database, bind_refs=True, bind_backrefs=True):
-        return _BoundModelsContext((cls,), database, bind_refs, bind_backrefs)
+    def bind_ctx(cls, database, bind_refs=True, bind_backrefs=True,
+                 context=False):
+        return _BoundModelsContext((cls,), database, bind_refs,
+                                   bind_backrefs, context=context)
+
+    @classmethod
+    def bind_context(cls, database, bind_refs=True, bind_backrefs=True):
+        return cls.bind_ctx(database, bind_refs=bind_refs,
+                            bind_backrefs=bind_backrefs, context=True)
 
     @classmethod
     def table_exists(cls):
@@ -8345,6 +8553,7 @@ class _ModelQueryHelper(object):
         super(_ModelQueryHelper, self).__init__(*args, **kwargs)
         if not self._database:
             self._database = self.model._meta.database
+            self._database_bound = False
 
     @Node.copy
     def objects(self, constructor=None):
@@ -8840,7 +9049,8 @@ class ModelSelect(BaseModelSelect, Select):
 
 class NoopModelSelect(ModelSelect):
     def __sql__(self, ctx):
-        return self.model._meta.database.get_noop_select(ctx)
+        database = _resolve_database(self._get_database())
+        return database.get_noop_select(ctx)
 
     def _get_cursor_wrapper(self, cursor):
         return CursorWrapper(cursor)
@@ -8874,10 +9084,11 @@ class ModelInsert(_ModelWriteQueryHelper, Insert):
 
     def __init__(self, *args, **kwargs):
         super(ModelInsert, self).__init__(*args, **kwargs)
-        if self._returning is None:
-            db = self.model._meta.get_database_instance()
-            if db is not None and db.returning_clause:
-                self._returning = self._pk_returning()
+
+    def _execute(self, database):
+        if self._returning is None and database.returning_clause:
+            self._returning = self._pk_returning()
+        return super(ModelInsert, self)._execute(database)
 
     def _pk_returning(self):
         return self.model._meta.get_primary_keys() or None

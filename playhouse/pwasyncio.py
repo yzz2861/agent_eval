@@ -420,7 +420,6 @@ class AsyncDatabaseMixin(object):
         return await greenlet_spawn(self.drop_tables, *args, **kwargs)
 
     async def aexecute(self, query):
-        query.bind(self)
         return await self.run(query.execute)
 
     async def get(self, query):
@@ -446,8 +445,8 @@ class AsyncDatabaseMixin(object):
 
     async def iterate(self, query, buffer_size=None):
         # Use similar approach to postgres_ext server-side query impl.
-        query.bind(self)
-        sql, params = query.sql()
+        database = query._get_database(self)
+        sql, params = database.get_sql_context().sql(query).query()
         conn = await self.aconnect()
         with __exception_wrapper__:
             cursor = await conn.execute_iter(sql, params or ())

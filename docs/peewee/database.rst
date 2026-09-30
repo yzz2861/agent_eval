@@ -362,22 +362,30 @@ for binding a given model class:
    # User is back to being bound to the sqlite_db.
    assert User._meta.database is sqlite_db
 
-Peewee database connections are thread-safe. However, if you plan to **bind**
-the database at run-time in a multi-threaded application, storing the model's
-database in a thread-local is necessary. This can be accomplished with
-the :class:`~playhouse.shortcuts.ThreadSafeDatabaseMetadata`.
+For multi-tenant services that temporarily bind the same model classes to
+different databases, use ``bind_context()``. The binding is stored in a
+``contextvars`` variable and is resolved when a query executes, so other
+threads and asyncio tasks are not affected (new threads begin with no binding).
+Exiting a nested context restores the enclosing binding.
 
 .. code-block:: python
 
-   from peewee import *
-   from playhouse.shortcuts import ThreadSafeDatabaseMetadata
+   with tenant_database.bind_context([User, Tweet]):
+       User.create(username='huey')  # Uses tenant_database.
 
-   class BaseModel(Model):
-       class Meta:
-           model_metadata_class = ThreadSafeDatabaseMetadata
+Forward and reverse relations follow the same ``bind_refs`` /
+``bind_backrefs`` rules as ``bind()``. Queries built before entering the
+context use the binding active when they execute. Once a transaction is open,
+switching one of its models to a different database raises
+:class:`OperationalError`; queries in that transaction continue using that
+database's thread/task-local connection. Each database keeps its own
+connection pool, and bindings never open, close, or share connections.
+An explicit ``query.bind(database)`` or ``query.execute(database)`` still
+takes precedence over the active model binding.
 
-The database can now be swapped safely while running in a multi-threaded
-environment using :meth:`Database.bind` or :meth:`Database.bind_ctx`.
+``bind_ctx(..., context=True)`` provides the same behavior.
+:class:`~playhouse.shortcuts.ThreadSafeDatabaseMetadata` remains available
+for applications that prefer thread-local permanent metadata binding.
 
 Connecting via URL
 ------------------

@@ -4,6 +4,7 @@ from peewee import *
 from peewee import Alias
 from peewee import CompoundSelectQuery
 from peewee import Metadata
+from peewee import _ModelDatabaseBindings
 from peewee import callable_
 
 
@@ -323,22 +324,38 @@ class ThreadSafeDatabaseMetadata(Metadata):
         # The database attribute is stored in a thread-local.
         self._database = None
         self._table = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._local = threading.local()
         super(ThreadSafeDatabaseMetadata, self).__init__(*args, **kwargs)
 
     def _get_db(self):
+        bindings = _ModelDatabaseBindings.current()
+        if bindings is not None:
+            database = bindings.get(self.model)
+            if database is not None:
+                return database
         return getattr(self._local, 'database', self._database)
     def _set_db(self, db):
-        if self._database is None:
-            self._database = db
-        self._local.database = db
+        current_thread = threading.get_ident()
+        with self._lock:
+            if getattr(self._local, 'thread_id', None) != current_thread:
+                self._local.thread_id = current_thread
+                self._local.database = self._database
+            if self._database is None:
+                self._database = db
+            self._local.database = db
     database = property(_get_db, _set_db)
 
     def set_database(self, database):
         with self._lock:
-            return super(ThreadSafeDatabaseMetadata,
-                         self).set_database(database)
+            self._local.thread_id = threading.get_ident()
+            self._local.database = database
+            self.model._schema.database = database
+            del self.table
+            if isinstance(database, Proxy) and database.obj is None:
+                database = None
+            for hook in self._db_hooks:
+                hook(database)
 
     @property
     def table(self):

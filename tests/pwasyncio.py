@@ -791,6 +791,45 @@ class TestQueryAexecuteErrors(unittest.IsolatedAsyncioTestCase):
         self.assertIs(q._database, proxy)  # Binding is still the proxy.
         await adb.close_pool()
 
+    async def test_bind_context_tasks_and_transactions(self):
+        a1 = AsyncSqliteDatabase(':memory:', pool_size=1)
+        a2 = AsyncSqliteDatabase(':memory:', pool_size=1)
+
+        class M(Model):
+            name = CharField()
+            class Meta:
+                database = a1
+
+        await a1.aconnect()
+        await a2.aconnect()
+        for database in (a1, a2):
+            async with database:
+                await database.aexecute_sql(
+                    'CREATE TABLE m (id INTEGER PRIMARY KEY, name TEXT)', ())
+
+        query = M.select()
+
+        async def use(database, name, delay=0):
+            with database.bind_context([M]):
+                await M.insert(name=name).aexecute()
+                if delay:
+                    await asyncio.sleep(delay)
+                return await database.count(query)
+
+        results = await asyncio.gather(
+            use(a1, 'a1', 0.02),
+            use(a2, 'a2'))
+        self.assertEqual(results, [1, 1])
+        self.assertIs(M._meta.database, a1)
+
+        with self.assertRaises(OperationalError):
+            async with a1.atomic():
+                with a2.bind_context([M]):
+                    pass
+
+        await a1.close_pool()
+        await a2.close_pool()
+
 
 class TestQueryHooksAsync(unittest.IsolatedAsyncioTestCase):
     async def test_query_hooks(self):

@@ -647,7 +647,7 @@ class ServerSideQuery(Node):
 
     def __iter__(self):
         if self._cursor_wrapper is None:
-            self._execute(self.query._database)
+            self._execute(self.query._get_database())
         return iter(self._cursor_wrapper.iterator())
 
     def close(self):
@@ -659,7 +659,7 @@ class ServerSideQuery(Node):
 
     def iterator(self):
         if self._cursor_wrapper is None:
-            self._execute(self.query._database)
+            self._execute(self.query._get_database())
         return self._cursor_wrapper.iterator()
 
     def _execute(self, database):

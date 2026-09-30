@@ -7,6 +7,11 @@ https://github.com/coleifer/peewee/releases
 
 ## master
 
+* Add context-scoped model bindings via ``Database.bind_context()``,
+  ``Model.bind_context()`` and ``bind_ctx(..., context=True)``. Bindings use
+  ``contextvars`` with a per-thread activation guard, resolve at query
+  execution, restore across nested scopes, and reject switching a model to
+  another database while a transaction is open.
 * Don't cache ``None`` on unselected FK join trees, see #3083.
 * Some fixes for edge-cases around non-unique aliases and unicode aliases,
   see #3081 and #3078.

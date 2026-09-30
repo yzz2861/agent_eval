@@ -726,16 +726,20 @@ Database
              test_db = SqliteDatabase(':memory:')
              test_db.bind([User, Tweet])
 
-   .. method:: bind_ctx(models, bind_refs=True, bind_backrefs=True)
+   .. method:: bind_ctx(models, bind_refs=True, bind_backrefs=True, context=False)
 
        :param list models: List of models to bind to the database.
        :param bool bind_refs: Bind models that are referenced using
            foreign-keys.
        :param bool bind_backrefs: Bind models that reference the given model
            with a foreign-key.
+       :param bool context: Resolve the binding per execution-context instead
+           of mutating shared model metadata.
 
        Create a context-manager or decorator that binds (associates) the given
        models with the current database for the duration of the wrapped block.
+       When ``context=True``, use :meth:`Database.bind_context` for concurrent
+       requests and asyncio tasks.
 
        Example:
 
@@ -2169,7 +2173,7 @@ Model
 
       See also: :meth:`Database.bind`.
 
-   .. classmethod:: bind_ctx(database, bind_refs=True, bind_backrefs=True)
+   .. classmethod:: bind_ctx(database, bind_refs=True, bind_backrefs=True, context=False)
 
       Like :meth:`~Model.bind`, but returns a context-manager or decorator that
       only binds the models for the duration of the wrapped block.
@@ -2181,6 +2185,11 @@ Model
               assert User._meta.database is test_db
 
       See also: :meth:`Database.bind_ctx`.
+
+   .. classmethod:: bind_context(database, bind_refs=True, bind_backrefs=True)
+
+      Like :meth:`~Model.bind_ctx`, but resolves the database at query
+      execution time without changing shared model metadata.
 
    .. classmethod:: table_exists()
 
