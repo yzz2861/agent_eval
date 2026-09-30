@@ -681,17 +681,44 @@ email backend API :ref:`provides an alternative
               Support for :class:`email.mime.base.MIMEBase` attachments is
               deprecated. Use :class:`~email.message.MIMEPart` instead.
 
-    .. method:: attach_file(path, mimetype=None)
+    .. method:: attach_file(path, mimetype=None, *, stream=False)
 
         Creates a new attachment using a file from your filesystem. Call it
         with the path of the file to attach and, optionally, the MIME type to
         use for the attachment. If the MIME type is omitted, it will be guessed
-        from the filename. You can use it like this::
+        from the filename. By default, the file is read immediately, like
+        :meth:`attach`. Pass ``stream=True`` to defer reading until sending;
+        the SMTP backend then base64-encodes and sends the file in fixed-size
+        chunks without loading it into memory. You can use it like this::
 
             message.attach_file("/images/weather_map.png")
+            message.attach_file("/images/weather_map.png", stream=True)
 
         For MIME types starting with :mimetype:`text/`, binary data is handled
         as in :meth:`attach`.
+
+        A streamed file is opened by Django and closed after each sending
+        attempt, including when an exception occurs. File paths can be sent
+        more than once because Django can reopen the file.
+
+    .. method:: attach_stream(stream, filename=None, mimetype=None, *,
+                               close_stream=False)
+
+        Attaches a binary file-like object whose ``read(size)`` method returns
+        at most ``size`` bytes. The SMTP backend reads, base64-encodes, and
+        sends it in fixed-size chunks. This is useful for objects that can
+        only be consumed once, such as uploads or pipe-backed streams.
+
+        By default, Django does not close the provided stream; pass
+        ``close_stream=True`` to close it after the sending attempt. A stream
+        that has been consumed cannot be retried as the same message; trying
+        to send it again raises ``ValueError`` rather than sending an empty
+        attachment. Use a path with :meth:`attach_file` and ``stream=True``
+        when an attachment must be reopenable for retries.
+
+        Streaming attachments are only serialized by backends that support
+        streaming, such as the SMTP backend. Calling :meth:`message` on a
+        message containing one raises ``ValueError``.
 
 .. class:: EmailAttachment
 

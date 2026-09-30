@@ -14,6 +14,33 @@ from django.utils.deprecation import RemovedInDjango2028Warning, warn_about_exte
 from django.utils.encoding import force_str, punycode
 from django.utils.functional import cached_property
 
+from ..message import StreamingAttachment
+
+
+def quote_smtp_data(chunks):
+    sentinel = object()
+
+    def chunks_with_sentinel():
+        yield from chunks
+        yield sentinel
+
+    pending = b""
+    for chunk in chunks_with_sentinel():
+        if chunk is sentinel:
+            if pending:
+                raise ValueError("SMTP message must end with CRLF.")
+            yield b".\r\n"
+            return
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise TypeError("SMTP message chunks must be bytes.")
+        data = pending + chunk
+        while b"\r\n" in data:
+            line, data = data.split(b"\r\n", 1)
+            if line.startswith(b"."):
+                line = b"." + line
+            yield line + b"\r\n"
+        pending = data
+
 
 class EmailBackend(BaseEmailBackend):
     """
@@ -32,6 +59,7 @@ class EmailBackend(BaseEmailBackend):
         timeout=None,
         ssl_keyfile=None,
         ssl_certfile=None,
+        stream_chunk_size=64 * 1024,
         **kwargs,
     ):
         # RemovedInDjango2028Warning.
@@ -44,6 +72,9 @@ class EmailBackend(BaseEmailBackend):
 
         super().__init__(**kwargs)
         self.fail_silently = fail_silently
+        self.stream_chunk_size = stream_chunk_size
+        if not isinstance(stream_chunk_size, int) or stream_chunk_size <= 0:
+            raise ValueError("stream_chunk_size must be a positive integer.")
         self.connection = None
         self._partial_connection = None
         self._lock = threading.RLock()
@@ -210,14 +241,77 @@ class EmailBackend(BaseEmailBackend):
             return False
         from_email = self.prep_address(email_message.from_email)
         recipients = [self.prep_address(addr) for addr in email_message.recipients()]
-        message = email_message.message(policy=email.policy.SMTP)
         try:
-            self.connection.sendmail(from_email, recipients, message.as_bytes())
+            if any(
+                isinstance(attachment, StreamingAttachment)
+                for attachment in email_message.attachments
+            ):
+                self._send_streaming(email_message, from_email, recipients)
+            else:
+                message = email_message.message(policy=email.policy.SMTP)
+                self.connection.sendmail(from_email, recipients, message.as_bytes())
         except smtplib.SMTPException:
             if not self.fail_silently:
                 raise
             return False
         return True
+
+    def _send_streaming(self, email_message, from_email, recipients):
+        connection = self.connection
+        for attachment in email_message.attachments:
+            if isinstance(attachment, StreamingAttachment):
+                attachment.prepare_to_send()
+        connection.ehlo_or_helo_if_needed()
+        code, response = connection.mail(from_email, ())
+        if code != 250:
+            if code == 421:
+                connection.close()
+            else:
+                connection._rset()
+            raise smtplib.SMTPSenderRefused(code, response, from_email)
+
+        recipient_errors = {}
+        for recipient in recipients:
+            code, response = connection.rcpt(recipient, ())
+            if code not in (250, 251):
+                recipient_errors[recipient] = (code, response)
+            if code == 421:
+                connection.close()
+                raise smtplib.SMTPRecipientsRefused(recipient_errors)
+        if len(recipient_errors) == len(recipients):
+            connection._rset()
+            raise smtplib.SMTPRecipientsRefused(recipient_errors)
+
+        connection.putcmd("data")
+        code, response = connection.getreply()
+        if code != 354:
+            if code == 421:
+                connection.close()
+            else:
+                connection._rset()
+            raise smtplib.SMTPDataError(code, response)
+
+        chunks = email_message.iter_message_chunks(
+            policy=email.policy.SMTP,
+            chunk_size=self.stream_chunk_size,
+        )
+        quoted_chunks = quote_smtp_data(chunks)
+        try:
+            for chunk in quoted_chunks:
+                connection.send(chunk)
+        except OSError:
+            connection.close()
+            raise smtplib.SMTPServerDisconnected("Server not connected")
+        finally:
+            quoted_chunks.close()
+
+        code, response = connection.getreply()
+        if code != 250:
+            if code == 421:
+                connection.close()
+            else:
+                connection._rset()
+            raise smtplib.SMTPDataError(code, response)
 
     def prep_address(self, address, force_ascii=True):
         """

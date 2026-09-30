@@ -147,7 +147,10 @@ Decorators
 Email
 ~~~~~
 
-* ...
+* ``EmailMessage.attach_file()`` now accepts ``stream=True``, and the new
+  ``EmailMessage.attach_stream()`` method accepts a binary file-like object.
+  The SMTP backend encodes and sends these attachments in chunks, so memory
+  use no longer grows with attachment size.
 
 Error Reporting
 ~~~~~~~~~~~~~~~

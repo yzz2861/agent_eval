@@ -1,3 +1,4 @@
+import base64
 import email.message
 import email.policy
 import mimetypes
@@ -237,6 +238,117 @@ EmailAlternative = namedtuple("EmailAlternative", ["content", "mimetype"])
 EmailAttachment = namedtuple("EmailAttachment", ["filename", "content", "mimetype"])
 
 
+class StreamingAttachment:
+    """A binary attachment that is encoded and sent without buffering it."""
+
+    def __init__(self, filename=None, mimetype=None):
+        self.filename = filename
+        self.mimetype = (
+            mimetype
+            or mimetypes.guess_type(filename)[0]
+            or DEFAULT_ATTACHMENT_MIME_TYPE
+        )
+        self.stream = None
+        self._opened = False
+        self._consumed = False
+
+    def open_stream(self):
+        if self._consumed and not self.can_retry():
+            raise ValueError("Streaming attachment can only be sent once.")
+        if self._opened and self.stream is not None:
+            return self.stream
+        stream = self._open_stream()
+        self.stream = stream
+        self._opened = True
+        self._consumed = True
+        return stream
+
+    def prepare_to_send(self):
+        if self._consumed and not self.can_retry():
+            raise ValueError("Streaming attachment can only be sent once.")
+
+    def _open_stream(self):
+        raise NotImplementedError
+
+    def can_retry(self):
+        return False
+
+    def close(self):
+        if self.stream is not None:
+            stream = self.stream
+            self.stream = None
+            self._close_stream(stream)
+
+    def _close_stream(self, stream):
+        stream.close()
+
+    def chunks(self, size=64 * 1024):
+        stream = self.open_stream()
+        try:
+            leftover = b""
+            line = b""
+            encoded_buffer = []
+
+            def encode(data):
+                nonlocal line
+                encoded = base64.b64encode(data)
+                line += encoded
+                complete_length = (len(line) // 76) * 76
+                if complete_length:
+                    for offset in range(0, complete_length, 76):
+                        encoded_buffer.append(line[offset : offset + 76])
+                    line = line[complete_length:]
+
+            while True:
+                chunk = stream.read(size)
+                if not chunk:
+                    break
+                if not isinstance(chunk, (bytes, bytearray)):
+                    raise TypeError("Streaming attachment content must be bytes.")
+                chunk = leftover + bytes(chunk)
+                complete_length = (len(chunk) // 3) * 3
+                leftover = chunk[complete_length:]
+                encode(chunk[:complete_length])
+                if encoded_buffer:
+                    yield b"\r\n".join(encoded_buffer) + b"\r\n"
+                    encoded_buffer.clear()
+
+            if leftover:
+                encode(leftover)
+            if line:
+                encoded_buffer.append(line)
+            if encoded_buffer:
+                yield b"\r\n".join(encoded_buffer) + b"\r\n"
+        finally:
+            self.close()
+
+
+class StreamingFileAttachment(StreamingAttachment):
+    def __init__(self, path, mimetype=None):
+        self.path = Path(path)
+        super().__init__(self.path.name, mimetype)
+
+    def can_retry(self):
+        return True
+
+    def _open_stream(self):
+        return self.path.open("rb")
+
+
+class StreamingBinaryAttachment(StreamingAttachment):
+    def __init__(self, stream, filename=None, mimetype=None, *, close_stream=False):
+        super().__init__(filename, mimetype)
+        self.raw_stream = stream
+        self.close_stream = close_stream
+
+    def _open_stream(self):
+        return self.raw_stream
+
+    def _close_stream(self, stream):
+        if self.close_stream:
+            super()._close_stream(stream)
+
+
 class EmailMessage:
     """A container for email information."""
 
@@ -305,7 +417,9 @@ class EmailMessage:
         self.attachments = []
         if attachments:
             for attachment in attachments:
-                if isinstance(attachment, email.message.MIMEPart):
+                if isinstance(attachment, StreamingAttachment):
+                    self.attachments.append(attachment)
+                elif isinstance(attachment, email.message.MIMEPart):
                     self.attach(attachment)
                 elif isinstance(attachment, MIMEBase):
                     # RemovedInDjango2028Warning.
@@ -337,6 +451,17 @@ class EmailMessage:
         self._connection = value
 
     def message(self, *, policy=email.policy.default):
+        if any(
+            isinstance(attachment, StreamingAttachment)
+            for attachment in self.attachments
+        ):
+            raise ValueError(
+                "Streaming attachments require a backend that supports "
+                "streaming serialization."
+            )
+        return self._message(policy)
+
+    def _message(self, policy):
         msg = email.message.EmailMessage(policy=policy)
         self._add_bodies(msg)
         self._add_attachments(msg)
@@ -371,6 +496,33 @@ class EmailMessage:
                 msg[name] = force_str(value, strings_only=True)
         self._idna_encode_address_header_domains(msg)
         return msg
+
+    def iter_message_chunks(self, *, policy=email.policy.SMTP, chunk_size=64 * 1024):
+        msg = self._message(policy)
+        if msg.get_boundary() is None:
+            msg.set_boundary(make_msgid()[1:-1])
+        boundary = msg.get_boundary()
+
+        for name, value in msg.raw_items():
+            yield policy.fold(name, value).encode("ascii", "surrogateescape")
+        yield b"\r\n"
+
+        parts = msg.get_payload()
+        for index, part in enumerate(parts):
+            if index:
+                yield b"\r\n--" + boundary.encode("ascii") + b"\r\n"
+            else:
+                yield b"--" + boundary.encode("ascii") + b"\r\n"
+            attachment = getattr(part, "_django_streaming_attachment", None)
+            if attachment is not None:
+                for name, value in part.raw_items():
+                    yield policy.fold(name, value).encode("ascii", "surrogateescape")
+                yield b"\r\n"
+                yield from attachment.chunks(chunk_size)
+            else:
+                yield part.as_bytes()
+            if index == len(parts) - 1:
+                yield b"\r\n--" + boundary.encode("ascii") + b"--\r\n"
 
     def recipients(self):
         """
@@ -471,7 +623,7 @@ class EmailMessage:
 
             self.attachments.append(EmailAttachment(filename, content, mimetype))
 
-    def attach_file(self, path, mimetype=None):
+    def attach_file(self, path, mimetype=None, *, stream=False):
         """
         Attach a file from the filesystem.
 
@@ -483,9 +635,24 @@ class EmailMessage:
         DEFAULT_ATTACHMENT_MIME_TYPE and don't decode the content.
         """
         path = Path(path)
-        with path.open("rb") as file:
-            content = file.read()
-            self.attach(path.name, content, mimetype)
+        if stream:
+            self.attachments.append(StreamingFileAttachment(path, mimetype))
+        else:
+            with path.open("rb") as file:
+                content = file.read()
+                self.attach(path.name, content, mimetype)
+
+    def attach_stream(
+        self, stream, filename=None, mimetype=None, *, close_stream=False
+    ):
+        self.attachments.append(
+            StreamingBinaryAttachment(
+                stream,
+                filename,
+                mimetype,
+                close_stream=close_stream,
+            )
+        )
 
     def _add_bodies(self, msg):
         if self.body or not self.attachments:
@@ -510,8 +677,24 @@ class EmailMessage:
                 elif isinstance(attachment, MIMEBase):
                     # RemovedInDjango2028Warning.
                     msg.attach(attachment)
+                elif isinstance(attachment, StreamingAttachment):
+                    self._add_streaming_attachment(msg, attachment)
                 else:
                     self._add_attachment(msg, *attachment)
+
+    def _add_streaming_attachment(self, msg, attachment):
+        maintype, subtype = attachment.mimetype.split("/", 1)
+        part = email.message.MIMEPart(policy=msg.policy)
+        part.set_content(
+            b"",
+            maintype=maintype,
+            subtype=subtype,
+            filename=str(attachment.filename),
+        )
+        part.set_payload(b"")
+        part.replace_header("Content-Transfer-Encoding", "base64")
+        part._django_streaming_attachment = attachment
+        msg.attach(part)
 
     def _add_attachment(self, msg, filename, content, mimetype):
         encoding = self.encoding or settings.DEFAULT_CHARSET
