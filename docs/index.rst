@@ -98,6 +98,8 @@ inserted into the cache.
    This class discards the least recently used items first to make
    space when necessary.
 
+.. autoclass:: PartitionedLRUCache(maxsize, partitions=None, getsizeof=None)
+
 .. autoclass:: RRCache(maxsize, choice=random.choice, getsizeof=None)
    :members: choice, popitem
 

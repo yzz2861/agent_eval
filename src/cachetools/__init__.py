@@ -5,6 +5,7 @@ __all__ = (
     "FIFOCache",
     "LFUCache",
     "LRUCache",
+    "PartitionedLRUCache",
     "RRCache",
     "TLRUCache",
     "TTLCache",
@@ -324,6 +325,312 @@ class LRUCache(Cache):
             self.__order.move_to_end(key)
         except KeyError:
             self.__order[key] = None
+
+
+class PartitionedLRUCache(collections.abc.MutableMapping):
+    """LRU cache with reserved size quotas for multiple partitions.
+
+    When the shared cache needs space, partitions using more than their quota
+    relinquish borrowed space first.  Among those partitions, the one with the
+    largest borrowed size is selected first; ties use partition registration
+    order.  Items within a partition are evicted LRU.
+    """
+
+    __marker = object()
+
+    def __init__(self, maxsize, partitions=None, getsizeof=None):
+        if maxsize < 0:
+            raise ValueError("maxsize must be non-negative")
+        if getsizeof:
+            self.getsizeof = getsizeof
+
+        self.__maxsize = maxsize
+        self.__currsize = 0
+        self.__size = _DefaultSize()
+        if self.getsizeof is not PartitionedLRUCache.getsizeof:
+            self.__size = {}
+
+        self.__data = {}
+        self.__order = {}
+        self.__partition_currsize = {}
+        self.__quota = {}
+
+        if partitions is None:
+            partitions = ()
+        if isinstance(partitions, collections.abc.Mapping):
+            for partition, quota in partitions.items():
+                self.set_quota(partition, quota)
+        else:
+            for partition in partitions:
+                self.set_quota(partition, 0)
+
+    def __repr__(self):
+        return "%s(%s, maxsize=%r, currsize=%r)" % (
+            type(self).__name__,
+            repr(dict(self.items())),
+            self.__maxsize,
+            self.__currsize,
+        )
+
+    def __getitem__(self, key):
+        partition, item_key = self._partition_key(key)
+        try:
+            value = self.__data[partition][item_key]
+        except KeyError:
+            return self.__missing__(key)
+        self.__order[partition].move_to_end(item_key)
+        return value
+
+    def __setitem__(self, key, value):
+        partition, item_key = self._partition_key(key)
+        self.set_partition_item(partition, item_key, value)
+
+    def __delitem__(self, key):
+        partition, item_key = self._partition_key(key)
+        self.delete_partition_item(partition, item_key)
+
+    def __missing__(self, key):
+        raise KeyError(key)
+
+    def __contains__(self, key):
+        partition, item_key = self._partition_key(key)
+        try:
+            return item_key in self.__data[partition]
+        except KeyError:
+            return False
+
+    def __iter__(self):
+        for partition, data in self.__data.items():
+            for item_key in data:
+                yield (partition, item_key)
+
+    def __len__(self):
+        return sum(len(data) for data in self.__data.values())
+
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        return default
+
+    def pop(self, key, default=__marker):
+        if key in self:
+            value = self[key]
+            del self[key]
+        elif default is self.__marker:
+            raise KeyError(key)
+        else:
+            value = default
+        return value
+
+    def setdefault(self, key, default=None):
+        if key in self:
+            return self[key]
+        self[key] = default
+        return default
+
+    def clear(self):
+        for data in self.__data.values():
+            data.clear()
+        for order in self.__order.values():
+            order.clear()
+        self.__size.clear()
+        for partition in self.__partition_currsize:
+            self.__partition_currsize[partition] = 0
+        self.__currsize = 0
+
+    @property
+    def maxsize(self):
+        """The maximum total size of all partitions."""
+        return self.__maxsize
+
+    @property
+    def currsize(self):
+        """The current total size of all partitions."""
+        return self.__currsize
+
+    @property
+    def partitions(self):
+        """Partition names in registration order."""
+        return tuple(self.__quota)
+
+    def partition_quota(self, partition):
+        """Return the reserved quota for a partition."""
+        return self.__quota[partition]
+
+    def partition_currsize(self, partition):
+        """Return the current size of a partition."""
+        return self.__partition_currsize[partition]
+
+    def partition_borrowed(self, partition):
+        """Return the size a partition uses above its reserved quota."""
+        return max(
+            0, self.partition_currsize(partition) - self.partition_quota(partition)
+        )
+
+    def get_partition_item(self, partition, key, default=__marker):
+        """Return an item from a partition."""
+        try:
+            return self[(partition, key)]
+        except KeyError:
+            if default is self.__marker:
+                raise
+            return default
+
+    def set_partition_item(self, partition, key, value):
+        """Add or update an item in a partition."""
+        size = self.getsizeof(value)
+        if size < 0:
+            raise ValueError("value size must be non-negative")
+
+        protected_size = 0
+        for other_partition in self.__quota:
+            if other_partition != partition:
+                other_size = self.__partition_currsize[other_partition]
+                other_quota = self.__quota[other_partition]
+                protected_size += min(other_size, other_quota)
+
+        if size > self.__maxsize - protected_size:
+            raise ValueError("value too large")
+
+        self.__add_partition(partition, 0)
+        exists = key in self.__order[partition]
+        old_size = self.__size[(partition, key)] if exists else 0
+        delta = size - old_size if exists else size
+
+        while self.__currsize + delta > self.__maxsize:
+            borrower = self.__largest_borrower(partition)
+            if borrower is None:
+                target_size = size
+                if exists:
+                    target_size = (
+                        self.__partition_currsize[partition]
+                        - old_size
+                        + size
+                    )
+                if target_size > self.__quota[partition] and self.__order[partition]:
+                    borrower = partition
+            if borrower is None:
+                raise ValueError("value too large")
+
+            evicted_key, _ = self.__evict_lru(borrower)
+            if borrower == partition and evicted_key == key:
+                exists = False
+                delta = size
+
+        if exists:
+            self.__data[partition][key] = value
+            self.__size[(partition, key)] = size
+            self.__partition_currsize[partition] += delta
+            self.__currsize += delta
+            self.__order[partition].move_to_end(key)
+        else:
+            self.__data[partition][key] = value
+            self.__order[partition][key] = None
+            self.__size[(partition, key)] = size
+            self.__partition_currsize[partition] += size
+            self.__currsize += size
+
+    def delete_partition_item(self, partition, key):
+        """Remove an item from a partition."""
+        try:
+            self.__delete_item(partition, key)
+        except KeyError:
+            raise KeyError((partition, key)) from None
+
+    def clear_partition(self, partition):
+        """Remove all items from a partition while retaining its quota."""
+        size = self.__partition_currsize[partition]
+        item_keys = tuple(self.__order[partition])
+        self.__data[partition].clear()
+        self.__order[partition].clear()
+        for item_key in item_keys:
+            self.__size.pop((partition, item_key))
+        self.__partition_currsize[partition] = 0
+        self.__currsize -= size
+
+    def set_quota(self, partition, quota):
+        """Set the reserved quota for a partition."""
+        if quota < 0:
+            raise ValueError("quota must be non-negative")
+        total_quota = sum(self.__quota.values()) + quota
+        if partition in self.__quota:
+            total_quota -= self.__quota[partition]
+        if total_quota > self.__maxsize:
+            raise ValueError("total quotas must not exceed maxsize")
+        self.__add_partition(partition, quota)
+
+    def set_maxsize(self, maxsize):
+        """Set the total cache size and evict borrowed space if required."""
+        if maxsize < 0:
+            raise ValueError("maxsize must be non-negative")
+        if sum(self.__quota.values()) > maxsize:
+            raise ValueError("total quotas must not exceed maxsize")
+        self.__maxsize = maxsize
+        self.__evict_borrowed()
+
+    def remove_partition(self, partition):
+        """Remove an empty partition and its quota."""
+        if self.__partition_currsize[partition]:
+            raise ValueError("partition is not empty")
+        del self.__data[partition]
+        del self.__order[partition]
+        del self.__partition_currsize[partition]
+        del self.__quota[partition]
+
+    @staticmethod
+    def getsizeof(value):
+        """Return the size of a cache element's value."""
+        return 1
+
+    @staticmethod
+    def _partition_key(key):
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise TypeError("key must be a (partition, key) tuple")
+        return key
+
+    def __add_partition(self, partition, quota):
+        if partition not in self.__quota:
+            self.__data[partition] = {}
+            self.__order[partition] = collections.OrderedDict()
+            self.__partition_currsize[partition] = 0
+            self.__quota[partition] = quota
+        elif quota:
+            self.__quota[partition] = quota
+
+    def __delete_item(self, partition, key):
+        size = self.__size.pop((partition, key))
+        del self.__data[partition][key]
+        del self.__order[partition][key]
+        self.__partition_currsize[partition] -= size
+        self.__currsize -= size
+        return size
+
+    def __evict_lru(self, partition):
+        key = next(iter(self.__order[partition]))
+        value = self.__data[partition][key]
+        self.__delete_item(partition, key)
+        return (key, value)
+
+    def __largest_borrower(self, exclude_partition=None):
+        best = None
+        for partition, size in self.__partition_currsize.items():
+            if partition == exclude_partition:
+                continue
+            borrowed = size - self.__quota[partition]
+            if borrowed <= 0 or not self.__order[partition]:
+                continue
+            if best is None or borrowed > (
+                self.__partition_currsize[best] - self.__quota[best]
+            ):
+                best = partition
+        return best
+
+    def __evict_borrowed(self):
+        while self.__currsize > self.__maxsize:
+            partition = self.__largest_borrower()
+            if partition is None:
+                raise ValueError("total quotas must not exceed maxsize")
+            self.__evict_lru(partition)
 
 
 class RRCache(Cache):
