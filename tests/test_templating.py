@@ -530,3 +530,176 @@ def test_custom_jinja_env():
 
     app = CustomFlask(__name__)
     assert isinstance(app.jinja_env, CustomEnvironment)
+
+
+def _make_namespaced_app(tmp_path, order=("one", "two")):
+    """Two blueprints that both provide ``base.html`` and ``shared.html``.
+
+    The application also provides ``base.html``. It only overrides
+    unqualified lookups.
+    """
+    app_dir = tmp_path / "app"
+    (app_dir / "templates").mkdir(parents=True, exist_ok=True)
+    (app_dir / "templates" / "base.html").write_text("App Base")
+    app = flask.Flask("namespaced", root_path=app_dir)
+
+    blueprints = {}
+
+    for name in ("one", "two"):
+        templates_dir = tmp_path / name / "templates"
+        (templates_dir / "sub").mkdir(parents=True, exist_ok=True)
+        (templates_dir / "base.html").write_text(f"{name} Base")
+        (templates_dir / "shared.html").write_text(f"{name} Shared")
+        (templates_dir / "sub" / "index.html").write_text(
+            "{% extends './base.html' %}"
+        )
+        (templates_dir / "sub" / "base.html").write_text(
+            f"{{{{ render_parent }}}} {name} Sub Base"
+        )
+        (templates_dir / "sub" / "include.html").write_text(
+            "{% include '../shared.html' %}"
+        )
+        (templates_dir / "macros").mkdir(exist_ok=True)
+        (templates_dir / "macros" / "ui.html").write_text(
+            "{% macro greet(who) %}hi {{ who }} from " + name + "{% endmacro %}"
+        )
+        (templates_dir / "sub" / "use_macro.html").write_text(
+            "{% from '../macros/ui.html' import greet %}{{ greet('world') }}"
+        )
+        blueprints[name] = flask.Blueprint(
+            name, name, template_folder=templates_dir
+        )
+
+    for name in order:
+        app.register_blueprint(blueprints[name])
+
+    return app
+
+
+def test_qualified_blueprint_template(tmp_path):
+    app = _make_namespaced_app(tmp_path)
+
+    with app.app_context():
+        assert flask.render_template("one:base.html") == "one Base"
+        assert flask.render_template("two:base.html") == "two Base"
+        # The application template only wins for unqualified names.
+        assert flask.render_template("base.html") == "App Base"
+
+
+def test_qualified_template_relative_extends_stays_in_namespace(tmp_path):
+    app = _make_namespaced_app(tmp_path)
+
+    with app.app_context():
+        assert (
+            flask.render_template("one:sub/index.html", render_parent="!")
+            == "! one Sub Base"
+        )
+        assert (
+            flask.render_template("two:sub/index.html", render_parent="?")
+            == "? two Sub Base"
+        )
+
+
+def test_qualified_template_relative_include_and_import(tmp_path):
+    app = _make_namespaced_app(tmp_path)
+
+    with app.app_context():
+        assert flask.render_template("one:sub/include.html") == "one Shared"
+        assert flask.render_template("two:sub/include.html") == "two Shared"
+        assert (
+            flask.render_template("one:sub/use_macro.html")
+            == "hi world from one"
+        )
+
+
+def test_qualified_template_unqualified_reference_uses_search_order(tmp_path):
+    # A bare (non-relative) reference from a qualified template is still an
+    # unqualified name and may be overridden by the application.
+    templates_dir = tmp_path / "bp" / "templates"
+    templates_dir.mkdir(parents=True)
+    (templates_dir / "page.html").write_text("{% include 'shared.html' %}")
+    (templates_dir / "shared.html").write_text("Blueprint Shared")
+    app_dir = tmp_path / "app"
+    (app_dir / "templates").mkdir(parents=True)
+    (app_dir / "templates" / "shared.html").write_text("App Shared")
+    app = flask.Flask("override", root_path=app_dir)
+    app.register_blueprint(
+        flask.Blueprint("bp", "bp", template_folder=templates_dir)
+    )
+
+    with app.app_context():
+        assert flask.render_template("bp:page.html") == "App Shared"
+
+
+def test_qualified_template_registration_order_invariant(tmp_path):
+    for order in (("one", "two"), ("two", "one")):
+        app = _make_namespaced_app(tmp_path, order=order)
+
+        with app.app_context():
+            assert flask.render_template("one:base.html") == "one Base"
+            assert flask.render_template("two:base.html") == "two Base"
+            assert (
+                flask.render_template("one:sub/include.html") == "one Shared"
+            )
+
+
+def test_same_blueprint_registered_twice(tmp_path):
+    templates_dir = tmp_path / "bp" / "templates"
+    templates_dir.mkdir(parents=True)
+    (templates_dir / "page.html").write_text("{{ bp_name }}")
+    app = flask.Flask("twice", root_path=tmp_path)
+    blueprint = flask.Blueprint("bp", "bp", template_folder=templates_dir)
+    app.register_blueprint(blueprint)
+    app.register_blueprint(blueprint, name="other")
+
+    with app.app_context():
+        assert flask.render_template("bp:page.html", bp_name="first") == "first"
+        assert (
+            flask.render_template("other:page.html", bp_name="second") == "second"
+        )
+        names = {key[1] for key in app.jinja_env.cache}
+        assert "bp:page.html" in names
+        assert "other:page.html" in names
+
+
+def test_qualified_template_cache_keys_are_distinct(tmp_path):
+    app = _make_namespaced_app(tmp_path)
+
+    with app.app_context():
+        flask.render_template("one:shared.html")
+        flask.render_template("two:shared.html")
+        flask.render_template("shared.html")
+        names = {key[1] for key in app.jinja_env.cache}
+
+    assert {"one:shared.html", "two:shared.html", "shared.html"} <= names
+
+
+def test_qualified_template_not_found_keeps_qualified_name(tmp_path):
+    app = _make_namespaced_app(tmp_path)
+
+    with app.app_context():
+        with pytest.raises(TemplateNotFound) as exc_info:
+            flask.render_template("one:does_not_exist.html")
+
+        assert exc_info.value.name == "one:does_not_exist.html"
+
+        with pytest.raises(TemplateNotFound) as exc_info:
+            flask.render_template("unknown:base.html")
+
+        assert exc_info.value.name == "unknown:base.html"
+
+
+def test_qualified_relative_not_found_keeps_qualified_name(tmp_path):
+    templates_dir = tmp_path / "bp" / "templates" / "sub"
+    templates_dir.mkdir(parents=True)
+    (templates_dir / "page.html").write_text("{% include './missing.html' %}")
+    app = flask.Flask("relative", root_path=tmp_path)
+    app.register_blueprint(
+        flask.Blueprint("bp", "bp", template_folder=templates_dir.parent)
+    )
+
+    with app.app_context():
+        with pytest.raises(TemplateNotFound) as exc_info:
+            flask.render_template("bp:sub/page.html")
+
+        assert exc_info.value.name == "bp:sub/missing.html"

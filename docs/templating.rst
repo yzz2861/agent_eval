@@ -228,6 +228,18 @@ You could also build `format_price` as a template filter (see
 :ref:`registering-filters`), but this demonstrates how to pass functions in a
 context processor.
 
+Blueprint Templates
+-------------------
+
+Templates provided by blueprints are normally looked up by an unqualified
+name, searching the application's template folder first and then each
+blueprint's template folder in registration order. A template name can be
+qualified instead, such as ``"admin:index.html"``, to look it up only in the
+``admin`` blueprint. Relative references such as ``{% extends
+"./base.html" %}`` stay within the qualified blueprint's namespace. See
+:ref:`qualified-template-names` in the blueprint documentation for more
+information.
+
 Streaming
 ---------
 

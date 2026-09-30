@@ -30,6 +30,14 @@ Unreleased
     of only lower case file extensions. :pr:`6012`
 -   Fix parsing IPv6 with port in ``run`` and the test client. :pr:`6096`
 -   Add ``app.query`` route decorator for the HTTP QUERY method.
+-   Blueprint templates can be referenced by a qualified name in the form
+    ``"blueprint_name:template_name"``. A qualified name is looked up only in
+    that blueprint's template folder, so application overrides and blueprint
+    registration order do not affect it. Relative ``extends``, ``include``,
+    ``import`` and ``from ... import`` references starting with ``"./"`` or
+    ``"../"`` stay within the qualified template's blueprint namespace.
+    Qualified and unqualified templates are cached separately and
+    :exc:`jinja2.TemplateNotFound` keeps the full qualified name.
 
 
 Version 3.1.3

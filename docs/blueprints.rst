@@ -262,6 +262,61 @@ the correct templates enable the ``EXPLAIN_TEMPLATE_LOADING`` config
 variable which will instruct Flask to print out the steps it goes through
 to locate templates on every ``render_template`` call.
 
+.. _qualified-template-names:
+
+Qualified template names
+.......................
+
+As shown above, an unqualified template name is searched for in the
+application template folder and then each blueprint's template folder in
+registration order. That makes it easy for the application to override a
+blueprint template, but it also means two blueprints can provide a template
+with the same name and the result depends on which blueprint was registered
+first.
+
+To render a specific blueprint's template regardless of registration order,
+prefix the template name with the blueprint's registered name and a colon:
+
+.. code-block:: python
+
+    render_template("admin:index.html")
+
+Only that blueprint's template folder is searched, so the application
+template folder and other blueprints can not override or shadow the
+template. If the blueprint or template does not exist,
+:exc:`jinja2.TemplateNotFound` is raised with the full qualified name.
+
+Relative references in a qualified template stay within that blueprint's
+namespace. This makes it possible to organize a blueprint's templates without
+repeating the blueprint name in every folder::
+
+    yourpackage/
+        blueprints/
+            admin/
+                templates/
+                    base.html
+                    index.html
+
+.. code-block:: jinja
+
+    {# admin/templates/index.html #}
+    {% extends "./base.html" %}
+
+The ``"./"`` and ``"../"`` prefixes are relative to the current template,
+and apply to ``{% extends %}``, ``{% include %}``, ``{% import %}`` and
+``{% from ... import %}``. A reference without such a prefix is still an
+unqualified name and uses the normal search order, including application
+overrides.
+
+The name a blueprint is registered with is the name used to qualify
+templates. If the same blueprint is registered twice with different names,
+each registration can be addressed separately, for example
+``"admin:index.html"`` and ``"admin2:index.html"``. Qualified and
+unqualified names, and the same name qualified with different blueprint
+names, are cached and loaded independently.
+
+.. versionadded:: 3.2
+
 Building URLs
 -------------
 
