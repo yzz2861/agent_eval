@@ -1,11 +1,22 @@
 import os
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import contextmanager
 from enum import Enum
 from typing import Annotated, Any, Literal, TypeVar
 
 from annotated_doc import Doc
 from fastapi import routing
 from fastapi.datastructures import Default, DefaultPlaceholder
+from fastapi.dependencies.overrides import (
+    dependency_overrides_context as dependency_overrides_context_manager,
+)
 from fastapi.exception_handlers import (
     http_exception_handler,
     request_validation_exception_handler,
@@ -1016,6 +1027,15 @@ class FastAPI(Starlette):
         )
         self.middleware_stack: ASGIApp | None = None
         self.setup()
+
+    @contextmanager
+    def dependency_overrides_context(
+        self,
+        overrides: Mapping[Callable[..., Any], Callable[..., Any]],
+    ) -> Iterator[None]:
+        """Temporarily override dependencies for the current context."""
+        with dependency_overrides_context_manager(self, overrides):
+            yield
 
     def build_middleware_stack(self) -> ASGIApp:
         # Duplicate/override from Starlette to add AsyncExitStackMiddleware
