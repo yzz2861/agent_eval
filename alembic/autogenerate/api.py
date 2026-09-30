@@ -399,6 +399,12 @@ class AutogenContext:
         self.imports = set()
         self.opts: dict[str, Any] = opts
         self._has_batch: bool = False
+        self._rename_hints = None
+        self._pending_foreign_key_ops = None
+
+    @property
+    def rename_hints(self):
+        return self._rename_hints
 
     @util.memoized_property
     def inspector(self) -> Inspector:

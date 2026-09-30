@@ -422,6 +422,7 @@ class EnvironmentContext(util.ModuleClsProxy):
         tag: str | None = None,
         template_args: dict[str, Any] | None = None,
         render_as_batch: bool = False,
+        rename_hints: Mapping[str, Mapping[Any, Any]] | None = None,
         target_metadata: MetaData | Sequence[MetaData] | None = None,
         include_name: IncludeNameFn | None = None,
         include_object: IncludeObjectFn | None = None,
@@ -734,6 +735,15 @@ class EnvironmentContext(util.ModuleClsProxy):
 
             :ref:`batch_migrations`
 
+        :param rename_hints: Explicit mappings used by autogenerate to
+         detect renamed tables and columns instead of emitting drop/add
+         pairs. Tables are supplied as ``"tables": {(schema, old):
+         (schema, new)}``, or ``{old: new}`` for the default schema.
+         Columns are supplied as ``"columns": {(schema, table, old):
+         (schema, table, new)}``, or ``{old: new}`` for the default
+         schema. When a table is renamed, its column hints still name
+         the existing table. No heuristic name matching is performed.
+
         :param include_schemas: If True, autogenerate will scan across
          all schemas located by the SQLAlchemy
          :meth:`~sqlalchemy.engine.reflection.Inspector.get_schema_names`
@@ -915,6 +925,7 @@ class EnvironmentContext(util.ModuleClsProxy):
         opts["include_object"] = include_object
         opts["include_schemas"] = include_schemas
         opts["render_as_batch"] = render_as_batch
+        opts["rename_hints"] = rename_hints
         opts["upgrade_token"] = upgrade_token
         opts["downgrade_token"] = downgrade_token
         opts["sqlalchemy_module_prefix"] = sqlalchemy_module_prefix

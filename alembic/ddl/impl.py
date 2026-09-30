@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 import logging
 import re
 from typing import Any
@@ -201,6 +203,10 @@ class DefaultImpl(metaclass=ImplMeta):
         before the new one uses those same names.
 
         """
+
+    @contextmanager
+    def batch_recreate(self) -> Iterator[None]:
+        yield
 
     @property
     def bind(self) -> Connection | None:

@@ -108,69 +108,72 @@ class BatchOperationsImpl:
     def flush(self) -> None:
         should_recreate = self._should_recreate()
 
-        with _ensure_scope_for_ddl(self.impl.connection):
-            if not should_recreate:
+        if not should_recreate:
+            with _ensure_scope_for_ddl(self.impl.connection):
                 for opname, arg, kw in self.batch:
                     fn = getattr(self.operations.impl, opname)
                     fn(*arg, **kw)
-            else:
-                m1 = MetaData()
+        else:
+            with self.impl.batch_recreate():
+                with _ensure_scope_for_ddl(self.impl.connection):
+                    self._flush_recreate()
 
-                if self.copy_from is not None:
-                    existing_table = self.copy_from
-                    reflected = False
-                else:
-                    if self.operations.migration_context.as_sql:
-                        raise exc.CommandError(
-                            f"This operation cannot proceed in --sql mode; "
-                            f"batch mode with dialect "
-                            f"{self.operations.migration_context.dialect.name} "  # noqa: E501
-                            f"requires a live database connection with which "
-                            f'to reflect the table "{self.table_name}". '
-                            f"To generate a batch SQL migration script using "
-                            "table "
-                            '"move and copy", a complete Table object '
-                            f'should be passed to the "copy_from" argument '
-                            "of the batch_alter_table() method so that table "
-                            "reflection can be skipped."
-                        )
+    def _flush_recreate(self) -> None:
+        m1 = MetaData()
 
-                    existing_table = Table(
-                        self.table_name,
-                        m1,
-                        schema=self.schema,
-                        autoload_with=self.operations.get_bind(),
-                        *self.reflect_args,
-                        **self.reflect_kwargs,
-                    )
-                    reflected = True
-
-                    if self.naming_convention:
-                        # names that came back from reflection are already
-                        # the names that are in the database, so mark them
-                        # as final; the naming convention is then applied
-                        # only to those constraints that were reflected
-                        # without a name, which is what this parameter is
-                        # for.  see the docstring for
-                        # sqlalchemy.schema.conv.
-                        _conv_constraint_names(existing_table)
-                        existing_table = existing_table.to_metadata(
-                            MetaData(naming_convention=self.naming_convention)
-                        )
-
-                batch_impl = ApplyBatchImpl(
-                    self.impl,
-                    existing_table,
-                    self.table_args,
-                    self.table_kwargs,
-                    reflected,
-                    partial_reordering=self.partial_reordering,
+        if self.copy_from is not None:
+            existing_table = self.copy_from
+            reflected = False
+        else:
+            if self.operations.migration_context.as_sql:
+                raise exc.CommandError(
+                    f"This operation cannot proceed in --sql mode; "
+                    f"batch mode with dialect "
+                    f"{self.operations.migration_context.dialect.name} "
+                    f"requires a live database connection with which "
+                    f'to reflect the table "{self.table_name}". '
+                    f"To generate a batch SQL migration script using "
+                    "table "
+                    '"move and copy", a complete Table object '
+                    f'should be passed to the "copy_from" argument '
+                    "of the batch_alter_table() method so that table "
+                    "reflection can be skipped."
                 )
-                for opname, arg, kw in self.batch:
-                    fn = getattr(batch_impl, opname)
-                    fn(*arg, **kw)
 
-                batch_impl._create(self.impl)
+            existing_table = Table(
+                self.table_name,
+                m1,
+                schema=self.schema,
+                autoload_with=self.operations.get_bind(),
+                *self.reflect_args,
+                **self.reflect_kwargs,
+            )
+            reflected = True
+
+            if self.naming_convention:
+                # names that came back from reflection are already the
+                # names that are in the database, so mark them as final;
+                # the naming convention is then applied only to those
+                # constraints that were reflected without a name, which
+                # is what this parameter is for.
+                _conv_constraint_names(existing_table)
+                existing_table = existing_table.to_metadata(
+                    MetaData(naming_convention=self.naming_convention)
+                )
+
+        batch_impl = ApplyBatchImpl(
+            self.impl,
+            existing_table,
+            self.table_args,
+            self.table_kwargs,
+            reflected,
+            partial_reordering=self.partial_reordering,
+        )
+        for opname, arg, kw in self.batch:
+            fn = getattr(batch_impl, opname)
+            fn(*arg, **kw)
+
+        batch_impl._create(self.impl)
 
     def alter_column(self, *arg, **kw) -> None:
         self.batch.append(("alter_column", arg, kw))
@@ -266,6 +269,7 @@ class ApplyBatchImpl:
             self.columns[c.name] = c_copy
         self.named_constraints: dict[str, Constraint] = {}
         self.unnamed_constraints = []
+        self.pending_constraints = []
         self.col_named_constraints = {}
         self.indexes: dict[str, Index] = {}
         self.new_indexes: dict[str, Index] = {}
@@ -373,36 +377,66 @@ class ApplyBatchImpl:
         _name_type_bound_constraints(new_table, self.table)
 
         for const in (
-            list(self.named_constraints.values()) + self.unnamed_constraints
+            list(self.named_constraints.values())
+            + self.unnamed_constraints
+            + self.pending_constraints
         ):
             const_columns = {c.key for c in _columns_for_constraint(const)}
-
-            if not const_columns.issubset(self.column_transfers):
+            available_columns = set(self.column_transfers).union(
+                transfer.get("name", old_name)
+                for old_name, transfer in self.column_transfers.items()
+            )
+            if not const_columns.issubset(available_columns):
                 continue
 
             const_copy: Constraint
             if isinstance(const, ForeignKeyConstraint):
-                if _fk_is_self_referential(const):
-                    # for self-referential constraint, refer to the
-                    # *original* table name, and not _alembic_batch_temp.
-                    # This is consistent with how we're handling
-                    # FK constraints from other tables; we assume SQLite
-                    # no foreign keys just keeps the names unchanged, so
-                    # when we rename back, they match again.
+                if const in self.pending_constraints:
+                    local_columns = []
+                    remote_columns = []
+                    for element in const.elements:
+                        new_name = element.parent.name
+                        old_name = next(
+                            (
+                                old_name
+                                for old_name, transfer in (
+                                    self.column_transfers.items()
+                                )
+                                if transfer.get("name") == new_name
+                            ),
+                            new_name,
+                        )
+                        local_columns.append(self.columns[old_name])
+                        remote_table = element.column.table
+                        remote_columns.append(
+                            "%s.%s"
+                            % (
+                                remote_table.fullname,
+                                element.column.name,
+                            )
+                        )
+                    const_copy = ForeignKeyConstraint(
+                        local_columns,
+                        remote_columns,
+                        name=const.name,
+                        onupdate=const.onupdate,
+                        ondelete=const.ondelete,
+                        deferrable=const.deferrable,
+                        initially=const.initially,
+                        match=const.match,
+                        **const.dialect_kwargs,
+                    )
+                elif _fk_is_self_referential(const):
                     const_copy = _copy(
                         const, schema=schema, target_table=self.table
                     )
                 else:
-                    # "target_table" for ForeignKeyConstraint.copy() is
-                    # only used if the FK is detected as being
-                    # self-referential, which we are handling above.
                     const_copy = _copy(const, schema=schema)
+                self._setup_referent(m, const_copy)
             else:
                 const_copy = _copy(
                     const, schema=schema, target_table=new_table
                 )
-            if isinstance(const, ForeignKeyConstraint):
-                self._setup_referent(m, const)
             new_table.append_constraint(const_copy)
 
     def _gather_indexes_from_both_tables(self) -> list[Index]:
@@ -706,13 +740,21 @@ class ApplyBatchImpl:
         """
 
     def add_constraint(self, const: Constraint) -> None:
+        if isinstance(const, ForeignKeyConstraint):
+            self.pending_constraints.append(const)
+            return
         if not constraint_name_defined(const.name):
             raise ValueError("Constraint must have a name")
         if isinstance(const, sql_schema.PrimaryKeyConstraint):
             if self.table.primary_key in self.unnamed_constraints:
                 self.unnamed_constraints.remove(self.table.primary_key)
 
-        if constraint_name_string(const.name):
+        if constraint_name_defined(const.name):
+            const.name = (
+                self.impl.dialect.identifier_preparer.format_constraint(
+                    const, _alembic_quote=False
+                )
+            )
             self.named_constraints[const.name] = const
         else:
             self.unnamed_constraints.append(const)

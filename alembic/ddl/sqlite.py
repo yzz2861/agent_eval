@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from typing import TYPE_CHECKING
 
@@ -70,6 +72,53 @@ class SQLiteImpl(DefaultImpl):
                 return True
         else:
             return False
+
+    @contextmanager
+    def batch_recreate(self) -> Iterator[None]:
+        connection = self.connection
+        if connection is None or not hasattr(connection, "connection"):
+            yield
+            return
+
+        dbapi_connection = getattr(
+            connection.connection, "dbapi_connection", None
+        )
+        if dbapi_connection is None:
+            yield
+            return
+
+        cursor = dbapi_connection.execute("PRAGMA foreign_keys")
+        foreign_keys = cursor.fetchone()[0]
+        cursor.close()
+        if foreign_keys:
+            dbapi_connection.commit()
+            cursor = dbapi_connection.execute("PRAGMA foreign_keys=OFF")
+            cursor.close()
+            dbapi_connection.commit()
+
+        try:
+            yield
+        finally:
+            if foreign_keys:
+                dbapi_connection.commit()
+                dbapi_connection.execute("PRAGMA foreign_keys=ON")
+                dbapi_connection.commit()
+                cursor = dbapi_connection.execute("PRAGMA foreign_keys")
+                restored = cursor.fetchone()[0]
+                cursor.close()
+                if not restored:
+                    raise util.CommandError(
+                        "SQLite foreign key enforcement could not be restored "
+                        "after batch table recreation"
+                    )
+                invalid_rows = dbapi_connection.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchall()
+                if invalid_rows:
+                    raise util.CommandError(
+                        "SQLite foreign key validation failed after batch "
+                        "table recreation"
+                    )
 
     def add_constraint(self, const: Constraint, **kw: Any):
         # attempt to distinguish between an

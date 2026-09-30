@@ -48,6 +48,37 @@ _C = TypeVar("_C", bound=Union[UniqueConstraint, ForeignKeyConstraint, Index])
 log = logging.getLogger(__name__)
 
 
+def _reflected_table_key(
+    autogen_context: AutogenContext,
+    schema: str | None,
+    tname: quoted_name | str,
+) -> tuple[str | None, quoted_name | str]:
+    hints = getattr(autogen_context, "_rename_hints", None)
+    if hints is None:
+        return schema, tname
+    for old_schema, old_name in hints.tables:
+        if hints.table_key((old_schema, old_name)) == (schema, tname):
+            return old_schema, old_name
+    return schema, tname
+
+
+def _column_renames(
+    autogen_context: AutogenContext,
+    schema: str | None,
+    tname: quoted_name | str,
+) -> dict[str, str]:
+    hints = getattr(autogen_context, "_rename_hints", None)
+    if hints is None:
+        return {}
+    return {
+        old_column: new_column
+        for old_key, new_key in hints.columns.items()
+        for old_schema, old_table, old_column in [old_key]
+        for new_schema, new_table, new_column in [new_key]
+        if (old_schema, old_table) == (schema, tname)
+    }
+
+
 def _compare_indexes_and_uniques(
     autogen_context: AutogenContext,
     modify_ops: ModifyTableOps,
@@ -57,6 +88,12 @@ def _compare_indexes_and_uniques(
     metadata_table: Table | None,
 ) -> PriorityDispatchResult:
     inspector = autogen_context.inspector
+    reflected_schema, reflected_tname = _reflected_table_key(
+        autogen_context, schema, tname
+    )
+    column_renames = _column_renames(
+        autogen_context, reflected_schema, reflected_tname
+    )
     is_create_table = conn_table is None
     is_drop_table = metadata_table is None
     impl = autogen_context.migration_context.impl
@@ -91,7 +128,7 @@ def _compare_indexes_and_uniques(
         try:
             conn_uniques_reflected = _InspectorConv(
                 inspector
-            ).get_unique_constraints(tname, schema=schema)
+            ).get_unique_constraints(reflected_tname, schema=reflected_schema)
 
             supports_unique_constraints = True
         except NotImplementedError:
@@ -102,6 +139,11 @@ def _compare_indexes_and_uniques(
             # not being present
             pass
         else:
+            for uq in conn_uniques_reflected:
+                uq["column_names"] = [
+                    column_renames.get(name, name)
+                    for name in uq["column_names"]
+                ]
             conn_uniques_reflected = [
                 uq
                 for uq in conn_uniques_reflected
@@ -116,7 +158,7 @@ def _compare_indexes_and_uniques(
                     unique_constraints_duplicate_unique_indexes = True
         try:
             conn_indexes_reflected = _InspectorConv(inspector).get_indexes(
-                tname, schema=schema
+                reflected_tname, schema=reflected_schema
             )
         except NotImplementedError:
             pass
@@ -130,6 +172,11 @@ def _compare_indexes_and_uniques(
                     {"table_name": tname, "schema_name": schema},
                 )
             ]
+            for index in conn_indexes_reflected:
+                index["column_names"] = [
+                    column_renames.get(name, name)
+                    for name in index["column_names"]
+                ]
 
         # 2. convert conn-level objects from raw inspector records
         # into schema objects
@@ -637,6 +684,12 @@ def _compare_foreign_keys(
         return PriorityDispatchResult.CONTINUE
 
     inspector = autogen_context.inspector
+    reflected_schema, reflected_tname = _reflected_table_key(
+        autogen_context, schema, tname
+    )
+    column_renames = _column_renames(
+        autogen_context, reflected_schema, reflected_tname
+    )
     # fk constraints can be set on columns, but they appear also on
     # the table constraint list
     metadata_fks = {
@@ -644,11 +697,19 @@ def _compare_foreign_keys(
         for fk in metadata_table.constraints
         if isinstance(fk, sa_schema.ForeignKeyConstraint)
     }
+    pending_removals = []
+    pending_additions = []
+    pending_key = (schema, tname)
+    pending = getattr(autogen_context, "_pending_foreign_key_ops", None)
+    if pending is None:
+        pending = {}
+        autogen_context._pending_foreign_key_ops = pending
+    pending[pending_key] = (pending_removals, pending_additions)
 
     conn_fks_list = [
         fk
         for fk in _InspectorConv(inspector).get_foreign_keys(
-            tname, schema=schema
+            reflected_tname, schema=reflected_schema
         )
         if autogen_context.run_name_filters(
             fk["name"],
@@ -656,6 +717,26 @@ def _compare_foreign_keys(
             {"table_name": tname, "schema_name": schema},
         )
     ]
+    for fk in conn_fks_list:
+        fk["constrained_columns"] = [
+            column_renames.get(name, name)
+            for name in fk["constrained_columns"]
+        ]
+        referred_schema = fk.get("referred_schema")
+        referred_table = fk["referred_table"]
+        hints = autogen_context._rename_hints
+        target = (
+            hints.table_key((referred_schema, referred_table))
+            if hints is not None
+            else (referred_schema, referred_table)
+        )
+        fk["referred_schema"], fk["referred_table"] = target
+        target_renames = _column_renames(
+            autogen_context, referred_schema, referred_table
+        )
+        fk["referred_columns"] = [
+            target_renames.get(name, name) for name in fk["referred_columns"]
+        ]
 
     conn_fks = {
         _make_foreign_key(const, conn_table) for const in conn_fks_list
@@ -698,8 +779,8 @@ def _compare_foreign_keys(
         if autogen_context.run_object_filters(
             obj.const, obj.name, "foreign_key_constraint", False, compare_to
         ):
-            modify_table_ops.ops.append(
-                ops.CreateForeignKeyOp.from_constraint(const.const)
+            pending_additions.append(
+                ops.CreateForeignKeyOp.from_constraint(obj.const)
             )
 
             log.info(
@@ -714,7 +795,7 @@ def _compare_foreign_keys(
         if autogen_context.run_object_filters(
             obj.const, obj.name, "foreign_key_constraint", True, compare_to
         ):
-            modify_table_ops.ops.append(
+            pending_removals.append(
                 ops.DropConstraintOp.from_constraint(obj.const)
             )
             log.info(
@@ -728,25 +809,42 @@ def _compare_foreign_keys(
     # so far it appears we don't need to do this by name at all.
     # SQLite doesn't preserve constraint names anyway
 
-    for removed_sig in set(conn_fks_by_sig).difference(metadata_fks_by_sig):
-        const = conn_fks_by_sig[removed_sig]
-        if removed_sig not in metadata_fks_by_sig:
-            compare_to = (
-                metadata_fks_by_name[const.name].const
-                if const.name and const.name in metadata_fks_by_name
-                else None
-            )
-            _remove_fk(const, compare_to)
+    removed_sigs = set(conn_fks_by_sig).difference(metadata_fks_by_sig)
+    added_sigs = set(metadata_fks_by_sig).difference(conn_fks_by_sig)
 
-    for added_sig in set(metadata_fks_by_sig).difference(conn_fks_by_sig):
+    for removed_sig in removed_sigs:
+        const = conn_fks_by_sig[removed_sig]
+        compare_to = (
+            metadata_fks_by_name[const.name].const
+            if const.name and const.name in metadata_fks_by_name
+            else None
+        )
+        _remove_fk(const, compare_to)
+
+    for added_sig in added_sigs:
         const = metadata_fks_by_sig[added_sig]
-        if added_sig not in conn_fks_by_sig:
-            compare_to = (
-                conn_fks_by_name[const.name].const
-                if const.name and const.name in conn_fks_by_name
-                else None
-            )
-            _add_fk(const, compare_to)
+        compare_to = (
+            conn_fks_by_name[const.name].const
+            if const.name and const.name in conn_fks_by_name
+            else None
+        )
+        _add_fk(const, compare_to)
+
+    for sig in set(conn_fks_by_sig).intersection(metadata_fks_by_sig):
+        conn_fk = conn_fks_by_sig[sig]
+        metadata_fk = metadata_fks_by_sig[sig]
+        old_name = sqla_compat._get_constraint_final_name(
+            conn_fk.const, autogen_context.dialect
+        )
+        new_name = sqla_compat._get_constraint_final_name(
+            metadata_fk.const, autogen_context.dialect
+        )
+        hinted = bool(
+            _column_renames(autogen_context, reflected_schema, reflected_tname)
+        )
+        if hinted and old_name is not None and old_name != new_name:
+            _remove_fk(conn_fk, metadata_fk.const)
+            _add_fk(metadata_fk, conn_fk.const)
 
     return PriorityDispatchResult.CONTINUE
 

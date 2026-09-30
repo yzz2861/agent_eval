@@ -8,7 +8,6 @@ from sqlalchemy import Column
 from sqlalchemy import Computed
 from sqlalchemy import DateTime
 from sqlalchemy import Enum
-from sqlalchemy import exc as sqla_exc
 from sqlalchemy import ForeignKey
 from sqlalchemy import ForeignKeyConstraint
 from sqlalchemy import func
@@ -1683,13 +1682,7 @@ class BatchRoundTripTest(_BatchRoundTripBase, TestBase):
     def test_fk_points_to_me_sqlite_refinteg(
         self, sqlite_referential_integrity, connection, metadata
     ):
-        # intentionally asserting that this doesn't work w/ pragma foreign
-        # keys; assert the specific error, as a generic "fails" rule would
-        # also pass for a test that breaks for some unrelated reason
-        with expect_raises_message(
-            sqla_exc.IntegrityError, "FOREIGN KEY constraint failed"
-        ):
-            self._test_fk_points_to_me(metadata, connection, "auto")
+        self._test_fk_points_to_me(metadata, connection, "auto")
 
     def _test_fk_points_to_me(self, metadata, connection, recreate):
         bar = Table(
@@ -1732,12 +1725,7 @@ class BatchRoundTripTest(_BatchRoundTripBase, TestBase):
     def test_selfref_fk_sqlite_refinteg(
         self, sqlite_referential_integrity, connection, metadata
     ):
-        # intentionally asserting that this doesn't work w/ pragma foreign
-        # keys; see test_fk_points_to_me_sqlite_refinteg
-        with expect_raises_message(
-            sqla_exc.IntegrityError, "FOREIGN KEY constraint failed"
-        ):
-            self._test_selfref_fk(metadata, connection, "auto")
+        self._test_selfref_fk(metadata, connection, "auto")
 
     def _test_selfref_fk(self, metadata, connection, recreate):
         bar = Table(

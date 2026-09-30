@@ -514,6 +514,44 @@ dictionary::
 
 
 
+Explicit Rename Hints
+----------------------
+
+Autogenerate does not guess that a missing old name and a new name represent the
+same table or column. Provide ``rename_hints`` when a database object was renamed
+so that Alembic emits real rename operations and continues comparing the matched
+object’s type, nullability, default, indexes, and constraints.
+
+Table hints map an existing ``(schema, name)`` key to a target ``(schema, name)``
+key. Column hints map ``(schema, old_table, old_column)`` to
+``(schema, new_table, new_column)``::
+
+    context.configure(
+        target_metadata=target_metadata,
+        render_as_batch=True,
+        rename_hints={
+            "tables": {
+                (None, "old_account"): (None, "account"),
+                ("audit", "old_event"): ("audit", "event"),
+            },
+            "columns": {
+                (None, "account", "old_name"): (
+                    None,
+                    "account",
+                    "name",
+                ),
+                "account.old_title": "account.title",
+            },
+        },
+    )
+
+A string table key defaults to the connection default schema. A two-part string
+column key is ``"table.column"``; use the three-tuple form for other schemas.
+When a column moves with a renamed table, state both old and new table names.
+Cycles, multiple old objects mapping to one new object, and targets that already
+exist in the database are rejected before a migration file is generated.
+
+
 Comparing and Rendering Types
 ------------------------------
 

@@ -1454,6 +1454,21 @@ class RenameTableOp(AlterTableOp):
         super().__init__(old_table_name, schema=schema)
         self.new_table_name = new_table_name
 
+    def to_diff_tuple(self) -> tuple[Any, ...]:
+        return (
+            "rename_table",
+            self.schema,
+            self.table_name,
+            self.new_table_name,
+        )
+
+    def reverse(self) -> "RenameTableOp":
+        return RenameTableOp(
+            self.new_table_name,
+            self.table_name,
+            schema=self.schema,
+        )
+
     @classmethod
     def rename_table(
         cls,
@@ -1714,6 +1729,17 @@ class AlterColumnOp(AlterTableOp):
         col_diff = []
         schema, tname, cname = self.schema, self.table_name, self.column_name
 
+        if self.modify_name is not None:
+            col_diff.append(
+                (
+                    "rename_column",
+                    schema,
+                    tname,
+                    cname,
+                    self.modify_name,
+                )
+            )
+
         if self.modify_type is not None:
             col_diff.append(
                 (
@@ -1792,7 +1818,8 @@ class AlterColumnOp(AlterTableOp):
 
     def has_changes(self) -> bool:
         hc1 = (
-            self.modify_nullable is not None
+            self.modify_name is not None
+            or self.modify_nullable is not None
             or self.modify_server_default is not False
             or self.modify_type is not None
             or self.modify_comment is not False
@@ -1834,7 +1861,17 @@ class AlterColumnOp(AlterTableOp):
                 kw["modify_%s" % k] = swap
 
         return self.__class__(
-            self.table_name, self.column_name, schema=self.schema, **kw
+            self.table_name,
+            (
+                self.modify_name
+                if self.modify_name is not None
+                else self.column_name
+            ),
+            schema=self.schema,
+            modify_name=(
+                self.column_name if self.modify_name is not None else None
+            ),
+            **kw,
         )
 
     @classmethod

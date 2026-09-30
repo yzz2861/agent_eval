@@ -222,6 +222,15 @@ def create_constraint(
     )
 
 
+@Operations.implementation_for(ops.CreateForeignKeyOp)
+def create_foreign_key(
+    operations: "Operations", operation: "ops.CreateForeignKeyOp"
+) -> None:
+    operations.impl.add_constraint(
+        operation.to_constraint(operations.migration_context)
+    )
+
+
 @Operations.implementation_for(ops.DropConstraintOp)
 def drop_constraint(
     operations: "Operations", operation: "ops.DropConstraintOp"

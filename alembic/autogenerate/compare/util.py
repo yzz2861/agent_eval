@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from copy import deepcopy
 from typing import Any
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,9 @@ if TYPE_CHECKING:
     from sqlalchemy.engine.interfaces import ReflectedIndex
     from sqlalchemy.engine.interfaces import ReflectedUniqueConstraint
     from sqlalchemy.engine.reflection import _ReflectionInfo
+
+TableKey = tuple[str | None, str]
+ColumnKey = tuple[str | None, str, str]
 
 _INSP_KEYS = (
     "columns",
@@ -203,27 +207,52 @@ class _InspectorConv:
             )
 
     def _make_reflection_info(
-        self, tname: str, schema: str | None
+        self,
+        tname: str,
+        schema: str | None,
+        reflected_name: str | None = None,
+        reflected_schema: str | None = None,
+        renamed_tables: dict[TableKey, TableKey] | None = None,
+        renamed_columns: dict[ColumnKey, ColumnKey] | None = None,
     ) -> _ReflectionInfo:
         from sqlalchemy.engine.reflection import _ReflectionInfo
 
+        reflected_name = reflected_name or tname
+        reflected_schema = (
+            reflected_schema if reflected_schema is not None else schema
+        )
+        reflected_key = (reflected_schema, reflected_name)
         table_key = (schema, tname)
+        renamed_tables = renamed_tables or {}
+        renamed_columns = renamed_columns or {}
 
-        return _ReflectionInfo(
+        ri = _ReflectionInfo(
             unreflectable={},
             **{
                 key: {
-                    table_key: self._return_from_cache(
-                        tname,
-                        schema,
-                        f"alembic_{key}",
-                        getattr(self.inspector, f"get_{key}"),
-                        apply_constraint_conv=(key in _CONSTRAINT_INSP_KEYS),
+                    table_key: deepcopy(
+                        self._return_from_cache(
+                            reflected_name,
+                            reflected_schema,
+                            f"alembic_{key}",
+                            getattr(self.inspector, f"get_{key}"),
+                            apply_constraint_conv=(
+                                key in _CONSTRAINT_INSP_KEYS
+                            ),
+                        )
                     )
                 }
                 for key in _INSP_KEYS
             },
         )
+        _remap_reflection_info(
+            ri,
+            reflected_key,
+            table_key,
+            renamed_tables,
+            renamed_columns,
+        )
+        return ri
 
     def reflect_table(self, table: Table) -> None:
         ri = self._make_reflection_info(table.name, table.schema)
@@ -234,3 +263,64 @@ class _InspectorConv:
             resolve_fks=False,
             _reflect_info=ri,
         )
+
+
+def _remap_reflection_info(
+    ri: _ReflectionInfo,
+    reflected_key: TableKey,
+    table_key: TableKey,
+    renamed_tables: dict[TableKey, TableKey],
+    renamed_columns: dict[ColumnKey, ColumnKey],
+) -> None:
+    if not renamed_tables and not renamed_columns:
+        return
+
+    local_columns = {
+        old_key[2]: new_key[2]
+        for old_key, new_key in renamed_columns.items()
+        if (old_key[0], old_key[1]) == reflected_key
+    }
+
+    for column in ri.columns.get(table_key, []):
+        column["name"] = local_columns.get(column["name"], column["name"])
+
+    pk_constraint = ri.pk_constraint.get(table_key)
+    if pk_constraint:
+        pk_constraint["constrained_columns"] = [
+            local_columns.get(name, name)
+            for name in pk_constraint["constrained_columns"]
+        ]
+
+    for constraint in ri.foreign_keys.get(table_key, []):
+        constraint["constrained_columns"] = [
+            local_columns.get(name, name)
+            for name in constraint["constrained_columns"]
+        ]
+
+        referred_schema = constraint.get("referred_schema")
+        referred_table = constraint["referred_table"]
+        referred_key = renamed_tables.get(
+            (referred_schema, referred_table),
+            (referred_schema, referred_table),
+        )
+        constraint["referred_schema"] = referred_key[0]
+        constraint["referred_table"] = referred_key[1]
+
+        referred_columns = {
+            old_key[2]: new_key[2]
+            for old_key, new_key in renamed_columns.items()
+            if (old_key[0], old_key[1]) == (referred_schema, referred_table)
+        }
+        constraint["referred_columns"] = [
+            referred_columns.get(name, name)
+            for name in constraint["referred_columns"]
+        ]
+
+    for collection_name in ("indexes", "unique_constraints"):
+        for constraint in getattr(ri, collection_name).get(table_key, []):
+            for key in ("constrained_columns", "column_names"):
+                if key in constraint:
+                    constraint[key] = [
+                        local_columns.get(name, name)
+                        for name in constraint[key]
+                    ]

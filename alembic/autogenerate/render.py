@@ -304,6 +304,21 @@ def _drop_table(autogen_context: AutogenContext, op: ops.DropTableOp) -> str:
     return text
 
 
+@renderers.dispatch_for(ops.RenameTableOp)
+def _rename_table(
+    autogen_context: AutogenContext, op: ops.RenameTableOp
+) -> str:
+    text = "%srename_table(%r, %r" % (
+        _alembic_autogenerate_prefix(autogen_context),
+        _ident(op.table_name),
+        _ident(op.new_table_name),
+    )
+    if op.schema:
+        text += ", schema=%r" % _ident(op.schema)
+    text += ")"
+    return text
+
+
 def _render_dialect_kwargs_items(
     autogen_context: AutogenContext, dialect_kwargs: _DialectArgView
 ) -> list[str]:
