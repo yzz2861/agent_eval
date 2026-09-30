@@ -7,10 +7,13 @@ from contextlib import asynccontextmanager
 from ._compat import httpx2
 from anyio import Lock # Import after httpx so import errors refer to httpx
 
+from authlib.common.urls import add_params_to_uri
 from authlib.common.urls import url_decode
 from authlib.oauth2.auth import ClientAuth
 from authlib.oauth2.auth import TokenAuth
+from authlib.oauth2.client import DEFAULT_HEADERS
 from authlib.oauth2.client import OAuth2Client as _OAuth2Client
+from authlib.oauth2.rfc9126.parameters import prepare_pushed_authorization_request
 
 from ..base_client import InvalidTokenError
 from ..base_client import MissingTokenError
@@ -203,6 +206,56 @@ class AsyncOAuth2Client(_OAuth2Client, httpx2.AsyncClient):
             await self.update_token(self.token, refresh_token=refresh_token)
 
         return self.token
+
+    async def pushed_authorization_request(
+        self, url=None, state=None, code_verifier=None, headers=None, **kwargs
+    ):
+        response_type, state, kwargs = self._build_authorization_request_params(
+            state=state,
+            code_verifier=code_verifier,
+            **kwargs,
+        )
+        body = prepare_pushed_authorization_request(
+            response_type=response_type,
+            state=state,
+            **kwargs,
+        )
+        if headers is None:
+            headers = DEFAULT_HEADERS
+        if url is None:
+            url = self.metadata.get("pushed_authorization_request_endpoint")
+        response = await self.post(
+            url,
+            data=dict(url_decode(body)),
+            headers=headers,
+            auth=self.client_auth(self.token_endpoint_auth_method),
+        )
+        result = response.json()
+        if "error" in result:
+            raise self.oauth_error_class(
+                error=result["error"],
+                description=result.get("error_description"),
+            )
+        return result
+
+    async def create_par_authorization_url(
+        self,
+        authorization_url,
+        pushed_authorization_request_url=None,
+        state=None,
+        code_verifier=None,
+        **kwargs,
+    ):
+        result = await self.pushed_authorization_request(
+            pushed_authorization_request_url,
+            state=state,
+            code_verifier=code_verifier,
+            **kwargs,
+        )
+        uri = add_params_to_uri(
+            authorization_url, [("request_uri", result["request_uri"])]
+        )
+        return uri, state
 
     def _http_post(
         self, url, body=None, auth=USE_CLIENT_DEFAULT, headers=None, **kwargs

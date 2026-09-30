@@ -88,6 +88,12 @@ class JWTAuthenticationRequest:
     def parse_authorization_request(
         self, authorization_server: AuthorizationServer, request: OAuth2Request
     ):
+        request_uri = request.payload.data.get("request_uri")
+        if request_uri and request_uri.startswith(
+            "urn:ietf:params:oauth:request_uri:"
+        ):
+            return
+
         client_id = request.payload.client_id
         if client_id is None:
             raise InvalidClientError(

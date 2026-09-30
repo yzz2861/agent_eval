@@ -128,6 +128,58 @@ def test_code_challenge():
     assert "code_challenge_method=S256" in auth_url
 
 
+def test_pushed_authorization_request():
+    response_payload = {
+        "request_uri": "urn:ietf:params:oauth:request_uri:value",
+        "expires_in": 60,
+    }
+
+    def fake_send(request, **kwargs):
+        assert request.url == "https://provider.test/par"
+        assert "client_secret=" not in request.body
+        assert "response_type=code" in request.body
+        assert "client_id=foo" in request.body
+        assert "state=par-state" in request.body
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        resp.json = lambda: response_payload
+        return resp
+
+    with OAuth2Session("foo", token_endpoint_auth_method="none") as sess:
+        sess.send = fake_send
+        result = sess.pushed_authorization_request(
+            "https://provider.test/par", state="par-state"
+        )
+        assert result == response_payload
+
+
+def test_create_par_authorization_url():
+    def fake_send(request, **kwargs):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        resp.json = lambda: {
+            "request_uri": "urn:ietf:params:oauth:request_uri:value",
+            "expires_in": 60,
+        }
+        return resp
+
+    with OAuth2Session("foo") as sess:
+        sess.send = fake_send
+        url, state = sess.create_par_authorization_url(
+            "https://provider.test/authorize",
+            "https://provider.test/par",
+            state="par-state",
+        )
+
+    assert state == "par-state"
+    assert url == (
+        "https://provider.test/authorize?request_uri="
+        "urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Avalue"
+    )
+    assert "client_id=" not in url
+    assert "response_type=" not in url
+
+
 def test_token_from_fragment(token):
     sess = OAuth2Session("foo")
     response_url = "https://provider.test/callback#" + url_encode(token.items())

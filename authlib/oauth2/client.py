@@ -1,4 +1,5 @@
 from authlib.common.security import generate_token
+from authlib.common.urls import add_params_to_uri
 from authlib.common.urls import url_decode
 
 from .auth import ClientAuth
@@ -10,6 +11,7 @@ from .rfc6749.parameters import prepare_grant_uri
 from .rfc6749.parameters import prepare_token_request
 from .rfc7009 import prepare_revoke_token_request
 from .rfc7636 import create_s256_code_challenge
+from .rfc9126.parameters import prepare_pushed_authorization_request
 
 DEFAULT_HEADERS = {
     "Accept": "application/json",
@@ -179,6 +181,88 @@ class OAuth2Client:
             response_type=response_type,
             state=state,
             **kwargs,
+        )
+        return uri, state
+
+    def _build_authorization_request_params(
+        self, state=None, code_verifier=None, **kwargs
+    ):
+        if state is None:
+            state = generate_token()
+
+        response_type = self.metadata.get("response_type", "code")
+        response_type = kwargs.pop("response_type", response_type)
+        if "redirect_uri" not in kwargs:
+            kwargs["redirect_uri"] = self.redirect_uri
+        if "scope" not in kwargs:
+            kwargs["scope"] = self.scope
+
+        if (
+            code_verifier
+            and response_type == "code"
+            and self.code_challenge_method == "S256"
+        ):
+            kwargs["code_challenge"] = create_s256_code_challenge(code_verifier)
+            kwargs["code_challenge_method"] = self.code_challenge_method
+
+        for name in self.EXTRA_AUTHORIZE_PARAMS:
+            if name not in kwargs and name in self.metadata:
+                kwargs[name] = self.metadata[name]
+
+        return response_type, state, kwargs
+
+    def pushed_authorization_request(
+        self, url=None, state=None, code_verifier=None, headers=None, **kwargs
+    ):
+        """Push authorization parameters to the PAR endpoint."""
+        response_type, state, kwargs = self._build_authorization_request_params(
+            state=state,
+            code_verifier=code_verifier,
+            **kwargs,
+        )
+        body = prepare_pushed_authorization_request(
+            response_type=response_type,
+            state=state,
+            **kwargs,
+        )
+        if headers is None:
+            headers = DEFAULT_HEADERS
+        if url is None:
+            url = self.metadata.get("pushed_authorization_request_endpoint")
+        auth = self.client_auth(self.token_endpoint_auth_method)
+
+        response = self._http_post(
+            url,
+            body=body,
+            auth=auth,
+            headers=headers,
+        )
+        result = response.json()
+        if "error" in result:
+            raise self.oauth_error_class(
+                error=result["error"],
+                description=result.get("error_description"),
+            )
+        return result
+
+    def create_par_authorization_url(
+        self,
+        authorization_url,
+        pushed_authorization_request_url=None,
+        state=None,
+        code_verifier=None,
+        **kwargs,
+    ):
+        """Push authorization parameters and build the browser URL."""
+        pushed = self.pushed_authorization_request(
+            pushed_authorization_request_url,
+            state=state,
+            code_verifier=code_verifier,
+            **kwargs,
+        )
+
+        uri = add_params_to_uri(
+            authorization_url, [("request_uri", pushed["request_uri"])]
         )
         return uri, state
 

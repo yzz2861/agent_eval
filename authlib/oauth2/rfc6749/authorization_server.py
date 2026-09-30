@@ -31,6 +31,7 @@ class AuthorizationServer(Hookable):
         self._token_grants = []
         self._endpoints = {}
         self._extensions = []
+        self._pushed_authorization_requests = []
 
     def query_client(self, client_id):
         """Query OAuth client by client_id. The client model class MUST
@@ -230,6 +231,8 @@ class AuthorizationServer(Hookable):
             endpoint.server = self
 
         endpoints = self._endpoints.setdefault(endpoint.ENDPOINT_NAME, [])
+        if hasattr(endpoint, "register_hooks"):
+            endpoint.register_hooks(self)
         endpoints.append(endpoint)
 
     @hooked
