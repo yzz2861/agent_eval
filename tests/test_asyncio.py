@@ -40,7 +40,7 @@ from tenacity import (
     stop_after_attempt,
 )
 from tenacity import asyncio as tasyncio
-from tenacity.wait import wait_fixed
+from tenacity.wait import wait_fixed, wait_retry_after
 
 from .test_tenacity import (
     NoIOErrorAfterCount,
@@ -77,6 +77,57 @@ async def _retryable_coroutine_with_2_attempts(thing: NoIOErrorAfterCount) -> An
 
 
 class TestAsyncio(unittest.TestCase):
+    @asynctest
+    async def test_wait_retry_after_uses_same_strategy(self) -> None:
+        sleeps: list[float] = []
+
+        async def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        attempts = 0
+
+        async def flaky() -> dict[str, int]:
+            nonlocal attempts
+            attempts += 1
+            return {"retry_after": 0}
+
+        retrying = AsyncRetrying(
+            wait=wait_retry_after(lambda result: result["retry_after"]),
+            stop=stop_after_attempt(2),
+            retry=retry_if_result(lambda result: True),
+            sleep=sleep,
+        )
+        with pytest.raises(tenacity.RetryError):
+            await retrying(flaky)
+        assert attempts == 2
+        assert sleeps == [0]
+
+    @asynctest
+    async def test_wait_retry_after_stop_before_delay_does_not_truncate(self) -> None:
+        wait, stop = wait_retry_after(
+            lambda result: result["retry_after"]
+        ).with_total_delay(5)
+
+        async def sleep(seconds: float) -> None:
+            raise AssertionError(f"unexpected sleep {seconds}")
+
+        attempts = 0
+
+        async def flaky() -> dict[str, int]:
+            nonlocal attempts
+            attempts += 1
+            return {"retry_after": 10}
+
+        retrying = AsyncRetrying(
+            wait=wait,
+            stop=stop,
+            retry=retry_if_result(lambda result: True),
+            sleep=sleep,
+        )
+        with pytest.raises(tenacity.RetryError):
+            await retrying(flaky)
+        assert attempts == 1
+
     @asynctest
     async def test_retry(self) -> None:
         thing = NoIOErrorAfterCount(5)

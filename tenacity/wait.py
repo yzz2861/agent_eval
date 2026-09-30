@@ -17,14 +17,21 @@
 import abc
 import math
 import random
+import time
 import typing
 import warnings
+from collections.abc import Iterable
+from concurrent.futures import Future as FutureResult
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 from tenacity import _utils
 from tenacity._utils import override
+from tenacity.stop import stop_base
 
 if typing.TYPE_CHECKING:
-    from tenacity import RetryCallState
+    from tenacity import Future, RetryCallState
 
 
 class wait_base(abc.ABC):
@@ -56,6 +63,46 @@ class wait_base(abc.ABC):
 
 
 WaitBaseT = wait_base | typing.Callable[["RetryCallState"], float | int]
+
+RetryAfterValueT = object
+RetryAfterExtractorT = typing.Callable[[typing.Any], RetryAfterValueT]
+RetryAfterServerTimeValueT = object
+ServerTimeExtractorT = typing.Callable[
+    [typing.Any], RetryAfterServerTimeValueT
+]
+MalformedPolicyT = typing.Literal["raise", "local", "zero"]
+ExpiredPolicyT = typing.Literal["raise", "local", "zero"]
+DuplicatePolicyT = typing.Literal["latest", "first", "raise", "local"]
+RetryAfterWaitReasonT = typing.Literal[
+    "server",
+    "missing",
+    "malformed",
+    "duplicate",
+    "expired",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RetryAfterWaitDecision:
+    """Information about a ``wait_retry_after`` decision.
+
+    ``server_wait`` is the waiting time required by the upstream service,
+    ``local_wait`` is the time suggested by the local backoff strategy, and
+    ``wait`` is the final waiting time. When no usable ``Retry-After`` value
+    is present, ``server_wait`` is ``None``.
+    """
+
+    wait: float
+    local_wait: float
+    server_wait: float | None
+    retry_after_values: tuple[typing.Any, ...]
+    selected_retry_after: typing.Any
+    retry_after_at: datetime | None
+    server_time: datetime | None
+    clock_offset: float | None
+    tolerance: float
+    reason: RetryAfterWaitReasonT
+    error: BaseException | None = None
 
 
 class wait_fixed(wait_base):
@@ -173,6 +220,400 @@ class wait_exception(wait_base):
         if exception is None:
             raise RuntimeError("outcome failed but the exception is None")
         return self.predicate(exception)
+
+
+def _coerce_retry_after_value(value: object) -> datetime | timedelta:
+    if isinstance(value, bool):
+        raise ValueError("Retry-After must not be a boolean")
+
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Retry-After must contain ASCII text") from exc
+
+    if isinstance(value, datetime):
+        return value
+
+    if isinstance(value, timedelta):
+        return value
+
+    if isinstance(value, int | float):
+        if not math.isfinite(value):
+            raise ValueError("Retry-After delay must be finite")
+        if value < 0:
+            raise ValueError("Retry-After delay must not be negative")
+        return timedelta(seconds=float(value))
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError("Retry-After must not be empty")
+
+        try:
+            delay = float(text)
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(text)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid Retry-After value: {value!r}") from exc
+            if parsed is None:
+                raise ValueError(f"invalid Retry-After value: {value!r}")
+            return parsed
+
+        if not math.isfinite(delay) or delay < 0:
+            raise ValueError("Retry-After delay must be a non-negative finite number")
+        return timedelta(seconds=delay)
+
+    raise ValueError(f"unsupported Retry-After value: {value!r}")
+
+
+def _coerce_server_time(value: object) -> datetime:
+    if value is None:
+        raise ValueError("server time must not be None")
+
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("server time must contain ASCII text") from exc
+
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        try:
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            try:
+                parsed = datetime.fromisoformat(text)
+            except ValueError as exc:
+                raise ValueError(f"invalid server time value: {value!r}") from exc
+        if parsed is None:
+            raise ValueError(f"invalid server time value: {value!r}")
+    else:
+        raise ValueError(f"unsupported server time value: {value!r}")
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+class _ExpiredRetryAfter(ValueError):
+    pass
+
+
+class retry_after_deadline_stop(stop_base):
+    """Stop before a wait that would cross a ``wait_retry_after`` deadline."""
+
+    def __init__(self, wait_strategy: "wait_retry_after") -> None:
+        self.wait_strategy = wait_strategy
+
+    @override
+    def __call__(self, retry_state: "RetryCallState") -> bool:
+        max_delay = self.wait_strategy.max_total_delay
+        seconds_since_start = retry_state.seconds_since_start
+        if max_delay is None or seconds_since_start is None:
+            return False
+        return seconds_since_start + retry_state.upcoming_sleep >= max_delay
+
+
+class wait_retry_after(wait_base):
+    """Wait according to a result-provided ``Retry-After`` value.
+
+    ``retry_after_extractor`` receives the value returned by the retried
+    callable and returns a delay in seconds, an HTTP-date, a timedelta, a
+    datetime, or a sequence of those values. Exceptions are inspected through
+    their ``RetryCallState.outcome``, so the extractor can read a response
+    stored on an exception.
+
+    ``wait`` is the local backoff used when no usable ``Retry-After`` value is
+    available. The final sleep is the later of the local recommendation and
+    the server requirement, so server values are never shortened.
+
+    Malformed and expired values can raise, use the local recommendation, or
+    use a zero-second server suggestion. Repeated values can select the latest
+    or first value, raise, or use the local recommendation. When the upstream
+    response date is unavailable, ``clock_skew_tolerance`` is added to
+    HTTP-date waits to avoid requesting before the server's intended time.
+
+    Use :meth:`with_total_delay` or :class:`tenacity.stop_before_delay` to
+    stop without sleeping when the complete required wait does not fit within
+    the overall deadline.
+    """
+
+    def __init__(
+        self,
+        retry_after_extractor: RetryAfterExtractorT,
+        *,
+        wait: WaitBaseT | None = None,
+        server_time_extractor: ServerTimeExtractorT | None = None,
+        clock_skew_tolerance: _utils.time_unit_type = 1,
+        on_malformed: MalformedPolicyT = "raise",
+        on_expired: ExpiredPolicyT = "local",
+        on_duplicate: DuplicatePolicyT = "latest",
+        on_decision: typing.Callable[[RetryAfterWaitDecision], None] | None = None,
+    ) -> None:
+        policies = {
+            "on_malformed": (on_malformed, {"raise", "local", "zero"}),
+            "on_expired": (on_expired, {"raise", "local", "zero"}),
+            "on_duplicate": (
+                on_duplicate,
+                {"latest", "first", "raise", "local"},
+            ),
+        }
+        for name, (policy, allowed) in policies.items():
+            if policy not in allowed:
+                raise ValueError(f"invalid {name}: {policy!r}")
+
+        tolerance = _utils.to_seconds(clock_skew_tolerance)
+        if tolerance < 0 or not math.isfinite(tolerance):
+            raise ValueError("clock_skew_tolerance must be finite and non-negative")
+
+        self.retry_after_extractor = retry_after_extractor
+        self.local_wait = wait
+        self.server_time_extractor = server_time_extractor
+        self.clock_skew_tolerance = tolerance
+        self.on_malformed = on_malformed
+        self.on_expired = on_expired
+        self.on_duplicate = on_duplicate
+        self.on_decision = on_decision
+        self.max_total_delay: float | None = None
+
+    def with_total_delay(
+        self, max_total_delay: _utils.time_unit_type
+    ) -> tuple["wait_retry_after", retry_after_deadline_stop]:
+        deadline = _utils.to_seconds(max_total_delay)
+        if deadline < 0 or not math.isfinite(deadline):
+            raise ValueError("max_total_delay must be finite and non-negative")
+        self.max_total_delay = deadline
+        return self, retry_after_deadline_stop(self)
+
+    @override
+    def __call__(self, retry_state: "RetryCallState") -> float:
+        outcome = retry_state.outcome
+        if outcome is None:
+            raise RuntimeError("__call__() called before outcome was set")
+
+        local_wait = max(0.0, self._local_wait(retry_state))
+        result = self._get_outcome_result(outcome)
+        raw_values = self._normalize_values(self.retry_after_extractor(result))
+
+        selected_value: typing.Any = None
+        retry_after_at: datetime | None = None
+        server_time: datetime | None = None
+        clock_offset: float | None = None
+        server_wait: float | None = None
+        reason: RetryAfterWaitReasonT
+        error: BaseException | None = None
+        final_wait = local_wait
+
+        if not raw_values:
+            reason = "missing"
+        elif len(raw_values) > 1:
+            reason = "duplicate"
+            error = ValueError(
+                f"received multiple Retry-After values: {raw_values!r}"
+            )
+            if self.on_duplicate == "first":
+                selected_value = raw_values[0]
+                error = None
+            elif self.on_duplicate == "latest":
+                selected_duplicate = self._select_latest_duplicate(raw_values, result)
+                if selected_duplicate is not None:
+                    selected_value = selected_duplicate
+                    error = None
+            elif self.on_duplicate == "raise":
+                self._report(
+                    retry_state, final_wait, local_wait, None, raw_values,
+                    selected_value, None, None, None, reason, error,
+                )
+                raise error
+
+        if error is None and (raw_values or selected_value is not None):
+            if selected_value is None:
+                selected_value = raw_values[0]
+            try:
+                parsed = _coerce_retry_after_value(selected_value)
+                if isinstance(parsed, datetime):
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    retry_after_at = parsed.astimezone(timezone.utc)
+
+                    if self.server_time_extractor is not None:
+                        server_time = _coerce_server_time(
+                            self.server_time_extractor(result)
+                        )
+                        outcome_wall_time = retry_state.outcome_wall_time
+                        if outcome_wall_time is not None:
+                            clock_offset = (
+                                server_time.timestamp() - outcome_wall_time
+                            )
+                            server_wait = (
+                                retry_after_at - server_time
+                            ).total_seconds()
+                        else:
+                            server_wait = (
+                                retry_after_at.timestamp() - time.time()
+                            ) + self.clock_skew_tolerance
+                    else:
+                        server_wait = (
+                            retry_after_at.timestamp() - time.time()
+                        ) + self.clock_skew_tolerance
+                else:
+                    server_wait = parsed.total_seconds()
+
+                if server_wait < 0:
+                    raise _ExpiredRetryAfter(
+                        f"Retry-After time is in the past: {selected_value!r}"
+                    )
+                reason = "server"
+                final_wait = max(local_wait, server_wait)
+            except _ExpiredRetryAfter as exc:
+                reason = "expired"
+                error = exc
+                if self.on_expired == "raise":
+                    self._report(
+                        retry_state, final_wait, local_wait, server_wait,
+                        raw_values, selected_value, retry_after_at,
+                        server_time, clock_offset, reason, error,
+                    )
+                    raise
+                server_wait, final_wait = self._invalid_wait(
+                    self.on_expired, local_wait
+                )
+            except (TypeError, ValueError) as exc:
+                reason = "malformed"
+                error = exc
+                if self.on_malformed == "raise":
+                    self._report(
+                        retry_state, final_wait, local_wait, None, raw_values,
+                        selected_value, retry_after_at, server_time,
+                        clock_offset, reason, error,
+                    )
+                    raise
+                server_wait, final_wait = self._invalid_wait(
+                    self.on_malformed, local_wait
+                )
+
+        self._report(
+            retry_state,
+            final_wait,
+            local_wait,
+            server_wait,
+            raw_values,
+            selected_value,
+            retry_after_at,
+            server_time,
+            clock_offset,
+            reason,
+            error,
+        )
+        return final_wait
+
+    def _local_wait(self, retry_state: "RetryCallState") -> float:
+        if self.local_wait is None:
+            return 0.0
+        return float(self.local_wait(retry_state))
+
+    def _select_latest_duplicate(
+        self, raw_values: tuple[object, ...], result: object
+    ) -> object | None:
+        candidates = []
+        if self.server_time_extractor is not None:
+            try:
+                response_server_time = _coerce_server_time(
+                    self.server_time_extractor(result)
+                )
+            except (TypeError, ValueError):
+                response_server_time = None
+        else:
+            response_server_time = None
+
+        now = time.time()
+        for value in raw_values:
+            try:
+                parsed = _coerce_retry_after_value(value)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, timedelta):
+                order = now + parsed.total_seconds()
+            else:
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                parsed = parsed.astimezone(timezone.utc)
+                if response_server_time is None:
+                    order = parsed.timestamp()
+                    order += self.clock_skew_tolerance
+                else:
+                    order = now + (
+                        parsed - response_server_time
+                    ).total_seconds()
+            candidates.append((order, value))
+
+        if not candidates:
+            return None
+        return max(candidates, key=lambda candidate: candidate[0])[1]
+
+    @staticmethod
+    def _get_outcome_result(outcome: "Future | object") -> object:
+        if isinstance(outcome, FutureResult):
+            exception = outcome.exception()
+            if exception is not None:
+                return exception
+            return outcome.result()
+        return outcome
+
+    @staticmethod
+    def _invalid_wait(
+        policy: MalformedPolicyT | ExpiredPolicyT, local_wait: float
+    ) -> tuple[float | None, float]:
+        if policy == "zero":
+            return 0.0, local_wait
+        return None, local_wait
+
+    @staticmethod
+    def _normalize_values(value: object) -> tuple[object, ...]:
+        if value is None:
+            return ()
+        if isinstance(
+            value, str | bytes | datetime | timedelta | int | float
+        ) and not isinstance(value, bool):
+            return (value,)
+        if isinstance(value, Iterable):
+            return tuple(item for item in value if item is not None)
+        return (value,)
+
+    def _report(
+        self,
+        retry_state: "RetryCallState",
+        final_wait: float,
+        local_wait: float,
+        server_wait: float | None,
+        raw_values: tuple[typing.Any, ...],
+        selected_value: typing.Any,
+        retry_after_at: datetime | None,
+        server_time: datetime | None,
+        clock_offset: float | None,
+        reason: RetryAfterWaitReasonT,
+        error: BaseException | None,
+    ) -> None:
+        decision = RetryAfterWaitDecision(
+            wait=final_wait,
+            local_wait=local_wait,
+            server_wait=server_wait,
+            retry_after_values=raw_values,
+            selected_retry_after=selected_value,
+            retry_after_at=retry_after_at,
+            server_time=server_time,
+            clock_offset=clock_offset,
+            tolerance=self.clock_skew_tolerance,
+            reason=reason,
+            error=error,
+        )
+        retry_state.retry_after_wait_decision = decision
+        if self.on_decision is not None:
+            self.on_decision(decision)
 
 
 class wait_incrementing(wait_base):

@@ -71,6 +71,8 @@ from .stop import (
 
 # Import all built-in wait strategies for easier usage.
 from .wait import (
+    RetryAfterWaitDecision,
+    retry_after_deadline_stop,
     wait_chain,
     wait_combine,
     wait_exception,
@@ -81,6 +83,7 @@ from .wait import (
     wait_none,
     wait_random,
     wait_random_exponential,
+    wait_retry_after,
 )
 from .wait import wait_random_exponential as wait_full_jitter
 
@@ -612,12 +615,16 @@ class RetryCallState:
         self.outcome: Future | None = None
         #: Timestamp of the last outcome
         self.outcome_timestamp: float | None = None
+        #: Wall-clock timestamp of the last outcome
+        self.outcome_wall_time: float | None = None
         #: Time spent sleeping in retries
         self.idle_for: float = 0.0
         #: Next action as decided by the retry manager
         self.next_action: RetryAction | None = None
         #: Next sleep time as decided by the retry manager.
         self.upcoming_sleep: float = 0.0
+        #: Details from wait_retry_after, when that strategy is used.
+        self.retry_after_wait_decision: RetryAfterWaitDecision | None = None
 
     def get_fn_name(self) -> str:
         """Get the name of the function being retried.
@@ -639,14 +646,21 @@ class RetryCallState:
     def prepare_for_next_attempt(self) -> None:
         self.outcome = None
         self.outcome_timestamp = None
+        self.outcome_wall_time = None
+        self.retry_after_wait_decision = None
         self.attempt_number += 1
         self.next_action = None
 
     def set_result(self, val: t.Any) -> None:
         ts = time.monotonic()
+        wall_ts = time.time()
         fut = Future(self.attempt_number)
         fut.set_result(val)
-        self.outcome, self.outcome_timestamp = fut, ts
+        self.outcome, self.outcome_timestamp, self.outcome_wall_time = (
+            fut,
+            ts,
+            wall_ts,
+        )
 
     def set_exception(
         self,
@@ -655,9 +669,14 @@ class RetryCallState:
         ],
     ) -> None:
         ts = time.monotonic()
+        wall_ts = time.time()
         fut = Future(self.attempt_number)
         fut.set_exception(exc_info[1])
-        self.outcome, self.outcome_timestamp = fut, ts
+        self.outcome, self.outcome_timestamp, self.outcome_wall_time = (
+            fut,
+            ts,
+            wall_ts,
+        )
 
     @override
     def __repr__(self) -> str:
@@ -821,6 +840,7 @@ __all__ = [
     "DoSleep",
     "Future",
     "RetryAction",
+    "RetryAfterWaitDecision",
     "RetryCallState",
     "RetryError",
     "Retrying",
@@ -833,6 +853,7 @@ __all__ = [
     "before_sleep_log",
     "before_sleep_nothing",
     "retry",
+    "retry_after_deadline_stop",
     "retry_all",
     "retry_always",
     "retry_any",
@@ -867,4 +888,5 @@ __all__ = [
     "wait_none",
     "wait_random",
     "wait_random_exponential",
+    "wait_retry_after",
 ]

@@ -30,6 +30,7 @@ import tenacity
 from tenacity import RetryCallState, RetryError, Retrying, retry
 from tenacity._utils import override
 from tenacity.retry import retry_all, retry_any
+from tenacity.wait import RetryAfterWaitDecision, wait_fixed, wait_retry_after
 
 _unset = object()
 
@@ -468,6 +469,327 @@ class TestWaitConditions(unittest.TestCase):
         fut3 = tenacity.Future.construct(1, None, False)
         with self.assertRaises(RuntimeError):
             r.wait(make_retry_state(1, 0, last_result=fut3))
+
+    def test_wait_retry_after_seconds_uses_later_recommendation(self) -> None:
+        wait = wait_retry_after(lambda response: response["retry_after"])
+        state = make_retry_state(1, 0, {"retry_after": 3})
+        self.assertEqual(wait(state), 3)
+        decision = state.retry_after_wait_decision
+        self.assertEqual(decision.wait, 3)
+        self.assertEqual(decision.local_wait, 0)
+        self.assertEqual(decision.server_wait, 3)
+        self.assertEqual(decision.reason, "server")
+
+        state = make_retry_state(1, 0, {"retry_after": 1})
+        wait = wait_retry_after(
+            lambda response: response["retry_after"], wait=wait_fixed(5)
+        )
+        self.assertEqual(wait(state), 5)
+        self.assertEqual(state.retry_after_wait_decision.server_wait, 1)
+        self.assertEqual(state.retry_after_wait_decision.local_wait, 5)
+
+        state = make_retry_state(
+            1, 0, {"retry_after": datetime.timedelta(seconds=2)}
+        )
+        wait = wait_retry_after(lambda response: response["retry_after"])
+        self.assertEqual(wait(state), 2)
+
+        state = make_retry_state(1, 0, {"retry_after": b"3"})
+        wait = wait_retry_after(lambda response: response["retry_after"])
+        self.assertEqual(wait(state), 3)
+
+        state = make_retry_state(1, 0, object())
+        wait = wait_retry_after(lambda response: response.missing_attribute)
+        with self.assertRaises(AttributeError):
+            wait(state)
+        self.assertIsNone(state.retry_after_wait_decision)
+
+    def test_wait_retry_after_http_date_accounts_for_clock_skew(self) -> None:
+        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+        target = now + datetime.timedelta(seconds=10)
+        response = {
+            "retry_after": target.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+        }
+
+        with mock.patch("tenacity.wait.time.time", return_value=now.timestamp()):
+            state = make_retry_state(1, 0, response)
+            wait = wait_retry_after(
+                lambda result: result["retry_after"],
+                clock_skew_tolerance=0,
+            )
+            self.assertAlmostEqual(wait(state), 10.0)
+            self.assertEqual(
+                state.retry_after_wait_decision.retry_after_at,
+                target,
+            )
+
+        server_time = now - datetime.timedelta(seconds=3)
+        response["date"] = server_time.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        with mock.patch("tenacity.wait.time.time", return_value=now.timestamp()):
+            state = make_retry_state(1, 0, response)
+        state.outcome_wall_time = now.timestamp()
+        wait = wait_retry_after(
+            lambda result: result["retry_after"],
+            server_time_extractor=lambda result: result["date"],
+        )
+        self.assertAlmostEqual(wait(state), 13.0)
+        decision = state.retry_after_wait_decision
+        self.assertAlmostEqual(decision.clock_offset or 0, -3.0)
+
+        target = now + datetime.timedelta(seconds=10)
+        response = {
+            "retry_after": target.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        }
+        with mock.patch("tenacity.wait.time.time", return_value=now.timestamp()):
+            state = make_retry_state(1, 0, response)
+            wait = wait_retry_after(
+                lambda result: result["retry_after"],
+                clock_skew_tolerance=2,
+            )
+            self.assertAlmostEqual(wait(state), 12.0)
+
+    def test_wait_retry_after_handles_timezones(self) -> None:
+        target = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=8))
+        ) + datetime.timedelta(seconds=4)
+        wait = wait_retry_after(lambda response: response, clock_skew_tolerance=0)
+        with mock.patch(
+            "tenacity.wait.time.time",
+            return_value=target.astimezone(datetime.timezone.utc).timestamp(),
+        ):
+            state = make_retry_state(1, 0, target)
+            self.assertAlmostEqual(wait(state), 0.0)
+        self.assertEqual(
+            state.retry_after_wait_decision.retry_after_at.tzinfo,
+            datetime.timezone.utc,
+        )
+
+    def test_wait_retry_after_invalid_and_duplicate_values(self) -> None:
+        state = make_retry_state(1, 0, {"retry_after": None})
+        wait = wait_retry_after(
+            lambda result: result["retry_after"], wait=wait_fixed(2)
+        )
+        self.assertEqual(wait(state), 2)
+        self.assertEqual(state.retry_after_wait_decision.reason, "missing")
+
+        state = make_retry_state(1, 0, {"retry_after": [None, "2", None]})
+        wait = wait_retry_after(lambda result: result["retry_after"])
+        self.assertEqual(wait(state), 2)
+        self.assertEqual(state.retry_after_wait_decision.reason, "server")
+
+        state = make_retry_state(1, 0, {"retry_after": "bad"})
+        wait = wait_retry_after(
+            lambda result: result["retry_after"],
+            on_malformed="local",
+            wait=wait_fixed(2),
+        )
+        self.assertEqual(wait(state), 2)
+        self.assertEqual(state.retry_after_wait_decision.reason, "malformed")
+        self.assertIsInstance(
+            state.retry_after_wait_decision.error, ValueError
+        )
+
+        state = make_retry_state(1, 0, {"retry_after": "bad"})
+        wait = wait_retry_after(
+            lambda result: result["retry_after"],
+            on_malformed="zero",
+            wait=wait_fixed(2),
+        )
+        self.assertEqual(wait(state), 2)
+        self.assertEqual(state.retry_after_wait_decision.server_wait, 0)
+
+        state = make_retry_state(1, 0, {"retry_after": "bad"})
+        wait = wait_retry_after(lambda result: result["retry_after"])
+        with self.assertRaises(ValueError):
+            wait(state)
+        self.assertEqual(state.retry_after_wait_decision.reason, "malformed")
+
+        past = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            seconds=2
+        )
+        state = make_retry_state(1, 0, {"retry_after": past})
+        wait = wait_retry_after(
+            lambda result: result["retry_after"],
+            clock_skew_tolerance=0,
+            on_expired="local",
+            wait=wait_fixed(2),
+        )
+        self.assertEqual(wait(state), 2)
+        self.assertEqual(state.retry_after_wait_decision.reason, "expired")
+
+        state = make_retry_state(1, 0, {"retry_after": ["2", "5"]})
+        wait = wait_retry_after(lambda result: result["retry_after"])
+        self.assertEqual(wait(state), 5)
+        self.assertEqual(
+            state.retry_after_wait_decision.selected_retry_after, "5"
+        )
+
+        state = make_retry_state(1, 0, {"retry_after": ["5", "2"]})
+        wait = wait_retry_after(lambda result: result["retry_after"])
+        self.assertEqual(wait(state), 5)
+
+        later = datetime.datetime.now(datetime.timezone.utc).replace(
+            microsecond=0
+        ) + datetime.timedelta(seconds=100)
+        state = make_retry_state(
+            1,
+            0,
+            {
+                "retry_after": [
+                    "10",
+                    later.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+                ]
+            },
+        )
+        wait = wait_retry_after(
+            lambda result: result["retry_after"],
+            clock_skew_tolerance=0,
+        )
+        self.assertGreaterEqual(wait(state), 99)
+
+        state = make_retry_state(1, 0, {"retry_after": ["2", "5"]})
+        wait = wait_retry_after(
+            lambda result: result["retry_after"], on_duplicate="first"
+        )
+        self.assertEqual(wait(state), 2)
+
+        state = make_retry_state(1, 0, {"retry_after": ["2", "5"]})
+        wait = wait_retry_after(
+            lambda result: result["retry_after"],
+            on_duplicate="local",
+            wait=wait_fixed(2),
+        )
+        self.assertEqual(wait(state), 2)
+        self.assertEqual(state.retry_after_wait_decision.reason, "duplicate")
+
+        state = make_retry_state(1, 0, {"retry_after": ["2", "5"]})
+        wait = wait_retry_after(
+            lambda result: result["retry_after"], on_duplicate="raise"
+        )
+        with self.assertRaises(ValueError):
+            wait(state)
+        self.assertEqual(state.retry_after_wait_decision.reason, "duplicate")
+
+    def test_wait_retry_after_decision_hook_fires_once(self) -> None:
+        decisions: list[RetryAfterWaitDecision] = []
+        wait = wait_retry_after(
+            lambda result: result,
+            on_malformed="local",
+            on_decision=decisions.append,
+        )
+        state = make_retry_state(1, 0, "bad")
+        wait(state)
+        self.assertEqual(len(decisions), 1)
+        self.assertIs(decisions[0], state.retry_after_wait_decision)
+
+    def test_wait_retry_after_reads_exception_result(self) -> None:
+        class HttpError(Exception):
+            def __init__(self, headers: dict[str, str]) -> None:
+                self.headers = headers
+
+        error = HttpError({"Retry-After": "4"})
+        fut = tenacity.Future.construct(1, error, True)
+        state = make_retry_state(1, 0, fut)
+        wait = wait_retry_after(lambda error: error.headers["Retry-After"])
+        self.assertEqual(wait(state), 4)
+
+    def test_wait_retry_after_stop_before_delay_does_not_truncate(self) -> None:
+        wait = wait_retry_after(lambda result: result["retry_after"])
+        decisions: list[object] = []
+        retrying = Retrying(
+            wait=wait,
+            stop=tenacity.stop_before_delay(5),
+            retry=tenacity.retry_if_result(lambda result: True),
+            sleep=lambda seconds: self.fail(f"unexpected sleep {seconds}"),
+            before_sleep=lambda state: decisions.append(
+                state.retry_after_wait_decision
+            ),
+        )
+
+        attempts = 0
+
+        def flaky() -> dict[str, int]:
+            nonlocal attempts
+            attempts += 1
+            return {"retry_after": 10}
+
+        with self.assertRaises(tenacity.RetryError):
+            retrying(flaky)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(decisions, [])
+
+    def test_wait_retry_after_deadline_stop_combines(self) -> None:
+        wait, stop = wait_retry_after(
+            lambda result: result["retry_after"]
+        ).with_total_delay(5)
+        retrying = Retrying(
+            wait=wait,
+            stop=stop | tenacity.stop_after_attempt(10),
+            retry=tenacity.retry_if_result(lambda result: True),
+            sleep=lambda seconds: self.fail(f"unexpected sleep {seconds}"),
+        )
+
+        with self.assertRaises(tenacity.RetryError):
+            retrying(lambda: {"retry_after": 10})
+
+    def test_wait_retry_after_total_delay_bundle_does_not_truncate(self) -> None:
+        wait, stop = wait_retry_after(
+            lambda result: result["retry_after"]
+        ).with_total_delay(5)
+        retrying = Retrying(
+            wait=wait,
+            stop=stop,
+            retry=tenacity.retry_if_result(lambda result: True),
+            sleep=lambda seconds: self.fail(f"unexpected sleep {seconds}"),
+        )
+
+        attempts = 0
+
+        def flaky() -> dict[str, int]:
+            nonlocal attempts
+            attempts += 1
+            return {"retry_after": 10}
+
+        with self.assertRaises(tenacity.RetryError):
+            retrying(flaky)
+        self.assertEqual(attempts, 1)
+
+    def test_wait_retry_after_total_delay_validation(self) -> None:
+        wait = wait_retry_after(lambda result: result)
+        with self.assertRaises(ValueError):
+            wait.with_total_delay(-1)
+
+    def test_wait_retry_after_before_sleep_includes_decision(self) -> None:
+        captured: list[object] = []
+        sleeps: list[float] = []
+        attempts = 0
+
+        def flaky() -> dict[str, int]:
+            nonlocal attempts
+            attempts += 1
+            return {"retry_after": 1}
+
+        retrying = Retrying(
+            wait=wait_retry_after(
+                lambda result: result["retry_after"], wait=wait_fixed(0)
+            ),
+            stop=tenacity.stop_after_attempt(2),
+            retry=tenacity.retry_if_result(lambda result: True),
+            sleep=sleeps.append,
+            before_sleep=lambda state: captured.append(
+                state.retry_after_wait_decision
+            ),
+        )
+        with self.assertRaises(tenacity.RetryError):
+            retrying(flaky)
+        self.assertEqual(sleeps, [1])
+        self.assertEqual(len(captured), 1)
+        decision = captured[0]
+        self.assertEqual(decision.wait, 1)
+        self.assertEqual(decision.local_wait, 0)
+        self.assertEqual(decision.server_wait, 1)
+
+        self.assertIsInstance(captured[0], RetryAfterWaitDecision)
 
     def test_wait_double_sum(self) -> None:
         r = Retrying(wait=tenacity.wait_random(0, 3) + tenacity.wait_fixed(5))

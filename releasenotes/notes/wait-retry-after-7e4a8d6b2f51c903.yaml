@@ -1,0 +1,9 @@
+features:
+  - |
+    Add ``wait_retry_after``, a result-driven wait strategy that honors both
+    delay-seconds and HTTP-date forms of the upstream ``Retry-After`` header
+    without depending on ``requests`` or ``httpx``. It combines the server
+    requirement with a local backoff by using the later retry time, supports a
+    server-time extractor and clock-skew tolerance, can enforce a total retry
+    deadline without truncating the required wait, and exposes its decision
+    through ``RetryCallState`` and an optional callback.

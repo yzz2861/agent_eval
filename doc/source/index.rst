@@ -200,6 +200,36 @@ increasing jitter helps minimise collisions.
         print("Randomly wait up to 2^x * 1 seconds between each retry until the range reaches 60 seconds, then randomly up to 60 seconds afterwards")
         raise Exception
 
+An upstream service can provide a ``Retry-After`` value in either seconds or
+HTTP-date form. ``wait_retry_after`` reads it through a caller-provided
+extractor, treats it as a minimum wait, and uses the local backoff when that is
+later. Providing the response ``Date`` lets Tenacity calculate the delay from
+server time, which avoids asking for an early retry when clocks differ.
+
+.. testcode::
+
+    def response_retry_after(response):
+        return response.headers["Retry-After"]
+
+    def response_date(response):
+        return response.headers["Date"]
+
+    retry_after_wait, retry_after_stop = wait_retry_after(
+        response_retry_after,
+        wait=wait_exponential(multiplier=1, max=60),
+        server_time_extractor=response_date,
+    ).with_total_delay(300)
+
+    @retry(
+        wait=retry_after_wait,
+        stop=retry_after_stop,
+    )
+    def wait_for_server_rate_limit():
+        print("Do not retry before the server allows it")
+        raise Exception
+
+If the complete server-specified wait would cross ``stop_before_delay``,
+Tenacity stops rather than shortening the wait and requesting early.
 
 Sometimes it's necessary to build a chain of backoffs.
 
@@ -423,6 +453,7 @@ Its most useful attributes are:
 * ``seconds_since_start`` — total elapsed seconds from the first attempt to the last outcome (``None`` if no outcome yet)
 * ``idle_for`` — cumulative seconds spent sleeping between attempts
 * ``start_time`` — :func:`time.monotonic` timestamp of the first attempt
+* ``retry_after_wait_decision`` — server, local and final wait details from ``wait_retry_after``
 
 For example, to log the total elapsed time after all retries:
 
