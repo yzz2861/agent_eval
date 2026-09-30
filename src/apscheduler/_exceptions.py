@@ -73,6 +73,20 @@ class DeserializationError(Exception):
     """Raised when a serializer fails to deserialize the given object."""
 
 
+class PersistentEventHistoryExpiredError(Exception):
+    """Raised when a persistent event subscription needs full resynchronization."""
+
+    def __init__(self, subscription_id: str, last_event_id: int, oldest_event_id: int):
+        super().__init__(
+            f"Persistent event subscription {subscription_id!r} is at event "
+            f"{last_event_id}, but the oldest retained event is "
+            f"{oldest_event_id}; the subscription must be resynchronized"
+        )
+        self.subscription_id = subscription_id
+        self.last_event_id = last_event_id
+        self.oldest_event_id = oldest_event_id
+
+
 class MaxIterationsReached(Exception):
     """
     Raised when a trigger has reached its maximum number of allowed computation

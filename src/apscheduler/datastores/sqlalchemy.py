@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from functools import partial
+from inspect import iscoroutine
 from logging import Logger
 from typing import Any, cast
 from uuid import UUID
@@ -12,8 +19,9 @@ from uuid import UUID
 import anyio
 import attrs
 import tenacity
-from anyio import CancelScope, to_thread
-from attr.validators import instance_of
+from anyio import CapacityLimiter, CancelScope, create_task_group, to_thread
+from anyio.abc import TaskGroup
+from attr.validators import instance_of, optional
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -34,6 +42,7 @@ from sqlalchemy import (
     bindparam,
     create_engine,
     false,
+    func,
     or_,
     select,
 )
@@ -53,6 +62,8 @@ from sqlalchemy.sql.ddl import DropTable
 from sqlalchemy.sql.elements import BindParameter, literal
 from sqlalchemy.sql.type_api import TypeEngine
 
+from .. import _events
+from ..abc import EventBroker, Subscription
 from .._enums import CoalescePolicy, ConflictPolicy, JobOutcome
 from .._events import (
     DataStoreEvent,
@@ -72,12 +83,12 @@ from .._events import (
 from .._exceptions import (
     ConflictingIdError,
     DeserializationError,
+    PersistentEventHistoryExpiredError,
     SerializationError,
     TaskLookupError,
 )
 from .._structures import Job, JobResult, Schedule, ScheduleResult, Task
 from .._utils import create_repr, current_async_library
-from ..abc import EventBroker
 from .base import BaseExternalDataStore
 
 
@@ -133,6 +144,136 @@ class _JobDiscard:
     exception: Exception | None = None
 
 
+@attrs.define(eq=False, frozen=True)
+class PersistentEvent:
+    """
+    An event read from persistent storage.
+
+    :ivar id: the stable monotonic event ID used as the subscription cursor
+    :ivar event: the original scheduler or data store event
+    """
+
+    id: int
+    event: Event
+
+
+@attrs.define(eq=False)
+class SQLAlchemyPersistentEventSubscription(Subscription):
+    _store: SQLAlchemyDataStore
+    subscription_id: str
+    event_types: set[type[Event]] | None
+    callback: Callable[[PersistentEvent], Any]
+    is_async: bool
+    _cursor: int
+    _broker_subscription: Subscription | None = attrs.field(
+        init=False, default=None
+    )
+    _stopped: bool = attrs.field(init=False, default=False)
+    _error: BaseException | None = attrs.field(init=False, default=None)
+    _cancel_scope: CancelScope = attrs.field(init=False, factory=CancelScope)
+    _wakeup: anyio.Event = attrs.field(init=False, factory=anyio.Event)
+    _finished: anyio.Event = attrs.field(init=False, factory=anyio.Event)
+
+    async def start(self) -> None:
+        self._broker_subscription = self._store._event_broker.subscribe(
+            self._notify,
+            self.event_types,
+        )
+        self._store._persistent_event_task_group.start_soon(self._run)
+
+    async def __aenter__(self) -> SQLAlchemyPersistentEventSubscription:
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.aclose()
+
+    def unsubscribe(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        self._cancel_scope.cancel()
+        self._wakeup.set()
+        if self._broker_subscription is not None:
+            self._broker_subscription.unsubscribe()
+
+    async def aclose(self) -> None:
+        self.unsubscribe()
+        await self._finished.wait()
+
+    async def wait_until_stopped(self) -> None:
+        await self._finished.wait()
+        if self._error is not None:
+            raise self._error
+
+    def _notify(self, event: Event) -> None:
+        self._wakeup.set()
+
+    async def _run(self) -> None:
+        with self._cancel_scope:
+            try:
+                while not self._stopped:
+                    persistent_events = await self._store._get_persistent_events(
+                        self.subscription_id,
+                        self._cursor,
+                        self._event_type_names(),
+                        limit=100,
+                    )
+                    if not persistent_events:
+                        with anyio.move_on_after(0.1):
+                            await self._wakeup.wait()
+                        self._wakeup = anyio.Event()
+                        continue
+
+                    for persistent_event in persistent_events:
+                        try:
+                            await self._deliver(persistent_event)
+                        except Exception:
+                            if self._stopped:
+                                return
+
+                            self._store._logger.exception(
+                                "Error delivering persistent event %d to "
+                                "subscription %r",
+                                persistent_event.id,
+                                self.subscription_id,
+                            )
+                            with anyio.move_on_after(1):
+                                await self._wakeup.wait()
+                            self._wakeup = anyio.Event()
+                            break
+                        else:
+                            await self._store._acknowledge_persistent_event(
+                                self.subscription_id, persistent_event.id
+                            )
+                            self._cursor = persistent_event.id
+            except Exception as exc:
+                self._error = exc
+                self.unsubscribe()
+            finally:
+                self._store._persistent_event_subscribers.pop(
+                    self.subscription_id, None
+                )
+                self._finished.set()
+
+    def _event_type_names(self) -> set[str] | None:
+        if self.event_types is None:
+            return None
+
+        return {event_type.__name__ for event_type in self.event_types}
+
+    async def _deliver(self, persistent_event: PersistentEvent) -> None:
+        if self.is_async:
+            retval = self.callback(persistent_event)
+            if iscoroutine(retval):
+                await retval
+        else:
+            await to_thread.run_sync(
+                self.callback,
+                persistent_event,
+                limiter=self._store._thread_limiter,
+            )
+
+
 @attrs.define(eq=False, repr=False)
 class SQLAlchemyDataStore(BaseExternalDataStore):
     """
@@ -154,6 +295,10 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
     :param engine_or_url: a SQLAlchemy URL or engine (preferably asynchronous, but can
         be synchronous)
     :param schema: a database schema name to use, if not the default
+    :param persistent_events: persist state-change events in the same transactions as
+        the corresponding scheduler state (SQLite only)
+    :param persistent_event_retention: retain persisted events for at most this
+        duration; ``None`` retains them indefinitely
 
     .. note:: The data store will not manage the life cycle of any engine instance
         passed to it, so you need to close the engine afterwards when you're done with
@@ -168,6 +313,10 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
         validator=instance_of((str, URL, Engine, AsyncEngine))
     )
     schema: str | None = attrs.field(kw_only=True, default=None)
+    persistent_events: bool = attrs.field(kw_only=True, default=False)
+    persistent_event_retention: timedelta | None = attrs.field(
+        kw_only=True, default=None, validator=optional(instance_of(timedelta))
+    )
 
     _engine: Engine | AsyncEngine = attrs.field(init=False)
     _close_on_exit: bool = attrs.field(init=False, default=False)
@@ -180,8 +329,27 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
     _t_schedules: Table = attrs.field(init=False)
     _t_jobs: Table = attrs.field(init=False)
     _t_job_results: Table = attrs.field(init=False)
+    _t_persistent_events: Table | None = attrs.field(init=False, default=None)
+    _t_persistent_event_subscriptions: Table | None = attrs.field(
+        init=False, default=None
+    )
+    _persistent_event_task_group: TaskGroup = attrs.field(init=False)
+    _thread_limiter: CapacityLimiter = attrs.field(init=False)
+    _persistent_event_subscribers: dict[
+        str, SQLAlchemyPersistentEventSubscription
+    ] = attrs.field(init=False, factory=dict)
 
     def __attrs_post_init__(self) -> None:
+        if self.persistent_event_retention is not None and not self.persistent_events:
+            raise ValueError(
+                "persistent_event_retention requires persistent_events to be enabled"
+            )
+        if (
+            self.persistent_event_retention is not None
+            and self.persistent_event_retention < timedelta()
+        ):
+            raise ValueError("persistent_event_retention must be non-negative")
+
         if isinstance(self.engine_or_url, (str, URL)):
             try:
                 self._engine = create_async_engine(self.engine_or_url)
@@ -191,6 +359,11 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             self._close_on_exit = True
         else:
             self._engine = self.engine_or_url
+
+        if self.persistent_events and self._engine.dialect.name != "sqlite":
+            raise NotImplementedError(
+                "Persistent events are currently only supported with SQLite"
+            )
 
         # Generate the table definitions
         prefix = f"{self.schema}." if self.schema else ""
@@ -205,6 +378,13 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
         self._t_schedules = self._metadata.tables[prefix + "schedules"]
         self._t_jobs = self._metadata.tables[prefix + "jobs"]
         self._t_job_results = self._metadata.tables[prefix + "job_results"]
+        if self.persistent_events:
+            self._t_persistent_events = self._metadata.tables[
+                prefix + "persistent_events"
+            ]
+            self._t_persistent_event_subscriptions = self._metadata.tables[
+                prefix + "persistent_event_subscriptions"
+            ]
 
     def __repr__(self) -> str:
         return create_repr(self, url=repr(self._engine.url), schema=self.schema)
@@ -263,6 +443,272 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             return await conn.execute(statement, parameters)
         else:
             return await to_thread.run_sync(conn.execute, statement, parameters)
+
+    async def _record_persistent_events(
+        self, conn: Connection | AsyncConnection, events: Iterable[Event]
+    ) -> None:
+        if not self.persistent_events or self._t_persistent_events is None:
+            return
+
+        parameters = [
+            {
+                "event_type": type(event).__name__,
+                "payload": self.serializer.serialize(event.marshal()),
+                "timestamp": event.timestamp,
+            }
+            for event in events
+        ]
+        if parameters:
+            await self._execute(conn, self._t_persistent_events.insert(), parameters)
+
+    async def _publish_events(self, events: Iterable[Event]) -> None:
+        for event in events:
+            await self._event_broker.publish(event)
+
+    async def _get_persistent_events(
+        self,
+        subscription_id: str,
+        cursor: int,
+        event_type_names: set[str] | None,
+        *,
+        limit: int,
+    ) -> list[PersistentEvent]:
+        if not self.persistent_events or self._t_persistent_events is None:
+            raise RuntimeError("Persistent events are not enabled")
+
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    if cursor:
+                        cursor_event_query = select(
+                            self._t_persistent_events.c.id
+                        ).where(self._t_persistent_events.c.id == cursor)
+                        cursor_event = (
+                            await self._execute(conn, cursor_event_query)
+                        ).first()
+                        if cursor_event is None:
+                            oldest_query = select(
+                                func.min(self._t_persistent_events.c.id)
+                            )
+                            oldest_event_id = (
+                                await self._execute(conn, oldest_query)
+                            ).scalar()
+                            raise PersistentEventHistoryExpiredError(
+                                subscription_id,
+                                cursor,
+                                oldest_event_id or cursor + 1,
+                            )
+
+                    query = (
+                        select(
+                            self._t_persistent_events.c.id,
+                            self._t_persistent_events.c.event_type,
+                            self._t_persistent_events.c.payload,
+                        )
+                        .where(self._t_persistent_events.c.id > cursor)
+                        .order_by(self._t_persistent_events.c.id)
+                        .limit(limit)
+                    )
+                    if event_type_names is not None:
+                        query = query.where(
+                            self._t_persistent_events.c.event_type.in_(
+                                event_type_names
+                            )
+                        )
+
+                    result = await self._execute(conn, query)
+                    persistent_events: list[PersistentEvent] = []
+                    for event_id, event_type_name, payload in result:
+                        event_class = getattr(_events, event_type_name)
+                        payload_data = self.serializer.deserialize(payload)
+                        event = event_class.unmarshal(payload_data)
+                        persistent_events.append(PersistentEvent(event_id, event))
+
+        return persistent_events
+
+    async def _acknowledge_persistent_event(
+        self, subscription_id: str, event_id: int
+    ) -> None:
+        if (
+            not self.persistent_events
+            or self._t_persistent_event_subscriptions is None
+        ):
+            raise RuntimeError("Persistent events are not enabled")
+
+        update = (
+            self._t_persistent_event_subscriptions.update()
+            .where(
+                (self._t_persistent_event_subscriptions.c.id == subscription_id)
+                & (self._t_persistent_event_subscriptions.c.last_event_id < event_id)
+            )
+            .values(
+                last_event_id=event_id,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    await self._execute(conn, update)
+
+    async def subscribe_persistent_events(
+        self,
+        callback: Callable[[PersistentEvent], Any],
+        event_types: Iterable[type[Event]] | None = None,
+        *,
+        subscription_id: str,
+        start_from: int | None = None,
+        is_async: bool = True,
+    ) -> SQLAlchemyPersistentEventSubscription:
+        """
+        Subscribe to persistent events for the given subscriber ID.
+
+        Callbacks receive events after storage commit and are acknowledged only after
+        they return successfully. Delivery is therefore at-least-once; callbacks must
+        be idempotent and use :attr:`PersistentEvent.id` to deduplicate events.
+
+        A new subscriber starts after the latest retained event by default. Pass an
+        explicit ``start_from`` to replay retained history. Reconnecting subscribers
+        resume from the cursor stored for ``subscription_id``.
+
+        :raises PersistentEventHistoryExpiredError: the stored cursor is older than
+            the retained history; the caller must resynchronize external state and
+            then call :meth:`resynchronize_persistent_subscription`
+        """
+        if not self.persistent_events or self._t_persistent_event_subscriptions is None:
+            raise RuntimeError("Persistent events are not enabled")
+        if subscription_id in self._persistent_event_subscribers:
+            raise ValueError(
+                f"Persistent event subscription {subscription_id!r} is already active"
+            )
+
+        types = set(event_types) if event_types is not None else None
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    query = select(
+                        self._t_persistent_event_subscriptions.c.last_event_id
+                    ).where(
+                        self._t_persistent_event_subscriptions.c.id == subscription_id
+                    )
+                    row = (await self._execute(conn, query)).one_or_none()
+                    if row is None:
+                        if start_from is None:
+                            max_query = select(
+                                func.max(self._t_persistent_events.c.id)
+                            )
+                            max_event_id = (
+                                await self._execute(conn, max_query)
+                            ).scalar()
+                            cursor = max_event_id or 0
+                        else:
+                            if start_from < 0:
+                                raise ValueError("start_from must be non-negative")
+                            cursor = start_from
+
+                        insert = self._t_persistent_event_subscriptions.insert().values(
+                            id=subscription_id,
+                            last_event_id=cursor,
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                        await self._execute(conn, insert)
+                    else:
+                        cursor = row[0]
+
+                    if cursor:
+                        cursor_event_query = select(
+                            self._t_persistent_events.c.id
+                        ).where(self._t_persistent_events.c.id == cursor)
+                        cursor_event = (
+                            await self._execute(conn, cursor_event_query)
+                        ).first()
+                        if cursor_event is None:
+                            oldest_query = select(
+                                func.min(self._t_persistent_events.c.id)
+                            )
+                            oldest_event_id = (
+                                await self._execute(conn, oldest_query)
+                            ).scalar()
+                            raise PersistentEventHistoryExpiredError(
+                                subscription_id,
+                                cursor,
+                                oldest_event_id or cursor + 1,
+                            )
+
+        subscription = SQLAlchemyPersistentEventSubscription(
+            self, subscription_id, types, callback, is_async, cursor
+        )
+        self._persistent_event_subscribers[subscription_id] = subscription
+        await subscription.start()
+        return subscription
+
+    async def resynchronize_persistent_subscription(
+        self,
+        subscription_id: str,
+        *,
+        start_from: int = 0,
+    ) -> None:
+        """
+        Reset a subscription after the caller has resynchronized its external state.
+
+        ``start_from`` is the ID of the already-handled event. Use ``0`` to replay all
+        retained history.
+
+        :raises PersistentEventHistoryExpiredError: ``start_from`` is not available in
+            the retained event history
+        """
+        if not self.persistent_events or self._t_persistent_event_subscriptions is None:
+            raise RuntimeError("Persistent events are not enabled")
+        if subscription_id in self._persistent_event_subscribers:
+            raise ValueError(
+                f"Persistent event subscription {subscription_id!r} is still active"
+            )
+        if start_from < 0:
+            raise ValueError("start_from must be non-negative")
+
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    if start_from:
+                        cursor_exists_query = select(
+                            self._t_persistent_events.c.id
+                        ).where(self._t_persistent_events.c.id == start_from)
+                        if (
+                            await self._execute(conn, cursor_exists_query)
+                        ).first() is None:
+                            oldest_query = select(
+                                func.min(self._t_persistent_events.c.id)
+                            )
+                            oldest_event_id = (
+                                await self._execute(conn, oldest_query)
+                            ).scalar()
+                            raise PersistentEventHistoryExpiredError(
+                                subscription_id,
+                                start_from,
+                                oldest_event_id or start_from + 1,
+                            )
+
+                    update = (
+                        self._t_persistent_event_subscriptions.update()
+                        .where(
+                            self._t_persistent_event_subscriptions.c.id
+                            == subscription_id
+                        )
+                        .values(
+                            last_event_id=start_from,
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    result = await self._execute(conn, update)
+                    if result.rowcount == 0:
+                        insert = (
+                            self._t_persistent_event_subscriptions.insert().values(
+                                id=subscription_id,
+                                last_event_id=start_from,
+                                updated_at=datetime.now(timezone.utc),
+                            )
+                        )
+                        await self._execute(conn, insert)
 
     @property
     def _temporary_failure_exceptions(self) -> tuple[type[Exception], ...]:
@@ -329,6 +775,11 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
         else:
             json_type = JSON
 
+        event_id_type = BigInteger().with_variant(Integer(), "sqlite")
+        table_kwargs: dict[str, Any] = {}
+        if self._engine.dialect.name == "sqlite":
+            table_kwargs["sqlite_autoincrement"] = True
+
         metadata = MetaData(schema=self.schema)
         Table("metadata", metadata, Column("schema_version", Integer, nullable=False))
         Table(
@@ -391,6 +842,28 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             Column("exception", LargeBinary),
             Column("return_value", LargeBinary),
         )
+        if self.persistent_events:
+            Table(
+                "persistent_events",
+                metadata,
+                Column(
+                    "id",
+                    event_id_type,
+                    primary_key=True,
+                    autoincrement=True,
+                ),
+                Column("event_type", Unicode(100), nullable=False, index=True),
+                Column("payload", LargeBinary, nullable=False),
+                Column("timestamp", timestamp_type, nullable=False, index=True),
+                **table_kwargs,
+            )
+            Table(
+                "persistent_event_subscriptions",
+                metadata,
+                Column("id", Unicode(500), primary_key=True),
+                Column("last_event_id", BigInteger),
+                Column("updated_at", timestamp_type, nullable=False),
+            )
         return metadata
 
     async def start(
@@ -407,6 +880,16 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             else:
                 exit_stack.callback(self._engine.dispose)
 
+        self._thread_limiter = CapacityLimiter(1)
+        task_group_cm = create_task_group()
+        self._persistent_event_task_group = await task_group_cm.__aenter__()
+
+        async def close_task_group() -> None:
+            for subscription in tuple(self._persistent_event_subscribers.values()):
+                await subscription.aclose()
+            await task_group_cm.__aexit__(None, None, None)
+
+        exit_stack.push_async_callback(close_task_group)
         await super().start(exit_stack, event_broker, logger)
 
         # Verify that the schema is in place
@@ -497,6 +980,9 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                 with attempt:
                     async with self._begin_transaction() as conn:
                         await self._execute(conn, insert)
+                        await self._record_persistent_events(
+                            conn, [TaskAdded(task_id=task.id)]
+                        )
         except IntegrityError:
             update = (
                 self._t_tasks.update()
@@ -513,6 +999,9 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                 with attempt:
                     async with self._begin_transaction() as conn:
                         await self._execute(conn, update)
+                        await self._record_persistent_events(
+                            conn, [TaskUpdated(task_id=task.id)]
+                        )
 
             await self._event_broker.publish(TaskUpdated(task_id=task.id))
         else:
@@ -520,14 +1009,20 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
 
     async def remove_task(self, task_id: str) -> None:
         delete = self._t_tasks.delete().where(self._t_tasks.c.id == task_id)
+        removed = False
         async for attempt in self._retry():
             with attempt:
                 async with self._begin_transaction() as conn:
                     result = await self._execute(conn, delete)
                     if result.rowcount == 0:
                         raise TaskLookupError(task_id)
-                    else:
-                        await self._event_broker.publish(TaskRemoved(task_id=task_id))
+                    await self._record_persistent_events(
+                        conn, [TaskRemoved(task_id=task_id)]
+                    )
+                    removed = True
+
+        if removed:
+            await self._event_broker.publish(TaskRemoved(task_id=task_id))
 
     async def get_task(self, task_id: str) -> Task:
         query = self._t_tasks.select().where(self._t_tasks.c.id == task_id)
@@ -565,6 +1060,16 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                 with attempt:
                     async with self._begin_transaction() as conn:
                         await self._execute(conn, insert)
+                        await self._record_persistent_events(
+                            conn,
+                            [
+                                ScheduleAdded(
+                                    schedule_id=schedule.id,
+                                    task_id=schedule.task_id,
+                                    next_fire_time=schedule.next_fire_time,
+                                )
+                            ],
+                        )
         except IntegrityError:
             if conflict_policy is ConflictPolicy.exception:
                 raise ConflictingIdError(schedule.id) from None
@@ -579,6 +1084,16 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                     with attempt:
                         async with self._begin_transaction() as conn:
                             await self._execute(conn, update)
+                            await self._record_persistent_events(
+                                conn,
+                                [
+                                    ScheduleUpdated(
+                                        schedule_id=schedule.id,
+                                        task_id=schedule.task_id,
+                                        next_fire_time=schedule.next_fire_time,
+                                    )
+                                ],
+                            )
 
                 event = ScheduleUpdated(
                     schedule_id=schedule.id,
@@ -595,7 +1110,9 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             await self._event_broker.publish(event)
 
     async def remove_schedules(self, ids: Iterable[str]) -> None:
+        removed_ids: list[tuple[str, str]] = []
         async for attempt in self._retry():
+            removed_ids = []
             with attempt:
                 async with self._begin_transaction() as conn:
                     if self._supports_update_returning:
@@ -606,7 +1123,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                                 self._t_schedules.c.id, self._t_schedules.c.task_id
                             )
                         )
-                        removed_ids: list[tuple[str, str]] = [
+                        removed_ids = [
                             (row[0], row[1])
                             for row in await self._execute(conn, delete_returning)
                         ]
@@ -615,7 +1132,6 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                             self._t_schedules.c.id, self._t_schedules.c.task_id
                         ).where(self._t_schedules.c.id.in_(ids))
                         ids_to_remove: list[str] = []
-                        removed_ids = []
                         for schedule_id, task_id in await self._execute(conn, query):
                             ids_to_remove.append(schedule_id)
                             removed_ids.append((schedule_id, task_id))
@@ -625,12 +1141,26 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                         )
                         await self._execute(conn, delete)
 
-        for schedule_id, task_id in removed_ids:
-            await self._event_broker.publish(
+                    await self._record_persistent_events(
+                        conn,
+                        [
+                            ScheduleRemoved(
+                                schedule_id=schedule_id,
+                                task_id=task_id,
+                                finished=False,
+                            )
+                            for schedule_id, task_id in removed_ids
+                        ],
+                    )
+
+        await self._publish_events(
+            [
                 ScheduleRemoved(
                     schedule_id=schedule_id, task_id=task_id, finished=False
                 )
-            )
+                for schedule_id, task_id in removed_ids
+            ]
+        )
 
     async def get_schedules(self, ids: set[str] | None = None) -> list[Schedule]:
         query = self._t_schedules.select().order_by(self._t_schedules.c.id)
@@ -705,11 +1235,13 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
         next_fire_times = {
             result.schedule_id: result.next_fire_time for result in results
         }
+        update_events: list[ScheduleUpdated] = []
+        finished_schedule_ids: list[str] = []
         async for attempt in self._retry():
+            update_events = []
+            finished_schedule_ids = []
             with attempt:
                 async with self._begin_transaction() as conn:
-                    update_events: list[ScheduleUpdated] = []
-                    finished_schedule_ids: list[str] = []
                     update_args: list[dict[str, Any]] = []
                     for result in results:
                         try:
@@ -799,17 +1331,32 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                         )
                         await self._execute(conn, delete)
 
-        for event in update_events:
-            await self._event_broker.publish(event)
+                    await self._record_persistent_events(
+                        conn,
+                        [
+                            *update_events,
+                            *(
+                                ScheduleRemoved(
+                                    schedule_id=schedule_id,
+                                    task_id=task_ids[schedule_id],
+                                    finished=True,
+                                )
+                                for schedule_id in finished_schedule_ids
+                            ),
+                        ],
+                    )
 
-        for schedule_id in finished_schedule_ids:
-            await self._event_broker.publish(
+        await self._publish_events(update_events)
+        await self._publish_events(
+            [
                 ScheduleRemoved(
                     schedule_id=schedule_id,
                     task_id=task_ids[schedule_id],
                     finished=True,
                 )
-            )
+                for schedule_id in finished_schedule_ids
+            ]
+        )
 
     async def get_next_schedule_run_time(self) -> datetime | None:
         columns = [self._t_schedules.c.next_fire_time]
@@ -843,16 +1390,17 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
     async def add_job(self, job: Job) -> None:
         marshalled = job.marshal(self.serializer)
         insert = self._t_jobs.insert().values(**marshalled)
-        async for attempt in self._retry():
-            with attempt:
-                async with self._begin_transaction() as conn:
-                    await self._execute(conn, insert)
-
         event = JobAdded(
             job_id=job.id,
             task_id=job.task_id,
             schedule_id=job.schedule_id,
         )
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    await self._execute(conn, insert)
+                    await self._record_persistent_events(conn, [event])
+
         await self._event_broker.publish(event)
 
     async def get_jobs(self, ids: Iterable[UUID] | None = None) -> list[Job]:
@@ -873,6 +1421,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
     ) -> list[Job]:
         events: list[JobAcquired | JobReleased] = []
         async for attempt in self._retry():
+            events = []
             with attempt:
                 async with self._begin_transaction() as conn:
                     now = datetime.now(timezone.utc)
@@ -995,7 +1544,9 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                         p_increment: BindParameter = bindparam("p_increment")
                         params = [
                             {"p_id": task_id, "p_increment": increment}
-                            for task_id, increment in running_job_count_increments.items()
+                            for task_id, increment in (
+                                running_job_count_increments.items()
+                            )
                         ]
                         update = (
                             self._t_tasks.update()
@@ -1027,9 +1578,10 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                             )
                         )
 
+                    await self._record_persistent_events(conn, events)
+
         # Publish the appropriate events
-        for event in events:
-            await self._event_broker.publish(event)
+        await self._publish_events(events)
 
         return acquired_jobs
 
@@ -1080,6 +1632,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                         job.schedule_id,
                         job.scheduled_fire_time,
                     )
+                    await self._record_persistent_events(conn, [event])
 
         # Notify other schedulers
         await self._event_broker.publish(event)
@@ -1141,8 +1694,9 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             .where(self._t_jobs.c.acquired_by == scheduler_id)
             .with_for_update()
         )
+        events: list[JobReleased] = []
         async for attempt in self._retry():
-            events: list[JobReleased] = []
+            events = []
             with attempt:
                 async with self._begin_transaction() as conn:
                     if results := await self._execute(conn, query):
@@ -1161,15 +1715,29 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                                 job.scheduled_fire_time,
                             )
                             events.append(event)
+                    await self._record_persistent_events(conn, events)
 
-            for event in events:
-                await self._event_broker.publish(event)
+        await self._publish_events(events)
 
     async def cleanup(self) -> None:
+        events: list[Event] = []
         async for attempt in self._retry():
+            events = []
             with attempt:
-                events: list[Event] = []
                 async with self._begin_transaction() as conn:
+                    if (
+                        self.persistent_events
+                        and self._t_persistent_events is not None
+                        and self.persistent_event_retention is not None
+                    ):
+                        cutoff = datetime.now(timezone.utc) - (
+                            self.persistent_event_retention
+                        )
+                        cleanup = self._t_persistent_events.delete().where(
+                            self._t_persistent_events.c.timestamp <= cutoff
+                        )
+                        await self._execute(conn, cleanup)
+
                     # Purge expired job results
                     delete = self._t_job_results.delete().where(
                         self._t_job_results.c.expires_at <= datetime.now(timezone.utc)
@@ -1268,6 +1836,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                             )
                         )
 
+                    await self._record_persistent_events(conn, events)
+
                 # Publish any events produced from the operations
-                for event in events:
-                    await self._event_broker.publish(event)
+                await self._publish_events(events)

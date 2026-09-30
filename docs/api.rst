@@ -75,6 +75,7 @@ Events
 ------
 
 .. autoclass:: apscheduler.Event
+.. autoclass:: apscheduler.datastores.sqlalchemy.PersistentEvent
 .. autoclass:: apscheduler.DataStoreEvent
 .. autoclass:: apscheduler.TaskAdded
 .. autoclass:: apscheduler.TaskUpdated
