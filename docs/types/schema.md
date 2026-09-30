@@ -108,6 +108,14 @@ schema = strawberry.Schema(Query, types=[Individual, Company])
 
 List of [extensions](/docs/extensions) to add to your Schema.
 
+#### `subscription_event_context_getter: Optional[Callable] = None`
+
+A regular or async callable that receives the connection context and a
+subscription source event, and returns a synchronous or asynchronous context
+manager. The manager is entered before resolving each event's fields and exited
+after that result is delivered. See
+[subscription contexts](/docs/general/subscriptions#per-event-context).
+
 #### `exception_handlers: Iterable[ExceptionHandler] = ()`
 
 List of handlers that convert expected Python exceptions into typed GraphQL

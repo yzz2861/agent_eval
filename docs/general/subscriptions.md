@@ -66,6 +66,50 @@ This is a very short example of what is possible. Like with queries and
 mutations the subscription can return any GraphQL type, not only scalars as
 demonstrated here.
 
+## Per-event context
+
+Subscription connections can remain open for hours, while a database transaction
+or DataLoader should usually only live for one delivered event. Pass
+`subscription_event_context_getter` when creating a schema to create a context
+manager for each event:
+
+```python
+import contextlib
+from typing import Any
+
+import strawberry
+
+
+@contextlib.asynccontextmanager
+async def event_context(connection_context: Any, event: Any):
+    async with database.transaction() as transaction:
+        yield {
+            "connection": connection_context,
+            "transaction": transaction,
+        }
+
+
+schema = strawberry.Schema(
+    query=Query,
+    subscription=Subscription,
+    subscription_event_context_getter=event_context,
+)
+```
+
+The getter receives the connection context and the source event. It may be a
+regular or async callable and can return either a synchronous or asynchronous
+context manager.
+
+Strawberry processes events serially in source order. It enters the context only
+after an event is available, keeps it open while field resolvers run and while
+the result is delivered, and exits it before requesting the next source event. A
+slow first event therefore does not open contexts for later events, and adjacent
+events do not share a transaction or DataLoader.
+
+The connection context remains available to every getter, but field resolvers
+receive the context produced by the manager. Build a new object or mapping per
+event rather than mutating the connection context in place.
+
 ## Authenticating Subscriptions
 
 Without going into detail on [why](https://github.com/websockets/ws/issues/467),

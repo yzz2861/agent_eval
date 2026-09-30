@@ -73,6 +73,7 @@ from ._graphql_core import (
     GraphQLIncrementalExecutionResults,
     GraphQLIncrementalResult,
     ResultType,
+    create_source_event_stream,
     execute,
     execution_context_class_kwargs,
     experimental_execute_incrementally,
@@ -83,6 +84,11 @@ from .base import BaseSchema
 from .config import StrawberryConfig
 from .directive_collector import SchemaDirectiveCollector
 from .exceptions import CannotGetOperationTypeError, InvalidOperationTypeError
+from .subscription import (
+    ActiveSubscriptionEvent,
+    SubscriptionSourceError,
+    run_subscription,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -100,6 +106,8 @@ if TYPE_CHECKING:
     from strawberry.types.field import StrawberryField
     from strawberry.types.scalar import ScalarDefinition, ScalarWrapper
     from strawberry.types.union import StrawberryUnion
+
+    from .subscription import SubscriptionEventContextGetter
 
 
 SubscriptionResult: TypeAlias = AsyncGenerator[
@@ -308,7 +316,7 @@ class StrawberryGraphQLCoreExecutionContext(GraphQLExecutionContext):
 
 
 class Schema(BaseSchema):
-    def __init__(  # noqa: PLR0917
+    def __init__(
         self,
         # TODO: can we make sure we only allow to pass
         # something that has been decorated?
@@ -327,6 +335,7 @@ class Schema(BaseSchema):
         ) = None,
         schema_directives: Iterable[object] = (),
         exception_handlers: Iterable[ExceptionHandler[Any]] = (),
+        subscription_event_context_getter: SubscriptionEventContextGetter | None = None,
     ) -> None:
         """Default Schema to be used in a Strawberry application.
 
@@ -351,6 +360,8 @@ class Schema(BaseSchema):
             schema_directives: A list of schema directives for the schema.
             exception_handlers: A list of handlers that can convert Python
                 exceptions into explicit GraphQL union return values.
+            subscription_event_context_getter: Returns a sync or async context
+                manager entered separately for each subscription event.
 
         Example:
         ```python
@@ -391,6 +402,7 @@ class Schema(BaseSchema):
         )
         self.config = config or StrawberryConfig()
         self.exception_handlers = tuple(exception_handlers)
+        self.subscription_event_context_getter = subscription_event_context_getter
 
         self.schema_converter = GraphQLCoreConverter(
             self.config,
@@ -609,7 +621,7 @@ class Schema(BaseSchema):
             *(ext for ext in extensions if ext._implements_resolve())
         )
 
-    def _create_execution_context(  # noqa: PLR0917
+    def _create_execution_context(
         self,
         query: str | None,
         allowed_operation_types: Iterable[OperationType],
@@ -846,7 +858,7 @@ class Schema(BaseSchema):
 
         return result
 
-    async def execute(  # noqa: PLR0917
+    async def execute(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
@@ -920,7 +932,7 @@ class Schema(BaseSchema):
             execution_context, result, extensions_runner, skip_process_errors=True
         )
 
-    def execute_sync(  # noqa: PLR0917
+    def execute_sync(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
@@ -1080,43 +1092,45 @@ class Schema(BaseSchema):
                 return
 
             try:
-                async with extensions_runner.executing():
-                    gql_33_kwargs = {
-                        "middleware": middleware_manager,
-                        "operation_extensions": operation_extensions,
-                        **execution_context_class_kwargs(execution_context_class),
-                    }
-                    try:
-                        # Might not be awaitable for pre-execution errors.
-                        aiter_or_result: OriginSubscriptionResult = await await_maybe(
-                            subscribe(
-                                self._schema,
-                                execution_context.graphql_document,
-                                root_value=execution_context.root_value,
-                                variable_values=execution_context.variables,
-                                operation_name=execution_context.operation_name,
-                                context_value=execution_context.context,
-                                **{} if IS_GQL_32 else gql_33_kwargs,
+                if self.subscription_event_context_getter is None:
+                    async with extensions_runner.executing():
+                        gql_33_kwargs = {
+                            "middleware": middleware_manager,
+                            "operation_extensions": operation_extensions,
+                            **execution_context_class_kwargs(execution_context_class),
+                        }
+                        try:
+                            # Might not be awaitable for pre-execution errors.
+                            aiter_or_result: OriginSubscriptionResult = (
+                                await await_maybe(
+                                    subscribe(
+                                        self._schema,
+                                        execution_context.graphql_document,
+                                        root_value=execution_context.root_value,
+                                        variable_values=execution_context.variables,
+                                        operation_name=execution_context.operation_name,
+                                        context_value=execution_context.context,
+                                        **{} if IS_GQL_32 else gql_33_kwargs,
+                                    )
+                                )
                             )
-                        )
-                    # graphql-core 3.2 doesn't handle some of the pre-execution errors.
-                    # see `test_subscription_immediate_error`
-                    except Exception as exc:  # noqa: BLE001
-                        aiter_or_result = OriginalExecutionResult(
-                            data=None, errors=[_coerce_error(exc)]
-                        )
+                        # graphql-core 3.2 doesn't handle some pre-execution errors.
+                        # see `test_subscription_immediate_error`
+                        except Exception as exc:  # noqa: BLE001
+                            aiter_or_result = OriginalExecutionResult(
+                                data=None, errors=[_coerce_error(exc)]
+                            )
 
-                # Handle pre-execution errors.
-                if isinstance(aiter_or_result, OriginalExecutionResult):
-                    execution_result = await self._handle_execution_result(
-                        execution_context,
-                        PreExecutionError(data=None, errors=aiter_or_result.errors),
-                        extensions_runner,
-                    )
-                    async with extensions_runner.on_stream_result(execution_result):
-                        yield execution_result
-                else:
-                    try:
+                    # Handle pre-execution errors.
+                    if isinstance(aiter_or_result, OriginalExecutionResult):
+                        execution_result = await self._handle_execution_result(
+                            execution_context,
+                            PreExecutionError(data=None, errors=aiter_or_result.errors),
+                            extensions_runner,
+                        )
+                        async with extensions_runner.on_stream_result(execution_result):
+                            yield execution_result
+                    else:
                         async with aclosing(aiter_or_result):
                             async for result in aiter_or_result:
                                 extension_result = await self._handle_execution_result(
@@ -1129,17 +1143,58 @@ class Schema(BaseSchema):
                                     extension_result
                                 ):
                                     yield extension_result
-                    # graphql-core doesn't handle exceptions raised while executing.
-                    except Exception as exc:  # noqa: BLE001
-                        execution_result = await self._handle_execution_result(
-                            execution_context,
-                            OriginalExecutionResult(
-                                data=None, errors=[_coerce_error(exc)]
-                            ),
-                            extensions_runner,
+                else:
+                    async with extensions_runner.executing():
+                        result_source = run_subscription(
+                            schema=self._schema,
+                            execution_context=execution_context,
+                            middleware_manager=middleware_manager,
+                            operation_extensions=operation_extensions,
+                            is_gql_32=IS_GQL_32,
+                            create_source_event_stream=create_source_event_stream,
+                            execute_subscription_event=execute,
+                            execution_context_class=execution_context_class,
+                            event_context_getter=self.subscription_event_context_getter,
                         )
-                        async with extensions_runner.on_stream_result(execution_result):
-                            yield execution_result
+                        async with aclosing(result_source):
+                            async for event_result in result_source:
+                                raw_result = (
+                                    event_result.result
+                                    if isinstance(event_result, ActiveSubscriptionEvent)
+                                    else event_result
+                                )
+                                source_result: ResultType = (
+                                    PreExecutionError(
+                                        data=None, errors=raw_result.errors
+                                    )
+                                    if isinstance(event_result, SubscriptionSourceError)
+                                    else raw_result
+                                )
+                                if isinstance(event_result, ActiveSubscriptionEvent):
+                                    async with event_result:
+                                        extension_result = (
+                                            await self._handle_execution_result(
+                                                execution_context,
+                                                raw_result,
+                                                extensions_runner,
+                                            )
+                                        )
+                                        async with extensions_runner.on_stream_result(
+                                            extension_result
+                                        ):
+                                            yield extension_result
+                                else:
+                                    extension_result = (
+                                        await self._handle_execution_result(
+                                            execution_context,
+                                            source_result,
+                                            extensions_runner,
+                                        )
+                                    )
+                                    async with extensions_runner.on_stream_result(
+                                        extension_result
+                                    ):
+                                        yield extension_result
             # catch exceptions raised in `on_execute` hook.
             except Exception as exc:  # noqa: BLE001
                 origin_result = OriginalExecutionResult(
@@ -1211,7 +1266,7 @@ class Schema(BaseSchema):
             execution_context, result, extensions_runner, skip_process_errors=True
         )
 
-    async def subscribe(  # noqa: PLR0917
+    async def subscribe(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
@@ -1241,7 +1296,7 @@ class Schema(BaseSchema):
             ),
         )
 
-    async def stream(  # noqa: PLR0917
+    async def stream(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from strawberry.types.union import StrawberryUnion
 
     from .config import StrawberryConfig
+    from .subscription import SubscriptionEventContextGetter
 
 
 class BaseSchema(Protocol):
@@ -39,9 +40,10 @@ class BaseSchema(Protocol):
     subscription: type[WithStrawberryObjectDefinition] | None
     schema_directives: list[object]
     exception_handlers: tuple[ExceptionHandler[Any], ...]
+    subscription_event_context_getter: SubscriptionEventContextGetter | None
 
     @abstractmethod
-    async def execute(  # noqa: PLR0917
+    async def execute(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
@@ -54,7 +56,7 @@ class BaseSchema(Protocol):
         raise NotImplementedError
 
     @abstractmethod
-    def execute_sync(  # noqa: PLR0917
+    def execute_sync(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
@@ -67,7 +69,7 @@ class BaseSchema(Protocol):
         raise NotImplementedError
 
     @abstractmethod
-    async def subscribe(  # noqa: PLR0917
+    async def subscribe(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
@@ -79,7 +81,7 @@ class BaseSchema(Protocol):
         raise NotImplementedError
 
     @abstractmethod
-    async def stream(  # noqa: PLR0917
+    async def stream(
         self,
         query: str | None,
         variable_values: dict[str, Any] | None = None,
