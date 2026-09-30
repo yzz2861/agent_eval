@@ -98,6 +98,17 @@ inserted into the cache.
    This class discards the least recently used items first to make
    space when necessary.
 
+.. autoclass:: ARCCache(maxsize, getsizeof=None)
+   :members: p, popitem
+
+   This class implements the Adaptive Replacement Cache algorithm of
+   Megiddo and Modha.  It divides cache entries between recently used
+   and frequently used entries, and adapts the target size of the
+   recent list, :attr:`p`, from accesses to two bounded lists of
+   recently evicted keys.  History entries retain keys only, not
+   values.  Capacity is measured in cache entries; custom values for
+   `getsizeof` are not supported.
+
 .. autoclass:: RRCache(maxsize, choice=random.choice, getsizeof=None)
    :members: choice, popitem
 

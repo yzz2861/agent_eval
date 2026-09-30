@@ -1,6 +1,7 @@
 """Extensible memoizing collections and decorators."""
 
 __all__ = (
+    "ARCCache",
     "Cache",
     "FIFOCache",
     "LFUCache",
@@ -324,6 +325,145 @@ class LRUCache(Cache):
             self.__order.move_to_end(key)
         except KeyError:
             self.__order[key] = None
+
+
+class ARCCache(Cache):
+    """Adaptive Replacement Cache (ARC) implementation."""
+
+    def __init__(self, maxsize, getsizeof=None):
+        if not isinstance(maxsize, int):
+            raise TypeError("maxsize must be an integer")
+        if getsizeof is not None:
+            raise TypeError("ARCCache does not support getsizeof")
+        if self.getsizeof is not ARCCache.getsizeof:
+            raise TypeError("ARCCache does not support getsizeof")
+        Cache.__init__(self, maxsize)
+        self.__t1 = collections.OrderedDict()
+        self.__t2 = collections.OrderedDict()
+        self.__b1 = collections.OrderedDict()
+        self.__b2 = collections.OrderedDict()
+        self.__p = 0
+
+    @property
+    def p(self):
+        """Target number of cache entries reserved for recent items."""
+        return self.__p
+
+    @staticmethod
+    def getsizeof(value):
+        """Return the size of a cache element's value."""
+        return 1
+
+    def __getitem__(self, key, cache_getitem=Cache.__getitem__):
+        value = cache_getitem(self, key)
+        if key in self:
+            self.__touch(key)
+        return value
+
+    def __setitem__(self, key, value, cache_setitem=Cache.__setitem__):
+        if self.maxsize == 0:
+            cache_setitem(self, key, value)
+            return
+
+        if key in self.__t1 or key in self.__t2:
+            cache_setitem(self, key, value)
+            self.__touch(key)
+            return
+
+        history_hit = False
+        if key in self.__b1:
+            history_hit = True
+            self.__p = min(
+                self.__p + max(len(self.__b2) // len(self.__b1), 1),
+                self.maxsize,
+            )
+            if len(self.__t1) + len(self.__t2) == self.maxsize:
+                self.__replace(key)
+            del self.__b1[key]
+        elif key in self.__b2:
+            history_hit = True
+            self.__p = max(self.__p - max(len(self.__b1) // len(self.__b2), 1), 0)
+            if len(self.__t1) + len(self.__t2) == self.maxsize:
+                self.__replace(key)
+            del self.__b2[key]
+        elif len(self.__t1) + len(self.__b1) == self.maxsize:
+            if len(self.__t1) + len(self.__t2) == self.maxsize:
+                if len(self.__t1) == self.maxsize:
+                    self.__discard()
+                else:
+                    self.__replace(key)
+            if self.__b1:
+                self.__b1.popitem(last=False)
+        else:
+            if self.__b2 and (
+                len(self.__t1) + len(self.__t2) + len(self.__b1) + len(self.__b2)
+                == 2 * self.maxsize
+            ):
+                self.__b2.popitem(last=False)
+            if len(self.__t1) + len(self.__t2) == self.maxsize:
+                self.__replace(key)
+
+        cache_setitem(self, key, value)
+        if history_hit:
+            self.__t2[key] = None
+        else:
+            self.__t1[key] = None
+
+    def __delitem__(self, key, cache_delitem=Cache.__delitem__):
+        cache_delitem(self, key)
+        if key in self.__t1:
+            del self.__t1[key]
+        else:
+            del self.__t2[key]
+
+    def popitem(self):
+        """Remove and return an ARC-selected `(key, value)` pair."""
+        if not self.__t1 and not self.__t2:
+            raise KeyError("%s is empty" % type(self).__name__) from None
+        victim, history = self.__replace_key(None)
+        value = Cache.__getitem__(self, victim)
+        del self[victim]
+        if len(history) < self.maxsize:
+            history[victim] = None
+        return (victim, value)
+
+    def clear(self):
+        Cache.clear(self)
+        self.__t1.clear()
+        self.__t2.clear()
+        self.__b1.clear()
+        self.__b2.clear()
+        self.__p = 0
+
+    def __touch(self, key):
+        if key in self.__t1:
+            del self.__t1[key]
+            self.__t2[key] = None
+        else:
+            self.__t2.move_to_end(key)
+
+    def __replace(self, key):
+        self.__evict(key)
+
+    def __discard(self):
+        victim = next(iter(self.__t1))
+        del self[victim]
+
+    def __evict(self, key):
+        victim, history = self.__replace_key(key)
+        value = Cache.__getitem__(self, victim)
+        del self[victim]
+        history[victim] = None
+        return (victim, value)
+
+    def __replace_key(self, key):
+        if self.__t1 and (
+            len(self.__t1) > self.__p
+            or (key in self.__b2 and len(self.__t1) == self.__p)
+        ):
+            return (next(iter(self.__t1)), self.__b1)
+        else:
+            return (next(iter(self.__t2)), self.__b2)
 
 
 class RRCache(Cache):

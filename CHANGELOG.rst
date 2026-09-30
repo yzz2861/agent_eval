@@ -1,3 +1,9 @@
+v7.3.0 (unreleased)
+==================
+
+- Add ``ARCCache``, an entry-counted Adaptive Replacement Cache with
+  bounded key-only access history.
+
 v7.2.0 (2026-09-16)
 ===================
 

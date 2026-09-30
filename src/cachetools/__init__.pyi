@@ -16,6 +16,7 @@ from typing import (
 )
 
 __all__: Final = (
+    "ARCCache",
     "Cache",
     "FIFOCache",
     "LFUCache",
@@ -62,6 +63,11 @@ class Cache(MutableMapping[_KT, _VT]):
 class FIFOCache(Cache[_KT, _VT]): ...
 class LFUCache(Cache[_KT, _VT]): ...
 class LRUCache(Cache[_KT, _VT]): ...
+
+class ARCCache(Cache[_KT, _VT]):
+    def __init__(self, maxsize: int, getsizeof: None = None) -> None: ...
+    @property
+    def p(self) -> int: ...
 
 class RRCache(Cache[_KT, _VT]):
     def __init__(
