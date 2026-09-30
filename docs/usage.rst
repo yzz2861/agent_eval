@@ -518,6 +518,36 @@ an error.
 requests. See :class:`~jwt.PyJWKClient` in the API reference for details on
 the caching parameters.
 
+Asynchronous applications can use :class:`~jwt.AsyncPyJWKClient`. Supply an
+object implementing :class:`~jwt.AsyncHTTPTransport` to control the non-blocking
+HTTP implementation, or use the built-in asyncio transport:
+
+.. code-block:: python
+
+    import asyncio
+    import jwt
+    from jwt import AsyncPyJWKClient
+
+
+    async def example(token: str) -> dict[str, object]:
+        jwks_client = AsyncPyJWKClient(
+            "https://example.com/.well-known/jwks.json"
+        )
+        try:
+            signing_key = await jwks_client.get_signing_key_from_jwt(token)
+        finally:
+            await jwks_client.close()
+
+        return jwt.decode(
+            token,
+            signing_key,
+            algorithms=["RS256"],
+            options={"verify_exp": False},
+        )
+
+
+    asyncio.run(example(token))
+
 OIDC Login Flow
 ---------------
 

@@ -25,7 +25,7 @@ from .exceptions import (
     PyJWKSetError,
     PyJWTError,
 )
-from .jwks_client import PyJWKClient
+from .jwks_client import AsyncHTTPTransport, AsyncPyJWKClient, PyJWKClient
 from .warnings import InsecureKeyLengthWarning
 
 __version__ = "2.15.0"
@@ -47,6 +47,8 @@ __all__ = [
     "PyJWS",
     "PyJWT",
     "PyJWKClient",
+    "AsyncPyJWKClient",
+    "AsyncHTTPTransport",
     "PyJWK",
     "PyJWKSet",
     "decode",

@@ -34,6 +34,13 @@ API Reference
     :class-doc-from: init
     :members:
 
+.. autoclass:: AsyncPyJWKClient
+    :class-doc-from: init
+    :members:
+
+.. autoclass:: AsyncHTTPTransport
+    :members:
+
 .. note:: TODO: Finish documenting PyJWS class
 .. module:: jwt.api_jws
 

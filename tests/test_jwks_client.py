@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import http.client
+import asyncio
 import io
 import json
 import ssl
@@ -16,7 +17,7 @@ from email.message import Message
 import pytest
 
 import jwt
-from jwt import PyJWKClient
+from jwt import AsyncPyJWKClient, PyJWKClient
 from jwt.jwks_client import _NoRedirectHandler
 from jwt.api_jwk import PyJWK, PyJWKSet
 from jwt.exceptions import (
@@ -809,3 +810,382 @@ class TestPyJWKClient:
                 jwks_client.get_jwk_set()
 
             assert http_error.closed
+
+
+class ControlledAsyncTransport:
+    def __init__(self, responses: list[object] | None = None) -> None:
+        self.responses = responses or []
+        self.calls = 0
+        self.requests: list[
+            tuple[str, dict[str, Any], float, ssl.SSLContext | None]
+        ] = []
+        self.hold: asyncio.Event | None = None
+        self.started = asyncio.Event()
+        self.closed = False
+
+    async def request(
+        self,
+        uri: str,
+        headers: dict[str, Any],
+        timeout: float,
+        ssl_context: ssl.SSLContext | None,
+    ) -> bytes:
+        self.calls += 1
+        self.requests.append((uri, headers, timeout, ssl_context))
+        if self.hold is not None:
+            self.started.set()
+            await self.hold.wait()
+        response = self.responses[(self.calls - 1) % len(self.responses)]
+        if isinstance(response, Exception):
+            raise response
+        return json.dumps(response).encode()
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@crypto_required
+class TestAsyncPyJWKClient:
+    url = "https://example.test/.well-known/jwks.json"
+    kid = "NEE1QURBOTM4MzI5RkFDNTYxOTU1MDg2ODgwQ0UzMTk1QjYyRkRFQw"
+
+    def test_fetch_data_uses_injected_transport_arguments(self) -> None:
+        transport = ControlledAsyncTransport([RESPONSE_DATA_WITH_MATCHING_KID])
+        ssl_context = ssl.create_default_context()
+        client = AsyncPyJWKClient(
+            self.url,
+            headers={"User-agent": "async-test"},
+            timeout=7,
+            ssl_context=ssl_context,
+            transport=transport,
+        )
+
+        data = asyncio.run(client.fetch_data())
+
+        assert data == RESPONSE_DATA_WITH_MATCHING_KID
+        assert transport.requests == [
+            (self.url, {"User-agent": "async-test"}, 7, ssl_context)
+        ]
+
+    def test_concurrent_miss_shares_one_fetch(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport([RESPONSE_DATA_WITH_MATCHING_KID])
+            client = AsyncPyJWKClient(self.url, transport=transport)
+            hold = asyncio.Event()
+            transport.hold = hold
+
+            first = asyncio.create_task(client.get_jwk_set())
+            second = asyncio.create_task(client.get_jwk_set())
+            await asyncio.wait_for(transport.started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            hold.set()
+
+            results = await asyncio.gather(first, second)
+
+            assert transport.calls == 1
+            assert [key.key_id for key in results[0].keys] == [
+                key.key_id for key in results[1].keys
+            ]
+            await client.close()
+
+        asyncio.run(scenario())
+
+    def test_cancelled_waiter_does_not_cancel_shared_fetch(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport([RESPONSE_DATA_NO_MATCHING_KID])
+            client = AsyncPyJWKClient(
+                self.url, cooldown_duration=30, transport=transport
+            )
+            await client.fetch_data()
+            client._last_successful_fetch = 0
+            transport.calls = 0
+            hold = asyncio.Event()
+            transport.hold = hold
+            transport.started.clear()
+
+            first = asyncio.create_task(client.get_signing_key("unknown-kid"))
+            await asyncio.wait_for(transport.started.wait(), timeout=1)
+            second = asyncio.create_task(client.get_signing_key("unknown-kid"))
+            await asyncio.sleep(0.1)
+
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            await asyncio.sleep(0.1)
+            hold.set()
+            with pytest.raises(PyJWKClientError, match="matches"):
+                await second
+
+            assert transport.calls == 1
+            await client.close()
+
+        asyncio.run(scenario())
+
+    def test_cancelled_only_waiter_can_let_shared_failure_finish(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport(
+                [RESPONSE_DATA_WITH_MATCHING_KID, RuntimeError("later failure")]
+            )
+            client = AsyncPyJWKClient(
+                self.url, cache_jwk_set=False, transport=transport
+            )
+            await client.fetch_data()
+            hold = asyncio.Event()
+            transport.hold = hold
+            transport.started.clear()
+
+            waiter = asyncio.create_task(client.fetch_data())
+            await asyncio.wait_for(transport.started.wait(), timeout=1)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+
+            hold.set()
+            await asyncio.sleep(0.1)
+            await client.close()
+
+        asyncio.run(scenario())
+
+    def test_failed_fetch_does_not_publish_partial_key_set(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport(
+                [{"keys": []}, RESPONSE_DATA_WITH_MATCHING_KID]
+            )
+            client = AsyncPyJWKClient(self.url, transport=transport)
+
+            with pytest.raises(PyJWKSetError):
+                await client.get_jwk_set()
+            assert client.jwk_set_cache is not None
+            assert client.jwk_set_cache.get() is None
+
+            jwk_set = await client.get_jwk_set()
+            assert len(jwk_set.keys) == 1
+            assert transport.calls == 2
+            await client.close()
+
+        asyncio.run(scenario())
+
+    def test_transport_exception_does_not_publish_key_set(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport(
+                [RuntimeError("unavailable"), RESPONSE_DATA_WITH_MATCHING_KID]
+            )
+            client = AsyncPyJWKClient(self.url, transport=transport)
+
+            with pytest.raises(PyJWKClientConnectionError):
+                await client.get_jwk_set()
+            assert client.jwk_set_cache is not None
+            assert client.jwk_set_cache.get() is None
+
+            jwk_set = await client.get_jwk_set()
+            assert len(jwk_set.keys) == 1
+            assert transport.calls == 2
+            await client.close()
+
+        asyncio.run(scenario())
+
+    def test_concurrent_unknown_kid_refresh_respects_cooldown(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport([RESPONSE_DATA_NO_MATCHING_KID])
+            client = AsyncPyJWKClient(
+                self.url, cooldown_duration=30, transport=transport
+            )
+            await client.fetch_data()
+            client._last_successful_fetch = 0
+            transport.calls = 0
+            hold = asyncio.Event()
+            transport.hold = hold
+
+            first = asyncio.create_task(client.get_signing_key("unknown-kid"))
+            second = asyncio.create_task(client.get_signing_key("unknown-kid"))
+            await asyncio.wait_for(transport.started.wait(), timeout=1)
+            hold.set()
+            results = await asyncio.gather(first, second, return_exceptions=True)
+
+            assert transport.calls == 1
+            assert all(isinstance(result, PyJWKClientError) for result in results)
+            await client.close()
+
+        asyncio.run(scenario())
+
+    def test_close_rejects_new_requests_and_preserves_external_transport(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport([RESPONSE_DATA_WITH_MATCHING_KID])
+            client = AsyncPyJWKClient(self.url, transport=transport)
+
+            await client.close()
+
+            with pytest.raises(PyJWKClientError, match="closed"):
+                await client.fetch_data()
+            with pytest.raises(PyJWKClientError, match="closed"):
+                await client.get_jwk_set()
+            assert transport.calls == 0
+            assert not transport.closed
+
+            await client.close()
+            assert not transport.closed
+
+        asyncio.run(scenario())
+
+    def test_close_closes_owned_default_transport(self) -> None:
+        async def scenario() -> None:
+            client = AsyncPyJWKClient(self.url)
+            close_transport = mock.AsyncMock()
+            client._transport.aclose = close_transport
+
+            await client.close()
+
+            close_transport.assert_awaited_once()
+
+        asyncio.run(scenario())
+
+    def test_external_transport_is_not_closed(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport([RESPONSE_DATA_WITH_MATCHING_KID])
+            client = AsyncPyJWKClient(self.url, transport=transport)
+
+            await client.close()
+
+            assert not transport.closed
+
+        asyncio.run(scenario())
+
+    def test_close_ends_all_waiters_and_in_flight_fetch(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport([RESPONSE_DATA_WITH_MATCHING_KID])
+            client = AsyncPyJWKClient(self.url, transport=transport)
+            hold = asyncio.Event()
+            transport.hold = hold
+
+            first = asyncio.create_task(client.get_jwk_set())
+            second = asyncio.create_task(client.get_jwk_set())
+            await asyncio.wait_for(transport.started.wait(), timeout=1)
+
+            close = asyncio.create_task(client.close())
+            results = await asyncio.gather(first, second, close, return_exceptions=True)
+
+            assert isinstance(results[0], PyJWKClientError)
+            assert isinstance(results[1], PyJWKClientError)
+            assert results[2] is None
+            assert not transport.closed
+            assert transport.calls == 1
+
+        asyncio.run(scenario())
+
+    def test_per_key_cache_avoids_fetch_and_close_rejects_cached_key(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport([RESPONSE_DATA_WITH_MATCHING_KID])
+            client = AsyncPyJWKClient(self.url, cache_keys=True, transport=transport)
+
+            first = await client.get_signing_key(self.kid)
+            second = await client.get_signing_key(self.kid)
+            assert first is second
+            assert transport.calls == 1
+
+            await client.close()
+            with pytest.raises(PyJWKClientError, match="closed"):
+                await client.get_signing_key(self.kid)
+
+        asyncio.run(scenario())
+
+    def test_zero_max_cached_keys_does_not_cache(self) -> None:
+        async def scenario() -> None:
+            transport = ControlledAsyncTransport([RESPONSE_DATA_WITH_MATCHING_KID])
+            client = AsyncPyJWKClient(
+                self.url,
+                cache_keys=True,
+                cache_jwk_set=False,
+                max_cached_keys=0,
+                transport=transport,
+            )
+
+            await client.get_signing_key(self.kid)
+            await client.get_signing_key(self.kid)
+
+            assert transport.calls == 2
+            await client.close()
+
+        asyncio.run(scenario())
+
+    def test_default_transport_fetches_from_http_server(self) -> None:
+        async def scenario() -> None:
+            body = json.dumps(RESPONSE_DATA_WITH_MATCHING_KID).encode()
+            reader = mock.AsyncMock()
+            reader.readuntil.return_value = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode()
+            )
+            reader.readexactly = mock.AsyncMock(return_value=body)
+            writer = mock.MagicMock()
+            writer.drain = mock.AsyncMock()
+            writer.wait_closed = mock.AsyncMock()
+            client = AsyncPyJWKClient(
+                "http://example.test/jwks?format=json",
+                headers={"User-agent": "async-default"},
+            )
+            with mock.patch(
+                "jwt.jwks_client.asyncio.open_connection",
+                new=mock.AsyncMock(return_value=(reader, writer)),
+            ):
+                jwk_set = await client.get_jwk_set()
+            await client.close()
+
+            request = writer.write.call_args.args[0]
+            assert b"User-agent: async-default\r\n" in request
+            assert request.startswith(b"GET /jwks?format=json HTTP/1.1\r\n")
+            assert len(jwk_set.keys) == 1
+            writer.close.assert_called_once_with()
+
+        asyncio.run(scenario())
+
+    def test_default_transport_reads_chunked_response(self) -> None:
+        async def scenario() -> None:
+            body = json.dumps(RESPONSE_DATA_WITH_MATCHING_KID).encode()
+            reader = mock.AsyncMock()
+            reader.readuntil.return_value = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+            )
+            reader.readline.side_effect = [
+                f"{len(body):x}\r\n".encode(),
+                b"0\r\n",
+                b"\r\n",
+            ]
+            reader.readexactly = mock.AsyncMock(side_effect=[body, b"\r\n"])
+            writer = mock.MagicMock()
+            writer.drain = mock.AsyncMock()
+            writer.wait_closed = mock.AsyncMock()
+            client = AsyncPyJWKClient("http://example.test/jwks")
+            with mock.patch(
+                "jwt.jwks_client.asyncio.open_connection",
+                new=mock.AsyncMock(return_value=(reader, writer)),
+            ):
+                jwk_set = await client.get_jwk_set()
+            await client.close()
+
+            assert len(jwk_set.keys) == 1
+
+        asyncio.run(scenario())
+
+    def test_default_transport_rejects_redirect_status(self) -> None:
+        async def scenario() -> None:
+            reader = mock.AsyncMock()
+            reader.readuntil.return_value = (
+                b"HTTP/1.1 302 Found\r\nLocation: http://other.test/jwks\r\n\r\n"
+            )
+            writer = mock.MagicMock()
+            writer.drain = mock.AsyncMock()
+            writer.wait_closed = mock.AsyncMock()
+            client = AsyncPyJWKClient("http://example.test/jwks")
+            with mock.patch(
+                "jwt.jwks_client.asyncio.open_connection",
+                new=mock.AsyncMock(return_value=(reader, writer)),
+            ):
+                with pytest.raises(PyJWKClientConnectionError, match="HTTP 302"):
+                    await client.fetch_data()
+            await client.close()
+
+        asyncio.run(scenario())
