@@ -1,3 +1,11 @@
+v7.3.0 (unreleased)
+===================
+
+- Add ``ARCCache`` implementing the Adaptive Replacement Cache (ARC)
+  algorithm by Megiddo and Modha.  Capacity is accounted per item;
+  passing a custom ``getsizeof`` function is rejected.
+
+
 v7.2.0 (2026-09-16)
 ===================
 
@@ -38,7 +46,7 @@ v7.1.5 (2026-07-23)
 - Fix ``TLRUCache`` silently keeping stale values on expired
   overwrites.
 
-- Reject negative cache item ``getsizeof`` values.
+- Reject negative cache item ```getsizeof``` values.
 
 - Update build environment.
 
@@ -636,7 +644,7 @@ v1.1.0 (2015-08-28)
 
 - Deprecate `cache` attribute for ``@cachedmethod`` wrappers.
 
-- Deprecate `getsizeof` and `lock` arguments for `cachetools.func`
+- Deprecate ``getsizeof`` and `lock` arguments for `cachetools.func`
   decorator.
 
 
@@ -768,7 +776,7 @@ v0.3.0 (2014-05-06)
 
 - Remove ``@cache`` decorator.
 
-- Add ``size``, ``getsizeof`` members.
+- Add ``size``, ```getsizeof``` members.
 
 - Add ``@cachedmethod`` decorator.
 

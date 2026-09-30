@@ -76,6 +76,26 @@ inserted into the cache.
    additionally need to override :meth:`__getitem__`,
    :meth:`__setitem__` and :meth:`__delitem__`.
 
+.. autoclass:: ARCCache(maxsize, getsizeof=None)
+   :members: p, popitem
+
+   This class implements the Adaptive Replacement Cache (ARC)
+   algorithm by Megiddo and Modha.  The cache is partitioned into a
+   list of items referenced only once recently and a list of items
+   referenced at least twice recently, and a self-tuning adaptation
+   parameter is used to balance the two lists between recency and
+   frequency based on the observed access pattern.  Keys of recently
+   evicted items are kept in two bounded history lists to guide the
+   adaptation; the corresponding values are not retained.
+
+   Since capacity is accounted per item, this class does not support
+   a custom :meth:`getsizeof` function and raises :exc:`ValueError`
+   if one is passed.
+
+   .. testcode::
+
+      cache = ARCCache(maxsize=100)
+
 .. autoclass:: FIFOCache(maxsize, getsizeof=None)
    :members: popitem
 

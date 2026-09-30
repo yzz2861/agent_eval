@@ -1,6 +1,7 @@
 """Extensible memoizing collections and decorators."""
 
 __all__ = (
+    "ARCCache",
     "Cache",
     "FIFOCache",
     "LFUCache",
@@ -166,6 +167,169 @@ class Cache(collections.abc.MutableMapping):
     def getsizeof(value):
         """Return the size of a cache element's value."""
         return 1
+
+
+class ARCCache(Cache):
+    """Adaptive Replacement Cache (ARC) implementation.
+
+    This is an implementation of the ARC algorithm by Megiddo and
+    Modha ("ARC: A Self-Tuning, Low Overhead Replacement Cache",
+    FAST '03).  The cache is partitioned into a list `T1` of items
+    referenced only once recently and a list `T2` of items
+    referenced at least twice recently.  Two additional lists `B1`
+    and `B2` keep the keys (but not the values) of items recently
+    evicted from `T1` and `T2`, respectively.  A self-tuning
+    parameter `p` is continuously adapted in response to hits in
+    `B1` and `B2`, balancing the target sizes of `T1` and `T2`
+    between recency and frequency.
+
+    The cache is bounded by `maxsize` items, and the `B1` and
+    `B2` history lists are bounded such that `T1`, `T2`, `B1`
+    and `B2` together never reference more than `2 * maxsize`
+    keys.  Since capacity is accounted per item, this implementation
+    does not support a custom `getsizeof` function and rejects one
+    if passed.
+
+    """
+
+    def __init__(self, maxsize, getsizeof=None):
+        if getsizeof is not None:
+            raise ValueError("ARCCache does not support getsizeof")
+        Cache.__init__(self, maxsize)
+        if self.getsizeof is not Cache.getsizeof:
+            raise ValueError("ARCCache does not support getsizeof")
+        self.__p = 0
+        # resident items: T1 (seen once recently), T2 (seen twice)
+        self.__t1 = collections.OrderedDict()
+        self.__t2 = collections.OrderedDict()
+        # ghost entries: keys recently evicted from T1 and T2
+        self.__b1 = collections.OrderedDict()
+        self.__b2 = collections.OrderedDict()
+
+    @property
+    def p(self):
+        """The current target size of the T1 (recent items) list.
+
+        This adaptation parameter is continuously adjusted by the ARC
+        algorithm between `0` and `maxsize` in response to the
+        observed access pattern.
+        """
+        return self.__p
+
+    def __getitem__(self, key, cache_getitem=Cache.__getitem__):
+        t1 = self.__t1
+        if key in t1:
+            # ARC case I: T1 hit, promote to MRU position of T2
+            value = cache_getitem(self, key)
+            self.__t2[key] = t1.pop(key)
+            return value
+        t2 = self.__t2
+        if key in t2:
+            # ARC case I: T2 hit, move to MRU position
+            value = cache_getitem(self, key)
+            t2.move_to_end(key)
+            return value
+        # miss: __missing__() may insert the item via __setitem__(),
+        # which handles the ARC miss cases
+        return cache_getitem(self, key)
+
+    def __setitem__(self, key, value, cache_setitem=Cache.__setitem__):
+        t1, t2, b1, b2 = self.__t1, self.__t2, self.__b1, self.__b2
+        if key in t1:
+            # ARC case I: T1 hit, promote to MRU position of T2
+            cache_setitem(self, key, value)
+            t2[key] = t1.pop(key)
+        elif key in t2:
+            # ARC case I: T2 hit, move to MRU position
+            cache_setitem(self, key, value)
+            t2.move_to_end(key)
+        elif key in b1:
+            # ARC case II: B1 hit, favor recency
+            self.__p = min(self.__p + max(len(b2) // len(b1), 1), self.maxsize)
+            if self.currsize + 1 > self.maxsize:
+                self.__replace(in_b2=False)
+            del b1[key]
+            cache_setitem(self, key, value)
+            t2[key] = None
+        elif key in b2:
+            # ARC case III: B2 hit, favor frequency
+            self.__p = max(self.__p - max(len(b1) // len(b2), 1), 0)
+            if self.currsize + 1 > self.maxsize:
+                self.__replace(in_b2=True)
+            del b2[key]
+            cache_setitem(self, key, value)
+            t2[key] = None
+        else:
+            # ARC case IV: complete miss
+            maxsize = self.maxsize
+            if len(t1) + len(b1) == maxsize:
+                if len(t1) < maxsize:
+                    # ARC case A: make room in B1, then replace
+                    b1.popitem(last=False)
+                    if self.currsize + 1 > maxsize:
+                        self.__replace(in_b2=False)
+                elif t1:
+                    # ARC case A: T1 alone fills the cache, drop its
+                    # LRU item without entering it into B1
+                    Cache.__delitem__(self, t1.popitem(last=False)[0])
+            elif len(t1) + len(t2) + len(b1) + len(b2) >= maxsize:
+                # ARC case B: keep the history lists bounded
+                if len(t1) + len(t2) + len(b1) + len(b2) >= 2 * maxsize:
+                    b2.popitem(last=False)
+                if self.currsize + 1 > maxsize:
+                    self.__replace(in_b2=False)
+            cache_setitem(self, key, value)
+            t1[key] = None
+
+    def __delitem__(self, key, cache_delitem=Cache.__delitem__):
+        cache_delitem(self, key)
+        # explicit deletion is not an eviction: remove the key from
+        # the resident lists without entering it into B1 or B2
+        try:
+            del self.__t1[key]
+        except KeyError:
+            del self.__t2[key]
+
+    def popitem(self):
+        """Remove and return the `(key, value)` pair selected by ARC's
+        REPLACE procedure.
+
+        """
+        item = self.__evict(in_b2=False)
+        if item is None:
+            raise KeyError("%s is empty" % type(self).__name__) from None
+        return item
+
+    def clear(self):
+        Cache.clear(self)
+        self.__p = 0
+        self.__t1.clear()
+        self.__t2.clear()
+        self.__b1.clear()
+        self.__b2.clear()
+
+    def __replace(self, in_b2):
+        # ARC's REPLACE procedure: evict the LRU item of T1 if T1
+        # exceeds its target size p, else the LRU item of T2; the
+        # evicted key is entered into the corresponding ghost list
+        self.__evict(in_b2)
+
+    def __evict(self, in_b2):
+        t1, t2 = self.__t1, self.__t2
+        if t1 and ((in_b2 and len(t1) == self.__p) or len(t1) > self.__p):
+            src, ghost = t1, self.__b1
+        elif t2:
+            src, ghost = t2, self.__b2
+        elif t1:
+            # T2 is empty but T1 is not (e.g. p == maxsize)
+            src, ghost = t1, self.__b1
+        else:
+            return None
+        key, _ = src.popitem(last=False)
+        value = Cache.__getitem__(self, key)
+        Cache.__delitem__(self, key)
+        ghost[key] = None
+        return (key, value)
 
 
 class FIFOCache(Cache):

@@ -16,6 +16,7 @@ from typing import (
 )
 
 __all__: Final = (
+    "ARCCache",
     "Cache",
     "FIFOCache",
     "LFUCache",
@@ -58,6 +59,11 @@ class Cache(MutableMapping[_KT, _VT]):
     def currsize(self) -> float: ...
     @staticmethod
     def getsizeof(value: _VT) -> float: ...
+
+class ARCCache(Cache[_KT, _VT]):
+    def __init__(self, maxsize: float, getsizeof: None = None) -> None: ...
+    @property
+    def p(self) -> float: ...
 
 class FIFOCache(Cache[_KT, _VT]): ...
 class LFUCache(Cache[_KT, _VT]): ...
