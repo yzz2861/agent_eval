@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 from fastapi import routing
 from fastapi._compat import (
     ModelField,
+    get_cached_model_fields,
     get_definitions,
     get_flat_models_from_fields,
     get_model_name_map,
@@ -26,6 +27,7 @@ from fastapi.dependencies.models import (
 )
 from fastapi.dependencies.utils import (
     _get_flat_fields_from_params,
+    _is_json_body_part,
     get_flat_params,
     get_validation_alias,
 )
@@ -259,6 +261,18 @@ def get_openapi_operation_request_body(
         )
     elif field_info.example is not _Unset:
         request_media_content["example"] = jsonable_encoder(field_info.example)
+    if request_media_type == "multipart/form-data":
+        encoding = {}
+        annotation = body_field.field_info.annotation
+        if lenient_issubclass(annotation, BaseModel):
+            for field in get_cached_model_fields(annotation):
+                if _is_json_body_part(field):
+                    serialization_alias = field.serialization_alias or field.alias
+                    encoding[serialization_alias] = {
+                        "contentType": field.field_info.media_type
+                    }
+        if encoding:
+            request_media_content["encoding"] = encoding
     request_body_oai["content"] = {request_media_type: request_media_content}
     return request_body_oai
 

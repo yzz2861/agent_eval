@@ -1,5 +1,7 @@
 import dataclasses
+import email.message
 import inspect
+import json
 import sys
 from collections.abc import (
     AsyncGenerator,
@@ -69,7 +71,7 @@ from fastapi.logger import logger
 from fastapi.security.oauth2 import SecurityScopes
 from fastapi.types import DependencyCacheKey
 from fastapi.utils import create_model_field, get_path_param_names
-from pydantic import BaseModel, Json
+from pydantic import BaseModel, Json, ValidationError
 from pydantic.fields import FieldInfo
 from starlette.background import BackgroundTasks as StarletteBackgroundTasks
 from starlette.concurrency import run_in_threadpool
@@ -98,6 +100,24 @@ multipart_incorrect_install_error = (
     'And then install "python-multipart" with: \n\n'
     "pip install python-multipart\n"
 )
+
+_MISSING_FORM_PART = object()
+
+
+def _is_json_media_type(media_type: str) -> bool:
+    message = email.message.Message()
+    message["content-type"] = media_type
+    return message.get_content_type() == "application/json" or (
+        message.get_content_maintype() == "application"
+        and message.get_content_subtype().endswith("+json")
+    )
+
+
+def _is_json_body_part(field: ModelField) -> bool:
+    field_info = field.field_info
+    return type(field_info) is params.Body and _is_json_media_type(
+        field_info.media_type
+    )
 
 
 def ensure_multipart_is_installed() -> None:
@@ -732,9 +752,14 @@ async def solve_dependencies(
 
 
 def _validate_value_with_model_field(
-    *, field: ModelField, value: Any, values: dict[str, Any], loc: tuple[str, ...]
+    *,
+    field: ModelField,
+    value: Any,
+    values: dict[str, Any],
+    loc: tuple[str, ...],
+    treat_none_as_missing: bool = True,
 ) -> tuple[Any, list[Any]]:
-    if value is None:
+    if treat_none_as_missing and value is None:
         if field.field_info.is_required():
             return None, [get_missing_field_error(loc=loc)]
         else:
@@ -912,12 +937,82 @@ def _should_embed_body_fields(fields: list[ModelField]) -> bool:
 async def _extract_form_body(
     body_fields: list[ModelField],
     received_body: FormData,
-) -> dict[str, Any]:
-    values = {}
+) -> tuple[dict[str, Any], list[dict[str, Any]], set[ModelField], set[ModelField]]:
+    values: dict[str, Any] = {}
+    errors: list[dict[str, Any]] = []
+    failed_fields: set[ModelField] = set()
+    present_fields: set[ModelField] = set()
+
+    def json_part_error(
+        field: ModelField,
+        *,
+        error: Exception,
+        value: Any,
+    ) -> dict[str, Any]:
+        alias = get_validation_alias(field)
+        loc: tuple[int | str, ...] = ("body", alias)
+        if isinstance(error, json.JSONDecodeError):
+            return {
+                "type": "json_invalid",
+                "loc": (*loc, error.pos),
+                "msg": "JSON decode error",
+                "input": value,
+                "ctx": {"error": error.msg},
+            }
+        return cast(
+            dict[str, Any],
+            ValidationError.from_exception_data(
+                str(error),
+                [
+                    {
+                        "type": "value_error",
+                        "loc": loc,
+                        "input": value,
+                        "ctx": {"error": error},
+                    }
+                ],
+            ).errors(include_url=False)[0],
+        )
 
     for field in body_fields:
-        value = _get_multidict_value(field, received_body)
+        alias = get_validation_alias(field)
+        raw_values = received_body.getlist(alias)
         field_info = field.field_info
+
+        if _is_json_body_part(field):
+            if len(raw_values) > 1:
+                error = ValueError(f"Duplicate JSON part: {alias}")
+                errors.append(json_part_error(field, error=error, value=alias))
+                failed_fields.add(field)
+                continue
+            if not raw_values:
+                continue
+            present_fields.add(field)
+
+            raw_value = raw_values[0]
+            raw_text = ""
+            error_value: Any = raw_value
+            try:
+                if isinstance(raw_value, UploadFile):
+                    raw_bytes = await raw_value.read()
+                    error_value = raw_bytes
+                    content_type_message = email.message.Message()
+                    content_type_message["content-type"] = (
+                        raw_value.headers.get("content-type") or field_info.media_type
+                    )
+                    charset = content_type_message.get_content_charset() or "utf-8"
+                    raw_text = raw_bytes.decode(charset)
+                else:
+                    raw_text = raw_value
+                values[alias] = json.loads(raw_text)
+            except (json.JSONDecodeError, UnicodeDecodeError, LookupError) as error:
+                errors.append(
+                    json_part_error(field, error=error, value=raw_text or error_value)
+                )
+                failed_fields.add(field)
+            continue
+
+        value = _get_multidict_value(field, received_body)
         if (
             isinstance(field_info, params.File)
             and is_bytes_or_nonable_bytes_annotation(field.field_info.annotation)
@@ -935,8 +1030,10 @@ async def _extract_form_body(
             for sub_value in value:
                 results.append(await sub_value.read())
             value = serialize_sequence_value(field=field, value=results)
-        if value is not None:
-            values[get_validation_alias(field)] = value
+        if raw_values or value is not None:
+            values[alias] = value
+        if raw_values:
+            present_fields.add(field)
     field_aliases = {get_validation_alias(field) for field in body_fields}
     for key in received_body.keys():
         if key not in field_aliases:
@@ -945,7 +1042,7 @@ async def _extract_form_body(
                 values[key] = param_values[0]
             else:
                 values[key] = param_values
-    return values
+    return values, errors, failed_fields, present_fields
 
 
 async def request_body_to_args(
@@ -959,6 +1056,8 @@ async def request_body_to_args(
     single_not_embedded_field = len(body_fields) == 1 and not embed_body_fields
     first_field = body_fields[0]
     body_to_process = received_body
+    failed_fields: set[ModelField] = set()
+    present_fields: set[ModelField] = set()
 
     fields_to_extract: list[ModelField] = body_fields
 
@@ -966,30 +1065,63 @@ async def request_body_to_args(
         single_not_embedded_field
         and lenient_issubclass(first_field.field_info.annotation, BaseModel)
         and isinstance(received_body, FormData)
+        and isinstance(first_field.field_info, params.Form)
     ):
         fields_to_extract = get_cached_model_fields(first_field.field_info.annotation)
 
     if isinstance(received_body, FormData):
-        body_to_process = await _extract_form_body(fields_to_extract, received_body)
+        (
+            body_to_process,
+            form_errors,
+            failed_fields,
+            present_fields,
+        ) = await _extract_form_body(fields_to_extract, received_body)
+        if form_errors:
+            return values, form_errors
 
     if single_not_embedded_field:
         loc: tuple[str, ...] = ("body",)
         v_, errors_ = _validate_value_with_model_field(
-            field=first_field, value=body_to_process, values=values, loc=loc
+            field=first_field,
+            value=body_to_process,
+            values=values,
+            loc=loc,
+            treat_none_as_missing=first_field not in present_fields,
         )
         return {first_field.name: v_}, errors_
     for field in body_fields:
+        if field in failed_fields:
+            continue
         loc = ("body", get_validation_alias(field))
-        value: Any | None = None
+        value: Any = None
         if body_to_process is not None and not isinstance(body_to_process, bytes):
             try:
-                value = body_to_process.get(get_validation_alias(field))
+                alias = get_validation_alias(field)
+                if isinstance(received_body, FormData):
+                    if field in present_fields:
+                        value = body_to_process[alias]
+                    else:
+                        value = _MISSING_FORM_PART
+                elif alias in body_to_process:
+                    value = body_to_process[alias]
+                else:
+                    value = body_to_process.get(alias)
             # If the received body is a list, not a dict
             except AttributeError:
                 errors.append(get_missing_field_error(loc))
                 continue
+            if value is _MISSING_FORM_PART:
+                if field.field_info.is_required():
+                    errors.append(get_missing_field_error(loc))
+                else:
+                    values[field.name] = deepcopy(field.default)
+                continue
         v_, errors_ = _validate_value_with_model_field(
-            field=field, value=value, values=values, loc=loc
+            field=field,
+            value=value,
+            values=values,
+            loc=loc,
+            treat_none_as_missing=field not in present_fields,
         )
         if errors_:
             errors.extend(errors_)
@@ -1025,7 +1157,10 @@ def _get_body_field(
     }
     if not required:
         BodyFieldInfo_kwargs["default"] = None
-    if any(isinstance(f.field_info, params.File) for f in body_params):
+    has_file = any(isinstance(f.field_info, params.File) for f in body_params)
+    has_form = any(isinstance(f.field_info, params.Form) for f in body_params)
+    has_json_part = any(_is_json_body_part(f) for f in body_params)
+    if has_file or (has_form and has_json_part):
         BodyFieldInfo: type[params.Body] = params.File
     elif any(isinstance(f.field_info, params.Form) for f in body_params):
         BodyFieldInfo = params.Form
