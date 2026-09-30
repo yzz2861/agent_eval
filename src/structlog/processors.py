@@ -13,6 +13,7 @@ import datetime
 import enum
 import json
 import logging
+import math
 import operator
 import os
 import sys
@@ -38,6 +39,7 @@ from ._frames import (
 from ._log_levels import NAME_TO_LEVEL, add_log_level
 from ._utils import get_processname
 from .contextvars import _ASYNC_CALLING_THREAD
+from .exceptions import DropEvent
 from .tracebacks import ExceptionDictTransformer
 from .typing import (
     EventDict,
@@ -47,10 +49,17 @@ from .typing import (
 )
 
 
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
+
+
 __all__ = [
     "NAME_TO_LEVEL",  # some people rely on it being here
     "CallsiteParameter",
     "CallsiteParameterAdder",
+    "EventMerger",
     "EventRenamer",
     "ExceptionPrettyPrinter",
     "JSONRenderer",
@@ -1003,3 +1012,327 @@ class EventRenamer:
                 event_dict["event"] = replace_by
 
         return event_dict
+
+
+_MERGED_SUMMARY_KEY: Final = "_structlog_event_merger_summary"
+"""
+Key that marks event dicts as summaries emitted by `EventMerger`.
+
+Marked event dicts pass through `EventMerger` uncounted, so summaries that
+re-enter the processor chain are not merged again. The key is removed on the
+way, so it doesn't leak into rendered output.
+"""
+
+
+class _MergeGroup:
+    """
+    Runtime state of one active `EventMerger` group.
+    """
+
+    __slots__ = ("count", "deadline", "fields", "method_name")
+
+    count: int
+    deadline: float
+    fields: dict[str, Any]
+    method_name: str
+
+    def __init__(
+        self, method_name: str, fields: dict[str, Any], deadline: float
+    ) -> None:
+        self.method_name = method_name
+        self.fields = fields
+        self.deadline = deadline
+        self.count = 0
+
+
+def _make_hashable(value: Any) -> Any:
+    """
+    Return *value* if hashable, else its `repr()` for identity purposes.
+    """
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+
+    return value
+
+
+def _exc_type_name(value: Any) -> str | None:
+    """
+    Return the exception type name of an `exc_info`-style *value*, or None.
+    """
+    exc_info = _figure_out_exc_info(value)
+    if exc_info is None or exc_info[0] is None:
+        return None
+
+    return exc_info[0].__name__
+
+
+def _emit_summary_via_get_logger(
+    method_name: str, event_dict: EventDict
+) -> None:
+    """
+    Re-enter the configured processor chain with a summary *event_dict*.
+    """
+    from . import get_logger
+
+    event_dict = dict(event_dict)
+    event = event_dict.pop("event")
+    getattr(get_logger(), method_name)(event, **event_dict)
+
+
+class EventMerger:
+    """
+    Merge repeated log events within a time window into summary entries.
+
+    Use this processor when a recurring error would otherwise flood your
+    logs: the first occurrence of an event passes through immediately,
+    repetitions within *window* seconds are counted and dropped, and once
+    the window ends -- or `flush()` / `close()` is called -- a summary entry
+    with the number of suppressed events is emitted.
+
+    The identity of an event is computed from the values of *keys* plus --
+    unless disabled -- the **type** of an `exc_info` exception. It is
+    deliberately *not* based on the `repr()` of the whole event dict, so
+    events that only differ in irrelevant fields still merge. Whether events
+    from different requests merge is your choice: add e.g. ``"request_id"``
+    to *keys* to keep them apart.
+
+    Args:
+        window: Length of the merging window in seconds.
+
+        keys:
+            Event dict keys whose values make up the identity of an event.
+            Values that are not hashable are compared by their `repr()`.
+
+        include_exc_info:
+            Whether the type of an exception in the `exc_info` key is part
+            of the identity.
+
+        max_groups:
+            Maximum number of simultaneously active groups. When a new group
+            would exceed the limit, the group closest to its window end is
+            evicted and its pending count is reported in a summary right
+            away, so no count is lost silently.
+
+        summary_event: The `event` value of emitted summary entries.
+
+        clock:
+            Monotonic clock used for window bookkeeping. Injectable for
+            testing.
+
+        emit:
+            Callable that is invoked as `emit(method_name, event_dict)`
+            for every summary entry. *method_name* is the log method of the
+            first event of the group. By default, summaries re-enter the
+            configured processor chain via `structlog.get_logger`; they are
+            marked internally, so they are not merged again.
+
+    The processor is thread-safe. Window ends are detected lazily when the
+    next event arrives; call `flush()` (e.g. periodically or before
+    shutdown) to report pending counts earlier. `close()` flushes and
+    deactivates the processor; both are idempotent and events pass through
+    unchanged afterwards, so counts can never be reported twice. A backwards
+    jump of *clock* only prolongs the current windows; it never causes
+    double counting.
+
+    .. versionadded:: 26.2.0
+    """
+
+    window: float
+    keys: tuple[str, ...]
+    include_exc_info: bool
+    max_groups: int
+    summary_event: str
+    clock: Callable[[], float]
+    emit: Callable[[str, EventDict], None]
+
+    def __init__(
+        self,
+        window: float = 60.0,
+        keys: Collection[str] = ("event",),
+        include_exc_info: bool = True,
+        max_groups: int = 1024,
+        summary_event: str = "event_merger.summary",
+        clock: Callable[[], float] = time.monotonic,
+        emit: Callable[[str, EventDict], None] | None = None,
+    ) -> None:
+        if window <= 0:
+            msg = "window must be positive"
+            raise ValueError(msg)
+        if max_groups < 1:
+            msg = "max_groups must be at least 1"
+            raise ValueError(msg)
+
+        self.window = window
+        self.keys = tuple(keys)
+        self.include_exc_info = include_exc_info
+        self.max_groups = max_groups
+        self.summary_event = summary_event
+        self.clock = clock
+        self.emit = _emit_summary_via_get_logger if emit is None else emit
+
+        self._lock = threading.Lock()
+        self._groups: dict[tuple[Any, ...], _MergeGroup] = {}
+        self._next_expiry = math.inf
+        self._closed = False
+
+    def __call__(
+        self, logger: WrappedLogger, method_name: str, event_dict: EventDict
+    ) -> EventDict:
+        if event_dict.pop(_MERGED_SUMMARY_KEY, False):
+            # Our own summary re-entering the chain: pass it on without
+            # counting it again.
+            return event_dict
+
+        if self._closed:
+            return event_dict
+
+        now = self.clock()
+        identity, fields = self._identity(event_dict)
+        summaries: list[tuple[str, EventDict]] = []
+
+        with self._lock:
+            self._expire_locked(now, summaries)
+
+            group = self._groups.get(identity)
+            if group is None:
+                self._evict_locked(summaries)
+                group = _MergeGroup(
+                    method_name=method_name,
+                    fields=fields,
+                    deadline=now + self.window,
+                )
+                self._groups[identity] = group
+                self._next_expiry = min(self._next_expiry, group.deadline)
+                first = True
+            else:
+                group.count += 1
+                first = False
+
+        # Emit outside the lock: emitting may re-enter this processor.
+        self._emit(summaries)
+
+        if first:
+            return event_dict
+
+        raise DropEvent
+
+    def flush(self) -> None:
+        """
+        Emit summaries for all active groups and start with a clean slate.
+
+        Groups without suppressed events don't produce a summary. Safe to
+        call concurrently and repeatedly; nothing is reported twice.
+        """
+        with self._lock:
+            summaries = self._drain_locked()
+
+        self._emit(summaries)
+
+    def close(self) -> None:
+        """
+        Flush pending summaries and deactivate the processor.
+
+        Idempotent. Afterwards, events pass through unchanged.
+        """
+        with self._lock:
+            if self._closed:
+                return
+
+            self._closed = True
+            summaries = self._drain_locked()
+
+        self._emit(summaries)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def _identity(
+        self, event_dict: EventDict
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        """
+        Compute the group identity of *event_dict* and the fields to report.
+        """
+        fields: dict[str, Any] = {}
+        parts: list[Any] = []
+        for key in self.keys:
+            value = event_dict.get(key)
+            fields[key] = value
+            parts.append(_make_hashable(value))
+
+        if self.include_exc_info:
+            exc_type = _exc_type_name(event_dict.get("exc_info"))
+            if exc_type is not None:
+                fields["exc_type"] = exc_type
+            parts.append(exc_type)
+
+        return tuple(parts), fields
+
+    def _expire_locked(
+        self, now: float, summaries: list[tuple[str, EventDict]]
+    ) -> None:
+        """
+        Summarize and remove groups whose window ended at or before *now*.
+        """
+        if now < self._next_expiry:
+            return
+
+        next_expiry = math.inf
+        for identity, group in list(self._groups.items()):
+            if group.deadline <= now:
+                self._append_summary(summaries, group)
+                del self._groups[identity]
+            elif group.deadline < next_expiry:
+                next_expiry = group.deadline
+
+        self._next_expiry = next_expiry
+
+    def _evict_locked(self, summaries: list[tuple[str, EventDict]]) -> None:
+        """
+        If at capacity, evict the group closest to its window end.
+        """
+        if len(self._groups) < self.max_groups:
+            return
+
+        identity, group = min(
+            self._groups.items(), key=lambda item: item[1].deadline
+        )
+        self._append_summary(summaries, group)
+        del self._groups[identity]
+
+    def _drain_locked(self) -> list[tuple[str, EventDict]]:
+        summaries: list[tuple[str, EventDict]] = []
+        for group in self._groups.values():
+            self._append_summary(summaries, group)
+
+        self._groups.clear()
+        self._next_expiry = math.inf
+
+        return summaries
+
+    def _append_summary(
+        self, summaries: list[tuple[str, EventDict]], group: _MergeGroup
+    ) -> None:
+        if group.count == 0:
+            return
+
+        summaries.append(
+            (
+                group.method_name,
+                {
+                    "event": self.summary_event,
+                    "suppressed": group.count,
+                    "window": self.window,
+                    "identity": group.fields,
+                    _MERGED_SUMMARY_KEY: True,
+                },
+            )
+        )
+
+    def _emit(self, summaries: list[tuple[str, EventDict]]) -> None:
+        for method_name, event_dict in summaries:
+            self.emit(method_name, event_dict)

@@ -15,6 +15,12 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.processors.EventMerger`: a new opt-in processor that merges repeated log events within a configurable time window.
+  The first occurrence passes through immediately, repetitions are counted and dropped, and a summary entry is emitted when the window ends or on `flush()` / `close()`.
+  The event identity is computed from configurable event dict keys plus the exception type, active groups are bounded with eviction reporting, and summaries re-entering the processor chain are not counted again.
+
 
 ## [26.1.0](https://github.com/hynek/structlog/compare/25.5.0...26.1.0) - 2026-06-06
 

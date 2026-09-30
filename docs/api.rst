@@ -229,6 +229,8 @@ API Reference
 
 .. autoclass:: EventRenamer
 
+.. autoclass:: EventMerger
+
 .. autofunction:: add_log_level
 
 .. autoclass:: UnicodeDecoder
