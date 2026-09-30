@@ -308,11 +308,17 @@ def find_evaluated_item_indexes_by_schema(validator, instance, schema):
     for keyword in ["allOf", "oneOf", "anyOf"]:
         if keyword in schema:
             for subschema in schema[keyword]:
-                errs = next(validator.descend(instance, subschema), None)
-                if errs is None:
-                    evaluated_indexes += find_evaluated_item_indexes_by_schema(
-                        validator, instance, subschema,
-                    )
+                errs_it = validator.descend(instance, subschema)
+                try:
+                    errs = next(errs_it, None)
+                    if errs is None:
+                        evaluated_indexes += (
+                            find_evaluated_item_indexes_by_schema(  # noqa: E501
+                                validator, instance, subschema,
+                            )
+                        )
+                finally:
+                    errs_it.close()
 
     return evaluated_indexes
 
@@ -394,11 +400,17 @@ def find_evaluated_property_keys_by_schema(validator, instance, schema):
     for keyword in ["allOf", "oneOf", "anyOf"]:
         if keyword in schema:
             for subschema in schema[keyword]:
-                errs = next(validator.descend(instance, subschema), None)
-                if errs is None:
-                    evaluated_keys += find_evaluated_property_keys_by_schema(
-                        validator, instance, subschema,
-                    )
+                errs_it = validator.descend(instance, subschema)
+                try:
+                    errs = next(errs_it, None)
+                    if errs is None:
+                        evaluated_keys += (
+                            find_evaluated_property_keys_by_schema(  # noqa: E501
+                                validator, instance, subschema,
+                            )
+                        )
+                finally:
+                    errs_it.close()
 
     if "if" in schema:
         if validator.evolve(schema=schema["if"]).is_valid(instance):

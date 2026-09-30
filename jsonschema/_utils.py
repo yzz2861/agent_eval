@@ -1,4 +1,5 @@
 from collections.abc import Mapping, MutableMapping, Sequence
+from contextvars import ContextVar
 from urllib.parse import urlsplit
 import re
 
@@ -8,6 +9,11 @@ import re
 _TRUE = object()
 _FALSE = object()
 _UNSUPPORTED = object()
+
+_INCREMENTAL_VALIDATION: ContextVar[object | None] = ContextVar(
+    "incremental_validation",
+    default=None,
+)
 
 
 class URIDict(MutableMapping):
@@ -305,11 +311,17 @@ def find_evaluated_item_indexes_by_schema(validator, instance, schema):
     for keyword in ["allOf", "oneOf", "anyOf"]:
         if keyword in schema:
             for subschema in schema[keyword]:
-                errs = next(validator.descend(instance, subschema), None)
-                if errs is None:
-                    evaluated_indexes += find_evaluated_item_indexes_by_schema(
-                        validator, instance, subschema,
-                    )
+                errs_it = validator.descend(instance, subschema)
+                try:
+                    errs = next(errs_it, None)
+                    if errs is None:
+                        evaluated_indexes += (
+                            find_evaluated_item_indexes_by_schema(  # noqa: E501
+                                validator, instance, subschema,
+                            )
+                        )
+                finally:
+                    errs_it.close()
 
     return evaluated_indexes
 
@@ -408,4 +420,9 @@ def find_evaluated_property_keys_by_schema(validator, instance, schema):
 
 def is_valid(errs_it):
     """Whether there are no errors in the given iterator."""
-    return next(errs_it, None) is None
+    try:
+        return next(errs_it, None) is None
+    finally:
+        close = getattr(errs_it, "close", None)
+        if close is not None:
+            close()

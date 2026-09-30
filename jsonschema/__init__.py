@@ -11,6 +11,15 @@ for you.
 import warnings
 
 from jsonschema._format import FormatChecker
+from jsonschema._incremental import (
+    CountingValidator,
+    IncrementalValidationError,
+    IncrementalValidationSession,
+    ValidationObserver,
+    full_validation_keyword,
+    incremental_keyword,
+    local_keyword,
+)
 from jsonschema._types import TypeChecker
 from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import (
@@ -20,6 +29,7 @@ from jsonschema.validators import (
     Draft7Validator,
     Draft201909Validator,
     Draft202012Validator,
+    incremental_validation_session,
     validate,
 )
 
@@ -112,9 +122,17 @@ __all__ = [
     "Draft7Validator",
     "Draft201909Validator",
     "Draft202012Validator",
+    "CountingValidator",
     "FormatChecker",
+    "IncrementalValidationError",
+    "IncrementalValidationSession",
     "SchemaError",
     "TypeChecker",
     "ValidationError",
+    "ValidationObserver",
+    "full_validation_keyword",
+    "incremental_keyword",
+    "incremental_validation_session",
+    "local_keyword",
     "validate",
 ]

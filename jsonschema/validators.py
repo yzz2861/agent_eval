@@ -347,6 +347,7 @@ def create(
             return NewValidator(**changes)
 
         def iter_errors(self, instance, _schema=None):
+            context = _utils._INCREMENTAL_VALIDATION.get()
             if _schema is not None:
                 warnings.warn(
                     (
@@ -368,30 +369,89 @@ def create(
 
             if _schema is True:
                 return
-            elif _schema is False:
-                yield exceptions.ValidationError(
-                    f"False schema does not allow {instance!r}",
-                    validator=None,
-                    validator_value=None,
-                    instance=instance,
-                    schema=_schema,
-                )
-                return
-
-            for validator, k, v in validators:
-                errors = validator(self, v, instance, _schema) or ()
-                for error in errors:
-                    # set details if not already set by the called fn
-                    error._set(
-                        validator=k,
-                        validator_value=v,
+            if context is None:
+                if _schema is False:
+                    yield exceptions.ValidationError(
+                        f"False schema does not allow {instance!r}",
+                        validator=None,
+                        validator_value=None,
                         instance=instance,
                         schema=_schema,
-                        type_checker=self.TYPE_CHECKER,
                     )
-                    if k not in {"if", "$ref"}:
-                        error.schema_path.appendleft(k)
+                    return
+
+                for validator, k, v in validators:
+                    errors = validator(self, v, instance, _schema) or ()
+                    for error in errors:
+                        # set details if not already set by the called fn
+                        error._set(
+                            validator=k,
+                            validator_value=v,
+                            instance=instance,
+                            schema=_schema,
+                            type_checker=self.TYPE_CHECKER,
+                        )
+                        if k not in {"if", "$ref"}:
+                            error.schema_path.appendleft(k)
+                        yield error
+                return
+
+            node = context.enter_node(
+                validator=self,
+                schema=_schema,
+                instance=instance,
+                path=None,
+            )
+            if _schema is False:
+                try:
+                    error = exceptions.ValidationError(
+                        f"False schema does not allow {instance!r}",
+                        validator=None,
+                        validator_value=None,
+                        instance=instance,
+                        schema=_schema,
+                    )
+                    node.on_error(error)
                     yield error
+                finally:
+                    node.exit()
+                return
+
+            try:
+                for validator, k, v in validators:
+                    frame = node.enter_keyword(
+                        keyword=k,
+                        validator=validator,
+                        validator_value=v,
+                        schema=_schema,
+                    )
+                    if frame.skip:
+                        continue
+
+                    try:
+                        errors = frame.effective_function(
+                            self,
+                            v,
+                            instance,
+                            _schema,
+                        ) or ()
+                        for error in errors:
+                            frame.on_error(error)
+                            # set details if not already set by the called fn
+                            error._set(
+                                validator=k,
+                                validator_value=v,
+                                instance=instance,
+                                schema=_schema,
+                                type_checker=self.TYPE_CHECKER,
+                            )
+                            if k not in {"if", "$ref"}:
+                                error.schema_path.appendleft(k)
+                            yield error
+                    finally:
+                        frame.exit()
+            finally:
+                node.exit()
 
         def descend(
             self,
@@ -401,19 +461,49 @@ def create(
             schema_path=None,
             resolver=None,
         ):
+            context = _utils._INCREMENTAL_VALIDATION.get()
             if schema is True:
                 return
-            elif schema is False:
-                yield exceptions.ValidationError(
-                    f"False schema does not allow {instance!r}",
-                    validator=None,
-                    validator_value=None,
-                    instance=instance,
+            if context is None:
+                if schema is False:
+                    yield exceptions.ValidationError(
+                        f"False schema does not allow {instance!r}",
+                        validator=None,
+                        validator_value=None,
+                        instance=instance,
+                        schema=schema,
+                        path=() if path is None else (path,),
+                        schema_path=(
+                            () if schema_path is None else (schema_path,)
+                        ),
+                    )
+                    return
+            else:
+                node = context.enter_node(
+                    validator=self,
                     schema=schema,
-                    path=() if path is None else (path,),
-                    schema_path=() if schema_path is None else (schema_path,),
+                    instance=instance,
+                    path=path,
+                    schema_path=schema_path,
                 )
-                return
+                if schema is False:
+                    try:
+                        error = exceptions.ValidationError(
+                            f"False schema does not allow {instance!r}",
+                            validator=None,
+                            validator_value=None,
+                            instance=instance,
+                            schema=schema,
+                            path=() if path is None else (path,),
+                            schema_path=(
+                                () if schema_path is None else (schema_path,)
+                            ),
+                        )
+                        node.on_error(error)
+                        yield error
+                    finally:
+                        node.exit()
+                    return
 
             if self._ref_resolver is not None:
                 evolved = self.evolve(schema=schema)
@@ -424,28 +514,74 @@ def create(
                     )
                 evolved = self.evolve(schema=schema, _resolver=resolver)
 
-            for k, v in applicable_validators(schema):
-                validator = evolved.VALIDATORS.get(k)
-                if validator is None:
-                    continue
+            if context is None:
+                for k, v in applicable_validators(schema):
+                    validator = evolved.VALIDATORS.get(k)
+                    if validator is None:
+                        continue
 
-                errors = validator(evolved, v, instance, schema) or ()
-                for error in errors:
-                    # set details if not already set by the called fn
-                    error._set(
-                        validator=k,
+                    errors = validator(evolved, v, instance, schema) or ()
+                    for error in errors:
+                        # set details if not already set by the called fn
+                        error._set(
+                            validator=k,
+                            validator_value=v,
+                            instance=instance,
+                            schema=schema,
+                            type_checker=evolved.TYPE_CHECKER,
+                        )
+                        if k not in {"if", "$ref"}:
+                            error.schema_path.appendleft(k)
+                        if path is not None:
+                            error.path.appendleft(path)
+                        if schema_path is not None:
+                            error.schema_path.appendleft(schema_path)
+                        yield error
+                return
+
+            try:
+                for k, v in applicable_validators(schema):
+                    validator = evolved.VALIDATORS.get(k)
+                    if validator is None:
+                        continue
+
+                    frame = node.enter_keyword(
+                        keyword=k,
+                        validator=validator,
                         validator_value=v,
-                        instance=instance,
                         schema=schema,
-                        type_checker=evolved.TYPE_CHECKER,
                     )
-                    if k not in {"if", "$ref"}:
-                        error.schema_path.appendleft(k)
-                    if path is not None:
-                        error.path.appendleft(path)
-                    if schema_path is not None:
-                        error.schema_path.appendleft(schema_path)
-                    yield error
+                    if frame.skip:
+                        continue
+
+                    try:
+                        errors = frame.effective_function(
+                            evolved,
+                            v,
+                            instance,
+                            schema,
+                        ) or ()
+                        for error in errors:
+                            frame.on_error(error)
+                            # set details if not already set by the called fn
+                            error._set(
+                                validator=k,
+                                validator_value=v,
+                                instance=instance,
+                                schema=schema,
+                                type_checker=evolved.TYPE_CHECKER,
+                            )
+                            if k not in {"if", "$ref"}:
+                                error.schema_path.appendleft(k)
+                            if path is not None:
+                                error.path.appendleft(path)
+                            if schema_path is not None:
+                                error.schema_path.appendleft(schema_path)
+                            yield error
+                    finally:
+                        frame.exit()
+            finally:
+                node.exit()
 
         def validate(self, *args, **kwargs):
             for error in self.iter_errors(*args, **kwargs):
@@ -498,7 +634,16 @@ def create(
                 )
                 self = self.evolve(schema=_schema)
 
-            error = next(self.iter_errors(instance), None)
+            context = _utils._INCREMENTAL_VALIDATION.get()
+            if context is not None:
+                context.begin_probe()
+            errors = self.iter_errors(instance)
+            try:
+                error = next(errors, None)
+            finally:
+                errors.close()
+                if context is not None:
+                    context.end_probe()
             return error is None
 
     evolve_fields = [
@@ -1332,6 +1477,29 @@ def validate(instance, schema, cls=None, *args, **kwargs):  # noqa: D417
     error = exceptions.best_match(validator.iter_errors(instance))
     if error is not None:
         raise error
+
+
+def incremental_validation_session(
+    instance,
+    schema,
+    cls=None,
+    *,
+    registry=None,
+    format_checker=None,
+    observer=None,
+    **kwargs,
+):
+    from jsonschema._incremental import session
+
+    return session(
+        instance,
+        schema,
+        cls=cls,
+        registry=registry,
+        format_checker=format_checker,
+        observer=observer,
+        **kwargs,
+    )
 
 
 def validator_for(
