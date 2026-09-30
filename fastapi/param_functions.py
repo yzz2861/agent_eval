@@ -1364,6 +1364,15 @@ def Body(  # noqa: N802
             """
         ),
     ] = "application/json",
+    media_types: Annotated[
+        dict[str, Any] | None,
+        Doc(
+            """
+            A mapping of media types to the model used to validate requests with
+            that `Content-Type`.
+            """
+        ),
+    ] = None,
     alias: Annotated[
         str | None,
         Doc(
@@ -1620,6 +1629,7 @@ def Body(  # noqa: N802
         default_factory=default_factory,
         embed=embed,
         media_type=media_type,
+        media_types=media_types,
         alias=alias,
         alias_priority=alias_priority,
         validation_alias=validation_alias,

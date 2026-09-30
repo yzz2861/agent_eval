@@ -171,6 +171,16 @@ class DependencyScopeError(FastAPIError):
     """
 
 
+class RequestBodyDecodeError(HTTPException):
+    def __init__(
+        self,
+        detail: Any = "There was an error parsing the body",
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        super().__init__(status_code=400, detail=detail, headers=headers)
+
+
 class ValidationException(Exception):
     def __init__(
         self,

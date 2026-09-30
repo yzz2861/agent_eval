@@ -48,6 +48,12 @@ from fastapi._compat import (
     Undefined,
     lenient_issubclass,
 )
+from fastapi.body_parsers import (
+    BodyDecoderRegistry,
+    MediaType,
+    call_body_decoder,
+    parse_media_type,
+)
 from fastapi.datastructures import Default, DefaultPlaceholder
 from fastapi.dependencies.models import (
     Dependant,
@@ -387,6 +393,7 @@ def get_request_handler(
     dependency_overrides_provider: Any | None = None,
     embed_body_fields: bool = False,
     strict_content_type: bool | DefaultPlaceholder = Default(True),
+    body_decoders: BodyDecoderRegistry | None = None,
     stream_item_field: ModelField | None = None,
     is_json_stream: bool = False,
 ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
@@ -426,9 +433,62 @@ def get_request_handler(
         try:
             body: Any = None
             if body_field:
+                body_content_fields = cast(
+                    dict[str, ModelField] | None,
+                    getattr(body_field, "content_fields", None),
+                )
                 if is_body_form:
                     body = await request.form()
                     file_stack.push_async_callback(body.close)
+                elif body_content_fields:
+                    body_bytes = await request.body()
+                    if body_bytes:
+                        content_type_value = request.headers.get("content-type")
+                        media_type = parse_media_type(content_type_value)
+                        if media_type is None:
+                            if (
+                                not content_type_value
+                                and not actual_strict_content_type
+                            ):
+                                media_type = MediaType(
+                                    maintype="application",
+                                    subtype="json",
+                                    parameters={},
+                                )
+                            else:
+                                raise HTTPException(status_code=415)
+                        selected_field = body_content_fields.get(media_type.value)
+                        if selected_field is None:
+                            raise HTTPException(status_code=415)
+                        decoder_registry = body_decoders or BodyDecoderRegistry()
+                        decoder = decoder_registry.get(media_type)
+                        if decoder is None:
+                            raise HTTPException(status_code=415)
+                        request.scope["fastapi_body_media_type"] = media_type.value
+                        try:
+                            body = await call_body_decoder(
+                                decoder, body_bytes, media_type
+                            )
+                        except json.JSONDecodeError as e:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=[
+                                    {
+                                        "type": "json_invalid",
+                                        "loc": ["body", e.pos],
+                                        "msg": "JSON decode error",
+                                        "input": {},
+                                        "ctx": {"error": e.msg},
+                                    }
+                                ],
+                            ) from e
+                        except HTTPException:
+                            raise
+                        except Exception as e:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="There was an error parsing the body",
+                            ) from e
                 else:
                     body_bytes = await request.body()
                     if body_bytes:
@@ -485,6 +545,7 @@ def get_request_handler(
             dependency_overrides_provider=dependency_overrides_provider,
             async_exit_stack=async_exit_stack,
             embed_body_fields=embed_body_fields,
+            body_media_type=request.scope.get("fastapi_body_media_type"),
         )
         errors = solved_result.errors
         assert dependant.call  # For types
@@ -1063,11 +1124,13 @@ def _populate_api_route_state(
         call=route.endpoint,
         dependencies=route.dependencies,
     )
-    route.body_field = _get_body_field(
+    route.body_field, route.body_content_fields = _get_body_field(
         body_params=body_params,
         name=route.unique_id,
         embed_body_fields=route._embed_body_fields,
     )
+    if route.body_field is not None:
+        route.body_field.content_fields = route.body_content_fields
     # Detect generator endpoints that should stream as JSONL or SSE
     is_generator = _is_async_gen_callable(route.dependant.call) or _is_gen_callable(
         route.dependant.call
@@ -1155,6 +1218,7 @@ class APIRoute(routing.Route):
     dependant: Dependant
     _embed_body_fields: bool
     body_field: ModelField | None
+    body_content_fields: dict[str, ModelField]
     is_sse_stream: bool
     is_json_stream: bool
 
@@ -1244,6 +1308,11 @@ class APIRoute(routing.Route):
             dependency_overrides_provider=route.dependency_overrides_provider,
             embed_body_fields=route._embed_body_fields,
             strict_content_type=route.strict_content_type,
+            body_decoders=getattr(
+                route.dependency_overrides_provider,
+                "body_decoders",
+                None,
+            ),
             stream_item_field=route.stream_item_field,
             is_json_stream=route.is_json_stream,
         )
@@ -1419,6 +1488,7 @@ class _EffectiveRouteContext:
     dependant: Dependant | None = None
     _embed_body_fields: bool = False
     body_field: ModelField | None = None
+    body_content_fields: dict[str, ModelField] = field(default_factory=dict)
     is_sse_stream: bool = False
     is_json_stream: bool = False
 

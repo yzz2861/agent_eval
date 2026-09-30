@@ -240,26 +240,32 @@ def get_openapi_operation_request_body(
     if not body_field:
         return None
     assert isinstance(body_field, ModelField)
-    body_schema = get_schema_from_model_field(
-        field=body_field,
-        model_name_map=model_name_map,
-        field_mapping=field_mapping,
-        separate_input_output_schemas=separate_input_output_schemas,
-    )
-    field_info = cast(Body, body_field.field_info)
-    request_media_type = field_info.media_type
-    required = body_field.field_info.is_required()
     request_body_oai: dict[str, Any] = {}
+    content_fields = getattr(body_field, "content_fields", None)
+    fields = (
+        list(cast(dict[str, ModelField], content_fields).values())
+        if isinstance(content_fields, dict) and content_fields
+        else [body_field]
+    )
+    required = any(field.field_info.is_required() for field in fields)
     if required:
-        request_body_oai["required"] = required
-    request_media_content: dict[str, Any] = {"schema": body_schema}
-    if field_info.openapi_examples:
-        request_media_content["examples"] = jsonable_encoder(
-            field_info.openapi_examples
+        request_body_oai["required"] = True
+    content: dict[str, Any] = {}
+    for body_media_field in fields:
+        body_schema = get_schema_from_model_field(
+            field=body_media_field,
+            model_name_map=model_name_map,
+            field_mapping=field_mapping,
+            separate_input_output_schemas=separate_input_output_schemas,
         )
-    elif field_info.example is not _Unset:
-        request_media_content["example"] = jsonable_encoder(field_info.example)
-    request_body_oai["content"] = {request_media_type: request_media_content}
+        field_info = cast(Body, body_media_field.field_info)
+        media_content: dict[str, Any] = {"schema": body_schema}
+        if field_info.openapi_examples:
+            media_content["examples"] = jsonable_encoder(field_info.openapi_examples)
+        elif field_info.example is not _Unset:
+            media_content["example"] = jsonable_encoder(field_info.example)
+        content[field_info.media_type] = media_content
+    request_body_oai["content"] = content
     return request_body_oai
 
 
@@ -565,6 +571,7 @@ def get_fields_from_routes(
                     "A request body must be a Pydantic Field"
                 )
                 body_fields_from_routes.append(api_route.body_field)
+                body_fields_from_routes.extend(api_route.body_content_fields.values())
             if api_route.response_field:
                 responses_from_routes.append(api_route.response_field)
             if api_route.response_fields:

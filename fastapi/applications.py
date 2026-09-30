@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal, TypeVar
 
 from annotated_doc import Doc
 from fastapi import routing
+from fastapi.body_parsers import BodyDecoder, BodyDecoderRegistry
 from fastapi.datastructures import Default, DefaultPlaceholder
 from fastapi.exception_handlers import (
     http_exception_handler,
@@ -981,6 +982,7 @@ class FastAPI(Starlette):
                 """
             ),
         ] = {}
+        self.body_decoders = BodyDecoderRegistry()
         self.router: routing.APIRouter = routing.APIRouter(
             routes=routes,
             redirect_slashes=redirect_slashes,
@@ -1016,6 +1018,9 @@ class FastAPI(Starlette):
         )
         self.middleware_stack: ASGIApp | None = None
         self.setup()
+
+    def add_body_decoder(self, media_type: str, decoder: BodyDecoder) -> None:
+        self.body_decoders.register(media_type, decoder)
 
     def build_middleware_stack(self) -> ASGIApp:
         # Duplicate/override from Starlette to add AsyncExitStackMiddleware

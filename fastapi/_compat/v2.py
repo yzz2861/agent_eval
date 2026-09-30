@@ -3,6 +3,7 @@ import warnings
 from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass, is_dataclass
+from dataclasses import field as dataclass_field
 from enum import Enum
 from functools import lru_cache
 from typing import (
@@ -116,6 +117,8 @@ class ModelField:
     name: str
     mode: Literal["validation", "serialization"] = "validation"
     config: ConfigDict | None = None
+    media_type_fields: dict[str, "ModelField"] = dataclass_field(default_factory=dict)
+    content_fields: dict[str, "ModelField"] = dataclass_field(default_factory=dict)
 
     @property
     def alias(self) -> str:

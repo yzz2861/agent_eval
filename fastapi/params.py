@@ -475,6 +475,7 @@ class Body(FieldInfo):  # type: ignore[misc]  # ty: ignore[subclass-of-final-cla
         annotation: Any | None = None,
         embed: bool | None = None,
         media_type: str = "application/json",
+        media_types: dict[str, Any] | None = None,
         alias: str | None = None,
         alias_priority: int | None = _Unset,
         validation_alias: str | AliasPath | AliasChoices | None = None,
@@ -516,6 +517,7 @@ class Body(FieldInfo):  # type: ignore[misc]  # ty: ignore[subclass-of-final-cla
     ):
         self.embed = embed
         self.media_type = media_type
+        self.media_types = media_types
         if example is not _Unset:
             warnings.warn(
                 "`example` has been deprecated, please use `examples` instead",

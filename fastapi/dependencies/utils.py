@@ -1,5 +1,6 @@
 import dataclasses
 import inspect
+import re
 import sys
 from collections.abc import (
     AsyncGenerator,
@@ -596,6 +597,8 @@ async def solve_dependencies(
     # people might be monkey patching this function (although that's not supported)
     async_exit_stack: AsyncExitStack,
     embed_body_fields: bool,
+    body_media_type: str | None = None,
+    body_validation_cache: dict[Any, tuple[Any, list[Any]]] | None = None,
     _uses_scopes_cache: _UsesScopesCache | None = None,
 ) -> SolvedDependency:
     request_astack = request.scope.get("fastapi_inner_astack")
@@ -614,6 +617,8 @@ async def solve_dependencies(
         response.status_code = None  # type: ignore
     if dependency_cache is None:
         dependency_cache = {}
+    if body_validation_cache is None:
+        body_validation_cache = {}
     if _uses_scopes_cache is None:
         _uses_scopes_cache = {}
     for sub_dependant in dependant.dependencies:
@@ -647,6 +652,8 @@ async def solve_dependencies(
             dependency_cache=dependency_cache,
             async_exit_stack=async_exit_stack,
             embed_body_fields=embed_body_fields,
+            body_media_type=body_media_type,
+            body_validation_cache=body_validation_cache,
             _uses_scopes_cache=_uses_scopes_cache,
         )
         background_tasks = solved_result.background_tasks
@@ -703,6 +710,8 @@ async def solve_dependencies(
             body_fields=dependant.body_params,
             received_body=body,
             embed_body_fields=embed_body_fields,
+            body_media_type=body_media_type,
+            body_validation_cache=body_validation_cache,
         )
         values.update(body_values)
         errors.extend(body_errors)
@@ -909,6 +918,103 @@ def _should_embed_body_fields(fields: list[ModelField]) -> bool:
     return False
 
 
+def _get_field_body_media_types(field: ModelField) -> dict[str, Any]:
+    field_info = field.field_info
+    if not isinstance(field_info, params.Body):
+        return {}
+    media_types = getattr(field_info, "media_types", None)
+    if isinstance(media_types, dict) and media_types:
+        return dict(media_types)
+    return {field_info.media_type: field_info.annotation}
+
+
+def _create_body_media_type_field(
+    field: ModelField, media_type: str, annotation: Any
+) -> ModelField:
+    field_info = copy_field_info(
+        field_info=field.field_info,
+        annotation=annotation,
+    )
+    field_info.media_type = media_type
+    field_info.media_types = None
+    return create_model_field(
+        name=field.name,
+        type_=annotation,
+        alias=field.alias,
+        field_info=field_info,
+    )
+
+
+def _prepare_body_media_type_fields(
+    body_fields: list[ModelField],
+) -> tuple[dict[str, list[ModelField]], bool]:
+    fields_by_media_type: dict[str, list[ModelField]] = {}
+    custom_negotiation = False
+    for field in body_fields:
+        media_types = _get_field_body_media_types(field)
+        if not media_types:
+            continue
+        field_media_type_fields: dict[str, ModelField] = {}
+        for media_type, annotation in media_types.items():
+            normalized_media_type = media_type.lower()
+            media_type_field = _create_body_media_type_field(
+                field=field,
+                media_type=normalized_media_type,
+                annotation=annotation,
+            )
+            field_media_type_fields[normalized_media_type] = media_type_field
+            fields_by_media_type.setdefault(normalized_media_type, []).append(
+                media_type_field
+            )
+        field.media_type_fields = field_media_type_fields
+        field_info = field.field_info
+        if (
+            isinstance(field_info, params.Body)
+            and getattr(field_info, "media_types", None) is not None
+        ):
+            custom_negotiation = True
+    return fields_by_media_type, custom_negotiation
+
+
+def _get_body_content_fields(
+    *,
+    body_params: list[ModelField],
+    name: str,
+    embed_body_fields: bool,
+) -> dict[str, ModelField]:
+    fields_by_media_type, custom_negotiation = _prepare_body_media_type_fields(
+        body_params
+    )
+    if not custom_negotiation:
+        return {}
+    content_fields: dict[str, ModelField] = {}
+    for media_type, fields in fields_by_media_type.items():
+        unique_fields_by_name: dict[str, ModelField] = {}
+        for field in fields:
+            unique_fields_by_name.setdefault(field.name, field)
+        fields = list(unique_fields_by_name.values())
+        if not embed_body_fields and len(fields) == 1:
+            content_fields[media_type] = fields[0]
+            continue
+        model_name = "Body_" + name + "_" + re.sub(r"[^A-Za-z0-9_]", "_", media_type)
+        body_model = create_body_model(fields=fields, model_name=model_name)
+        required = any(True for field in fields if field.field_info.is_required())
+        field_info_kwargs: dict[str, Any] = {
+            "annotation": body_model,
+            "alias": "body",
+            "media_type": media_type,
+        }
+        if not required:
+            field_info_kwargs["default"] = None
+        content_fields[media_type] = create_model_field(
+            name="body",
+            type_=body_model,
+            alias="body",
+            field_info=params.Body(**field_info_kwargs),
+        )
+    return content_fields
+
+
 async def _extract_form_body(
     body_fields: list[ModelField],
     received_body: FormData,
@@ -952,10 +1058,21 @@ async def request_body_to_args(
     body_fields: list[ModelField],
     received_body: dict[str, Any] | FormData | bytes | None,
     embed_body_fields: bool,
+    body_media_type: str | None = None,
+    body_validation_cache: dict[Any, tuple[Any, list[Any]]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     values: dict[str, Any] = {}
     errors: list[dict[str, Any]] = []
     assert body_fields, "request_body_to_args() should be called with fields"
+    if body_media_type is not None:
+        selected_fields: list[ModelField] = []
+        for field in body_fields:
+            media_type_fields = getattr(field, "media_type_fields", None)
+            if isinstance(media_type_fields, dict):
+                selected_field = media_type_fields.get(body_media_type)
+                if selected_field is not None:
+                    selected_fields.append(selected_field)
+        body_fields = selected_fields or body_fields
     single_not_embedded_field = len(body_fields) == 1 and not embed_body_fields
     first_field = body_fields[0]
     body_to_process = received_body
@@ -973,20 +1090,48 @@ async def request_body_to_args(
         body_to_process = await _extract_form_body(fields_to_extract, received_body)
 
     if single_not_embedded_field:
+        cache_key: Any | None = None
+        if body_validation_cache is not None and body_media_type is not None:
+            cache_key = (
+                body_media_type,
+                id(received_body),
+                first_field.field_info.annotation,
+            )
+            cached = body_validation_cache.get(cache_key)
+            if cached is not None:
+                v_, errors_ = cached
+                return {first_field.name: v_}, list(errors_)
         loc: tuple[str, ...] = ("body",)
         v_, errors_ = _validate_value_with_model_field(
             field=first_field, value=body_to_process, values=values, loc=loc
         )
+        if cache_key is not None:
+            body_validation_cache[cache_key] = (v_, errors_)
         return {first_field.name: v_}, errors_
     for field in body_fields:
         loc = ("body", get_validation_alias(field))
         value: Any | None = None
+        cache_key: Any | None = None
         if body_to_process is not None and not isinstance(body_to_process, bytes):
             try:
                 value = body_to_process.get(get_validation_alias(field))
             # If the received body is a list, not a dict
             except AttributeError:
                 errors.append(get_missing_field_error(loc))
+                continue
+        if body_validation_cache is not None and body_media_type is not None:
+            cache_key = (
+                body_media_type,
+                id(received_body),
+                get_validation_alias(field),
+            )
+            cached = body_validation_cache.get(cache_key)
+            if cached is not None:
+                cached_value, cached_errors = cached
+                if cached_errors:
+                    errors.extend(cached_errors)
+                else:
+                    values[field.name] = cached_value
                 continue
         v_, errors_ = _validate_value_with_model_field(
             field=field, value=value, values=values, loc=loc
@@ -995,12 +1140,17 @@ async def request_body_to_args(
             errors.extend(errors_)
         else:
             values[field.name] = v_
+        if cache_key is not None:
+            body_validation_cache[cache_key] = (v_, errors_)
     return values, errors
 
 
 def _get_body_field(
-    *, body_params: list[ModelField], name: str, embed_body_fields: bool
-) -> ModelField | None:
+    *,
+    body_params: list[ModelField],
+    name: str,
+    embed_body_fields: bool,
+) -> tuple[ModelField | None, dict[str, ModelField]]:
     """
     Get a ModelField representing the request body for a path operation, combining
     all body parameters into a single field if necessary.
@@ -1012,10 +1162,18 @@ def _get_body_field(
     individual body parameter.
     """
     if not body_params:
-        return None
+        return None, {}
+    content_fields = _get_body_content_fields(
+        body_params=body_params,
+        name=name,
+        embed_body_fields=embed_body_fields,
+    )
+    if content_fields:
+        first_media_type = next(iter(content_fields))
+        return content_fields[first_media_type], content_fields
     first_param = body_params[0]
     if not embed_body_fields:
-        return first_param
+        return first_param, {}
     model_name = "Body_" + name
     BodyModel = create_body_model(fields=body_params, model_name=model_name)
     required = any(True for f in body_params if f.field_info.is_required())
@@ -1045,7 +1203,7 @@ def _get_body_field(
         alias="body",
         field_info=BodyFieldInfo(**BodyFieldInfo_kwargs),
     )
-    return final_field
+    return final_field, {}
 
 
 def get_validation_alias(field: ModelField) -> str:

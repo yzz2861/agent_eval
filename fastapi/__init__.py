@@ -6,8 +6,11 @@ from starlette import status as status
 
 from .applications import FastAPI as FastAPI
 from .background import BackgroundTasks as BackgroundTasks
+from .body_parsers import BodyDecoder as BodyDecoder
+from .body_parsers import MediaType as MediaType
 from .datastructures import UploadFile as UploadFile
 from .exceptions import HTTPException as HTTPException
+from .exceptions import RequestBodyDecodeError as RequestBodyDecodeError
 from .exceptions import WebSocketException as WebSocketException
 from .param_functions import Body as Body
 from .param_functions import Cookie as Cookie
