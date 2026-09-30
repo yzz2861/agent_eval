@@ -1,3 +1,12 @@
+## Version 0.23.2
+
+Unreleased
+
+- Add a WebsocketRPC helper that dispatches JSON-RPC style calls
+  ({"id", "method", "params"}) received over a websocket route to
+  handlers, running calls with distinct ids in parallel, supporting
+  cancellation, bounded concurrency and per-id error responses.
+
 ## Version 0.23.1
 
 Released 2026-08-29

@@ -30,6 +30,8 @@ from .helpers import send_from_directory as send_from_directory
 from .helpers import stream_with_context as stream_with_context
 from .helpers import url_for as url_for
 from .json import jsonify as jsonify
+from .rpc import RPCProtocolError as RPCProtocolError
+from .rpc import WebsocketRPC as WebsocketRPC
 from .signals import appcontext_popped as appcontext_popped
 from .signals import appcontext_pushed as appcontext_pushed
 from .signals import appcontext_tearing_down as appcontext_tearing_down
