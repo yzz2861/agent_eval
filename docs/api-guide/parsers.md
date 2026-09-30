@@ -74,6 +74,28 @@ Parses `JSON` request content. `request.data` will be populated with a dictionar
 
 **.media_type**: `application/json`
 
+### JSONPatchParser
+
+Parses `JSON` request content as a JSON Patch document, as described by [RFC 6902][rfc6902]. `request.data` will be populated with a list of patch operations.
+
+The parsed operations may be applied to a serializer's instance with `rest_framework.jsonpatch.apply_json_patch()`.  Patch paths are interpreted against the serializer's external field names, each operation is validated through the serializer, and `.save()` is only called once every operation has succeeded.  Failures raise `rest_framework.jsonpatch.JSONPatchError`, which carries the failing operation's `.index` and `.path`, along with a validation code on `.detail.code`.
+
+    from rest_framework.jsonpatch import apply_json_patch
+    from rest_framework.parsers import JSONPatchParser
+    from rest_framework.response import Response
+    from rest_framework.views import APIView
+
+    class ExampleView(APIView):
+        parser_classes = [JSONPatchParser]
+
+        def patch(self, request, format=None):
+            instance = self.get_object()
+            serializer = ExampleSerializer(instance, context={'request': request})
+            apply_json_patch(serializer, request.data)
+            return Response(serializer.data)
+
+**.media_type**: `application/json-patch+json`
+
 ### FormParser
 
 Parses HTML form content.  `request.data` will be populated with a `QueryDict` of data.
@@ -234,3 +256,4 @@ Modify your REST framework settings.
 [vbabiy]: https://github.com/vbabiy
 [djangorestframework-msgpack]: https://github.com/juanriaza/django-rest-framework-msgpack
 [djangorestframework-camel-case]: https://github.com/vbabiy/djangorestframework-camel-case
+[rfc6902]: https://www.rfc-editor.org/rfc/rfc6902

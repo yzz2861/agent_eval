@@ -69,6 +69,31 @@ class JSONParser(BaseParser):
             raise ParseError('JSON parse error - %s' % str(exc))
 
 
+class JSONPatchParser(JSONParser):
+    """
+    Parses JSON-serialized JSON Patch documents (RFC 6902), as used by
+    the 'application/json-patch+json' media type.
+
+    Returns a list of patch operations, suitable for passing to
+    `rest_framework.jsonpatch.apply_json_patch()`.
+    """
+    media_type = 'application/json-patch+json'
+
+    def parse(self, stream, media_type=None, parser_context=None):
+        """
+        Parses the incoming bytestream as a JSON Patch document, ie. a
+        JSON array of patch operations.
+        """
+        data = super().parse(
+            stream, media_type=media_type, parser_context=parser_context
+        )
+        if not isinstance(data, list):
+            raise ParseError(
+                'JSON patch documents must be arrays of operations.'
+            )
+        return data
+
+
 class FormParser(BaseParser):
     """
     Parser for form data.
