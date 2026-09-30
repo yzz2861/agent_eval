@@ -98,6 +98,59 @@ inserted into the cache.
    This class discards the least recently used items first to make
    space when necessary.
 
+.. autoclass:: PartitionedLRUCache(maxsize, quotas=(), getsizeof=None)
+   :members: currsize, maxsize, partition, partitions, quotas, remove_partition, resize, set_maxsize, set_quota, stats
+
+   This class divides a shared cache into named partitions.  Each quota
+   is a minimum reservation, so a partition may use idle capacity above
+   its quota, but current entries below the quota are not evicted for
+   another partition.  Entries are evicted least-recently-used within
+   each partition.  Entries can be accessed either through partition
+   views or ``(partition, key)`` tuple keys.  When borrowed capacity
+   must be returned, the first candidate is the writing partition
+   itself if it is over quota; otherwise another over-quota partition
+   is selected, preferring the partition with the largest amount of
+   borrowed capacity and using partition creation order to break ties.
+   Shrinking the total size has no writing partition, so it uses the
+   same over-quota order for all partitions.
+
+   >>> from cachetools import PartitionedLRUCache
+   >>> cache = PartitionedLRUCache(maxsize=5, quotas={"a": 2, "b": 2})
+   >>> a, b = cache["a"], cache["b"]
+   >>> a["a1"] = 1
+   >>> a["a2"] = 1
+   >>> b["b1"] = 1
+   >>> b["b2"] = 1
+
+   Partition ``b`` borrows one unit of idle capacity:
+
+   >>> b["b3"] = 1
+   >>> list(b)
+   ['b1', 'b2', 'b3']
+   >>> cache.currsize
+   5
+
+   The next write to ``a`` reclaims ``b``'s borrowed capacity rather
+   than evicting ``a``'s reserved entries:
+
+   >>> a["a3"] = 1
+   >>> list(a)
+   ['a1', 'a2', 'a3']
+   >>> list(b)
+   ['b2', 'b3']
+   >>> cache.currsize
+   5
+
+   Shrinking the total limit first evicts entries above quotas:
+
+   >>> cache.resize(maxsize=4)
+   >>> list(a)
+   ['a2', 'a3']
+   >>> list(b)
+   ['b2', 'b3']
+   >>> cache.currsize
+   4
+
 .. autoclass:: RRCache(maxsize, choice=random.choice, getsizeof=None)
    :members: choice, popitem
 

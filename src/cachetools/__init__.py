@@ -5,6 +5,9 @@ __all__ = (
     "FIFOCache",
     "LFUCache",
     "LRUCache",
+    "PartitionedCache",
+    "PartitionStats",
+    "PartitionedLRUCache",
     "RRCache",
     "TLRUCache",
     "TTLCache",
@@ -324,6 +327,372 @@ class LRUCache(Cache):
             self.__order.move_to_end(key)
         except KeyError:
             self.__order[key] = None
+
+
+PartitionStats = collections.namedtuple("PartitionStats", ("currsize", "quota"))
+
+
+class _PartitionState:
+    __slots__ = ("key", "quota", "data", "order", "currsize")
+
+    def __init__(self, key, quota):
+        self.key = key
+        self.quota = quota
+        self.data = {}
+        self.order = collections.OrderedDict()
+        self.currsize = 0
+
+
+class _PartitionView(collections.abc.MutableMapping):
+    __slots__ = ("_cache", "_partition")
+
+    def __init__(self, cache, partition):
+        self._cache = cache
+        self._partition = partition
+
+    @property
+    def _state(self):
+        return self._cache._partition_state(self._partition)
+
+    def __repr__(self):
+        return "Partition(%r, %r, quota=%r, currsize=%r)" % (
+            self._state.key,
+            self._state.data,
+            self._state.quota,
+            self._state.currsize,
+        )
+
+    def __getitem__(self, key):
+        try:
+            value = self._state.data[key]
+        except KeyError:
+            raise KeyError(key) from None
+        self._state.order.move_to_end(key)
+        return value
+
+    def __setitem__(self, key, value):
+        self._cache._setitem(self._state, key, value)
+
+    def __delitem__(self, key):
+        self._cache._remove_item(self._state, key)
+
+    def __iter__(self):
+        return iter(self._state.order)
+
+    def __len__(self):
+        return len(self._state.order)
+
+    def __contains__(self, key):
+        return key in self._state.data
+
+    def popitem(self):
+        """Remove and return the least recently used `(key, value)` pair."""
+        try:
+            key = next(iter(self._state.order))
+        except StopIteration:
+            raise KeyError("partition is empty") from None
+        return (key, self.pop(key))
+
+    def clear(self):
+        self._cache._clear_partition(self._state)
+
+    @property
+    def quota(self):
+        """The partition's reserved size."""
+        return self._state.quota
+
+    @property
+    def currsize(self):
+        """The partition's current size."""
+        return self._state.currsize
+
+
+class PartitionedCache(collections.abc.MutableMapping):
+    """LRU cache with size reservations for named partitions.
+
+    Partitions are accessed with :meth:`partition`, while individual
+    entries are also available through ``(partition, key)`` tuple keys.
+    """
+
+    def __init__(self, maxsize, quotas=(), getsizeof=None):
+        if maxsize < 0:
+            raise ValueError("maxsize must be non-negative")
+        if getsizeof:
+            self.getsizeof = getsizeof
+        self.__size = (
+            {}
+            if self.getsizeof is not PartitionedLRUCache.getsizeof
+            else _DefaultSize()
+        )
+        self.__maxsize = maxsize
+        self.__currsize = 0
+        self.__partitions = {}
+
+        quotas = dict(quotas)
+        total_quota = 0
+        for key, quota in quotas.items():
+            self._check_size(quota, "quota")
+            total_quota += quota
+            if total_quota > maxsize:
+                raise ValueError("partition quotas exceed maxsize")
+        self.__partitions = {
+            key: _PartitionState(key, quota) for key, quota in quotas.items()
+        }
+
+    def __repr__(self):
+        return "%s(maxsize=%r, currsize=%r, quotas=%r)" % (
+            type(self).__name__,
+            self.__maxsize,
+            self.__currsize,
+            self.quotas,
+        )
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple) and len(key) == 2:
+            partition, item_key = key
+            state = self._partition_state(partition)
+            try:
+                value = state.data[item_key]
+            except KeyError:
+                raise KeyError(key) from None
+            state.order.move_to_end(item_key)
+            return value
+        partition = key
+        self._partition_state(partition)
+        return _PartitionView(self, partition)
+
+    def __setitem__(self, key, value):
+        if not (isinstance(key, tuple) and len(key) == 2):
+            raise TypeError(
+                "partitions cannot be replaced; use cache[partition][key] = value"
+            )
+        partition, item_key = key
+        self._setitem(self._partition_state(partition), item_key, value)
+
+    def __delitem__(self, key):
+        if not (isinstance(key, tuple) and len(key) == 2):
+            raise KeyError(key)
+        partition, item_key = key
+        self._remove_item(self._partition_state(partition), item_key)
+
+    def __iter__(self):
+        for partition, state in self.__partitions.items():
+            for item_key in state.order:
+                yield partition, item_key
+
+    def __len__(self):
+        return sum(len(state.order) for state in self.__partitions.values())
+
+    def __contains__(self, key):
+        if isinstance(key, tuple) and len(key) == 2:
+            partition, item_key = key
+            return item_key in self._partition_state(partition).data
+        return key in self.__partitions
+
+    def clear(self):
+        """Remove all entries while retaining partitions and quotas."""
+        for state in self.__partitions.values():
+            self._clear_partition(state)
+
+    def partition(self, partition):
+        """Return the LRU mapping for a named partition."""
+        self._partition_state(partition)
+        return _PartitionView(self, partition)
+
+    @property
+    def partitions(self):
+        """The keys of all configured partitions."""
+        return self.__partitions.keys()
+
+    def remove_partition(self, partition):
+        """Remove a partition and all of its entries."""
+        state = self.__partitions.pop(partition)
+        self._clear_partition(state)
+
+    def _partition_state(self, partition):
+        try:
+            return self.__partitions[partition]
+        except KeyError:
+            raise KeyError(partition) from None
+
+    def set_quota(self, partition, quota):
+        """Set a partition's reserved quota, adding an empty partition if needed."""
+        self._check_size(quota, "quota")
+        total_quota = quota
+        for key, state in self.__partitions.items():
+            if key != partition:
+                total_quota += state.quota
+        if total_quota > self.__maxsize:
+            raise ValueError("partition quotas exceed maxsize")
+        try:
+            state = self.__partitions[partition]
+        except KeyError:
+            state = _PartitionState(partition, quota)
+            self.__partitions[partition] = state
+        else:
+            state.quota = quota
+
+    def resize(self, maxsize=None, quotas=None):
+        """Atomically set the total size and update selected quotas.
+
+        Quotas not present in ``quotas`` keep their current value.
+        """
+        if maxsize is None:
+            maxsize = self.__maxsize
+        if maxsize < 0:
+            raise ValueError("maxsize must be non-negative")
+
+        updated_quotas = dict(quotas) if quotas is not None else None
+        total_quota = 0
+        for partition, state in self.__partitions.items():
+            quota = (
+                updated_quotas[partition]
+                if updated_quotas is not None and partition in updated_quotas
+                else state.quota
+            )
+            self._check_size(quota, "quota")
+            total_quota += quota
+        new_quotas = {
+            partition: quota
+            for partition, quota in (updated_quotas or {}).items()
+            if partition not in self.__partitions
+        }
+        for partition, quota in new_quotas.items():
+            self._check_size(quota, "quota")
+            total_quota += quota
+        if total_quota > maxsize:
+            raise ValueError("partition quotas exceed maxsize")
+
+        for partition, quota in new_quotas.items():
+            self.__partitions[partition] = _PartitionState(partition, quota)
+        if updated_quotas is not None:
+            for partition, state in self.__partitions.items():
+                if partition in updated_quotas:
+                    state.quota = updated_quotas[partition]
+        self.__maxsize = maxsize
+        self.__shrink_to_maxsize()
+
+    def set_maxsize(self, maxsize):
+        """Set the shared maximum size and evict borrowed entries if needed."""
+        if maxsize < 0:
+            raise ValueError("maxsize must be non-negative")
+        total_quota = 0
+        for state in self.__partitions.values():
+            total_quota += state.quota
+        if total_quota > maxsize:
+            raise ValueError("partition quotas exceed maxsize")
+        self.__maxsize = maxsize
+        self.__shrink_to_maxsize()
+
+    @property
+    def maxsize(self):
+        """The maximum total size of all partitions."""
+        return self.__maxsize
+
+    @property
+    def currsize(self):
+        """The current total size of all partitions."""
+        return self.__currsize
+
+    @property
+    def quotas(self):
+        """A copy of the current partition quotas."""
+        return {
+            partition: state.quota for partition, state in self.__partitions.items()
+        }
+
+    def stats(self):
+        """Return current size and quota statistics for all partitions."""
+        return {
+            partition: PartitionStats(state.currsize, state.quota)
+            for partition, state in self.__partitions.items()
+        }
+
+    @staticmethod
+    def getsizeof(value):
+        """Return the size of a cache element's value."""
+        return 1
+
+    def _setitem(self, target, key, value):
+        size = self.getsizeof(value)
+        self._check_size(size, "value size")
+
+        other_minimum = 0
+        for state in self.__partitions.values():
+            if state is not target:
+                other_minimum += min(state.currsize, state.quota)
+        if other_minimum + size > self.__maxsize:
+            raise ValueError("value too large")
+
+        if key in target.data:
+            self._remove_item(target, key)
+
+        while self.__currsize + size > self.__maxsize:
+            if target.currsize > target.quota:
+                candidate = target
+            else:
+                candidate = self._partition_over_quota()
+            if candidate is None:
+                if target.currsize:
+                    candidate = target
+                else:
+                    raise ValueError("value too large")
+            self._pop_partition_item(candidate)
+
+        target.data[key] = value
+        target.order[key] = None
+        self.__size[(target.key, key)] = size
+        target.currsize += size
+        self.__currsize += size
+
+    def _remove_item(self, state, key):
+        try:
+            del state.data[key]
+        except KeyError:
+            raise KeyError(key) from None
+        del state.order[key]
+        size = self.__size.pop((state.key, key))
+        state.currsize -= size
+        self.__currsize -= size
+
+    def _pop_partition_item(self, state):
+        key = next(iter(state.order))
+        value = state.data[key]
+        self._remove_item(state, key)
+        return key, value
+
+    def _clear_partition(self, state):
+        for key in tuple(state.order):
+            self.__size.pop((state.key, key))
+        self.__currsize -= state.currsize
+        state.currsize = 0
+        state.data.clear()
+        state.order.clear()
+
+    def _partition_over_quota(self):
+        best = None
+        largest_overage = 0
+        for state in self.__partitions.values():
+            overage = state.currsize - state.quota
+            if overage > largest_overage:
+                best = state
+                largest_overage = overage
+        return best
+
+    def __shrink_to_maxsize(self):
+        while self.__currsize > self.__maxsize:
+            state = self._partition_over_quota()
+            if state is None:
+                raise ValueError("partition quotas exceed maxsize")
+            self._pop_partition_item(state)
+
+    @staticmethod
+    def _check_size(size, name):
+        if size < 0:
+            raise ValueError("%s must be non-negative" % name)
+
+
+PartitionedLRUCache = PartitionedCache
 
 
 class RRCache(Cache):
