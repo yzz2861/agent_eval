@@ -17,8 +17,10 @@ from anyio import (
     CancelScope,
     ClosedResourceError,
     EndOfStream,
+    ProcessPipelineError,
     create_task_group,
     fail_after,
+    open_pipeline,
     open_process,
     run_process,
 )
@@ -493,3 +495,218 @@ async def test_close_with_stdout_blocked_subprocess(anyio_backend_name: str) -> 
             process._process._transport.close()  # type: ignore[attr-defined]
 
         pytest.fail("Process.aclose() deadlocked")
+
+
+async def test_open_pipeline_streams_and_stderr() -> None:
+    pipeline = await open_pipeline(
+        [
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('err1'); "
+                "sys.stdout.write(sys.stdin.read())",
+            ],
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('err2'); sys.stdout.write(sys.stdin.read().upper())",
+            ],
+        ],
+        stderr_buffer_size=(4, None),
+    )
+    async with pipeline:
+        await pipeline.stdin.send(b"hello")
+        await pipeline.stdin.aclose()
+
+        chunks = [chunk async for chunk in pipeline.stdout]
+
+        assert pipeline.stderr[1] is not None
+        async for chunk in pipeline.stderr[1]:
+            assert chunk == b"err2"
+
+        result = await pipeline.wait(check=False)
+
+    assert b"".join(chunks) == b"HELLO"
+    assert result.returncodes == (0, 0)
+    assert result.stderr == (b"err1", None)
+    assert result.stderr_truncated == (False, None)
+
+
+async def test_open_pipeline_applies_backpressure_to_large_input() -> None:
+    commands = [
+        [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+        [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+        [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+    ]
+    async with await open_pipeline(commands, stderr_buffer_size=0) as pipeline:
+        await pipeline.stdin.send(b"x" * 2_000_000)
+        await pipeline.stdin.aclose()
+
+        received = b""
+        async for chunk in pipeline.stdout:
+            received += chunk
+
+        result = await pipeline.wait()
+
+    assert len(received) == 2_000_000
+    assert result.stderr_truncated == (False, False, False)
+
+
+async def test_open_pipeline_truncates_bounded_stderr() -> None:
+    async with await open_pipeline(
+        [[sys.executable, "-c", "import sys; sys.stderr.write('abcdef')"]],
+        stderr_buffer_size=3,
+    ) as pipeline:
+        result = await pipeline.wait()
+
+    assert result.stderr == (b"abc",)
+    assert result.stderr_truncated == (True,)
+
+
+async def test_open_pipeline_pipefail() -> None:
+    commands = [
+        [sys.executable, "-c", "import sys; sys.exit(1)"],
+        [sys.executable, "-c", "import sys; sys.exit(0)"],
+    ]
+    async with await open_pipeline(commands) as pipeline:
+        output = b""
+        async for chunk in pipeline.stdout:
+            output += chunk
+
+        result = await pipeline.wait(check=False)
+        assert result.returncode == 0
+        assert result.returncodes == (1, 0)
+
+        with pytest.raises(ProcessPipelineError) as exc_info:
+            await pipeline.wait(pipefail=True)
+
+    assert output == b""
+    assert exc_info.value.result.returncode == 1
+
+
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="SIGTERM behavior is POSIX-specific in this test",
+)
+async def test_open_pipeline_terminates_upstream_after_early_exit() -> None:
+    commands = [
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(5)",
+        ],
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.exit(3)",
+        ],
+    ]
+    async with await open_pipeline(commands) as pipeline:
+        result = await pipeline.wait(check=False)
+
+    assert result.returncodes[1] == 3
+    assert result.returncodes[0] != 0
+
+
+async def test_open_pipeline_does_not_deadlock_when_stdout_is_not_read() -> None:
+    with fail_after(5):
+        async with await open_pipeline(
+            [
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.write('x' * 1024 * 1024)",
+                ],
+            ]
+        ):
+            pass
+
+
+async def test_open_pipeline_cancellation_closes_pipeline() -> None:
+    with CancelScope() as scope:
+        pipeline = await open_pipeline(
+            [[sys.executable, "-c", "import time; time.sleep(5)"]]
+        )
+        async with pipeline:
+            scope.cancel()
+
+    assert pipeline.returncodes[0] is not None
+
+
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="graceful SIGTERM behavior is POSIX-specific",
+)
+async def test_open_pipeline_graceful_close() -> None:
+    code = (
+        "import signal, sys, time; "
+        "signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(2)); "
+        "print('ready', flush=True); time.sleep(5)"
+    )
+    with fail_after(5):
+        async with await open_pipeline(
+            [[sys.executable, "-c", code]], grace_period=1
+        ) as pipeline:
+            await pipeline.stdout.receive()
+            pass
+
+    assert pipeline.returncodes[0] == 2
+
+
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="SIGTERM/SIGKILL behavior is POSIX-specific",
+)
+async def test_open_pipeline_forces_close_after_grace_period() -> None:
+    code = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(5)"
+    with fail_after(5):
+        async with await open_pipeline(
+            [[sys.executable, "-c", code]], grace_period=0.1
+        ) as pipeline:
+            pass
+
+    assert pipeline.returncodes[0] is not None
+    assert pipeline.returncodes[0] != 0
+
+
+async def test_open_pipeline_cleans_up_when_startup_fails(
+    mocker: MockerFixture,
+) -> None:
+    started_processes = []
+    original_open_process = get_async_backend().open_process
+
+    async def failing_open_process(command: object, **kwargs: object) -> object:
+        if len(started_processes) == 1:
+            raise RuntimeError("startup failed")
+
+        process = await original_open_process(command, **kwargs)
+        started_processes.append(process)
+        return process
+
+    mocker.patch.object(
+        get_async_backend(), "open_process", side_effect=failing_open_process
+    )
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        await open_pipeline(
+            [
+                [sys.executable, "-c", "import time; time.sleep(5)"],
+                [sys.executable, "-c", "pass"],
+            ]
+        )
+
+    assert len(started_processes) == 1
+    assert started_processes[0].returncode is not None
+
+
+@pytest.mark.parametrize(
+    ("commands", "match"),
+    [
+        ([], "at least one command"),
+        ([[sys.executable], "not-argv"], "argv sequence"),
+        ([[sys.executable], []], "program name"),
+    ],
+)
+async def test_open_pipeline_invalid_arguments(commands: list[Any], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        await open_pipeline(commands)

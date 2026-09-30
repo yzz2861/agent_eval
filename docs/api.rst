@@ -187,6 +187,11 @@ Subprocesses
 
 .. autofunction:: anyio.run_process
 .. autofunction:: anyio.open_process
+.. autofunction:: anyio.open_pipeline
+
+.. autoclass:: anyio.ProcessPipeline()
+.. autoclass:: anyio.ProcessPipelineResult()
+.. autoexception:: anyio.ProcessPipelineError
 
 .. autoclass:: anyio.abc.Process
 

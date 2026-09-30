@@ -36,6 +36,49 @@ The snippet above runs the ``ps`` command within a shell. To run it directly::
 
     run(main)
 
+Pipelining processes
+---------------------
+
+To connect several programs without invoking a shell, pass their argv sequences to
+:func:`~open_pipeline`. The first process's standard input and the last process's
+standard output are available as asynchronous byte streams::
+
+    import sys
+
+    from anyio import open_pipeline, run
+
+
+    async def main():
+        commands = [
+            [
+                sys.executable,
+                '-c',
+                "import sys; sys.stdout.write(sys.stdin.read())",
+            ],
+            [
+                sys.executable,
+                '-c',
+                "import sys; sys.stdout.write(sys.stdin.read().upper())",
+            ],
+        ]
+        async with await open_pipeline(commands) as pipeline:
+            await pipeline.stdin.send(b'hello\n')
+            await pipeline.stdin.aclose()
+            async for chunk in pipeline.stdout:
+                print(chunk)
+
+            result = await pipeline.wait()
+
+        print(result.returncodes)
+
+    run(main)
+
+Standard error is captured independently for every process up to ``stderr_buffer_size``
+bytes. Pass ``None`` for a process to leave its stderr stream exposed on
+``pipeline.stderr``. Use ``pipefail=True`` when waiting if a failure in any process
+should make the pipeline result unsuccessful, instead of using only the last
+process's return code.
+
 Working with processes
 ----------------------
 

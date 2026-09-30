@@ -5,6 +5,10 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 **UNRELEASED**
 
+- Added ``open_pipeline()`` for running multiple argv-based subprocesses connected
+  with pipes, exposing the first stdin and final stdout as asynchronous byte streams
+  with bounded per-process stderr collection, ``pipefail`` semantics, and graceful
+  shutdown timeouts
 - Fixed ``sleep()`` treating a negative delay (including ``-inf``) inconsistently
   across backends (asyncio returned immediately; Trio raised ``ValueError``) by
   raising ``ValueError`` on all backends
