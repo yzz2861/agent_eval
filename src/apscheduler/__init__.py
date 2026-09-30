@@ -31,6 +31,7 @@ from ._events import TaskUpdated as TaskUpdated
 from ._exceptions import CallableLookupError as CallableLookupError
 from ._exceptions import ConflictingIdError as ConflictingIdError
 from ._exceptions import DeserializationError as DeserializationError
+from ._exceptions import EventLogPrunedError as EventLogPrunedError
 from ._exceptions import JobCancelled as JobCancelled
 from ._exceptions import JobDeadlineMissed as JobDeadlineMissed
 from ._exceptions import JobLookupError as JobLookupError

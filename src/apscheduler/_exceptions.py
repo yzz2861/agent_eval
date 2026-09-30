@@ -65,6 +65,25 @@ class ConflictingIdError(KeyError):
         )
 
 
+class EventLogPrunedError(Exception):
+    """
+    Raised when resuming a persistent event subscription whose acknowledged cursor
+    points to events that have since been pruned from the persistent event log by the
+    retention policy.
+
+    The subscriber must resynchronize (for example by re-subscribing with an explicit
+    ``start_from`` value) instead of silently continuing from the latest event.
+    """
+
+    def __init__(self, subscription_id: str):
+        super().__init__(
+            f"The persistent event subscription {subscription_id!r} cannot be "
+            f"resumed because its acknowledged position has been pruned from the "
+            f"event log; resynchronize the subscriber and subscribe again with an "
+            f"explicit start_from value"
+        )
+
+
 class SerializationError(Exception):
     """Raised when a serializer fails to serialize the given object."""
 

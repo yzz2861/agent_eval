@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from functools import partial
+from inspect import iscoroutine
 from logging import Logger
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 import anyio
 import attrs
 import tenacity
-from anyio import CancelScope, to_thread
+from anyio import CancelScope, create_task_group, to_thread
+from anyio.abc import TaskGroup
 from attr.validators import instance_of
 from sqlalchemy import (
     JSON,
@@ -34,6 +36,7 @@ from sqlalchemy import (
     bindparam,
     create_engine,
     false,
+    func,
     or_,
     select,
 )
@@ -54,6 +57,7 @@ from sqlalchemy.sql.elements import BindParameter, literal
 from sqlalchemy.sql.type_api import TypeEngine
 
 from .._enums import CoalescePolicy, ConflictPolicy, JobOutcome
+from .. import _events
 from .._events import (
     DataStoreEvent,
     Event,
@@ -72,13 +76,15 @@ from .._events import (
 from .._exceptions import (
     ConflictingIdError,
     DeserializationError,
+    EventLogPrunedError,
     SerializationError,
     TaskLookupError,
 )
 from .._structures import Job, JobResult, Schedule, ScheduleResult, Task
 from .._utils import create_repr, current_async_library
-from ..abc import EventBroker
+from ..abc import EventBroker, Subscription
 from .base import BaseExternalDataStore
+from ..serializers.pickle import PickleSerializer
 
 
 class EmulatedTimestampTZ(TypeDecorator[datetime]):
