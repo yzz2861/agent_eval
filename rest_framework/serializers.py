@@ -82,6 +82,62 @@ LIST_SERIALIZER_KWARGS_REMOVE = ('allow_empty', 'min_length', 'max_length')
 
 ALL_FIELDS = '__all__'
 
+# Default limits for graph serialization. Both can be overridden per
+# serializer with the `graph_max_depth` / `graph_max_nodes` keyword
+# arguments, or with the matching `Meta` attributes.
+GRAPH_SERIALIZATION_MAX_DEPTH = 32
+GRAPH_SERIALIZATION_MAX_NODES = 10000
+
+
+class GraphSerializationState:
+    """
+    Bookkeeping for a single graph serialization pass.
+
+    One instance is shared by every serializer taking part in the same
+    serialization, including all of the items of a `many=True` root, so
+    that every object is referenced from a single reference space.
+    """
+
+    def __init__(self, max_depth, max_nodes):
+        self.max_depth = max_depth
+        self.max_nodes = max_nodes
+        self.depth = 0
+        self.node_count = 0
+        self._references = {}
+        self._counter = 0
+
+    @staticmethod
+    def identity_key(instance):
+        """
+        Return a key uniquely identifying `instance` within one serialization.
+
+        The primary key alone cannot be used as a global identifier: different
+        models and different databases may use the same primary key values,
+        and unsaved instances do not have a primary key at all.
+        """
+        cls = type(instance)
+        pk = getattr(instance, 'pk', None)
+        if pk is not None:
+            meta = getattr(cls, '_meta', None)
+            if meta is not None:
+                label = meta.label_lower
+            else:
+                label = '%s.%s' % (cls.__module__, cls.__qualname__)
+            state = getattr(instance, '_state', None)
+            database = getattr(state, 'db', None)
+            return ('pk', label, database, pk)
+        return ('object', '%s.%s' % (cls.__module__, cls.__qualname__), id(instance))
+
+    def lookup_reference(self, instance):
+        return self._references.get(self.identity_key(instance))
+
+    def register(self, instance):
+        self._counter += 1
+        reference = str(self._counter)
+        self._references[self.identity_key(instance)] = reference
+        self.node_count += 1
+        return reference
+
 
 # BaseSerializer
 # --------------
@@ -111,6 +167,10 @@ class BaseSerializer(Field):
     .data - Available.
     """
 
+    # Reference space of the graph serialization this serializer is
+    # currently taking part in, or `None` for regular serialization.
+    _graph_state = None
+
     def __init__(self, instance=None, data=empty, **kwargs):
         self.instance = instance
         if data is not empty:
@@ -118,6 +178,16 @@ class BaseSerializer(Field):
         self.partial = kwargs.pop('partial', False)
         self._context = kwargs.pop('context', {})
         kwargs.pop('many', None)
+        meta = getattr(self, 'Meta', None)
+        self._graph = kwargs.pop('graph', getattr(meta, 'graph_serialization', False))
+        self._graph_max_depth = kwargs.pop(
+            'graph_max_depth',
+            getattr(meta, 'graph_max_depth', GRAPH_SERIALIZATION_MAX_DEPTH)
+        )
+        self._graph_max_nodes = kwargs.pop(
+            'graph_max_nodes',
+            getattr(meta, 'graph_max_nodes', GRAPH_SERIALIZATION_MAX_NODES)
+        )
         super().__init__(**kwargs)
 
     def __new__(cls, *args, **kwargs):
@@ -167,6 +237,18 @@ class BaseSerializer(Field):
 
     def to_representation(self, instance):
         raise NotImplementedError('`to_representation()` must be implemented.')
+
+    def _child_serializers(self):
+        """
+        Serializers directly nested within this one.
+
+        Used to propagate the graph serialization state down the tree.
+        """
+        return ()
+
+    def _set_child_graph_states(self, state):
+        for child in self._child_serializers():
+            child._graph_state = state
 
     def update(self, instance, validated_data):
         raise NotImplementedError('`update()` must be implemented.')
@@ -531,6 +613,11 @@ class Serializer(BaseSerializer, metaclass=SerializerMetaclass):
         """
         Object instance -> Dict of primitive datatypes.
         """
+        if self._graph_state is not None or self._graph:
+            return self._graph_to_representation(instance)
+        return self._serialize_fields(instance)
+
+    def _serialize_fields(self, instance):
         ret = {}
         fields = self._readable_fields
 
@@ -552,6 +639,46 @@ class Serializer(BaseSerializer, metaclass=SerializerMetaclass):
                 ret[field.field_name] = field.to_representation(attribute)
 
         return ret
+
+    def _child_serializers(self):
+        return [
+            field for field in self._readable_fields
+            if isinstance(field, BaseSerializer)
+        ]
+
+    def _graph_to_representation(self, instance):
+        state = self._graph_state
+        if state is None:
+            # This serializer is the root of a graph serialization.
+            state = GraphSerializationState(
+                max_depth=self._graph_max_depth,
+                max_nodes=self._graph_max_nodes,
+            )
+            self._graph_state = state
+            try:
+                return self._graph_to_representation(instance)
+            finally:
+                self._graph_state = None
+
+        reference = state.lookup_reference(instance)
+        if reference is not None:
+            # The object was already serialized once during this pass.
+            # Only emit a reference to its first occurrence.
+            return {'$ref': reference}
+        if state.depth >= state.max_depth:
+            return {'$truncated': 'max_depth'}
+        if state.node_count >= state.max_nodes:
+            return {'$truncated': 'max_nodes'}
+
+        reference = state.register(instance)
+        state.depth += 1
+        self._set_child_graph_states(state)
+        try:
+            ret = self._serialize_fields(instance)
+        finally:
+            self._set_child_graph_states(None)
+            state.depth -= 1
+        return {'$id': reference, **ret}
 
     def validate(self, attrs):
         return attrs
@@ -618,6 +745,12 @@ class ListSerializer(BaseSerializer):
         assert self.child is not None, '`child` is a required argument.'
         assert not inspect.isclass(self.child), '`child` has not been instantiated.'
         super().__init__(*args, **kwargs)
+        if not self._graph and getattr(self.child, '_graph', False):
+            # A `many=True` root opts into graph serialization together
+            # with its child serializer.
+            self._graph = True
+            self._graph_max_depth = self.child._graph_max_depth
+            self._graph_max_nodes = self.child._graph_max_nodes
         self.child.bind(field_name='', parent=self)
 
     def get_initial(self):
@@ -733,9 +866,31 @@ class ListSerializer(BaseSerializer):
         # so, first get a queryset from the Manager if needed
         iterable = data.all() if isinstance(data, models.manager.BaseManager) else data
 
-        return [
-            self.child.to_representation(item) for item in iterable
-        ]
+        if self._graph_state is None and not self._graph:
+            return [
+                self.child.to_representation(item) for item in iterable
+            ]
+
+        owns_state = self._graph_state is None
+        if owns_state:
+            # Root of a graph serialization. All of the items share a
+            # single reference space.
+            self._graph_state = GraphSerializationState(
+                max_depth=self._graph_max_depth,
+                max_nodes=self._graph_max_nodes,
+            )
+        self._set_child_graph_states(self._graph_state)
+        try:
+            return [
+                self.child.to_representation(item) for item in iterable
+            ]
+        finally:
+            self._set_child_graph_states(None)
+            if owns_state:
+                self._graph_state = None
+
+    def _child_serializers(self):
+        return [self.child]
 
     def validate(self, attrs):
         return attrs

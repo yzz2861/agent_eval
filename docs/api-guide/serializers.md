@@ -443,6 +443,36 @@ You can provide arbitrary additional context by passing a `context` argument whe
 
 The context dictionary can be used within any serializer field logic, such as a custom `.to_representation()` method, by accessing the `self.context` attribute.
 
+### Graph serialization
+
+Object graphs with shared nodes or cycles do not serialize well by default: shared objects are duplicated in the output, and cycles recurse until the maximum depth is exceeded. Graph serialization is an opt-in mode that instead emits each object once, together with a reference identifier. Any later occurrence of the same object only emits a reference.
+
+    serializer = NodeSerializer(node, graph=True)
+    serializer.data
+    # {
+    #     '$id': '1', 'name': 'one',
+    #     'friend': {'$id': '2', 'name': 'two', 'friend': {'$ref': '1'}}
+    # }
+
+The mode can also be enabled on the serializer class, and the limits can be tuned, either with keyword arguments or with `Meta` attributes:
+
+    class NodeSerializer(serializers.ModelSerializer):
+        class Meta:
+            model = Node
+            fields = ['name', 'friend']
+            graph_serialization = True
+            graph_max_depth = 16     # default: 32
+            graph_max_nodes = 1000   # default: 10000
+
+The behavior of the mode is:
+
+* Reference identifiers are only stable within a single serialization. They are not derived from the primary key alone, so different models, different databases, and unsaved instances never collide. When `many=True` is used, all of the root objects share a single reference space.
+* Field selection and permissions are unchanged. A reference only ever replaces the output of an entire object, so graph serialization cannot expose fields that a regular serialization would not.
+* Cycles terminate: an object that is already being serialized, or has been serialized, is emitted as `{'$ref': ...}`, so a self-referencing object is expanded exactly once.
+* Objects beyond `graph_max_depth` nesting levels, or beyond the `graph_max_nodes` budget, are emitted as `{'$truncated': 'max_depth'}` or `{'$truncated': 'max_nodes'}`. An object truncated because of the depth limit is still expanded in full if it is reached again within the limit.
+
+Serializers that do not opt in are unaffected.
+
 ---
 
 ## ModelSerializer
