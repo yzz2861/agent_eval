@@ -8,6 +8,7 @@ The guides below demonstrate how to extend schemas in various ways.
 
   pre_and_post_processing
   schema_validation
+  async_validation
   using_original_input_data
   overriding_attribute_access
   custom_error_handling

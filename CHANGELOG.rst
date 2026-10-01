@@ -8,6 +8,14 @@ Features:
 
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
+- Add asynchronous load/validate API: `Schema.aload <marshmallow.Schema.aload>`,
+  `Schema.aloads <marshmallow.Schema.aloads>`, and
+  `Schema.avalidate <marshmallow.Schema.avalidate>`. Hooks
+  (`pre_load`, `post_load`, `validates`, `validates_schema`) and field
+  validators may be defined with ``async def`` and are awaited by the
+  asynchronous API. The synchronous API raises `ValueError` when a schema
+  defines asynchronous hooks.
+
 Bug fixes:
 
 - Raise `ValidationError <marshmallow.exceptions.ValidationError>`

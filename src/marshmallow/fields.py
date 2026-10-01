@@ -118,6 +118,15 @@ def _resolve_field_instance(cls_or_instance: Field | type[Field]) -> Field:
     return cls_or_instance
 
 
+def _iter_validators(validators) -> typing.Iterator[types.Validator]:
+    """Iterate over ``validators``, expanding composed `And` validators."""
+    for validator in validators:
+        if isinstance(validator, And):
+            yield from _iter_validators(validator.validators)
+        else:
+            yield validator
+
+
 class Field(typing.Generic[_InternalT]):
     """Base field from which all other fields inherit.
     This class should not be used directly within Schemas.
@@ -279,11 +288,37 @@ class Field(typing.Generic[_InternalT]):
         """Perform validation on ``value``. Raise a :exc:`ValidationError` if validation
         does not succeed.
         """
+        for validator in _iter_validators(self.validators):
+            if utils.is_async_callable(validator):
+                raise ValueError(
+                    "Cannot run asynchronous validators synchronously. "
+                    "Use `Schema.aload` or `Field.adeserialize` instead."
+                )
         self._validate_all(value)
 
     @property
     def _validate_all(self) -> typing.Callable[[typing.Any], None]:
         return And(*self.validators)
+
+    async def _avalidate(self, value: typing.Any) -> None:
+        """Asynchronously perform validation on ``value``.
+
+        Validators may be synchronous or asynchronous callables. Raise a
+        :exc:`ValidationError` if validation does not succeed.
+        """
+        errors: list[str | dict] = []
+        kwargs: dict[str, typing.Any] = {}
+        for validator in _iter_validators(self.validators):
+            try:
+                await utils.maybe_await(validator(value))
+            except ValidationError as err:
+                kwargs.update(err.kwargs)
+                if isinstance(err.messages, dict):
+                    errors.append(err.messages)
+                else:
+                    errors.extend(err.messages)
+        if errors:
+            raise ValidationError(errors, **kwargs)
 
     def make_error(self, key: str, **kwargs) -> ValidationError:
         """Helper method to make a `ValidationError` with an error message
@@ -382,6 +417,14 @@ class Field(typing.Generic[_InternalT]):
             _miss = self.load_default
             return _miss() if callable(_miss) else _miss
 
+        for func in (*self.pre_load, *self.post_load):
+            if utils.is_async_callable(func):
+                raise ValueError(
+                    "Cannot run asynchronous pre_load/post_load processors "
+                    "synchronously. Use `Schema.aload` or `Field.adeserialize` "
+                    "instead."
+                )
+
         # Apply pre_load functions
         for func in self.pre_load:
             value = func(value)
@@ -397,6 +440,56 @@ class Field(typing.Generic[_InternalT]):
         for func in self.post_load:
             output = func(output)
         return output
+
+    async def adeserialize(
+        self,
+        value: typing.Any,
+        attr: str | None = None,
+        data: typing.Mapping[str, typing.Any] | None = None,
+        **kwargs,
+    ) -> _InternalT | None:
+        """Asynchronously deserialize ``value``.
+
+        Like `deserialize <marshmallow.fields.Field.deserialize>`, except
+        asynchronous ``pre_load``/``post_load`` processors and validators are
+        awaited. Synchronous callables may be mixed in freely.
+
+        .. versionadded:: 4.4.0
+        """
+        self._validate_missing(value)
+        if value is missing_:
+            _miss = self.load_default
+            return _miss() if callable(_miss) else _miss
+
+        # Apply pre_load functions
+        for func in self.pre_load:
+            value = await utils.maybe_await(func(value))
+
+        if self.allow_none and value is None:
+            return None
+
+        output = await self._adeserialize(value, attr, data, **kwargs)
+        # Apply validators
+        await self._avalidate(output)
+
+        # Apply post_load functions
+        for func in self.post_load:
+            output = await utils.maybe_await(func(output))
+        return output
+
+    async def _adeserialize(
+        self,
+        value: typing.Any,
+        attr: str | None,
+        data: typing.Mapping[str, typing.Any] | None,
+        **kwargs,
+    ) -> typing.Any:
+        """Asynchronous counterpart of `_deserialize`. By default, delegates
+        to the synchronous `_deserialize`. Fields that wrap other fields or
+        schemas (e.g. `Nested`, `List`) override this to await inner
+        asynchronous deserialization.
+        """
+        return self._deserialize(value, attr, data, **kwargs)
 
     # Methods for concrete classes to override.
 
@@ -666,6 +759,32 @@ class Nested(Field):
         self._test_collection(value)
         return self._load(value, partial=partial)
 
+    async def _aload(
+        self,
+        value: typing.Any,
+        partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+    ):
+        try:
+            valid_data = await self.schema.aload(
+                value, unknown=self.unknown, partial=partial
+            )
+        except ValidationError as error:
+            raise ValidationError(
+                error.messages, valid_data=error.valid_data
+            ) from error
+        return valid_data
+
+    async def _adeserialize(
+        self,
+        value: typing.Any,
+        attr: str | None,
+        data: typing.Mapping[str, typing.Any] | None,
+        partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        **kwargs,
+    ):
+        self._test_collection(value)
+        return await self._aload(value, partial=partial)
+
 
 class Pluck(Nested):
     """Allows you to replace nested data with one of the data's fields.
@@ -728,6 +847,14 @@ class Pluck(Nested):
             value = {self._field_data_key: value}
         return self._load(value, partial=partial)
 
+    async def _adeserialize(self, value, attr, data, partial=None, **kwargs):
+        self._test_collection(value)
+        if self.many:
+            value = [{self._field_data_key: v} for v in value]
+        else:
+            value = {self._field_data_key: value}
+        return await self._aload(value, partial=partial)
+
 
 class List(Field[list[_InternalT | None]]):
     """A list field, composed with another `Field` class or
@@ -786,6 +913,25 @@ class List(Field[list[_InternalT | None]]):
         for idx, each in enumerate(value):
             try:
                 result.append(self.inner.deserialize(each, **kwargs))
+            except ValidationError as error:
+                if error.valid_data is not None:
+                    result.append(typing.cast("_InternalT", error.valid_data))
+                errors.update({idx: error.messages})
+        if errors:
+            raise ValidationError(errors, valid_data=result)
+        return result
+
+    async def _adeserialize(
+        self, value, attr, data, **kwargs
+    ) -> list[_InternalT | None]:
+        if not utils.is_collection(value):
+            raise self.make_error("invalid")
+
+        result = []
+        errors = {}
+        for idx, each in enumerate(value):
+            try:
+                result.append(await self.inner.adeserialize(each, **kwargs))
             except ValidationError as error:
                 if error.valid_data is not None:
                     result.append(typing.cast("_InternalT", error.valid_data))
@@ -881,6 +1027,27 @@ class Tuple(Field[tuple]):
         for idx, (field, each) in enumerate(zip(self.tuple_fields, value, strict=True)):
             try:
                 result.append(field.deserialize(each, **kwargs))
+            except ValidationError as error:
+                if error.valid_data is not None:
+                    result.append(error.valid_data)
+                errors.update({idx: error.messages})
+        if errors:
+            raise ValidationError(errors, valid_data=result)
+
+        return tuple(result)
+
+    async def _adeserialize(self, value, attr, data, **kwargs) -> tuple:
+        if not utils.is_sequence_but_not_string(value):
+            raise self.make_error("invalid")
+
+        self.validate_length(value)
+
+        result = []
+        errors = {}
+
+        for idx, (field, each) in enumerate(zip(self.tuple_fields, value, strict=True)):
+            try:
+                result.append(await field.adeserialize(each, **kwargs))
             except ValidationError as error:
                 if error.valid_data is not None:
                     result.append(error.valid_data)
@@ -2052,7 +2219,17 @@ class Method(Field):
 
     def _deserialize(self, value, attr, data, **kwargs):
         if self._deserialize_method is not None:
+            if utils.is_async_callable(self._deserialize_method):
+                raise ValueError(
+                    "Cannot run asynchronous deserialize method synchronously. "
+                    "Use `Schema.aload` or `Field.adeserialize` instead."
+                )
             return self._deserialize_method(value)
+        return value
+
+    async def _adeserialize(self, value, attr, data, **kwargs):
+        if self._deserialize_method is not None:
+            return await utils.maybe_await(self._deserialize_method(value))
         return value
 
 
@@ -2105,7 +2282,17 @@ class Function(Field):
 
     def _deserialize(self, value, attr, data, **kwargs):
         if self.deserialize_func:
+            if utils.is_async_callable(self.deserialize_func):
+                raise ValueError(
+                    "Cannot run asynchronous deserialize function synchronously. "
+                    "Use `Schema.aload` or `Field.adeserialize` instead."
+                )
             return self.deserialize_func(value)
+        return value
+
+    async def _adeserialize(self, value, attr, data, **kwargs):
+        if self.deserialize_func:
+            return await utils.maybe_await(self.deserialize_func(value))
         return value
 
 

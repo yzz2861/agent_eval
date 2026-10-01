@@ -33,14 +33,34 @@ from marshmallow.error_store import ErrorStore
 from marshmallow.exceptions import SCHEMA, StringNotCollectionError, ValidationError
 from marshmallow.orderedset import OrderedSet
 from marshmallow.utils import (
+    gather_limited,
     get_value,
+    is_async_callable,
     is_collection,
     is_sequence_but_not_string,
+    maybe_await,
     set_value,
 )
 
 if typing.TYPE_CHECKING:
     from marshmallow.fields import Field
+
+#: Default maximum number of independent asynchronous validations or
+#: processors running concurrently in `Schema.aload` and `Schema.avalidate`.
+DEFAULT_MAX_CONCURRENCY = 32
+
+
+def _normalize_max_concurrency(max_concurrency: int | None) -> int:
+    if max_concurrency is None:
+        return DEFAULT_MAX_CONCURRENCY
+    if max_concurrency < 1:
+        raise ValueError("max_concurrency must be a positive integer.")
+    return max_concurrency
+
+
+async def _run_processor(processor, *args, **kwargs):
+    """Run ``processor`` and await its return value if it is awaitable."""
+    return await maybe_await(processor(*args, **kwargs))
 
 
 def _get_fields(attrs) -> list[tuple[str, Field]]:
@@ -527,6 +547,20 @@ class Schema(metaclass=SchemaMeta):
             return error.valid_data or missing
         return value
 
+    @staticmethod
+    async def _acall_and_store(
+        getter_func, data, *, field_name, error_store, index=None
+    ):
+        """Asynchronous counterpart of `_call_and_store`. Awaits the result
+        of ``getter_func`` if it is awaitable.
+        """
+        try:
+            value = await maybe_await(getter_func(data))
+        except ValidationError as error:
+            error_store.store_error(error.messages, field_name, index=index)
+            return error.valid_data or missing
+        return value
+
     def _serialize(self, obj: typing.Any, *, many: bool = False):
         """Serialize ``obj``.
 
@@ -704,6 +738,122 @@ class Schema(metaclass=SchemaMeta):
                         )
         return ret_d
 
+    async def _adeserialize(
+        self,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        error_store: ErrorStore,
+        many: bool = False,
+        partial=None,
+        unknown: types.UnknownOption = RAISE,
+        index=None,
+        max_concurrency: int,
+    ) -> typing.Any | list[typing.Any]:
+        """Asynchronous counterpart of `_deserialize`. Awaits asynchronous
+        field deserialization. Independent items of a collection and
+        independent fields are deserialized concurrently, with at most
+        ``max_concurrency`` running at once.
+        """
+        index = index if self.opts.index_errors else None
+        if many:
+            if not is_sequence_but_not_string(data):
+                error_store.store_error([self.error_messages["type"]], index=index)
+                ret_l = []
+            else:
+                ret_l = await gather_limited(
+                    [
+                        self._adeserialize(
+                            d,
+                            error_store=error_store,
+                            many=False,
+                            partial=partial,
+                            unknown=unknown,
+                            index=idx,
+                            max_concurrency=max_concurrency,
+                        )
+                        for idx, d in enumerate(data)
+                    ],
+                    max_concurrency,
+                )
+            return ret_l
+        ret_d = self.dict_class()
+        # Check data is a dict
+        if not isinstance(data, Mapping):
+            error_store.store_error([self.error_messages["type"]], index=index)
+        else:
+            partial_is_collection = is_collection(partial)
+
+            async def load_field(attr_name, field_obj):
+                field_name = (
+                    field_obj.data_key if field_obj.data_key is not None else attr_name
+                )
+                raw_value = data.get(field_name, missing)
+                if raw_value is missing:
+                    # Ignore missing field if we're allowed to.
+                    if partial is True or (
+                        partial_is_collection and attr_name in partial
+                    ):
+                        return attr_name, field_obj, missing
+                d_kwargs = {}
+                # Allow partial loading of nested schemas.
+                if partial_is_collection:
+                    prefix = attr_name + "."
+                    len_prefix = len(prefix)
+                    sub_partial = [
+                        f[len_prefix:] for f in partial if f.startswith(prefix)
+                    ]
+                    d_kwargs["partial"] = sub_partial
+                elif partial is not None:
+                    d_kwargs["partial"] = partial
+
+                async def getter(
+                    val, field_obj=field_obj, field_name=field_name, d_kwargs=d_kwargs
+                ):
+                    return await field_obj.adeserialize(
+                        val,
+                        field_name,
+                        data,
+                        **d_kwargs,
+                    )
+
+                value = await self._acall_and_store(
+                    getter_func=getter,
+                    data=raw_value,
+                    field_name=field_name,
+                    error_store=error_store,
+                    index=index,
+                )
+                return attr_name, field_obj, value
+
+            field_results = await gather_limited(
+                [
+                    load_field(attr_name, field_obj)
+                    for attr_name, field_obj in self.load_fields.items()
+                ],
+                max_concurrency,
+            )
+            # Assemble the result in field-definition order
+            for attr_name, field_obj, value in field_results:
+                if value is not missing:
+                    key = field_obj.attribute or attr_name
+                    set_value(ret_d, key, value)
+            if unknown != EXCLUDE:
+                fields = {
+                    field_obj.data_key if field_obj.data_key is not None else field_name
+                    for field_name, field_obj in self.load_fields.items()
+                }
+                for key in set(data) - fields:
+                    value = data[key]
+                    if unknown == INCLUDE:
+                        ret_d[key] = value
+                    elif unknown == RAISE:
+                        error_store.store_error(
+                            [self.error_messages["unknown"]],
+                            key,
+                            index,
+                        )
+        return ret_d
+
     def load(
         self,
         data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
@@ -770,6 +920,78 @@ class Schema(metaclass=SchemaMeta):
         data = self.opts.render_module.loads(s, **kwargs)
         return self.load(data, many=many, partial=partial, unknown=unknown)
 
+    async def aload(
+        self,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        many: bool | None = None,
+        partial: bool | types.StrSequenceOrSet | None = None,
+        unknown: types.UnknownOption | None = None,
+        max_concurrency: int | None = None,
+    ):
+        """Asynchronously deserialize a data structure to an object defined by
+        this Schema's fields.
+
+        Behaves like `load <marshmallow.Schema.load>`, but asynchronous hooks
+        (`pre_load <marshmallow.decorators.pre_load>`,
+        `post_load <marshmallow.decorators.post_load>`,
+        `validates <marshmallow.decorators.validates>` and
+        `validates_schema <marshmallow.decorators.validates_schema>` methods
+        defined with ``async def``) and asynchronous field validators are
+        awaited. Synchronous hooks may be mixed in and behave as in
+        `load <marshmallow.Schema.load>`.
+
+        :param data: The data to deserialize.
+        :param many: Whether to deserialize `data` as a collection. If `None`, the
+            value for `self.many` is used.
+        :param partial: Whether to ignore missing fields and not require
+            any fields declared. Propagates down to ``Nested`` fields as well. If
+            its value is an iterable, only missing fields listed in that iterable
+            will be ignored. Use dot delimiters to specify nested fields.
+        :param unknown: Whether to exclude, include, or raise an error for unknown
+            fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
+            If `None`, the value for `self.unknown` is used.
+        :param max_concurrency: Maximum number of independent asynchronous
+            validations or processors to run concurrently. If `None`,
+            ``DEFAULT_MAX_CONCURRENCY`` is used.
+        :return: Deserialized data
+
+        .. versionadded:: 4.4.0
+        """
+        return await self._ado_load(
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            postprocess=True,
+            max_concurrency=max_concurrency,
+        )
+
+    async def aloads(
+        self,
+        s: str | bytes | bytearray,
+        /,
+        *,
+        many: bool | None = None,
+        partial: bool | types.StrSequenceOrSet | None = None,
+        unknown: types.UnknownOption | None = None,
+        max_concurrency: int | None = None,
+        **kwargs,
+    ):
+        """Same as :meth:`aload`, except it uses `marshmallow.Schema.Meta.render_module`
+        to deserialize the passed string before passing data to :meth:`aload`.
+
+        .. versionadded:: 4.4.0
+        """
+        data = self.opts.render_module.loads(s, **kwargs)
+        return await self.aload(
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            max_concurrency=max_concurrency,
+        )
+
     def _run_validator(
         self,
         validator_func: types.SchemaValidator,
@@ -791,26 +1013,58 @@ class Schema(metaclass=SchemaMeta):
             else:
                 validator_func(output, partial=partial, many=many, unknown=unknown)
         except ValidationError as err:
-            field_name = err.field_name
-            data_key: str
-            if field_name == SCHEMA:
-                data_key = SCHEMA
+            self._store_validator_error(err, error_store, index)
+
+    async def _arun_validator(
+        self,
+        validator_func: types.SchemaValidator,
+        output,
+        *,
+        original_data,
+        error_store: ErrorStore,
+        many: bool,
+        partial: bool | types.StrSequenceOrSet | None,
+        unknown: types.UnknownOption | None,
+        pass_original: bool,
+        index: int | None = None,
+    ):
+        """Asynchronous counterpart of `_run_validator`. Awaits the
+        validator's return value if it is awaitable.
+        """
+        try:
+            if pass_original:  # Pass original, raw data (before unmarshalling)
+                result = validator_func(
+                    output, original_data, partial=partial, many=many, unknown=unknown
+                )
             else:
-                field_obj: Field | None = None
-                try:
-                    field_obj = self.fields[field_name]
-                except KeyError:
-                    if field_name in self.declared_fields:
-                        field_obj = self.declared_fields[field_name]
-                if field_obj:
-                    data_key = (
-                        field_obj.data_key
-                        if field_obj.data_key is not None
-                        else field_name
-                    )
-                else:
-                    data_key = field_name
-            error_store.store_error(err.messages, data_key, index=index)
+                result = validator_func(
+                    output, partial=partial, many=many, unknown=unknown
+                )
+            await maybe_await(result)
+        except ValidationError as err:
+            self._store_validator_error(err, error_store, index)
+
+    def _store_validator_error(
+        self, err: ValidationError, error_store: ErrorStore, index: int | None
+    ) -> None:
+        field_name = err.field_name
+        data_key: str
+        if field_name == SCHEMA:
+            data_key = SCHEMA
+        else:
+            field_obj: Field | None = None
+            try:
+                field_obj = self.fields[field_name]
+            except KeyError:
+                if field_name in self.declared_fields:
+                    field_obj = self.declared_fields[field_name]
+            if field_obj:
+                data_key = (
+                    field_obj.data_key if field_obj.data_key is not None else field_name
+                )
+            else:
+                data_key = field_name
+        error_store.store_error(err.messages, data_key, index=index)
 
     def validate(
         self,
@@ -833,6 +1087,37 @@ class Schema(metaclass=SchemaMeta):
         """
         try:
             self._do_load(data, many=many, partial=partial, postprocess=False)
+        except ValidationError as exc:
+            return typing.cast("dict[str, list[str]]", exc.messages)
+        return {}
+
+    async def avalidate(
+        self,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        many: bool | None = None,
+        partial: bool | types.StrSequenceOrSet | None = None,
+        max_concurrency: int | None = None,
+    ) -> dict[str, list[str]]:
+        """Asynchronously validate `data` against the schema, returning a
+        dictionary of validation errors.
+
+        Behaves like `validate <marshmallow.Schema.validate>`, but awaits
+        asynchronous hooks and field validators. See
+        `aload <marshmallow.Schema.aload>` for the supported parameters.
+
+        :return: A dictionary of validation errors.
+
+        .. versionadded:: 4.4.0
+        """
+        try:
+            await self._ado_load(
+                data,
+                many=many,
+                partial=partial,
+                postprocess=False,
+                max_concurrency=max_concurrency,
+            )
         except ValidationError as exc:
             return typing.cast("dict[str, list[str]]", exc.messages)
         return {}
@@ -864,6 +1149,7 @@ class Schema(metaclass=SchemaMeta):
         :param postprocess: Whether to run post_load methods.
         :return: Deserialized data
         """
+        self._ensure_no_async_hooks()
         error_store = ErrorStore()
         errors: dict[str, list[str]] = {}
         many = self.many if many is None else bool(many)
@@ -933,6 +1219,124 @@ class Schema(metaclass=SchemaMeta):
                         original_data=data,
                         partial=partial,
                         unknown=unknown,
+                    )
+                except ValidationError as err:
+                    errors = err.normalized_messages()
+        if errors:
+            exc = ValidationError(errors, data=data, valid_data=result)
+            self.handle_error(exc, data, many=many, partial=partial)
+            raise exc
+
+        return result
+
+    def _ensure_no_async_hooks(self) -> None:
+        """Raise a `ValueError` if any load-time hooks are asynchronous.
+
+        The synchronous `load`/`loads`/`validate` API cannot run asynchronous
+        hooks; `aload`/`aloads`/`avalidate` must be used instead.
+        """
+        async_hooks = [
+            attr_name
+            for tag in (PRE_LOAD, POST_LOAD, VALIDATES, VALIDATES_SCHEMA)
+            for attr_name, _, _ in self._hooks[tag]
+            if is_async_callable(getattr(self, attr_name))
+        ]
+        if async_hooks:
+            raise ValueError(
+                f"Cannot run asynchronous hooks {async_hooks} synchronously. "
+                "Use `aload`, `aloads` or `avalidate` to load data involving "
+                "asynchronous hooks."
+            )
+
+    async def _ado_load(
+        self,
+        data: (Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]]),
+        *,
+        many: bool | None = None,
+        partial: bool | types.StrSequenceOrSet | None = None,
+        unknown: types.UnknownOption | None = None,
+        postprocess: bool = True,
+        max_concurrency: int | None = None,
+    ):
+        """Asynchronous counterpart of `_do_load`. Awaits asynchronous hooks
+        and field validators. Independent items are run concurrently, bounded
+        by ``max_concurrency``.
+        """
+        error_store = ErrorStore()
+        errors: dict[str, list[str]] = {}
+        many = self.many if many is None else bool(many)
+        unknown = self.unknown if unknown is None else unknown
+        if partial is None:
+            partial = self.partial
+        limit = _normalize_max_concurrency(max_concurrency)
+        # Run preprocessors
+        if self._hooks[PRE_LOAD]:
+            try:
+                processed_data = await self._ainvoke_load_processors(
+                    PRE_LOAD,
+                    data,
+                    many=many,
+                    original_data=data,
+                    partial=partial,
+                    unknown=unknown,
+                    max_concurrency=limit,
+                )
+            except ValidationError as err:
+                errors = err.normalized_messages()
+                result: list | dict | None = None
+        else:
+            processed_data = data
+        if not errors:
+            # Deserialize data
+            result = await self._adeserialize(
+                processed_data,
+                error_store=error_store,
+                many=many,
+                partial=partial,
+                unknown=unknown,
+                max_concurrency=limit,
+            )
+            # Run field-level validation
+            await self._ainvoke_field_validators(
+                error_store=error_store, data=result, many=many, max_concurrency=limit
+            )
+            # Run schema-level validation
+            if self._hooks[VALIDATES_SCHEMA]:
+                field_errors = bool(error_store.errors)
+                await self._ainvoke_schema_validators(
+                    error_store=error_store,
+                    pass_collection=True,
+                    data=result,
+                    original_data=data,
+                    many=many,
+                    partial=partial,
+                    unknown=unknown,
+                    field_errors=field_errors,
+                    max_concurrency=limit,
+                )
+                await self._ainvoke_schema_validators(
+                    error_store=error_store,
+                    pass_collection=False,
+                    data=result,
+                    original_data=data,
+                    many=many,
+                    partial=partial,
+                    unknown=unknown,
+                    field_errors=field_errors,
+                    max_concurrency=limit,
+                )
+            errors = error_store.errors
+            # Run post processors
+            if not errors and postprocess and self._hooks[POST_LOAD]:
+                try:
+                    result = await self._ainvoke_load_processors(
+                        POST_LOAD,
+                        result,
+                        many=many,
+                        original_data=data,
+                        partial=partial,
+                        unknown=unknown,
+                        max_concurrency=limit,
                     )
                 except ValidationError as err:
                     errors = err.normalized_messages()
@@ -1248,6 +1652,193 @@ class Schema(metaclass=SchemaMeta):
             else:
                 data = processor(data, many=many, **kwargs)
         return data
+
+    async def _ainvoke_load_processors(
+        self,
+        tag: str,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        many: bool,
+        original_data,
+        partial: bool | types.StrSequenceOrSet | None,
+        unknown: types.UnknownOption | None,
+        max_concurrency: int,
+    ):
+        # This has to invert the order of the dump processors, so run the pass_collection
+        # processors first.
+        data = await self._ainvoke_processors(
+            tag,
+            pass_collection=True,
+            data=data,
+            many=many,
+            original_data=original_data,
+            partial=partial,
+            unknown=unknown,
+            max_concurrency=max_concurrency,
+        )
+        return await self._ainvoke_processors(
+            tag,
+            pass_collection=False,
+            data=data,
+            many=many,
+            original_data=original_data,
+            partial=partial,
+            unknown=unknown,
+            max_concurrency=max_concurrency,
+        )
+
+    async def _ainvoke_processors(
+        self,
+        tag: str,
+        *,
+        pass_collection: bool,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        many: bool,
+        original_data=None,
+        max_concurrency: int,
+        **kwargs,
+    ):
+        for attr_name, hook_many, processor_kwargs in self._hooks[tag]:
+            if hook_many != pass_collection:
+                continue
+            # This will be a bound method.
+            processor = getattr(self, attr_name)
+            pass_original = processor_kwargs.get("pass_original", False)
+
+            if many and not pass_collection:
+                if pass_original:
+                    data = await gather_limited(
+                        [
+                            _run_processor(
+                                processor, item, original, many=many, **kwargs
+                            )
+                            for item, original in zip_longest(data, original_data)
+                        ],
+                        max_concurrency,
+                    )
+                else:
+                    data = await gather_limited(
+                        [
+                            _run_processor(processor, item, many=many, **kwargs)
+                            for item in data
+                        ],
+                        max_concurrency,
+                    )
+            elif pass_original:
+                data = await maybe_await(
+                    processor(data, original_data, many=many, **kwargs)
+                )
+            else:
+                data = await maybe_await(processor(data, many=many, **kwargs))
+        return data
+
+    async def _ainvoke_field_validators(
+        self, *, error_store: ErrorStore, data, many: bool, max_concurrency: int
+    ):
+        # Collect independent validation jobs first, then run them
+        # concurrently, bounded by max_concurrency.
+        jobs = []
+        for attr_name, _, validator_kwargs in self._hooks[VALIDATES]:
+            validator = getattr(self, attr_name)
+
+            field_names = validator_kwargs["field_names"]
+
+            for field_name in field_names:
+                try:
+                    field_obj = self.fields[field_name]
+                except KeyError as error:
+                    if field_name in self.declared_fields:
+                        continue
+                    raise ValueError(f'"{field_name}" field does not exist.') from error
+
+                data_key = (
+                    field_obj.data_key if field_obj.data_key is not None else field_name
+                )
+
+                if many:
+                    items = enumerate(data)
+                else:
+                    items = ((None, data),)
+                for idx, item in items:
+                    try:
+                        value = item[field_obj.attribute or field_name]
+                    except KeyError:
+                        continue
+                    index = idx if (many and self.opts.index_errors) else None
+                    jobs.append((validator, value, data_key, index, item, field_name))
+
+        async def run_job(validator, value, data_key, index):
+            try:
+                return await maybe_await(validator(value, data_key=data_key))
+            except ValidationError as error:
+                error_store.store_error(error.messages, data_key, index=index)
+                return error.valid_data or missing
+
+        results = await gather_limited(
+            [
+                run_job(validator, value, data_key, index)
+                for validator, value, data_key, index, _, _ in jobs
+            ],
+            max_concurrency,
+        )
+        for (_, _, _, _, item, field_name), validated_value in zip(
+            jobs, results, strict=True
+        ):
+            if validated_value is missing:
+                item.pop(field_name, None)
+
+    async def _ainvoke_schema_validators(
+        self,
+        *,
+        error_store: ErrorStore,
+        pass_collection: bool,
+        data,
+        original_data,
+        many: bool,
+        partial: bool | types.StrSequenceOrSet | None,
+        field_errors: bool = False,
+        unknown: types.UnknownOption | None,
+        max_concurrency: int,
+    ):
+        for attr_name, hook_many, validator_kwargs in self._hooks[VALIDATES_SCHEMA]:
+            if hook_many != pass_collection:
+                continue
+            validator = getattr(self, attr_name)
+            if field_errors and validator_kwargs["skip_on_field_errors"]:
+                continue
+            pass_original = validator_kwargs.get("pass_original", False)
+
+            if many and not pass_collection:
+                await gather_limited(
+                    [
+                        self._arun_validator(
+                            validator,
+                            item,
+                            original_data=orig,
+                            error_store=error_store,
+                            many=many,
+                            partial=partial,
+                            unknown=unknown,
+                            index=idx,
+                            pass_original=pass_original,
+                        )
+                        for idx, (item, orig) in enumerate(
+                            zip(data, original_data, strict=True)
+                        )
+                    ],
+                    max_concurrency,
+                )
+            else:
+                await self._arun_validator(
+                    validator,
+                    data,
+                    original_data=original_data,
+                    error_store=error_store,
+                    many=many,
+                    pass_original=pass_original,
+                    partial=partial,
+                    unknown=unknown,
+                )
 
 
 BaseSchema = Schema  # for backwards compatibility

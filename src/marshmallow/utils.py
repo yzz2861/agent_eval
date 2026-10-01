@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import functools
 import inspect
 import typing
 from collections.abc import Mapping, Sequence
@@ -28,6 +30,50 @@ def is_sequence_but_not_string(obj) -> typing.TypeGuard[Sequence]:
 def is_collection(obj) -> typing.TypeGuard[typing.Iterable]:
     """Return True if ``obj`` is a collection type, e.g. list, tuple, queryset."""
     return is_iterable_but_not_string(obj) and not isinstance(obj, Mapping)
+
+
+def is_async_callable(func) -> bool:
+    """Return True if ``func`` is an asynchronous callable, i.e. calling it
+    returns an awaitable that must be awaited.
+    """
+    while isinstance(func, functools.partial):
+        func = func.func
+    if inspect.iscoroutinefunction(func):
+        return True
+    # Check for callable instances defining an async __call__
+    call = getattr(func, "__call__", None)  # noqa: B004
+    return call is not None and inspect.iscoroutinefunction(call)
+
+
+async def maybe_await(value):
+    """Await ``value`` if it is awaitable, otherwise return it unchanged."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def gather_limited(coroutines, limit: int) -> list:
+    """Run ``coroutines`` concurrently, with at most ``limit`` running at once.
+
+    Results are returned in the same order as the input coroutines. If any
+    coroutine fails or the surrounding task is cancelled, the remaining
+    coroutines are cancelled and awaited so no background tasks are left
+    running.
+    """
+    semaphore = asyncio.Semaphore(limit)
+
+    async def runner(coro):
+        async with semaphore:
+            return await coro
+
+    tasks = [asyncio.ensure_future(runner(coro)) for coro in coroutines]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 # https://stackoverflow.com/a/27596917
