@@ -7,6 +7,10 @@ Changelog
 Features:
 
 - Simplify `get_value` to match actual usage (:pr:`3024`).
+- ``partial`` now also accepts a structured mask: a mapping of field names
+  to `True` or nested masks, with integer indices and ``"*"`` wildcards
+  for collections. This allows different elements of the same list to relax
+  different required fields, and supports field names containing dots.
 
 Bug fixes:
 

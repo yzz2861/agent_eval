@@ -637,7 +637,7 @@ class Nested(Field):
     def _load(
         self,
         value: typing.Any,
-        partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        partial: types.PartialOption = None,
     ):
         try:
             valid_data = self.schema.load(value, unknown=self.unknown, partial=partial)
@@ -652,7 +652,7 @@ class Nested(Field):
         value: typing.Any,
         attr: str | None,
         data: typing.Mapping[str, typing.Any] | None,
-        partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        partial: types.PartialOption = None,
         **kwargs,
     ):
         """Same as :meth:`Field._deserialize` with additional ``partial`` argument.
@@ -777,13 +777,20 @@ class List(Field[list[_InternalT | None]]):
             return None
         return [self.inner._serialize(each, attr, obj, **kwargs) for each in value]
 
-    def _deserialize(self, value, attr, data, **kwargs) -> list[_InternalT | None]:
+    def _deserialize(
+        self, value, attr, data, partial=None, **kwargs
+    ) -> list[_InternalT | None]:
         if not utils.is_collection(value):
             raise self.make_error("invalid")
 
         result = []
         errors = {}
         for idx, each in enumerate(value):
+            if isinstance(partial, _Mapping):
+                # Structured masks apply per element, by index or "*".
+                kwargs["partial"] = utils.partial_mask_for_index(partial, idx)
+            elif partial is not None:
+                kwargs["partial"] = partial
             try:
                 result.append(self.inner.deserialize(each, **kwargs))
             except ValidationError as error:

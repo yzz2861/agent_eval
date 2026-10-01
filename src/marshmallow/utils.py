@@ -30,6 +30,37 @@ def is_collection(obj) -> typing.TypeGuard[typing.Iterable]:
     return is_iterable_but_not_string(obj) and not isinstance(obj, Mapping)
 
 
+def _merge_partial_masks(first, second):
+    """Merge two partial masks. ``True`` (fully partial) wins over sub-masks."""
+    if first is True or second is True:
+        return True
+    merged = dict(first)
+    for key, value in second.items():
+        if key in merged:
+            merged[key] = _merge_partial_masks(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def partial_mask_for_index(mask: Mapping, index: int) -> typing.Any:
+    """Return the partial mask applicable to the element at ``index``.
+
+    Combines the wildcard (``"*"``) entry of a collection-level partial mask
+    with the entry specific to ``index``, if any. Returns an empty mapping
+    if neither is present.
+    """
+    sub_masks = []
+    if "*" in mask:
+        sub_masks.append(mask["*"])
+    if index in mask:
+        sub_masks.append(mask[index])
+    result: typing.Any = {}
+    for sub_mask in sub_masks:
+        result = _merge_partial_masks(result, sub_mask)
+    return result
+
+
 # https://stackoverflow.com/a/27596917
 def is_aware(datetime: dt.datetime) -> bool:
     return (

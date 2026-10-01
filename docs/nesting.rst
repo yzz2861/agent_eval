@@ -168,6 +168,43 @@ You can specify a subset of the fields to allow partial loading using dot delimi
     pprint(result)
     # {'author': {'name': 'Monty'}, 'title': 'Something Completely Different'}
 
+For finer control, ``partial`` also accepts a structured mask: a mapping of
+field names to ``True`` (the field may be missing) or to a nested mask.
+Within a collection, keys may be integer indices or ``"*"`` (all elements),
+so different elements of the same list can relax different fields. Field
+names containing dots can be referenced as-is, since keys are not split on
+dot delimiters.
+
+.. code-block:: python
+
+    class AddressSchema(Schema):
+        city = fields.String(required=True)
+        zip_code = fields.String(required=True)
+
+
+    class PersonSchema(Schema):
+        name = fields.String(required=True)
+        address = fields.Nested(AddressSchema, required=True)
+
+
+    class BatchSchema(Schema):
+        people = fields.List(fields.Nested(PersonSchema), required=True)
+
+
+    data = {
+        "people": [
+            {"name": "Monty"},  # address may be omitted
+            {"name": "John", "address": {"city": "London", "zip_code": "SW1"}},
+        ]
+    }
+    # Only the first element may omit "address"
+    result = BatchSchema().load(data, partial={"people": {0: {"address": True}}})
+
+Mask keys are matched against field names, not ``data_key``. A mask only
+relaxes missing-field requirements: values that are present (including
+explicit ``None``) are still validated normally. Invalid masks raise a
+``ValueError`` before any data is processed.
+
 .. _two-way-nesting:
 
 Two-way nesting

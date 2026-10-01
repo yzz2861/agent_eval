@@ -14,6 +14,15 @@ T = typing.TypeVar("T")
 #: A type that can be either a sequence of strings or a set of strings
 StrSequenceOrSet: typing.TypeAlias = typing.Sequence[str] | typing.AbstractSet[str]
 
+#: A structured partial mask. Maps schema field names to `True` (the field may
+#: be missing) or to a nested mask. Within a mask applied to a collection
+#: (``many=True``), keys may also be integer indices or the ``"*"`` wildcard,
+#: mapping to the mask for the corresponding elements.
+PartialMask: typing.TypeAlias = typing.Mapping[str | int, "bool | PartialMask"]
+
+#: Valid options for the ``partial`` argument
+PartialOption: typing.TypeAlias = bool | StrSequenceOrSet | PartialMask | None
+
 #: Type for validator functions
 Validator: typing.TypeAlias = typing.Callable[[typing.Any], typing.Any]
 
@@ -38,7 +47,7 @@ class SchemaValidator(typing.Protocol):
         output: typing.Any,
         original_data: typing.Any = ...,
         *,
-        partial: bool | StrSequenceOrSet | None = None,
+        partial: PartialOption = None,
         unknown: UnknownOption | None = None,
         many: bool = False,
     ) -> None: ...

@@ -36,6 +36,7 @@ from marshmallow.utils import (
     get_value,
     is_collection,
     is_sequence_but_not_string,
+    partial_mask_for_index,
     set_value,
 )
 
@@ -266,6 +267,11 @@ class Schema(metaclass=SchemaMeta):
         any fields declared. Propagates down to ``Nested`` fields as well. If
         its value is an iterable, only missing fields listed in that iterable
         will be ignored. Use dot delimiters to specify nested fields.
+        If its value is a mapping, it is interpreted as a structured mask:
+        keys are field names and values are either `True` (the field may be
+        missing) or a nested mask. Within a collection, keys may also be
+        non-negative integer indices or ``"*"`` (all elements). Mask keys are
+        matched against field names, not ``data_key``.
     :param unknown: Whether to exclude, include, or raise an error for unknown
         fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
 
@@ -413,7 +419,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         load_only: types.StrSequenceOrSet = (),
         dump_only: types.StrSequenceOrSet = (),
-        partial: bool | types.StrSequenceOrSet | None = None,
+        partial: types.PartialOption = None,
         unknown: types.UnknownOption | None = None,
     ):
         # Raise error if only or exclude is passed as string, not list of strings
@@ -613,6 +619,11 @@ class Schema(metaclass=SchemaMeta):
             any fields declared. Propagates down to ``Nested`` fields as well. If
             its value is an iterable, only missing fields listed in that iterable
             will be ignored. Use dot delimiters to specify nested fields.
+            If its value is a mapping, it is interpreted as a structured mask:
+            keys are field names and values are either `True` (the field may be
+            missing) or a nested mask. Within a collection, keys may also be
+            non-negative integer indices or ``"*"`` (all elements). Mask keys are
+            matched against field names, not ``data_key``.
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
         :param index: Index of the item being deserialized (for storing errors) if
@@ -631,7 +642,11 @@ class Schema(metaclass=SchemaMeta):
                         d,
                         error_store=error_store,
                         many=False,
-                        partial=partial,
+                        partial=(
+                            partial_mask_for_index(partial, idx)
+                            if isinstance(partial, Mapping)
+                            else partial
+                        ),
                         unknown=unknown,
                         index=idx,
                     )
@@ -644,6 +659,7 @@ class Schema(metaclass=SchemaMeta):
             error_store.store_error([self.error_messages["type"]], index=index)
         else:
             partial_is_collection = is_collection(partial)
+            partial_is_mapping = isinstance(partial, Mapping)
             for attr_name, field_obj in self.load_fields.items():
                 field_name = (
                     field_obj.data_key if field_obj.data_key is not None else attr_name
@@ -651,13 +667,19 @@ class Schema(metaclass=SchemaMeta):
                 raw_value = data.get(field_name, missing)
                 if raw_value is missing:
                     # Ignore missing field if we're allowed to.
-                    if partial is True or (
-                        partial_is_collection and attr_name in partial
+                    if (
+                        partial is True
+                        or (partial_is_collection and attr_name in partial)
+                        or (partial_is_mapping and partial.get(attr_name) is True)
                     ):
                         continue
                 d_kwargs = {}
                 # Allow partial loading of nested schemas.
-                if partial_is_collection:
+                if partial_is_mapping:
+                    sub_mask = partial.get(attr_name)
+                    if isinstance(sub_mask, Mapping):
+                        d_kwargs["partial"] = sub_mask
+                elif partial_is_collection:
                     prefix = attr_name + "."
                     len_prefix = len(prefix)
                     sub_partial = [
@@ -709,7 +731,7 @@ class Schema(metaclass=SchemaMeta):
         data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
         *,
         many: bool | None = None,
-        partial: bool | types.StrSequenceOrSet | None = None,
+        partial: types.PartialOption = None,
         unknown: types.UnknownOption | None = None,
     ):
         """Deserialize a data structure to an object defined by this Schema's fields.
@@ -721,6 +743,11 @@ class Schema(metaclass=SchemaMeta):
             any fields declared. Propagates down to ``Nested`` fields as well. If
             its value is an iterable, only missing fields listed in that iterable
             will be ignored. Use dot delimiters to specify nested fields.
+            If its value is a mapping, it is interpreted as a structured mask:
+            keys are field names and values are either `True` (the field may be
+            missing) or a nested mask. Within a collection, keys may also be
+            non-negative integer indices or ``"*"`` (all elements). Mask keys are
+            matched against field names, not ``data_key``.
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
@@ -741,7 +768,7 @@ class Schema(metaclass=SchemaMeta):
         /,
         *,
         many: bool | None = None,
-        partial: bool | types.StrSequenceOrSet | None = None,
+        partial: types.PartialOption = None,
         unknown: types.UnknownOption | None = None,
         **kwargs,
     ):
@@ -755,6 +782,11 @@ class Schema(metaclass=SchemaMeta):
             any fields declared. Propagates down to ``Nested`` fields as well. If
             its value is an iterable, only missing fields listed in that iterable
             will be ignored. Use dot delimiters to specify nested fields.
+            If its value is a mapping, it is interpreted as a structured mask:
+            keys are field names and values are either `True` (the field may be
+            missing) or a nested mask. Within a collection, keys may also be
+            non-negative integer indices or ``"*"`` (all elements). Mask keys are
+            matched against field names, not ``data_key``.
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
@@ -778,7 +810,7 @@ class Schema(metaclass=SchemaMeta):
         original_data,
         error_store: ErrorStore,
         many: bool,
-        partial: bool | types.StrSequenceOrSet | None,
+        partial: types.PartialOption,
         unknown: types.UnknownOption | None,
         pass_original: bool,
         index: int | None = None,
@@ -817,7 +849,7 @@ class Schema(metaclass=SchemaMeta):
         data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
         *,
         many: bool | None = None,
-        partial: bool | types.StrSequenceOrSet | None = None,
+        partial: types.PartialOption = None,
     ) -> dict[str, list[str]]:
         """Validate `data` against the schema, returning a dictionary of
         validation errors.
@@ -829,6 +861,11 @@ class Schema(metaclass=SchemaMeta):
             any fields declared. Propagates down to ``Nested`` fields as well. If
             its value is an iterable, only missing fields listed in that iterable
             will be ignored. Use dot delimiters to specify nested fields.
+            If its value is a mapping, it is interpreted as a structured mask:
+            keys are field names and values are either `True` (the field may be
+            missing) or a nested mask. Within a collection, keys may also be
+            non-negative integer indices or ``"*"`` (all elements). Mask keys are
+            matched against field names, not ``data_key``.
         :return: A dictionary of validation errors.
         """
         try:
@@ -844,7 +881,7 @@ class Schema(metaclass=SchemaMeta):
         data: (Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]]),
         *,
         many: bool | None = None,
-        partial: bool | types.StrSequenceOrSet | None = None,
+        partial: types.PartialOption = None,
         unknown: types.UnknownOption | None = None,
         postprocess: bool = True,
     ):
@@ -857,7 +894,8 @@ class Schema(metaclass=SchemaMeta):
         :param partial: Whether to validate required fields. If its
             value is an iterable, only fields listed in that iterable
             will be allowed missing. If `True`, all fields will be allowed missing.
-            If `None`, the value for `self.partial` is used.
+            If its value is a mapping, it is interpreted as a structured mask
+            (see `load`). If `None`, the value for `self.partial` is used.
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
@@ -870,6 +908,9 @@ class Schema(metaclass=SchemaMeta):
         unknown = self.unknown if unknown is None else unknown
         if partial is None:
             partial = self.partial
+        if isinstance(partial, Mapping):
+            # Fail fast on malformed masks, before any data is processed.
+            self._validate_partial_mask(partial, many=many)
         # Run preprocessors
         if self._hooks[PRE_LOAD]:
             try:
@@ -942,6 +983,72 @@ class Schema(metaclass=SchemaMeta):
             raise exc
 
         return result
+
+    def _validate_partial_mask(self, mask: types.PartialMask, *, many: bool) -> None:
+        """Check a structured partial mask against this schema's fields.
+
+        Raise a `ValueError` if the mask references unknown fields or is
+        otherwise malformed, so that configuration errors are reported before
+        any data is processed. This method is private API.
+        """
+        if many:
+            for key, sub_mask in mask.items():
+                if not (
+                    key == "*"
+                    or (isinstance(key, int) and not isinstance(key, bool) and key >= 0)
+                ):
+                    raise ValueError(
+                        f"Invalid partial mask for {self!r}: collection keys must "
+                        f"be non-negative integer indices or '*', got {key!r}."
+                    )
+                if sub_mask is True:
+                    continue
+                if not isinstance(sub_mask, Mapping):
+                    raise ValueError(
+                        f"Invalid partial mask for {self!r}: value for {key!r} "
+                        "must be True or a nested mask."
+                    )
+                self._validate_partial_mask(sub_mask, many=False)
+            return
+        for name, sub_mask in mask.items():
+            if not isinstance(name, str):
+                raise ValueError(
+                    f"Invalid partial mask for {self!r}: field names must be "
+                    f"strings, got {name!r}."
+                )
+            field_obj = self.load_fields.get(name)
+            if field_obj is None:
+                raise ValueError(
+                    f"Invalid partial mask for {self!r}: {name!r} is not "
+                    "a declared field."
+                )
+            if sub_mask is True:
+                continue
+            if not isinstance(sub_mask, Mapping):
+                raise ValueError(
+                    f"Invalid partial mask for {self!r}: value for {name!r} must "
+                    "be True or a nested mask."
+                )
+            nested_schema, nested_many = self._nested_schema_for_partial_mask(
+                name, field_obj
+            )
+            nested_schema._validate_partial_mask(sub_mask, many=nested_many)
+
+    @staticmethod
+    def _nested_schema_for_partial_mask(
+        name: str, field_obj: Field
+    ) -> tuple[Schema, bool]:
+        """Return the nested schema for a field and whether it is a collection."""
+        if isinstance(field_obj, ma_fields.Nested):
+            return field_obj.schema, field_obj.many or field_obj.schema.many
+        if isinstance(field_obj, ma_fields.List) and isinstance(
+            field_obj.inner, ma_fields.Nested
+        ):
+            return field_obj.inner.schema, True
+        raise ValueError(
+            f"Invalid partial mask: {name!r} is not a nested field, "
+            "so a nested mask cannot be applied to it."
+        )
 
     def _normalize_nested_options(self) -> None:
         """Apply then flatten nested schema options.
@@ -1097,7 +1204,7 @@ class Schema(metaclass=SchemaMeta):
         *,
         many: bool,
         original_data,
-        partial: bool | types.StrSequenceOrSet | None,
+        partial: types.PartialOption,
         unknown: types.UnknownOption | None,
     ):
         # This has to invert the order of the dump processors, so run the pass_collection
@@ -1179,7 +1286,7 @@ class Schema(metaclass=SchemaMeta):
         data,
         original_data,
         many: bool,
-        partial: bool | types.StrSequenceOrSet | None,
+        partial: types.PartialOption,
         field_errors: bool = False,
         unknown: types.UnknownOption | None,
     ):
