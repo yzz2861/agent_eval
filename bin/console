@@ -1,0 +1,21 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "bundler/setup"
+require "dry/types"
+
+Dry::Types.load_extensions(:maybe)
+
+module Types
+  include Dry.Types()
+end
+
+begin
+  require "pry-byebug"
+  binding.pry
+rescue LoadError
+  require "irb"
+  binding.irb
+end
+
+puts
