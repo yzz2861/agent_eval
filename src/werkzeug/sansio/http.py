@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import re
+import typing as t
+from datetime import datetime
+
+from .._internal import _dt_as_utc
+from ..datastructures.etag import ETag
+from ..http import generate_etag
+from ..http import parse_date
+
+
+def _is_resource_modified(
+    http_range: str | None = None,
+    http_if_range: str | None = None,
+    http_if_modified_since: str | None = None,
+    http_if_none_match: str | None = None,
+    http_if_match: str | None = None,
+    etag: str | None = None,
+    data: bytes | None = None,
+    last_modified: datetime | str | None = None,
+    ignore_if_range: bool = True,
+) -> bool:
+    """Convenience method for conditional requests.
+    :param http_range: Range HTTP header
+    :param http_if_range: If-Range HTTP header
+    :param http_if_modified_since: If-Modified-Since HTTP header
+    :param http_if_none_match: If-None-Match HTTP header
+    :param http_if_match: If-Match HTTP header
+    :param etag: the ETag for the response for comparison.
+    :param data: or alternatively the data of the response to automatically
+                 generate an ETag using :func:`generate_etag`.
+    :param last_modified: an optional date of the last modification.
+    :param ignore_if_range: If `False`, `If-Range` header will be taken into
+                            account.
+    :return: `True` if the resource was modified, otherwise `False`.
+
+    .. deprecated:: 3.2
+        Will be removed in Werkzeug 4.0. ``Response.apply_conditions`` and
+        ``apply_range`` perform their own checks.
+
+    .. versionadded:: 2.2
+    """
+    if etag is None and data is not None:
+        etag = f'"{generate_etag(data)}"'
+    elif data is not None:
+        raise TypeError("Only one of 'data' or 'etag` may be given.")
+
+    unmodified = False
+    if isinstance(last_modified, str):
+        last_modified = parse_date(last_modified)
+
+    # HTTP doesn't use microsecond, remove it to avoid false positive
+    # comparisons. Mark naive datetimes as UTC.
+    if last_modified is not None:
+        last_modified = _dt_as_utc(last_modified.replace(microsecond=0))
+
+    if_range = None
+    if not ignore_if_range and http_range is not None:
+        # https://tools.ietf.org/html/rfc7233#section-3.2
+        # A server MUST ignore an If-Range header field received in a request
+        # that does not contain a Range header field.
+        if_range = ds.IfRange.from_header(http_if_range)
+
+    if if_range is not None and if_range.date is not None:
+        modified_since: datetime | None = if_range.date
+    else:
+        modified_since = parse_date(http_if_modified_since)
+
+    if modified_since and last_modified and last_modified <= modified_since:
+        unmodified = True
+
+    if etag:
+        if (parsed_etag := ETag.from_header(etag)) is None:
+            unmodified = False
+        elif if_range is not None and if_range.etag is not None:
+            unmodified = if_range.etag == parsed_etag.value
+        else:
+            # https://tools.ietf.org/html/rfc7232#section-3.2
+            # "A recipient MUST use the weak comparison function when comparing
+            # entity-tags for If-None-Match"
+            if if_none_match := ds.ETagSet.from_header(http_if_none_match):
+                unmodified = if_none_match.contains_weak(parsed_etag.value)
+
+            # https://tools.ietf.org/html/rfc7232#section-3.1
+            # "Origin server MUST use the strong comparison function when
+            # comparing entity-tags for If-Match"
+            if if_match := ds.ETagSet.from_header(http_if_match):
+                unmodified = not if_match.contains_strong(parsed_etag.value)
+
+    return not unmodified
+
+
+_cookie_re = re.compile(
+    r"""
+    [ \t]*  # ignore leading space
+    ([^ \t=";]+)  # key
+    (?:[ \t]*=[ \t]*  # optional =value, ignoring invalid space
+        (
+            "(?:[^\\"]|\\.)*"  # quoted value with backslash escapes
+        |
+            [^ \t";]*  # token value
+        )
+    )?
+    [ \t]*  # ignore trailing space
+    (?:;|\Z)  # only if followed by semicolon or end
+    """,
+    flags=re.ASCII | re.VERBOSE,
+)
+_cookie_unslash_re = re.compile(rb"\\([0-3][0-7]{2}|.)")
+
+
+def _cookie_unslash_replace(m: t.Match[bytes]) -> bytes:
+    v = m.group(1)
+
+    if len(v) == 1:
+        return v
+
+    return int(v, 8).to_bytes(1, "big")
+
+
+def parse_cookie(
+    cookie: str | None = None, **kwargs: t.Any
+) -> ds.ImmutableMultiDict[str, str]:
+    """Parse cookies from a ``Cookie`` header as an :class:`.ImmutableMultiDict`.
+
+    :param cookie: The ``Cookie`` header.
+
+    .. versionchanged:: 3.2
+        The ``cls`` parameter is deprecated and will be removed in Werkzeug 4.0.
+        It will always be ``ImmutableMultiDict``.
+
+    .. versionchanged:: 3.0
+        Passing bytes, and the ``charset`` and ``errors`` parameters, were removed.
+
+    .. versionadded:: 2.2
+    """
+    if "cls" in kwargs:
+        import warnings
+
+        warnings.warn(
+            "The 'cls' parameter is deprecated and will be removed in Werkzeug 4.0."
+            " It will always be 'ImmutableMultiDict'.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+    cls: type[ds.ImmutableMultiDict[str, str]] = kwargs.get(
+        "cls", ds.ImmutableMultiDict
+    )
+
+    if not cookie:
+        return cls()
+
+    out = []
+    pos = 0
+
+    while True:
+        if (m := _cookie_re.match(cookie, pos)) is None:
+            # Skip invalid chars until the next semicolon.
+            if (pos := cookie.find(";", pos) + 1) == 0:
+                break
+
+            continue
+
+        ck, cv = m.groups()
+        pos = m.end()
+
+        if cv is None:
+            cv = ""
+
+        if cv.startswith('"') and cv.endswith('"'):
+            # Work with bytes here, since a UTF-8 character could be multiple bytes.
+            cv = _cookie_unslash_re.sub(
+                _cookie_unslash_replace, cv[1:-1].encode()
+            ).decode(errors="replace")
+
+        out.append((ck, cv))
+
+    return cls(out)
+
+
+# circular dependencies
+from .. import datastructures as ds  # noqa: E402
+
+if not t.TYPE_CHECKING:
+
+    def __getattr__(name: str) -> t.Any:
+        import warnings
+
+        if name == "is_resource_modified":
+            warnings.warn(
+                "'is_resource_modified' is deprecated and will be removed in"
+                " Werkzeug 4.0. 'Response.apply_conditions' and 'apply_range'"
+                " perform their own checks.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return _is_resource_modified
+
+        raise AttributeError(name)
