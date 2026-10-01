@@ -394,6 +394,15 @@ The following configuration values are used internally by Flask:
     responses. This can be overridden per route by altering the
     ``provide_automatic_options`` attribute.
 
+.. py:data:: MAX_SUBREQUEST_DEPTH
+
+    The maximum number of nested calls allowed by :meth:`.Flask.subrequest`.
+    If the limit is exceeded, a :exc:`RuntimeError` is raised.
+
+    Default: ``8``
+
+    .. versionadded:: 3.2
+
 .. versionadded:: 0.4
    ``LOGGER_NAME``
 

@@ -336,6 +336,9 @@ class AppContext:
         original push has been popped.
         """
 
+        self.subrequest_depth: int = 0
+        """The subrequest nesting depth represented by this context."""
+
     @classmethod
     def from_environ(cls, app: Flask, environ: WSGIEnvironment, /) -> te.Self:
         """Create an app context with request data from the given WSGI environ.
@@ -502,6 +505,34 @@ class AppContext:
             appcontext_popped.send(self.app, _async_wrapper=self.app.ensure_sync)
 
         collect_errors.raise_any("Errors during context teardown")
+
+    def _suspend(self) -> None:
+        """Temporarily make the previous context active without tearing this
+        context down. The context must later be resumed and popped.
+        """
+        if self._cv_token is None:
+            raise RuntimeError(
+                f"Cannot suspend this context ({self!r}), it is not pushed."
+            )
+
+        ctx = _cv_app.get(None)
+
+        if ctx is not self:
+            raise RuntimeError(
+                f"Cannot suspend this context ({self!r}), it is not the active"
+                f" context ({ctx!r})."
+            )
+
+        token = self._cv_token
+        self._cv_token = None
+        _cv_app.reset(token)
+
+    def _resume(self) -> None:
+        """Make a suspended context active again."""
+        if self._cv_token is not None:
+            return
+
+        self._cv_token = _cv_app.set(self)
 
     def __enter__(self) -> te.Self:
         self.push()

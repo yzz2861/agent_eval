@@ -30,6 +30,9 @@ Unreleased
     of only lower case file extensions. :pr:`6012`
 -   Fix parsing IPv6 with port in ``run`` and the test client. :pr:`6096`
 -   Add ``app.query`` route decorator for the HTTP QUERY method.
+-   Add ``Flask.subrequest`` to dispatch a request to the same application in
+    process while using a separate request, ``g``, and session context. The
+    ``MAX_SUBREQUEST_DEPTH`` config controls nested subrequest depth.
 
 
 Version 3.1.3

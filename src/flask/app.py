@@ -81,6 +81,47 @@ def _make_timedelta(value: timedelta | int | None) -> timedelta | None:
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
 
 
+class _SubrequestResponseIterator(cabc.Iterator[bytes]):
+    def __init__(self, iterable: cabc.Iterable[str | bytes], ctx: AppContext) -> None:
+        self._iterator = iter(iterable)
+        self._ctx = ctx
+        self._closed = False
+
+    def __next__(self) -> bytes:
+        self._ctx._resume()
+
+        try:
+            item = next(self._iterator)
+        except StopIteration:
+            self.close()
+            raise
+        except BaseException as exc:
+            self.close(exc)
+            raise
+
+        self._ctx._suspend()
+
+        if isinstance(item, str):
+            return item.encode()
+
+        return item
+
+    def close(self, exc: BaseException | None = None) -> None:
+        if self._closed:
+            return
+
+        self._closed = True
+        self._ctx._resume()
+
+        try:
+            close = getattr(self._iterator, "close", None)
+
+            if close is not None:
+                close()
+        finally:
+            self._ctx.pop(exc)
+
+
 # Other methods may call the overridden method with the new ctx arg. Remove it
 # and call the method with the remaining args.
 def remove_ctx(f: F) -> F:
@@ -235,6 +276,7 @@ class Flask(App):
             "TEMPLATES_AUTO_RELOAD": None,
             "MAX_COOKIE_SIZE": 4093,
             "PROVIDE_AUTOMATIC_OPTIONS": True,
+            "MAX_SUBREQUEST_DEPTH": 8,
         }
     )
 
@@ -1565,6 +1607,79 @@ class Flask(App):
             builder.close()
 
         return self.request_context(environ)
+
+    def subrequest(self, *args: t.Any, **kwargs: t.Any) -> Response:
+        """Dispatch a request to this application without making a network call.
+
+        The arguments are the same as :meth:`test_request_context`. Matching,
+        request callbacks, error handlers, session saving, and response
+        callbacks run normally. A separate request context is pushed, so
+        :data:`.request`, :data:`session`, and :data:`g` in the subrequest do
+        not replace the caller's values.
+
+        The incoming ``Cookie`` header is copied when the caller is handling a
+        request. Changes to the subrequest session and cookies in its response
+        do not affect the caller's session or response.
+
+        Subrequests may be nested up to :data:`MAX_SUBREQUEST_DEPTH`. For a
+        streamed response, the subrequest context remains available while the
+        response body is consumed and is cleaned up when the response is closed.
+        """
+        from .testing import EnvironBuilder
+
+        parent = _cv_app.get(None)
+        depth = getattr(parent, "subrequest_depth", 0)
+        max_depth = self.config["MAX_SUBREQUEST_DEPTH"]
+
+        if depth >= max_depth:
+            raise RuntimeError(
+                f"Subrequest nesting depth {depth + 1} exceeds maximum"
+                f" {max_depth}."
+            )
+
+        builder = EnvironBuilder(self, *args, **kwargs)
+
+        if parent is not None and parent.has_request:
+            cookie = parent.request.headers.get("Cookie")
+
+            if cookie is not None:
+                builder.headers.setdefault("Cookie", cookie)
+
+        try:
+            environ = builder.get_environ()
+        finally:
+            builder.close()
+
+        ctx = self.request_context(environ)
+        ctx.subrequest_depth = depth + 1
+        error: BaseException | None = None
+
+        try:
+            ctx.push()
+
+            try:
+                response = self.full_dispatch_request(ctx)
+            except Exception as e:
+                error = e
+                response = self.handle_exception(ctx, e)
+            except:
+                error = sys.exc_info()[1]
+                raise
+
+            if response.direct_passthrough or response.is_streamed:
+                response.response = _SubrequestResponseIterator(
+                    t.cast(cabc.Iterable[str | bytes], response.response), ctx
+                )
+                ctx._suspend()
+            else:
+                ctx.pop(error)
+
+            return response
+        except BaseException:
+            if ctx._cv_token is not None:
+                ctx.pop(error if error is not None else sys.exc_info()[1])
+
+            raise
 
     def wsgi_app(
         self, environ: WSGIEnvironment, start_response: StartResponse
