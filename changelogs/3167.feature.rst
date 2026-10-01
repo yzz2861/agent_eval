@@ -1,0 +1,9 @@
+Add transactional route updates with app.route_transaction()
+
+A route transaction stages a group of route additions, removals, and
+replacements, builds and validates them as a new router version, and then
+atomically swaps it in at runtime. If any part of the transaction is
+invalid, the previous router version keeps serving traffic untouched.
+Requests that are already being handled keep using the router version that
+was active when they started, including url_for calls made mid-handler,
+while new requests see the updated routes.

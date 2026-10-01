@@ -163,6 +163,55 @@ class Router(BaseRouter):
             return routes[0]
         return routes
 
+    def clone(self, exclude: Iterable[Route] | None = None) -> Router:
+        """Build an unfinalized copy of this router containing the same routes.
+
+        The returned router is a brand new, independent instance. It carries
+        over every route (with its handler, methods, name, host requirements,
+        and extra metadata), any custom parameter types, and the router
+        context. Because the source router is never mutated, it can keep
+        serving in-flight requests while the clone is being prepared, and the
+        two may later be swapped atomically.
+
+        Args:
+            exclude (Optional[Iterable[Route]], optional): Route objects that
+                should not be carried over to the new router. Defaults to None.
+
+        Returns:
+            Router: an unfinalized copy of this router
+        """
+        excluded = tuple(exclude or ())
+        clone = type(self)()
+        clone.ctx.__dict__.update(self.ctx.__dict__)
+
+        # Custom parameter types (converters) registered on top of the
+        # built-in ones need to exist on the clone as well
+        for label, definition in self.regex_types.items():
+            if label not in clone.regex_types:
+                clone.register_pattern(label, *definition)
+
+        for group in self.groups.values():
+            for route in group:
+                if any(route is skipped for skipped in excluded):
+                    continue
+                # The path is already normalized, so we bypass Router.add and
+                # go straight to the base implementation to avoid applying
+                # normalization (version prefixes, annotations) a second time
+                new_route = BaseRouter.add(
+                    clone,
+                    path=route.path,
+                    handler=route.handler,
+                    methods=route.methods,
+                    name=route.name or None,
+                    requirements=dict(route.requirements) or None,
+                    strict=route.strict,
+                    unquote=route.unquote,
+                )
+                new_route.extra.__dict__.update(route.extra.__dict__)
+                new_route.ctx.__dict__.update(route.ctx.__dict__)
+
+        return clone
+
     @lru_cache(maxsize=ROUTER_CACHE_SIZE)
     def find_route_by_view_name(
         self, view_name: str, name: str | None = None

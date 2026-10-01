@@ -81,6 +81,7 @@ from sanic.models.handler_types import ListenerType, MiddlewareType
 from sanic.models.handler_types import Sanic as SanicVar
 from sanic.request import Request
 from sanic.response import BaseHTTPResponse, HTTPResponse, ResponseStream
+from sanic.route_transaction import RouteTransaction
 from sanic.router import Router
 from sanic.server.websockets.impl import ConnectionClosed
 from sanic.signals import Event, Signal, SignalRouter
@@ -192,6 +193,7 @@ class Sanic(
         "_future_statics",
         "_inspector",
         "_manager",
+        "_route_update_lock",
         "_state",
         "_task_registry",
         "_test_client",
@@ -377,6 +379,7 @@ class Sanic(
         self.request_middleware: deque[Middleware] = deque()
         self.response_middleware: deque[Middleware] = deque()
         self.router: Router = router or Router()
+        self._route_update_lock: asyncio.Lock = asyncio.Lock()
         self.shared_ctx: SharedContext = SharedContext()
         self.signal_router: SignalRouter = signal_router or SignalRouter()
         self.sock: socket | None = None
@@ -584,7 +587,10 @@ class Sanic(
         )
 
     def _apply_route(
-        self, route: FutureRoute, overwrite: bool = False
+        self,
+        route: FutureRoute,
+        overwrite: bool = False,
+        router: Router | None = None,
     ) -> list[Route]:
         params = route._asdict()
         params["overwrite"] = overwrite
@@ -604,8 +610,8 @@ class Sanic(
 
         ctx = params.pop("route_context")
 
-        with self.amend():
-            routes = self.router.add(**params)
+        def apply(target: Router) -> list[Route]:
+            routes = target.add(**params)
             if isinstance(routes, Route):
                 routes = [routes]
 
@@ -614,7 +620,17 @@ class Sanic(
                 r.extra.static = params.get("static", False)
                 r.ctx.__dict__.update(ctx)
 
-        return routes
+            return routes
+
+        if router is not None:
+            # Adding to a router other than the active one (for example
+            # while building a new router version inside a route
+            # transaction) does not go through amend() since that router
+            # is not the finalized, actively serving one.
+            return apply(router)
+
+        with self.amend():
+            return apply(self.router)
 
     def _apply_middleware(
         self,
@@ -994,6 +1010,18 @@ class Sanic(
         kw: dict[str, str] = {}
         # special static files url_for
 
+        # Resolve against a specific router version when one is provided,
+        # or when a request is currently being handled (so that a request
+        # keeps using the router version that was active when it started,
+        # even if the routes have since been swapped out).
+        router = kwargs.pop("_router", None)
+        if router is None:
+            current_request = Request._current.get(None)
+            if current_request is not None and current_request.app is self:
+                router = current_request.router_version
+        if router is None:
+            router = self.router
+
         if "." not in view_name:
             view_name = f"{self.name}.{view_name}"
 
@@ -1003,7 +1031,7 @@ class Sanic(
                 view_name = view_name.replace("static", name)
             kw.update(name=view_name)
 
-        route = self.router.find_route_by_view_name(view_name, **kw)
+        route = router.find_route_by_view_name(view_name, **kw)
         if not route:
             raise URLBuildError(
                 f"Endpoint with name `{view_name}` was not found"
@@ -1289,6 +1317,11 @@ class Sanic(
         """
         __tracebackhide__ = True
 
+        # Pin the router version that is active when the request enters.
+        # Routing and url_for for this request keep using this version even
+        # if the application's routes are swapped while it is in flight.
+        request._router_version = self.router
+
         await self.dispatch(
             "http.lifecycle.handle",
             inline=True,
@@ -1311,7 +1344,9 @@ class Sanic(
                 context={"request": request},
             )
             # Fetch handler from router
-            route, handler, kwargs = self.router.get(
+            route, handler, kwargs = (
+                request.router_version or self.router
+            ).get(
                 request.path,
                 request.method,
                 request.headers.getone("host", None),
@@ -2285,6 +2320,31 @@ class Sanic(
                 self.signalize(cast(bool, self.config.TOUCHUP))
             if do_router:
                 self.finalize()
+
+    def route_transaction(self) -> RouteTransaction:
+        """Begin a transactional update of the application's routes.
+
+        Unlike :meth:`amend`, which mutates the active router in place, a
+        route transaction stages a group of route changes, builds and
+        validates them as a new router version, and then atomically swaps
+        it in. If any part of the transaction is invalid, an exception is
+        raised and the previous router version keeps serving traffic
+        untouched.
+
+        Requests that are already being handled keep using the router
+        version that was active when they started (including url_for calls
+        made mid-handler); requests that arrive after the swap see the new
+        version. Transactions committed concurrently are serialized.
+
+        Returns:
+            RouteTransaction: a pending transaction to stage changes on
+
+        Example:
+            async with app.route_transaction() as transaction:
+                transaction.remove("old_plugin_route")
+                transaction.add(new_handler, "/plugin/new", name="new_plugin_route")
+        """  # noqa: E501
+        return RouteTransaction(self)
 
     def finalize(self) -> None:
         """Finalize the routing configuration for the Sanic application.

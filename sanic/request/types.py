@@ -24,6 +24,7 @@ from sanic.models.http_types import Credentials
 if TYPE_CHECKING:
     from sanic.app import Sanic
     from sanic.config import Config
+    from sanic.router import Router
     from sanic.server import ConnInfo
 
 import uuid
@@ -112,6 +113,7 @@ class Request(Generic[sanic_type, ctx_type]):
         "_remote_addr",
         "_request_middleware_started",
         "_response_middleware_started",
+        "_router_version",
         "_scheme",
         "_socket",
         "_stream_id",
@@ -196,6 +198,7 @@ class Request(Generic[sanic_type, ctx_type]):
         self._response_middleware_started = False
         self.responded: bool = False
         self.route: Route | None = None
+        self._router_version: Router | None = None
         self.stream: Stream | None = None
         self._match_info: dict[str, Any] = {}
         self._protocol: BaseProtocol | None = None
@@ -1061,12 +1064,32 @@ class Request(Generic[sanic_type, ctx_type]):
             (self.scheme, self.host, self.path, None, self.query_string, None)
         )
 
+    @property
+    def router_version(self) -> Router | None:
+        """The router version this request is bound to.
+
+        It is captured when the request starts being handled, and is used
+        for routing and for building URLs so that the request always sees
+        one consistent set of routes, even if the application's routes are
+        swapped while the request is in flight. It is None if the request
+        has not entered the application handler yet.
+
+        Returns:
+            Optional[Router]: The pinned router version.
+        """
+        return self._router_version
+
     def url_for(self, view_name: str, **kwargs) -> str:
         """Retrieve a URL for a given view name.
 
         Same as `sanic.Sanic.url_for`, but automatically determine `scheme`
         and `netloc` base on the request. Since this method is aiming
         to generate correct schema & netloc, `_external` is implied.
+
+        The URL is resolved against the router version that was active
+        when this request started being handled, so a handler always sees
+        a consistent set of routes even if routes are swapped while the
+        request is in flight.
 
         Args:
             view_name (str): The view name to generate URL for.
@@ -1075,6 +1098,8 @@ class Request(Generic[sanic_type, ctx_type]):
         Returns:
             str: The generated URL.
         """
+        kwargs.setdefault("_router", self.router_version or self.app.router)
+
         # Full URL SERVER_NAME can only be handled in app.url_for
         try:
             sp = self.app.config.get("SERVER_NAME", "").split("://", 1)

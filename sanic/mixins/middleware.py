@@ -161,7 +161,7 @@ class MiddlewareMixin(metaclass=SanicMeta):
                 self.middleware, attach_to="response", priority=priority
             )
 
-    def finalize_middleware(self) -> None:
+    def finalize_middleware(self, router: Router | None = None) -> None:
         """Finalize the middleware configuration for the Sanic application.
 
         This method completes the middleware setup for the application.
@@ -178,12 +178,18 @@ class MiddlewareMixin(metaclass=SanicMeta):
             This method is usually called internally during the server setup
             process and does not typically need to be invoked manually.
 
+        Args:
+            router (Optional[Router], optional): The router whose routes
+                should have middleware attached. Defaults to the
+                application's active router.
+
         Example:
             ```python
             app.finalize_middleware()
             ```
         """
-        for route in self.router.routes:
+        target = router if router is not None else self.router
+        for route in target.routes:
             request_middleware = Middleware.convert(
                 self.request_middleware,  # type: ignore
                 self.named_request_middleware.get(route.name, deque()),  # type: ignore  # noqa: E501

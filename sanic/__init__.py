@@ -18,6 +18,7 @@ from sanic.exceptions import (
     MethodNotAllowed,
     NotFound,
     RangeNotSatisfiable,
+    RouteUpdateError,
     SanicException,
     ServerError,
     ServiceUnavailable,
@@ -34,6 +35,7 @@ from sanic.response import (
     redirect,
     text,
 )
+from sanic.route_transaction import RouteTransaction
 from sanic.server.websockets.impl import WebsocketImplProtocol as Websocket
 
 
@@ -56,6 +58,7 @@ __all__ = (
     "HTTPMethod",
     "HTTPResponse",
     "Request",
+    "RouteTransaction",
     "Websocket",
     # Common types
     "DefaultSanic",
@@ -71,6 +74,7 @@ __all__ = (
     "MethodNotAllowed",
     "NotFound",
     "RangeNotSatisfiable",
+    "RouteUpdateError",
     "SanicException",
     "ServerError",
     "ServiceUnavailable",
