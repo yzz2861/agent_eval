@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from functools import wraps
 from itertools import count
 from typing import Any, SupportsInt, TypeVar
@@ -223,6 +223,35 @@ class MySQLClient(BaseDBAsyncClient):
 
     async def execute_query_dict(self, query: str, values: list | None = None) -> list[dict]:
         return (await self.execute_query(query, values))[1]
+
+    async def execute_query_stream(
+        self, query: str, values: list | None = None, batch_size: int = 100
+    ) -> AsyncIterator[list[dict]]:
+        self.log.debug("%s: %s", query, values)
+        try:
+            # An unbuffered cursor streams rows from the server. The MySQL
+            # protocol does not allow interleaving other commands on the same
+            # connection while rows are pending, so the connection is held for
+            # the whole stream.
+            async with self.acquire_connection() as connection:
+                async with connection.cursor(mysql.SSCursor) as cursor:
+                    await cursor.execute(query, values)
+                    fields = [f.name for f in cursor._result.fields] if cursor._result else []
+                    while True:
+                        rows = await cursor.fetchmany(batch_size)
+                        if not rows:
+                            break
+                        yield [dict(zip(fields, row)) for row in rows]
+        except (
+            errors.OperationalError,
+            errors.ProgrammingError,
+            errors.DataError,
+            errors.InternalError,
+            errors.NotSupportedError,
+        ) as exc:
+            raise OperationalError(exc)
+        except errors.IntegrityError as exc:
+            raise IntegrityError(exc)
 
     @translate_exceptions
     async def execute_script(self, query: str) -> None:

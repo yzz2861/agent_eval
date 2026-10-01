@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import decimal
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from copy import copy
 from typing import TYPE_CHECKING, Any, cast
 
@@ -116,51 +116,86 @@ class BaseExecutor:
     ) -> list:
         _, raw_results = await self.db.execute_query(sql, values)
         instance_list = []
-        if self.select_related_idx:
-            _split_cache: dict[str, str] = {}
+        _split_cache: dict[str, str] = {}
         for row_idx, row in enumerate(raw_results):
             if row_idx != 0 and row_idx % CHUNK_SIZE == 0:
                 # Forcibly yield to the event loop to avoid blocking the event loop
                 # when selecting a large number of rows
                 await asyncio.sleep(0)
-
-            if self.select_related_idx:
-                _, current_idx, _, _, path = self.select_related_idx[0]
-                row_items = list(dict(row).items())
-                instance: Model = self.model._init_from_db(**dict(row_items[:current_idx]))
-                instances: dict[Any, Any] = {path: instance}
-                for model, index, *__, full_path in self.select_related_idx[1:]:
-                    (*path, attr) = full_path
-                    related_items = row_items[current_idx : current_idx + index]
-                    if any(v for _, v in related_items):
-                        related_kwargs = {}
-                        for k, v in related_items:
-                            fname = _split_cache.get(k)
-                            if fname is None:
-                                fname = _split_cache[k] = k.split(".", 1)[1]
-                            related_kwargs[fname] = v
-                        obj = model._init_from_db(**related_kwargs)
-                    elif index == 0:
-                        # 0 signals that an empty "filler" object should be created in the case
-                        # where a field of related model is selected but model itself isn't,
-                        # e.g. .only("relatedmodel__field")
-                        obj = model._init_from_db()
-                    else:
-                        obj = None
-                    target = instances.get(tuple(path))
-                    if target is not None:
-                        object.__setattr__(target, f"_{attr}", obj)
-                    if obj is not None:
-                        instances[(*path, attr)] = obj
-                    current_idx += index
-            else:
-                instance = self.model._init_from_db(**row)
-            if custom_fields:
-                for field in custom_fields:
-                    object.__setattr__(instance, field, row[field])
-            instance_list.append(instance)
+            instance_list.append(self._init_from_row(row, custom_fields, _split_cache))
         await self._execute_prefetch_queries(instance_list)
         return instance_list
+
+    def _init_from_row(
+        self,
+        row: dict,
+        custom_fields: list | None = None,
+        _split_cache: dict[str, str] | None = None,
+    ) -> Model:
+        if self.select_related_idx:
+            if _split_cache is None:
+                _split_cache = {}
+            _, current_idx, _, _, path = self.select_related_idx[0]
+            row_items = list(dict(row).items())
+            instance: Model = self.model._init_from_db(**dict(row_items[:current_idx]))
+            instances: dict[Any, Any] = {path: instance}
+            for model, index, *__, full_path in self.select_related_idx[1:]:
+                (*path, attr) = full_path
+                related_items = row_items[current_idx : current_idx + index]
+                if any(v for _, v in related_items):
+                    related_kwargs = {}
+                    for k, v in related_items:
+                        fname = _split_cache.get(k)
+                        if fname is None:
+                            fname = _split_cache[k] = k.split(".", 1)[1]
+                        related_kwargs[fname] = v
+                    obj = model._init_from_db(**related_kwargs)
+                elif index == 0:
+                    # 0 signals that an empty "filler" object should be created in the case
+                    # where a field of related model is selected but model itself isn't,
+                    # e.g. .only("relatedmodel__field")
+                    obj = model._init_from_db()
+                else:
+                    obj = None
+                target = instances.get(tuple(path))
+                if target is not None:
+                    object.__setattr__(target, f"_{attr}", obj)
+                if obj is not None:
+                    instances[(*path, attr)] = obj
+                current_idx += index
+        else:
+            instance = self.model._init_from_db(**row)
+        if custom_fields:
+            for field in custom_fields:
+                object.__setattr__(instance, field, row[field])
+        return instance
+
+    async def execute_select_stream(
+        self,
+        sql: str,
+        values: list | None = None,
+        custom_fields: list | None = None,
+        batch_size: int = 100,
+    ) -> AsyncIterator[list]:
+        """
+        Yields lists of model instances, built from rows fetched in batches of
+        up to ``batch_size``. Prefetch queries (if any) are resolved per batch,
+        so each batch is fully prefetched before it is yielded.
+        """
+        if self.prefetch_map or self._prefetch_queries:
+            self._make_prefetch_queries()
+        _split_cache: dict[str, str] = {}
+        db_stream = self.db.execute_query_stream(sql, values, batch_size)
+        try:
+            async for rows in db_stream:
+                instance_list = [
+                    self._init_from_row(row, custom_fields, _split_cache) for row in rows
+                ]
+                if instance_list and self._prefetch_queries:
+                    await self._execute_prefetch_tasks(instance_list)
+                yield instance_list
+        finally:
+            await db_stream.aclose()
 
     async def execute_union(
         self, sql: str, app_field: str, model_field: str, models: set[type[Model]]
@@ -762,13 +797,15 @@ class BaseExecutor:
     async def _execute_prefetch_queries(self, instance_list: Iterable[Model]) -> Iterable[Model]:
         if instance_list and (self.prefetch_map or self._prefetch_queries):
             self._make_prefetch_queries()
-            prefetch_tasks = []
-            for field, related_queries in self._prefetch_queries.items():
-                for related_query in related_queries:
-                    prefetch_tasks.append(self._do_prefetch(instance_list, field, related_query))
-            await asyncio.gather(*prefetch_tasks)
-
+            await self._execute_prefetch_tasks(instance_list)
         return instance_list
+
+    async def _execute_prefetch_tasks(self, instance_list: Iterable[Model]) -> None:
+        prefetch_tasks = []
+        for field, related_queries in self._prefetch_queries.items():
+            for related_query in related_queries:
+                prefetch_tasks.append(self._do_prefetch(instance_list, field, related_query))
+        await asyncio.gather(*prefetch_tasks)
 
     async def fetch_for_list(self, instance_list: Iterable[Model], *args: str) -> Iterable[Model]:
         self.prefetch_map = {}

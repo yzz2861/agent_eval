@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import _AsyncGeneratorContextManager
+from itertools import count
 from ssl import SSLContext
 from typing import Any, TypeVar, cast
 
@@ -23,6 +24,8 @@ from tortoise.backends.psycopg.schema_generator import PsycopgSchemaGenerator
 
 FuncType = Callable[..., Any]
 F = TypeVar("F", bound=FuncType)
+
+_stream_cursor_counter = count(1)
 
 
 class AsyncConnectionPool(psycopg_pool.AsyncConnectionPool):
@@ -186,6 +189,53 @@ class PsycopgClient(postgres_client.BasePostgresClient):
     async def execute_query_dict(self, query: str, values: list | None = None) -> list[dict]:
         rowcount, rows = await self.execute_query(query, values, row_factory=psycopg.rows.dict_row)
         return rows
+
+    async def execute_query_stream(
+        self, query: str, values: list | None = None, batch_size: int = 100
+    ) -> AsyncIterator[list[dict]]:
+        self.log.debug("%s: %s", query, values)
+        try:
+            async with self._streaming_connection() as connection:
+                if connection.info.transaction_status == psycopg.pq.TransactionStatus.IDLE:
+                    # A server-side cursor requires a transaction to live in.
+                    async with connection.transaction():
+                        async for batch in self._fetch_cursor_batches(
+                            connection, query, values, batch_size
+                        ):
+                            yield batch
+                else:
+                    async for batch in self._fetch_cursor_batches(
+                        connection, query, values, batch_size
+                    ):
+                        yield batch
+        except (
+            psycopg.errors.SyntaxErrorOrAccessRuleViolation,
+            psycopg.errors.DataException,
+            psycopg.errors.UndefinedTable,
+        ) as exc:
+            raise exceptions.OperationalError(exc)
+        except psycopg.errors.IntegrityError as exc:
+            raise exceptions.IntegrityError(exc)
+        except (
+            psycopg.errors.InvalidTransactionState,
+            psycopg.errors.InFailedSqlTransaction,
+        ) as exc:
+            raise exceptions.TransactionManagementError(exc)
+
+    @staticmethod
+    async def _fetch_cursor_batches(
+        connection: psycopg.AsyncConnection,
+        query: str,
+        values: list | None,
+        batch_size: int,
+    ) -> AsyncIterator[list[dict]]:
+        cursor_name = f"tortoise_stream_{next(_stream_cursor_counter)}"
+        async with connection.cursor(
+            cursor_name, row_factory=psycopg.rows.dict_row
+        ) as cursor:
+            await cursor.execute(query, values)
+            while rows := await cursor.fetchmany(batch_size):
+                yield rows
 
     async def _expire_connections(self) -> None:
         if self._pool:  # pragma: nobranch

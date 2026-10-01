@@ -13,6 +13,7 @@ Changelog
 
 Added
 ^^^^^
+- ``QuerySet.stream()`` (also on ``values()``/``values_list()`` querysets): an explicit streaming async iterator that fetches rows from the database cursor in batches instead of materializing the whole result list like ``async for`` does, prefetches ``prefetch_related()`` relations per batch, and closes the cursor/releases the connection when exhausted, closed or cancelled.
 - ``Q.__bool__()`` so ``Q`` objects with no filters/children (including nested empty ``Q`` children) are falsy. (#2227)
 - PostgreSQL ``password`` credential now accepts a sync or async callable, resolved once per new connection, to support short-lived credentials such as AWS RDS/Aurora IAM tokens and Azure Entra ID tokens. (#2261)
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from functools import wraps
 from itertools import count
 from typing import Any, TypeVar, cast
@@ -161,6 +161,30 @@ class SqliteClient(BaseDBAsyncClient):
         async with self.acquire_connection() as connection:
             self.log.debug("%s: %s", query, values)
             return list(map(dict, await connection.execute_fetchall(query, values)))
+
+    async def execute_query_stream(
+        self, query: str, values: list | None = None, batch_size: int = 100
+    ) -> AsyncIterator[list[dict]]:
+        query = query.replace("\x00", "'||CHAR(0)||'")
+        self.log.debug("%s: %s", query, values)
+        cursor: aiosqlite.Cursor | None = None
+        try:
+            # The lock is only held while the cursor is created; fetching happens
+            # without it so that other queries can interleave between batches.
+            async with self.acquire_connection() as connection:
+                cursor = await connection.execute(query, values or [])
+            while True:
+                rows = await cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                yield [dict(row) for row in rows]
+        except sqlite3.OperationalError as exc:
+            raise OperationalError(exc)
+        except sqlite3.IntegrityError as exc:
+            raise IntegrityError(exc)
+        finally:
+            if cursor is not None:
+                await cursor.close()
 
     @translate_exceptions
     async def execute_script(self, query: str) -> None:

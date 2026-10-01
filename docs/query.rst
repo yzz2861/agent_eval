@@ -170,6 +170,41 @@ QuerySet also supports aggregation and database functions through ``.annotate()`
 
 Check `examples <https://github.com/tortoise/tortoise-orm/tree/master/examples>`_ to see it all in work
 
+.. _streaming:
+
+Streaming
+=========
+
+Awaiting a QuerySet (or using ``async for`` on it) executes the query and materializes the
+whole result list in memory. For large resultsets you can use ``.stream()`` instead, which
+returns an async iterator that fetches rows from the database cursor in batches, only as
+the consumer advances:
+
+.. code-block:: python3
+
+    async for event in Event.all().stream(batch_size=100):
+        ...
+
+``.stream()`` is also available on ``values()`` and ``values_list()`` querysets.
+
+Relations declared with ``prefetch_related()`` are prefetched per batch: each batch is fully
+prefetched (one extra query per relation level per batch, never one query per row) before
+its items are yielded.
+
+The stream holds a database cursor (and, for pooled backends, a connection) until it is
+exhausted or closed. If you break out of the iteration early, close the stream explicitly,
+either with ``aclose()`` or by using it as an async context manager:
+
+.. code-block:: python3
+
+    async with Event.all().stream() as stream:
+        async for event in stream:
+            if event.name == 'Final':
+                break  # cursor is closed and the connection released on exit
+
+When used inside ``in_transaction()``, the stream reads through the transaction connection
+and should be consumed or closed before the transaction ends.
+
 .. _foreign_key:
 
 Foreign Key

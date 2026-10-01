@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any, TypeVar, cast
 
 import asyncpg
@@ -152,6 +152,40 @@ class AsyncpgDBClient(BasePostgresClient):
             params = [query, *values] if values else [query]
             results = await connection.fetch(*params)
             return [dict(i) for i in results]
+
+    async def execute_query_stream(
+        self, query: str, values: list | None = None, batch_size: int = 100
+    ) -> AsyncIterator[list[dict]]:
+        self.log.debug("%s: %s", query, values)
+        params = [query, *values] if values else [query]
+        try:
+            async with self._streaming_connection() as connection:
+                if connection.is_in_transaction():
+                    async for batch in self._fetch_cursor_batches(
+                        connection, params, batch_size
+                    ):
+                        yield batch
+                else:
+                    # A cursor requires a transaction to live in.
+                    async with connection.transaction():
+                        async for batch in self._fetch_cursor_batches(
+                            connection, params, batch_size
+                        ):
+                            yield batch
+        except (asyncpg.SyntaxOrAccessError, asyncpg.exceptions.DataError) as exc:
+            raise OperationalError(exc) from exc
+        except asyncpg.IntegrityConstraintViolationError as exc:
+            raise IntegrityError(exc) from exc
+        except asyncpg.InvalidTransactionStateError as exc:  # pragma: nocoverage
+            raise TransactionManagementError(exc) from exc
+
+    @staticmethod
+    async def _fetch_cursor_batches(
+        connection: asyncpg.Connection, params: list, batch_size: int
+    ) -> AsyncIterator[list[dict]]:
+        cursor = await connection.cursor(*params)
+        while rows := await cursor.fetch(batch_size):
+            yield [dict(row) for row in rows]
 
 
 class TransactionWrapper(AsyncpgDBClient, TransactionalDBClient):

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextlib
 import inspect
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any, Generic, TypeAlias, TypeVar, cast
 
 from pypika_tortoise import Query
@@ -278,6 +279,44 @@ class BaseDBAsyncClient(abc.ABC):
         rowcount, rows = await self.execute_query(query, values)
         normalized = [dict(row) for row in rows]
         return normalized, rowcount
+
+    async def execute_query_stream(
+        self, query: str, values: list | None = None, batch_size: int = 100
+    ) -> AsyncIterator[list[dict]]:
+        """
+        Executes a RAW SQL query statement and yields the resultset in batches of
+        up to ``batch_size`` rows.
+
+        This base implementation materializes the whole resultset first and then
+        chunks it. Backends with cursor support override it to fetch rows from the
+        database incrementally, so that a slow consumer does not pull the whole
+        resultset into memory.
+
+        :param query: The SQL string, pre-parametrized for the target DB dialect.
+        :param values: A sequence of positional DB parameters.
+        :param batch_size: Maximum number of rows to fetch per batch.
+        """
+        _, rows = await self.execute_query(query, values)
+        for offset in range(0, len(rows), batch_size):
+            yield [dict(row) for row in rows[offset : offset + batch_size]]
+
+    @contextlib.asynccontextmanager
+    async def _streaming_connection(self) -> AsyncIterator[Any]:
+        """
+        Acquires the connection to run a streaming query on.
+
+        Pooled clients must hold the acquired connection for the whole stream, as
+        the cursor is bound to it. Lock-protected single connections (e.g. a
+        transaction wrapper) must not hold the lock for the whole stream, so that
+        other queries (e.g. per-batch prefetches) can interleave between batches.
+        """
+        wrapper = self.acquire_connection()
+        if isinstance(wrapper, PoolConnectionWrapper):
+            async with wrapper as connection:
+                yield connection
+        else:
+            await wrapper.ensure_connection()
+            yield wrapper.connection
 
 
 class TransactionalDBClient(BaseDBAsyncClient, abc.ABC):
