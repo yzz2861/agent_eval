@@ -188,6 +188,7 @@ async def open_tcp_stream(
     *,
     happy_eyeballs_delay: float | None = DEFAULT_DELAY,
     local_address: str | None = None,
+    max_connections: int | None = None,
 ) -> trio.SocketStream:
     """Connect to the given host and port over TCP.
 
@@ -247,6 +248,18 @@ async def open_tcp_stream(
           address ``local_address="0.0.0.0"``, or the IPv6 wildcard address
           ``local_address="::"``.
 
+      max_connections (int or None): The maximum number of connection
+          attempts that may be in progress at the same time. New attempts
+          are only started once an in-progress attempt has failed (freeing
+          up a slot), no matter how impatient the
+          ``happy_eyeballs_delay`` makes us. The
+          ``happy_eyeballs_delay`` countdown for scheduling the next
+          attempt only starts once the previous attempt has actually begun,
+          so time spent waiting for a free slot doesn't count against it.
+          Set to `None` (the default) for no limit, or to 1 to only ever
+          make one connection attempt at a time (like
+          :func:`socket.create_connection`).
+
     Returns:
       SocketStream: a :class:`~trio.abc.Stream` connected to the given server.
 
@@ -269,6 +282,14 @@ async def open_tcp_stream(
     if happy_eyeballs_delay is None:
         happy_eyeballs_delay = DEFAULT_DELAY
 
+    if max_connections is not None:
+        if not isinstance(max_connections, int):
+            raise TypeError(
+                f"max_connections must be int or None, not {max_connections!r}"
+            )
+        if max_connections < 1:
+            raise ValueError("max_connections must be at least 1")
+
     targets = await getaddrinfo(host, port, type=SOCK_STREAM)
 
     # I don't think this can actually happen -- if there are no results,
@@ -286,6 +307,14 @@ async def open_tcp_stream(
     # Keeps track of the socket that we're going to complete with,
     # need to make sure this isn't automatically closed
     winning_socket: SocketType | None = None
+
+    # Limits how many connection attempts may be in progress at once. A slot
+    # is acquired before each attempt is started, and released when that
+    # attempt fails. (On success everything is torn down anyway, so there's
+    # no need to release then.)
+    attempt_slots = trio.Semaphore(
+        len(targets) if max_connections is None else max_connections
+    )
 
     # Try connecting to the specified address. Possible outcomes:
     # - success: record connected socket in winning_socket and cancel
@@ -364,6 +393,9 @@ async def open_tcp_stream(
             # everything fails, and tell the next attempt that it should go
             # ahead (if it hasn't already).
             oserrors.append(exc)
+            # Free up a slot so that a queued connection attempt (if any)
+            # can start right away.
+            attempt_slots.release()
             attempt_failed.set()
 
     with close_all() as open_sockets:
@@ -374,6 +406,13 @@ async def open_tcp_stream(
                 # create an event to indicate connection failure,
                 # allowing the next target to be tried early
                 attempt_failed = trio.Event()
+
+                # Wait for a free slot before starting this attempt. This
+                # happens before the attempt is spawned, so the
+                # happy_eyeballs_delay below is measured from when the
+                # previous attempt actually started -- time spent waiting
+                # here doesn't count as part of any attempt's delay.
+                await attempt_slots.acquire()
 
                 nursery.start_soon(
                     attempt_connect,

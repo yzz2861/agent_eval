@@ -361,6 +361,7 @@ async def run_scenario(
     expect_error: tuple[type[BaseException], ...] | type[BaseException] = (),
     happy_eyeballs_delay: float | None = 0.25,
     local_address: str | None = None,
+    max_connections: int | None = None,
 ) -> tuple[SocketType, Scenario] | tuple[BaseException, Scenario]:
     supported_families = set()
     if ipv4_supported:
@@ -377,6 +378,7 @@ async def run_scenario(
             port,
             happy_eyeballs_delay=happy_eyeballs_delay,
             local_address=local_address,
+            max_connections=max_connections,
         )
         assert expect_error == ()
         scenario.check(stream.socket)
@@ -512,6 +514,145 @@ async def test_none_default(autojump_clock: MockClock) -> None:
         "2.2.2.2": 0.250,
         "3.3.3.3": 0.500,
     }
+
+
+async def test_max_connections_input_validation() -> None:
+    with pytest.raises(ValueError, match="^max_connections must be at least 1$"):
+        await open_tcp_stream("127.0.0.1", 80, max_connections=0)
+    with pytest.raises(ValueError, match="^max_connections must be at least 1$"):
+        await open_tcp_stream("127.0.0.1", 80, max_connections=-1)
+    with pytest.raises(TypeError, match="^max_connections must be int or None"):
+        await open_tcp_stream("127.0.0.1", 80, max_connections=1.5)  # type: ignore[arg-type]
+
+
+# With max_connections=2, only two attempts are ever in progress; the
+# remaining targets are never even started once an attempt succeeds.
+async def test_max_connections_limits_simultaneous_attempts(
+    autojump_clock: MockClock,
+) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("1.1.1.1", 10, "success"),
+            # started 0.25 later, so both succeed at the same instant
+            ("2.2.2.2", 9.75, "success"),
+            ("3.3.3.3", 0.1, "success"),
+            ("4.4.4.4", 0.1, "success"),
+        ],
+        max_connections=2,
+    )
+    assert isinstance(sock, FakeSocket)
+    # both attempts succeed at t=10; exactly one of them is delivered, and
+    # scenario.check() (via run_scenario) verified that the other socket was
+    # closed.
+    assert sock.ip in ["1.1.1.1", "2.2.2.2"]
+    assert trio.current_time() == 10
+    assert scenario.connect_times == {
+        "1.1.1.1": 0,
+        "2.2.2.2": 0.250,
+        # 3.3.3.3 and 4.4.4.4 were never even started
+    }
+
+
+# A failed attempt frees up its slot immediately, so the next attempt starts
+# as soon as a slot is available -- and the scheduling delay is measured
+# from when attempts actually start, not from when they were queued.
+async def test_max_connections_slot_freed_on_failure(
+    autojump_clock: MockClock,
+) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("1.1.1.1", 1, "error"),
+            ("2.2.2.2", 10, "success"),
+            ("3.3.3.3", 0.1, "success"),
+        ],
+        max_connections=2,
+    )
+    assert isinstance(sock, FakeSocket)
+    assert sock.ip == "3.3.3.3"
+    assert trio.current_time() == 1 + 0.1
+    assert scenario.connect_times == {
+        "1.1.1.1": 0,
+        "2.2.2.2": 0.250,
+        # the third attempt was queued at 0.250 + 0.250, but only started
+        # once 1.1.1.1's failure freed up a slot at t=1
+        "3.3.3.3": 1,
+    }
+
+
+# max_connections=1 serializes all attempts, like socket.create_connection
+async def test_max_connections_one_at_a_time(autojump_clock: MockClock) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("1.1.1.1", 1, "error"),
+            ("2.2.2.2", 1, "error"),
+            ("3.3.3.3", 0.1, "success"),
+        ],
+        max_connections=1,
+    )
+    assert isinstance(sock, FakeSocket)
+    assert sock.ip == "3.3.3.3"
+    assert trio.current_time() == 1 + 1 + 0.1
+    assert scenario.connect_times == {
+        "1.1.1.1": 0,
+        "2.2.2.2": 1,
+        "3.3.3.3": 2,
+    }
+
+
+# The address-family interleaving (RFC 6555 section 5.4) still applies, and
+# a slow IPv6 attempt doesn't hold up a fast IPv4 attempt.
+async def test_max_connections_ipv6_waits_ipv4_wins(
+    autojump_clock: MockClock,
+) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("::1", 10, "success"),
+            ("::2", 10, "success"),
+            # reordered to second place by section 5.4
+            ("4.4.4.4", 0.1, "success"),
+        ],
+        max_connections=2,
+    )
+    assert isinstance(sock, FakeSocket)
+    assert sock.ip == "4.4.4.4"
+    assert trio.current_time() == 0.250 + 0.1
+    assert scenario.connect_times == {
+        "::1": 0,
+        "4.4.4.4": 0.250,
+        # ::2 was never even started
+    }
+
+
+# Cancelling while queued attempts are waiting for a free slot still cleans
+# up all sockets.
+async def test_max_connections_cancel(autojump_clock: MockClock) -> None:
+    with trio.move_on_after(5) as cancel_scope:
+        exc, scenario = await run_scenario(
+            80,
+            [
+                ("1.1.1.1", 10, "success"),
+                ("2.2.2.2", 10, "success"),
+                ("3.3.3.3", 10, "success"),
+            ],
+            max_connections=1,
+            expect_error=BaseExceptionGroup,
+        )
+        assert isinstance(exc, BaseException)
+        # What comes out should be 1 or more Cancelled errors that all belong
+        # to this cancel_scope; this is the easiest way to check that
+        raise exc
+    assert cancel_scope.cancelled_caught
+
+    assert trio.current_time() == 5
+
+    # only the first attempt was ever started; make sure its socket was
+    # cleaned up.
+    assert scenario.connect_times == {"1.1.1.1": 0}
+    scenario.check(succeeded=None)
 
 
 async def test_custom_errors_expedite(autojump_clock: MockClock) -> None:

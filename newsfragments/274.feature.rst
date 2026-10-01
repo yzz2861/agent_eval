@@ -1,0 +1,5 @@
+Add ``max_connections`` parameter to :func:`trio.open_tcp_stream` to
+limit the number of connection attempts that may be in progress at the same
+time. Attempts beyond the limit are started once an in-progress attempt
+fails, and the ``happy_eyeballs_delay`` countdown only starts once an
+attempt has actually begun.
