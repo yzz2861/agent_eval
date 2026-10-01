@@ -248,6 +248,7 @@ class Query(BaseExpression):
     filter_is_sticky = False
     subquery = False
     contains_subquery = False
+    ctes = ()
 
     # SQL-related attributes.
     # Select and related select clauses are expressions to use in the SELECT
@@ -401,6 +402,8 @@ class Query(BaseExpression):
         obj.table_map = self.table_map.copy()
         obj.where = self.where.clone()
         obj.annotations = self.annotations.copy()
+        if self.ctes:
+            obj.ctes = tuple(self.ctes)
         if self.annotation_select_mask is not None:
             obj.annotation_select_mask = self.annotation_select_mask.copy()
         if self.combined_queries:
@@ -1162,7 +1165,9 @@ class Query(BaseExpression):
 
         # No reuse is possible, so we need a new alias.
         alias, _ = self.table_alias(
-            join.table_name, create=True, filtered_relation=join.filtered_relation
+            join.table_name,
+            create=True,
+            filtered_relation=join.filtered_relation,
         )
         if join.join_type:
             if self.alias_map[join.parent_alias].join_type == LOUTER or join.nullable:
@@ -1277,6 +1282,8 @@ class Query(BaseExpression):
             if hasattr(resolved, "external_aliases"):
                 resolved.external_aliases.update(clone.external_aliases)
             clone.annotations[key] = resolved
+        for cte in self.ctes:
+            cte._attach_to(clone, query)
         # Outer query's aliases are considered external.
         for alias, table in query.alias_map.items():
             clone.external_aliases[alias] = (
@@ -1286,6 +1293,10 @@ class Query(BaseExpression):
                 isinstance(table, BaseTable) and table.table_name != table.table_alias
             )
         return clone
+
+    def add_cte(self, cte):
+        if cte not in self.ctes:
+            self.ctes = (*self.ctes, cte)
 
     def get_external_cols(self):
         exprs = chain(self.annotations.values(), self.where.children)

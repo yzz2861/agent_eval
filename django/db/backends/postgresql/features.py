@@ -39,6 +39,7 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     can_clone_databases = True
     supports_temporal_subtraction = True
     supports_slicing_ordering_in_compound = True
+    supports_recursive_cte = True
     create_test_procedure_without_params_sql = """
         CREATE FUNCTION test_procedure () RETURNS void AS $$
         DECLARE

@@ -2,6 +2,7 @@ import collections
 import json
 import re
 import warnings
+from contextvars import ContextVar
 from functools import partial
 from itertools import chain
 
@@ -29,6 +30,9 @@ from django.utils.functional import cached_property
 from django.utils.hashable import make_hashable
 from django.utils.regex_helper import _lazy_re_compile
 from django.utils.warnings import django_file_prefixes
+
+
+_cte_body_compilation = ContextVar("cte_body_compilation", default=False)
 
 
 class PositionRef(Ref):
@@ -71,6 +75,65 @@ class SQLCompiler:
             f"model={self.query.model.__qualname__} "
             f"connection={self.connection!r} using={self.using!r}>"
         )
+
+    def get_cte_sql(self):
+        ctes = []
+        seen = set()
+
+        def add_cte(cte):
+            if id(cte) in seen:
+                return
+            seen.add(id(cte))
+            for dependency in cte.dependencies:
+                add_cte(dependency)
+            ctes.append(cte)
+
+        for cte in self.query.ctes:
+            add_cte(cte)
+        if not ctes or _cte_body_compilation.get():
+            return [], []
+        if not self.connection.features.supports_recursive_cte:
+            raise NotSupportedError(
+                "Recursive common table expressions are not supported on this "
+                "database backend."
+            )
+
+        declarations = []
+        params = []
+        token = _cte_body_compilation.set(True)
+        try:
+            for cte in ctes:
+                anchor = cte.anchor.clone()
+                anchor.subquery = False
+                anchor.clear_ordering(force=True)
+                recursive = cte.recursive.clone()
+                recursive.subquery = False
+                recursive.clear_ordering(force=True)
+                anchor_sql, anchor_params = anchor.get_compiler(
+                    connection=self.connection,
+                    elide_empty=False,
+                ).as_sql()
+                recursive_sql, recursive_params = recursive.get_compiler(
+                    connection=self.connection,
+                    elide_empty=False,
+                ).as_sql()
+                columns = ", ".join(
+                    self.quote_name(name) for name, field in cte.fields
+                )
+                declarations.append(
+                    "%s (%s) AS (%s UNION ALL %s)"
+                    % (
+                        self.quote_name(cte.sql_name),
+                        columns,
+                        anchor_sql,
+                        recursive_sql,
+                    )
+                )
+                params.extend(anchor_params)
+                params.extend(recursive_params)
+        finally:
+            _cte_body_compilation.reset(token)
+        return ["WITH RECURSIVE " + ", ".join(declarations)], params
 
     def setup_query(self, with_col_aliases=False):
         if all(self.query.alias_refcount[a] == 0 for a in self.query.alias_map):
@@ -783,6 +846,7 @@ class SQLCompiler:
         """
         refcounts_before = self.query.alias_refcount.copy()
         try:
+            cte_sql, cte_params = self.get_cte_sql()
             combinator = self.query.combinator
             extra_select, order_by, group_by = self.pre_sql_setup(
                 with_col_aliases=with_col_aliases or bool(combinator),
@@ -802,8 +866,12 @@ class SQLCompiler:
                 result, params = self.get_combinator_sql(
                     combinator, self.query.combinator_all
                 )
+                result = [*cte_sql, *result]
+                params = [*cte_params, *params]
             elif self.qualify:
                 result, params = self.get_qualify_sql()
+                result = [*cte_sql, *result]
+                params = [*cte_params, *params]
                 order_by = None
             else:
                 distinct_fields, distinct_params = self.get_distinct()
@@ -829,8 +897,8 @@ class SQLCompiler:
                     )
                 except FullResultSet:
                     having, h_params = "", []
-                result = ["SELECT"]
-                params = []
+                result = [*cte_sql, "SELECT"]
+                params = [*cte_params]
 
                 if self.query.distinct:
                     distinct_result, distinct_params = self.connection.ops.distinct_sql(

@@ -255,6 +255,7 @@ class BaseDatabaseFeatures:
 
     # Combinatorial flags
     supports_select_union = True
+    supports_recursive_cte = False
     supports_select_intersection = True
     supports_select_difference = True
     supports_slicing_ordering_in_compound = False
