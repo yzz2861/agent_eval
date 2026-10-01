@@ -207,7 +207,8 @@ Migrations
 Models
 ~~~~~~
 
-* ...
+* Recursive common table expressions are supported by the new
+  :class:`~django.db.models.RecursiveCTE` expression on SQLite and PostgreSQL.
 
 Requests and Responses
 ~~~~~~~~~~~~~~~~~~~~~~

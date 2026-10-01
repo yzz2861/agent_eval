@@ -74,6 +74,7 @@ class BaseDatabaseFeatures:
     # Is there a REAL datatype in addition to floats/doubles?
     has_real_datatype = False
     supports_subqueries_in_group_by = True
+    supports_recursive_cte = False
 
     # Does the backend ignore unnecessary ORDER BY clauses in subqueries?
     ignores_unnecessary_order_by_in_subqueries = True

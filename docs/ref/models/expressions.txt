@@ -739,6 +739,39 @@ degrade performance, it's automatically removed.
 
 You can query using ``NOT EXISTS`` with ``~Exists()``.
 
+``RecursiveCTE()`` expressions
+------------------------------
+
+.. class:: RecursiveCTE(anchor, recursive, name=None)
+
+``RecursiveCTE`` represents an SQL recursive common table expression. The
+first argument is a ``QuerySet`` defining the anchor members. The second
+argument is either a ``QuerySet`` or a callable taking the current CTE and
+returning the recursive ``QuerySet``. Both terms must select the same number
+and compatible types of columns.
+
+The returned object is itself a ``QuerySet`` and may be filtered, ordered,
+aggregated, and used in a subquery::
+
+    >>> from django.db.models import F, IntegerField, RecursiveCTE, Value
+    >>> roots = Node.objects.filter(parent__isnull=True).values(
+    ...     "id", "parent_id", depth=Value(0, output_field=IntegerField())
+    ... )
+    >>> tree = RecursiveCTE(
+    ...     roots,
+    ...     lambda nodes: nodes.filter(
+    ...         depth__lt=10, children__isnull=False
+    ...     ).annotate(next_depth=F("depth") + 1).values(
+    ...         "children__id", "children__parent_id", depth=F("next_depth")
+    ...     ),
+    ... )
+    >>> Node.objects.filter(pk__in=tree.values("pk"))
+
+A condition such as ``depth__lt=10`` allows callers to terminate queries over
+cyclic data.
+
+``RecursiveCTE`` is supported for ``SELECT`` queries on SQLite and PostgreSQL.
+
 Filtering on a ``Subquery()`` or ``Exists()`` expressions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

@@ -33,6 +33,7 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     supports_frame_range_fixed_distance = True
     supports_frame_exclusion = True
     supports_aggregate_filter_clause = True
+    supports_recursive_cte = True
     supports_aggregate_order_by_clause = Database.sqlite_version_info >= (3, 44, 0)
     supports_aggregate_distinct_multiple_argument = False
     supports_any_value = True

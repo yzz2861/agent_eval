@@ -31,6 +31,7 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     can_introspect_materialized_views = True
     can_distinct_on_fields = True
     can_rollback_ddl = True
+    supports_recursive_cte = True
     schema_editor_uses_clientside_param_binding = True
     supports_combined_alters = True
     nulls_order_largest = True

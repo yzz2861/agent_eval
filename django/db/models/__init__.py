@@ -58,6 +58,7 @@ from django.db.models.query import (
     aprefetch_related_objects,
     prefetch_related_objects,
 )
+from django.db.models.sql.cte import RecursiveCTE
 from django.db.models.query_utils import FilteredRelation, Q
 
 # Imports that would create circular imports if sorted
@@ -122,6 +123,7 @@ __all__ += [
     "Prefetch",
     "Q",
     "QuerySet",
+    "RecursiveCTE",
     "aprefetch_related_objects",
     "prefetch_related_objects",
     "DEFERRED",

@@ -22,6 +22,14 @@ from django.db.models.sql.constants import (
     ROW_COUNT,
     SINGLE,
 )
+from django.db.models.sql.cte import (
+    _cte_compilation,
+    begin_cte_compilation,
+    collect_scope_recursive_ctes,
+    compiler_recursive_ctes,
+    end_cte_compilation,
+    order_recursive_ctes,
+)
 from django.db.models.sql.query import Query, get_order_dir
 from django.db.transaction import TransactionManagementError
 from django.utils.deprecation import RemovedInDjango2028Warning
@@ -598,6 +606,77 @@ class SQLCompiler:
             sql, params = node.as_sql(self, self.connection)
         return sql, params
 
+    def get_cte_sql(self):
+        if getattr(self, "_is_cte_component", False):
+            return [], []
+        ctes, _ = compiler_recursive_ctes(self.query)
+        ctes = order_recursive_ctes(ctes)
+        if not ctes:
+            return [], []
+        if not self.connection.features.supports_recursive_cte:
+            raise NotSupportedError(
+                "Recursive common table expressions are not supported on this "
+                "database backend."
+            )
+        result = []
+        params = []
+        for cte in ctes:
+            components = [
+                cte.anchor,
+                cte.get_recursive_queryset(),
+            ]
+            component_sql = []
+            output_length = None
+            output_types = None
+            for queryset in components:
+                component_refcounts = None
+                compiler = queryset.query.get_compiler(
+                    self.using, connection=self.connection, elide_empty=self.elide_empty
+                )
+                compiler._is_cte_component = True
+                component_context_token = _cte_compilation.set(None)
+                try:
+                    component_refcounts = compiler.query.alias_refcount.copy()
+                    compiler.pre_sql_setup()
+                    if output_length is None:
+                        output_length = len(compiler.select)
+                        output_types = tuple(
+                            expr.output_field for expr, _, _ in compiler.select
+                        )
+                    else:
+                        if len(compiler.select) != output_length:
+                            raise FieldError(
+                                "Recursive CTE anchor and recursive term must "
+                                "select the same number of columns."
+                            )
+                        current_types = tuple(
+                            expr.output_field for expr, _, _ in compiler.select
+                        )
+                        if tuple(map(type, current_types)) != tuple(
+                            map(type, output_types)
+                        ):
+                            raise FieldError(
+                                "Recursive CTE anchor and recursive term must "
+                                "select compatible column types."
+                            )
+                    sql, sql_params = compiler.as_sql()
+                finally:
+                    _cte_compilation.reset(component_context_token)
+                    if component_refcounts is not None:
+                        compiler.query.reset_refcounts(component_refcounts)
+                if compiler.query.subquery:
+                    sql = sql[1:-1]
+                component_sql.append(sql)
+                params.extend(sql_params)
+            result.append(
+                "%s AS (%s)"
+                % (
+                    self.quote_name(cte.alias),
+                    " UNION ALL ".join(component_sql),
+                )
+            )
+        return ["WITH RECURSIVE", ", ".join(result)], params
+
     def get_combinator_sql(self, combinator, all):
         features = self.connection.features
         compilers = [
@@ -782,7 +861,9 @@ class SQLCompiler:
         in the query.
         """
         refcounts_before = self.query.alias_refcount.copy()
+        cte_token = begin_cte_compilation(self)
         try:
+            cte_sql, cte_params = self.get_cte_sql()
             combinator = self.query.combinator
             extra_select, order_by, group_by = self.pre_sql_setup(
                 with_col_aliases=with_col_aliases or bool(combinator),
@@ -933,15 +1014,6 @@ class SQLCompiler:
                     result.append("HAVING %s" % having)
                     params.extend(h_params)
 
-            if self.query.explain_info:
-                result.insert(
-                    0,
-                    self.connection.ops.explain_query_prefix(
-                        self.query.explain_info.format,
-                        **self.query.explain_info.options,
-                    ),
-                )
-
             if order_by:
                 ordering = []
                 for _, (o_sql, o_params, _) in order_by:
@@ -962,6 +1034,13 @@ class SQLCompiler:
 
             if for_update_part and not features.for_update_after_from:
                 result.append(for_update_part)
+
+            if self.query.explain_info:
+                explain_prefix = self.connection.ops.explain_query_prefix(
+                    self.query.explain_info.format,
+                    **self.query.explain_info.options,
+                )
+                result.insert(0, explain_prefix)
 
             if self.query.subquery and extra_select:
                 # If the query is used as a subquery, the extra selects would
@@ -995,8 +1074,13 @@ class SQLCompiler:
                     " ".join(result),
                 ), tuple(sub_params + params)
 
+            if cte_sql:
+                cte_string = " ".join(cte_sql)
+                result = [cte_string, *result]
+                params = [*cte_params, *params]
             return " ".join(result), tuple(params)
         finally:
+            end_cte_compilation(cte_token)
             # Finally do cleanup - get rid of the joins we created above.
             self.query.reset_refcounts(refcounts_before)
 
