@@ -65,6 +65,8 @@ def create_method_not_allowed(
             (default ``False``).
     """
 
+    responder: ResponderCallable | AsgiResponderCallable
+
     if asgi:
 
         async def method_not_allowed_responder_async(
@@ -72,12 +74,16 @@ def create_method_not_allowed(
         ) -> NoReturn:
             raise HTTPMethodNotAllowed(allowed_methods)
 
-        return method_not_allowed_responder_async
+        responder = method_not_allowed_responder_async
+    else:
 
-    def method_not_allowed(req: Request, resp: Response, **kwargs: Any) -> NoReturn:
-        raise HTTPMethodNotAllowed(allowed_methods)
+        def method_not_allowed(req: Request, resp: Response, **kwargs: Any) -> NoReturn:
+            raise HTTPMethodNotAllowed(allowed_methods)
 
-    return method_not_allowed
+        responder = method_not_allowed
+
+    setattr(responder, '_falcon_default_responder', True)
+    return responder
 
 
 def create_default_options(
@@ -93,6 +99,8 @@ def create_default_options(
     """
     allowed = ', '.join(allowed_methods)
 
+    responder: ResponderCallable | AsgiResponderCallable
+
     if asgi:
 
         async def options_responder_async(
@@ -103,12 +111,16 @@ def create_default_options(
                 resp.set_header('Allow', allowed)
             resp.set_header('Content-Length', '0')
 
-        return options_responder_async
+        responder = options_responder_async
+    else:
 
-    def options_responder(req: Request, resp: Response, **kwargs: Any) -> None:
-        resp.status = HTTP_200
-        if allowed:
-            resp.set_header('Allow', allowed)
-        resp.set_header('Content-Length', '0')
+        def options_responder(req: Request, resp: Response, **kwargs: Any) -> None:
+            resp.status = HTTP_200
+            if allowed:
+                resp.set_header('Allow', allowed)
+            resp.set_header('Content-Length', '0')
 
-    return options_responder
+        responder = options_responder
+
+    setattr(responder, '_falcon_default_responder', True)
+    return responder

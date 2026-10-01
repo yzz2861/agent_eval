@@ -105,6 +105,13 @@ class Request:
         '_wsgierrors',
         'content_type',
         'context',
+        '_cors_method_map',
+        '_cors_preflight_allowed',
+        '_cors_preflight_headers',
+        '_cors_preflight_methods',
+        '_cors_preflight_policy',
+        '_cors_preflight_raw_headers',
+        '_cors_preflight_policies',
         'env',
         'method',
         'options',
@@ -254,6 +261,13 @@ class Request:
         self.method = env['REQUEST_METHOD']
 
         self.uri_template = None
+        self._cors_method_map = {}
+        self._cors_preflight_allowed = None
+        self._cors_preflight_policy = None
+        self._cors_preflight_methods = ()
+        self._cors_preflight_headers = ()
+        self._cors_preflight_raw_headers = ()
+        self._cors_preflight_policies = ()
         self._media: UnsetOr[Any] = _UNSET
         self._media_error: Exception | None = None
 

@@ -470,6 +470,7 @@ class App(Generic[_ReqT, _RespT]):
                 raise
         else:
             try:
+                skip_responder = False
                 # NOTE(kgriffs): If the request did not match any
                 # route, a default responder is returned and the
                 # resource is None. In that case, we skip the
@@ -477,13 +478,27 @@ class App(Generic[_ReqT, _RespT]):
                 # None when a middleware method already set
                 # resp.complete to True.
                 if resource:
-                    # Call process_resource middleware methods.
-                    for process_resource in mw_rsrc_stack:
-                        process_resource(req, resp, resource, params)
-                        if resp.complete:
-                            break
+                    if req.method == 'OPTIONS' and req.get_header(
+                        'Access-Control-Request-Method'
+                    ):
+                        for middleware in self._unprepared_middleware:
+                            if isinstance(middleware, CORSMiddleware):
+                                skip_responder = middleware.process_preflight(
+                                    req,
+                                    resp,
+                                    resource,
+                                    getattr(req, '_cors_method_map', {}),
+                                )
+                                break
 
-                if not resp.complete:
+                    # Call process_resource middleware methods.
+                    if not resp.complete:
+                        for process_resource in mw_rsrc_stack:
+                            process_resource(req, resp, resource, params)
+                            if resp.complete:
+                                break
+
+                if not resp.complete and not skip_responder:
                     responder(req, resp, **params)
 
                 req_succeeded = True
@@ -1264,6 +1279,7 @@ class App(Generic[_ReqT, _RespT]):
             params = {}
 
         if resource is not None:
+            setattr(req, '_cors_method_map', method_map)
             try:
                 responder = method_map[method]
             except KeyError:

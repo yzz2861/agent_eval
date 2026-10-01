@@ -73,6 +73,7 @@ __all__ = (
     'CaseInsensitiveDict',
     'code_to_http_status',
     'Context',
+    'CORSPolicy',
     'create_task',
     'deprecated',
     'dt_to_http',
@@ -414,6 +415,7 @@ from falcon.hooks import before
 from falcon.http_error import HTTPError
 from falcon.http_status import HTTPStatus
 from falcon.middleware import CORSMiddleware
+from falcon.middleware import CORSPolicy
 from falcon.redirects import HTTPFound
 from falcon.redirects import HTTPMovedPermanently
 from falcon.redirects import HTTPPermanentRedirect

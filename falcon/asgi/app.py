@@ -62,6 +62,7 @@ from falcon.errors import WebSocketDisconnected
 from falcon.http_error import HTTPError
 from falcon.http_status import HTTPStatus
 from falcon.media.multipart import MultipartFormHandler
+from falcon.middleware import CORSMiddleware
 from falcon.util.deprecation import DeprecatedWarning
 from falcon.util.misc import _has_arg_name
 from falcon.util.misc import is_python_func
@@ -567,6 +568,7 @@ class App(falcon.app.App[_ReqT, _RespT]):
 
         else:
             try:
+                skip_responder = False
                 # NOTE(kgriffs): If the request did not match any
                 # route, a default responder is returned and the
                 # resource is None. In that case, we skip the
@@ -574,14 +576,28 @@ class App(falcon.app.App[_ReqT, _RespT]):
                 # None when a middleware method already set
                 # resp.complete to True.
                 if resource:
+                    if req.method == 'OPTIONS' and req.get_header(
+                        'Access-Control-Request-Method'
+                    ):
+                        for middleware in self._unprepared_middleware:
+                            if isinstance(middleware, CORSMiddleware):
+                                skip_responder = middleware.process_preflight(
+                                    req,
+                                    resp,
+                                    resource,
+                                    getattr(req, '_cors_method_map', {}),
+                                )
+                                break
+
                     # Call process_resource middleware methods.
-                    for process_resource in mw_rsrc_stack:
-                        await process_resource(req, resp, resource, params)
+                    if not resp.complete:
+                        for process_resource in mw_rsrc_stack:
+                            await process_resource(req, resp, resource, params)
 
-                        if resp.complete:
-                            break
+                            if resp.complete:
+                                break
 
-                if not resp.complete:
+                if not resp.complete and not skip_responder:
                     await responder(req, resp, **params)
 
                 req_succeeded = True

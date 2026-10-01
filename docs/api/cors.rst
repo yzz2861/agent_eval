@@ -26,6 +26,31 @@ allows customization of the CORS policy applied. The middleware allows customizi
 the allowed origins, if credentials should be allowed and if additional headers
 can be exposed.
 
+A :class:`~falcon.CORSPolicy` can be attached to a resource or an individual
+responder. Fields that are not specified inherit the application's default policy.
+Responder policies take precedence over resource policies.
+
+.. code:: python
+
+    class ItemsResource:
+        @falcon.CORSPolicy(allow_origins='*', allow_credentials=None)
+        def on_get(self, req, resp):
+            resp.media = {'items': []}
+
+        @falcon.CORSPolicy(
+            allow_origins=['https://admin.example'],
+            allow_headers=['X-Admin-Token'],
+            allow_credentials='*',
+        )
+        def on_post(self, req, resp):
+            resp.status = falcon.HTTP_204
+
+A resource-wide policy can instead be assigned to its ``cors_policy`` attribute.
+Preflight requests always use the policy of the responder named by
+``Access-Control-Request-Method``; the policy attached to ``on_options`` is never
+used in place of the target method's policy. Falcon publishes only methods that
+are both supported by the route and allowed by that policy.
+
 Usage
 -----
 
@@ -74,3 +99,8 @@ CORSMiddleware
 --------------
 
 .. autoclass:: falcon.CORSMiddleware
+
+CORSPolicy
+----------
+
+.. autoclass:: falcon.CORSPolicy
