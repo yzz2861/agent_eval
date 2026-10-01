@@ -206,6 +206,29 @@ class Validator(Protocol):
 
         """
 
+    def apply_defaults(self, instance: Any) -> "jsonschema.Completion":
+        """
+        Return a deep copy of ``instance`` completed with its defaults.
+
+        The :kw:`default` keyword is only an annotation and is otherwise
+        never applied during validation. This method explicitly produces a
+        completed copy (leaving ``instance`` untouched), recording the
+        schema source of every added value. Only genuinely missing
+        locations are filled, so an explicit ``null`` is preserved.
+
+        Raises:
+
+            `jsonschema.DefaultsConflict`:
+
+                if applicable subschemas provide unequal defaults for a
+                location
+
+            `jsonschema.exceptions.ValidationError`:
+
+                if the completed instance is invalid under the schema
+
+        """
+
     def evolve(self, **kwargs) -> Validator:
         """
         Create a new validator like this one, but with given changes.

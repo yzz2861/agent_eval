@@ -24,6 +24,53 @@ The simplest way to validate an instance under a given schema is to use the `val
    Accepting untrusted schemas as input, especially when combined with untrusted data to validate, can lead to vulnerabilities even when restricting to official JSON Schema dialects and vocabularies.
    Never validate data against schemas from untrusted sources without proper sandboxing or input validation.
 
+Applying Defaults
+-----------------
+
+The :kw:`default` keyword is purely an annotation: JSON Schema does not
+require (and `validate` never performs) any insertion of default values into
+an instance. If you explicitly want to complete an instance from the
+defaults described by a schema, use `apply_defaults` (or the matching
+`Validator.apply_defaults` method), which leaves the original instance
+untouched and returns a `Completion` containing a completed deep copy along
+with the schema location each inserted value came from:
+
+.. code:: python
+
+    >>> schema = {
+    ...     "type": "object",
+    ...     "properties": {
+    ...         "point": {
+    ...             "default": {},
+    ...             "properties": {"x": {"default": 0}},
+    ...         },
+    ...     },
+    ... }
+    >>> result = jsonschema.apply_defaults({}, schema)
+    >>> result.instance
+    {'point': {'x': 0}}
+    >>> [applied.schema_path for applied in result.applied]
+    [('properties', 'point'), ('properties', 'point', 'properties', 'x')]
+
+Only genuinely missing locations are filled, so an explicit ``null`` is
+preserved. Unequal defaults proposed by applicable subschemas (such as two
+``allOf`` branches) raise `DefaultsConflict`, and ``anyOf`` / ``oneOf``
+branch defaults are only applied when a single branch unambiguously matches.
+The completed copy is validated against the original schema before it is
+returned; a `jsonschema.exceptions.ValidationError` is raised otherwise,
+rather than returning a partial result.
+
+.. autofunction:: apply_defaults
+
+.. autoclass:: Completion
+    :members:
+
+.. autoclass:: AppliedDefault
+    :members:
+
+.. autoclass:: DefaultsConflict
+    :members:
+
 .. _validator-protocol:
 
 The Validator Protocol

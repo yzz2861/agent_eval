@@ -451,6 +451,22 @@ def create(
             for error in self.iter_errors(*args, **kwargs):
                 raise error
 
+        def apply_defaults(self, instance):
+            """
+            Return a deep copy of ``instance`` completed from ``default``.
+
+            Unlike validation, this explicitly applies the (normally
+            purely annotative) :kw:`default` keyword. Only missing
+            locations are filled (an explicit ``null`` is preserved),
+            conflicting defaults raise
+            `jsonschema.DefaultsConflict`, and the completed copy is
+            validated against this validator's schema before being
+            returned as a `jsonschema.Completion`.
+            """
+            from jsonschema._defaults import _Completer
+
+            return _Completer(self).complete(instance)
+
         def is_type(self, instance, type):
             try:
                 return self.TYPE_CHECKER.is_type(instance, type)

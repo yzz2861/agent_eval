@@ -11,6 +11,12 @@ for you.
 import warnings
 
 from jsonschema._format import FormatChecker
+from jsonschema._defaults import (
+    AppliedDefault,
+    Completion,
+    DefaultsConflict,
+    apply_defaults,
+)
 from jsonschema._types import TypeChecker
 from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import (
@@ -106,6 +112,9 @@ def __getattr__(name):
 
 
 __all__ = [
+    "AppliedDefault",
+    "Completion",
+    "DefaultsConflict",
     "Draft3Validator",
     "Draft4Validator",
     "Draft6Validator",
@@ -116,5 +125,6 @@ __all__ = [
     "SchemaError",
     "TypeChecker",
     "ValidationError",
+    "apply_defaults",
     "validate",
 ]
