@@ -1,5 +1,6 @@
 from flask_sqlalchemy import SQLAlchemy
 
+from authlib.common.encoding import json_dumps
 from authlib.integrations.sqla_oauth2 import OAuth2AuthorizationCodeMixin
 from authlib.integrations.sqla_oauth2 import OAuth2ClientMixin
 from authlib.integrations.sqla_oauth2 import OAuth2TokenMixin
@@ -108,6 +109,9 @@ def save_authorization_code(code, request):
         user_id=request.user.id,
         code_challenge=request.payload.data.get("code_challenge"),
         code_challenge_method=request.payload.data.get("code_challenge_method"),
+        authorization_details=json_dumps(
+            request.authorization_details
+        ),
         acr="urn:mace:incommon:iap:silver",
         amr="pwd otp",
     )

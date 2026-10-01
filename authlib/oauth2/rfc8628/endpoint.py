@@ -1,6 +1,9 @@
 from authlib.common.security import generate_token
 from authlib.common.urls import add_params_to_uri
 from authlib.consts import default_json_headers
+from authlib.oauth2.rfc9396.authorization_server import (
+    validate_request_authorization_details,
+)
 
 
 class DeviceAuthorizationEndpoint:
@@ -97,6 +100,7 @@ class DeviceAuthorizationEndpoint:
 
         self.authenticate_client(request)
         self.server.validate_requested_scope(request.payload.scope)
+        validate_request_authorization_details(self.server, request)
 
         device_code = self.generate_device_code()
         user_code = self.generate_user_code()
@@ -113,9 +117,10 @@ class DeviceAuthorizationEndpoint:
             "expires_in": self.EXPIRES_IN,
             "interval": self.INTERVAL,
         }
-
         self.save_device_credential(
-            request.client.get_client_id(), request.payload.scope, data
+            request.client.get_client_id(),
+            request.payload.scope,
+            data,
         )
         return 200, data, default_json_headers
 

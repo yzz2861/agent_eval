@@ -63,6 +63,9 @@ class JWTBearerTokenGenerator(BearerTokenGenerator):
         """
         return {}
 
+    def get_authorization_details_claim(self, authorization_details):
+        return authorization_details
+
     def get_audiences(self, client, user, scope) -> str | list[str]:
         """Return the audience for the token. By default this simply returns
         the client ID. Developers MAY re-implement this method to add extra
@@ -126,7 +129,9 @@ class JWTBearerTokenGenerator(BearerTokenGenerator):
         """
         return generate_token(16)
 
-    def access_token_generator(self, client, grant_type, user, scope):
+    def access_token_generator(
+        self, client, grant_type, user, scope, authorization_details=None
+    ):
         now = int(time.time())
         expires_in = now + self._get_expires_in(client, grant_type)
 
@@ -179,6 +184,11 @@ class JWTBearerTokenGenerator(BearerTokenGenerator):
 
         if auth_time := self.get_auth_time(user):
             token_data["auth_time"] = auth_time
+        authorization_details = self.get_authorization_details_claim(
+            authorization_details
+        )
+        if authorization_details is not None:
+            token_data["authorization_details"] = authorization_details
 
         # The meaning and processing of acr Claim Values is out of scope for this
         # specification.

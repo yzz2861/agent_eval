@@ -7,6 +7,8 @@ The OAuth 2.0 Authorization Framework.
 https://tools.ietf.org/html/rfc6749
 """
 
+from ..rfc9396 import AuthorizationDetailType
+from ..rfc9396 import InvalidAuthorizationDetailsError
 from .authenticate_client import ClientAuthentication
 from .authorization_server import AuthorizationServer
 from .endpoint import Endpoint
@@ -52,6 +54,8 @@ from .wrappers import OAuth2Token
 __all__ = [
     "OAuth2Payload",
     "OAuth2Token",
+    "AuthorizationDetailType",
+    "InvalidAuthorizationDetailsError",
     "OAuth2Request",
     "JsonPayload",
     "JsonRequest",

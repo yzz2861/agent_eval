@@ -1,6 +1,11 @@
 from authlib.common.errors import ContinueIteration
 from authlib.deprecate import deprecate
 
+from ..rfc9396.authorization_server import add_authorization_details
+from ..rfc9396.authorization_server import grant_authorization_details
+from ..rfc9396.authorization_server import register_authorization_detail_type
+from ..rfc9396.authorization_server import reject_token_authorization_details
+from ..rfc9396.authorization_server import validate_request_authorization_details
 from .authenticate_client import ClientAuthentication
 from .endpoint import Endpoint
 from .endpoint import EndpointRequest
@@ -31,6 +36,7 @@ class AuthorizationServer(Hookable):
         self._token_grants = []
         self._endpoints = {}
         self._extensions = []
+        self._authorization_detail_types = {}
 
     def query_client(self, client_id):
         """Query OAuth client by client_id. The client model class MUST
@@ -51,6 +57,7 @@ class AuthorizationServer(Hookable):
         scope=None,
         expires_in=None,
         include_refresh_token=True,
+        authorization_details=None,
     ):
         """Generate the token dict.
 
@@ -70,7 +77,7 @@ class AuthorizationServer(Hookable):
         if not func:
             raise RuntimeError("No configured token generator")
 
-        return func(
+        token = func(
             grant_type=grant_type,
             client=client,
             user=user,
@@ -78,6 +85,8 @@ class AuthorizationServer(Hookable):
             expires_in=expires_in,
             include_refresh_token=include_refresh_token,
         )
+        add_authorization_details(token, authorization_details)
+        return token
 
     def register_token_generator(self, grant_type, func):
         """Register a function as token generator for the given ``grant_type``.
@@ -155,6 +164,14 @@ class AuthorizationServer(Hookable):
 
     def register_extension(self, extension):
         self._extensions.append(extension(self))
+
+    def register_authorization_detail_type(
+        self, type_name, validator=None, narrower=None
+    ):
+        """Register validation and user-approval narrowing for a RAR type."""
+        return register_authorization_detail_type(
+            self, type_name, validator, narrower
+        )
 
     def get_error_uri(self, request, error):
         """Return a URI for the given error, framework may implement this method."""
@@ -402,6 +419,17 @@ class AuthorizationServer(Hookable):
 
         try:
             grant.validate_token_request()
+            if getattr(
+                grant,
+                "TOKEN_ENDPOINT_ACCEPTS_AUTHORIZATION_DETAILS",
+                False,
+            ):
+                validate_request_authorization_details(self, request)
+                grant_authorization_details(
+                    self, request, getattr(request, "user", None)
+                )
+            else:
+                reject_token_authorization_details(request)
             args = grant.create_token_response()
             return self.handle_response(*args)
         except OAuth2Error as error:

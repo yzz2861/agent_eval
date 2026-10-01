@@ -6,6 +6,9 @@ from ..rfc6749.errors import AccessDeniedError
 from ..rfc6749.errors import InvalidRequestError
 from ..rfc6749.errors import UnauthorizedClientError
 from ..rfc6749.hooks import hooked
+from ..rfc9396.authorization_server import add_authorization_details
+from ..rfc9396.authorization_server import grant_authorization_details
+from ..rfc9396.authorization_server import read_authorization_code_details
 from .errors import AuthorizationPendingError
 from .errors import ExpiredTokenError
 from .errors import SlowDownError
@@ -61,6 +64,7 @@ class DeviceCodeGrant(BaseGrant, TokenEndpointMixin):
 
     GRANT_TYPE = DEVICE_CODE_GRANT_TYPE
     TOKEN_ENDPOINT_AUTH_METHODS = ["client_secret_basic", "client_secret_post", "none"]
+    TOKEN_ENDPOINT_ACCEPTS_AUTHORIZATION_DETAILS = False
 
     def validate_token_request(self):
         """After displaying instructions to the user, the client creates an
@@ -111,6 +115,9 @@ class DeviceCodeGrant(BaseGrant, TokenEndpointMixin):
         self.request.user = user
         self.request.client = client
         self.request.credential = credential
+        self.request.authorization_details = read_authorization_code_details(
+            credential
+        )
 
     @hooked
     def create_token_response(self):
@@ -124,6 +131,9 @@ class DeviceCodeGrant(BaseGrant, TokenEndpointMixin):
             user=self.request.user,
             scope=scope,
             include_refresh_token=client.check_grant_type("refresh_token"),
+        )
+        add_authorization_details(
+            token, self.request.authorization_details
         )
         log.debug("Issue token %r to %r", token, client)
         self.save_token(token)
@@ -140,6 +150,11 @@ class DeviceCodeGrant(BaseGrant, TokenEndpointMixin):
             user, approved = user_grant
             if not approved:
                 raise AccessDeniedError()
+            grant_authorization_details(
+                self.server,
+                self.request,
+                user,
+            )
             return user
 
         if self.should_slow_down(credential):

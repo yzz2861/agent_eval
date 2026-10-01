@@ -104,6 +104,8 @@ class JWTIntrospectionEndpoint(IntrospectionEndpoint):
             "exp": token["exp"],
             "iat": token["iat"],
         }
+        if "authorization_details" in token:
+            payload["authorization_details"] = token["authorization_details"]
 
         if username := self.get_username(token["sub"]):
             payload["username"] = username

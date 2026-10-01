@@ -1,3 +1,4 @@
+import json
 import time
 
 from django.contrib.auth.models import User
@@ -72,6 +73,7 @@ class OAuth2Token(Model, TokenMixin):
     access_token = CharField(max_length=255, unique=True, null=False)
     refresh_token = CharField(max_length=255, db_index=True)
     scope = TextField(default="")
+    authorization_details = TextField(null=True)
 
     issued_at = IntegerField(null=False, default=now_timestamp)
     expires_in = IntegerField(null=False, default=0)
@@ -83,6 +85,11 @@ class OAuth2Token(Model, TokenMixin):
 
     def get_scope(self):
         return self.scope
+
+    def get_authorization_details(self):
+        if not self.authorization_details:
+            return None
+        return json.loads(self.authorization_details)
 
     def get_expires_in(self):
         return self.expires_in
@@ -109,6 +116,7 @@ class OAuth2Code(Model, AuthorizationCodeMixin):
     response_type = TextField(default="")
     scope = TextField(default="", null=True)
     auth_time = IntegerField(null=False, default=now_timestamp)
+    authorization_details = TextField(null=True)
 
     def is_expired(self):
         return self.auth_time + 300 < time.time()
@@ -118,6 +126,11 @@ class OAuth2Code(Model, AuthorizationCodeMixin):
 
     def get_scope(self):
         return self.scope or ""
+
+    def get_authorization_details(self):
+        if not self.authorization_details:
+            return None
+        return json.loads(self.authorization_details)
 
     def get_auth_time(self):
         return self.auth_time

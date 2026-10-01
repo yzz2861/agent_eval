@@ -1,5 +1,7 @@
 import time
 
+from authlib.common.encoding import json_dumps
+
 
 def create_query_client_func(session, client_model):
     """Create an ``query_client`` function that can be used in authorization
@@ -30,7 +32,10 @@ def create_save_token_func(session, token_model):
         else:
             user_id = None
         client = request.client
-        item = token_model(client_id=client.client_id, user_id=user_id, **token)
+        data = dict(token)
+        if data.get("authorization_details") is not None:
+            data["authorization_details"] = json_dumps(data["authorization_details"])
+        item = token_model(client_id=client.client_id, user_id=user_id, **data)
         session.add(item)
         session.commit()
 

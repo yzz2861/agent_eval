@@ -9,6 +9,8 @@ Access Token per `Section 6`_.
 
 import logging
 
+from ...rfc9396.authorization_server import add_authorization_details
+from ...rfc9396.authorization_server import read_token_authorization_details
 from ..errors import InvalidGrantError
 from ..errors import InvalidRequestError
 from ..errors import InvalidScopeError
@@ -32,6 +34,7 @@ class RefreshTokenGrant(BaseGrant, TokenEndpointMixin):
 
     #: The authorization server MAY issue a new refresh token
     INCLUDE_NEW_REFRESH_TOKEN = False
+    TOKEN_ENDPOINT_ACCEPTS_AUTHORIZATION_DETAILS = False
 
     def _validate_request_client(self):
         # require client authentication for confidential clients or for any
@@ -109,6 +112,9 @@ class RefreshTokenGrant(BaseGrant, TokenEndpointMixin):
         refresh_token = self._validate_request_token(client)
         self._validate_token_scope(refresh_token)
         self.request.refresh_token = refresh_token
+        self.request.authorization_details = read_token_authorization_details(
+            refresh_token
+        )
 
     @hooked
     def create_token_response(self):
@@ -140,6 +146,10 @@ class RefreshTokenGrant(BaseGrant, TokenEndpointMixin):
             user=user,
             scope=scope,
             include_refresh_token=self.INCLUDE_NEW_REFRESH_TOKEN,
+        )
+        add_authorization_details(
+            token,
+            read_token_authorization_details(refresh_token),
         )
         return token
 

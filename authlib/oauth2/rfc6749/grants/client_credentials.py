@@ -30,6 +30,7 @@ class ClientCredentialsGrant(BaseGrant, TokenEndpointMixin):
     """
 
     GRANT_TYPE = "client_credentials"
+    TOKEN_ENDPOINT_ACCEPTS_AUTHORIZATION_DETAILS = True
 
     def validate_token_request(self):
         """The client makes a request to the token endpoint by adding the

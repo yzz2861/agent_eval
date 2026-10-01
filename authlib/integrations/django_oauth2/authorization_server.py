@@ -54,7 +54,13 @@ class AuthorizationServer(_AuthorizationServer):
             user_id = request.user.pk
         else:
             user_id = client.user_id
-        item = self.token_model(client_id=client.client_id, user_id=user_id, **token)
+        data = dict(token)
+        authorization_details = data.get("authorization_details")
+        if authorization_details is not None:
+            data["authorization_details"] = json_dumps(authorization_details)
+        item = self.token_model(
+            client_id=client.client_id, user_id=user_id, **data
+        )
         item.save()
         return item
 

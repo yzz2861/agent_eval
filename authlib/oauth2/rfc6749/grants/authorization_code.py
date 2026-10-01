@@ -3,6 +3,9 @@ import logging
 from authlib.common.security import generate_token
 from authlib.common.urls import add_params_to_uri
 
+from ...rfc9396.authorization_server import grant_authorization_details
+from ...rfc9396.authorization_server import read_authorization_code_details
+from ...rfc9396.authorization_server import reject_token_authorization_details
 from ..errors import AccessDeniedError
 from ..errors import InvalidClientError
 from ..errors import InvalidGrantError
@@ -61,6 +64,7 @@ class AuthorizationCodeGrant(BaseGrant, AuthorizationEndpointMixin, TokenEndpoin
 
     RESPONSE_TYPES = {"code"}
     GRANT_TYPE = "authorization_code"
+    TOKEN_ENDPOINT_ACCEPTS_AUTHORIZATION_DETAILS = False
 
     def validate_authorization_request(self):
         """The client constructs the request URI by adding the following
@@ -155,6 +159,7 @@ class AuthorizationCodeGrant(BaseGrant, AuthorizationEndpointMixin, TokenEndpoin
             raise AccessDeniedError(redirect_uri=redirect_uri)
 
         self.request.user = grant_user
+        grant_authorization_details(self.server, self.request, grant_user)
 
         code = self.generate_authorization_code()
         self.save_authorization_code(code, self.request)
@@ -240,6 +245,10 @@ class AuthorizationCodeGrant(BaseGrant, AuthorizationEndpointMixin, TokenEndpoin
         # save for create_token_response
         self.request.client = client
         self.request.authorization_code = authorization_code
+        self.request.authorization_details = read_authorization_code_details(
+            authorization_code
+        )
+        reject_token_authorization_details(self.request)
 
     @hooked
     def create_token_response(self):
@@ -387,6 +396,7 @@ def validate_code_authorization_request(grant):
     @hooked
     def validate_authorization_request_payload(grant, redirect_uri):
         grant.validate_requested_scope()
+        grant.validate_requested_authorization_details()
         scope = client.get_allowed_scope(request.payload.scope)
         if scope is None:
             raise InvalidScopeError()

@@ -3,6 +3,7 @@ from authlib.consts import default_json_headers
 from ..rfc6749 import InvalidRequestError
 from ..rfc6749 import TokenEndpoint
 from ..rfc6749 import UnsupportedTokenTypeError
+from ..rfc9396.authorization_server import read_token_authorization_details
 
 
 class IntrospectionEndpoint(TokenEndpoint):
@@ -76,6 +77,9 @@ class IntrospectionEndpoint(TokenEndpoint):
         if token.is_expired() or token.is_revoked():
             return {"active": False}
         payload = self.introspect_token(token)
+        authorization_details = read_token_authorization_details(token)
+        if authorization_details is not None:
+            payload["authorization_details"] = authorization_details
         if "active" not in payload:
             payload["active"] = True
         return payload

@@ -31,6 +31,7 @@ class IntrospectionToken(dict, TokenMixin):
             "aud",
             "iss",
             "jti",
+            "authorization_details",
         }
         try:
             return object.__getattribute__(self, key)

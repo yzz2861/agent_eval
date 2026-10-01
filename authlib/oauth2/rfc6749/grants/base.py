@@ -1,5 +1,6 @@
 from authlib.consts import default_json_headers
 
+from ...rfc9396.authorization_server import validate_request_authorization_details
 from ..errors import InvalidRequestError
 from ..hooks import Hookable
 from ..hooks import hooked
@@ -37,9 +38,14 @@ class BaseGrant(Hookable):
         grant_type=None,
         expires_in=None,
         include_refresh_token=True,
+        authorization_details=None,
     ):
         if grant_type is None:
             grant_type = self.GRANT_TYPE
+        if authorization_details is None:
+            authorization_details = getattr(
+                self.request, "authorization_details", None
+            )
         return self.server.generate_token(
             client=self.request.client,
             grant_type=grant_type,
@@ -47,6 +53,7 @@ class BaseGrant(Hookable):
             scope=scope,
             expires_in=expires_in,
             include_refresh_token=include_refresh_token,
+            authorization_details=authorization_details,
         )
 
     def authenticate_token_endpoint_client(self):
@@ -84,10 +91,17 @@ class BaseGrant(Hookable):
         scope = self.request.payload.scope
         return self.server.validate_requested_scope(scope)
 
+    def validate_requested_authorization_details(self):
+        return validate_request_authorization_details(
+            self.server, self.request
+        )
+
 
 class TokenEndpointMixin:
     #: Allowed HTTP methods of this token endpoint
     TOKEN_ENDPOINT_HTTP_METHODS = ["POST"]
+    #: Whether clients may submit RFC 9396 details at this token endpoint
+    TOKEN_ENDPOINT_ACCEPTS_AUTHORIZATION_DETAILS = False
 
     #: Designed for which "grant_type"
     GRANT_TYPE = None
@@ -138,7 +152,14 @@ class AuthorizationEndpointMixin:
         .. _`Section 3.1`: https://tools.ietf.org/html/rfc6749#section-3.1
         """
         datalist = request.payload.datalist
-        parameters = ["response_type", "client_id", "redirect_uri", "scope", "state"]
+        parameters = [
+            "response_type",
+            "client_id",
+            "redirect_uri",
+            "scope",
+            "state",
+            "authorization_details",
+        ]
         for param in parameters:
             if len(datalist.get(param, [])) > 1:
                 raise InvalidRequestError(

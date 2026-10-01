@@ -31,6 +31,7 @@ def server(server):
                 redirect_uri=request.payload.redirect_uri,
                 response_type=request.payload.response_type,
                 scope=request.payload.scope,
+                authorization_details=request.authorization_details,
                 user=request.user,
             )
             auth_code.save()

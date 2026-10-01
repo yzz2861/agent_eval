@@ -2,6 +2,7 @@ import logging
 
 from authlib.common.urls import add_params_to_uri
 
+from ...rfc9396.authorization_server import grant_authorization_details
 from ..errors import AccessDeniedError
 from ..errors import InvalidScopeError
 from ..errors import OAuth2Error
@@ -141,6 +142,7 @@ class ImplicitGrant(BaseGrant, AuthorizationEndpointMixin):
         try:
             self.request.client = client
             self.validate_requested_scope()
+            self.validate_requested_authorization_details()
             scope = client.get_allowed_scope(self.request.payload.scope)
             if scope is None:
                 raise InvalidScopeError()
@@ -211,6 +213,7 @@ class ImplicitGrant(BaseGrant, AuthorizationEndpointMixin):
         state = self.request.payload.state
         if grant_user:
             self.request.user = grant_user
+            grant_authorization_details(self.server, self.request, grant_user)
             token = self.generate_token(
                 user=grant_user,
                 scope=self.request.scope,

@@ -22,6 +22,14 @@ class DeviceCredentialDict(dict, DeviceCredentialMixin):
     def get_scope(self):
         return self.get("scope")
 
+    def get_authorization_details(self):
+        value = self.get("authorization_details")
+        if isinstance(value, str):
+            from ..rfc9396.authorization_details import get_authorization_details
+
+            value = get_authorization_details(value)
+        return value
+
     def get_user_code(self):
         return self["user_code"]
 

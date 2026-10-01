@@ -165,6 +165,10 @@ class AuthorizationCodeMixin:
         """
         raise NotImplementedError()
 
+    def get_authorization_details(self):
+        """Return the approved RFC 9396 details associated with the code."""
+        return None
+
 
 class TokenMixin:
     def check_client(self, client):
@@ -188,6 +192,10 @@ class TokenMixin:
         :return: scope string
         """
         raise NotImplementedError()
+
+    def get_authorization_details(self):
+        """Return the approved RFC 9396 details associated with the token."""
+        return None
 
     def get_expires_in(self):
         """A method to get the ``expires_in`` value of the token. e.g.

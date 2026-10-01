@@ -22,6 +22,7 @@ class JWTAccessTokenClaims(JWTClaims):
         "auth_time",
         "acr",
         "amr",
+        "authorization_details",
         "scope",
         "groups",
         "roles",

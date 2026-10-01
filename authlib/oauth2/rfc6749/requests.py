@@ -91,6 +91,7 @@ class OAuth2Request(OAuth2Payload):
         self.refresh_token = None
         self.credential = None
         self._scope = None
+        self._authorization_details = None
 
     @property
     def args(self):
@@ -159,6 +160,14 @@ class OAuth2Request(OAuth2Payload):
     @scope.setter
     def scope(self, value: str):
         self._scope = value
+
+    @property
+    def authorization_details(self):
+        return self._authorization_details
+
+    @authorization_details.setter
+    def authorization_details(self, value):
+        self._authorization_details = value
 
     @property
     def state(self):

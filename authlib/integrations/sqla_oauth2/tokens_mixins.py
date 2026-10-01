@@ -5,6 +5,7 @@ from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import Text
 
+from authlib.common.encoding import json_loads
 from authlib.oauth2.rfc6749 import AuthorizationCodeMixin
 from authlib.oauth2.rfc6749 import TokenMixin
 
@@ -22,6 +23,7 @@ class OAuth2AuthorizationCodeMixin(AuthorizationCodeMixin):
 
     code_challenge = Column(Text)
     code_challenge_method = Column(String(48))
+    authorization_details = Column(Text, nullable=True)
 
     def is_expired(self):
         return self.auth_time + 300 < time.time()
@@ -31,6 +33,11 @@ class OAuth2AuthorizationCodeMixin(AuthorizationCodeMixin):
 
     def get_scope(self):
         return self.scope
+
+    def get_authorization_details(self):
+        if self.authorization_details is None:
+            return None
+        return json_loads(self.authorization_details)
 
     def get_auth_time(self):
         return self.auth_time
@@ -55,12 +62,18 @@ class OAuth2TokenMixin(TokenMixin):
     access_token_revoked_at = Column(Integer, nullable=False, default=0)
     refresh_token_revoked_at = Column(Integer, nullable=False, default=0)
     expires_in = Column(Integer, nullable=False, default=0)
+    authorization_details = Column(Text, nullable=True)
 
     def check_client(self, client):
         return self.client_id == client.get_client_id()
 
     def get_scope(self):
         return self.scope
+
+    def get_authorization_details(self):
+        if self.authorization_details is None:
+            return None
+        return json_loads(self.authorization_details)
 
     def get_expires_in(self):
         return self.expires_in

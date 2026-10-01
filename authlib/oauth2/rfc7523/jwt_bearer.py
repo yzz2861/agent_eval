@@ -23,6 +23,7 @@ JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 
 
 class JWTBearerGrant(BaseGrant, TokenEndpointMixin):
+    TOKEN_ENDPOINT_ACCEPTS_AUTHORIZATION_DETAILS = False
     GRANT_TYPE = JWT_BEARER_GRANT_TYPE
 
     #: Options for verifying JWT payload claims. Developers MAY
@@ -200,7 +201,7 @@ class JWTBearerGrant(BaseGrant, TokenEndpointMixin):
         token.
         """
         token = self.generate_token(
-            scope=self.request.payload.scope,
+            scope=self.request.scope,
             user=self.request.user,
             include_refresh_token=False,
         )

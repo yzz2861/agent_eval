@@ -79,6 +79,7 @@ class BearerTokenGenerator:
         scope=None,
         expires_in=None,
         include_refresh_token=True,
+        authorization_details=None,
     ):
         """Generate a bearer token for OAuth 2.0 authorization token endpoint.
 
@@ -109,6 +110,8 @@ class BearerTokenGenerator:
             )
         if scope:
             token["scope"] = scope
+        if authorization_details is not None:
+            token["authorization_details"] = authorization_details
         return token
 
     def __call__(
@@ -119,7 +122,14 @@ class BearerTokenGenerator:
         scope=None,
         expires_in=None,
         include_refresh_token=True,
+        authorization_details=None,
     ):
         return self.generate(
-            grant_type, client, user, scope, expires_in, include_refresh_token
+            grant_type,
+            client,
+            user,
+            scope,
+            expires_in,
+            include_refresh_token,
+            authorization_details,
         )
