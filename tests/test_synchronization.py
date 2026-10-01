@@ -13,12 +13,14 @@ from anyio import (
     Condition,
     Event,
     Lock,
+    RWLock,
     Semaphore,
     WouldBlock,
     create_task_group,
     fail_after,
     move_on_after,
     run,
+    sleep_forever,
     to_thread,
     wait_all_tasks_blocked,
 )
@@ -263,6 +265,460 @@ class TestLock:
             tg.start_soon(lock.acquire, name="task2")
             await wait_all_tasks_blocked()
             event.set()
+
+
+class TestRWLock:
+    async def test_concurrent_readers(self) -> None:
+        async def reader() -> None:
+            async with lock.read():
+                nonlocal max_readers
+                max_readers = max(max_readers, len(lock.statistics().readers))
+                await checkpoint()
+
+        lock = RWLock()
+        max_readers = 0
+        async with create_task_group() as tg:
+            for _ in range(3):
+                tg.start_soon(reader)
+
+        assert max_readers == 3
+        assert lock.statistics().readers == ()
+
+    async def test_writer_excludes_readers_and_writers(self) -> None:
+        async def reader() -> None:
+            async with lock.read():
+                results.append("reader")
+
+        async def writer() -> None:
+            async with lock.write():
+                results.append("writer")
+
+        results: list[str] = []
+        lock = RWLock()
+        async with create_task_group() as tg:
+            async with lock.write():
+                tg.start_soon(reader)
+                await wait_all_tasks_blocked()
+                tg.start_soon(writer)
+                await wait_all_tasks_blocked()
+                statistics = lock.statistics()
+                assert statistics.writer is not None
+                assert statistics.tasks_waiting_read == 1
+                assert statistics.tasks_waiting_write == 1
+                assert results == []
+
+        assert results == ["reader", "writer"]
+
+    async def test_readers_exclude_writer(self) -> None:
+        async def writer() -> None:
+            async with lock.write():
+                results.append("writer")
+
+        results: list[str] = []
+        lock = RWLock()
+        async with create_task_group() as tg:
+            async with lock.read():
+                tg.start_soon(writer)
+                await wait_all_tasks_blocked()
+                assert results == []
+                results.append("reader")
+
+        assert results == ["reader", "writer"]
+
+    async def test_writer_waiting_blocks_new_readers(self) -> None:
+        async def reader() -> None:
+            async with lock.read():
+                results.append("reader")
+
+        async def writer() -> None:
+            async with lock.write():
+                results.append("writer")
+
+        async def try_read_nowait() -> None:
+            # A new reader must not barge in ahead of the waiting writer
+            with pytest.raises(WouldBlock):
+                lock.acquire_read_nowait()
+
+        results: list[str] = []
+        lock = RWLock()
+        async with create_task_group() as tg:
+            async with lock.read():
+                tg.start_soon(writer)
+                await wait_all_tasks_blocked()
+                tg.start_soon(reader)
+                await wait_all_tasks_blocked()
+                # The reader must queue up behind the writer instead of barging in
+                assert lock.statistics().tasks_waiting_read == 1
+                tg.start_soon(try_read_nowait)
+                await wait_all_tasks_blocked()
+
+        assert results == ["writer", "reader"]
+
+    async def test_readers_ahead_of_writer_woken_together(self) -> None:
+        async def reader() -> None:
+            async with lock.read():
+                nonlocal max_readers
+                max_readers = max(max_readers, len(lock.statistics().readers))
+                await wait_all_tasks_blocked()
+
+        async def writer() -> None:
+            async with lock.write():
+                results.append("writer")
+
+        results: list[str] = []
+        lock = RWLock()
+        max_readers = 0
+        async with create_task_group() as tg:
+            async with lock.write():
+                tg.start_soon(reader)
+                await wait_all_tasks_blocked()
+                tg.start_soon(reader)
+                await wait_all_tasks_blocked()
+                tg.start_soon(writer)
+                await wait_all_tasks_blocked()
+
+        # Both readers queued up ahead of the writer were let in together
+        assert max_readers == 2
+        assert results == ["writer"]
+
+    async def test_last_reader_release_wakes_single_writer(self) -> None:
+        async def reader(index: int) -> None:
+            async with lock.read():
+                await reader_gates[index].wait()
+
+        async def writer(index: int) -> None:
+            async with lock.write():
+                results.append(index)
+                await writer_gates[index].wait()
+
+        results: list[int] = []
+        lock = RWLock()
+        reader_gates = [Event(), Event()]
+        writer_gates = {1: Event(), 2: Event()}
+        async with create_task_group() as tg:
+            tg.start_soon(reader, 0)
+            tg.start_soon(reader, 1)
+            await wait_all_tasks_blocked()
+            tg.start_soon(writer, 1)
+            await wait_all_tasks_blocked()
+            tg.start_soon(writer, 2)
+            await wait_all_tasks_blocked()
+            assert len(lock.statistics().readers) == 2
+
+            # Releasing one reader must not let any writer in yet
+            reader_gates[0].set()
+            await wait_all_tasks_blocked()
+            assert lock.statistics().writer is None
+            assert lock.statistics().tasks_waiting_write == 2
+
+            # Releasing the last reader lets exactly one writer in
+            reader_gates[1].set()
+            await wait_all_tasks_blocked()
+            assert results == [1]
+            assert lock.statistics().writer is not None
+            assert lock.statistics().tasks_waiting_write == 1
+
+            # Releasing the first writer lets the second one in
+            writer_gates[1].set()
+            await wait_all_tasks_blocked()
+            assert results == [1, 2]
+            writer_gates[2].set()
+
+    async def test_cancel_waiting_reader(self) -> None:
+        acquired = False
+
+        async def reader() -> None:
+            nonlocal acquired
+            async with lock.read():
+                acquired = True
+
+        lock = RWLock()
+        async with lock.write(), create_task_group() as tg:
+            tg.start_soon(reader)
+            await wait_all_tasks_blocked()
+            assert lock.statistics().tasks_waiting_read == 1
+            tg.cancel_scope.cancel()
+
+        assert not acquired
+        assert lock.statistics().tasks_waiting_read == 0
+        async with lock.read():
+            pass
+
+    async def test_cancel_waiting_writer(self) -> None:
+        acquired = False
+
+        async def writer() -> None:
+            nonlocal acquired
+            async with lock.write():
+                acquired = True
+
+        lock = RWLock()
+        async with lock.read(), create_task_group() as tg:
+            tg.start_soon(writer)
+            await wait_all_tasks_blocked()
+            assert lock.statistics().tasks_waiting_write == 1
+            tg.cancel_scope.cancel()
+
+        assert not acquired
+        assert lock.statistics().tasks_waiting_write == 0
+        async with lock.write():
+            pass
+
+    async def test_cancelled_writer_lets_queued_readers_through(self) -> None:
+        scopes: list[CancelScope] = []
+        entered: list[str] = []
+
+        async def writer() -> None:
+            with CancelScope() as scope:
+                scopes.append(scope)
+                async with lock.write():
+                    pass
+
+        async def reader() -> None:
+            async with lock.read():
+                entered.append("reader")
+
+        lock = RWLock()
+        async with create_task_group() as tg:
+            async with lock.read():
+                tg.start_soon(writer)
+                await wait_all_tasks_blocked()
+                tg.start_soon(reader)
+                await wait_all_tasks_blocked()
+                assert lock.statistics().tasks_waiting_write == 1
+                assert lock.statistics().tasks_waiting_read == 1
+
+                # Cancelling the writer must wake the reader queued up behind it,
+                # even though the read lock is still held by this task
+                scopes[0].cancel()
+                await wait_all_tasks_blocked()
+                assert entered == ["reader"]
+                assert lock.statistics().tasks_waiting_write == 0
+
+    @pytest.mark.parametrize("anyio_backend", asyncio_params)
+    async def test_cancelled_read_grant_handed_off(self) -> None:
+        """
+        Test that a native asyncio cancellation racing with a read lock grant does
+        not lose the ownership, and that the writer queued up behind is let in once
+        the cancelled reader's grant is released.
+
+        """
+        writer_acquired = False
+
+        async def writer() -> None:
+            nonlocal writer_acquired
+            await lock.acquire_write()
+            writer_acquired = True
+            lock.release_write()
+
+        lock = RWLock()
+        lock.acquire_write_nowait()
+        loop = asyncio.get_running_loop()
+        reader_task = loop.create_task(lock.acquire_read(), name="reader")
+        await asyncio.sleep(0)
+        writer_task = loop.create_task(writer(), name="writer")
+        await asyncio.sleep(0)
+
+        # Grant the read lock to the reader, but cancel it before it resumes
+        lock.release_write()
+        reader_task.cancel()
+        assert len(lock.statistics().readers) == 1
+        await asyncio.wait([reader_task, writer_task], timeout=5)
+
+        # The cancelled reader's grant must have been released and handed off
+        assert writer_acquired
+        statistics = lock.statistics()
+        assert statistics.readers == ()
+        assert statistics.writer is None
+        assert statistics.tasks_waiting_read == 0
+        assert statistics.tasks_waiting_write == 0
+        lock.acquire_read_nowait()
+        lock.release_read()
+
+    @pytest.mark.parametrize("anyio_backend", asyncio_params)
+    async def test_cancelled_write_grant_handed_off(self) -> None:
+        """
+        Test that a native asyncio cancellation racing with a write lock grant does
+        not lose the ownership, and that the next queued up writer is let in
+        instead.
+
+        """
+        writer2_acquired = False
+
+        async def writer2() -> None:
+            nonlocal writer2_acquired
+            await lock.acquire_write()
+            writer2_acquired = True
+            lock.release_write()
+
+        lock = RWLock()
+        lock.acquire_read_nowait()
+        loop = asyncio.get_running_loop()
+        writer1_task = loop.create_task(lock.acquire_write(), name="writer1")
+        await asyncio.sleep(0)
+        writer2_task = loop.create_task(writer2(), name="writer2")
+        await asyncio.sleep(0)
+
+        # Grant the write lock to writer1, but cancel it before it resumes
+        lock.release_read()
+        writer1_task.cancel()
+        assert lock.statistics().writer is not None
+        await asyncio.wait([writer1_task, writer2_task], timeout=5)
+
+        # The cancelled writer's grant must have been released and handed off
+        assert writer2_acquired
+        statistics = lock.statistics()
+        assert statistics.readers == ()
+        assert statistics.writer is None
+        assert statistics.tasks_waiting_read == 0
+        assert statistics.tasks_waiting_write == 0
+        lock.acquire_write_nowait()
+        lock.release_write()
+
+    async def test_holder_cancellation_releases(self) -> None:
+        async def reader() -> None:
+            async with lock.read():
+                await sleep_forever()
+
+        lock = RWLock()
+        async with create_task_group() as tg:
+            tg.start_soon(reader)
+            await wait_all_tasks_blocked()
+            assert len(lock.statistics().readers) == 1
+            tg.cancel_scope.cancel()
+
+        assert lock.statistics().readers == ()
+        async with lock.write():
+            pass
+
+    @pytest.mark.parametrize("mode", ["read", "write"])
+    async def test_context_manager_releases_on_exception(self, mode: str) -> None:
+        lock = RWLock()
+        with pytest.raises(ValueError, match="dummy"):
+            async with lock.read() if mode == "read" else lock.write():
+                raise ValueError("dummy")
+
+        statistics = lock.statistics()
+        assert statistics.readers == ()
+        assert statistics.writer is None
+
+    async def test_acquire_read_twice(self) -> None:
+        lock = RWLock()
+        await lock.acquire_read()
+        with pytest.raises(RuntimeError, match="reentrant locking is not supported"):
+            await lock.acquire_read()
+        with pytest.raises(RuntimeError, match="reentrant locking is not supported"):
+            lock.acquire_read_nowait()
+
+        lock.release_read()
+
+    async def test_acquire_write_twice(self) -> None:
+        lock = RWLock()
+        await lock.acquire_write()
+        with pytest.raises(RuntimeError, match="reentrant locking is not supported"):
+            await lock.acquire_write()
+        with pytest.raises(RuntimeError, match="reentrant locking is not supported"):
+            lock.acquire_write_nowait()
+
+        lock.release_write()
+
+    async def test_upgrade_read_to_write(self) -> None:
+        lock = RWLock()
+        await lock.acquire_read()
+        with pytest.raises(RuntimeError, match="upgrading is not supported"):
+            await lock.acquire_write()
+        with pytest.raises(RuntimeError, match="upgrading is not supported"):
+            lock.acquire_write_nowait()
+
+        lock.release_read()
+
+    async def test_acquire_read_while_holding_write(self) -> None:
+        lock = RWLock()
+        await lock.acquire_write()
+        with pytest.raises(RuntimeError, match="while holding its write lock"):
+            await lock.acquire_read()
+        with pytest.raises(RuntimeError, match="while holding its write lock"):
+            lock.acquire_read_nowait()
+
+        lock.release_write()
+
+    async def test_release_read_without_holding(self) -> None:
+        lock = RWLock()
+        with pytest.raises(RuntimeError, match="without holding it"):
+            lock.release_read()
+
+    async def test_release_write_without_holding(self) -> None:
+        lock = RWLock()
+        with pytest.raises(RuntimeError, match="without holding it"):
+            lock.release_write()
+
+    async def test_acquire_write_nowait_wouldblock(self) -> None:
+        async def try_write_nowait() -> None:
+            with pytest.raises(WouldBlock):
+                lock.acquire_write_nowait()
+
+        lock = RWLock()
+        async with lock.read(), create_task_group() as tg:
+            tg.start_soon(try_write_nowait)
+
+    async def test_acquire_read_nowait_wouldblock(self) -> None:
+        async def try_read_nowait() -> None:
+            with pytest.raises(WouldBlock):
+                lock.acquire_read_nowait()
+
+        lock = RWLock()
+        async with lock.write(), create_task_group() as tg:
+            tg.start_soon(try_read_nowait)
+
+    async def test_statistics(self) -> None:
+        async def waiter() -> None:
+            async with lock.write():
+                pass
+
+        lock = RWLock()
+        statistics = lock.statistics()
+        assert statistics.readers == ()
+        assert statistics.writer is None
+        assert statistics.tasks_waiting_read == 0
+        assert statistics.tasks_waiting_write == 0
+
+        async with create_task_group() as tg:
+            async with lock.read():
+                statistics = lock.statistics()
+                assert len(statistics.readers) == 1
+                tg.start_soon(waiter)
+                await wait_all_tasks_blocked()
+                assert lock.statistics().tasks_waiting_write == 1
+
+            async with lock.write():
+                statistics = lock.statistics()
+                assert statistics.writer is not None
+                assert statistics.readers == ()
+
+        statistics = lock.statistics()
+        assert statistics.readers == ()
+        assert statistics.writer is None
+        assert statistics.tasks_waiting_read == 0
+        assert statistics.tasks_waiting_write == 0
+
+    def test_instantiate_outside_event_loop(
+        self, anyio_backend_name: str, anyio_backend_options: dict[str, Any]
+    ) -> None:
+        async def use_lock() -> None:
+            async with lock.read():
+                pass
+
+            async with lock.write():
+                pass
+
+        lock = RWLock()
+        statistics = lock.statistics()
+        assert statistics.readers == ()
+        assert statistics.writer is None
+        assert statistics.tasks_waiting_read == 0
+        assert statistics.tasks_waiting_write == 0
+
+        run(use_lock, backend=anyio_backend_name, backend_options=anyio_backend_options)
 
 
 class TestEvent:

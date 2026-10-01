@@ -127,6 +127,45 @@ Example::
    to the task never yielding control back to to the event loop if use the lock in a
    loop that does not have other yield points.
 
+Readers-writer locks
+--------------------
+
+Readers-writer locks (:class:``RWLock``) are used to guard shared resources that are
+read often but written only rarely. Any number of readers may hold the lock at the
+same time, while writers get exclusive access. The lock is fair: once a writer
+starts waiting, readers arriving later will queue up behind it instead of barging
+in.
+
+Example::
+
+    from anyio import RWLock, create_task_group, sleep, run
+
+
+    async def read_index(lock):
+        async with lock.read():
+            print('Reading the index')
+            await sleep(1)
+
+
+    async def rebuild_index(lock):
+        async with lock.write():
+            print('Rebuilding the index')
+            await sleep(1)
+
+
+    async def main():
+        lock = RWLock()
+        async with create_task_group() as tg:
+            for _ in range(3):
+                tg.start_soon(read_index, lock)
+
+            tg.start_soon(rebuild_index, lock)
+
+    run(main)
+
+.. note:: Reentrant acquisition and upgrading a read lock to a write lock are not
+   supported, and raise :exc:``RuntimeError`` rather than deadlocking.
+
 Conditions
 ----------
 
