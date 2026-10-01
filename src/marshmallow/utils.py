@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import inspect
 import typing
@@ -28,6 +29,104 @@ def is_sequence_but_not_string(obj) -> typing.TypeGuard[Sequence]:
 def is_collection(obj) -> typing.TypeGuard[typing.Iterable]:
     """Return True if ``obj`` is a collection type, e.g. list, tuple, queryset."""
     return is_iterable_but_not_string(obj) and not isinstance(obj, Mapping)
+
+
+def is_coroutine_callable(obj) -> bool:
+    """Return True if calling ``obj`` returns a coroutine.
+
+    Handles ``async def`` functions as well as callable objects whose
+    ``__call__`` is a coroutine function (including bound methods and
+    :func:`functools.partial` wrappers).
+    """
+    if inspect.iscoroutinefunction(obj):
+        return True
+    if not callable(obj):
+        return False
+    return inspect.iscoroutinefunction(obj.__call__)
+
+
+def reject_awaitable(result: typing.Any, func: typing.Any, *, operation: str) -> None:
+    """Raise a clear error if a synchronously-invoked hook/validator produced
+    an awaitable instead of a plain value.
+
+    The coroutine is closed so it does not trigger a "coroutine was never
+    awaited" warning.
+    """
+    if inspect.isawaitable(result):
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+        raise RuntimeError(
+            f"{operation} {func!r} returned an awaitable while loading "
+            "synchronously. Asynchronous validators and load hooks require "
+            "`Schema.aload` (or `Schema.avalidate`)."
+        )
+
+
+async def bounded_gather(
+    coroutines: typing.Iterable[typing.Coroutine],
+    *,
+    semaphore: asyncio.Semaphore,
+) -> list[typing.Any]:
+    """Run ``coroutines`` concurrently, never allowing more than the
+    ``semaphore``'s capacity to run at the same time.
+
+    Results are returned in the same order as the input coroutines. If the
+    surrounding task is cancelled (or any coroutine raises an error other than
+    :class:`~marshmallow.exceptions.ValidationError`, which callers handle
+    themselves), every still-running task is cancelled and awaited so that no
+    background task is left behind.
+    """
+
+    async def run(coroutine: typing.Coroutine) -> typing.Any:
+        async with semaphore:
+            return await coroutine
+
+    coroutines = list(coroutines)
+    tasks: list[asyncio.Task] = []
+    try:
+        tasks.extend(asyncio.ensure_future(run(coroutine)) for coroutine in coroutines)
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        # Any coroutine that was never wrapped into a task (because the
+        # cancellation arrived while we were scheduling) must be closed.
+        for coroutine in coroutines[len(tasks) :]:
+            coroutine.close()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+async def bounded_gather_factories(
+    factories: typing.Iterable[typing.Callable[[], typing.Coroutine]],
+    *,
+    semaphore: asyncio.Semaphore,
+) -> list[typing.Any]:
+    """Like :func:`bounded_gather`, but coroutines are created lazily by
+    ``factories`` only when their task starts.
+
+    If the load run is cancelled before all tasks started, no coroutine for
+    an un-started factory is ever created, and every started task is cancelled
+    and awaited so no background task survives.
+    """
+
+    async def run(factory: typing.Callable[[], typing.Coroutine]) -> typing.Any:
+        async with semaphore:
+            return await factory()
+
+    factories = list(factories)
+    tasks: list[asyncio.Task] = []
+    try:
+        tasks.extend(asyncio.ensure_future(run(factory)) for factory in factories)
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 # https://stackoverflow.com/a/27596917

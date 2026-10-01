@@ -3,6 +3,7 @@
 # ruff: noqa: SLF001
 from __future__ import annotations
 
+import asyncio
 import copy
 import datetime as dt
 import decimal
@@ -18,7 +19,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from itertools import zip_longest
 
-from marshmallow import class_registry, types
+from marshmallow import class_registry, types, utils
 from marshmallow import fields as ma_fields
 from marshmallow.constants import EXCLUDE, INCLUDE, RAISE, missing
 from marshmallow.decorators import (
@@ -305,6 +306,13 @@ class Schema(metaclass=SchemaMeta):
     }
 
     OPTIONS_CLASS: type = SchemaOpts
+
+    #: Maximum number of field/item validations awaited concurrently by
+    #: :meth:`aload` and :meth:`avalidate`. Independent items may run in
+    #: parallel; dependent stages (pre_load, deserialize, schema validators,
+    #: post_load) still run in their usual order. Override on a subclass to
+    #: tune the bound.
+    ASYNC_CONCURRENCY: typing.ClassVar[int] = 32
 
     set_class = OrderedSet
     dict_class: type[dict] = dict
@@ -704,6 +712,223 @@ class Schema(metaclass=SchemaMeta):
                         )
         return ret_d
 
+    @staticmethod
+    async def _acall_and_store(
+        factory,
+        *,
+        field_name,
+        index,
+    ):
+        """Await a field deserialize coroutine, capturing its
+        :class:`ValidationError` and returning a tagged outcome.
+
+        ``factory`` builds the coroutine lazily, inside the bounded task, so
+        cancellation before scheduling never leaves an un-awaited field
+        coroutine behind.
+        """
+        coroutine = factory()
+        try:
+            value = await coroutine
+        except ValidationError as error:
+            return (False, field_name, index, error)
+        return (True, field_name, index, value)
+
+    async def _adeserialize(
+        self,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        error_store: ErrorStore,
+        many: bool = False,
+        partial=None,
+        unknown: types.UnknownOption = RAISE,
+        index=None,
+        sem: asyncio.Semaphore | None = None,
+        parent_holds_slot: bool = False,
+    ) -> typing.Any | list[typing.Any]:
+        """Async counterpart of :meth:`_deserialize`.
+
+        Fields of a single object are independent and awaited concurrently
+        (bounded by ``sem``). Error messages end up at exactly the same
+        ``field_name``/``index`` locations as in the synchronous path.
+        """
+        index = index if self.opts.index_errors else None
+        if many:
+            return await self._adeserialize_many(
+                data,
+                error_store=error_store,
+                partial=partial,
+                unknown=unknown,
+                index=index,
+                sem=sem,
+                parent_holds_slot=parent_holds_slot,
+            )
+        return await self._adeserialize_one(
+            data,
+            error_store=error_store,
+            partial=partial,
+            unknown=unknown,
+            index=index,
+            sem=sem,
+            parent_holds_slot=parent_holds_slot,
+        )
+
+    async def _adeserialize_many(
+        self,
+        data,
+        *,
+        error_store: ErrorStore,
+        partial,
+        unknown: types.UnknownOption,
+        index,
+        sem,
+        parent_holds_slot,
+    ):
+        if not is_sequence_but_not_string(data):
+            error_store.store_error([self.error_messages["type"]], index=index)
+            return []
+        # When this call already holds a concurrency slot (it is running
+        # inside a parent's bounded gather), its child items must not take
+        # additional slots from the same semaphore, or a small bound could
+        # deadlock. Bounded collection concurrency only applies at the load
+        # entry point (or inside a Nested field, whose own deserialization
+        # releases its slot while awaiting the nested schema).
+        child_sem = None if parent_holds_slot else sem
+
+        async def load_item(idx, item, *, item_sem):
+            item_error_store = ErrorStore()
+            result = await self._adeserialize_one(
+                item,
+                error_store=item_error_store,
+                partial=partial,
+                unknown=unknown,
+                index=None,
+                sem=item_sem,
+                # The item task itself owns this slot; the single-object
+                # deserialization inside it runs without taking more.
+                parent_holds_slot=True,
+            )
+            return idx, item_error_store, result
+
+        if child_sem is None:
+            outcomes = [
+                await load_item(idx, d, item_sem=None) for idx, d in enumerate(data)
+            ]
+        else:
+            outcomes = await utils.bounded_gather_factories(
+                (
+                    functools.partial(load_item, idx, d, item_sem=child_sem)
+                    for idx, d in enumerate(data)
+                ),
+                semaphore=child_sem,
+            )
+        ret_l = [None] * len(data)
+        for idx, item_error_store, result in outcomes:
+            if item_error_store.errors:
+                error_store.store_error(item_error_store.errors, index=idx)
+            ret_l[idx] = result
+        return ret_l
+
+    async def _adeserialize_one(
+        self,
+        data,
+        *,
+        error_store: ErrorStore,
+        partial,
+        unknown: types.UnknownOption,
+        index,
+        sem,
+        parent_holds_slot,
+    ):
+        ret_d = self.dict_class()
+        if not isinstance(data, Mapping):
+            error_store.store_error([self.error_messages["type"]], index=index)
+            return ret_d
+
+        partial_is_collection = is_collection(partial)
+        field_specs: list[tuple[str, Field, str, typing.Any, dict]] = []
+        # Factories rather than coroutines: coroutines are created only when
+        # their task starts, so a cancellation before scheduling leaves no
+        # un-awaited (and possibly running) coroutine behind.
+        factories: list[typing.Callable[[], typing.Coroutine]] = []
+        for attr_name, field_obj in self.load_fields.items():
+            field_name = (
+                field_obj.data_key if field_obj.data_key is not None else attr_name
+            )
+            raw_value = data.get(field_name, missing)
+            if raw_value is missing:
+                if partial is True or (partial_is_collection and attr_name in partial):
+                    continue
+            d_kwargs = {}
+            if partial_is_collection:
+                prefix = attr_name + "."
+                len_prefix = len(prefix)
+                sub_partial = [f[len_prefix:] for f in partial if f.startswith(prefix)]
+                d_kwargs["partial"] = sub_partial
+            elif partial is not None:
+                d_kwargs["partial"] = partial
+            field_specs.append((attr_name, field_obj, field_name, raw_value, d_kwargs))
+            factories.append(
+                functools.partial(
+                    self._acall_and_store,
+                    functools.partial(
+                        field_obj.adeserialize,
+                        raw_value,
+                        field_name,
+                        data,
+                        _sem=sem,
+                        _parent_holds_slot=True,
+                        _holds_slot=True,
+                        **d_kwargs,
+                    ),
+                    field_name=field_name,
+                    index=index,
+                )
+            )
+
+        # This call itself runs inside a parent slot whenever
+        # ``parent_holds_slot`` is True; its field tasks must not take nested
+        # slots from the same semaphore, which could deadlock.
+        active_sem = None if parent_holds_slot else sem
+        if active_sem is not None:
+            outcomes = await utils.bounded_gather_factories(
+                factories, semaphore=active_sem
+            )
+        else:
+            outcomes = [await factory() for factory in factories]
+
+        # Apply outcomes in declaration order so the result dict preserves the
+        # schema's field order.
+        for (attr_name, field_obj, _field_name, _raw, _kwargs), outcome in zip(
+            field_specs, outcomes, strict=True
+        ):
+            ok, outcome_field, outcome_index, payload = outcome
+            if ok:
+                value = payload
+            else:
+                error: ValidationError = payload
+                error_store.store_error(
+                    error.messages, outcome_field, index=outcome_index
+                )
+                value = error.valid_data or missing
+            if value is not missing:
+                key = field_obj.attribute or attr_name
+                set_value(ret_d, key, value)
+
+        if unknown != EXCLUDE:
+            fields = {
+                field_obj.data_key if field_obj.data_key is not None else field_name
+                for field_name, field_obj in self.load_fields.items()
+            }
+            unknown_keys = set(data) - fields
+            for key in unknown_keys:
+                if unknown == INCLUDE:
+                    ret_d[key] = data[key]
+                elif unknown == RAISE:
+                    error_store.store_error(
+                        [self.error_messages["unknown"]], key, index
+                    )
+        return ret_d
+
     def load(
         self,
         data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
@@ -837,6 +1062,94 @@ class Schema(metaclass=SchemaMeta):
             return typing.cast("dict[str, list[str]]", exc.messages)
         return {}
 
+    async def aload(
+        self,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        many: bool | None = None,
+        partial: bool | types.StrSequenceOrSet | None = None,
+        unknown: types.UnknownOption | None = None,
+        _sem: asyncio.Semaphore | None = None,
+        _parent_holds_slot: bool = False,
+    ):
+        """Async counterpart of :meth:`load`.
+
+        Runs the same pipeline as :meth:`load` (``pre_load`` hooks, field
+        deserialization and field validators, schema validators, then
+        ``post_load`` hooks), but asynchronous validators and hooks are
+        awaited. Synchronous processors may be freely mixed in and run in the
+        same relative order.
+
+        Independent fields (and items of a collection) are awaited concurrently
+        up to :attr:`ASYNC_CONCURRENCY`; dependent stages still run in order.
+        Nested schemas and ``many=True`` report errors at the same locations as
+        the synchronous path.
+
+        If the awaiting coroutine is cancelled, every validation task started
+        by this call is cancelled too; no background task is left running.
+
+        :param data: The data to deserialize.
+        :param many: Whether to deserialize `data` as a collection. If `None`,
+            the value for `self.many` is used.
+        :param partial: Same meaning as on :meth:`load`.
+        :param unknown: Same meaning as on :meth:`load`.
+        :param _sem: Shared concurrency semaphore; created at the entry point of
+            a load run and propagated to nested schemas. This is a private
+            parameter.
+        """
+        return await self._ado_load(
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            postprocess=True,
+            sem=_sem,
+            parent_holds_slot=_parent_holds_slot,
+        )
+
+    async def aloads(
+        self,
+        s: str | bytes | bytearray,
+        /,
+        *,
+        many: bool | None = None,
+        partial: bool | types.StrSequenceOrSet | None = None,
+        unknown: types.UnknownOption | None = None,
+        **kwargs,
+    ):
+        """Async counterpart of :meth:`loads`. The string is decoded with
+        `Schema.Meta.render_module` (a synchronous, local operation), then the
+        decoded data is passed to :meth:`aload`.
+        """
+        data = self.opts.render_module.loads(s, **kwargs)
+        return await self.aload(data, many=many, partial=partial, unknown=unknown)
+
+    async def avalidate(
+        self,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        many: bool | None = None,
+        partial: bool | types.StrSequenceOrSet | None = None,
+        _sem: asyncio.Semaphore | None = None,
+        _parent_holds_slot: bool = False,
+    ) -> dict[str, list[str]]:
+        """Async counterpart of :meth:`validate`.
+
+        :return: A dictionary of validation errors, or ``{}`` when valid.
+        """
+        try:
+            await self._ado_load(
+                data,
+                many=many,
+                partial=partial,
+                postprocess=False,
+                sem=_sem,
+                parent_holds_slot=_parent_holds_slot,
+            )
+        except ValidationError as exc:
+            return typing.cast("dict[str, list[str]]", exc.messages)
+        return {}
+
     ##### Private Helpers #####
 
     def _do_load(
@@ -864,6 +1177,12 @@ class Schema(metaclass=SchemaMeta):
         :param postprocess: Whether to run post_load methods.
         :return: Deserialized data
         """
+        if self._requires_async_load():
+            raise RuntimeError(
+                f"{self.__class__.__name__} contains asynchronous validators "
+                "or load hooks and cannot be loaded synchronously. Use "
+                "`aload()` instead."
+            )
         error_store = ErrorStore()
         errors: dict[str, list[str]] = {}
         many = self.many if many is None else bool(many)
@@ -942,6 +1261,134 @@ class Schema(metaclass=SchemaMeta):
             raise exc
 
         return result
+
+    async def _ado_load(
+        self,
+        data: (Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]]),
+        *,
+        many: bool | None = None,
+        partial: bool | types.StrSequenceOrSet | None = None,
+        unknown: types.UnknownOption | None = None,
+        postprocess: bool = True,
+        sem: asyncio.Semaphore | None = None,
+        parent_holds_slot: bool = False,
+    ):
+        """Async counterpart of :meth:`_do_load`. This method is private API."""
+        # An explicit entry check gives a clear message when a schema with
+        # async processors is loaded synchronously; here we also guard against
+        # non-declared awaitables (e.g. a field returning a coroutine).
+        error_store = ErrorStore()
+        errors: dict[str, list[str]] = {}
+        many = self.many if many is None else bool(many)
+        unknown = self.unknown if unknown is None else unknown
+        if partial is None:
+            partial = self.partial
+        owns_semaphore = sem is None
+        if owns_semaphore:
+            sem = asyncio.Semaphore(max(1, self.ASYNC_CONCURRENCY))
+
+        result: list | dict | None = None
+        # Run preprocessors (dependent stage: sequential)
+        if self._hooks[PRE_LOAD]:
+            try:
+                processed_data = await self._ainvoke_load_processors(
+                    PRE_LOAD,
+                    data,
+                    many=many,
+                    original_data=data,
+                    partial=partial,
+                    unknown=unknown,
+                    sem=sem,
+                )
+            except ValidationError as err:
+                errors = err.normalized_messages()
+        else:
+            processed_data = data
+        if not errors:
+            # Deserialize data (independent fields/items run concurrently)
+            result = await self._adeserialize(
+                processed_data,
+                error_store=error_store,
+                many=many,
+                partial=partial,
+                unknown=unknown,
+                sem=sem,
+                parent_holds_slot=parent_holds_slot,
+            )
+            # Run field-level validation
+            await self._ainvoke_field_validators(
+                error_store=error_store,
+                data=result,
+                many=many,
+                sem=sem,
+                parent_holds_slot=parent_holds_slot,
+            )
+            # Run schema-level validation
+            if self._hooks[VALIDATES_SCHEMA]:
+                field_errors = bool(error_store.errors)
+                await self._ainvoke_schema_validators(
+                    error_store=error_store,
+                    pass_collection=True,
+                    data=result,
+                    original_data=data,
+                    many=many,
+                    partial=partial,
+                    unknown=unknown,
+                    field_errors=field_errors,
+                    sem=sem,
+                    parent_holds_slot=parent_holds_slot,
+                )
+                await self._ainvoke_schema_validators(
+                    error_store=error_store,
+                    pass_collection=False,
+                    data=result,
+                    original_data=data,
+                    many=many,
+                    partial=partial,
+                    unknown=unknown,
+                    field_errors=field_errors,
+                    sem=sem,
+                    parent_holds_slot=parent_holds_slot,
+                )
+            errors = error_store.errors
+            # Run post processors (dependent stage: sequential)
+            if not errors and postprocess and self._hooks[POST_LOAD]:
+                try:
+                    result = await self._ainvoke_load_processors(
+                        POST_LOAD,
+                        result,
+                        many=many,
+                        original_data=data,
+                        partial=partial,
+                        unknown=unknown,
+                        sem=sem,
+                    )
+                except ValidationError as err:
+                    errors = err.normalized_messages()
+        if errors:
+            exc = ValidationError(errors, data=data, valid_data=result)
+            self.handle_error(exc, data, many=many, partial=partial)
+            raise exc
+
+        return result
+
+    def _requires_async_load(self) -> bool:
+        """Return True if this schema (or a load field) defines anything that
+        can only be awaited: async ``pre_load``/``post_load`` hooks,
+        ``@validates``/``@validates_schema`` methods, async field validators or
+        per-field ``pre_load``/``post_load`` callables, async field
+        ``_deserialize`` overrides, or nested schemas that themselves require
+        asynchronous loading.
+        """
+        hooks = self._hooks
+        for tag in (PRE_LOAD, POST_LOAD, VALIDATES, VALIDATES_SCHEMA):
+            for attr_name, _, _ in hooks[tag]:
+                if utils.is_coroutine_callable(getattr(self, attr_name)):
+                    return True
+        for field_obj in self.load_fields.values():
+            if field_obj._requires_async_load():
+                return True
+        return False
 
     def _normalize_nested_options(self) -> None:
         """Apply then flatten nested schema options.
@@ -1247,6 +1694,313 @@ class Schema(metaclass=SchemaMeta):
                 data = processor(data, original_data, many=many, **kwargs)
             else:
                 data = processor(data, many=many, **kwargs)
+        return data
+
+    ##### Async helpers #####
+
+    async def _acall_validator(
+        self,
+        validator_func: types.SchemaValidator,
+        output,
+        *,
+        original_data,
+        many: bool,
+        partial: bool | types.StrSequenceOrSet | None,
+        unknown: types.UnknownOption | None,
+        pass_original: bool,
+    ):
+        """Invoke a schema validator, awaiting it when asynchronous."""
+        if pass_original:
+            result = validator_func(
+                output, original_data, partial=partial, many=many, unknown=unknown
+            )
+        else:
+            result = validator_func(output, partial=partial, many=many, unknown=unknown)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _a_run_validator(
+        self,
+        validator_func: types.SchemaValidator,
+        output,
+        *,
+        original_data,
+        error_store: ErrorStore,
+        many: bool,
+        partial: bool | types.StrSequenceOrSet | None,
+        unknown: types.UnknownOption | None,
+        pass_original: bool,
+        index: int | None = None,
+    ):
+        try:
+            await self._acall_validator(
+                validator_func,
+                output,
+                original_data=original_data,
+                many=many,
+                partial=partial,
+                unknown=unknown,
+                pass_original=pass_original,
+            )
+        except ValidationError as err:
+            field_name = err.field_name
+            if field_name == SCHEMA:
+                data_key = SCHEMA
+            else:
+                field_obj: Field | None = None
+                try:
+                    field_obj = self.fields[field_name]
+                except KeyError:
+                    if field_name in self.declared_fields:
+                        field_obj = self.declared_fields[field_name]
+                if field_obj:
+                    data_key = (
+                        field_obj.data_key
+                        if field_obj.data_key is not None
+                        else field_name
+                    )
+                else:
+                    data_key = field_name
+            error_store.store_error(err.messages, data_key, index=index)
+
+    async def _ainvoke_field_validators(
+        self,
+        *,
+        error_store: ErrorStore,
+        data,
+        many: bool,
+        sem: asyncio.Semaphore | None,
+        parent_holds_slot: bool = False,
+    ):
+        # One task is scheduled per data location (field, and per collection
+        # item). Within a single location, hooks run in declaration order
+        # (mirroring the synchronous pipeline, including the ``missing`` pop
+        # behavior); different fields/items are independent and may run
+        # concurrently up to the shared semaphore bound.
+        factories: list[typing.Callable[[], typing.Coroutine]] = []
+
+        field_hooks: dict[str, list[typing.Any]] = defaultdict(list)
+        field_objects: dict[str, Field] = {}
+
+        for attr_name, _, validator_kwargs in self._hooks[VALIDATES]:
+            validator = getattr(self, attr_name)
+            for field_name in validator_kwargs["field_names"]:
+                try:
+                    field_obj = self.fields[field_name]
+                except KeyError as error:
+                    if field_name in self.declared_fields:
+                        continue
+                    raise ValueError(f'"{field_name}" field does not exist.') from error
+                field_objects[field_name] = field_obj
+                field_hooks[field_name].append(validator)
+
+        for field_name, validators in field_hooks.items():
+            field_obj = field_objects[field_name]
+            data_key = (
+                field_obj.data_key if field_obj.data_key is not None else field_name
+            )
+
+            async def run_location(
+                item,
+                index,
+                *,
+                field_name=field_name,
+                data_key=data_key,
+                field_obj=field_obj,
+                validators=validators,
+            ):
+                try:
+                    value = item[field_obj.attribute or field_name]
+                except KeyError:
+                    return
+                for validator in validators:
+                    do_validate = functools.partial(validator, data_key=data_key)
+                    try:
+                        validated = do_validate(value)
+                        if inspect.isawaitable(validated):
+                            validated = await validated
+                    except ValidationError as error:
+                        error_store.store_error(error.messages, data_key, index=index)
+                        validated = error.valid_data or missing
+                    if validated is missing:
+                        if item is not None:
+                            item.pop(field_name, None)
+                        break
+
+            if many:
+                for idx, item in enumerate(data):
+                    factories.append(
+                        functools.partial(
+                            run_location,
+                            item,
+                            idx if self.opts.index_errors else None,
+                        )
+                    )
+            else:
+                factories.append(functools.partial(run_location, data, None))
+
+        if not factories:
+            return
+        active_sem = None if parent_holds_slot else sem
+        if active_sem is not None:
+            await utils.bounded_gather_factories(factories, semaphore=active_sem)
+        else:
+            for factory in factories:
+                await factory()
+
+    async def _ainvoke_schema_validators(
+        self,
+        *,
+        error_store: ErrorStore,
+        pass_collection: bool,
+        data,
+        original_data,
+        many: bool,
+        partial: bool | types.StrSequenceOrSet | None,
+        field_errors: bool = False,
+        unknown: types.UnknownOption | None,
+        sem: asyncio.Semaphore | None,
+        parent_holds_slot: bool = False,
+    ):
+        for attr_name, hook_many, validator_kwargs in self._hooks[VALIDATES_SCHEMA]:
+            if hook_many != pass_collection:
+                continue
+            validator = getattr(self, attr_name)
+            if field_errors and validator_kwargs["skip_on_field_errors"]:
+                continue
+            pass_original = validator_kwargs.get("pass_original", False)
+
+            if many and not pass_collection:
+                active_sem = None if parent_holds_slot else sem
+                factories = [
+                    functools.partial(
+                        self._a_run_validator,
+                        validator,
+                        item,
+                        original_data=orig,
+                        error_store=error_store,
+                        many=many,
+                        partial=partial,
+                        unknown=unknown,
+                        index=idx,
+                        pass_original=pass_original,
+                    )
+                    for idx, (item, orig) in enumerate(
+                        zip(data, original_data, strict=True)
+                    )
+                ]
+                if active_sem is not None:
+                    await utils.bounded_gather_factories(
+                        factories, semaphore=active_sem
+                    )
+                else:
+                    for factory in factories:
+                        await factory()
+            else:
+                await self._a_run_validator(
+                    validator,
+                    data,
+                    original_data=original_data,
+                    error_store=error_store,
+                    many=many,
+                    pass_original=pass_original,
+                    partial=partial,
+                    unknown=unknown,
+                )
+
+    async def _ainvoke_load_processors(
+        self,
+        tag: str,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        many: bool,
+        original_data,
+        partial: bool | types.StrSequenceOrSet | None,
+        unknown: types.UnknownOption | None,
+        sem: asyncio.Semaphore | None,
+    ):
+        # Same ordering contract as the synchronous load processors: the
+        # pass_collection stage runs before the per-item stage.
+        data = await self._ainvoke_processors(
+            tag,
+            pass_collection=True,
+            data=data,
+            many=many,
+            original_data=original_data,
+            partial=partial,
+            unknown=unknown,
+            sem=sem,
+        )
+        return await self._ainvoke_processors(
+            tag,
+            pass_collection=False,
+            data=data,
+            many=many,
+            original_data=original_data,
+            partial=partial,
+            unknown=unknown,
+            sem=sem,
+        )
+
+    async def _ainvoke_processors(
+        self,
+        tag: str,
+        *,
+        pass_collection: bool,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        many: bool,
+        original_data=None,
+        sem: asyncio.Semaphore | None = None,
+        **kwargs,
+    ):
+        # Processor hooks are a dependent stage: each hook sees the data
+        # returned by the previous one, so hooks run sequentially in declared
+        # order. Per-item invocations within one hook are independent and run
+        # concurrently (bounded by the shared semaphore).
+        for attr_name, hook_many, processor_kwargs in self._hooks[tag]:
+            if hook_many != pass_collection:
+                continue
+            processor = getattr(self, attr_name)
+            pass_original = processor_kwargs.get("pass_original", False)
+
+            async def call_processor(
+                item,
+                original,
+                *,
+                processor=processor,
+                pass_original=pass_original,
+                data=data,
+                original_data=original_data,
+                many=many,
+                kwargs=kwargs,
+                pass_collection=pass_collection,
+            ):
+                if many and not pass_collection:
+                    if pass_original:
+                        result = processor(item, original, many=many, **kwargs)
+                    else:
+                        result = processor(item, many=many, **kwargs)
+                elif pass_original:
+                    result = processor(data, original_data, many=many, **kwargs)
+                else:
+                    result = processor(data, many=many, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
+
+            if many and not pass_collection:
+                originals = list(original_data) if pass_original else [None] * len(data)
+                factories = [
+                    functools.partial(call_processor, item, original)
+                    for item, original in zip_longest(data, originals)
+                ]
+                data = (
+                    await utils.bounded_gather_factories(factories, semaphore=sem)
+                    if sem is not None
+                    else [await factory() for factory in factories]
+                )
+            else:
+                data = await call_processor(None, None)
         return data
 
 

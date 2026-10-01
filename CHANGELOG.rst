@@ -6,6 +6,18 @@ Changelog
 
 Features:
 
+- Add explicit asynchronous load/validate API: `Schema.aload`,
+  `Schema.aloads`, and `Schema.avalidate`. Async field validators (including
+  within ``validate.And``), field-level ``pre_load``/``post_load`` functions,
+  ``@validates``/``@validates_schema`` methods, and ``pre_load``/``post_load``
+  hooks participate in the same pipeline as synchronous processors, which may
+  be freely mixed. Independent fields and collection items run concurrently up
+  to the ``Schema.ASYNC_CONCURRENCY`` bound (default 32); error locations for
+  nested schemas and ``many=True`` match the synchronous paths, and
+  cancellation tears down every validation started by the run. Synchronous
+  ``load``/``loads``/``validate`` now raise ``RuntimeError`` when the schema
+  (including a nested schema) requires the asynchronous path, instead of
+  returning a coroutine as a field value.
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
 Bug fixes:

@@ -52,6 +52,7 @@ Usage guide
     install
     quickstart
     nesting
+    async
     custom_fields
     extending/index
     examples/index

@@ -7,6 +7,8 @@ import copy
 import datetime as dt
 import decimal
 import email.utils
+import functools
+import inspect
 import ipaddress
 import math
 import numbers
@@ -38,6 +40,8 @@ from marshmallow.exceptions import (
 from marshmallow.validate import And, Length
 
 if typing.TYPE_CHECKING:
+    import asyncio
+
     from marshmallow.schema import Schema, SchemaMeta
 
 
@@ -281,6 +285,38 @@ class Field(typing.Generic[_InternalT]):
         """
         self._validate_all(value)
 
+    async def _avalidate(self, value: typing.Any) -> None:
+        """Async counterpart of :meth:`_validate`; awaited validators run
+        sequentially in declaration order.
+        """
+        await self._validate_all.acall(value)
+
+    def _requires_async_load(self) -> bool:
+        """Return True if loading this field requires an event loop: any async
+        field-level validators, ``pre_load``/``post_load`` callables, or an
+        async ``_deserialize`` override. Container and nested fields recurse
+        into their child field(s)/schema.
+        """
+        # ``_adeserialize`` is async on Field itself and on the built-in
+        # containers (Nested, List, Tuple, Mapping). A user subclass adding
+        # its own async ``_adeserialize`` is what must force the async path;
+        # containers already recurse into their children via their own
+        # ``_requires_async_load`` overrides.
+        builtin_async_hosts = (Field, Nested, Pluck, List, Tuple, Mapping)
+        async_override = any(
+            klass not in builtin_async_hosts
+            and inspect.iscoroutinefunction(klass.__dict__["_adeserialize"])
+            for klass in type(self).__mro__
+            if "_adeserialize" in klass.__dict__
+        )
+        return (
+            any(utils.is_coroutine_callable(func) for func in self.pre_load)
+            or any(utils.is_coroutine_callable(func) for func in self.post_load)
+            or self._validate_all.has_async_validators()
+            or utils.is_coroutine_callable(self._deserialize)
+            or async_override
+        )
+
     @property
     def _validate_all(self) -> typing.Callable[[typing.Any], None]:
         return And(*self.validators)
@@ -385,17 +421,88 @@ class Field(typing.Generic[_InternalT]):
         # Apply pre_load functions
         for func in self.pre_load:
             value = func(value)
+            utils.reject_awaitable(value, func, operation="pre_load function")
 
         if self.allow_none and value is None:
             return None
 
         output = self._deserialize(value, attr, data, **kwargs)
+        utils.reject_awaitable(
+            output, self._deserialize, operation="field `_deserialize` method"
+        )
         # Apply validators
         self._validate(output)
 
         # Apply post_load functions
         for func in self.post_load:
             output = func(output)
+            utils.reject_awaitable(output, func, operation="post_load function")
+        return output
+
+    async def adeserialize(
+        self,
+        value: typing.Any,
+        attr: str | None = None,
+        data: typing.Mapping[str, typing.Any] | None = None,
+        *,
+        _sem: asyncio.Semaphore | None = None,
+        _parent_holds_slot: bool = False,
+        _holds_slot: bool = False,
+        **kwargs,
+    ) -> _InternalT | None:
+        """Async counterpart of :meth:`deserialize`.
+
+        Supports async field-level ``pre_load``/``post_load`` callables, async
+        validators (including :class:`marshmallow.validate.And`), async
+        ``_deserialize`` overrides, and nested schemas exposing
+        :meth:`~marshmallow.Schema.aload`. Synchronous processors participate in
+        the same pipeline unchanged.
+
+        :param _sem: Shared semaphore bounding concurrency within one load run.
+            Receiving a semaphore means this field invocation is already
+            running within a bounded parent task; container fields forward the
+            marker so nested collection scheduling avoids self-deadlock.
+        """
+        # Validate required fields, deserialize, then validate
+        # deserialized value
+        self._validate_missing(value)
+        if value is missing_:
+            _miss = self.load_default
+            return _miss() if callable(_miss) else _miss
+
+        # Apply pre_load functions (sync and async may be mixed, in order)
+        for func in self.pre_load:
+            processed = func(value)
+            if inspect.isawaitable(processed):
+                value = await processed
+            else:
+                value = processed
+
+        if self.allow_none and value is None:
+            return None
+
+        # The semaphore is forwarded as-is. Containers fanning out inside a
+        # parent-held slot schedule children sequentially; Nested reuses the
+        # shared semaphore without claiming an additional parent slot.
+        output = await self._adeserialize(
+            value,
+            attr,
+            data,
+            _sem=_sem,
+            _parent_holds_slot=_parent_holds_slot,
+            _holds_slot=_holds_slot,
+            **kwargs,
+        )
+        # Apply validators
+        await self._avalidate(output)
+
+        # Apply post_load functions (sync and async may be mixed, in order)
+        for func in self.post_load:
+            processed = func(output)
+            if inspect.isawaitable(processed):
+                output = await processed
+            else:
+                output = processed
         return output
 
     # Methods for concrete classes to override.
@@ -455,6 +562,31 @@ class Field(typing.Generic[_InternalT]):
             Added ``**kwargs`` to signature.
         """
         return value
+
+    async def _adeserialize(
+        self,
+        value: typing.Any,
+        attr: str | None,
+        data: typing.Mapping[str, typing.Any] | None,
+        *,
+        _sem: asyncio.Semaphore | None = None,
+        _parent_holds_slot: bool = False,
+        _holds_slot: bool = False,
+        **kwargs,
+    ) -> _InternalT:
+        """Async counterpart of :meth:`_deserialize`.
+
+        The default implementation runs the synchronous :meth:`_deserialize`.
+        Subclasses (or custom fields) may override this as an ``async def`` to
+        await asynchronous services. A plain awaitable returned from a
+        synchronous override is also supported but rejected on the synchronous
+        code path.
+        """
+        del _sem, _parent_holds_slot, _holds_slot  # scalars do not fan out
+        output = self._deserialize(value, attr, data, **kwargs)
+        if inspect.isawaitable(output):
+            output = await output
+        return output
 
     @staticmethod
     def _normalize_processors(
@@ -647,6 +779,33 @@ class Nested(Field):
             ) from error
         return valid_data
 
+    async def _aload(
+        self,
+        value: typing.Any,
+        partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        *,
+        _sem: asyncio.Semaphore | None = None,
+        _parent_holds_slot: bool = False,
+        _holds_slot: bool = False,
+    ):
+        del _parent_holds_slot
+        try:
+            valid_data = await self.schema.aload(
+                value,
+                unknown=self.unknown,
+                partial=partial,
+                _sem=_sem,
+                # When the Nested field itself occupies a parent slot, the
+                # nested schema continues inside that slot instead of taking
+                # another one. Otherwise it owns its scheduling freely.
+                _parent_holds_slot=_holds_slot,
+            )
+        except ValidationError as error:
+            raise ValidationError(
+                error.messages, valid_data=error.valid_data
+            ) from error
+        return valid_data
+
     def _deserialize(
         self,
         value: typing.Any,
@@ -665,6 +824,33 @@ class Nested(Field):
         """
         self._test_collection(value)
         return self._load(value, partial=partial)
+
+    async def _adeserialize(
+        self,
+        value: typing.Any,
+        attr: str | None,
+        data: typing.Mapping[str, typing.Any] | None,
+        partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        *,
+        _sem: asyncio.Semaphore | None = None,
+        _parent_holds_slot: bool = False,
+        _holds_slot: bool = False,
+        **kwargs,
+    ):
+        """Async counterpart of :meth:`_deserialize`; delegates to the nested
+        schema's :meth:`~marshmallow.Schema.aload` so nested error locations
+        match the synchronous path.
+        """
+        self._test_collection(value)
+        return await self._aload(
+            value,
+            partial=partial,
+            _sem=_sem,
+            _holds_slot=_holds_slot,
+        )
+
+    def _requires_async_load(self) -> bool:
+        return super()._requires_async_load() or self.schema._requires_async_load()
 
 
 class Pluck(Nested):
@@ -727,6 +913,30 @@ class Pluck(Nested):
         else:
             value = {self._field_data_key: value}
         return self._load(value, partial=partial)
+
+    async def _adeserialize(
+        self,
+        value,
+        attr,
+        data,
+        partial=None,
+        *,
+        _sem=None,
+        _parent_holds_slot=False,
+        _holds_slot=False,
+        **kwargs,
+    ):
+        self._test_collection(value)
+        if self.many:
+            value = [{self._field_data_key: v} for v in value]
+        else:
+            value = {self._field_data_key: value}
+        return await self._aload(
+            value,
+            partial=partial,
+            _sem=_sem,
+            _holds_slot=_holds_slot,
+        )
 
 
 class List(Field[list[_InternalT | None]]):
@@ -793,6 +1003,66 @@ class List(Field[list[_InternalT | None]]):
         if errors:
             raise ValidationError(errors, valid_data=result)
         return result
+
+    async def _adeserialize(
+        self,
+        value,
+        attr,
+        data,
+        *,
+        _sem: asyncio.Semaphore | None = None,
+        _parent_holds_slot: bool = False,
+        _holds_slot: bool = False,
+        **kwargs,
+    ) -> list[_InternalT | None]:
+        del _parent_holds_slot
+        if not utils.is_collection(value):
+            raise self.make_error("invalid")
+
+        async def load_each(each):
+            try:
+                return (
+                    True,
+                    await self.inner.adeserialize(
+                        each,
+                        _sem=child_sem,
+                        # The child field does not own a slot: scheduling is
+                        # done by this container (bounded_gather), which
+                        # already wraps the call in a slot.
+                        _holds_slot=child_sem is not None,
+                        **kwargs,
+                    ),
+                )
+            except ValidationError as error:
+                return (False, error)
+
+        # When this field itself is running inside a parent-held slot, taking
+        # more slots from the same semaphore could deadlock; fan out serially
+        # instead (the parent-level parallelism already applies the bound).
+        child_sem = None if _holds_slot else _sem
+        if child_sem is not None:
+            outcomes = await utils.bounded_gather_factories(
+                (functools.partial(load_each, each) for each in value),
+                semaphore=child_sem,
+            )
+        else:
+            outcomes = [await load_each(each) for each in value]
+
+        result: list[_InternalT | None] = []
+        errors = {}
+        for idx, (ok, payload) in enumerate(outcomes):
+            if ok:
+                result.append(payload)
+            else:
+                if payload.valid_data is not None:
+                    result.append(typing.cast("_InternalT", payload.valid_data))
+                errors.update({idx: payload.messages})
+        if errors:
+            raise ValidationError(errors, valid_data=result)
+        return result
+
+    def _requires_async_load(self) -> bool:
+        return super()._requires_async_load() or self.inner._requires_async_load()
 
 
 class Tuple(Field[tuple]):
@@ -889,6 +1159,66 @@ class Tuple(Field[tuple]):
             raise ValidationError(errors, valid_data=result)
 
         return tuple(result)
+
+    async def _adeserialize(
+        self,
+        value,
+        attr,
+        data,
+        *,
+        _sem: asyncio.Semaphore | None = None,
+        _parent_holds_slot: bool = False,
+        _holds_slot: bool = False,
+        **kwargs,
+    ) -> tuple:
+        del _parent_holds_slot
+        if not utils.is_sequence_but_not_string(value):
+            raise self.make_error("invalid")
+
+        self.validate_length(value)
+
+        async def load_field(field, each):
+            try:
+                return (
+                    True,
+                    await field.adeserialize(
+                        each,
+                        _sem=child_sem,
+                        _holds_slot=child_sem is not None,
+                        **kwargs,
+                    ),
+                )
+            except ValidationError as error:
+                return (False, error)
+
+        pairs = list(zip(self.tuple_fields, value, strict=True))
+        child_sem = None if _holds_slot else _sem
+        if child_sem is not None:
+            outcomes = await utils.bounded_gather_factories(
+                (functools.partial(load_field, field, each) for field, each in pairs),
+                semaphore=child_sem,
+            )
+        else:
+            outcomes = [await load_field(field, each) for field, each in pairs]
+
+        result = []
+        errors = {}
+        for idx, (ok, payload) in enumerate(outcomes):
+            if ok:
+                result.append(payload)
+            else:
+                if payload.valid_data is not None:
+                    result.append(payload.valid_data)
+                errors.update({idx: payload.messages})
+        if errors:
+            raise ValidationError(errors, valid_data=result)
+
+        return tuple(result)
+
+    def _requires_async_load(self) -> bool:
+        return super()._requires_async_load() or any(
+            field._requires_async_load() for field in self.tuple_fields
+        )
 
 
 class String(Field[str]):
@@ -1726,6 +2056,99 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
             raise ValidationError(errors, valid_data=result)
 
         return result
+
+    async def _adeserialize(
+        self,
+        value,
+        attr,
+        data,
+        *,
+        _sem: asyncio.Semaphore | None = None,
+        _parent_holds_slot: bool = False,
+        _holds_slot: bool = False,
+        **kwargs,
+    ):
+        del _parent_holds_slot
+        if not isinstance(value, _Mapping):
+            raise self.make_error("invalid")
+        if not self.value_field and not self.key_field:
+            return self.mapping_type(value)
+
+        child_sem = None if _holds_slot else _sem
+
+        errors = collections.defaultdict(dict)
+
+        # Deserialize keys
+        if self.key_field is None:
+            keys = {k: k for k in value}
+        else:
+            keys = {}
+            for key in value:
+                try:
+                    keys[key] = await self.key_field.adeserialize(
+                        key,
+                        _sem=child_sem,
+                        _holds_slot=child_sem is not None,
+                        **kwargs,
+                    )
+                except ValidationError as error:
+                    errors[key]["key"] = error.messages
+
+        # Deserialize values
+        result = self.mapping_type()
+        if self.value_field is None:
+            for k, v in value.items():
+                if k in keys:
+                    result[keys[k]] = v
+        else:
+
+            async def load_value(key, val):
+                try:
+                    return (
+                        True,
+                        key,
+                        await self.value_field.adeserialize(
+                            val,
+                            _sem=child_sem,
+                            _holds_slot=child_sem is not None,
+                            **kwargs,
+                        ),
+                    )
+                except ValidationError as error:
+                    return (False, key, error)
+
+            if child_sem is not None:
+                outcomes = await utils.bounded_gather_factories(
+                    (
+                        functools.partial(load_value, key, val)
+                        for key, val in value.items()
+                    ),
+                    semaphore=child_sem,
+                )
+            else:
+                outcomes = [await load_value(key, val) for key, val in value.items()]
+            for ok, key, payload in outcomes:
+                if ok:
+                    if key in keys:
+                        result[keys[key]] = payload
+                else:
+                    errors[key]["value"] = payload.messages
+                    if payload.valid_data is not None and key in keys:
+                        result[keys[key]] = payload.valid_data
+
+        if errors:
+            raise ValidationError(errors, valid_data=result)
+
+        return result
+
+    def _requires_async_load(self) -> bool:
+        return (
+            super()._requires_async_load()
+            or (self.key_field is not None and self.key_field._requires_async_load())
+            or (
+                self.value_field is not None and self.value_field._requires_async_load()
+            )
+        )
 
 
 class Dict(Mapping[dict]):

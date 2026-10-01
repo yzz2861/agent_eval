@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from operator import attrgetter
 
 from marshmallow.exceptions import ValidationError
+from marshmallow.utils import is_coroutine_callable, reject_awaitable
 
 if typing.TYPE_CHECKING:
     from marshmallow import types
@@ -73,7 +74,8 @@ class And(Validator):
         kwargs: dict[str, typing.Any] = {}
         for validator in self.validators:
             try:
-                validator(value)
+                result = validator(value)
+                reject_awaitable(result, validator, operation="validator")
             except ValidationError as err:
                 kwargs.update(err.kwargs)
                 if isinstance(err.messages, dict):
@@ -83,6 +85,44 @@ class And(Validator):
         if errors:
             raise ValidationError(errors, **kwargs)
         return value
+
+    async def acall(self, value: typing.Any) -> typing.Any:
+        """Async counterpart of :meth:`__call__`.
+
+        Validators are awaited in declaration order so that a validator that
+        depends on a previous one sees the same ordering it would under
+        synchronous validation; their error messages are combined just like
+        :meth:`__call__`.
+        """
+        errors: list[str | dict] = []
+        kwargs: dict[str, typing.Any] = {}
+        for validator in self.validators:
+            try:
+                if is_coroutine_callable(validator):
+                    await validator(value)
+                elif isinstance(validator, And):
+                    await validator.acall(value)
+                else:
+                    result = validator(value)
+                    reject_awaitable(result, validator, operation="validator")
+            except ValidationError as err:
+                kwargs.update(err.kwargs)
+                if isinstance(err.messages, dict):
+                    errors.append(err.messages)
+                else:
+                    errors.extend(err.messages)
+        if errors:
+            raise ValidationError(errors, **kwargs)
+        return value
+
+    def has_async_validators(self) -> bool:
+        """Return True if any of the composed validators is asynchronous."""
+        for validator in self.validators:
+            if is_coroutine_callable(validator):
+                return True
+            if isinstance(validator, And) and validator.has_async_validators():
+                return True
+        return False
 
 
 class URL(Validator):
