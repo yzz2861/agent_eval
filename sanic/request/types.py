@@ -387,6 +387,7 @@ class Request(Generic[sanic_type, ctx_type]):
                 headers=headers,
                 content_type=content_type,
             )
+            response._manual_stream = True
 
         # Connect the response
         if isinstance(response, BaseHTTPResponse) and self.stream:

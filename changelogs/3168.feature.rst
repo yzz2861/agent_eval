@@ -1,0 +1,2 @@
+Add optional standard-library gzip response compression for regular and
+streaming responses, including configurable minimum size and media types.

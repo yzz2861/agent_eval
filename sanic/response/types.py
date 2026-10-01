@@ -9,12 +9,10 @@ from sanic.cookies import CookieJar
 from sanic.cookies.response import Cookie, SameSite
 from sanic.exceptions import SanicException, ServerError
 from sanic.helpers import Default, _default, has_message_body, json_dumps
-from sanic.http import Http
+from sanic.http.stream import Stream
 
 
 if TYPE_CHECKING:
-    from sanic.asgi import ASGIApp
-    from sanic.http.http3 import HTTPReceiver
     from sanic.request import Request
 else:
     Request = TypeVar("Request")
@@ -33,6 +31,7 @@ class BaseHTTPResponse:
         "stream",
         "status",
         "headers",
+        "_manual_stream",
         "_cookies",
     )
 
@@ -42,10 +41,11 @@ class BaseHTTPResponse:
         self.asgi: bool = False
         self.body: bytes | None = None
         self.content_type: str | None = None
-        self.stream: Http | ASGIApp | HTTPReceiver | None = None
+        self.stream: Stream | None = None
         self.status: int = None
         self.headers = Header({})
         self._cookies: CookieJar | None = None
+        self._manual_stream = False
 
     def __repr__(self):
         class_name = self.__class__.__name__

@@ -8,6 +8,7 @@ from sanic.compat import Header
 from sanic.exceptions import BadRequest, ServerError
 from sanic.helpers import Default
 from sanic.http import Stage
+from sanic.http.stream import Stream
 from sanic.log import error_logger, logger
 from sanic.models.asgi import ASGIReceive, ASGIScope, ASGISend, MockTransport
 from sanic.request import Request
@@ -104,7 +105,7 @@ class Lifespan:
                 return
 
 
-class ASGIApp:
+class ASGIApp(Stream):
     sanic_app: Sanic
     request: Request
     transport: MockTransport

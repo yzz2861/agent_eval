@@ -15,11 +15,14 @@ class Stream:
     response: BaseHTTPResponse | None
     protocol: HttpProtocol
     url: str | None
-    request_body: bytes | None
+    request_body: bool | str | None
     request_max_size: int | float
 
     __touchup__: tuple[str, ...] = tuple()
     __slots__ = ("request_max_size",)
+
+    async def send(self, data: bytes, end_stream: bool) -> None:  # no cov
+        raise NotImplementedError("Not implemented")
 
     def respond(
         self, response: BaseHTTPResponse

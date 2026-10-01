@@ -5,6 +5,7 @@ from typing_extensions import TypeAlias
 from sanic.__version__ import __version__
 from sanic.app import Sanic
 from sanic.blueprints import Blueprint
+from sanic.compression import Compression
 from sanic.config import Config
 from sanic.constants import HTTPMethod
 from sanic.exceptions import (
@@ -52,6 +53,7 @@ __all__ = (
     # Common objects
     "Sanic",
     "Config",
+    "Compression",
     "Blueprint",
     "HTTPMethod",
     "HTTPResponse",
