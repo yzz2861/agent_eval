@@ -25,6 +25,14 @@ class InvalidSignatureError(DecodeError):
     pass
 
 
+class UnmetSignerPolicyError(InvalidSignatureError):
+    """Raised when a JSON-serialized JWS does not satisfy the caller's signer policy."""
+
+    def __init__(self, message: str, result: object) -> None:
+        super().__init__(message)
+        self.result = result
+
+
 class ExpiredSignatureError(InvalidTokenError):
     """Raised when a token's ``exp`` claim indicates that it has expired"""
 

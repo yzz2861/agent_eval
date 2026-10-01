@@ -1,10 +1,16 @@
 from .api_jwk import PyJWK, PyJWKSet
 from .api_jws import (
+    JWSSignatureResult,
+    JWSVerificationResult,
     PyJWS,
+    decode_json,
+    decode_json_complete,
+    encode_json,
     get_algorithm_by_name,
     get_unverified_header,
     register_algorithm,
     unregister_algorithm,
+    verify_json,
 )
 from .api_jwt import PyJWT, decode, decode_complete, encode
 from .exceptions import (
@@ -24,6 +30,7 @@ from .exceptions import (
     PyJWKError,
     PyJWKSetError,
     PyJWTError,
+    UnmetSignerPolicyError,
 )
 from .jwks_client import PyJWKClient
 from .warnings import InsecureKeyLengthWarning
@@ -49,12 +56,18 @@ __all__ = [
     "PyJWKClient",
     "PyJWK",
     "PyJWKSet",
+    "JWSSignatureResult",
+    "JWSVerificationResult",
     "decode",
+    "decode_json",
     "decode_complete",
+    "decode_json_complete",
     "encode",
+    "encode_json",
     "get_unverified_header",
     "register_algorithm",
     "unregister_algorithm",
+    "verify_json",
     "get_algorithm_by_name",
     # Warnings
     "InsecureKeyLengthWarning",
@@ -75,4 +88,5 @@ __all__ = [
     "PyJWKError",
     "PyJWKSetError",
     "PyJWTError",
+    "UnmetSignerPolicyError",
 ]

@@ -12,6 +12,7 @@ from jwt.exceptions import (
     InvalidKeyError,
     InvalidSignatureError,
     InvalidTokenError,
+    UnmetSignerPolicyError,
 )
 from jwt.utils import base64url_decode, base64url_encode
 from jwt.warnings import RemovedInPyjwt3Warning
@@ -1271,4 +1272,338 @@ class TestJWS:
         with pytest.raises(jwt.InvalidKeyError, match="must not be empty"):
             jwt.PyJWK.from_dict(
                 {"kty": "oct", "k": "", "kid": "active", "alg": "HS256"}
+            )
+
+
+class TestJWSJSONSerialization:
+    def test_general_json_roundtrip(self, jws: PyJWS, payload: bytes) -> None:
+        message = jws.encode_json(
+            payload,
+            [
+                {
+                    "key": "a" * 32,
+                    "protected_headers": {"kid": "a"},
+                },
+                {
+                    "key": "b" * 32,
+                    "unprotected_headers": {"kid": "b"},
+                },
+            ],
+        )
+
+        assert "signatures" in message
+        decoded = jws.decode_json_complete(
+            message,
+            {"a": "a" * 32, "b": "b" * 32},
+            ["HS256"],
+            required_signers=["a", "b"],
+        )
+
+        assert decoded.payload == payload
+        assert decoded.verified is True
+        assert [signature.status for signature in decoded.signatures] == [
+            "valid",
+            "valid",
+        ]
+
+    def test_flattened_json_roundtrip(self, jws: PyJWS, payload: bytes) -> None:
+        message = jws.encode_json(
+            payload,
+            {
+                "key": "a" * 32,
+                "protected_headers": {"kid": "a"},
+                "unprotected_headers": {"cty": "example"},
+            },
+        )
+
+        assert "signatures" not in message
+        assert message["header"] == {"cty": "example"}
+        assert (
+            jws.decode_json(message, {"a": "a" * 32}, ["HS256"], minimum_signers=1)
+            == payload
+        )
+
+    def test_accepts_json_bytes_and_objects(self, jws: PyJWS, payload: bytes) -> None:
+        message = jws.encode_json(
+            payload, {"key": "a" * 32, "protected_headers": {"kid": "a"}}
+        )
+
+        assert (
+            jws.decode_json(
+                json.dumps(message).encode(),
+                {"a": "a" * 32},
+                ["HS256"],
+                minimum_signers=1,
+            )
+            == payload
+        )
+        assert (
+            jws.decode_json(
+                message,
+                {"a": "a" * 32},
+                ["HS256"],
+                minimum_signers=1,
+            )
+            == payload
+        )
+
+    def test_bad_signature_has_independent_status(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload,
+            [
+                {"key": "a" * 32, "protected_headers": {"kid": "a"}},
+                {"key": "b" * 32, "protected_headers": {"kid": "b"}},
+            ],
+        )
+        message["signatures"][0]["signature"] = message["signatures"][1]["signature"]
+
+        decoded = jws.decode_json_complete(
+            message,
+            {"a": "a" * 32, "b": "b" * 32},
+            ["HS256"],
+            minimum_signers=1,
+        )
+
+        assert decoded.payload == payload
+        assert decoded.signatures[0].status == "invalid"
+        assert isinstance(decoded.signatures[0].error, InvalidSignatureError)
+        assert decoded.signatures[1].status == "valid"
+
+    def test_duplicate_valid_kid_does_not_count_twice(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload,
+            [
+                {"key": "a" * 32, "protected_headers": {"kid": "a"}},
+                {"key": "a" * 32, "unprotected_headers": {"kid": "a"}},
+            ],
+        )
+
+        with pytest.raises(UnmetSignerPolicyError) as exc_info:
+            jws.decode_json_complete(
+                message,
+                {"a": "a" * 32},
+                ["HS256"],
+                minimum_signers=2,
+            )
+
+        assert exc_info.value.result.payload is None
+        assert [signature.status for signature in exc_info.value.result.signatures] == [
+            "valid",
+            "valid",
+        ]
+
+    def test_required_signers_policy_must_be_satisfied(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload,
+            [
+                {"key": "a" * 32, "protected_headers": {"kid": "a"}},
+                {"key": "b" * 32, "protected_headers": {"kid": "b"}},
+            ],
+        )
+
+        with pytest.raises(UnmetSignerPolicyError) as exc_info:
+            jws.decode_json_complete(
+                message,
+                {"a": "a" * 32, "b": "wrong" * 8},
+                ["HS256"],
+                required_signers=["a", "b"],
+            )
+
+        assert exc_info.value.result.payload is None
+        assert [signature.status for signature in exc_info.value.result.signatures] == [
+            "valid",
+            "invalid",
+        ]
+
+    def test_per_signature_algorithm_allowlists(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload,
+            [
+                {"key": "a" * 32, "protected_headers": {"kid": "a"}},
+                {"key": "b" * 32, "protected_headers": {"kid": "b"}},
+            ],
+        )
+
+        with pytest.raises(UnmetSignerPolicyError) as exc_info:
+            jws.decode_json_complete(
+                message,
+                {
+                    "a": ("a" * 32, ["HS256"]),
+                    "b": ("b" * 32, ["HS384"]),
+                },
+                minimum_signers=2,
+            )
+
+        statuses = exc_info.value.result.signatures
+        assert statuses[0].status == "valid"
+        assert statuses[1].status == "invalid"
+        assert isinstance(statuses[1].error, InvalidAlgorithmError)
+
+    def test_callable_key_resolves_independent_signers(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        keys = {"a": "a" * 32, "b": "b" * 32}
+        message = jws.encode_json(
+            payload,
+            [
+                {"key": keys["a"], "protected_headers": {"kid": "a"}},
+                {"key": keys["b"], "protected_headers": {"kid": "b"}},
+            ],
+        )
+
+        decoded = jws.decode_json_complete(
+            message,
+            lambda kid, header: keys[kid],
+            ["HS256"],
+            minimum_signers=2,
+        )
+
+        assert decoded.payload == payload
+
+    def test_algorithm_can_be_owned_by_signature_headers(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload,
+            {
+                "key": "a" * 32,
+                "protected_headers": {"alg": "HS256", "kid": "a"},
+            },
+        )
+
+        assert (
+            jws.decode_json(message, {"a": "a" * 32}, ["HS256"], minimum_signers=1)
+            == payload
+        )
+
+    def test_requires_a_signer_policy(self, jws: PyJWS, payload: bytes) -> None:
+        message = jws.encode_json(
+            payload, {"key": "a" * 32, "protected_headers": {"kid": "a"}}
+        )
+
+        with pytest.raises(ValueError, match="exactly one"):
+            jws.decode_json_complete(message, {"a": "a" * 32}, ["HS256"])
+
+    def test_skip_verification_reports_skipped_and_returns_payload(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload, {"key": "a" * 32, "protected_headers": {"kid": "a"}}
+        )
+
+        decoded = jws.decode_json_complete(message, options={"verify_signature": False})
+
+        assert decoded.payload == payload
+        assert decoded.signatures[0].status == "skipped"
+
+    def test_verify_json_reports_failed_policy_without_raising(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload, {"key": "a" * 32, "protected_headers": {"kid": "a"}}
+        )
+
+        result = jws.verify_json(
+            message,
+            {"a": "wrong" * 8},
+            ["HS256"],
+            minimum_signers=1,
+        )
+
+        assert result.verified is False
+        assert result.payload is None
+        assert result.signatures[0].status == "invalid"
+
+    def test_rejects_header_name_in_both_partitions(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        with pytest.raises(DecodeError, match="both protected and header"):
+            jws.encode_json(
+                payload,
+                {
+                    "key": "a" * 32,
+                    "protected_headers": {"kid": "a"},
+                    "unprotected_headers": {"kid": "a"},
+                },
+            )
+
+    def test_rejects_duplicate_protected_header_name_when_decoding(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload, {"key": "a" * 32, "protected_headers": {"kid": "a"}}
+        )
+        protected_json = b'{"alg":"HS256","kid":"a","kid":"b"}'
+        message["protected"] = base64url_encode(protected_json).decode()
+
+        with pytest.raises(UnmetSignerPolicyError) as exc_info:
+            jws.decode_json_complete(
+                message,
+                {"a": "a" * 32},
+                ["HS256"],
+                minimum_signers=1,
+            )
+
+        status = exc_info.value.result.signatures[0]
+        assert status.status == "invalid"
+        assert isinstance(status.error, DecodeError)
+        assert "Duplicate JSON member" in str(status.error)
+
+    def test_rejects_duplicate_top_level_json_member(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload, {"key": "a" * 32, "protected_headers": {"kid": "a"}}
+        )
+        raw = json.dumps(message).encode().rstrip(b"}") + b',"payload":"x"}'
+
+        with pytest.raises(DecodeError, match="Duplicate JSON member"):
+            jws.decode_json(
+                raw,
+                {"a": "a" * 32},
+                ["HS256"],
+                minimum_signers=1,
+            )
+
+    def test_rejects_mixed_general_and_flattened_forms(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        message = jws.encode_json(
+            payload,
+            [
+                {"key": "a" * 32, "protected_headers": {"kid": "a"}},
+                {"key": "b" * 32, "protected_headers": {"kid": "b"}},
+            ],
+        )
+        message["signature"] = message["signatures"][0]["signature"]
+
+        with pytest.raises(DecodeError, match="both General and Flattened"):
+            jws.decode_json_complete(
+                message,
+                {"a": "a" * 32, "b": "b" * 32},
+                ["HS256"],
+                required_signers=["a", "b"],
+            )
+
+    def test_rejects_crit_header_outside_protected_headers(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        with pytest.raises(DecodeError, match="integrity protected"):
+            jws.encode_json(
+                payload,
+                {
+                    "key": "a" * 32,
+                    "protected_headers": {"kid": "a", "b64": True},
+                    "unprotected_headers": {
+                        "crit": ["b64"],
+                    },
+                },
             )
