@@ -12,6 +12,7 @@ from ._core import (
     Abort,
     ParkingLot,
     RaiseCancelT,
+    _wait_diagnostics,
     add_parking_lot_breaker,
     enable_ki_protection,
     remove_parking_lot_breaker,
@@ -349,11 +350,20 @@ class CapacityLimiter(AsyncContextManagerMixin):
         except trio.WouldBlock:
             task = trio.lowlevel.current_task()
             self._pending_borrowers[task] = borrower
+            wait_token = _wait_diagnostics.begin_wait(
+                task,
+                self,
+                _wait_diagnostics.CAPACITY_LIMITER,
+                "acquire",
+                owner_fn=lambda: self._borrowers,
+            )
             try:
                 await self._lot.park()
             except trio.Cancelled:
                 self._pending_borrowers.pop(task)
                 raise
+            finally:
+                _wait_diagnostics.end_wait(wait_token)
         else:
             await trio.lowlevel.cancel_shielded_checkpoint()
 
@@ -604,6 +614,13 @@ class _LockImpl(AsyncContextManagerMixin):
         try:
             self.acquire_nowait()
         except trio.WouldBlock:
+            wait_token = _wait_diagnostics.begin_wait(
+                trio.lowlevel.current_task(),
+                self,
+                _wait_diagnostics.LOCK,
+                "acquire",
+                owner_fn=lambda: self._owner,
+            )
             try:
                 # NOTE: it's important that the contended acquire path is just
                 # "_lot.park()", because that's how Condition.wait() acquires the
@@ -613,6 +630,8 @@ class _LockImpl(AsyncContextManagerMixin):
                 raise trio.BrokenResourceError(
                     f"Owner of this lock exited without releasing: {self._owner}",
                 ) from None
+            finally:
+                _wait_diagnostics.end_wait(wait_token)
         else:
             await trio.lowlevel.cancel_shielded_checkpoint()
 

@@ -72,6 +72,13 @@ from ._traps import (
     wait_task_rescheduled,
 )
 from ._unbounded_queue import UnboundedQueue, UnboundedQueueStatistics
+from ._wait_diagnostics import (
+    WaitEdge,
+    WaitGraphSnapshot,
+    record_wait_diagnostics,
+    wait_diagnostics_enabled,
+    wait_graph_snapshot,
+)
 
 # Windows imports
 if sys.platform == "win32" or (

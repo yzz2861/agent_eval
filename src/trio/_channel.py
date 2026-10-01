@@ -17,7 +17,14 @@ from outcome import Error, Value
 import trio
 
 from ._abc import ReceiveChannel, ReceiveType, SendChannel, SendType, T
-from ._core import Abort, BrokenResourceError, RaiseCancelT, Task, enable_ki_protection
+from ._core import (
+    Abort,
+    BrokenResourceError,
+    RaiseCancelT,
+    Task,
+    _wait_diagnostics,
+    enable_ki_protection,
+)
 from ._util import (
     MultipleExceptionError,
     NoPublicConstructor,
@@ -247,13 +254,22 @@ class MemorySendChannel(SendChannel[SendType], metaclass=NoPublicConstructor):
         self._tasks.add(task)
         self._state.send_tasks[task] = value
         task.custom_sleep_data = self
+        wait_token = _wait_diagnostics.begin_wait(
+            task,
+            self,
+            _wait_diagnostics.MEMORY_SEND_CHANNEL,
+            "send",
+        )
 
         def abort_fn(_: RaiseCancelT) -> Abort:
             self._tasks.remove(task)
             del self._state.send_tasks[task]
             return trio.lowlevel.Abort.SUCCEEDED
 
-        await trio.lowlevel.wait_task_rescheduled(abort_fn)
+        try:
+            await trio.lowlevel.wait_task_rescheduled(abort_fn)
+        finally:
+            _wait_diagnostics.end_wait(wait_token)
 
     # Return type must be stringified or use a TypeVar
     @enable_ki_protection
@@ -401,15 +417,24 @@ class MemoryReceiveChannel(ReceiveChannel[ReceiveType], metaclass=NoPublicConstr
         self._tasks.add(task)
         self._state.receive_tasks[task] = None
         task.custom_sleep_data = self
+        wait_token = _wait_diagnostics.begin_wait(
+            task,
+            self,
+            _wait_diagnostics.MEMORY_RECEIVE_CHANNEL,
+            "receive",
+        )
 
         def abort_fn(_: RaiseCancelT) -> Abort:
             self._tasks.remove(task)
             del self._state.receive_tasks[task]
             return trio.lowlevel.Abort.SUCCEEDED
 
-        # Not strictly guaranteed to return ReceiveType, but will do so unless
-        # you intentionally reschedule with a bad value.
-        return await trio.lowlevel.wait_task_rescheduled(abort_fn)  # type: ignore[no-any-return]
+        try:
+            # Not strictly guaranteed to return ReceiveType, but will do so
+            # unless you intentionally reschedule with a bad value.
+            return await trio.lowlevel.wait_task_rescheduled(abort_fn)  # type: ignore[no-any-return]
+        finally:
+            _wait_diagnostics.end_wait(wait_token)
 
     @enable_ki_protection
     def clone(self) -> MemoryReceiveChannel[ReceiveType]:

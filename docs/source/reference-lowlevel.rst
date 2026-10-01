@@ -56,6 +56,34 @@ Global statistics
 .. autoclass:: RunStatistics()
 
 
+Wait-relation diagnostics
+-------------------------
+
+When a Trio program hangs, the raw number of waiting tasks is often not
+enough: you want to know what each task is waiting on, and which task
+holds the lock or capacity token it needs. Trio can collect this
+wait graph on demand:
+
+.. autofunction:: record_wait_diagnostics
+
+.. autofunction:: wait_diagnostics_enabled
+
+.. autofunction:: wait_graph_snapshot
+
+.. autoclass:: WaitGraphSnapshot
+   :members:
+
+.. autoclass:: WaitEdge
+   :members:
+
+Collection is strictly opt-in and does not change scheduling behavior,
+and wait edges are discarded as soon as the corresponding wait ends, so
+finished tasks are never retained. Only cycles backed by complete
+lock/token ownership evidence are reported as definite deadlocks; in
+particular, a task blocked on a memory channel is never reported as
+deadlocked, because its counterpart may simply not have run yet.
+
+
 .. _trio_contexts:
 
 Checking for Trio

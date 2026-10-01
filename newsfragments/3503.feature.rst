@@ -1,0 +1,8 @@
+Add opt-in wait-relation diagnostics: while
+`trio.lowlevel.record_wait_diagnostics` is active, Trio records which
+resource each blocked task is waiting on (covering `trio.Lock`,
+`trio.CapacityLimiter`, and memory channels, with unrecognized wait
+types preserved as ``unknown``), and
+`trio.lowlevel.wait_graph_snapshot` returns a structured snapshot of
+those wait edges, including which task holds the needed lock or token
+and any definite deadlock cycles.

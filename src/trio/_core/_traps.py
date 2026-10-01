@@ -20,6 +20,7 @@ import attrs
 import outcome
 
 from . import _run
+from . import _wait_diagnostics
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Generator
@@ -213,7 +214,15 @@ async def wait_task_rescheduled(  # type: ignore[explicit-any]
        above about how you should use a higher-level API if at all possible?
 
     """
-    return (await _async_yield(WaitTaskRescheduled(abort_func))).unwrap()
+    # If wait-relation diagnostics are enabled and no higher-level primitive
+    # has recorded a more specific wait edge for this task, record an
+    # "unknown" wait so the task still shows up in snapshots. This is a
+    # no-op when diagnostics are disabled.
+    wait_token = _wait_diagnostics.begin_generic_wait()
+    try:
+        return (await _async_yield(WaitTaskRescheduled(abort_func))).unwrap()
+    finally:
+        _wait_diagnostics.end_wait(wait_token)
 
 
 async def permanently_detach_coroutine_object(
