@@ -20,6 +20,7 @@ import sniffio
 from .. import (
     CancelScope,
     CapacityLimiter,
+    ClosedResourceError,
     Event,
     _core,
     fail_after,
@@ -30,11 +31,14 @@ from .. import (
 from .._core._tests.test_ki import ki_self
 from .._core._tests.tutil import gc_collect_harder, slow
 from .._threads import (
+    ThreadSession,
     active_thread_count,
     current_default_thread_limiter,
     from_thread_check_cancelled,
     from_thread_run,
     from_thread_run_sync,
+    open_thread_session,
+    open_worker_thread,
     to_thread_run_sync,
     wait_all_threads_completed,
 )
@@ -337,6 +341,186 @@ async def test_run_in_worker_thread() -> None:
         await to_thread_run_sync(g)
     print(excinfo.value.args)
     assert excinfo.value.args[0] != trio_thread
+
+
+async def test_thread_session_uses_one_thread_and_waits_for_destroyer() -> None:
+    session_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+        "thread_session_var",
+    )
+    session_var.set("from submitter")
+    records: list[tuple[str, int, str | None]] = []
+    gate = threading.Event()
+
+    def initialize() -> None:
+        records.append(("init", threading.get_ident(), session_var.get(None)))
+
+    def call(value: str) -> tuple[int, str]:
+        records.append((value, threading.get_ident(), session_var.get(None)))
+        gate.wait()
+        return threading.get_ident(), value
+
+    def record_queued() -> None:
+        records.append(("queued", threading.get_ident(), session_var.get(None)))
+
+    def destroy(state: None) -> None:
+        records.append(("destroy", threading.get_ident(), session_var.get(None)))
+
+    async with open_worker_thread(
+        initializer=initialize,
+        destroyer=destroy,
+        thread_name="persistent-session",
+    ) as session:
+        assert isinstance(session, ThreadSession)
+        assert (await session.run_sync(lambda: threading.current_thread().name)) == (
+            "persistent-session"
+        )
+        event = Event()
+
+        async def blocked_call() -> None:
+            ident, value = await session.run_sync(call, "first")
+            assert ident == records[0][1]
+            assert value == "first"
+            event.set()
+
+        async with _core.open_nursery() as nursery:
+            nursery.start_soon(blocked_call)
+            await wait_all_tasks_blocked()
+            queued_scope = CancelScope()
+
+            async def queued_call() -> None:
+                with queued_scope:
+                    await session.run_sync(record_queued)
+
+            nursery.start_soon(queued_call)
+            await wait_all_tasks_blocked()
+            queued_scope.cancel()
+            await wait_all_tasks_blocked()
+            gate.set()
+            await event.wait()
+
+            ident, value = await session.run_sync(call, "third")
+            assert value == "third"
+            assert ident == records[0][1]
+            assert event.is_set()
+
+    assert [record[0] for record in records] == ["init", "first", "third", "destroy"]
+    assert len({record[1] for record in records}) == 1
+    assert all(record[2] == "from submitter" for record in records)
+
+
+async def test_thread_session_propagates_exceptions() -> None:
+    def fail() -> NoReturn:
+        raise ValueError("boom")
+
+    async with open_worker_thread() as session:
+        with pytest.raises(ValueError, match="boom"):
+            await session.run_sync(fail)
+
+
+async def test_thread_session_initializer_and_destroyer_failures() -> None:
+    events: list[str] = []
+
+    def fail_initializer() -> NoReturn:
+        events.append("initialize")
+        raise ValueError("init boom")
+
+    def should_not_run(value: None) -> None:
+        events.append("destroy")
+
+    with pytest.raises(ValueError, match="init boom"):
+        async with open_worker_thread(
+            initializer=fail_initializer,
+            destroyer=should_not_run,
+        ):
+            pass
+    assert events == ["initialize"]
+
+    def fail_destroyer(value: None) -> NoReturn:
+        events.append("destroy")
+        raise RuntimeError("destroy boom")
+
+    thread_ref: list[threading.Thread | None] = [None]
+    with pytest.raises(RuntimeError, match="destroy boom"):
+        async with open_worker_thread(destroyer=fail_destroyer) as session:
+            thread_ref[0] = await session.run_sync(threading.current_thread)
+    assert thread_ref[0] is not None
+    assert not thread_ref[0].is_alive()
+    assert events == ["initialize", "destroy"]
+
+
+async def test_thread_session_closed_and_aliased() -> None:
+    session_cm = open_thread_session()
+    async with session_cm as session:
+        assert isinstance(session, ThreadSession)
+        assert await session.run_sync(lambda: 42) == 42
+
+    with pytest.raises(ClosedResourceError):
+        await session.run_sync(lambda: None)
+
+
+async def test_thread_session_rejects_reentrant_submission() -> None:
+    async with open_worker_thread() as session:
+
+        def in_worker() -> None:
+            async def in_trio() -> None:
+                await session.run_sync(lambda: None)
+
+            with pytest.raises(RuntimeError, match="same session"):
+                from_thread_run(in_trio)
+
+        await session.run_sync(in_worker)
+
+
+async def test_thread_session_running_call_cancellation() -> None:
+    state: list[str] = []
+
+    async with open_worker_thread() as session:
+        gate = threading.Event()
+        first_finished = Event()
+
+        def first() -> None:
+            state.append("first-start")
+            gate.wait()
+            state.append("first-finish")
+
+        async def first_caller(scope: CancelScope) -> None:
+            try:
+                with scope:
+                    await session.run_sync(first)
+            finally:
+                first_finished.set()
+
+        async with _core.open_nursery() as nursery:
+            scope = CancelScope()
+            nursery.start_soon(first_caller, scope)
+            await wait_all_tasks_blocked()
+            scope.cancel()
+            await wait_all_tasks_blocked()
+            assert state == ["first-start"]
+            gate.set()
+
+        assert first_finished.is_set()
+        assert state == ["first-start", "first-finish"]
+
+        gate = threading.Event()
+
+        def second() -> None:
+            state.append("second-start")
+            gate.wait()
+            state.append("second-finish")
+
+        async def abandoned_call() -> None:
+            await session.run_sync(second, abandon_on_cancel=True)
+
+        async with _core.open_nursery() as nursery:
+            nursery.start_soon(abandoned_call)
+            await wait_all_tasks_blocked()
+            nursery.cancel_scope.cancel()
+
+        assert state[-1] == "second-start"
+        gate.set()
+        await session.run_sync(lambda: None)
+        assert state[-1] == "second-finish"
 
 
 async def test_run_in_worker_thread_cancellation() -> None:

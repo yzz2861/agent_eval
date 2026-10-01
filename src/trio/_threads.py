@@ -6,7 +6,7 @@ import inspect
 import queue as stdlib_queue
 import threading
 from itertools import count
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 import attrs
 import outcome
@@ -24,10 +24,10 @@ from ._core import (
     start_thread_soon,
 )
 from ._sync import CapacityLimiter, Event
-from ._util import coroutine_or_error
+from ._util import coroutine_or_error, final
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Generator
 
     from typing_extensions import TypeVarTuple, Unpack
 
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     Ts = TypeVarTuple("Ts")
 
 RetT = TypeVar("RetT")
+InitT = TypeVar("InitT")
 
 
 class _ParentTaskData(threading.local):
@@ -251,6 +252,332 @@ class RunSync(Generic[RetT]):  # type: ignore[explicit-any]
 
     def run_in_system_nursery(self, token: TrioToken) -> None:
         token.run_sync_soon(self.run_sync)
+
+
+@attrs.define(eq=False, slots=False)
+class ThreadSessionJob(Generic[RetT]):  # type: ignore[explicit-any]
+    sync_fn: Callable[..., RetT]  # type: ignore[explicit-any]
+    args: tuple[object, ...]
+    abandon_on_cancel: bool
+    context: contextvars.Context
+    trio_token: TrioToken
+    host_task: trio.lowlevel.Task
+    session: ThreadSession[object]
+    cancel_register: list[RaiseCancelT | None] = attrs.field(factory=lambda: [None])
+    task_register: list[trio.lowlevel.Task | None] = attrs.field(
+        factory=lambda: [None],
+    )
+    state_lock: threading.Lock = attrs.field(factory=threading.Lock, init=False)
+    started: bool = attrs.field(default=False, init=False)
+    cancelled: bool = attrs.field(default=False, init=False)
+
+    @disable_ki_protection
+    def unprotected_fn(self) -> RetT:
+        def call_sync_fn() -> RetT:
+            guard = _ThreadSessionReentry(self.session)
+            token = _reentrant_thread_session.set(guard)
+            guard.active = True
+            try:
+                return self.sync_fn(*self.args)
+            finally:
+                guard.active = False
+                _reentrant_thread_session.reset(token)
+
+        ret = self.context.run(call_sync_fn)
+
+        if inspect.iscoroutine(ret):
+            ret.close()
+            raise TypeError(
+                "Trio expected a synchronous function, but {!r} appears to be "
+                "asynchronous".format(
+                    getattr(self.sync_fn, "__qualname__", self.sync_fn),
+                ),
+            )
+
+        return ret
+
+
+_SHUTDOWN_SENTINEL = object()
+
+
+_reentrant_thread_session: contextvars.ContextVar[_ThreadSessionReentry | None] = (
+    contextvars.ContextVar("reentrant_thread_session", default=None)
+)
+
+
+@attrs.define(eq=False, slots=False)
+class _ThreadSessionReentry:
+    session: ThreadSession[object]
+    active: bool = False
+
+
+@final
+class ThreadSession(Generic[InitT]):
+    """A sequential queue of synchronous operations on a dedicated thread.
+
+    Instances are normally opened with `open_worker_thread`.
+    """
+
+    def __init__(
+        self,
+        *,
+        initializer: Callable[[], InitT] | None = None,
+        destroyer: Callable[[InitT], object] | None = None,
+        thread_name: str | None = None,
+    ) -> None:
+        self._initializer = initializer
+        self._destroyer = destroyer
+        self._thread_name = thread_name
+        self._queue: stdlib_queue.SimpleQueue[ThreadSessionJob[object] | object] = (
+            stdlib_queue.SimpleQueue()
+        )
+        self._closed = False
+        self._closing = False
+        self._initialized = False
+        self._thread: threading.Thread | None = None
+        self._trio_token: TrioToken | None = None
+        self._init_result: InitT = cast(InitT, None)
+
+    async def __aenter__(self) -> ThreadSession[InitT]:
+        context = self._make_worker_context()
+        self._trio_token = trio.lowlevel.current_trio_token()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=self._thread_name or f"trio-thread-session-{next(_thread_counter)}",
+            daemon=True,
+        )
+        try:
+            self._thread.start()
+        except BaseException:
+            self._thread = None
+            raise
+
+        try:
+            if self._initializer is not None:
+                self._init_result = await self._submit(
+                    self._initializer,
+                    (),
+                    False,
+                    context,
+                )
+                self._initialized = True
+            else:
+                self._initialized = True
+        except BaseException:
+            await self._shutdown()
+            raise
+
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object | None,
+    ) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Stop accepting work and wait for the worker thread to finish."""
+        await self._shutdown()
+
+    async def _shutdown(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+
+        thread = self._thread
+        if thread is None:
+            return
+        self._closed = True
+        context = self._make_worker_context()
+        try:
+            with trio.CancelScope(shield=True):
+                try:
+                    if self._destroyer is not None and self._initialized:
+                        await self._submit(
+                            self._destroyer,
+                            (self._init_result,),
+                            False,
+                            context,
+                        )
+                finally:
+                    self._queue.put_nowait(_SHUTDOWN_SENTINEL)
+                    await to_thread_run_sync(
+                        thread.join,
+                        limiter=CapacityLimiter(1),
+                    )
+        finally:
+            self._thread = None
+
+    async def run_sync(
+        self,
+        sync_fn: Callable[[Unpack[Ts]], RetT],
+        *args: Unpack[Ts],
+        abandon_on_cancel: bool = False,
+    ) -> RetT:
+        """Run ``sync_fn`` on this session's worker thread.
+
+        Calls run in FIFO order. The caller's `contextvars.Context` is copied
+        when this coroutine submits the call. If cancellation reaches this
+        coroutine before the worker starts the call, the call is skipped. Once
+        it has started, this method waits for completion unless
+        ``abandon_on_cancel=True``.
+        """
+        reentry = _reentrant_thread_session.get()
+        if reentry is not None and reentry.active and reentry.session is self:
+            raise RuntimeError(
+                "cannot submit work to a ThreadSession from a callback running on "
+                "that same session's worker thread",
+            )
+        await trio.lowlevel.checkpoint_if_cancelled()
+        if self._closed or self._thread is None:
+            raise trio.ClosedResourceError("worker thread session is closed")
+        return await self._submit(
+            sync_fn,
+            args,
+            abandon_on_cancel,
+            self._make_worker_context(),
+        )
+
+    async def __call__(
+        self,
+        sync_fn: Callable[[Unpack[Ts]], RetT],
+        *args: Unpack[Ts],
+        abandon_on_cancel: bool = False,
+    ) -> RetT:
+        return await self.run_sync(
+            sync_fn,
+            *args,
+            abandon_on_cancel=abandon_on_cancel,
+        )
+
+    @staticmethod
+    def _make_worker_context() -> contextvars.Context:
+        context = contextvars.copy_context()
+        context.run(current_async_library_cvar.set, None)
+        return context
+
+    @staticmethod
+    def _deliver_result(
+        task: trio.lowlevel.Task,
+        result: outcome.Outcome[object],
+    ) -> None:
+        trio.lowlevel.reschedule(task, outcome.Value(result))
+
+    async def _submit(
+        self,
+        sync_fn: Callable[..., RetT],  # type: ignore[explicit-any]
+        args: tuple[object, ...],
+        abandon_on_cancel: bool,
+        context: contextvars.Context,
+    ) -> RetT:
+        if self._trio_token is None:
+            raise RuntimeError("worker thread session was not entered")
+
+        job = ThreadSessionJob(
+            sync_fn,
+            args,
+            bool(abandon_on_cancel),
+            context,
+            self._trio_token,
+            trio.lowlevel.current_task(),
+            cast(ThreadSession[object], self),
+        )
+        self._queue.put_nowait(job)
+        return await self._await_job(job)
+
+    async def _await_job(self, job: ThreadSessionJob[RetT]) -> RetT:
+        def abort(raise_cancel: RaiseCancelT) -> trio.lowlevel.Abort:
+            with job.state_lock:
+                job.cancel_register[0] = raise_cancel
+                if not job.started:
+                    job.cancelled = True
+                if job.abandon_on_cancel or not job.started:
+                    if job.abandon_on_cancel:
+                        job.task_register[0] = None
+                    return trio.lowlevel.Abort.SUCCEEDED
+            return trio.lowlevel.Abort.FAILED
+
+        while True:
+            message: outcome.Outcome[RetT] | Run[object] | RunSync[object] = (
+                await trio.lowlevel.wait_task_rescheduled(abort)
+            )
+            if isinstance(message, outcome.Outcome):
+                return message.unwrap()
+
+            if isinstance(message, Run):
+                await message.run()
+            elif isinstance(message, RunSync):
+                message.run_sync()
+            else:  # pragma: no cover
+                raise TypeError(
+                    f"trio worker thread received unrecognized message {message!r}.",
+                )
+
+    def _run(self) -> None:
+        while True:
+            job = self._queue.get()
+            if job is _SHUTDOWN_SENTINEL:
+                return
+
+            assert isinstance(job, ThreadSessionJob)
+            with job.state_lock:
+                if job.cancelled:
+                    continue
+                job.started = True
+                job.task_register[0] = job.host_task
+
+            PARENT_TASK_DATA.token = job.trio_token
+            PARENT_TASK_DATA.abandon_on_cancel = job.abandon_on_cancel
+            PARENT_TASK_DATA.cancel_register = job.cancel_register
+            PARENT_TASK_DATA.task_register = job.task_register
+            result_task = job.host_task
+            try:
+                result = outcome.capture(job.unprotected_fn)
+            finally:
+                del PARENT_TASK_DATA.token
+                del PARENT_TASK_DATA.abandon_on_cancel
+                del PARENT_TASK_DATA.cancel_register
+                del PARENT_TASK_DATA.task_register
+
+            if not job.abandon_on_cancel:
+                with contextlib.suppress(trio.RunFinishedError):
+                    job.trio_token.run_sync_soon(
+                        self._deliver_result,
+                        result_task,
+                        result,
+                    )
+
+
+@contextlib.asynccontextmanager
+async def open_worker_thread(
+    *,
+    initializer: Callable[[], InitT] | None = None,
+    destroyer: Callable[[InitT], object] | None = None,
+    thread_name: str | None = None,
+) -> AsyncIterator[ThreadSession[InitT]]:
+    """Open a session that owns a single, dedicated worker thread.
+
+    This is useful for synchronous libraries which require initialization,
+    calls, and destruction to all happen on one OS thread. The optional
+    ``initializer`` runs first, every `ThreadSession.run_sync` call is queued
+    after it, and ``destroyer`` receives the initializer's return value when
+    the context exits. Exiting the context stops accepting new calls and waits
+    for the worker thread to terminate.
+    """
+    worker = ThreadSession(
+        initializer=initializer,
+        destroyer=destroyer,
+        thread_name=thread_name,
+    )
+    async with worker:
+        yield worker
+
+
+open_thread_session = open_worker_thread
+PersistentWorkerThread = ThreadSession
+open_persistent_worker_thread = open_worker_thread
 
 
 @enable_ki_protection
