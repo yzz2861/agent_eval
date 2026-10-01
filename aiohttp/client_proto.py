@@ -11,6 +11,7 @@ from .client_exceptions import (
     ServerDisconnectedError,
     SocketTimeoutError,
 )
+from .content_digest import ContentDigestVerification
 from .helpers import (
     _EXC_SENTINEL,
     DEFAULT_CHUNK_SIZE,
@@ -250,6 +251,7 @@ class ResponseHandler(BaseProtocol, DataQueue[tuple[RawResponseMessage, StreamRe
         skip_payload: bool = False,
         read_until_eof: bool = False,
         auto_decompress: bool = True,
+        content_digest_policy: ContentDigestVerification | None = None,
         read_timeout: float | None = None,
         read_bufsize: int = DEFAULT_CHUNK_SIZE,
         timeout_ceil_threshold: float = 5,
@@ -273,12 +275,24 @@ class ResponseHandler(BaseProtocol, DataQueue[tuple[RawResponseMessage, StreamRe
             response_with_body=not skip_payload,
             read_until_eof=read_until_eof,
             auto_decompress=auto_decompress,
+            content_digest_policy=content_digest_policy,
             max_line_size=max_line_size,
             max_field_size=max_field_size,
             max_headers=max_headers,
         )
 
         self._drain_tail()
+
+    async def read(self) -> tuple[RawResponseMessage, StreamReader]:
+        verifier = getattr(self._parser, "_content_digest_verifier", None)
+        failure = getattr(verifier, "_failure", None)
+        if not self._buffer and not self._eof and failure is not None:
+            self.set_exception(failure)
+        message, payload = await super().read()
+        failure = getattr(verifier, "_failure", None)
+        if failure is not None and payload is EMPTY_PAYLOAD:
+            raise failure
+        return message, payload
 
     def _drop_timeout(self) -> None:
         if self._read_timeout_handle is not None:

@@ -33,6 +33,10 @@ from .client_exceptions import (
     InvalidURL,
     ServerFingerprintMismatch,
 )
+from .content_digest import (
+    ContentDigestVerification,
+    ContentDigestVerifier,
+)
 from .compression_utils import HAS_BROTLI, HAS_ZSTD
 from .formdata import FormData
 from .helpers import (
@@ -237,6 +241,7 @@ class ResponseParams(TypedDict):
     skip_payload: bool
     read_until_eof: bool
     auto_decompress: bool
+    content_digest_policy: ContentDigestVerification | None
     read_timeout: float | None
     read_bufsize: int
     timeout_ceil_threshold: float
@@ -272,6 +277,8 @@ class ClientResponse(HeadersMixin):
     _closed = True  # to allow __del__ for non-initialized properly response
     _released = False
     _in_context = False
+    _content_digest_verifier: ContentDigestVerifier | None = None
+    _content_digest_verified = False
 
     _resolve_charset: Callable[["ClientResponse", bytes], str] = lambda *_: "utf-8"
 
@@ -317,6 +324,8 @@ class ClientResponse(HeadersMixin):
             self._continue = continue100
         self._request_headers = request_headers
         self._original_url = original_url
+        self._content_digest_verifier = None
+        self._content_digest_verified = False
         self._timer = timer if timer is not None else TimerNoop()
         self._cache: dict[str, Any] = {}
         self._traces = traces
@@ -542,9 +551,6 @@ class ClientResponse(HeadersMixin):
                     set_result(self._continue, True)
                     self._continue = None
 
-        # payload eof handler
-        payload.on_eof(self._response_eof)
-
         # response status
         self.version = message.version
         self.status = message.code
@@ -558,6 +564,18 @@ class ClientResponse(HeadersMixin):
         # payload
         self.content = payload
 
+        verifier = getattr(
+            getattr(self._protocol, "_parser", None),
+            "_content_digest_verifier",
+            None,
+        )
+        if verifier is not None and payload is not EMPTY_PAYLOAD:
+            payload._content_digest_verifier = verifier
+            self._content_digest_verifier = verifier
+            verifier._on_output_verified = self._content_digest_pending_eof
+        else:
+            payload.on_eof(self._response_eof)
+
         if self._traces and payload is not EMPTY_PAYLOAD:
             payload._on_chunk_received = self._on_chunk_response_received
 
@@ -566,6 +584,12 @@ class ClientResponse(HeadersMixin):
             # Store raw cookie headers for CookieJar
             self._raw_cookie_headers = tuple(cookie_hdrs)
         return self
+
+    def _content_digest_pending_eof(self) -> None:
+        verifier = self._content_digest_verifier
+        if verifier is not None and verifier.active:
+            self._content_digest_verified = True
+        self._response_eof()
 
     def _response_eof(self) -> None:
         if self._closed:
@@ -579,6 +603,10 @@ class ClientResponse(HeadersMixin):
         self._closed = True
         self._cleanup_writer()
         self._release_connection()
+
+    @property
+    def content_digest_verified(self) -> bool:
+        return self._content_digest_verified
 
     @property
     def closed(self) -> bool:

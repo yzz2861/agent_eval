@@ -55,6 +55,7 @@ The client session supports the context manager protocol for self closing.
                          requote_redirect_url=True, \
                          trace_configs=None, \
                          middlewares=(), \
+                         content_digest_policy=None, \
                          read_bufsize=2**18, \
                          max_line_size=8190, \
                          max_field_size=8190, \
@@ -173,6 +174,15 @@ The client session supports the context manager protocol for self closing.
    :param bool auto_decompress: Automatically decompress response body (``True`` by default).
 
       .. versionadded:: 2.3
+
+   :param aiohttp.ContentDigestVerification content_digest_policy: When to
+      verify response ``Content-Digest`` headers (``None`` by default).
+
+      Use :attr:`ContentDigestVerification.IF_PRESENT` to verify supported
+      digest algorithms when the header is present, or
+      :attr:`ContentDigestVerification.REQUIRED` to also require a supported
+      digest. Verification covers the coded response payload (before automatic
+      decompression) and completes only after the response body is fully read.
 
    :param ssl: Default SSL validation mode for requests made through this
       session. ``True`` for default SSL check
@@ -378,6 +388,12 @@ The client session supports the context manager protocol for self closing.
       :class:`bool` default is ``True``
 
       .. versionadded:: 3.7
+
+   .. attribute:: content_digest_policy
+
+      Configured response ``Content-Digest`` verification policy.
+
+      :class:`~aiohttp.ContentDigestVerification` or ``None``.
 
    .. attribute:: trust_env
 
@@ -1475,6 +1491,11 @@ Response object
 
    User never creates the instance of ClientResponse class but gets it
    from API calls.
+
+   .. attribute:: content_digest_verified
+
+      ``True`` after a successful session-configured ``Content-Digest`` check
+      has completed for the full response body, otherwise ``False``.
 
    :class:`ClientResponse` supports async context manager protocol, e.g.::
 
@@ -2605,6 +2626,19 @@ Utilities
 
    .. versionadded:: 3.0
 
+.. class:: ContentDigestVerification
+   :canonical: aiohttp.content_digest.ContentDigestVerification
+
+   Policy for verifying response ``Content-Digest`` headers.
+
+   .. attribute:: IF_PRESENT
+
+      Verify supported digests when a ``Content-Digest`` header is present.
+
+   .. attribute:: REQUIRED
+
+      Require at least one supported digest and verify the response body.
+
 .. function:: set_zlib_backend(lib)
    :canonical: aiohttp.compression_utils.set_zlib_backend
 
@@ -2739,6 +2773,14 @@ All exceptions are available as members of *aiohttp* module.
    3. not enough data that satisfy ``Content-Length`` HTTP header.
 
    Derived from :exc:`ClientError`
+
+.. exception:: ContentDigestError
+   :canonical: aiohttp.client_exceptions.ContentDigestError
+
+   Response body did not match its ``Content-Digest`` header, or the header
+   required by the session policy was missing or malformed.
+
+   Derived from :exc:`ClientPayloadError`
 
 .. exception:: InvalidURL
    :canonical: aiohttp.client_exceptions.InvalidURL

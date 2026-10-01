@@ -47,7 +47,9 @@ from .client import (
     WSServerHandshakeError,
     request,
 )
+from .client_exceptions import ContentDigestError
 from .client_middleware_digest_auth import DigestAuthMiddleware
+from .content_digest import ContentDigestVerification
 from .client_middlewares import ClientHandlerType, ClientMiddlewareType
 from .compression_utils import set_zlib_backend
 from .connector import AddrInfoType, SocketFactoryType
@@ -138,7 +140,9 @@ __all__: tuple[str, ...] = (
     "ClientWebSocketResponse",
     "ClientWSTimeout",
     "ConnectionTimeoutError",
+    "ContentDigestError",
     "ContentTypeError",
+    "ContentDigestVerification",
     "Fingerprint",
     "InvalidURL",
     "InvalidUrlClientError",

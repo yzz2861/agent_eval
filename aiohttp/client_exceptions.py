@@ -39,6 +39,7 @@ __all__ = (
     "ClientResponseError",
     "ClientHttpProxyError",
     "WSServerHandshakeError",
+    "ContentDigestError",
     "ContentTypeError",
     "ClientPayloadError",
     "InvalidURL",
@@ -259,6 +260,10 @@ class ServerFingerprintMismatch(ServerConnectionError):
 
 class ClientPayloadError(ClientError):
     """Response payload error."""
+
+
+class ContentDigestError(ClientPayloadError):
+    """Response Content-Digest verification failed."""
 
 
 class InvalidURL(ClientError, ValueError):

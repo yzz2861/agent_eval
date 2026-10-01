@@ -22,6 +22,11 @@ from yarl import URL
 
 from . import hdrs
 from .base_protocol import BaseProtocol
+from .content_digest import (
+    ContentDigestVerification,
+    ContentDigestVerifier,
+    create_content_digest_verifier,
+)
 from .compression_utils import (
     HAS_BROTLI,
     HAS_ZSTD,
@@ -267,6 +272,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
         response_with_body: bool = True,
         read_until_eof: bool = False,
         auto_decompress: bool = True,
+        content_digest_policy: ContentDigestVerification | None = None,
         max_msg_queue_size: int = 0,
     ) -> None:
         self.protocol = protocol
@@ -289,6 +295,8 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
         self._payload_parser: HttpPayloadParser | None = None
         self._payload_has_more_data = False
         self._auto_decompress = auto_decompress
+        self._content_digest_policy = content_digest_policy
+        self._content_digest_verifier: ContentDigestVerifier | None = None
         self._limit = limit
         self._headers_parser = HeadersParser(max_field_size, self.lax)
         # Stop emitting messages once this many are queued unconsumed (0 = off).
@@ -301,9 +309,38 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
     @abc.abstractmethod
     def _is_chunked_te(self, te: str) -> bool: ...
 
+    def _create_content_digest_verifier(
+        self, msg: _MsgT
+    ) -> ContentDigestVerifier | None:
+        policy = self._content_digest_policy
+        if policy is None or not self.response_with_body:
+            return None
+        verifier = create_content_digest_verifier(
+            msg.headers, policy, self.protocol.force_close
+        )
+        self._content_digest_verifier = verifier
+        return verifier
+
     def pause_reading(self) -> None:
         assert self._payload_parser is not None
         self._payload_parser.pause_reading()
+
+    def _content_digest_error_payload(
+        self,
+        verifier: ContentDigestVerifier,
+        *,
+        timer: Any,
+        loop: asyncio.AbstractEventLoop,
+    ) -> StreamReader:
+        payload = StreamReader(
+            self.protocol,
+            timer=timer,
+            loop=loop,
+            limit=self._limit,
+        )
+        payload._content_digest_verifier = verifier
+        payload.set_exception(verifier._failure)
+        return payload
 
     def message_consumed(self) -> None:
         """Protocol drained a queued message; free a slot for parsing."""
@@ -396,6 +433,9 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                         finally:
                             self._lines.clear()
 
+                        self._content_digest_verifier = None
+                        verifier = self._create_content_digest_verifier(msg)
+
                         def get_content_length() -> int | None:
                             # payload length
                             length_hdr = msg.headers.get(CONTENT_LENGTH)
@@ -430,8 +470,11 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                         empty_body = code in EMPTY_BODY_STATUS_CODES or bool(
                             self.method and self.method in EMPTY_BODY_METHODS
                         )
+                        active_verifier = verifier is not None
                         if not empty_body and (
-                            (length is not None and length > 0) or msg.chunked
+                            (length is not None and length > 0)
+                            or msg.chunked
+                            or active_verifier
                         ):
                             payload = StreamReader(
                                 self.protocol,
@@ -448,6 +491,9 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 code=self.code,
                                 response_with_body=self.response_with_body,
                                 auto_decompress=self._auto_decompress,
+                                content_digest_verifier=(
+                                    verifier if active_verifier else None
+                                ),
                                 lax=self.lax,
                                 headers_parser=self._headers_parser,
                                 max_line_size=self.max_line_size,
@@ -475,6 +521,9 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 method=msg.method,
                                 compression=msg.compression,
                                 auto_decompress=self._auto_decompress,
+                                content_digest_verifier=(
+                                    verifier if active_verifier else None
+                                ),
                                 lax=self.lax,
                                 headers_parser=self._headers_parser,
                                 max_line_size=self.max_line_size,
@@ -498,6 +547,9 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 code=self.code,
                                 response_with_body=self.response_with_body,
                                 auto_decompress=self._auto_decompress,
+                                content_digest_verifier=(
+                                    verifier if active_verifier else None
+                                ),
                                 lax=self.lax,
                                 headers_parser=self._headers_parser,
                                 max_line_size=self.max_line_size,
@@ -512,6 +564,17 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                             # the upgraded protocol immediately.
                             self._upgraded = True
                             payload = EMPTY_PAYLOAD
+                        elif active_verifier:
+                            if verifier._failure is not None:
+                                payload = self._content_digest_error_payload(
+                                    verifier, timer=self.timer, loop=loop
+                                )
+                            else:
+                                verifier.check_coded_eof()
+                                if verifier._failure is not None:
+                                    payload = self._content_digest_error_payload(
+                                        verifier, timer=self.timer, loop=loop
+                                    )
                         else:
                             payload = EMPTY_PAYLOAD
 
@@ -861,6 +924,7 @@ class HttpPayloadParser:
         method: str | None = None,
         response_with_body: bool = True,
         auto_decompress: bool = True,
+        content_digest_verifier: ContentDigestVerifier | None = None,
         lax: bool = False,
         *,
         headers_parser: HeadersParser,
@@ -894,6 +958,13 @@ class HttpPayloadParser:
         else:
             real_payload = payload
 
+        active_verifier = (
+            content_digest_verifier is not None
+            and content_digest_verifier.active
+        )
+        if active_verifier:
+            payload._content_digest_verifier = content_digest_verifier
+
         # payload parser
         if not response_with_body:
             # don't parse payload if it's not expected to be received
@@ -907,10 +978,19 @@ class HttpPayloadParser:
             self._length = length
             self._length_expected = length
             if self._length == 0:
-                real_payload.feed_eof()
+                if active_verifier:
+                    CodedDigestBuffer(
+                        real_payload, content_digest_verifier
+                    ).feed_eof()
+                else:
+                    real_payload.feed_eof()
                 self.done = True
 
-        self.payload = real_payload
+        self.payload = (
+            CodedDigestBuffer(real_payload, content_digest_verifier)
+            if active_verifier
+            else real_payload
+        )
 
     def pause_reading(self) -> None:
         self._paused = True
@@ -1228,6 +1308,45 @@ class DeflateBuffer:
             if self.encoding == "deflate" and not self.decompressor.eof:  # type: ignore[union-attr]
                 raise ContentEncodingError("deflate")
 
+        self.out.feed_eof()
+
+    def begin_http_chunk_receiving(self) -> None:
+        self.out.begin_http_chunk_receiving()
+
+    def end_http_chunk_receiving(self) -> None:
+        self.out.end_http_chunk_receiving()
+
+
+class CodedDigestBuffer:
+    __slots__ = ("out", "verifier")
+
+    def __init__(
+        self, out: StreamReader | DeflateBuffer, verifier: ContentDigestVerifier
+    ) -> None:
+        self.out = out
+        self.verifier = verifier
+
+    def set_exception(
+        self,
+        exc: type[BaseException] | BaseException,
+        exc_cause: BaseException = _EXC_SENTINEL,
+    ) -> None:
+        set_exception(self.out, exc, exc_cause)
+
+    def feed_data(self, chunk: bytes) -> bool:
+        try:
+            self.verifier.update(chunk)
+        except Exception as exc:
+            set_exception(self.out, exc)
+            return False
+        return self.out.feed_data(chunk)
+
+    def feed_eof(self) -> None:
+        try:
+            self.verifier.check_coded_eof()
+        except Exception as exc:
+            set_exception(self.out, exc)
+            return
         self.out.feed_eof()
 
     def begin_http_chunk_receiving(self) -> None:

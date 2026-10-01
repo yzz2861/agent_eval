@@ -35,8 +35,6 @@ from multidict import CIMultiDict, MultiDict, MultiDictProxy, istr
 from yarl import URL, Query
 
 from . import hdrs, http, payload
-from ._websocket.reader import WebSocketDataQueue
-from .abc import AbstractCookieJar
 from .client_exceptions import (
     ClientConnectionError,
     ClientConnectionResetError,
@@ -52,6 +50,7 @@ from .client_exceptions import (
     ClientResponseError,
     ClientSSLError,
     ConnectionTimeoutError,
+    ContentDigestError,
     ContentTypeError,
     InvalidURL,
     InvalidUrlClientError,
@@ -68,6 +67,8 @@ from .client_exceptions import (
     WSMessageTypeError,
     WSServerHandshakeError,
 )
+from .abc import AbstractCookieJar
+from ._websocket.reader import WebSocketDataQueue
 from .client_middlewares import ClientMiddlewareType, _cached_build_client_middlewares
 from .client_reqrep import (
     SSL_ALLOWED_TYPES,
@@ -78,6 +79,7 @@ from .client_reqrep import (
     RequestInfo,
     ResponseParams,
 )
+from .content_digest import ContentDigestVerification
 from .client_ws import (
     DEFAULT_WS_CLIENT_TIMEOUT,
     ClientWebSocketResponse,
@@ -125,6 +127,7 @@ __all__ = (
     "ClientSSLError",
     "ConnectionTimeoutError",
     "ContentTypeError",
+    "ContentDigestError",
     "InvalidURL",
     "InvalidUrlClientError",
     "RedirectClientError",
@@ -289,6 +292,7 @@ class ClientSession:
         "_default_ssl",
         "_retry_connection",
         "_middlewares",
+        "_content_digest_policy",
     )
 
     def __init__(
@@ -322,6 +326,7 @@ class ClientSession:
         fallback_charset_resolver: _CharsetResolver = lambda r, b: "utf-8",
         middlewares: Sequence[ClientMiddlewareType] = (),
         ssl_shutdown_timeout: _SENTINEL | None | float = sentinel,
+        content_digest_policy: ContentDigestVerification | None = None,
     ) -> None:
         # We initialise _connector to None immediately, as it's referenced in __del__()
         # and could cause issues if an exception occurs during initialisation.
@@ -421,6 +426,11 @@ class ClientSession:
         self._default_ssl = ssl
         self._retry_connection: bool = True
         self._middlewares = tuple(middlewares)
+        if content_digest_policy is not None and not isinstance(
+            content_digest_policy, ContentDigestVerification
+        ):
+            raise TypeError("content_digest_policy must be ContentDigestVerification")
+        self._content_digest_policy = content_digest_policy
 
     def __init_subclass__(cls: type["ClientSession"]) -> None:
         raise TypeError(
@@ -677,6 +687,7 @@ class ClientSession:
                         "skip_payload": method in EMPTY_BODY_METHODS,
                         "read_until_eof": read_until_eof,
                         "auto_decompress": auto_decompress,
+                        "content_digest_policy": self._content_digest_policy,
                         "read_timeout": real_timeout.sock_read,
                         "read_bufsize": read_bufsize,
                         "timeout_ceil_threshold": self._connector._timeout_ceil_threshold,
@@ -1433,6 +1444,11 @@ class ClientSession:
     def auto_decompress(self) -> bool:
         """Should the body response be automatically decompressed."""
         return self._auto_decompress
+
+    @property
+    def content_digest_policy(self) -> ContentDigestVerification | None:
+        """Policy used to verify response Content-Digest headers."""
+        return self._content_digest_policy
 
     @property
     def trust_env(self) -> bool:

@@ -1,0 +1,3 @@
+Added optional client-side verification of response ``Content-Digest`` headers
+with ``sha-256`` and ``sha-512``, including policies for verifying when present
+or requiring a supported digest.

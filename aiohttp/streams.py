@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import Final, Generic, TypeVar
 
 from .base_protocol import BaseProtocol
+from .content_digest import ContentDigestVerifier
 from .helpers import (
     _EXC_SENTINEL,
     DEFAULT_CHUNK_SIZE,
@@ -102,6 +103,8 @@ class StreamReader:
         "_eof_callbacks",
         "_eof_counter",
         "_on_chunk_received",
+        "_content_digest_verifier",
+        "_content_digest_complete",
         "total_bytes",
         "total_compressed_bytes",
     )
@@ -138,6 +141,8 @@ class StreamReader:
         self._on_chunk_received: (
             Callable[[bytes], Coroutine[None, None, None]] | None
         ) = None
+        self._content_digest_verifier: ContentDigestVerifier | None = None
+        self._content_digest_complete = False
         self.total_bytes = 0
         self.total_compressed_bytes: int | None = None
 
@@ -375,6 +380,14 @@ class StreamReader:
         with self._timer:
             await cb(chunk)
 
+    def _finish_content_digest(self) -> None:
+        if self._content_digest_complete:
+            return
+        self._content_digest_complete = True
+        verifier = self._content_digest_verifier
+        if verifier is not None:
+            verifier.mark_output_verified()
+
     async def readline(self, *, max_line_length: int | None = None) -> bytes:
         return await self.readuntil(max_size=max_line_length)
 
@@ -415,6 +428,8 @@ class StreamReader:
             if not_enough:
                 await self._wait("readuntil")
 
+        if not chunk and self._eof and not self._buffer:
+            self._finish_content_digest()
         if chunk and self._on_chunk_received is not None:
             await self._fire_chunk_received(chunk)
         return chunk
@@ -436,6 +451,7 @@ class StreamReader:
                 if not block:
                     break
                 blocks.append(block)
+            self._finish_content_digest()
             return b"".join(blocks)
 
         self.set_read_chunk_size(n)
@@ -446,6 +462,8 @@ class StreamReader:
             await self._wait("read")
 
         chunk = self._read_nowait(n)
+        if not chunk and self._eof and not self._buffer:
+            self._finish_content_digest()
         if chunk and self._on_chunk_received is not None:
             await self._fire_chunk_received(chunk)
         return chunk
@@ -461,6 +479,8 @@ class StreamReader:
             await self._wait("readany")
 
         chunk = self._read_nowait(-1)
+        if not chunk and self._eof and not self._buffer:
+            self._finish_content_digest()
         if chunk and self._on_chunk_received is not None:
             await self._fire_chunk_received(chunk)
         return chunk
@@ -480,9 +500,17 @@ class StreamReader:
             while self._http_chunk_splits:
                 pos = self._http_chunk_splits.popleft()
                 if pos == self._cursor:
+                    if not chunk and self._eof and not self._buffer:
+                        self._finish_content_digest()
                     return (b"", True)
                 if pos > self._cursor:
                     chunk = self._read_nowait(pos - self._cursor)
+                    if (
+                        not chunk
+                        and self._eof
+                        and not self._buffer
+                    ):
+                        self._finish_content_digest()
                     if chunk and self._on_chunk_received is not None:
                         await self._fire_chunk_received(chunk)
                     return (chunk, True)
@@ -501,6 +529,7 @@ class StreamReader:
             if self._eof:
                 # Special case for signifying EOF.
                 # (b'', True) is not a final return value actually.
+                self._finish_content_digest()
                 return (b"", False)
 
             await self._wait("readchunk")
@@ -534,6 +563,8 @@ class StreamReader:
             )
 
         chunk = self._read_nowait(n)
+        if not chunk and self._eof and not self._buffer:
+            self._finish_content_digest()
         if chunk and (cb := self._on_chunk_received) is not None:
             # read_nowait is sync but the hook is async; schedule it so the
             # observability event still fires.
@@ -601,6 +632,7 @@ class EmptyStreamReader(StreamReader):  # lgtm [py/missing-call-to-init]
 
     def __init__(self) -> None:
         self._read_eof_chunk = False
+        self._content_digest_complete = False
         self.total_bytes = 0
 
     # Shadow the inherited slot with a property so the EMPTY_PAYLOAD singleton
