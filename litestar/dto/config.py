@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from litestar.exceptions import ImproperlyConfiguredException
 
 if TYPE_CHECKING:
-    from litestar.dto.types import RenameStrategy
+    from litestar.dto.types import RenameStrategy, UnloadedFieldsStrategy
 
 __all__ = ("DTOConfig",)
 
@@ -58,6 +58,20 @@ class DTOConfig:
     """Use the experimental codegen backend"""
     forbid_unknown_fields: bool = False
     """Raise an exception for fields present in the raw data that are not defined on the model"""
+    unloaded_fields_strategy: UnloadedFieldsStrategy | None = None
+    """Control how fields that have not been loaded on the source object are handled during
+    serialization.
+
+    This only applies when encoding data, i.e. for return DTOs, and only has an effect if the
+    DTO's :meth:`AbstractDTO.is_field_loaded <litestar.dto.AbstractDTO.is_field_loaded>` hook is
+    able to detect unloaded fields for the model type, e.g. lazy-loaded SQLAlchemy attributes.
+
+    - ``None`` (default): Unloaded fields are not treated specially. Accessing them may trigger
+        lazy loading, e.g. a SQL query.
+    - ``"omit"``: Unloaded fields are omitted from the serialized output.
+    - ``"raise"``: A :class:`UnloadedFieldException <litestar.exceptions.dto_exceptions.UnloadedFieldException>`
+        including the dotted path of the field is raised.
+    """
 
     def __post_init__(self) -> None:
         if self.include and self.exclude:

@@ -5,7 +5,7 @@ from .base_exceptions import (
     MissingDependencyException,
     SerializationException,
 )
-from .dto_exceptions import DTOFactoryException, InvalidAnnotationException
+from .dto_exceptions import DTOFactoryException, InvalidAnnotationException, UnloadedFieldException
 from .http_exceptions import (
     ClientException,
     HTTPException,
@@ -43,6 +43,7 @@ __all__ = (
     "ServiceUnavailableException",
     "TemplateNotFoundException",
     "TooManyRequestsException",
+    "UnloadedFieldException",
     "ValidationException",
     "WebSocketDisconnect",
     "WebSocketException",

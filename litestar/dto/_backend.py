@@ -34,6 +34,7 @@ from litestar.dto._types import (
 from litestar.dto.data_structures import DTOData, DTOFieldDefinition
 from litestar.dto.field import Mark
 from litestar.enums import RequestEncodingType
+from litestar.exceptions.dto_exceptions import UnloadedFieldException
 from litestar.params import KwargDefinition
 from litestar.serialization import decode_json, decode_msgpack
 from litestar.types import Empty
@@ -43,6 +44,7 @@ from litestar.utils import unique_name_for_scope
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
     from litestar.dto import AbstractDTO, RenameStrategy
+    from litestar.dto.types import UnloadedFieldsStrategy
     from litestar.types.serialization import LitestarEncodableType
 
 __all__ = ("DTOBackend",)
@@ -69,10 +71,12 @@ class DTOBackend:
         "field_definition",
         "handler_id",
         "is_data_field",
+        "is_field_loaded",
         "model_type",
         "parsed_field_definitions",
         "reverse_name_map",
         "transfer_model_type",
+        "unloaded_fields_strategy",
         "wrapper_attribute_name",
     )
 
@@ -105,6 +109,10 @@ class DTOBackend:
         self.model_type: Final[type[Any]] = model_type
         self.wrapper_attribute_name: Final[str | None] = wrapper_attribute_name
         self.attribute_accessor = dto_factory.attribute_accessor
+        self.unloaded_fields_strategy: Final[UnloadedFieldsStrategy | None] = (
+            dto_factory.config.unloaded_fields_strategy
+        )
+        self.is_field_loaded = dto_factory.is_field_loaded
 
         self.parsed_field_definitions = self.parse_model(
             model_type=model_type,
@@ -223,6 +231,7 @@ class DTOBackend:
             field_definitions=field_definitions,
             rename_strategy=self.dto_factory.config.rename_strategy,
             forbid_unknown_fields=self.dto_factory.config.forbid_unknown_fields,
+            all_fields_optional=not self.is_data_field and self.dto_factory.config.unloaded_fields_strategy == "omit",
         )
         setattr(struct, "__schema_name__", struct_name)
         return struct
@@ -359,6 +368,8 @@ class DTOBackend:
                 field_definition=self.field_definition,
                 is_data_field=self.is_data_field,
                 attribute_accessor=self.attribute_accessor,
+                unloaded_fields_strategy=self.unloaded_fields_strategy,
+                is_field_loaded=self.is_field_loaded,
             )
             setattr(
                 data,
@@ -376,6 +387,8 @@ class DTOBackend:
                 field_definition=self.field_definition,
                 is_data_field=self.is_data_field,
                 attribute_accessor=self.attribute_accessor,
+                unloaded_fields_strategy=self.unloaded_fields_strategy,
+                is_field_loaded=self.is_field_loaded,
             ),
         )
 
@@ -583,6 +596,8 @@ def _transfer_data(
     field_definition: FieldDefinition,
     is_data_field: bool,
     attribute_accessor: Callable[[object, str], Any],
+    unloaded_fields_strategy: UnloadedFieldsStrategy | None = None,
+    is_field_loaded: Callable[[Any, str], bool] | None = None,
 ) -> Any:
     """Create instance or iterable of instances of ``destination_type``.
 
@@ -593,6 +608,8 @@ def _transfer_data(
         field_definition: the parsed type that represents the handler annotation for which the DTO is being applied.
         is_data_field: whether the DTO is being applied to a ``data`` field.
         attribute_accessor: 'getattr'-like function to access attributes on the data source
+        unloaded_fields_strategy: How to handle fields that have not been loaded on the source object.
+        is_field_loaded: Callable to determine if a field on the source object has been loaded.
 
     Returns:
         Data parsed into ``destination_type``.
@@ -607,6 +624,8 @@ def _transfer_data(
                     field_definition=field_definition.inner_types[0],
                     is_data_field=is_data_field,
                     attribute_accessor=attribute_accessor,
+                    unloaded_fields_strategy=unloaded_fields_strategy,
+                    is_field_loaded=is_field_loaded,
                 )
                 for item in source_data
             )
@@ -620,6 +639,8 @@ def _transfer_data(
                     field_definition=field_definition.inner_types[1],
                     is_data_field=is_data_field,
                     attribute_accessor=attribute_accessor,
+                    unloaded_fields_strategy=unloaded_fields_strategy,
+                    is_field_loaded=is_field_loaded,
                 ),
             )
             for key, value in source_data.items()  # type: ignore[union-attr]
@@ -631,6 +652,8 @@ def _transfer_data(
         field_definitions=field_definitions,
         is_data_field=is_data_field,
         attribute_accessor=attribute_accessor,
+        unloaded_fields_strategy=unloaded_fields_strategy,
+        is_field_loaded=is_field_loaded,
     )
 
 
@@ -640,6 +663,9 @@ def _transfer_instance_data(
     field_definitions: tuple[TransferDTOFieldDefinition, ...],
     is_data_field: bool,
     attribute_accessor: Callable[[object, str], Any],
+    unloaded_fields_strategy: UnloadedFieldsStrategy | None = None,
+    is_field_loaded: Callable[[Any, str], bool] | None = None,
+    field_path: str = "",
 ) -> Any:
     """Create instance of ``destination_type`` with data from ``source_instance``.
 
@@ -649,6 +675,9 @@ def _transfer_instance_data(
         field_definitions: model field definitions.
         is_data_field: whether the given field is a 'data' kwarg field.
         attribute_accessor: 'getattr'-like function to access attributes on the data source
+        unloaded_fields_strategy: How to handle fields that have not been loaded on the source object.
+        is_field_loaded: Callable to determine if a field on the source object has been loaded.
+        field_path: Dotted path of the fields leading to the current instance.
 
     Returns:
         Data parsed into ``model_type``.
@@ -659,6 +688,15 @@ def _transfer_instance_data(
         if not is_data_field:
             if field_definition.is_excluded:
                 continue
+            if (
+                unloaded_fields_strategy is not None
+                and is_field_loaded is not None
+                and not isinstance(source_instance, Mapping)
+                and not is_field_loaded(source_instance, field_definition.name)
+            ):
+                if unloaded_fields_strategy == "omit":
+                    continue
+                raise UnloadedFieldException(f"{field_path}{field_definition.name}")
         elif not (
             field_definition.name in source_instance
             if isinstance(source_instance, Mapping)
@@ -682,6 +720,9 @@ def _transfer_instance_data(
             nested_as_dict=destination_type is dict,
             is_data_field=is_data_field,
             attribute_accessor=attribute_accessor,
+            unloaded_fields_strategy=unloaded_fields_strategy,
+            is_field_loaded=is_field_loaded,
+            field_path=f"{field_path}{field_definition.name}.",
         )
 
     return destination_type(**unstructured_data)
@@ -693,6 +734,9 @@ def _transfer_type_data(
     nested_as_dict: bool,
     is_data_field: bool,
     attribute_accessor: Callable[[object, str], Any],
+    unloaded_fields_strategy: UnloadedFieldsStrategy | None = None,
+    is_field_loaded: Callable[[Any, str], bool] | None = None,
+    field_path: str = "",
 ) -> Any:
     if isinstance(transfer_type, SimpleType) and transfer_type.nested_field_info:
         if nested_as_dict:
@@ -708,6 +752,9 @@ def _transfer_type_data(
             field_definitions=transfer_type.nested_field_info.field_definitions,
             is_data_field=is_data_field,
             attribute_accessor=attribute_accessor,
+            unloaded_fields_strategy=unloaded_fields_strategy,
+            is_field_loaded=is_field_loaded,
+            field_path=field_path,
         )
 
     if isinstance(transfer_type, UnionType) and transfer_type.has_nested:
@@ -716,6 +763,9 @@ def _transfer_type_data(
             source_value=source_value,
             is_data_field=is_data_field,
             attribute_accessor=attribute_accessor,
+            unloaded_fields_strategy=unloaded_fields_strategy,
+            is_field_loaded=is_field_loaded,
+            field_path=field_path,
         )
 
     if isinstance(transfer_type, CollectionType):
@@ -727,6 +777,9 @@ def _transfer_type_data(
                     nested_as_dict=False,
                     is_data_field=is_data_field,
                     attribute_accessor=attribute_accessor,
+                    unloaded_fields_strategy=unloaded_fields_strategy,
+                    is_field_loaded=is_field_loaded,
+                    field_path=field_path,
                 )
                 for item in source_value
             )
@@ -744,6 +797,9 @@ def _transfer_type_data(
                         nested_as_dict=False,
                         is_data_field=is_data_field,
                         attribute_accessor=attribute_accessor,
+                        unloaded_fields_strategy=unloaded_fields_strategy,
+                        is_field_loaded=is_field_loaded,
+                        field_path=field_path,
                     ),
                 )
                 for key, value in source_value.items()
@@ -759,6 +815,9 @@ def _transfer_nested_union_type_data(
     source_value: Any,
     is_data_field: bool,
     attribute_accessor: Callable[[object, str], Any],
+    unloaded_fields_strategy: UnloadedFieldsStrategy | None = None,
+    is_field_loaded: Callable[[Any, str], bool] | None = None,
+    field_path: str = "",
 ) -> Any:
     for inner_type in transfer_type.inner_types:
         if isinstance(inner_type, CompositeType):
@@ -776,13 +835,16 @@ def _transfer_nested_union_type_data(
                 field_definitions=inner_type.nested_field_info.field_definitions,
                 is_data_field=is_data_field,
                 attribute_accessor=attribute_accessor,
+                unloaded_fields_strategy=unloaded_fields_strategy,
+                is_field_loaded=is_field_loaded,
+                field_path=field_path,
             )
     return source_value
 
 
-def _create_msgspec_field(field_definition: TransferDTOFieldDefinition) -> Any:
+def _create_msgspec_field(field_definition: TransferDTOFieldDefinition, all_fields_optional: bool = False) -> Any:
     kwargs: dict[str, Any] = {}
-    if field_definition.is_partial:
+    if field_definition.is_partial or all_fields_optional:
         kwargs["default"] = UNSET
 
     elif field_definition.default is not Empty:
@@ -824,6 +886,7 @@ def _create_struct_for_field_definitions(
     field_definitions: tuple[TransferDTOFieldDefinition, ...],
     rename_strategy: RenameStrategy | dict[str, str] | None,
     forbid_unknown_fields: bool,
+    all_fields_optional: bool = False,
 ) -> type[Struct]:
     struct_fields: list[tuple[str, type] | tuple[str, type, type]] = []
 
@@ -832,7 +895,7 @@ def _create_struct_for_field_definitions(
             continue
 
         field_type = _create_transfer_model_type_annotation(field_definition.transfer_type)
-        if field_definition.is_partial:
+        if field_definition.is_partial or all_fields_optional:
             field_type = Union[field_type, UnsetType]
 
         if field_definition.passthrough_constraints:
@@ -845,7 +908,7 @@ def _create_struct_for_field_definitions(
             (  # pyright: ignore[reportArgumentType]
                 field_definition.name,
                 field_type,
-                _create_msgspec_field(field_definition),
+                _create_msgspec_field(field_definition, all_fields_optional),
             )
         )
     return defstruct(

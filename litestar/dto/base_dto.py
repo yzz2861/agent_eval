@@ -148,6 +148,29 @@ class AbstractDTO(Generic[T]):
         """
 
     @classmethod
+    def is_field_loaded(cls, instance: Any, field_name: str) -> bool:
+        """Determine whether ``field_name`` on ``instance`` has been loaded and can be accessed
+        without triggering I/O, e.g. a lazy-loaded SQLAlchemy attribute.
+
+        This is used to support :attr:`DTOConfig.unloaded_fields_strategy
+        <litestar.dto.DTOConfig.unloaded_fields_strategy>`. It is only called when encoding data,
+        and only if that config value is set. Implementations must not access the attribute value
+        itself, as doing so may trigger the lazy load this check is meant to prevent.
+
+        The default implementation returns ``True`` for all fields, i.e. it assumes all fields are
+        loaded. DTO types supporting models with lazily loaded attributes, such as ORM entities,
+        should override this method.
+
+        Args:
+            instance: The object being serialized.
+            field_name: Name of the field on ``instance`` to check.
+
+        Returns:
+            Whether the field has been loaded.
+        """
+        return True
+
+    @classmethod
     def is_supported_model_type_field(cls, field_definition: FieldDefinition) -> bool:
         """Check support for the given type.
 

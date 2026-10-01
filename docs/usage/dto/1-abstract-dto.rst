@@ -178,6 +178,48 @@ error response will be returned if the data contains a field not defined on the 
     :linenos:
 
 
+Handling unloaded fields
+------------------------
+
+Some model types, most notably ORM entities, load their attributes lazily. Accessing an
+attribute that has not been loaded may trigger I/O, e.g. a SQL query, or fail outright if
+the underlying resource, such as a database session, is no longer available.
+
+The ``unloaded_fields_strategy`` parameter of the
+:class:`DTOConfig <litestar.dto.config.DTOConfig>` controls how such fields are handled
+when serializing data:
+
+- ``None`` (default): Unloaded fields are not treated specially.
+- ``"omit"``: Unloaded fields are omitted from the serialized output.
+- ``"raise"``: A :class:`UnloadedFieldException <litestar.exceptions.dto_exceptions.UnloadedFieldException>`
+  is raised, including the dotted path of the field, e.g. ``"user.address"``.
+
+Whether a field is considered loaded is determined by the DTO's
+:meth:`is_field_loaded <litestar.dto.base_dto.AbstractDTO.is_field_loaded>` hook, which
+defaults to reporting all fields as loaded. DTO types supporting lazily loaded models
+should override it. The hook must not access the attribute value itself, as doing so may
+trigger the lazy load it is meant to prevent. For SQLAlchemy models, this can be
+implemented using inspection:
+
+.. code-block:: python
+
+    import sqlalchemy as sa
+    from advanced_alchemy.extensions.litestar import SQLAlchemyDTO
+
+
+    class LoadedAwareDTO(SQLAlchemyDTO):
+        @classmethod
+        def is_field_loaded(cls, instance, field_name):
+            inspection = sa.inspect(instance, raiseerr=False)
+            if inspection is None:
+                return True
+            return field_name not in inspection.unloaded
+
+The check is only performed when encoding data, so it does not affect request data
+handling. A field that has been loaded with a value of ``None`` is serialized as
+``null`` and is not treated as unloaded.
+
+
 DTO Data
 --------
 
