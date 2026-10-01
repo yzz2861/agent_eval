@@ -1,3 +1,12 @@
+Unreleased
+----------
+
+* Add optional PROXY protocol v2 support for plaintext TCP listeners,
+  enabled via the proxy_protocol_trusted_sources config option or the
+  --proxy-protocol-trusted command line argument. Parsed information is
+  exposed to the application in the
+  extensions["hypercorn.proxy_protocol"] scope extension.
+
 0.18.0 2025-11-08
 -----------------
 

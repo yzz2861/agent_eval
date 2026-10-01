@@ -64,3 +64,32 @@ class MemoryWriter:
 
     async def receive(self) -> bytes:
         return await self.data.get()
+
+
+class SocketWriter:
+    """StreamWriter-like wrapper exposing a FakeTCPSocket via get_extra_info."""
+
+    def __init__(self, writer: asyncio.StreamWriter, fake_socket: object) -> None:
+        self._writer = writer
+        self._fake_socket = fake_socket
+
+    def get_extra_info(self, name: str) -> object:
+        if name == "socket":
+            return self._fake_socket
+        return None
+
+    def write(self, data: bytes) -> None:
+        self._writer.write(data)
+
+    async def drain(self) -> None:
+        await self._writer.drain()
+
+    def write_eof(self) -> None:
+        if self._writer.can_write_eof():
+            self._writer.write_eof()
+
+    def close(self) -> None:
+        self._writer.close()
+
+    async def wait_closed(self) -> None:
+        await self._writer.wait_closed()

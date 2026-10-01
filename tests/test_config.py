@@ -152,3 +152,20 @@ def test_response_headers(monkeypatch: MonkeyPatch) -> None:
     ]
     config.include_server_header = False
     assert config.response_headers("test") == [(b"date", b"Sat, 02 Dec 2017 15:43:15 GMT")]
+
+
+def test_proxy_protocol_disabled_by_default() -> None:
+    config = Config()
+    assert not config.proxy_protocol_enabled
+    assert not config.is_proxy_protocol_trusted(("127.0.0.1", 1234))
+
+
+def test_proxy_protocol_trusted_sources() -> None:
+    config = Config()
+    config.proxy_protocol_trusted_sources = ["127.0.0.1", "10.0.0.0/8", "2001:db8::/32"]
+    assert config.proxy_protocol_enabled
+    assert config.is_proxy_protocol_trusted(("127.0.0.1", 1234))
+    assert config.is_proxy_protocol_trusted(("10.1.2.3", 1234))
+    assert config.is_proxy_protocol_trusted(("2001:db8::1", 1234))
+    assert not config.is_proxy_protocol_trusted(("192.0.2.1", 1234))
+    assert not config.is_proxy_protocol_trusted(None)

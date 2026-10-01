@@ -144,6 +144,14 @@ max_requests_jitter        ``--max-requests-jitter``     This jitter causes the 
                                                          to be randomized by
                                                          ``randint(0, max_requests_jitter)``
 pid_path                   ``-p``, ``--pid``             Location to write the PID (Program ID) to.
+proxy_protocol_header_timeout N/A                        Seconds to wait for the PROXY protocol   5s
+                                                         preamble on plaintext TCP connections.
+proxy_protocol_max_header_size N/A                       Maximum size in bytes of an accepted      16KiB
+                                                         PROXY protocol v2 header.
+proxy_protocol_trusted_sources ``--proxy-protocol-trusted`` List of trusted IP addresses or CIDR    []
+                                                         networks allowed to send a PROXY
+                                                         protocol v2 header on plaintext TCP
+                                                         listeners.
 quic_bind                  ``--quic-bind``               The UDP/QUIC host/address to bind to. See
                                                          *bind* for formatting options.
 root_path                  ``--root-path``               The setting for the ASGI root_path

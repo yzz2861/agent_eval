@@ -10,6 +10,7 @@ from .worker_context import AsyncioSingleTask, WorkerContext
 from ..config import Config
 from ..events import Closed, Event, RawData, Updated
 from ..protocol import ProtocolWrapper
+from ..proxy_protocol import ProxyProtocolError, ProxyInfo, read_proxy_header
 from ..typing import AppWrapper, ConnectionState, LifespanState
 from ..utils import parse_socket_addr
 
@@ -43,6 +44,8 @@ class TCPServer:
 
     async def run(self) -> None:
         socket = self.writer.get_extra_info("socket")
+        proxy_info: ProxyInfo | None = None
+        initial_data = b""
         try:
             client = parse_socket_addr(socket.family, socket.getpeername())
             server = parse_socket_addr(socket.family, socket.getsockname())
@@ -53,6 +56,14 @@ class TCPServer:
             else:
                 ssl = False
                 alpn_protocol = "http/1.1"
+                if self.config.proxy_protocol_enabled:
+                    if not self.config.is_proxy_protocol_trusted(client):
+                        raise ProxyProtocolError("Untrusted PROXY protocol source")
+                    proxy_info, initial_data = await self._read_proxy_header()
+                    if proxy_info.client is not None:
+                        client = proxy_info.client
+                    if proxy_info.server is not None:
+                        server = proxy_info.server
 
             async with TaskGroup(self.loop) as task_group:
                 self._task_group = task_group
@@ -67,14 +78,32 @@ class TCPServer:
                     server,
                     self.protocol_send,
                     alpn_protocol,
+                    proxy_info,
                 )
                 await self.protocol.initiate()
                 await self.idle_task.restart(task_group, self._idle_timeout)
-                await self._read_data()
+                await self._read_data(initial_data)
         except OSError:
+            pass
+        except ProxyProtocolError:
             pass
         finally:
             await self._close()
+
+    async def _read_proxy_header(self) -> tuple[ProxyInfo, bytes]:
+        async def receive() -> bytes:
+            try:
+                return await self.reader.read(MAX_RECV)
+            except (ConnectionError, OSError, SSLError) as error:
+                raise ProxyProtocolError("Failed to read the PROXY protocol header") from error
+
+        try:
+            return await asyncio.wait_for(
+                read_proxy_header(receive, self.config.proxy_protocol_max_header_size),
+                self.config.proxy_protocol_header_timeout,
+            )
+        except asyncio.TimeoutError as error:
+            raise ProxyProtocolError("Timed out reading the PROXY protocol header") from error
 
     async def protocol_send(self, event: Event) -> None:
         if isinstance(event, RawData):
@@ -92,7 +121,9 @@ class TCPServer:
             else:
                 await self.idle_task.stop()
 
-    async def _read_data(self) -> None:
+    async def _read_data(self, initial_data: bytes = b"") -> None:
+        if initial_data:
+            await self.protocol.handle(RawData(initial_data))
         while not self.reader.at_eof():
             try:
                 data = await asyncio.wait_for(self.reader.read(MAX_RECV), self.config.read_timeout)

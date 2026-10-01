@@ -22,6 +22,7 @@ from wsproto.utilities import generate_accept_token, LocalProtocolError, split_c
 
 from .events import Body, Data, EndBody, EndData, Event, Request, Response, StreamClosed
 from ..config import Config
+from ..proxy_protocol import ProxyInfo, SCOPE_EXTENSION
 from ..typing import (
     AppWrapper,
     ASGISendEvent,
@@ -174,6 +175,7 @@ class WSStream:
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
         stream_id: int,
+        proxy_info: ProxyInfo | None = None,
     ) -> None:
         self.app = app
         self.app_put: Callable | None = None
@@ -192,6 +194,7 @@ class WSStream:
         self.start_time: float
         self.state = ASGIWebsocketState.HANDSHAKE
         self.stream_id = stream_id
+        self.proxy_info = proxy_info
 
         self.connection: Connection
         self.handshake: Handshake
@@ -223,6 +226,8 @@ class WSStream:
                 "subprotocols": self.handshake.subprotocols or [],
                 "extensions": {"websocket.http.response": {}},
             }
+            if self.proxy_info is not None:
+                self.scope["extensions"][SCOPE_EXTENSION] = self.proxy_info.scope_extension()
 
             if not valid_server_name(self.config, event):
                 await self._send_error_response(404)

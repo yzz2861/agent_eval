@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 from json import dumps
+import socket
 from socket import AF_INET
 from typing import cast
 
@@ -19,6 +20,53 @@ class MockSocket:
 
     def getpeername(self) -> tuple[str, int]:
         return ("127.0.0.1", 80)
+
+
+class FakeTCPSocket:
+    """A real OS socket pair presenting itself as an IPv4 TCP peer."""
+
+    family = AF_INET
+    type = socket.SOCK_STREAM
+
+    def __init__(
+        self,
+        raw: socket.socket,
+        peer: tuple[str, int] = ("127.0.0.1", 54321),
+        local: tuple[str, int] = ("127.0.0.1", 8000),
+    ) -> None:
+        self._raw = raw
+        self._peer = peer
+        self._local = local
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def setblocking(self, flag: bool) -> None:
+        self._raw.setblocking(flag)
+
+    def settimeout(self, value: object) -> None:
+        self._raw.settimeout(value)
+
+    def gettimeout(self) -> object:
+        return self._raw.gettimeout()
+
+    def setsockopt(self, *args: object) -> None:
+        self._raw.setsockopt(*args)
+
+    def getsockopt(self, *args: object) -> object:
+        return self._raw.getsockopt(*args)
+
+    def getpeername(self) -> tuple[str, int]:
+        return self._peer
+
+    def getsockname(self) -> tuple[str, int]:
+        return self._local
+
+    def close(self) -> None:
+        self._raw.close()
+
+    def shutdown(self, how: int) -> None:
+        self._raw.shutdown(how)
 
 
 async def empty_framework(scope: Scope, receive: Callable, send: Callable) -> None:

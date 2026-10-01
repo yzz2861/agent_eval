@@ -24,6 +24,7 @@ from .http_stream import HTTPStream
 from .ws_stream import WSStream
 from ..config import Config
 from ..events import Closed, Event, RawData, Updated
+from ..proxy_protocol import ProxyInfo
 from ..typing import AppWrapper, ConnectionState, Event as IOEvent, TaskGroup, WorkerContext
 from ..utils import filter_pseudo_headers
 
@@ -90,6 +91,7 @@ class H2Protocol:
         client: tuple[str, int] | None,
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
+        proxy_info: ProxyInfo | None = None,
     ) -> None:
         self.app = app
         self.client = client
@@ -117,6 +119,7 @@ class H2Protocol:
         self.server = server
         self.ssl = ssl
         self.streams: dict[int, HTTPStream | WSStream] = {}
+        self.proxy_info = proxy_info
         # The below are used by the sending task
         self.has_data = self.context.event_class()
         self.priority = priority.PriorityTree()
@@ -334,6 +337,7 @@ class H2Protocol:
                 self.server,
                 self.stream_send,
                 request.stream_id,
+                self.proxy_info,
             )
         else:
             self.streams[request.stream_id] = HTTPStream(
@@ -346,6 +350,7 @@ class H2Protocol:
                 self.server,
                 self.stream_send,
                 request.stream_id,
+                self.proxy_info,
             )
         self.stream_buffers[request.stream_id] = StreamBuffer(self.context.event_class)
         try:

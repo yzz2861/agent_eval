@@ -24,6 +24,8 @@ from time import time
 from typing import Any
 from wsgiref.handlers import format_date_time
 
+from .proxy_protocol import is_trusted_source
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -97,6 +99,9 @@ class Config:
     max_requests: int | None = None
     max_requests_jitter: int = 0
     pid_path: str | None = None
+    proxy_protocol_header_timeout: float | None = 5 * SECONDS
+    proxy_protocol_max_header_size = 16 * 1024 * BYTES
+    proxy_protocol_trusted_sources: list[str] = []
     server_names: list[str] = []
     shutdown_timeout = 60 * SECONDS
     ssl_handshake_timeout = 60 * SECONDS
@@ -166,6 +171,14 @@ class Config:
     @root_path.setter
     def root_path(self, value: str) -> None:
         self._root_path = value.rstrip("/")
+
+    @property
+    def proxy_protocol_enabled(self) -> bool:
+        return bool(self.proxy_protocol_trusted_sources)
+
+    def is_proxy_protocol_trusted(self, client: tuple[str, int] | None) -> bool:
+        """Return whether the direct peer is trusted to send a preamble."""
+        return is_trusted_source(client, self.proxy_protocol_trusted_sources)
 
     def create_ssl_context(self) -> SSLContext | None:
         if not self.ssl_enabled:

@@ -140,6 +140,15 @@ def main(sys_args: list[str] | None = None) -> int:
         action="append",
     )
     parser.add_argument(
+        "--proxy-protocol-trusted",
+        dest="proxy_protocol_trusted_sources",
+        help="""Enable PROXY protocol v2 on plaintext TCP listeners and accept
+        the preamble only from these trusted IPs or CIDR networks, e.g.
+        127.0.0.1 or 10.0.0.0/8. Repeat for multiple sources.""",
+        default=[],
+        action="append",
+    )
+    parser.add_argument(
         "--log-config",
         help=""""A Python logging configuration file. This can be prefixed with
         'json:' or 'toml:' to load the configuration from a file in
@@ -308,6 +317,8 @@ def main(sys_args: list[str] | None = None) -> int:
         config.quic_bind = args.quic_binds
     if len(args.server_names) > 0:
         config.server_names = args.server_names
+    if len(args.proxy_protocol_trusted_sources) > 0:
+        config.proxy_protocol_trusted_sources = args.proxy_protocol_trusted_sources
 
     return run(config)
 

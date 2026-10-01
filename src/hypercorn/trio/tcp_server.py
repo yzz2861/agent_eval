@@ -11,6 +11,7 @@ from .worker_context import TrioSingleTask, WorkerContext
 from ..config import Config
 from ..events import Closed, Event, RawData, Updated
 from ..protocol import ProtocolWrapper
+from ..proxy_protocol import ProxyProtocolError, ProxyInfo, read_proxy_header
 from ..typing import AppWrapper, ConnectionState, LifespanState
 from ..utils import parse_socket_addr
 
@@ -39,6 +40,8 @@ class TCPServer:
         return self.run().__await__()
 
     async def run(self) -> None:
+        proxy_info: ProxyInfo | None = None
+        initial_data = b""
         try:
             try:
                 with trio.fail_after(self.config.ssl_handshake_timeout):
@@ -57,6 +60,15 @@ class TCPServer:
             client = parse_socket_addr(socket.family, socket.getpeername())
             server = parse_socket_addr(socket.family, socket.getsockname())
 
+            if not ssl and self.config.proxy_protocol_enabled:
+                if not self.config.is_proxy_protocol_trusted(client):
+                    raise ProxyProtocolError("Untrusted PROXY protocol source")
+                proxy_info, initial_data = await self._read_proxy_header()
+                if proxy_info.client is not None:
+                    client = proxy_info.client
+                if proxy_info.server is not None:
+                    server = proxy_info.server
+
             async with TaskGroup() as task_group:
                 self._task_group = task_group
                 self.protocol = ProtocolWrapper(
@@ -70,14 +82,36 @@ class TCPServer:
                     server,
                     self.protocol_send,
                     alpn_protocol,
+                    proxy_info,
                 )
                 await self.protocol.initiate()
                 await self.idle_task.restart(self._task_group, self._idle_timeout)
-                await self._read_data()
+                await self._read_data(initial_data)
         except OSError:
+            pass
+        except ProxyProtocolError:
             pass
         finally:
             await self._close()
+
+    async def _read_proxy_header(self) -> tuple[ProxyInfo, bytes]:
+        timeout = self.config.proxy_protocol_header_timeout
+
+        async def receive() -> bytes:
+            try:
+                return bytes(await self.stream.receive_some(MAX_RECV))
+            except (trio.ClosedResourceError, trio.BrokenResourceError) as error:
+                raise ProxyProtocolError(
+                    "Connection closed before the PROXY protocol header ended"
+                ) from error
+
+        try:
+            with trio.fail_after(timeout or inf):
+                return await read_proxy_header(
+                    receive, self.config.proxy_protocol_max_header_size
+                )
+        except trio.TooSlowError as error:
+            raise ProxyProtocolError("Timed out reading the PROXY protocol header") from error
 
     async def protocol_send(self, event: Event) -> None:
         if isinstance(event, RawData):
@@ -97,7 +131,9 @@ class TCPServer:
             else:
                 await self.idle_task.stop()
 
-    async def _read_data(self) -> None:
+    async def _read_data(self, initial_data: bytes = b"") -> None:
+        if initial_data:
+            await self.protocol.handle(RawData(initial_data))
         while True:
             try:
                 with trio.fail_after(self.config.read_timeout or inf):

@@ -21,6 +21,7 @@ from .http_stream import HTTPStream
 from .ws_stream import WSStream
 from ..config import Config
 from ..events import Closed, Event, RawData, Updated
+from ..proxy_protocol import ProxyInfo
 from ..typing import AppWrapper, ConnectionState, H11SendableEvent, TaskGroup, WorkerContext
 
 STREAM_ID = 1
@@ -90,6 +91,7 @@ class H11Protocol:
         client: tuple[str, int] | None,
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
+        proxy_info: ProxyInfo | None = None,
     ) -> None:
         self.app = app
         self.can_read = context.event_class()
@@ -106,6 +108,7 @@ class H11Protocol:
         self.stream: HTTPStream | WSStream | None = None
         self.task_group = task_group
         self.connection_state = connection_state
+        self.proxy_info = proxy_info
 
     async def initiate(self) -> None:
         pass
@@ -212,6 +215,7 @@ class H11Protocol:
                 self.server,
                 self.stream_send,
                 STREAM_ID,
+                self.proxy_info,
             )
             self.connection = H11WSConnection(cast(h11.Connection, self.connection))
         else:
@@ -225,6 +229,7 @@ class H11Protocol:
                 self.server,
                 self.stream_send,
                 STREAM_ID,
+                self.proxy_info,
             )
 
         if self.config.h11_pass_raw_headers:

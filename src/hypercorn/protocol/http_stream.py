@@ -16,6 +16,7 @@ from .events import (
     Trailers,
 )
 from ..config import Config
+from ..proxy_protocol import ProxyInfo, SCOPE_EXTENSION
 from ..typing import (
     AppWrapper,
     ASGISendEvent,
@@ -58,6 +59,7 @@ class HTTPStream:
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
         stream_id: int,
+        proxy_info: ProxyInfo | None = None,
     ) -> None:
         self.app = app
         self.client = client
@@ -73,6 +75,7 @@ class HTTPStream:
         self.state = ASGIHTTPState.REQUEST
         self.stream_id = stream_id
         self.task_group = task_group
+        self.proxy_info = proxy_info
 
     @property
     def idle(self) -> bool:
@@ -109,6 +112,9 @@ class HTTPStream:
 
             if event.http_version in EARLY_HINTS_VERSIONS:
                 self.scope["extensions"]["http.response.early_hint"] = {}
+
+            if self.proxy_info is not None:
+                self.scope["extensions"][SCOPE_EXTENSION] = self.proxy_info.scope_extension()
 
             if valid_server_name(self.config, event):
                 self.app_put = await self.task_group.spawn_app(
