@@ -1,6 +1,15 @@
 v4.27.0
 =======
 
+* Add an optional explanation mode (`jsonschema.explain.explain`, or the
+  ``explain`` method on a validator) which records which keywords ran and
+  whether they succeeded, which ``allOf`` / ``anyOf`` / ``oneOf`` / ``if`` /
+  ``then`` / ``else`` / ``$ref`` / ``$dynamicRef`` branches were entered and
+  whether they succeeded, and where each evaluated property or array item was
+  evaluated from.
+  Locations are reported as JSON Pointers, input values are omitted by
+  default, the report is size-capped and terminates on recursive references,
+  and validation results and order are unchanged.
 * Improve ``best_match`` for ``anyOf`` / ``oneOf`` errors: the most relevant error is now found within each subschema separately before the deepest of those is picked (#1257, #1300).
   In particular an applicator with a single subschema now produces the same best match as the bare subschema would.
   ``relevance`` no longer considers an error's position amongst its siblings.

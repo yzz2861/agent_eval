@@ -2,7 +2,7 @@ import re
 
 from referencing.jsonschema import lookup_recursive_ref
 
-from jsonschema import _utils
+from jsonschema import _explain, _utils
 from jsonschema.exceptions import ValidationError
 
 
@@ -232,6 +232,9 @@ def contains_draft6_draft7(validator, contains, instance, schema):
 
 def recursiveRef(validator, recursiveRef, instance, schema):
     resolved = lookup_recursive_ref(validator._resolver)
+    explainer = _explain.current()
+    if explainer is not None:
+        explainer._pending_ref = ("$recursiveRef", recursiveRef)
     yield from validator.descend(
         instance,
         resolved.contents,
@@ -320,9 +323,19 @@ def find_evaluated_item_indexes_by_schema(validator, instance, schema):
 def unevaluatedItems_draft2019(validator, unevaluatedItems, instance, schema):
     if not validator.is_type(instance, "array"):
         return
-    evaluated_item_indexes = find_evaluated_item_indexes_by_schema(
-        validator, instance, schema,
-    )
+    explainer = _explain.current()
+    if explainer is not None:
+        context = explainer.inhibit()
+        context.__enter__()
+    else:
+        context = None
+    try:
+        evaluated_item_indexes = find_evaluated_item_indexes_by_schema(
+            validator, instance, schema,
+        )
+    finally:
+        if context is not None:
+            context.__exit__(None, None, None)
     unevaluated_items = [
         item for index, item in enumerate(instance)
         if index not in evaluated_item_indexes
@@ -420,9 +433,19 @@ def find_evaluated_property_keys_by_schema(validator, instance, schema):
 def unevaluatedProperties_draft2019(validator, uP, instance, schema):
     if not validator.is_type(instance, "object"):
         return
-    evaluated_keys = find_evaluated_property_keys_by_schema(
-        validator, instance, schema,
-    )
+    explainer = _explain.current()
+    if explainer is not None:
+        context = explainer.inhibit()
+        context.__enter__()
+    else:
+        context = None
+    try:
+        evaluated_keys = find_evaluated_property_keys_by_schema(
+            validator, instance, schema,
+        )
+    finally:
+        if context is not None:
+            context.__exit__(None, None, None)
     unevaluated_keys = []
     for property in instance:
         if property not in evaluated_keys:

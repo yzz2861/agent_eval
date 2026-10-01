@@ -206,6 +206,16 @@ class Validator(Protocol):
 
         """
 
+    def explain(self, instance: Any) -> Any:
+        """
+        Validate ``instance`` while recording an explanation.
+
+        Returns a `jsonschema.explain.Explanation` describing which
+        keywords ran, which applicator branches were entered and whether
+        they succeeded, and where each evaluated property or array item was
+        evaluated from.  Input values are not included by default.
+        """
+
     def evolve(self, **kwargs) -> Validator:
         """
         Create a new validator like this one, but with given changes.

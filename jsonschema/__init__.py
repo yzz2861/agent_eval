@@ -82,6 +82,16 @@ def __getattr__(name):
             stacklevel=2,
         )
         return _RefResolutionError
+    elif name in {
+        "BranchEvaluation",
+        "EvaluationSource",
+        "Explanation",
+        "KeywordEvaluation",
+        "explain",
+    }:
+        import jsonschema.explain as explain_module
+
+        return getattr(explain_module, name)
 
     format_checkers = {
         "draft3_format_checker": Draft3Validator,
@@ -106,15 +116,20 @@ def __getattr__(name):
 
 
 __all__ = [
+    "BranchEvaluation",
     "Draft3Validator",
     "Draft4Validator",
     "Draft6Validator",
     "Draft7Validator",
     "Draft201909Validator",
     "Draft202012Validator",
+    "EvaluationSource",
+    "Explanation",
     "FormatChecker",
+    "KeywordEvaluation",
     "SchemaError",
     "TypeChecker",
     "ValidationError",
+    "explain",
     "validate",
 ]

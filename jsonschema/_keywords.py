@@ -1,6 +1,7 @@
 from fractions import Fraction
 import re
 
+from jsonschema import _explain
 from jsonschema._utils import (
     ensure_list,
     equal,
@@ -69,6 +70,10 @@ def items(validator, items, instance, schema):
     if items is False:
         rest = instance[prefix:] if extra != 1 else instance[prefix]
         item = "items" if prefix != 1 else "item"
+        explainer = _explain.current()
+        if explainer is not None:
+            for index in range(prefix, total):
+                explainer.evaluated_item("items", index, instance[index])
         yield ValidationError(
             f"Expected at most {prefix} {item} but found {extra} "
             f"extra: {rest!r}",
@@ -97,9 +102,12 @@ def contains(validator, contains, instance, schema):
 
     contains_validator = validator.evolve(schema=contains)
 
-    for each in instance:
+    explainer = _explain.current()
+    for index, each in enumerate(instance):
         if contains_validator.is_valid(each):
             matches += 1
+            if explainer is not None:
+                explainer.evaluated_item("contains", index, each)
             if matches > max_contains:
                 yield ValidationError(
                     "Too many items match the given schema "
@@ -276,7 +284,11 @@ def ref(validator, ref, instance, schema):
 
 
 def dynamicRef(validator, dynamicRef, instance, schema):
-    yield from validator._validate_reference(ref=dynamicRef, instance=instance)
+    yield from validator._validate_reference(
+        ref=dynamicRef,
+        instance=instance,
+        keyword="$dynamicRef",
+    )
 
 
 def type(validator, types, instance, schema):
@@ -335,10 +347,19 @@ def allOf(validator, allOf, instance, schema):
 
 
 def anyOf(validator, anyOf, instance, schema):
+    explainer = _explain.current()
     all_errors = []
     for index, subschema in enumerate(anyOf):
         errs = list(validator.descend(instance, subschema, schema_path=index))
         if not errs:
+            if explainer is not None:
+                for skipped in range(index + 1, len(anyOf)):
+                    explainer.branch(
+                        keyword="anyOf",
+                        index=skipped,
+                        evaluated=False,
+                        valid=None,
+                    )
             break
         all_errors.extend(errs)
     else:
@@ -349,12 +370,13 @@ def anyOf(validator, anyOf, instance, schema):
 
 
 def oneOf(validator, oneOf, instance, schema):
-    subschemas = enumerate(oneOf)
+    explainer = _explain.current()
     all_errors = []
-    for index, subschema in subschemas:
+    first_index = None
+    for index, subschema in enumerate(oneOf):
         errs = list(validator.descend(instance, subschema, schema_path=index))
         if not errs:
-            first_valid = subschema
+            first_index = index
             break
         all_errors.extend(errs)
     else:
@@ -363,13 +385,33 @@ def oneOf(validator, oneOf, instance, schema):
             context=all_errors,
         )
 
-    more_valid = [
-        each for _, each in subschemas
-        if validator.evolve(schema=each).is_valid(instance)
-    ]
+    if first_index is None:
+        return
+
+    more_valid = []
+    for index, subschema in enumerate(oneOf):
+        if index == first_index:
+            continue
+        if validator.evolve(schema=subschema).is_valid(instance):
+            more_valid.append((index, subschema))
+            if explainer is not None:
+                explainer.branch(
+                    keyword="oneOf",
+                    index=index,
+                    evaluated=False,
+                    valid=True,
+                )
+        elif explainer is not None:
+            explainer.branch(
+                keyword="oneOf",
+                index=index,
+                evaluated=False,
+                valid=False,
+            )
     if more_valid:
-        more_valid.append(first_valid)
-        reprs = ", ".join(repr(schema) for schema in more_valid)
+        valid_schemas = [subschema for _, subschema in more_valid]
+        valid_schemas.append(oneOf[first_index])
+        reprs = ", ".join(repr(schema) for schema in valid_schemas)
         yield ValidationError(f"{instance!r} is valid under each of {reprs}")
 
 
@@ -380,21 +422,68 @@ def not_(validator, not_schema, instance, schema):
 
 
 def if_(validator, if_schema, instance, schema):
-    if validator.evolve(schema=if_schema).is_valid(instance):
+    explainer = _explain.current()
+    if_valid = validator.evolve(schema=if_schema).is_valid(instance)
+    if explainer is not None:
+        explainer.branch(
+            keyword="if",
+            label="",
+            evaluated=True,
+            valid=if_valid,
+        )
+    if if_valid:
         if "then" in schema:
             then = schema["then"]
+            if explainer is not None:
+                explainer.branch(
+                    keyword="then",
+                    label="then",
+                    evaluated=True,
+                    valid=None,
+                )
             yield from validator.descend(instance, then, schema_path="then")
+        if explainer is not None and "else" in schema:
+            explainer.branch(
+                keyword="else",
+                label="else",
+                evaluated=False,
+                valid=None,
+            )
     elif "else" in schema:
         else_ = schema["else"]
+        if explainer is not None:
+            explainer.branch(
+                keyword="else",
+                label="else",
+                evaluated=True,
+                valid=None,
+            )
         yield from validator.descend(instance, else_, schema_path="else")
+        if explainer is not None and "then" in schema:
+            explainer.branch(
+                keyword="then",
+                label="then",
+                evaluated=False,
+                valid=None,
+            )
 
 
 def unevaluatedItems(validator, unevaluatedItems, instance, schema):
     if not validator.is_type(instance, "array"):
         return
-    evaluated_item_indexes = find_evaluated_item_indexes_by_schema(
-        validator, instance, schema,
-    )
+    explainer = _explain.current()
+    if explainer is not None:
+        context = explainer.inhibit()
+        context.__enter__()
+    else:
+        context = None
+    try:
+        evaluated_item_indexes = find_evaluated_item_indexes_by_schema(
+            validator, instance, schema,
+        )
+    finally:
+        if context is not None:
+            context.__exit__(None, None, None)
     unevaluated_items = [
         item for index, item in enumerate(instance)
         if index not in evaluated_item_indexes
@@ -407,9 +496,19 @@ def unevaluatedItems(validator, unevaluatedItems, instance, schema):
 def unevaluatedProperties(validator, unevaluatedProperties, instance, schema):
     if not validator.is_type(instance, "object"):
         return
-    evaluated_keys = find_evaluated_property_keys_by_schema(
-        validator, instance, schema,
-    )
+    explainer = _explain.current()
+    if explainer is not None:
+        context = explainer.inhibit()
+        context.__enter__()
+    else:
+        context = None
+    try:
+        evaluated_keys = find_evaluated_property_keys_by_schema(
+            validator, instance, schema,
+        )
+    finally:
+        if context is not None:
+            context.__exit__(None, None, None)
     unevaluated_keys = []
     for property in instance:
         if property not in evaluated_keys:

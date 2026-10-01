@@ -22,6 +22,7 @@ import referencing.exceptions
 import referencing.jsonschema
 
 from jsonschema import (
+    _explain,
     _format,
     _keywords,
     _legacy_keywords,
@@ -366,7 +367,16 @@ def create(
             else:
                 _schema, validators = self.schema, self._validators
 
+            explainer = _explain.current()
+            frame = None
+            if explainer is not None:
+                frame = explainer.begin_iter_errors(
+                    schema=_schema,
+                    instance=instance,
+                )
             if _schema is True:
+                if explainer is not None:
+                    explainer.end_frame(frame)
                 return
             elif _schema is False:
                 yield exceptions.ValidationError(
@@ -376,22 +386,42 @@ def create(
                     instance=instance,
                     schema=_schema,
                 )
+                if explainer is not None:
+                    explainer.add_error(frame)
+                    explainer.end_frame(frame)
                 return
 
-            for validator, k, v in validators:
-                errors = validator(self, v, instance, _schema) or ()
-                for error in errors:
-                    # set details if not already set by the called fn
-                    error._set(
-                        validator=k,
-                        validator_value=v,
-                        instance=instance,
-                        schema=_schema,
-                        type_checker=self.TYPE_CHECKER,
-                    )
-                    if k not in {"if", "$ref"}:
-                        error.schema_path.appendleft(k)
-                    yield error
+            try:
+                for validator, k, v in validators:
+                    keyword_frame = None
+                    if explainer is not None:
+                        keyword_frame = explainer.keyword(k)
+                        if keyword_frame is not None:
+                            keyword_frame.__enter__()
+                    errors = validator(self, v, instance, _schema) or ()
+                    try:
+                        for error in errors:
+                            # set details if not already set by the called fn
+                            error._set(
+                                validator=k,
+                                validator_value=v,
+                                instance=instance,
+                                schema=_schema,
+                                type_checker=self.TYPE_CHECKER,
+                            )
+                            if k not in {"if", "$ref"}:
+                                error.schema_path.appendleft(k)
+                            if keyword_frame is not None:
+                                keyword_frame.add_error()
+                            if explainer is not None:
+                                explainer.add_error(frame)
+                            yield error
+                    finally:
+                        if keyword_frame is not None:
+                            keyword_frame.__exit__(None, None, None)
+            finally:
+                if explainer is not None:
+                    explainer.end_frame(frame)
 
         def descend(
             self,
@@ -401,7 +431,18 @@ def create(
             schema_path=None,
             resolver=None,
         ):
+            explainer = _explain.current()
+            frame = None
+            if explainer is not None:
+                frame = explainer.begin_descend(
+                    schema=schema,
+                    instance=instance,
+                    path=path,
+                    schema_path=schema_path,
+                )
             if schema is True:
+                if explainer is not None:
+                    explainer.end_frame(frame)
                 return
             elif schema is False:
                 yield exceptions.ValidationError(
@@ -413,39 +454,62 @@ def create(
                     path=() if path is None else (path,),
                     schema_path=() if schema_path is None else (schema_path,),
                 )
+                if explainer is not None:
+                    explainer.add_error(frame)
+                    explainer.end_frame(frame)
                 return
 
-            if self._ref_resolver is not None:
-                evolved = self.evolve(schema=schema)
-            else:
-                if resolver is None:
-                    resolver = self._resolver.in_subresource(
-                        specification.create_resource(schema),
-                    )
-                evolved = self.evolve(schema=schema, _resolver=resolver)
-
-            for k, v in applicable_validators(schema):
-                validator = evolved.VALIDATORS.get(k)
-                if validator is None:
-                    continue
-
-                errors = validator(evolved, v, instance, schema) or ()
-                for error in errors:
-                    # set details if not already set by the called fn
-                    error._set(
-                        validator=k,
-                        validator_value=v,
-                        instance=instance,
+            try:
+                if self._ref_resolver is not None:
+                    evolved = self.evolve(schema=schema)
+                else:
+                    if resolver is None:
+                        resolver = self._resolver.in_subresource(
+                            specification.create_resource(schema),
+                        )
+                    evolved = self.evolve(
                         schema=schema,
-                        type_checker=evolved.TYPE_CHECKER,
+                        _resolver=resolver,
                     )
-                    if k not in {"if", "$ref"}:
-                        error.schema_path.appendleft(k)
-                    if path is not None:
-                        error.path.appendleft(path)
-                    if schema_path is not None:
-                        error.schema_path.appendleft(schema_path)
-                    yield error
+
+                for k, v in applicable_validators(schema):
+                    validator = evolved.VALIDATORS.get(k)
+                    if validator is None:
+                        continue
+
+                    keyword_frame = None
+                    if explainer is not None:
+                        keyword_frame = explainer.keyword(k)
+                        if keyword_frame is not None:
+                            keyword_frame.__enter__()
+                    errors = validator(evolved, v, instance, schema) or ()
+                    try:
+                        for error in errors:
+                            # set details if not already set by the called fn
+                            error._set(
+                                validator=k,
+                                validator_value=v,
+                                instance=instance,
+                                schema=schema,
+                                type_checker=evolved.TYPE_CHECKER,
+                            )
+                            if k not in {"if", "$ref"}:
+                                error.schema_path.appendleft(k)
+                            if path is not None:
+                                error.path.appendleft(path)
+                            if schema_path is not None:
+                                error.schema_path.appendleft(schema_path)
+                            if keyword_frame is not None:
+                                keyword_frame.add_error()
+                            if explainer is not None:
+                                explainer.add_error(frame)
+                            yield error
+                    finally:
+                        if keyword_frame is not None:
+                            keyword_frame.__exit__(None, None, None)
+            finally:
+                if explainer is not None:
+                    explainer.end_frame(frame)
 
         def validate(self, *args, **kwargs):
             for error in self.iter_errors(*args, **kwargs):
@@ -458,14 +522,17 @@ def create(
                 exc = exceptions.UnknownType(type, instance, self.schema)
                 raise exc from None
 
-        def _validate_reference(self, ref, instance):
+        def _validate_reference(self, ref, instance, keyword="$ref"):
+            explainer = _explain.current()
+            if explainer is not None:
+                explainer._pending_ref = (keyword, ref)
             if self._ref_resolver is None:
                 try:
                     resolved = self._resolver.lookup(ref)
                 except referencing.exceptions.Unresolvable as err:
                     raise exceptions._WrappedReferencingError(err) from err
 
-                return self.descend(
+                yield from self.descend(
                     instance,
                     resolved.contents,
                     resolver=resolved.resolver,
@@ -474,13 +541,13 @@ def create(
                 resolve = getattr(self._ref_resolver, "resolve", None)
                 if resolve is None:
                     with self._ref_resolver.resolving(ref) as resolved:
-                        return self.descend(instance, resolved)
+                        yield from self.descend(instance, resolved)
                 else:
                     scope, resolved = resolve(ref)
                     self._ref_resolver.push_scope(scope)
 
                     try:
-                        return list(self.descend(instance, resolved))
+                        yield from self.descend(instance, resolved)
                     finally:
                         self._ref_resolver.pop_scope()
 
@@ -500,6 +567,32 @@ def create(
 
             error = next(self.iter_errors(instance), None)
             return error is None
+
+        def explain(
+            self,
+            instance,
+            *,
+            include_values=False,
+            max_events=10_000,
+            max_depth=1_000,
+        ):
+            """
+            Validate ``instance`` while recording an explanation.
+
+            Returns a `jsonschema.explain.Explanation` describing which
+            keywords ran, which branches were entered and succeeded, and
+            where each evaluated property or array item was evaluated
+            from.  Input values are not included unless ``include_values``
+            is set.
+            """
+            explainer = _explain.Explainer(
+                include_values=include_values,
+                max_events=max_events,
+                max_depth=max_depth,
+            )
+            with _explain.activate(explainer):
+                errors = list(self.iter_errors(instance))
+            return explainer.build(errors=errors)
 
     evolve_fields = [
         (field.name, field.alias)
