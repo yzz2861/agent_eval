@@ -156,7 +156,7 @@ impl Validator for ModelValidator {
                 let fields_set = py_input.getattr(intern!(py, DUNDER_FIELDS_SET_KEY))?;
                 if self.root_model {
                     let inner_input = py_input.getattr(root_field_py_str(py))?;
-                    self.validate_construct(py, &inner_input, Some(&fields_set), state)
+                    self.validate_construct_reported(py, &inner_input, Some(&fields_set), state)
                 } else {
                     // get dict here so from_attributes logic doesn't apply
                     let dict = py_input.getattr(intern!(py, DUNDER_DICT))?;
@@ -169,7 +169,7 @@ impl Validator for ModelValidator {
                         full_model_dict.update(model_extra.cast()?)?;
                         full_model_dict.into_any()
                     };
-                    self.validate_construct(py, &inner_input, Some(&fields_set), state)
+                    self.validate_construct_reported(py, &inner_input, Some(&fields_set), state)
                 }
             } else {
                 Ok(input.to_object(py)?.unbind())
@@ -177,7 +177,7 @@ impl Validator for ModelValidator {
         } else {
             // Having to construct a new model is not an exact match
             state.floor_exactness(Exactness::Strict);
-            self.validate_construct(py, input, None, state)
+            self.validate_construct_reported(py, input, None, state)
         }
     }
 
@@ -277,6 +277,28 @@ impl ModelValidator {
             set_model_attrs(self_instance, &model_dict, &model_extra, &fields_set)?;
         }
         self.call_post_init(py, self_instance.clone(), input, state.extra())
+    }
+
+    fn validate_construct_reported<'py>(
+        &self,
+        py: Python<'py>,
+        input: &(impl Input<'py> + ?Sized),
+        existing_fields_set: Option<&Bound<'_, PyAny>>,
+        state: &mut ValidationState<'_, 'py>,
+    ) -> ValResult<Py<PyAny>> {
+        let reports = state.report.is_some();
+        let mut guard = if reports {
+            let mut collector = state.report.take().expect("report collected");
+            collector.enter_model();
+            Some(crate::validation_report::ReportModelGuard(Some(collector)))
+        } else {
+            None
+        };
+        let result = self.validate_construct(py, input, existing_fields_set, state);
+        if let Some(guard) = guard.take() {
+            state.report = guard.finish();
+        }
+        result
     }
 
     fn validate_construct<'py>(

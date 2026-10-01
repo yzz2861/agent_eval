@@ -332,6 +332,8 @@ impl ModelFieldsValidator {
 
             for field in &self.fields {
                 let state = &mut state.scoped_set_field_name(Some(field.name.as_py_str().bind(py).clone()));
+                let mut field_report =
+                    crate::validation_report::ReportFieldGuard::start(&mut state.report, &field.name);
 
                 if let Some((lookup_path, lookup_result)) = field
                     .lookup_path_collection
@@ -344,6 +346,9 @@ impl ModelFieldsValidator {
                             for err in line_errors {
                                 errors.push(err.with_outer_location(field.name.clone()));
                             }
+                            if let Some(guard) = field_report.take() {
+                                state.report = guard.finish();
+                            }
                             continue;
                         }
                         Err(e) => {
@@ -355,6 +360,15 @@ impl ModelFieldsValidator {
                         // key is "used" whether or not validation passes, since we want to skip this key in
                         // extra logic either way
                         used_keys.insert(lookup_path.first_key());
+                    }
+                    if let Some(collector) = state.report.as_mut() {
+                        collector.record_input(Some(lookup_path));
+                        if lookup_type.matches(LookupType::Alias) {
+                            collector.record_unconsumed_aliases(
+                                Some(lookup_path),
+                                field.lookup_path_collection.by_alias.iter(),
+                            );
+                        }
                     }
 
                     match field.validator.validate(py, value.borrow_input(), state) {
@@ -376,11 +390,20 @@ impl ModelFieldsValidator {
                             }
                         }
                     }
+                    if let Some(guard) = field_report.take() {
+                        state.report = guard.finish();
+                    }
                     continue;
                 }
 
                 match field.validator.default_value(py, Some(field.name.clone()), state) {
                     Ok(Some(value)) => {
+                        if let Some(collector) = state.report.as_mut()
+                            && lookup_type.matches(LookupType::Alias)
+                        {
+                            collector
+                                .record_unconsumed_aliases(None, field.lookup_path_collection.by_alias.iter());
+                        }
                         // Default value exists, and passed validation if required
                         model_dict.set_item(&field.name, value)?;
                     }
@@ -403,6 +426,9 @@ impl ModelFieldsValidator {
                         }
                     }
                     Err(err) => return Err(err),
+                }
+                if let Some(guard) = field_report.take() {
+                    state.report = guard.finish();
                 }
             }
         }
@@ -586,7 +612,7 @@ impl ModelFieldsValidator {
                     continue;
                 }
 
-                *field_result = Some((*field_info, field_value));
+                *field_result = Some((field_info.clone(), field_value));
             }
 
             if handled {
@@ -631,15 +657,30 @@ impl ModelFieldsValidator {
 
         for (field, field_result) in std::iter::zip(&self.fields, field_results) {
             let state = &mut state.scoped_set_field_name(Some(field.name.as_py_str().bind(py).clone()));
+            let mut field_report =
+                crate::validation_report::ReportFieldGuard::start(&mut state.report, &field.name);
 
             let field_value = if let Some((field_info, field_json_value)) = field_result {
+                if let Some(collector) = state.report.as_mut() {
+                    let path = field_info.path();
+                    collector.record_input(Some(path));
+                    if lookup_type.matches(LookupType::Alias) {
+                        collector
+                            .record_unconsumed_aliases(Some(path), field.lookup_path_collection.by_alias.iter());
+                    }
+                }
                 match field.validator.validate(py, field_json_value, state) {
                     Ok(value) => {
                         fields_set.add(&field.name)?;
                         fields_set_count += 1;
                         value
                     }
-                    Err(ValError::Omit) => continue,
+                    Err(ValError::Omit) => {
+                        if let Some(guard) = field_report.take() {
+                            state.report = guard.finish();
+                        }
+                        continue;
+                    }
                     Err(ValError::LineErrors(line_errors)) => {
                         state.has_field_error = true;
                         // for line errors, apply the actual lookup path used
@@ -657,21 +698,40 @@ impl ModelFieldsValidator {
                             }
                             err
                         }));
+                        if let Some(guard) = field_report.take() {
+                            state.report = guard.finish();
+                        }
                         continue;
                     }
                     Err(err) => return Err(err),
                 }
             } else {
                 match field.validator.default_value(py, Some(&*field.name), state) {
-                    Ok(Some(default_value)) => default_value,
+                    Ok(Some(default_value)) => {
+                        if let Some(collector) = state.report.as_mut()
+                            && lookup_type.matches(LookupType::Alias)
+                        {
+                            collector
+                                .record_unconsumed_aliases(None, field.lookup_path_collection.by_alias.iter());
+                        }
+                        default_value
+                    }
                     Ok(None) => {
                         // There was no default value
                         let error_type = ErrorTypeDefaults::Missing;
                         let error_loc = field.lookup_path_collection.error_loc(lookup_type, self.loc_by_alias);
                         errors.push(ValLineError::new_with_full_loc(error_type, json_input, error_loc));
+                        if let Some(guard) = field_report.take() {
+                            state.report = guard.finish();
+                        }
                         continue;
                     }
-                    Err(ValError::Omit) => continue,
+                    Err(ValError::Omit) => {
+                        if let Some(guard) = field_report.take() {
+                            state.report = guard.finish();
+                        }
+                        continue;
+                    }
                     Err(ValError::LineErrors(line_errors)) => {
                         state.has_field_error = true;
                         for err in line_errors {
@@ -681,6 +741,9 @@ impl ModelFieldsValidator {
                             // We could try to "fix" this in the future if desired.
                             errors.push(err);
                         }
+                        if let Some(guard) = field_report.take() {
+                            state.report = guard.finish();
+                        }
                         continue;
                     }
                     Err(err) => return Err(err),
@@ -688,6 +751,9 @@ impl ModelFieldsValidator {
             };
 
             model_dict.set_item(&field.name, field_value)?;
+            if let Some(guard) = field_report.take() {
+                state.report = guard.finish();
+            }
         }
 
         if matches!(extra_behavior, ExtraBehavior::Allow) {

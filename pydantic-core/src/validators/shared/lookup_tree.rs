@@ -38,6 +38,7 @@ impl LookupTree {
                             LookupType::Name
                         },
                         alias_index: 0,
+                        path: collection.by_name.clone(),
                     },
                 },
             );
@@ -51,6 +52,7 @@ impl LookupTree {
                         lookup_priority: LookupFieldPriority {
                             lookup_type: LookupType::Alias,
                             alias_index,
+                            path: alias.clone(),
                         },
                     },
                 );
@@ -72,12 +74,13 @@ impl LookupTree {
 }
 
 /// When resolving data for a field, aliases are preferred over names, and earlier aliases are preferred over later ones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupFieldPriority {
     /// The type of lookups that will match this lookup
     lookup_type: LookupType,
     /// The index of this alias within the `AliasChoices` for the field
     alias_index: usize,
+    path: LookupPath,
 }
 
 impl LookupFieldPriority {
@@ -97,7 +100,7 @@ impl LookupFieldPriority {
 }
 
 /// Represents a location in the lookup tree which corresponds to data for a specific field.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LookupFieldInfo {
     /// The field which this lookup will populate.
     pub field_index: usize,
@@ -118,6 +121,10 @@ impl LookupFieldInfo {
         } else {
             None
         }
+    }
+
+    pub fn path(&self) -> &LookupPath {
+        &self.lookup_priority.path
     }
 }
 

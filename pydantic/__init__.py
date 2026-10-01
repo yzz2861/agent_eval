@@ -51,6 +51,13 @@ if TYPE_CHECKING:
     from .type_adapter import TypeAdapter
     from .types import *
     from .validate_call_decorator import validate_call
+    from .validation_report import (
+        DefaultFactorySource,
+        DefaultSource,
+        ValidationInputPath,
+        ValidationReport,
+        ValidationValueReport,
+    )
     from .warnings import (
         PydanticDeprecatedSince20,
         PydanticDeprecatedSince26,
@@ -221,6 +228,12 @@ __all__ = (
     'FailFast',
     # type_adapter
     'TypeAdapter',
+    # validation report
+    'DefaultFactorySource',
+    'DefaultSource',
+    'ValidationInputPath',
+    'ValidationReport',
+    'ValidationValueReport',
     # version
     '__version__',
     'VERSION',
@@ -389,6 +402,12 @@ _dynamic_imports: 'dict[str, tuple[str, str]]' = {
     'FailFast': (__spec__.parent, '.types'),
     # type_adapter
     'TypeAdapter': (__spec__.parent, '.type_adapter'),
+    # validation report
+    'DefaultFactorySource': (__spec__.parent, '.validation_report'),
+    'DefaultSource': (__spec__.parent, '.validation_report'),
+    'ValidationInputPath': (__spec__.parent, '.validation_report'),
+    'ValidationReport': (__spec__.parent, '.validation_report'),
+    'ValidationValueReport': (__spec__.parent, '.validation_report'),
     # warnings
     'PydanticDeprecatedSince20': (__spec__.parent, '.warnings'),
     'PydanticDeprecatedSince26': (__spec__.parent, '.warnings'),

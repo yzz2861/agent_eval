@@ -10,6 +10,7 @@ use crate::recursion_guard::{ContainsRecursionState, RecursionState};
 use crate::tools::new_py_string;
 
 use super::Extra;
+use crate::validation_report::ValidationReportCollector;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub enum Exactness {
@@ -43,6 +44,7 @@ pub struct ValidationState<'a, 'py> {
     pub self_instance: Option<&'a Bound<'py, PyAny>>,
     // deliberately make Extra readonly
     extra: Extra<'a, 'py>,
+    pub report: Option<ValidationReportCollector>,
 }
 
 impl<'a, 'py> ValidationState<'a, 'py> {
@@ -63,6 +65,7 @@ impl<'a, 'py> ValidationState<'a, 'py> {
             extra,
             data: None,
             self_instance,
+            report: None,
         }
     }
 

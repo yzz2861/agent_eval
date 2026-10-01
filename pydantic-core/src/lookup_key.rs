@@ -48,7 +48,7 @@ impl FromPyObject<'_, '_> for LookupPath {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct LookupPath {
     /// All paths must start with a string key
     first_item: PathItemString,

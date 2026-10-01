@@ -27,6 +27,7 @@ mod serializers;
 mod tools;
 mod url;
 mod validators;
+mod validation_report;
 
 // required for benchmarks
 pub use self::input::TzInfo;

@@ -193,8 +193,20 @@ impl Validator for WithDefaultValidator {
             }
             return Err(err);
         }
+        let report_default = state.report.is_some();
         match self.default.default_value(py, state.data.as_ref())? {
             Some(stored_dft) => {
+                if report_default {
+                    match &self.default {
+                        DefaultType::Default(_) => state.report.as_mut().expect("report collected").record_default(),
+                        DefaultType::DefaultFactory(_, _) => state
+                            .report
+                            .as_mut()
+                            .expect("report collected")
+                            .record_default_factory(),
+                        DefaultType::None => {}
+                    }
+                }
                 let dft: Py<PyAny> = if self.copy_default {
                     let deepcopy_func = COPY_DEEPCOPY.get_or_init(py, || get_deepcopy(py).unwrap());
                     deepcopy_func.call1(py, (&stored_dft,))?
@@ -202,7 +214,7 @@ impl Validator for WithDefaultValidator {
                     stored_dft
                 };
                 if self.validate_default {
-                    match self.validate(py, dft.bind(py), state) {
+                    match self.validator.validate(py, dft.bind(py), state) {
                         Ok(v) => Ok(Some(v)),
                         Err(e) => {
                             if let Some(outer_loc) = outer_loc {

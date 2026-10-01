@@ -54,6 +54,7 @@ from .config import ConfigDict, ExtraValues
 from .errors import PydanticUndefinedAnnotation, PydanticUserError
 from .json_schema import DEFAULT_REF_TEMPLATE, GenerateJsonSchema, JsonSchemaMode, JsonSchemaValue, model_json_schema
 from .plugin._schema_validator import PluggableSchemaValidator
+from .validation_report import ValidationReport
 from .version import version_short
 
 if TYPE_CHECKING:
@@ -743,6 +744,7 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
                 is_force_rebuild=force,
             )
 
+    @overload
     @classmethod
     def model_validate(
         cls,
@@ -754,7 +756,37 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
         context: Any | None = None,
         by_alias: bool | None = None,
         by_name: bool | None = None,
-    ) -> Self:
+        validation_report: Literal[False] = False,
+    ) -> Self: ...
+
+    @overload
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+        validation_report: Literal[True],
+    ) -> tuple[Self, ValidationReport]: ...
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+        validation_report: bool = False,
+    ) -> Self | tuple[Self, ValidationReport]:
         """Validate a pydantic model instance.
 
         If validation fails, the resulting [`ValidationError`][pydantic_core.ValidationError] reports the
@@ -771,12 +803,14 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
             context: Additional context to pass to the validator.
             by_alias: Whether to use the field's alias when validating against the provided input data.
             by_name: Whether to use the field's name when validating against the provided input data.
+            validation_report: Whether to return a report describing which input path or default supplied each field.
 
         Raises:
             ValidationError: If the object could not be validated.
 
         Returns:
-            The validated model instance.
+            The validated model, or a tuple of the model and validation report when
+            `validation_report=True`.
         """
         # `__tracebackhide__` tells pytest and some other tools to omit this function from tracebacks
         __tracebackhide__ = True
@@ -787,15 +821,36 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
                 code='validate-by-alias-and-name-false',
             )
 
-        return cls.__pydantic_validator__.validate_python(
-            obj,
-            strict=strict,
-            extra=extra,
-            from_attributes=from_attributes,
-            context=context,
-            by_alias=by_alias,
-            by_name=by_name,
-        )
+        if validation_report:
+            try:
+                result = cls.__pydantic_validator__.validate_python(
+                    obj,
+                    strict=strict,
+                    extra=extra,
+                    from_attributes=from_attributes,
+                    context=context,
+                    by_alias=by_alias,
+                    by_name=by_name,
+                    validation_report=True,
+                )
+            except TypeError as exc:
+                if 'validation_report' not in str(exc):
+                    raise
+                raise RuntimeError('validation_report requires a pydantic-core build with report support') from exc
+        else:
+            result = cls.__pydantic_validator__.validate_python(
+                obj,
+                strict=strict,
+                extra=extra,
+                from_attributes=from_attributes,
+                context=context,
+                by_alias=by_alias,
+                by_name=by_name,
+            )
+        if validation_report:
+            model, raw_report = result
+            return model, ValidationReport._from_core(raw_report)
+        return result
 
     @classmethod
     def model_validate_json(

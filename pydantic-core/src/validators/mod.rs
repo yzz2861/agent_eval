@@ -184,7 +184,7 @@ impl SchemaValidator {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (input, *, strict=None, extra=None, from_attributes=None, context=None, self_instance=None, allow_partial=PartialMode::Off, by_alias=None, by_name=None))]
+    #[pyo3(signature = (input, *, strict=None, extra=None, from_attributes=None, context=None, self_instance=None, allow_partial=PartialMode::Off, by_alias=None, by_name=None, validation_report=False))]
     pub fn validate_python(
         &self,
         py: Python,
@@ -197,6 +197,7 @@ impl SchemaValidator {
         allow_partial: PartialMode,
         by_alias: Option<bool>,
         by_name: Option<bool>,
+        validation_report: bool,
     ) -> PyResult<Py<PyAny>> {
         let extra_behavior = extra
             .map(|e| ExtraBehavior::from_str(e.to_str()?).map_err(|err| PyValueError::new_err(err.to_string())))
@@ -215,8 +216,13 @@ impl SchemaValidator {
             allow_partial,
             by_alias,
             by_name,
+            validation_report,
         )
-        .map_err(|e| self.prepare_validation_err(py, e, InputType::Python))
+        .map(|(value, report)| match report {
+            Some(report) => PyTuple::new(py, [value, report])?.into_py_any(py),
+            None => Ok(value),
+        })
+        .map_err(|e| self.prepare_validation_err(py, e, InputType::Python))?;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -250,6 +256,7 @@ impl SchemaValidator {
             false.into(),
             by_alias,
             by_name,
+            false,
         ) {
             Ok(_) => Ok(true),
             Err(ValError::InternalErr(err)) => Err(err),
@@ -293,7 +300,7 @@ impl SchemaValidator {
             ),
             Err(err) => Err(err),
         };
-        r.map_err(|e| self.prepare_validation_err(py, e, InputType::Json))
+        r.map(|(value, _)| value).map_err(|e| self.prepare_validation_err(py, e, InputType::Json))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -328,8 +335,9 @@ impl SchemaValidator {
             allow_partial,
             by_alias,
             by_name,
+            false,
         ) {
-            Ok(r) => Ok(r),
+            Ok((r, _)) => Ok(r),
             Err(e) => Err(self.prepare_validation_err(py, e, t)),
         }
     }
@@ -446,7 +454,8 @@ impl SchemaValidator {
         allow_partial: PartialMode,
         by_alias: Option<bool>,
         by_name: Option<bool>,
-    ) -> ValResult<Py<PyAny>> {
+        collect_report: bool,
+    ) -> ValResult<(Py<PyAny>, Option<Py<PyDict>>)> {
         let mut recursion_guard = RecursionState::default();
         let mut state = ValidationState::new(
             Extra::new(
@@ -464,7 +473,12 @@ impl SchemaValidator {
             None,
             self_instance,
         );
-        self.validator.validate(py, input, &mut state)
+        if collect_report {
+            state.report = Some(crate::validation_report::ValidationReportCollector::new());
+        }
+        let value = self.validator.validate(py, input, &mut state)?;
+        let report: Option<Py<PyDict>> = state.report.take().map(|report| report.into_py_dict(py)).transpose()?;
+        Ok((value, report))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -496,6 +510,7 @@ impl SchemaValidator {
             allow_partial,
             by_alias,
             by_name,
+            false,
         )
     }
 

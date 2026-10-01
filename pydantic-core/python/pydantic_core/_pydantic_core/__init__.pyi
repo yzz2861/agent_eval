@@ -91,6 +91,7 @@ class SchemaValidator:
         """
         The title of the schema, as used in the heading of [`ValidationError.__str__()`][pydantic_core.ValidationError].
         """
+    @overload
     def validate_python(
         self,
         input: Any,
@@ -103,6 +104,38 @@ class SchemaValidator:
         allow_partial: bool | Literal['off', 'on', 'trailing-strings'] = False,
         by_alias: bool | None = None,
         by_name: bool | None = None,
+        validation_report: Literal[False] = False,
+    ) -> Any: ...
+
+    @overload
+    def validate_python(
+        self,
+        input: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraBehavior | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        self_instance: Any | None = None,
+        allow_partial: bool | Literal['off', 'on', 'trailing-strings'] = False,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+        validation_report: Literal[True],
+    ) -> tuple[Any, dict[str, Any]]: ...
+
+    def validate_python(
+        self,
+        input: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraBehavior | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        self_instance: Any | None = None,
+        allow_partial: bool | Literal['off', 'on', 'trailing-strings'] = False,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+        validation_report: bool = False,
     ) -> Any:
         """
         Validate a Python object against the schema and return the validated object.
@@ -124,6 +157,7 @@ class SchemaValidator:
                 `'trailing-strings'` means any final unfinished JSON string is included in the result.
             by_alias: Whether to use the field's alias when validating against the provided input data.
             by_name: Whether to use the field's name when validating against the provided input data.
+            validation_report: Whether to also return a report describing the input path or default used by each field.
 
         Raises:
             ValidationError: If validation fails.

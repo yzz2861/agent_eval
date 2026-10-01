@@ -128,17 +128,37 @@ impl Validator for ListValidator {
         let seq = input.validate_list(state.strict_or(self.strict))?.unpack(state);
 
         let actual_length = seq.len();
+        if self.item_validator.is_none()
+            && actual_length.is_some()
+            && let Some(collector) = state.report.as_mut()
+        {
+            collector.mark_list(actual_length.unwrap_or(0));
+        }
         let output = match self.item_validator {
-            Some(ref v) => seq.iterate(ValidateToVec {
-                py,
-                input,
-                actual_length,
-                max_length: self.max_length,
-                field_type: "List",
-                item_validator: v,
-                state,
-                fail_fast: self.fail_fast,
-            })??,
+            Some(ref v) => {
+                if state.report.is_some() {
+                    state
+                        .report
+                        .as_mut()
+                        .expect("report collected")
+                        .enter_list(actual_length.unwrap_or(DEFAULT_CAPACITY));
+                }
+                let result = seq.iterate(ValidateToVec {
+                    py,
+                    input,
+                    actual_length,
+                    max_length: self.max_length,
+                    field_type: "List",
+                    item_validator: v,
+                    state,
+                    fail_fast: self.fail_fast,
+                });
+                let output = result??;
+                if let Some(collector) = state.report.as_mut() {
+                    collector.exit_list();
+                }
+                output
+            }
             None => {
                 if let Some(py_list) = seq.as_py_list() {
                     length_check!(input, "List", self.min_length, self.max_length, py_list);

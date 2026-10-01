@@ -108,21 +108,36 @@ impl UnionValidator {
     ) -> ValResult<Py<PyAny>> {
         let old_exactness = state.exactness;
         let old_fields_set_count = state.fields_set_count;
+        let report_snapshot = state.report.as_ref().map(|report| report.snapshot());
+        let mut best_report_snapshot = None;
 
         let mut errors = MaybeErrors::new(self.custom_error.as_ref());
         let mut should_omit = false;
 
         let mut best_match: Option<(Py<PyAny>, Exactness, Option<usize>)> = None;
 
-        for (choice, label) in &self.choices {
+        for (choice_index, (choice, label)) in self.choices.iter().enumerate() {
+            if let (Some(report), Some(snapshot)) = (state.report.as_mut(), report_snapshot.as_ref()) {
+                report.restore(snapshot.clone());
+            }
             state.exactness = Some(Exactness::Exact);
             state.fields_set_count = None;
             let result = choice.validate(py, input, state);
             match result {
                 Ok(new_success) => match (state.exactness, state.fields_set_count) {
                     (Some(Exactness::Exact), None) => {
+                        if let Some(report) = state.report.as_mut() {
+                            report.set_branch(choice_index);
+                        }
                         // exact match with no fields set data, return immediately
                         return {
+                            if let (Some(report), Some(snapshot)) =
+                                (state.report.as_mut(), report_snapshot.as_ref())
+                            {
+                                let selected_report = report.snapshot();
+                                report.restore(snapshot.clone());
+                                report.restore(selected_report.take().collector());
+                            }
                             // exact match, return, restore any previous exactness
                             state.exactness = old_exactness;
                             state.fields_set_count = old_fields_set_count;
@@ -153,7 +168,19 @@ impl UnionValidator {
                                 });
 
                         if new_success_is_best_match {
+                            if let Some(report) = state.report.as_mut() {
+                                report.set_branch(choice_index);
+                            }
                             best_match = Some((new_success, new_exactness, new_fields_set_count));
+                        }
+                        if new_success_is_best_match && state.report.is_some() {
+                            best_report_snapshot = Some(
+                                state
+                                    .report
+                                    .as_ref()
+                                    .expect("report collected")
+                                    .snapshot(),
+                            );
                         }
                     }
                 },
@@ -175,6 +202,9 @@ impl UnionValidator {
         // restore previous validation state to prepare for any future validations
         state.exactness = old_exactness;
         state.fields_set_count = old_fields_set_count;
+        if let Some(snapshot) = best_report_snapshot {
+            state.report.as_mut().expect("report collected").restore(snapshot);
+        }
 
         if let Some((best_match, exactness, fields_set_count)) = best_match {
             state.floor_exactness(exactness);
@@ -198,10 +228,20 @@ impl UnionValidator {
         state: &mut ValidationState<'_, 'py>,
     ) -> ValResult<Py<PyAny>> {
         let mut errors = MaybeErrors::new(self.custom_error.as_ref());
+        let report_snapshot = state.report.as_ref().map(|report| report.snapshot());
 
-        for (validator, label) in &self.choices {
+        for (choice_index, (validator, label)) in self.choices.iter().enumerate() {
+            if let (Some(report), Some(snapshot)) = (state.report.as_mut(), report_snapshot.as_ref()) {
+                report.restore(snapshot.clone());
+            }
             match validator.validate(py, input, state) {
                 Err(ValError::LineErrors(lines)) => errors.push(validator, label.as_deref(), lines),
+                Ok(value) => {
+                    if let Some(report) = state.report.as_mut() {
+                        report.set_branch(choice_index);
+                    }
+                    return Ok(value);
+                }
                 otherwise => return otherwise,
             }
         }
@@ -293,6 +333,7 @@ impl<'a> MaybeErrors<'a> {
 pub struct TaggedUnionValidator {
     discriminator: Box<Discriminator>,
     lookup: Box<LiteralLookup<Arc<CombinedValidator>>>,
+    choice_lookup: Box<LiteralLookup<usize>>,
     from_attributes: bool,
     custom_error: Option<CustomError>,
     tags_repr: String,
@@ -334,6 +375,11 @@ impl BuildValidator for TaggedUnionValidator {
         }
 
         let lookup = Box::new(LiteralLookup::new(py, lookup_map.into_iter())?);
+        let choice_map = schema_choices
+            .iter()
+            .enumerate()
+            .map(|(index, (choice_key, _))| (choice_key, index));
+        let choice_lookup = Box::new(LiteralLookup::new(py, choice_map)?);
 
         let key = intern!(py, "from_attributes");
         let from_attributes = schema_or_config(schema, config, key, key)?.unwrap_or(true);
@@ -341,6 +387,7 @@ impl BuildValidator for TaggedUnionValidator {
         Ok(CombinedValidator::TaggedUnion(Box::new(Self {
             discriminator: Box::new(discriminator),
             lookup,
+            choice_lookup,
             from_attributes,
             custom_error: CustomError::build(schema, config, definitions)?,
             tags_repr,
@@ -351,7 +398,7 @@ impl BuildValidator for TaggedUnionValidator {
     }
 }
 
-impl_py_gc_traverse!(TaggedUnionValidator { discriminator, lookup });
+impl_py_gc_traverse!(TaggedUnionValidator { discriminator, lookup, choice_lookup });
 
 impl Validator for TaggedUnionValidator {
     fn validate<'py>(
@@ -396,7 +443,12 @@ impl TaggedUnionValidator {
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
     ) -> ValResult<Py<PyAny>> {
-        if let Ok(Some((tag, validator))) = self.lookup.validate(py, tag) {
+        if let Ok(Some((looked_up_tag, validator))) = self.lookup.validate(py, tag)
+            && let Ok(Some((_, choice_index))) = self.choice_lookup.validate(py, looked_up_tag)
+        {
+            if let Some(report) = state.report.as_mut() {
+                report.set_branch(*choice_index);
+            }
             return match validator.validate(py, input, state) {
                 Ok(res) => Ok(res),
                 Err(err) => Err(err.with_outer_location(tag)),

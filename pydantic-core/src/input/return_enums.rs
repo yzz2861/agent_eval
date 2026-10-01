@@ -137,13 +137,23 @@ pub(crate) fn validate_iter_to_vec<'py>(
             false => PartialMode::Off,
         };
         let item = item_result.map_err(|e| any_next_error!(py, e, max_length_check.input, index))?;
+        let reports = state.report.is_some();
+        if reports {
+            state.report.as_mut().expect("report collected").enter_list_item(index);
+        }
         match validator.validate(py, item.borrow_input(), state) {
             Ok(item) => {
                 max_length_check.incr()?;
                 output.push(item);
+                if reports {
+                    state.report.as_mut().expect("report collected").exit_list_item();
+                }
             }
             Err(ValError::LineErrors(line_errors)) => {
                 max_length_check.incr()?;
+                if reports {
+                    state.report.as_mut().expect("report collected").exit_list_item();
+                }
                 if !is_last_partial {
                     errors.extend(line_errors.into_iter().map(|err| err.with_outer_location(index)));
                     if fail_fast {
@@ -151,8 +161,17 @@ pub(crate) fn validate_iter_to_vec<'py>(
                     }
                 }
             }
-            Err(ValError::Omit) => (),
-            Err(err) => return Err(err),
+            Err(ValError::Omit) => {
+                if reports {
+                    state.report.as_mut().expect("report collected").exit_list_item();
+                }
+            }
+            Err(err) => {
+                if reports {
+                    state.report.as_mut().expect("report collected").exit_list_item();
+                }
+                return Err(err);
+            }
         }
     }
 
