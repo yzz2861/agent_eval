@@ -18,10 +18,131 @@ import collections
 import collections.abc
 import functools
 import heapq
+import math
 import random
 import time
 
 from . import keys
+
+
+_SNAPSHOT_VERSION = 1
+
+
+def _snapshot_entries(snapshot, cache):
+    if not isinstance(snapshot, dict):
+        raise ValueError("invalid snapshot: expected a dict")
+    if type(snapshot.get("version")) is not int:
+        raise ValueError("invalid snapshot: missing version")
+    if snapshot["version"] != _SNAPSHOT_VERSION:
+        raise ValueError("unsupported snapshot version")
+    if snapshot.get("cache") != cache:
+        raise ValueError("invalid snapshot: cache type mismatch")
+    entries = snapshot.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("invalid snapshot: entries must be a list")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("invalid snapshot: entry must be a dict")
+        if "key" not in entry or "value" not in entry:
+            raise ValueError("invalid snapshot: missing key or value")
+    return entries
+
+
+def _timed_snapshot_entries(snapshot, cache):
+    entries = _snapshot_entries(snapshot, cache)
+    if "exported_at" not in snapshot:
+        raise ValueError("invalid snapshot: missing exported_at")
+    if isinstance(snapshot["exported_at"], bool):
+        raise ValueError("invalid snapshot: incompatible export time")
+    expiry_order = snapshot.get("expiry_order")
+    if not isinstance(expiry_order, list):
+        raise ValueError("invalid snapshot: expiry order must be a list")
+    if len(expiry_order) != len(entries):
+        raise ValueError("invalid snapshot: expiry order length mismatch")
+    seen_positions = set()
+    for position in expiry_order:
+        if type(position) is not int or not 0 <= position < len(entries):
+            raise ValueError("invalid snapshot: invalid expiry order position")
+        if position in seen_positions:
+            raise ValueError("invalid snapshot: duplicate expiry order position")
+        seen_positions.add(position)
+    for entry in entries:
+        if "remaining" not in entry:
+            raise ValueError("invalid snapshot: missing remaining lifetime")
+        remaining = entry["remaining"]
+        if isinstance(remaining, bool) or (
+            isinstance(remaining, float) and math.isnan(remaining)
+        ):
+            raise ValueError("invalid snapshot: remaining lifetime must be positive")
+        try:
+            if remaining <= 0:
+                raise ValueError(
+                    "invalid snapshot: remaining lifetime must be positive"
+                )
+        except TypeError:
+            raise ValueError(
+                "invalid snapshot: incompatible remaining lifetime"
+            ) from None
+    return entries, snapshot["exported_at"]
+
+
+def _restore_timed_entries(
+    cache, snapshot, kind, restored_at, decode_key, decode_value
+):
+    raw_entries, exported_at = _timed_snapshot_entries(snapshot, kind)
+    cache_time = cache.timer()
+    if isinstance(restored_at, bool):
+        raise ValueError("invalid snapshot: incompatible export time")
+    try:
+        downtime = restored_at - exported_at
+        if isinstance(downtime, float) and math.isnan(downtime):
+            raise ValueError("invalid snapshot: incompatible export time")
+        if downtime < 0:
+            raise ValueError("invalid snapshot: restore time is before export time")
+    except TypeError:
+        raise ValueError("invalid snapshot: incompatible export time") from None
+
+    decoded = []
+    seen = set()
+    sizes = {}
+    maxsize = cache.maxsize
+    expiry_rank_by_position = {
+        expiry_position: position
+        for position, expiry_position in enumerate(snapshot["expiry_order"])
+    }
+    for position, entry in enumerate(raw_entries):
+        key = decode_key(entry["key"])
+        value = decode_value(entry["value"])
+        if key in seen:
+            raise ValueError("invalid snapshot: duplicate key")
+        seen.add(key)
+        try:
+            expires = cache_time + (entry["remaining"] - downtime)
+        except TypeError:
+            raise ValueError(
+                "invalid snapshot: incompatible remaining lifetime"
+            ) from None
+        expiry_rank = expiry_rank_by_position[position]
+        decoded.append((key, value, expires, expiry_rank))
+
+    active = collections.deque()
+    for decoded_item in decoded:
+        key, value, expires, expiry_rank = decoded_item
+        if expires > cache_time:
+            size = cache.getsizeof(value)
+            if size < 0:
+                raise ValueError("value size must be non-negative")
+            if size > maxsize:
+                raise ValueError("value too large")
+            sizes[key] = size
+            active.append((key, value, expires, size, expiry_rank))
+    currsize = sum(size for _key, _value, _expires, size, _rank in active)
+    while currsize > maxsize:
+        key, _value, _expires, size, _rank = active.popleft()
+        sizes.pop(key)
+        currsize -= size
+    active = list(active)
+    return active, sizes, currsize
 
 
 class _DefaultSize:
@@ -318,6 +439,61 @@ class LRUCache(Cache):
         Cache.clear(self)
         self.__order.clear()
 
+    def export(self, encode_key, encode_value):
+        """Return a portable snapshot with entries in LRU order."""
+        data = self._Cache__data
+        entries = [
+            {
+                "key": encode_key(key),
+                "value": encode_value(data[key]),
+            }
+            for key in self.__order
+        ]
+        return {
+            "version": _SNAPSHOT_VERSION,
+            "cache": "LRUCache",
+            "entries": entries,
+        }
+
+    def restore(self, snapshot, decode_key, decode_value):
+        """Replace the cache contents with a portable LRU snapshot."""
+        raw_entries = _snapshot_entries(snapshot, "LRUCache")
+        entries = collections.deque()
+        seen = set()
+        sizes = {}
+        currsize = 0
+        maxsize = self.maxsize
+
+        for entry in raw_entries:
+            key = decode_key(entry["key"])
+            value = decode_value(entry["value"])
+            if key in seen:
+                raise ValueError("invalid snapshot: duplicate key")
+            seen.add(key)
+            size = self.getsizeof(value)
+            if size < 0:
+                raise ValueError("value size must be non-negative")
+            if size > maxsize:
+                raise ValueError("value too large")
+            entries.append((key, value))
+            sizes[key] = size
+            currsize += size
+
+        while entries and currsize > maxsize:
+            key, _value = entries.popleft()
+            currsize -= sizes.pop(key)
+
+        data = {}
+        order = collections.OrderedDict()
+        for key, value in entries:
+            data[key] = value
+            order[key] = None
+
+        self._Cache__data = data
+        self._Cache__size = sizes
+        self._Cache__currsize = currsize
+        self.__order = order
+
     def __touch(self, key):
         """Mark as recently used"""
         try:
@@ -583,6 +759,71 @@ class TTLCache(_TimedCache):
         root.prev = root.next = root
         self.__links.clear()
 
+    def export(self, encode_key, encode_value, clock=time.time):
+        """Return a portable snapshot with LRU order and remaining TTL."""
+        with self.timer as cache_time:
+            self.expire(cache_time)
+            portable_time = clock()
+            expiry_order = []
+            entry_positions = {}
+            entries = [
+                {
+                    "key": encode_key(key),
+                    "value": encode_value(Cache.__getitem__(self, key)),
+                    "remaining": link.expires - cache_time,
+                }
+                for key, link in self.__links.items()
+            ]
+            for position, key in enumerate(self.__links):
+                entry_positions[key] = position
+            curr = self.__root.next
+            while curr is not self.__root:
+                expiry_order.append(entry_positions[curr.key])
+                curr = curr.next
+        return {
+            "version": _SNAPSHOT_VERSION,
+            "cache": "TTLCache",
+            "exported_at": portable_time,
+            "expiry_order": expiry_order,
+            "entries": entries,
+        }
+
+    def restore(self, snapshot, decode_key, decode_value, clock=time.time):
+        """Replace the cache contents with a portable TTL snapshot."""
+        restored_at = clock()
+        active, sizes, currsize = _restore_timed_entries(
+            self,
+            snapshot,
+            "TTLCache",
+            restored_at,
+            decode_key,
+            decode_value,
+        )
+
+        data = {}
+        links = collections.OrderedDict()
+        root = TTLCache._Link()
+        root.prev = root.next = root
+        for key, value, _expires, _size, _rank in active:
+            data[key] = value
+            links[key] = TTLCache._Link(key)
+
+        for expiry_position in sorted(
+            range(len(active)), key=lambda index: active[index][4]
+        ):
+            key, _value, expires, _size, _rank = active[expiry_position]
+            link = links[key]
+            link.expires = expires
+            link.next = root
+            link.prev = prev = root.prev
+            prev.next = root.prev = link
+
+        self._Cache__data = data
+        self._Cache__size = sizes
+        self._Cache__currsize = currsize
+        self.__root = root
+        self.__links = links
+
     def __getlink(self, key):
         value = self.__links[key]
         self.__links.move_to_end(key)
@@ -596,20 +837,26 @@ class TLRUCache(_TimedCache):
 
     @functools.total_ordering
     class _Item:
-        __slots__ = ("expires", "key", "removed")
+        __slots__ = ("expires", "key", "order", "removed")
 
-        def __init__(self, key=None, expires=None):
+        def __init__(self, key=None, expires=None, order=0):
             self.key = key
             self.expires = expires
+            self.order = order
             self.removed = False
 
         def __lt__(self, other):
-            return self.expires < other.expires
+            if self.expires < other.expires:
+                return True
+            if other.expires < self.expires:
+                return False
+            return self.order < other.order
 
     def __init__(self, maxsize, ttu, timer=time.monotonic, getsizeof=None):
         _TimedCache.__init__(self, maxsize, timer, getsizeof)
         self.__items = collections.OrderedDict()
         self.__order = []
+        self.__sequence = 0
         self.__ttu = ttu
 
     def __contains__(self, key):
@@ -647,7 +894,9 @@ class TLRUCache(_TimedCache):
             self.__getitem(key).removed = True
         except KeyError:
             pass
-        self.__items[key] = item = TLRUCache._Item(key, expires)
+        item = TLRUCache._Item(key, expires, self.__sequence)
+        self.__sequence += 1
+        self.__items[key] = item
         heapq.heappush(self.__order, item)
 
     def __delitem__(self, key, cache_delitem=Cache.__delitem__):
@@ -665,6 +914,14 @@ class TLRUCache(_TimedCache):
             with self.timer as time:
                 if time < curr.expires and not curr.removed:
                     yield curr.key
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if "_TLRUCache__sequence" not in self.__dict__:
+            self.__sequence = len(self.__items)
+        for item in self.__order:
+            if not hasattr(item, "order"):
+                item.order = 0
 
     @property
     def ttu(self):
@@ -713,6 +970,71 @@ class TLRUCache(_TimedCache):
         _TimedCache.clear(self)
         self.__items.clear()
         del self.__order[:]
+
+    def export(self, encode_key, encode_value, clock=time.time):
+        """Return a portable snapshot with LRU order and remaining lifetimes."""
+        with self.timer as cache_time:
+            self.expire(cache_time)
+            portable_time = clock()
+            expiry_order = []
+            entry_positions = {}
+            entries = [
+                {
+                    "key": encode_key(key),
+                    "value": encode_value(Cache.__getitem__(self, key)),
+                    "remaining": item.expires - cache_time,
+                }
+                for key, item in self.__items.items()
+            ]
+            for position, key in enumerate(self.__items):
+                entry_positions[key] = position
+            expiry_heap = [item for item in self.__order]
+            expiry_order = []
+            while expiry_heap:
+                item = heapq.heappop(expiry_heap)
+                if not item.removed:
+                    expiry_order.append(entry_positions[item.key])
+        return {
+            "version": _SNAPSHOT_VERSION,
+            "cache": "TLRUCache",
+            "exported_at": portable_time,
+            "expiry_order": expiry_order,
+            "entries": entries,
+        }
+
+    def restore(self, snapshot, decode_key, decode_value, clock=time.time):
+        """Replace the cache contents with a portable TLRU snapshot."""
+        restored_at = clock()
+        active, sizes, currsize = _restore_timed_entries(
+            self,
+            snapshot,
+            "TLRUCache",
+            restored_at,
+            decode_key,
+            decode_value,
+        )
+
+        data = {}
+        items = collections.OrderedDict()
+        sequence = 0
+        for key, value, expires, _size, _rank in active:
+            data[key] = value
+            items[key] = TLRUCache._Item(key, expires, _rank)
+            sequence = max(sequence, _rank + 1)
+        order = []
+        for expiry_position in sorted(
+            range(len(active)), key=lambda index: active[index][4]
+        ):
+            key = active[expiry_position][0]
+            order.append(items[key])
+        heapq.heapify(order)
+
+        self._Cache__data = data
+        self._Cache__size = sizes
+        self._Cache__currsize = currsize
+        self.__items = items
+        self.__order = order
+        self.__sequence = sequence
 
     def __getitem(self, key):
         value = self.__items[key]

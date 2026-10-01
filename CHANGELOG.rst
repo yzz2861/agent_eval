@@ -1,3 +1,10 @@
+v7.2.1 (unreleased)
+===================
+
+- Add explicit non-pickle export and restore support for
+  ``LRUCache``, ``TTLCache`` and ``TLRUCache``.
+
+
 v7.2.0 (2026-09-16)
 ===================
 

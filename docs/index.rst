@@ -93,7 +93,7 @@ inserted into the cache.
    items used least often to make space when necessary.
 
 .. autoclass:: LRUCache(maxsize, getsizeof=None)
-   :members: popitem
+   :members: export, popitem, restore
 
    This class discards the least recently used items first to make
    space when necessary.
@@ -110,7 +110,7 @@ inserted into the cache.
    non-empty sequence.
 
 .. autoclass:: TTLCache(maxsize, ttl, timer=time.monotonic, getsizeof=None)
-   :members: popitem, timer, ttl
+   :members: export, popitem, restore, timer, ttl
 
    This class associates a time-to-live value with each item.  Items
    that expire because they have exceeded their time-to-live will be
@@ -152,7 +152,7 @@ inserted into the cache.
       :returns: An iterable of expired `(key, value)` pairs.
 
 .. autoclass:: TLRUCache(maxsize, ttu, timer=time.monotonic, getsizeof=None)
-   :members: popitem, timer, ttu
+   :members: export, popitem, restore, timer, ttu
 
    Similar to :class:`TTLCache`, this class also associates an
    expiration time with each item.  However, for :class:`TLRUCache`
@@ -203,6 +203,56 @@ inserted into the cache.
       :attr:`timer`.
 
       :returns: An iterable of expired `(key, value)` pairs.
+
+
+Exporting and restoring caches
+==============================
+
+:class:`LRUCache`, :class:`TTLCache` and :class:`TLRUCache` provide
+``export()`` and ``restore()`` methods for explicitly transferring cache
+state across processes or service restarts.  The returned object is a
+plain :class:`dict`, but keys and values are not serialized by this
+library: callers provide ``encode_key``/``decode_key`` and
+``encode_value``/``decode_value`` callables, for example to convert
+objects to and from JSON.  ``pickle`` is neither required nor used.
+
+.. testcode::
+
+   import json
+
+   cache = LRUCache(maxsize=10)
+   cache[1] = "one"
+   snapshot = cache.export(str, lambda value: value)
+   data = json.dumps(snapshot)
+
+   restored = LRUCache(maxsize=10)
+   restored.restore(json.loads(data), int, str)
+
+For timed caches, entries store their remaining lifetime and a portable
+``exported_at`` timestamp.  The default portable clock is
+:func:`time.time`, while the cache itself can continue to use
+:func:`time.monotonic`.  On restore, the difference between the new and
+exported portable timestamps is subtracted from each remaining lifetime,
+so values from another process's monotonic clock are never interpreted as
+absolute times.  Custom cache timers with non-second units must receive a
+compatible portable ``clock`` callable.
+
+.. testcode::
+
+   import json
+
+   cache = TTLCache(maxsize=10, ttl=60)
+   cache[1] = "one"
+   data = json.dumps(cache.export(str, lambda value: value))
+
+   restored = TTLCache(maxsize=10, ttl=60)
+   restored.restore(json.loads(data), int, str)
+
+Exported snapshots retain LRU order.  Timed snapshots also retain their
+expiration order.  Items that expired during downtime are not restored.
+When the destination cache has a smaller ``maxsize``, items are pruned
+using the cache's normal LRU policy.  Invalid metadata, duplicate keys,
+or decoder failures leave the destination cache unchanged.
 
 
 Extending cache classes
