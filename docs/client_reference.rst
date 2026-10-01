@@ -50,6 +50,7 @@ The client session supports the context manager protocol for self closing.
                          raise_for_status=False, \
                          timeout=sentinel, \
                          auto_decompress=True, \
+                         content_digest_verification=None, \
                          ssl=True, \
                          trust_env=False, \
                          requote_redirect_url=True, \
@@ -173,6 +174,12 @@ The client session supports the context manager protocol for self closing.
    :param bool auto_decompress: Automatically decompress response body (``True`` by default).
 
       .. versionadded:: 2.3
+
+   :param ContentDigestVerification content_digest_verification: Verify
+      supported ``Content-Digest`` values while reading response content.
+      :attr:`ContentDigestVerification.IF_PRESENT` verifies supported digests
+      when present; :attr:`ContentDigestVerification.REQUIRED` also rejects a
+      response without a supported digest.
 
    :param ssl: Default SSL validation mode for requests made through this
       session. ``True`` for default SSL check
@@ -379,6 +386,10 @@ The client session supports the context manager protocol for self closing.
 
       .. versionadded:: 3.7
 
+   .. attribute:: content_digest_verification
+
+      Default :class:`ContentDigestVerification` policy, or ``None``.
+
    .. attribute:: trust_env
 
       Trust environment settings for proxy configuration
@@ -411,6 +422,7 @@ The client session supports the context manager protocol for self closing.
                          middlewares=None, \
                          read_bufsize=None, \
                          auto_decompress=None, \
+                         content_digest_verification=None, \
                          max_line_size=None, \
                          max_field_size=None, \
                          max_headers=None)
@@ -577,6 +589,9 @@ The client session supports the context manager protocol for self closing.
       :param bool auto_decompress: Automatically decompress response body.
          Overrides :attr:`ClientSession.auto_decompress`.
          May be used to enable/disable auto decompression on a per-request basis.
+
+      :param ContentDigestVerification content_digest_verification: Overrides
+         :attr:`ClientSession.content_digest_verification` for this request.
 
       :param int max_line_size: Maximum allowed size of lines in responses.
 
@@ -908,6 +923,7 @@ certification chaining.
                         server_hostname=None, \
                         proxy_headers=None, \
                         trace_request_ctx=None, \
+                        content_digest_verification=None, \
                         read_bufsize=None, \
                         auto_decompress=None, \
                         max_line_size=None, \
@@ -1047,6 +1063,9 @@ certification chaining.
 
    :param bool auto_decompress: Automatically decompress response body.
       May be used to enable/disable auto decompression on a per-request basis.
+
+   :param ContentDigestVerification content_digest_verification: Overrides
+      the session's default verification policy for this request.
 
    :param int max_line_size: Maximum allowed size of lines in responses.
 
@@ -1532,6 +1551,14 @@ Response object
       closed before response receives all data or in case if any
       transfer encoding related errors like malformed chunked
       encoding of broken compression data.
+
+   .. attribute:: content_digest_verified
+
+      :class:`bool` indicating that response content was fully consumed and
+      its supported ``Content-Digest`` value matched. It stays ``False`` while
+      content is pending, when optional verification has no supported digest,
+      or after a verification failure.
+      ``response.verified`` is an alias for this attribute.
 
    .. attribute:: cookies
 
@@ -2603,6 +2630,24 @@ Utilities
 
       await session.get(url, ssl=aiohttp.Fingerprint(digest))
 
+.. class:: ContentDigestVerification
+   :canonical: aiohttp.content_digest.ContentDigestVerification
+
+   Policy for verifying a response's ``Content-Digest`` header.
+   ``OPTIONAL`` is an alias for :attr:`IF_PRESENT`.
+
+   .. attribute:: IF_PRESENT
+
+      Verify every supported digest (``sha-256`` and ``sha-512``) when the
+      header contains one. Missing or unsupported-only headers leave
+      :attr:`ClientResponse.content_digest_verified` as ``False``; malformed
+      or mismatching supported values raise :exc:`ContentDigestError`.
+
+   .. attribute:: REQUIRED
+
+      Like :attr:`IF_PRESENT`, but also raise :exc:`ContentDigestError` when
+      the response does not provide a supported digest.
+
    .. versionadded:: 3.0
 
 .. function:: set_zlib_backend(lib)
@@ -2739,6 +2784,15 @@ All exceptions are available as members of *aiohttp* module.
    3. not enough data that satisfy ``Content-Length`` HTTP header.
 
    Derived from :exc:`ClientError`
+
+.. exception:: ContentDigestError
+   :canonical: aiohttp.content_digest.ContentDigestError
+
+   Raised while reading response content when ``Content-Digest`` is
+   malformed, lacks a supported digest in required mode, or the streamed
+   representation data does not match the supplied digest.
+
+   Derived from :exc:`ClientPayloadError`
 
 .. exception:: InvalidURL
    :canonical: aiohttp.client_exceptions.InvalidURL

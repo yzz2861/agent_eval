@@ -84,6 +84,10 @@ from .client_ws import (
     ClientWSTimeout,
 )
 from .connector import BaseConnector, NamedPipeConnector, TCPConnector, UnixConnector
+from .content_digest import (
+    ContentDigestVerification,
+    normalize_content_digest_verification,
+)
 from .cookiejar import CookieJar
 from .helpers import (
     _SENTINEL,
@@ -190,6 +194,7 @@ class _RequestOptions(TypedDict, total=False):
     trace_request_ctx: object
     read_bufsize: int | None
     auto_decompress: bool | None
+    content_digest_verification: ContentDigestVerification | str | None
     max_line_size: int | None
     max_field_size: int | None
     max_headers: int | None
@@ -273,6 +278,7 @@ class ClientSession:
         "_timeout",
         "_raise_for_status",
         "_auto_decompress",
+        "_content_digest_verification",
         "_trust_env",
         "_default_headers",
         "_skip_auto_headers",
@@ -312,6 +318,7 @@ class ClientSession:
         raise_for_status: bool | Callable[[ClientResponse], Awaitable[None]] = False,
         timeout: _SENTINEL | ClientTimeout | None = sentinel,
         auto_decompress: bool = True,
+        content_digest_verification: ContentDigestVerification | str | None = None,
         trust_env: bool = False,
         requote_redirect_url: bool = True,
         trace_configs: list[TraceConfig[object]] | None = None,
@@ -389,6 +396,9 @@ class ClientSession:
         self._json_serialize_bytes = json_serialize_bytes
         self._raise_for_status = raise_for_status
         self._auto_decompress = auto_decompress
+        self._content_digest_verification = normalize_content_digest_verification(
+            content_digest_verification
+        )
         self._trust_env = trust_env
         self._requote_redirect_url = requote_redirect_url
         self._read_bufsize = read_bufsize
@@ -490,6 +500,7 @@ class ClientSession:
         trace_request_ctx: object = None,
         read_bufsize: int | None = None,
         auto_decompress: bool | None = None,
+        content_digest_verification: ContentDigestVerification | str | None = None,
         max_line_size: int | None = None,
         max_field_size: int | None = None,
         max_headers: int | None = None,
@@ -578,6 +589,12 @@ class ClientSession:
 
         if auto_decompress is None:
             auto_decompress = self._auto_decompress
+        if content_digest_verification is None:
+            content_digest_verification = self._content_digest_verification
+        else:
+            content_digest_verification = normalize_content_digest_verification(
+                content_digest_verification
+            )
 
         if max_line_size is None:
             max_line_size = self._max_line_size
@@ -677,6 +694,7 @@ class ClientSession:
                         "skip_payload": method in EMPTY_BODY_METHODS,
                         "read_until_eof": read_until_eof,
                         "auto_decompress": auto_decompress,
+                        "content_digest_verification": content_digest_verification,
                         "read_timeout": real_timeout.sock_read,
                         "read_bufsize": read_bufsize,
                         "timeout_ceil_threshold": self._connector._timeout_ceil_threshold,

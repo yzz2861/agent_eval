@@ -31,6 +31,10 @@ from .http_exceptions import (
     PayloadEncodingError,
     TransferEncodingError,
 )
+from .content_digest import (
+    ContentDigestError as _ContentDigestError,
+    ContentDigestVerifier as _ContentDigestVerifier,
+)
 from .http_parser import DeflateBuffer as _DeflateBuffer
 from .http_writer import (
     HttpVersion as _HttpVersion,
@@ -68,6 +72,9 @@ cdef object HttpVersion10 = _HttpVersion10
 cdef object HttpVersion11 = _HttpVersion11
 cdef object SEC_WEBSOCKET_KEY1 = hdrs.SEC_WEBSOCKET_KEY1
 cdef object CONTENT_ENCODING = hdrs.CONTENT_ENCODING
+cdef object CONTENT_DIGEST = hdrs.CONTENT_DIGEST
+cdef object ContentDigestVerifier = _ContentDigestVerifier
+cdef object ContentDigestError = _ContentDigestError
 cdef object EMPTY_PAYLOAD = _EMPTY_PAYLOAD
 cdef object StreamReader = _StreamReader
 cdef object DeflateBuffer = _DeflateBuffer
@@ -344,6 +351,9 @@ cdef class HttpParser:
         object  _payload_exception
         object  _last_error
         bint    _auto_decompress
+        object  _content_digest_verification
+        object  _content_digest_verifier
+        object  _content_digest_output_verifier
         int     _limit
 
         str     _content_encoding
@@ -374,6 +384,7 @@ cdef class HttpParser:
         bint response_with_body=True, bint read_until_eof=False,
         bint auto_decompress=True,
         Py_ssize_t max_msg_queue_size=0,
+        content_digest_verification=None,
     ):
         cparser.llhttp_settings_init(self._csettings)
         cparser.llhttp_init(self._cparser, mode, self._csettings)
@@ -410,6 +421,9 @@ cdef class HttpParser:
         self._upgraded = False
         self._pending_upgrade = False
         self._auto_decompress = auto_decompress
+        self._content_digest_verification = content_digest_verification
+        self._content_digest_verifier = None
+        self._content_digest_output_verifier = None
         self._content_encoding = None
         self._lax = False
         self._seen_singletons = set()
@@ -533,7 +547,7 @@ cdef class HttpParser:
         if (
             self._response_with_body
             and (
-                ULLONG_MAX > self._cparser.content_length > 0 or chunked or
+                ULLONG_MAX > self._cparser.content_length >= 0 or chunked or
                 self._cparser.method == cparser.HTTP_CONNECT or
                 (self._cparser.status_code >= 199 and
                  self._cparser.content_length == 0 and
@@ -546,10 +560,17 @@ cdef class HttpParser:
         else:
             payload = EMPTY_PAYLOAD
 
+        self._prepare_content_digest_verifier(headers, payload)
         self._payload = payload
         self._content_length_expected = self._cparser.content_length
         if encoding is not None and self._auto_decompress:
-            self._payload = DeflateBuffer(payload, encoding, max_decompress_size=self._limit)
+            self._payload = DeflateBuffer(
+                payload,
+                encoding,
+                max_decompress_size=self._limit,
+                content_digest_verifier=self._content_digest_verifier)
+            self._content_digest_output_verifier = self._content_digest_verifier
+            self._content_digest_verifier = None
 
         self._messages.append((msg, payload))
         if self._max_msg_queue_size:
@@ -560,8 +581,14 @@ cdef class HttpParser:
         # The payload is None when feed_eof() already completed a fully
         # received content-length body.
         if self._payload is not None:
-            self._payload.feed_eof()
-            self._payload = None
+            try:
+                self._finalize_content_digest()
+                self._payload.feed_eof()
+            except BaseException as exc:
+                set_exception(payload, exc)
+                raise
+            else:
+                self._payload = None
 
     cdef _on_chunk_header(self):
         self._payload.begin_http_chunk_receiving()
@@ -582,6 +609,29 @@ cdef class HttpParser:
                 return HttpVersion11
 
         return HttpVersion(parser.http_major, parser.http_minor)
+
+    cdef _prepare_content_digest_verifier(self, object headers, object payload):
+        cdef object policy = self._content_digest_verification
+        cdef object verifier
+        if policy is None or payload is EMPTY_PAYLOAD:
+            return
+        verifier = ContentDigestVerifier(
+            headers.getall(CONTENT_DIGEST), policy)
+        payload.content_digest_verifier = verifier
+        self._content_digest_verifier = verifier
+
+    cdef _update_content_digest(self, bytes chunk):
+        cdef object verifier = self._content_digest_verifier
+        if verifier is not None:
+            verifier.update(chunk)
+
+    cdef _finalize_content_digest(self):
+        cdef object verifier = self._content_digest_verifier
+        cdef object output_verifier = self._content_digest_output_verifier
+        if verifier is not None:
+            verifier.finalize_encoded()
+        elif output_verifier is not None:
+            output_verifier.finalize_encoded()
 
     ### Public API ###
 
@@ -613,16 +663,22 @@ cdef class HttpParser:
             else:
                 # Reading until EOF, or a content-length body that was fully
                 # received but the parser paused.
-                self._eof_pending = True
-                while self._more_data_available:
-                    if self._paused:
-                        self._paused = False
-                        return  # Will resume via feed_data(b"") later
-                    self._more_data_available = self._payload.feed_data(b"")
-                self._payload.feed_eof()
-                self._payload = None
-                self._more_data_available = False
-                self._eof_pending = False
+                try:
+                    self._eof_pending = True
+                    while self._more_data_available:
+                        if self._paused:
+                            self._paused = False
+                            return  # Will resume via feed_data(b"") later
+                        self._more_data_available = self._payload.feed_data(b"")
+                    self._finalize_content_digest()
+                    self._payload.feed_eof()
+                except BaseException as exc:
+                    set_exception(self._payload, exc)
+                    raise
+                finally:
+                    self._payload = None
+                    self._more_data_available = False
+                    self._eof_pending = False
         elif self._started:
             self._on_headers_complete()
             if self._messages:
@@ -656,9 +712,15 @@ cdef class HttpParser:
                 return EMPTY_FEED_DATA_RESULT
 
         if self._eof_pending:
-            self._payload.feed_eof()
-            self._payload = None
-            self._eof_pending = False
+            try:
+                self._finalize_content_digest()
+                self._payload.feed_eof()
+            except BaseException as exc:
+                set_exception(self._payload, exc)
+                raise
+            finally:
+                self._payload = None
+                self._eof_pending = False
             # We can't have new messages here, otherwise we wouldn't have
             # received EOF.
             return EMPTY_FEED_DATA_RESULT
@@ -731,11 +793,13 @@ cdef class HttpRequestParser(HttpParser):
         size_t max_field_size=8190, payload_exception=None,
         bint response_with_body=True, bint read_until_eof=False,
         bint auto_decompress=True, Py_ssize_t max_msg_queue_size=0,
+        content_digest_verification=None,
     ):
         self._init(cparser.HTTP_REQUEST, protocol, loop, limit, timer,
                    max_line_size, max_headers, max_field_size,
                    payload_exception, response_with_body, read_until_eof,
-                   auto_decompress, max_msg_queue_size)
+                   auto_decompress, max_msg_queue_size,
+                   content_digest_verification)
 
     cdef object _on_status_complete(self):
         cdef int idx1, idx2
@@ -794,12 +858,14 @@ cdef class HttpResponseParser(HttpParser):
             size_t max_line_size=8190, size_t max_headers=128,
             size_t max_field_size=8190, payload_exception=None,
             bint response_with_body=True, bint read_until_eof=False,
-            bint auto_decompress=True
+            bint auto_decompress=True,
+            content_digest_verification=None
     ):
         self._init(cparser.HTTP_RESPONSE, protocol, loop, limit, timer,
                    max_line_size, max_headers, max_field_size,
                    payload_exception, response_with_body, read_until_eof,
-                   auto_decompress)
+                   auto_decompress, 0,
+                   content_digest_verification)
         # Use strict parsing on dev mode, so users are warned about broken servers.
         if not DEBUG:
             cparser.llhttp_set_lenient_headers(self._cparser, 1)
@@ -818,6 +884,8 @@ cdef int cb_on_message_begin(cparser.llhttp_t* parser) except? -1:
     cdef HttpParser pyparser = <HttpParser>parser.data
 
     pyparser._started = True
+    pyparser._content_digest_verifier = None
+    pyparser._content_digest_output_verifier = None
     pyparser._headers = []
     pyparser._seen_singletons = set()
     pyparser._raw_headers = []
@@ -913,10 +981,14 @@ cdef int cb_on_body(cparser.llhttp_t* parser,
     cdef bytes body = at[:length]
     while body or pyparser._more_data_available:
         try:
+            if pyparser._content_digest_verifier is not None:
+                pyparser._content_digest_verifier.update(body)
             pyparser._more_data_available = pyparser._payload.feed_data(body)
         except BaseException as underlying_exc:
             reraised_exc = underlying_exc
-            if pyparser._payload_exception is not None:
+            if isinstance(underlying_exc, ContentDigestError):
+                reraised_exc = underlying_exc
+            elif pyparser._payload_exception is not None:
                 reraised_exc = pyparser._payload_exception(str(underlying_exc))
 
             set_exception(pyparser._payload, reraised_exc, underlying_exc)

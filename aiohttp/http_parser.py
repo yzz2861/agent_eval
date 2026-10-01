@@ -29,6 +29,11 @@ from .compression_utils import (
     ZLibDecompressor,
     ZSTDDecompressor,
 )
+from .content_digest import (
+    ContentDigestError,
+    ContentDigestVerification,
+    ContentDigestVerifier,
+)
 from .helpers import (
     _EXC_SENTINEL,
     DEBUG,
@@ -57,6 +62,8 @@ from .typedefs import RawHeaders
 
 if TYPE_CHECKING:
     from .client_proto import ResponseHandler
+
+ContentDigestVerifierType = ContentDigestVerifier
 
 __all__ = (
     "HeadersParser",
@@ -268,6 +275,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
         read_until_eof: bool = False,
         auto_decompress: bool = True,
         max_msg_queue_size: int = 0,
+        content_digest_verification: ContentDigestVerification | None = None,
     ) -> None:
         self.protocol = protocol
         self.loop = loop
@@ -280,6 +288,8 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
         self.payload_exception = payload_exception
         self.response_with_body = response_with_body
         self.read_until_eof = read_until_eof
+        self._content_digest_verification = content_digest_verification
+        self._content_digest_verifier: ContentDigestVerifierType | None = None
 
         self._lines: list[bytes] = []
         self._tail = b""
@@ -294,6 +304,21 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
         # Stop emitting messages once this many are queued unconsumed (0 = off).
         self._max_msg_queue_size = max_msg_queue_size
         self._msg_in_flight = 0
+
+    def _prepare_content_digest_verifier(
+        self,
+        headers: HeadersDictProxy,
+        payload: StreamReader,
+    ) -> None:
+        policy = self._content_digest_verification
+        if policy is None:
+            return
+        verifier = ContentDigestVerifier(
+            headers.getall(hdrs.CONTENT_DIGEST),
+            policy,
+        )
+        payload.content_digest_verifier = verifier
+        self._content_digest_verifier = verifier
 
     @abc.abstractmethod
     def parse_message(self, lines: list[bytes]) -> _MsgT: ...
@@ -390,6 +415,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
 
                     # \r\n\r\n found
                     if self._lines[-1] == EMPTY:
+                        self._content_digest_verifier = None
                         max_trailers = self.max_headers - len(self._lines)
                         try:
                             msg: _MsgT = self.parse_message(self._lines)
@@ -439,6 +465,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 loop=loop,
                                 limit=self._limit,
                             )
+                            self._prepare_content_digest_verifier(msg.headers, payload)
                             payload_parser = HttpPayloadParser(
                                 payload,
                                 length=length,
@@ -454,6 +481,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 max_field_size=self.max_field_size,
                                 max_trailers=max_trailers,
                                 limit=self._limit,
+                                content_digest_verifier=self._content_digest_verifier,
                             )
                             if not payload_parser.done:
                                 self._payload_parser = payload_parser
@@ -469,6 +497,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 loop=loop,
                                 limit=self._limit,
                             )
+                            self._prepare_content_digest_verifier(msg.headers, payload)
                             self._upgraded = True
                             self._payload_parser = HttpPayloadParser(
                                 payload,
@@ -481,6 +510,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 max_field_size=self.max_field_size,
                                 max_trailers=max_trailers,
                                 limit=self._limit,
+                                content_digest_verifier=self._content_digest_verifier,
                             )
                         elif not empty_body and length is None and self.read_until_eof:
                             payload = StreamReader(
@@ -489,6 +519,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 loop=loop,
                                 limit=self._limit,
                             )
+                            self._prepare_content_digest_verifier(msg.headers, payload)
                             payload_parser = HttpPayloadParser(
                                 payload,
                                 length=length,
@@ -504,6 +535,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 max_field_size=self.max_field_size,
                                 max_trailers=max_trailers,
                                 limit=self._limit,
+                                content_digest_verifier=self._content_digest_verifier,
                             )
                             if not payload_parser.done:
                                 self._payload_parser = payload_parser
@@ -545,9 +577,12 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                         data[start_pos:], SEP
                     )
                 except Exception as underlying_exc:
-                    reraised_exc: BaseException = underlying_exc
-                    if self.payload_exception is not None:
+                    if isinstance(underlying_exc, ContentDigestError):
+                        reraised_exc: BaseException = underlying_exc
+                    elif self.payload_exception is not None:
                         reraised_exc = self.payload_exception(str(underlying_exc))
+                    else:
+                        reraised_exc = underlying_exc
 
                     set_exception(
                         self._payload_parser.payload,
@@ -868,6 +903,7 @@ class HttpPayloadParser:
         max_field_size: int = 8190,
         max_trailers: int = 128,
         limit: int = DEFAULT_CHUNK_SIZE,
+        content_digest_verifier: ContentDigestVerifier | None = None,
     ) -> None:
         self._length = 0
         self._paused = False
@@ -885,12 +921,20 @@ class HttpPayloadParser:
         self._trailer_lines: list[bytes] = []
         self.done = False
         self._eof_pending = False
+        self._content_digest_verifier = content_digest_verifier
+        self._content_digest_output_verifier: ContentDigestVerifier | None = None
 
         # payload decompression wrapper
+        verifier = content_digest_verifier
         if response_with_body and compression and self._auto_decompress:
             real_payload: StreamReader | DeflateBuffer = DeflateBuffer(
-                payload, compression, max_decompress_size=limit
+                payload,
+                compression,
+                max_decompress_size=limit,
+                content_digest_verifier=verifier,
             )
+            self._content_digest_output_verifier = verifier
+            verifier = None
         else:
             real_payload = payload
 
@@ -911,6 +955,19 @@ class HttpPayloadParser:
                 self.done = True
 
         self.payload = real_payload
+        self._content_digest_verifier = verifier
+
+    def _finalize_content_digest(self) -> None:
+        verifier = self._content_digest_verifier
+        output_verifier = self._content_digest_output_verifier
+        if verifier is not None:
+            verifier.finalize_encoded()
+        elif output_verifier is not None:
+            output_verifier.finalize_encoded()
+
+    def _update_content_digest(self, chunk: bytes) -> None:
+        if self._content_digest_verifier is not None:
+            self._content_digest_verifier.update(chunk)
 
     def pause_reading(self) -> None:
         self._paused = True
@@ -923,6 +980,7 @@ class HttpPayloadParser:
                     self._paused = False
                     return  # Will resume via feed_data(b"") later
                 self._more_data_available = self.payload.feed_data(b"")
+            self._finalize_content_digest()
             self.payload.feed_eof()
             self.done = True
             self._eof_pending = False
@@ -939,6 +997,7 @@ class HttpPayloadParser:
                     self._paused = False
                     return  # Will resume via feed_data(b"") later
                 self._more_data_available = self.payload.feed_data(b"")
+            self._finalize_content_digest()
             self.payload.feed_eof()
             self.done = True
         elif self._type == ParseState.PARSE_CHUNKED:
@@ -966,6 +1025,7 @@ class HttpPayloadParser:
 
             required = self._length
             self._length = max(required - len(chunk), 0)
+            self._update_content_digest(chunk[:required])
             self._more_data_available = self.payload.feed_data(chunk[:required])
             while self._more_data_available:
                 if self._paused:
@@ -975,6 +1035,7 @@ class HttpPayloadParser:
                 self._more_data_available = self.payload.feed_data(b"")
 
             if self._length == 0:
+                self._finalize_content_digest()
                 self.payload.feed_eof()
                 return PayloadState.PAYLOAD_COMPLETE, chunk[required:]
         # Chunked transfer encoding parser
@@ -1054,6 +1115,7 @@ class HttpPayloadParser:
 
                     required = self._chunk_size
                     self._chunk_size = max(required - len(chunk), 0)
+                    self._update_content_digest(chunk[:required])
                     self._more_data_available = self.payload.feed_data(chunk[:required])
                     chunk = chunk[required:]
 
@@ -1118,11 +1180,13 @@ class HttpPayloadParser:
                             )
                         finally:
                             self._trailer_lines.clear()
+                        self._finalize_content_digest()
                         self.payload.feed_eof()
                         return PayloadState.PAYLOAD_COMPLETE, chunk
 
         # Read all bytes until eof
         elif self._type == ParseState.PARSE_UNTIL_EOF:
+            self._update_content_digest(chunk)
             self._more_data_available = self.payload.feed_data(chunk)
             while self._more_data_available:
                 if self._paused:
@@ -1131,6 +1195,7 @@ class HttpPayloadParser:
                 self._more_data_available = self.payload.feed_data(b"")
 
             if self._eof_pending:
+                self._finalize_content_digest()
                 self.payload.feed_eof()
                 self.done = True
                 self._eof_pending = False
@@ -1147,10 +1212,12 @@ class DeflateBuffer:
         out: StreamReader,
         encoding: str | None,
         max_decompress_size: int = DEFAULT_CHUNK_SIZE,
+        content_digest_verifier: ContentDigestVerifier | None = None,
     ) -> None:
         self.out = out
         self.size = 0
         out.total_compressed_bytes = self.size
+        out.content_digest_verifier = content_digest_verifier
         self.encoding = encoding
         self._started_decoding = False
 
@@ -1173,6 +1240,7 @@ class DeflateBuffer:
             self.decompressor = ZLibDecompressor(encoding=encoding)
 
         self._max_decompress_size = max_decompress_size
+        self._content_digest_verifier = content_digest_verifier
 
     def set_exception(
         self,
@@ -1213,6 +1281,8 @@ class DeflateBuffer:
             )
 
         if chunk:
+            if self._content_digest_verifier is not None:
+                self._content_digest_verifier.update(chunk)
             self.out.feed_data(chunk)
         return self.decompressor.data_available
 

@@ -1599,6 +1599,7 @@ def test_terminate_with_closed_loop(
                 "skip_payload": True,
                 "read_until_eof": True,
                 "auto_decompress": True,
+                "content_digest_verification": None,
                 "read_timeout": timeout.sock_read,
                 "read_bufsize": 2**16,
                 "timeout_ceil_threshold": 5,

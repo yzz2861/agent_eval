@@ -102,6 +102,8 @@ class StreamReader:
         "_eof_callbacks",
         "_eof_counter",
         "_on_chunk_received",
+        "_on_data_read",
+        "content_digest_verifier",
         "total_bytes",
         "total_compressed_bytes",
     )
@@ -138,6 +140,8 @@ class StreamReader:
         self._on_chunk_received: (
             Callable[[bytes], Coroutine[None, None, None]] | None
         ) = None
+        self._on_data_read: Callable[[bytes, bool], None] | None = None
+        self.content_digest_verifier: object | None = None
         self.total_bytes = 0
         self.total_compressed_bytes: int | None = None
 
@@ -177,6 +181,11 @@ class StreamReader:
 
     def get_read_buffer_limits(self) -> tuple[int, int]:
         return (self._low_water, self._high_water)
+
+    def _notify_data_read(self, chunk: bytes) -> None:
+        observer = self._on_data_read
+        if observer is not None:
+            observer(chunk, self._eof and not self._buffer)
 
     def set_read_chunk_size(self, n: int) -> None:
         """Raise buffer limits to match the consumer's chunk size."""
@@ -417,6 +426,7 @@ class StreamReader:
 
         if chunk and self._on_chunk_received is not None:
             await self._fire_chunk_received(chunk)
+        self._notify_data_read(chunk)
         return chunk
 
     async def read(self, n: int = -1) -> bytes:
@@ -448,6 +458,7 @@ class StreamReader:
         chunk = self._read_nowait(n)
         if chunk and self._on_chunk_received is not None:
             await self._fire_chunk_received(chunk)
+        self._notify_data_read(chunk)
         return chunk
 
     async def readany(self) -> bytes:
@@ -463,6 +474,7 @@ class StreamReader:
         chunk = self._read_nowait(-1)
         if chunk and self._on_chunk_received is not None:
             await self._fire_chunk_received(chunk)
+        self._notify_data_read(chunk)
         return chunk
 
     async def readchunk(self) -> tuple[bytes, bool]:
@@ -485,6 +497,7 @@ class StreamReader:
                     chunk = self._read_nowait(pos - self._cursor)
                     if chunk and self._on_chunk_received is not None:
                         await self._fire_chunk_received(chunk)
+                    self._notify_data_read(chunk)
                     return (chunk, True)
                 internal_logger.warning(
                     "Skipping HTTP chunk end due to data "
@@ -495,12 +508,14 @@ class StreamReader:
                 chunk = self._read_nowait_chunk(-1)
                 if chunk and self._on_chunk_received is not None:
                     await self._fire_chunk_received(chunk)
+                self._notify_data_read(chunk)
                 return (chunk, False)
                 # return (self._read_nowait(-1), False)
 
             if self._eof:
                 # Special case for signifying EOF.
                 # (b'', True) is not a final return value actually.
+                self._notify_data_read(b"")
                 return (b"", False)
 
             await self._wait("readchunk")
@@ -539,6 +554,7 @@ class StreamReader:
             # observability event still fires.
             # TODO: Save and await this task.
             asyncio.create_task(cb(chunk))  # type: ignore[unused-awaitable]
+        self._notify_data_read(chunk)
         return chunk
 
     def _read_nowait_chunk(self, n: int) -> bytes:
@@ -615,6 +631,24 @@ class EmptyStreamReader(StreamReader):  # lgtm [py/missing-call-to-init]
         self, value: Callable[[bytes], Coroutine[None, None, None]] | None
     ) -> None:
         raise AttributeError("EmptyStreamReader._on_chunk_received is read-only")
+
+    @property
+    def _on_data_read(self) -> None:
+        return None
+
+    @_on_data_read.setter
+    def _on_data_read(self, value: Callable[[bytes, bool], None] | None) -> None:
+        raise AttributeError("EmptyStreamReader._on_data_read is read-only")
+
+    @property
+    def content_digest_verifier(self) -> None:
+        return None
+
+    @content_digest_verifier.setter
+    def content_digest_verifier(self, value: object | None) -> None:
+        raise AttributeError(
+            "EmptyStreamReader.content_digest_verifier is read-only"
+        )
 
     def __repr__(self) -> str:
         return "<%s>" % self.__class__.__name__

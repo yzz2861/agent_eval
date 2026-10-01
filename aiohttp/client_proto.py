@@ -256,6 +256,7 @@ class ResponseHandler(BaseProtocol, DataQueue[tuple[RawResponseMessage, StreamRe
         max_line_size: int = 8190,
         max_field_size: int = 8190,
         max_headers: int = 128,
+        content_digest_verification: object | None = None,
     ) -> None:
         self._skip_payload = skip_payload
 
@@ -276,6 +277,7 @@ class ResponseHandler(BaseProtocol, DataQueue[tuple[RawResponseMessage, StreamRe
             max_line_size=max_line_size,
             max_field_size=max_field_size,
             max_headers=max_headers,
+            content_digest_verification=content_digest_verification,
         )
 
         self._drain_tail()

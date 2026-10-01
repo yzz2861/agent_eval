@@ -1,7 +1,9 @@
 # Tests for aiohttp/protocol.py
 
 import asyncio
+import base64
 import gzip
+import hashlib
 import platform
 import re
 import sys
@@ -20,6 +22,7 @@ import aiohttp
 from aiohttp import http_exceptions, streams
 from aiohttp.base_protocol import BaseProtocol
 from aiohttp.client_proto import ResponseHandler
+from aiohttp.content_digest import ContentDigestError, ContentDigestVerification
 from aiohttp.helpers import DEFAULT_CHUNK_SIZE, NO_EXTENSIONS, HeadersDictProxy
 from aiohttp.http_parser import (
     DeflateBuffer,
@@ -2632,6 +2635,167 @@ def test_parse_length_payload(response: HttpResponseParser) -> None:
 
     assert payload.is_eof()
     assert b"data" == b"".join(d for d in payload._buffer)
+
+
+async def test_content_digest_content_length(response_cls) -> None:
+    loop = asyncio.get_running_loop()
+    body = b"archive-content"
+    digest = hashlib.sha256(body).digest()
+    encoded = base64.standard_b64encode(digest).decode()
+    protocol = ResponseHandler(loop)
+    parser = response_cls(
+        protocol,
+        loop,
+        2**16,
+        read_until_eof=True,
+        content_digest_verification=ContentDigestVerification.IF_PRESENT,
+    )
+    text = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: %d\r\n"
+        b"Content-Digest: sha-256=:%s:\r\n\r\n%s"
+        % (len(body), encoded.encode(), body)
+    )
+    _, payload = parser.feed_data(text)[0][0]
+    assert await payload.read() == body
+    assert payload.content_digest_verifier.error is None
+
+
+async def test_content_digest_gzip_uses_content_coding_bytes(response_cls) -> None:
+    loop = asyncio.get_running_loop()
+    body = b"archive-content"
+    compressed = gzip.compress(body, mtime=0)
+    digest = hashlib.sha256(body).digest()
+    encoded = base64.standard_b64encode(digest).decode()
+    protocol = ResponseHandler(loop)
+    parser = response_cls(
+        protocol,
+        loop,
+        2**16,
+        read_until_eof=True,
+        content_digest_verification=ContentDigestVerification.REQUIRED,
+    )
+    text = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: %d\r\n"
+        b"Content-Encoding: gzip\r\n"
+        b"Content-Digest: sha-256=:%s:\r\n\r\n%s"
+        % (len(compressed), encoded.encode(), compressed)
+    )
+    _, payload = parser.feed_data(text)[0][0]
+    assert await payload.read() == body
+    assert payload.content_digest_verifier.error is None
+
+
+async def test_content_digest_gzip_mismatch(response_cls) -> None:
+    loop = asyncio.get_running_loop()
+    body = b"archive-content"
+    compressed = gzip.compress(body, mtime=0)
+    digest = hashlib.sha256(b"different").digest()
+    encoded = base64.standard_b64encode(digest).decode()
+    protocol = ResponseHandler(loop)
+    parser = response_cls(
+        protocol,
+        loop,
+        2**16,
+        read_until_eof=True,
+        content_digest_verification=ContentDigestVerification.IF_PRESENT,
+    )
+    text = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: %d\r\n"
+        b"Content-Encoding: gzip\r\n"
+        b"Content-Digest: sha-256=:%s:\r\n\r\n%s"
+        % (len(compressed), encoded.encode(), compressed)
+    )
+    _, payload = parser.feed_data(text)[0][0]
+    assert await payload.read() == body
+    with pytest.raises(ContentDigestError):
+        payload.content_digest_verifier.check()
+
+
+async def test_content_digest_truncated_content_length(response_cls) -> None:
+    loop = asyncio.get_running_loop()
+    body = b"archive-content"
+    digest = hashlib.sha256(body).digest()
+    encoded = base64.standard_b64encode(digest).decode()
+    protocol = ResponseHandler(loop)
+    parser = response_cls(
+        protocol,
+        loop,
+        2**16,
+        read_until_eof=True,
+        content_digest_verification=ContentDigestVerification.REQUIRED,
+    )
+    text = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: %d\r\n"
+        b"Content-Digest: sha-256=:%s:\r\n\r\n%s"
+        % (len(body) + 1, encoded.encode(), body)
+    )
+    _, _payload = parser.feed_data(text)[0][0]
+    with pytest.raises(http_exceptions.ContentLengthError):
+        parser.feed_eof()
+
+
+async def test_content_digest_chunked_mismatch(response_cls) -> None:
+    loop = asyncio.get_running_loop()
+    body = b"archive-content"
+    digest = hashlib.sha256(b"different").digest()
+    encoded = base64.standard_b64encode(digest).decode()
+    protocol = ResponseHandler(loop)
+    parser = response_cls(
+        protocol,
+        loop,
+        2**16,
+        read_until_eof=True,
+        content_digest_verification=ContentDigestVerification.IF_PRESENT,
+    )
+    text = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+        b"Content-Digest: sha-256=:%s:\r\n\r\n"
+        b"%x\r\n%s\r\n0\r\n\r\n" % (encoded.encode(), len(body), body)
+    )
+    _, payload = parser.feed_data(text)[0][0]
+    assert await payload.read() == body
+    with pytest.raises(ContentDigestError):
+        payload.content_digest_verifier.check()
+
+
+async def test_content_digest_malformed_header(response_cls) -> None:
+    loop = asyncio.get_running_loop()
+    protocol = ResponseHandler(loop)
+    parser = response_cls(
+        protocol,
+        loop,
+        2**16,
+        read_until_eof=True,
+        content_digest_verification=ContentDigestVerification.IF_PRESENT,
+    )
+    text = (
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n"
+        b"Content-Digest: sha-256=bad\r\n\r\nx"
+    )
+    _, payload = parser.feed_data(text)[0][0]
+    with pytest.raises(ContentDigestError):
+        payload.content_digest_verifier.check()
+
+
+async def test_content_digest_required_missing(response_cls) -> None:
+    loop = asyncio.get_running_loop()
+    protocol = ResponseHandler(loop)
+    parser = response_cls(
+        protocol,
+        loop,
+        2**16,
+        read_until_eof=True,
+        content_digest_verification=ContentDigestVerification.REQUIRED,
+    )
+    _, payload = parser.feed_data(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx"
+    )[0][0]
+    with pytest.raises(ContentDigestError):
+        payload.content_digest_verifier.check()
 
 
 def test_parse_no_length_payload(parser: HttpRequestParser) -> None:

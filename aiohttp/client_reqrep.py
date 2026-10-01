@@ -34,6 +34,7 @@ from .client_exceptions import (
     ServerFingerprintMismatch,
 )
 from .compression_utils import HAS_BROTLI, HAS_ZSTD
+from .content_digest import ContentDigestVerification, ContentDigestVerifier
 from .formdata import FormData
 from .helpers import (
     _SENTINEL,
@@ -243,6 +244,7 @@ class ResponseParams(TypedDict):
     max_line_size: int
     max_field_size: int
     max_headers: int
+    content_digest_verification: ContentDigestVerification | None
 
 
 class ClientResponse(HeadersMixin):
@@ -272,6 +274,9 @@ class ClientResponse(HeadersMixin):
     _closed = True  # to allow __del__ for non-initialized properly response
     _released = False
     _in_context = False
+    _skip_payload = False
+    _content_digest_verification: ContentDigestVerification | None = None
+    _content_digest_verifier: ContentDigestVerifier | None = None
 
     _resolve_charset: Callable[["ClientResponse", bytes], str] = lambda *_: "utf-8"
 
@@ -294,6 +299,8 @@ class ClientResponse(HeadersMixin):
         request_headers: CIMultiDict[str],
         original_url: URL,
         stream_writer: AbstractStreamWriter,
+        content_digest_verification: ContentDigestVerification | None = None,
+        skip_payload: bool = False,
         **kwargs: object,
     ) -> None:
         # kwargs exists so authors of subclasses should expect to pass through unknown
@@ -317,6 +324,8 @@ class ClientResponse(HeadersMixin):
             self._continue = continue100
         self._request_headers = request_headers
         self._original_url = original_url
+        self._skip_payload = skip_payload
+        self._content_digest_verification = content_digest_verification
         self._timer = timer if timer is not None else TimerNoop()
         self._cache: dict[str, Any] = {}
         self._traces = traces
@@ -449,7 +458,10 @@ class ClientResponse(HeadersMixin):
             return
 
         if self._connection is not None:
-            self._connection.release()
+            if self._content_digest_verifier is not None:
+                self._connection.close()
+            else:
+                self._connection.release()
             self._cleanup_writer()
 
             if self._loop.get_debug():
@@ -480,6 +492,15 @@ class ClientResponse(HeadersMixin):
     @property
     def connection(self) -> "Connection | None":
         return self._connection
+
+    @property
+    def content_digest_verified(self) -> bool:
+        verifier = self._content_digest_verifier
+        return verifier is not None and verifier.verified
+
+    @property
+    def verified(self) -> bool:
+        return self.content_digest_verified
 
     @reify
     def history(self) -> tuple["ClientResponse", ...]:
@@ -557,6 +578,7 @@ class ClientResponse(HeadersMixin):
 
         # payload
         self.content = payload
+        self._setup_content_digest(payload)
 
         if self._traces and payload is not EMPTY_PAYLOAD:
             payload._on_chunk_received = self._on_chunk_response_received
@@ -567,8 +589,38 @@ class ClientResponse(HeadersMixin):
             self._raw_cookie_headers = tuple(cookie_hdrs)
         return self
 
+    def _setup_content_digest(self, payload: StreamReader) -> None:
+        policy = self._content_digest_verification
+        if policy is None or self._skip_payload:
+            return
+
+        verifier = getattr(payload, "content_digest_verifier", None)
+        if verifier is None:
+            verifier = ContentDigestVerifier(
+                self._headers.getall(hdrs.CONTENT_DIGEST, ()),
+                policy,
+            )
+        self._content_digest_verifier = verifier
+        if payload is not EMPTY_PAYLOAD:
+            payload.content_digest_verifier = verifier
+            payload._on_data_read = self._on_content_data_read
+        else:
+            verifier.finalize_output()
+
+    def _on_content_data_read(self, chunk: bytes, at_eof: bool) -> None:
+        verifier = self._content_digest_verifier
+        assert verifier is not None
+        if at_eof and not chunk:
+            verifier.finalize_output()
+            verifier.check()
+
     def _response_eof(self) -> None:
         if self._closed:
+            return
+
+        verifier = self._content_digest_verifier
+        if verifier is not None and not verifier.connection_safe:
+            self.close()
             return
 
         # protocol could be None because connection could be detached
@@ -602,6 +654,14 @@ class ClientResponse(HeadersMixin):
             self._notify_content()
 
         self._closed = True
+
+        verifier = self._content_digest_verifier
+        if verifier is not None and not verifier.verified:
+            self._cleanup_writer()
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+            return
 
         self._cleanup_writer()
         self._release_connection()
@@ -701,6 +761,9 @@ class ClientResponse(HeadersMixin):
         if self._body is None:
             try:
                 self._body = await self.content.read()
+                verifier = self._content_digest_verifier
+                if verifier is not None:
+                    verifier.check()
             except BaseException:
                 self.close()
                 raise
@@ -930,6 +993,10 @@ class ClientRequestBase:
             request_headers=self.headers,
             original_url=self.original_url,
             stream_writer=stream_writer,
+            content_digest_verification=self._response_params.get(
+                "content_digest_verification"
+            ),
+            skip_payload=self._response_params.get("skip_payload", False),
         )
 
     def _create_writer(self, protocol: BaseProtocol) -> StreamWriter:

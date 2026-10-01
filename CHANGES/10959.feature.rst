@@ -1,0 +1,2 @@
+Added optional ``Content-Digest`` verification for client responses with
+``sha-256`` and ``sha-512`` support.

@@ -50,6 +50,11 @@ from .client import (
 from .client_middleware_digest_auth import DigestAuthMiddleware
 from .client_middlewares import ClientHandlerType, ClientMiddlewareType
 from .compression_utils import set_zlib_backend
+from .content_digest import (
+    ContentDigestError,
+    ContentDigestVerification,
+    ContentDigestVerificationPolicy,
+)
 from .connector import AddrInfoType, SocketFactoryType
 from .cookiejar import CookieJar, DummyCookieJar
 from .formdata import FormData
@@ -139,6 +144,9 @@ __all__: tuple[str, ...] = (
     "ClientWSTimeout",
     "ConnectionTimeoutError",
     "ContentTypeError",
+    "ContentDigestError",
+    "ContentDigestVerification",
+    "ContentDigestVerificationPolicy",
     "Fingerprint",
     "InvalidURL",
     "InvalidUrlClientError",

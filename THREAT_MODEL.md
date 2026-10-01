@@ -252,6 +252,7 @@ into `StreamReader`) is then handed to `web_protocol.RequestHandler` and
 | 1.12 | Cython ⇄ pure-Python divergence | T / S | Behaviour differences between llhttp and the Python fallback may produce parser-confusion if a deployment unintentionally switches backends (e.g. a user installs without compiled extensions). | Med |
 | 1.13 | Vendored llhttp version drift | S / T | An upstream llhttp CVE not picked up by aiohttp's vendoring cadence remains exploitable until `make generate-llhttp` is re-run and released. | Medium |
 | 1.14 | Build/regen of llhttp (`make generate-llhttp`) | S / T | Local tampering or supply-chain compromise of the npm `llhttp` package gets baked into the vendored C. Covered in [§5.19](#519-build--release-supply-chain) but originates here. | Medium |
+| 1.15 | Client `Content-Digest` verification | T / S | A malformed or compressed-layer digest could be accepted, or verified bytes could accidentally cover chunk framing / compressed bytes instead of the RFC 9530 representation data. Verification after partial reads could also mark a response trusted before consumption finished. | Medium |
 
 **Mitigations.**
 
@@ -271,6 +272,7 @@ into `StreamReader`) is then handed to `web_protocol.RequestHandler` and
 | 1.12 | Cython ⇄ pure-Python divergence | `tests/test_http_parser.py` parameterises tests over `REQUEST_PARSERS` / `RESPONSE_PARSERS` (pure-Python always; Cython when the extension imports). The high-leverage attack vectors are already covered under both backends: CL+TE (`test_content_length_transfer_encoding`), CL×N (`test_duplicate_singleton_header_rejected`), obs-fold (`test_reject_obsolete_line_folding`, `test_http_response_parser_obs_line_folding*`), CR/LF/NUL (`test_bad_headers`, `test_http_response_parser_null_byte_in_header_value`, `test_http_response_parser_bad_crlf`), version regex (`test_http_request_parser_bad_version*`, `test_http_response_parser_bad_version*`), bare-LF line endings (`test_reject_bare_lf_no_cross_request_leak`), control characters in the request target (`test_http_request_parser_ctl_in_request_target`). | None. When new attack vectors emerge, add them to the parameterised tests. |
 | 1.13 | llhttp version drift | Manual upgrade via `make generate-llhttp`; vendor pinned in `vendor/llhttp/package.json`. | Track upstream releases (e.g. via Dependabot rule for `vendor/llhttp/package.json`), bump on every llhttp release, regenerate in CI. |
 | 1.14 | npm-side compromise of `llhttp` | The vendored output is checked into git, so a compromise during a future regen would be detectable in PR review. See [§5.19](#519-build--release-supply-chain). | **Make the llhttp build reproducible: pin Node.js version, commit the npm lockfile, and on every bump verify the regenerated C against upstream's release tarballs before committing.** |
+| 1.15 | Client Content-Digest integrity | `ContentDigestVerification` supports RFC 9530 `sha-256` / `sha-512`, parses sf-binary and parameters strictly, rejects malformed/incorrect-length digests, and incrementally hashes decoded representation data after HTTP chunk framing removal and content-coding decompression. `ClientResponse.content_digest_verified` is set only when the final empty read reaches EOF; mismatch, malformed headers, decompression failure, truncation, or early release force-close the connection rather than returning it to the pool. Both pure-Python and Cython response parsers share the verifier interface. | Keep digest algorithms centralized in `content_digest.py`; parameterize parser and compressed/chunked tests over both backends. |
 
 **Past advisories / hardening (recap).**
 
@@ -331,6 +333,12 @@ into `StreamReader`) is then handed to `web_protocol.RequestHandler` and
   Now rejected at the point it is seen, matching llhttp (request line,
   headers, chunk-size, trailers). Not a vulnerability because no proxy would
   pipeline requests from multiple clients and forward raw LFs to the backend.
+- **Client Content-Digest hardening** — opt-in streamed integrity
+  verification for RFC 9530 `sha-256` / `sha-512`. Hashes cover decoded
+  representation data, run across both parser backends, only mark a
+  response verified at complete EOF, and force-close unsafe connections on
+  malformed, mismatching, truncated, or decompression-failed bodies (threat
+  1.15).
 
 These are all currently in place; this section assumes no regression.
 
