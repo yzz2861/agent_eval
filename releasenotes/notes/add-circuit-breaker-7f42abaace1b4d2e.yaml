@@ -1,0 +1,8 @@
+---
+features:
+  - |
+    Added ``CircuitBreaker`` for sharing open/half-open/closed state between
+    synchronous and asynchronous retry calls. A breaker counts each logical
+    call once, supports configurable half-open probe limits, injected state
+    and clocks, and treats cancellation as a permit release rather than an
+    upstream failure.

@@ -36,6 +36,16 @@ from .before import before_log, before_nothing
 
 # Import all built-in before sleep strategies for easier usage.
 from .before_sleep import before_sleep_log, before_sleep_nothing
+from .circuit import (
+    CircuitBreaker,
+    CircuitBreakerError,
+    CircuitBreakerFullError,
+    CircuitBreakerOpenError,
+    CircuitBreakerSnapshot,
+    CircuitBreakerState,
+    CircuitPermit,
+    CircuitState,
+)
 
 # Import all nap strategies for easier usage.
 from .nap import sleep, sleep_using_event
@@ -98,6 +108,8 @@ def _has_tornado() -> bool:
 
 
 if t.TYPE_CHECKING:
+    from types import TracebackType
+
     if sys.version_info >= (3, 11):
         from typing import Self
     else:
@@ -225,7 +237,7 @@ class AttemptManager:
         self,
         exc_type: type[BaseException] | None,
         exc_value: BaseException | None,
-        traceback: "types.TracebackType | None",
+        traceback: "TracebackType | None",
     ) -> bool | None:
         if exc_type is not None and exc_value is not None:
             self.retry_state.set_exception((exc_type, exc_value, traceback))
@@ -241,7 +253,7 @@ class AttemptManager:
         self,
         exc_type: type[BaseException] | None,
         exc_value: BaseException | None,
-        traceback: "types.TracebackType | None",
+        traceback: "TracebackType | None",
     ) -> bool | None:
         return self.__exit__(exc_type, exc_value, traceback)
 
@@ -261,6 +273,8 @@ class BaseRetrying(ABC):
         retry_error_callback: t.Callable[["RetryCallState"], t.Any] | None = None,
         name: str | None = None,
         enabled: bool = True,
+        circuit_breaker: CircuitBreaker | None = None,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self.sleep = sleep
         self.stop = stop
@@ -275,6 +289,7 @@ class BaseRetrying(ABC):
         self.retry_error_callback = retry_error_callback
         self._name = name
         self.enabled = enabled
+        self.circuit_breaker = circuit_breaker or breaker
 
     def copy(
         self,
@@ -292,6 +307,8 @@ class BaseRetrying(ABC):
         | None = _unset,
         name: str | object | None = _unset,
         enabled: bool | object = _unset,
+        circuit_breaker: CircuitBreaker | object | None = _unset,
+        breaker: CircuitBreaker | object | None = _unset,
     ) -> "Self":
         """Copy this object with some parameters changed if needed."""
         return self.__class__(
@@ -309,6 +326,9 @@ class BaseRetrying(ABC):
             ),
             name=_first_set(name, self._name),
             enabled=_first_set(enabled, self.enabled),
+            circuit_breaker=_first_set(circuit_breaker, self.circuit_breaker)
+            if circuit_breaker is not _unset
+            else _first_set(breaker, self.circuit_breaker),
         )
 
     # No @override: object.__getstate__ only exists from Python 3.11 on.
@@ -411,6 +431,58 @@ class BaseRetrying(ABC):
         self.statistics["idle_for"] = 0
         self.statistics["delay_since_first_attempt"] = 0
 
+    def _acquire_circuit(self, _retry_state: "RetryCallState") -> CircuitPermit | None:
+        if self.circuit_breaker is None:
+            return None
+        return self.circuit_breaker.acquire()
+
+    def _record_circuit_outcome(
+        self,
+        retry_state: "RetryCallState",
+        permit: CircuitPermit,
+        *,
+        terminal: bool,
+    ) -> bool:
+        outcome = retry_state.outcome
+        if outcome is None:
+            permit.release()
+            return False
+
+        if outcome.failed:
+            exception = outcome.exception()
+            interrupt_types: tuple[type[BaseException], ...] = (
+                KeyboardInterrupt,
+                SystemExit,
+            )
+            try:
+                from asyncio import CancelledError
+            except ImportError:  # pragma: no cover
+                pass
+            else:
+                interrupt_types = (*interrupt_types, CancelledError)
+            try:
+                from trio import Cancelled as TrioCancelled
+            except ImportError:
+                pass
+            else:
+                interrupt_types = (*interrupt_types, TrioCancelled)
+            if isinstance(exception, interrupt_types):
+                permit.release()
+                return True
+
+        retryable = (
+            self.iter_state.is_explicit_retry or self.iter_state.retry_run_result
+        )
+        if not terminal and retryable:
+            return False
+        if retryable:
+            permit.record_failure()
+        elif not outcome.failed:
+            permit.record_success()
+        else:
+            permit.release()
+        return False
+
     def _add_action_func(self, fn: t.Callable[..., t.Any]) -> None:
         self.iter_state.actions.append(fn)
 
@@ -453,7 +525,15 @@ class BaseRetrying(ABC):
         )
         if not self.iter_state.is_explicit_retry:
             self._add_action_func(self._run_retry)
+        self._add_action_func(self._record_circuit_outcome_action)
         self._add_action_func(self._post_retry_check_actions)
+
+    def _record_circuit_outcome_action(self, retry_state: "RetryCallState") -> None:
+        permit = retry_state.circuit_permit
+        if permit is None:
+            return
+        if self._record_circuit_outcome(retry_state, permit, terminal=False):
+            raise retry_state.outcome.exception()  # type: ignore[misc]
 
     def _post_retry_check_actions(self, retry_state: "RetryCallState") -> None:
         if not (self.iter_state.is_explicit_retry or self.iter_state.retry_run_result):
@@ -469,6 +549,11 @@ class BaseRetrying(ABC):
 
     def _post_stop_check_actions(self, retry_state: "RetryCallState") -> None:
         if self.iter_state.stop_run_result:
+            permit = retry_state.circuit_permit
+            if permit is not None and self._record_circuit_outcome(
+                retry_state, permit, terminal=True
+            ):
+                raise retry_state.outcome.exception()  # type: ignore[misc]
             if self.retry_error_callback:
                 self._add_action_func(self.retry_error_callback)
                 return
@@ -505,18 +590,24 @@ class BaseRetrying(ABC):
                 raise retry_state.outcome.exception()  # type: ignore[misc]
             return
 
-        self.begin()
-
         retry_state = RetryCallState(self, fn=None, args=(), kwargs={})
-        while True:
-            do = self.iter(retry_state=retry_state)
-            if isinstance(do, DoAttempt):
-                yield AttemptManager(retry_state=retry_state)
-            elif isinstance(do, DoSleep):
-                retry_state.prepare_for_next_attempt()
-                self.sleep(do)
-            else:
-                break
+        retry_state.circuit_permit = self._acquire_circuit(retry_state)
+        self.begin()
+        permit = retry_state.circuit_permit
+        try:
+            while True:
+                do = self.iter(retry_state=retry_state)
+                if isinstance(do, DoAttempt):
+                    yield AttemptManager(retry_state=retry_state)
+                elif isinstance(do, DoSleep):
+                    retry_state.prepare_for_next_attempt()
+                    self.sleep(do)
+                else:
+                    break
+        except BaseException:
+            if permit is not None:
+                permit.release()
+            raise
 
     @abstractmethod
     def __call__(
@@ -541,23 +632,29 @@ class Retrying(BaseRetrying):
         if not self.enabled:
             return fn(*args, **kwargs)
 
-        self.begin()
-
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
+        retry_state.circuit_permit = self._acquire_circuit(retry_state)
+        self.begin()
         while True:
-            do = self.iter(retry_state=retry_state)
-            if isinstance(do, DoAttempt):
-                try:
-                    result = fn(*args, **kwargs)
-                except BaseException:
-                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+            permit = retry_state.circuit_permit
+            try:
+                do = self.iter(retry_state=retry_state)
+                if isinstance(do, DoAttempt):
+                    try:
+                        result = fn(*args, **kwargs)
+                    except BaseException:
+                        retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    else:
+                        retry_state.set_result(result)
+                elif isinstance(do, DoSleep):
+                    retry_state.prepare_for_next_attempt()
+                    self.sleep(do)
                 else:
-                    retry_state.set_result(result)
-            elif isinstance(do, DoSleep):
-                retry_state.prepare_for_next_attempt()
-                self.sleep(do)
-            else:
-                return do  # type: ignore[no-any-return]
+                    return do  # type: ignore[no-any-return]
+            except BaseException:
+                if permit is not None:
+                    permit.release()
+                raise
 
 
 class Future(futures.Future[t.Any]):
@@ -618,6 +715,8 @@ class RetryCallState:
         self.next_action: RetryAction | None = None
         #: Next sleep time as decided by the retry manager.
         self.upcoming_sleep: float = 0.0
+        #: Circuit-breaker permit owned by this logical call.
+        self.circuit_permit: CircuitPermit | None = None
 
     def get_fn_name(self) -> str:
         """Get the name of the function being retried.
@@ -747,6 +846,8 @@ def retry(
     retry_error_callback: t.Callable[["RetryCallState"], t.Any | t.Awaitable[t.Any]]
     | None = ...,
     enabled: bool = ...,
+    circuit_breaker: "CircuitBreaker | None" = ...,
+    breaker: "CircuitBreaker | None" = ...,
 ) -> _AsyncRetryDecorator: ...
 
 
@@ -765,6 +866,8 @@ def retry(
     retry_error_callback: t.Callable[["RetryCallState"], t.Any | t.Awaitable[t.Any]]
     | None = None,
     enabled: bool = True,
+    circuit_breaker: CircuitBreaker | None = None,
+    breaker: CircuitBreaker | None = None,
 ) -> t.Callable[[t.Callable[P, R]], _RetryDecorated[P, R]]: ...
 
 
@@ -817,6 +920,14 @@ __all__ = [
     "AttemptManager",
     "BaseAction",
     "BaseRetrying",
+    "CircuitBreaker",
+    "CircuitBreakerError",
+    "CircuitBreakerFullError",
+    "CircuitBreakerOpenError",
+    "CircuitBreakerSnapshot",
+    "CircuitBreakerState",
+    "CircuitPermit",
+    "CircuitState",
     "DoAttempt",
     "DoSleep",
     "Future",

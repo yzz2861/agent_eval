@@ -45,20 +45,26 @@ class TornadoRetrying(BaseRetrying):
         *args: typing.Any,
         **kwargs: typing.Any,
     ) -> "typing.Generator[typing.Any, typing.Any, _RetValT]":
-        self.begin()
-
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
+        retry_state.circuit_permit = self._acquire_circuit(retry_state)
+        self.begin()
         while True:
-            do = self.iter(retry_state=retry_state)
-            if isinstance(do, DoAttempt):
-                try:
-                    result = yield fn(*args, **kwargs)
-                except BaseException:
-                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+            permit = retry_state.circuit_permit
+            try:
+                do = self.iter(retry_state=retry_state)
+                if isinstance(do, DoAttempt):
+                    try:
+                        result = yield fn(*args, **kwargs)
+                    except BaseException:
+                        retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    else:
+                        retry_state.set_result(result)
+                elif isinstance(do, DoSleep):
+                    retry_state.prepare_for_next_attempt()
+                    yield self.sleep(do)
                 else:
-                    retry_state.set_result(result)
-            elif isinstance(do, DoSleep):
-                retry_state.prepare_for_next_attempt()
-                yield self.sleep(do)
-            else:
-                raise gen.Return(do)
+                    raise gen.Return(do)
+            except BaseException:
+                if permit is not None:
+                    permit.release()
+                raise
