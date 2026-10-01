@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import socket
 import sys
 from socket import AddressFamily, SocketKind
@@ -361,6 +362,7 @@ async def run_scenario(
     expect_error: tuple[type[BaseException], ...] | type[BaseException] = (),
     happy_eyeballs_delay: float | None = 0.25,
     local_address: str | None = None,
+    max_concurrent_attempts: int | None = None,
 ) -> tuple[SocketType, Scenario] | tuple[BaseException, Scenario]:
     supported_families = set()
     if ipv4_supported:
@@ -377,6 +379,7 @@ async def run_scenario(
             port,
             happy_eyeballs_delay=happy_eyeballs_delay,
             local_address=local_address,
+            max_concurrent_attempts=max_concurrent_attempts,
         )
         assert expect_error == ()
         scenario.check(stream.socket)
@@ -690,4 +693,221 @@ async def test_cancel(autojump_clock: MockClock) -> None:
     # This should have been called already, but just to make sure, since the
     # exception-handling logic in run_scenario is a bit complicated and the
     # main thing we care about here is that all the sockets were cleaned up.
+    scenario.check(succeeded=None)
+
+
+async def test_max_concurrent_attempts_invalid() -> None:
+    with pytest.raises(ValueError, match="^max_concurrent_attempts must be"):
+        await open_tcp_stream("127.0.0.1", 80, max_concurrent_attempts=0)
+    with pytest.raises(ValueError, match="^max_concurrent_attempts must be"):
+        await open_tcp_stream("127.0.0.1", 80, max_concurrent_attempts=-1)
+
+
+# With at most 2 attempts in flight, the later targets are never even tried:
+# the first two attempts hang until the first one succeeds.
+async def test_max_concurrent_attempts_limits_sockets(
+    autojump_clock: MockClock,
+) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("1.1.1.1", 10, "success"),
+            ("2.2.2.2", 10, "success"),
+            ("3.3.3.3", 0.1, "success"),
+            ("4.4.4.4", 0.1, "success"),
+        ],
+        max_concurrent_attempts=2,
+    )
+    assert isinstance(sock, FakeSocket)
+    assert sock.ip == "1.1.1.1"
+    assert trio.current_time() == 10
+    assert scenario.socket_count == 2
+    assert scenario.connect_times == {
+        "1.1.1.1": 0,
+        "2.2.2.2": 0.250,
+        # 3.3.3.3 and 4.4.4.4 were never even started
+    }
+
+
+# A failed attempt frees up its slot immediately, and the
+# happy-eyeballs delay is measured from when the previous attempt
+# actually started -- not from when we started waiting for a slot.
+async def test_max_concurrent_attempts_failure_frees_slot(
+    autojump_clock: MockClock,
+) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("1.1.1.1", 0.5, "error"),
+            ("2.2.2.2", 100, "success"),
+            ("3.3.3.3", 0.1, "success"),
+        ],
+        happy_eyeballs_delay=10,
+        max_concurrent_attempts=2,
+    )
+    assert isinstance(sock, FakeSocket)
+    assert sock.ip == "3.3.3.3"
+    assert trio.current_time() == (0.5 + 10 + 0.1)
+    assert scenario.connect_times == {
+        "1.1.1.1": 0,
+        # expedited by 1.1.1.1's failure, despite the 10 second delay
+        "2.2.2.2": 0.5,
+        # 10 second delay measured from 2.2.2.2's actual start time
+        "3.3.3.3": 0.5 + 10,
+    }
+
+
+# While all slots are busy, no happy-eyeballs timers are running: the next
+# attempt starts as soon as a failure frees a slot, and time spent waiting
+# for that slot is not counted against the delay for the attempt after it.
+async def test_max_concurrent_attempts_slot_wait_not_counted(
+    autojump_clock: MockClock,
+) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("1.1.1.1", 5, "error"),
+            ("2.2.2.2", 5, "error"),
+            ("3.3.3.3", 0.1, "success"),
+            ("4.4.4.4", 0.1, "success"),
+        ],
+        happy_eyeballs_delay=1,
+        max_concurrent_attempts=2,
+    )
+    assert isinstance(sock, FakeSocket)
+    assert sock.ip == "3.3.3.3"
+    assert trio.current_time() == (5 + 0.1)
+    assert scenario.socket_count == 3
+    assert scenario.connect_times == {
+        "1.1.1.1": 0,
+        "2.2.2.2": 1,
+        # started the moment 1.1.1.1's failure freed a slot, even though
+        # it had been "due" since t=2
+        "3.3.3.3": 5,
+    }
+
+
+# With max_concurrent_attempts=1, attempts happen strictly one at a time,
+# like socket.create_connection.
+async def test_max_concurrent_attempts_one_is_serial(
+    autojump_clock: MockClock,
+) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("1.1.1.1", 1, "error"),
+            ("2.2.2.2", 1, "error"),
+            ("3.3.3.3", 0.5, "success"),
+        ],
+        max_concurrent_attempts=1,
+    )
+    assert isinstance(sock, FakeSocket)
+    assert sock.ip == "3.3.3.3"
+    assert trio.current_time() == 2.5
+    assert scenario.connect_times == {
+        "1.1.1.1": 0,
+        "2.2.2.2": 1,
+        "3.3.3.3": 2,
+    }
+
+
+# Two attempts succeeding at the same time: exactly one is delivered, the
+# other is closed (scenario.check verifies this), and no further attempts
+# are started.
+async def test_max_concurrent_attempts_simultaneous_success(
+    autojump_clock: MockClock,
+) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("1.1.1.1", 1, "success"),
+            ("2.2.2.2", 1, "success"),
+            ("3.3.3.3", 1, "success"),
+        ],
+        happy_eyeballs_delay=0,
+        max_concurrent_attempts=2,
+    )
+    assert isinstance(sock, FakeSocket)
+    assert sock.ip in ["1.1.1.1", "2.2.2.2"]
+    assert trio.current_time() == 1
+    assert scenario.socket_count == 2
+    assert scenario.connect_times == {
+        "1.1.1.1": 0,
+        "2.2.2.2": 0,
+    }
+
+
+# An IPv6 attempt that hangs forever occupies a slot, but the IPv4 attempt
+# still goes ahead in its own slot and wins; the hung attempt is cleaned up.
+async def test_max_concurrent_attempts_ipv6_hangs_ipv4_wins(
+    autojump_clock: MockClock,
+) -> None:
+    sock, scenario = await run_scenario(
+        80,
+        [
+            ("::1", math.inf, "success"),
+            ("1.2.3.4", 0.1, "success"),
+        ],
+        max_concurrent_attempts=2,
+    )
+    assert isinstance(sock, FakeSocket)
+    assert sock.ip == "1.2.3.4"
+    assert trio.current_time() == (0.250 + 0.1)
+    assert scenario.connect_times == {
+        "::1": 0,
+        "1.2.3.4": 0.250,
+    }
+
+
+async def test_max_concurrent_attempts_all_fail(autojump_clock: MockClock) -> None:
+    exc, scenario = await run_scenario(
+        80,
+        [
+            ("1.1.1.1", 1, "error"),
+            ("2.2.2.2", 1, "error"),
+            ("3.3.3.3", 1, "error"),
+        ],
+        expect_error=OSError,
+        max_concurrent_attempts=2,
+    )
+    assert isinstance(exc, OSError)
+
+    subexceptions = (pytest.RaisesExc(OSError, match="^sorry$"),) * 3
+    assert pytest.RaisesGroup(
+        *subexceptions,
+        match="all attempts to connect to test.example.com:80 failed",
+    ).matches(exc.__cause__)
+
+    assert trio.current_time() == 2
+    assert scenario.connect_times == {
+        "1.1.1.1": 0,
+        "2.2.2.2": 0.250,
+        # started as soon as 1.1.1.1's failure freed a slot
+        "3.3.3.3": 1,
+    }
+
+
+async def test_max_concurrent_attempts_cancel(autojump_clock: MockClock) -> None:
+    with trio.move_on_after(5) as cancel_scope:
+        exc, scenario = await run_scenario(
+            80,
+            [
+                ("1.1.1.1", 10, "success"),
+                ("2.2.2.2", 10, "success"),
+                ("3.3.3.3", 10, "success"),
+                ("4.4.4.4", 10, "success"),
+            ],
+            expect_error=BaseExceptionGroup,
+            max_concurrent_attempts=2,
+        )
+        assert isinstance(exc, BaseException)
+        # What comes out should be 1 or more Cancelled errors that all belong
+        # to this cancel_scope; this is the easiest way to check that
+        raise exc
+    assert cancel_scope.cancelled_caught
+
+    assert trio.current_time() == 5
+
+    # Only two attempts were ever started, and both were cleaned up.
+    assert scenario.socket_count == 2
     scenario.check(succeeded=None)

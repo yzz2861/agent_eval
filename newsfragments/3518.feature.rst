@@ -1,0 +1,1 @@
+Add ``max_concurrent_attempts`` parameter to `trio.open_tcp_stream`, allowing you to limit how many connection attempts are in progress at the same time when a hostname resolves to multiple IP addresses.

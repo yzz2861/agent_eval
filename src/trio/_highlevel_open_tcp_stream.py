@@ -188,6 +188,7 @@ async def open_tcp_stream(
     *,
     happy_eyeballs_delay: float | None = DEFAULT_DELAY,
     local_address: str | None = None,
+    max_concurrent_attempts: int | None = None,
 ) -> trio.SocketStream:
     """Connect to the given host and port over TCP.
 
@@ -247,6 +248,21 @@ async def open_tcp_stream(
           address ``local_address="0.0.0.0"``, or the IPv6 wildcard address
           ``local_address="::"``.
 
+      max_concurrent_attempts (int or None): The maximum number of connection
+          attempts that may be in progress at the same time. If ``None``
+          (the default), then there is no limit: a new attempt is started
+          every time ``happy_eyeballs_delay`` seconds pass without any
+          attempt succeeding or failing, no matter how many attempts are
+          already running.
+
+          If this is set, then a new attempt is only started once fewer than
+          ``max_concurrent_attempts`` attempts are still in progress. A
+          failed attempt immediately frees up its slot, so the next attempt
+          can start right away; the ``happy_eyeballs_delay`` timer for each
+          attempt only starts once the previous attempt has actually been
+          initiated, so time spent waiting for a free slot does not count
+          against it.
+
     Returns:
       SocketStream: a :class:`~trio.abc.Stream` connected to the given server.
 
@@ -269,6 +285,12 @@ async def open_tcp_stream(
     if happy_eyeballs_delay is None:
         happy_eyeballs_delay = DEFAULT_DELAY
 
+    if max_concurrent_attempts is not None and max_concurrent_attempts < 1:
+        raise ValueError(
+            "max_concurrent_attempts must be a positive integer or None, "
+            f"not {max_concurrent_attempts!r}"
+        )
+
     targets = await getaddrinfo(host, port, type=SOCK_STREAM)
 
     # I don't think this can actually happen -- if there are no results,
@@ -287,19 +309,33 @@ async def open_tcp_stream(
     # need to make sure this isn't automatically closed
     winning_socket: SocketType | None = None
 
+    # Scheduler state, used to coordinate between the main task (which
+    # starts new connection attempts) and the attempt tasks (which report
+    # failures). All of these are only mutated while holding
+    # scheduler_condition, or by the main task between releasing
+    # scheduler_condition and spawning the next attempt.
+    scheduler_condition = trio.Condition()
+    # How many connection attempts are currently in progress. Failed
+    # attempts decrement this, freeing up a slot for the next attempt.
+    running_attempts = 0
+    # How many connection attempts have failed so far. The main task
+    # watches for changes to this, because a failure means the next
+    # attempt should start immediately instead of waiting for the full
+    # happy_eyeballs_delay.
+    failed_attempts = 0
+
     # Try connecting to the specified address. Possible outcomes:
     # - success: record connected socket in winning_socket and cancel
     #   concurrent attempts
-    # - failure: record exception in oserrors, set attempt_failed allowing
-    #   the next connection attempt to start early
+    # - failure: record exception in oserrors, free up its slot and wake
+    #   the main task so the next connection attempt can start early
     # code needs to ensure sockets can be closed appropriately in the
     # face of crash or cancellation
     async def attempt_connect(
         socket_args: tuple[AddressFamily, SocketKind, int],
         sockaddr: AddressFormat,
-        attempt_failed: trio.Event,
     ) -> None:
-        nonlocal winning_socket
+        nonlocal winning_socket, running_attempts, failed_attempts
 
         try:
             sock = socket(*socket_args)
@@ -361,30 +397,70 @@ async def open_tcp_stream(
         except OSError as exc:
             # This connection attempt failed, but the next one might
             # succeed. Save the error for later so we can report it if
-            # everything fails, and tell the next attempt that it should go
-            # ahead (if it hasn't already).
+            # everything fails, and wake up the main task so it can start
+            # the next attempt right away (this also frees up the slot this
+            # attempt was occupying, if max_concurrent_attempts is set).
             oserrors.append(exc)
-            attempt_failed.set()
+            async with scheduler_condition:
+                running_attempts -= 1
+                failed_attempts += 1
+                scheduler_condition.notify_all()
 
     with close_all() as open_sockets:
         # nursery spawns a task for each connection attempt, will be
         # cancelled by the task that gets a successful connection
         async with trio.open_nursery() as nursery:
+            # When the most recently started attempt was actually
+            # initiated. The happy_eyeballs_delay timer is measured from
+            # this, so time spent waiting for a free slot (when
+            # max_concurrent_attempts is set) doesn't count against it.
+            last_start_time: float | None = None
+            # failed_attempts as of when the last attempt was started, so
+            # we can tell if any attempt has failed since then.
+            failures_seen = 0
             for address_family, socket_type, proto, _, addr in targets:
-                # create an event to indicate connection failure,
-                # allowing the next target to be tried early
-                attempt_failed = trio.Event()
-
+                # Wait until we're allowed to start the next attempt: there
+                # must be a free slot, and either happy_eyeballs_delay must
+                # have elapsed since the previous attempt actually started,
+                # or some attempt must have failed since then.
+                async with scheduler_condition:
+                    while True:
+                        slot_available = (
+                            max_concurrent_attempts is None
+                            or running_attempts < max_concurrent_attempts
+                        )
+                        failure_expedites = failed_attempts != failures_seen
+                        if last_start_time is None:
+                            remaining_delay = 0.0
+                        else:
+                            remaining_delay = (
+                                last_start_time
+                                + happy_eyeballs_delay
+                                - trio.current_time()
+                            )
+                        if slot_available and (
+                            remaining_delay <= 0 or failure_expedites
+                        ):
+                            break
+                        if slot_available:
+                            # A slot is free, so all we're waiting for is
+                            # the happy-eyeballs delay to elapse (or a
+                            # failure to expedite us).
+                            with trio.move_on_after(remaining_delay):
+                                await scheduler_condition.wait()
+                        else:
+                            # All slots are busy, so only a failure can
+                            # move us forward: it both frees a slot and
+                            # expedites the next attempt.
+                            await scheduler_condition.wait()
+                    running_attempts += 1
+                    failures_seen = failed_attempts
+                    last_start_time = trio.current_time()
                 nursery.start_soon(
                     attempt_connect,
                     (address_family, socket_type, proto),
                     addr,
-                    attempt_failed,
                 )
-
-                # give this attempt at most this time before moving on
-                with trio.move_on_after(happy_eyeballs_delay):
-                    await attempt_failed.wait()
 
         # nothing succeeded
         if winning_socket is None:
