@@ -1347,6 +1347,78 @@ print(
 """
 ```
 
+## Generating OpenAPI 3.0 Compatible Schemas
+
+Some tools (e.g. OpenAPI 3.0 client generators) only understand the Schema Object defined by the
+OpenAPI 3.0 specification, which is based on an older JSON Schema draft than the 2020-12 dialect used
+by default. The [`GenerateOpenAPI30JsonSchema`][pydantic.json_schema.GenerateOpenAPI30JsonSchema]
+schema generator converts the generated schema to an OpenAPI 3.0 compatible form, in both
+`'validation'` and `'serialization'` modes:
+
+```python
+import json
+
+from pydantic import BaseModel
+from pydantic.json_schema import GenerateOpenAPI30JsonSchema
+
+
+class Model(BaseModel):
+    x: int | None = None
+
+
+print(
+    json.dumps(
+        Model.model_json_schema(schema_generator=GenerateOpenAPI30JsonSchema),
+        indent=2,
+    )
+)
+"""
+{
+  "properties": {
+    "x": {
+      "default": null,
+      "nullable": true,
+      "title": "X",
+      "type": "integer"
+    }
+  },
+  "title": "Model",
+  "type": "object"
+}
+"""
+```
+
+Constructs that can be represented equivalently are converted in place: `null` types become
+`'nullable': True`, `const` becomes a single-valued `enum`, numeric `exclusiveMinimum`/`exclusiveMaximum`
+become boolean modifiers of `minimum`/`maximum`, and definitions are moved from `$defs` to
+`components.schemas` (with `$ref` values rewritten to `#/components/schemas/...`). Recursive models,
+discriminated unions, default values and field aliases are preserved.
+
+Constructs that have no OpenAPI 3.0 equivalent (e.g. tuples expressed with `prefixItems`) are degraded
+to the closest representable schema, and a diagnostic carrying the JSON Pointer of the affected schema is
+recorded on the generator instance. Use `on_unrepresentable='error'` to raise an
+[`OpenAPI30SchemaError`][pydantic.json_schema.OpenAPI30SchemaError] instead:
+
+```python
+from pydantic import BaseModel
+from pydantic.json_schema import GenerateOpenAPI30JsonSchema, OpenAPI30SchemaError
+
+
+class Model(BaseModel):
+    t: tuple[int, str]
+
+
+try:
+    Model.model_json_schema(
+        schema_generator=lambda **kwargs: GenerateOpenAPI30JsonSchema(
+            on_unrepresentable='error', **kwargs
+        )
+    )
+except OpenAPI30SchemaError as e:
+    print(e.diagnostics[0].path)
+    #> /properties/t
+```
+
 ## Miscellaneous Notes on JSON Schema Generation
 
 * The JSON schema for `Optional` fields indicates that the value `null` is allowed.
