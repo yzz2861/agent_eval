@@ -4,6 +4,7 @@
 import asyncio
 import sqlite3
 import sys
+from itertools import count
 from pathlib import Path
 from sqlite3 import OperationalError
 from tempfile import TemporaryDirectory
@@ -13,6 +14,26 @@ from unittest.mock import patch
 
 import aiosqlite
 from .helpers import setup_logger
+
+
+SLOW_RECURSIVE_QUERY = """
+    with recursive counter(value) as (
+        select 1
+        union all
+        select value + 1 from counter where value < 100000000
+    )
+    select count(*) from counter
+"""
+
+
+SHORT_RECURSIVE_QUERY = """
+    with recursive counter(value) as (
+        select 1
+        union all
+        select value + 1 from counter where value < 1000
+    )
+    select count(*) from counter
+"""
 
 
 class SmokeTest(IsolatedAsyncioTestCase):
@@ -295,6 +316,84 @@ class SmokeTest(IsolatedAsyncioTestCase):
                 await db.execute(
                     "create table test_progress_handler (i integer primary key asc, k integer)"
                 )
+
+    async def test_timeout_interrupts_running_query_and_preserves_connection(self):
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("create table timeout_query (id integer)")
+            await db.execute("insert into timeout_query values (1)")
+            self.assertTrue(db.in_transaction)
+
+            progress_calls = 0
+
+            def progress_handler():
+                nonlocal progress_calls
+                progress_calls += 1
+
+            await db.set_progress_handler(progress_handler, 1)
+
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    db.execute_fetchall(SLOW_RECURSIVE_QUERY), 0.1
+                )
+
+            self.assertGreater(progress_calls, 0)
+            self.assertEqual(db._active_operation_id, 0)
+            self.assertTrue(db.in_transaction)
+            self.assertIs(db._progress_handler, progress_handler)
+            self.assertEqual(db._progress_interval, 1)
+
+            cursor = await db.execute("select 42")
+            self.assertEqual(await cursor.fetchall(), [(42,)])
+            self.assertIs(db._progress_handler, progress_handler)
+
+            await db.rollback()
+            self.assertFalse(db.in_transaction)
+
+    async def test_timeout_skips_operation_still_queued(self):
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("create table queued_query (id integer)")
+            await db.commit()
+
+            running = asyncio.ensure_future(
+                db.execute_fetchall(SLOW_RECURSIVE_QUERY)
+            )
+            await asyncio.sleep(0.05)
+
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    db.execute("insert into queued_query values (1)"), 0.05
+                )
+
+            running.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await running
+
+            cursor = await db.execute("select count(*) from queued_query")
+            self.assertEqual(await cursor.fetchall(), [(0,)])
+            self.assertFalse(db.in_transaction)
+            await db.rollback()
+
+    async def test_late_cancel_does_not_interrupt_next_operation(self):
+        async with aiosqlite.connect(":memory:") as db:
+            late_cancelled_operation_id = None
+
+            def progress_handler():
+                if late_cancelled_operation_id is not None:
+                    if db._active_operation_id != late_cancelled_operation_id:
+                        db._cancel_operation(late_cancelled_operation_id)
+
+            await db.set_progress_handler(progress_handler, 1)
+
+            db._operation_ids = count(1)
+            late_cancelled_operation_id = 1
+            cursor = await db.execute("select 1")
+            await cursor.fetchall()
+
+            cursor = await db.execute(SHORT_RECURSIVE_QUERY)
+            self.assertEqual(await cursor.fetchall(), [(1000,)])
+
+            cursor = await db.execute("select 42")
+            self.assertEqual(await cursor.fetchall(), [(42,)])
 
     async def test_create_function(self):
         """Assert that after creating a custom function, it can be used"""

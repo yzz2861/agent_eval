@@ -10,11 +10,13 @@ import logging
 import sqlite3
 from collections.abc import AsyncIterator, Generator, Iterable
 from functools import partial
+from itertools import count
 from pathlib import Path
 from queue import Empty, Queue, SimpleQueue
-from threading import Thread
-from typing import Any, Callable, Literal, Optional, Union
+from threading import Lock, Thread
+from typing import Any, Callable, Literal, NamedTuple, Optional, Union
 from warnings import warn
+from weakref import ReferenceType, ref
 
 from .context import contextmanager
 from .cursor import Cursor
@@ -42,10 +44,88 @@ def set_exception(fut: asyncio.Future, e: BaseException) -> None:
 
 
 _STOP_RUNNING_SENTINEL = object()
-_TxQueue = SimpleQueue[tuple[Optional[asyncio.Future], Callable[[], Any]]]
 
 
-def _connection_worker_thread(tx: _TxQueue):
+class _Operation(NamedTuple):
+    future: Optional[asyncio.Future]
+    function: Callable[[], Any]
+    id: int
+    progress_handler: Optional[Callable[[], Optional[int]]] = None
+    progress_interval: int = 0
+
+
+_TxQueue = SimpleQueue[_Operation]
+
+
+def _run_operation(connection: "Connection", operation: _Operation) -> bool:
+    future = operation.future
+
+    with connection._operation_lock:
+        if future is not None and future.cancelled():
+            LOG.debug("skipping cancelled operation %s", operation.id)
+            return False
+        connection._active_operation_id = operation.id
+
+    def operation_progress_handler() -> Optional[int]:
+        if operation.progress_handler is not None:
+            result = operation.progress_handler()
+            if result is not None and result != 0:
+                return result
+
+        with connection._operation_lock:
+            if future is not None and future.cancelled():
+                return 1
+
+        return None
+
+    raw_connection: Optional[sqlite3.Connection] = None
+    try:
+        if operation.progress_handler is not None:
+            raw_connection = connection._conn
+            raw_connection.set_progress_handler(
+                operation_progress_handler, operation.progress_interval
+            )
+
+        LOG.debug("executing operation %s", operation.id)
+        result = operation.function()
+    except BaseException as e:  # noqa B036
+        LOG.debug("returning exception %s", e)
+        if future:
+            future.get_loop().call_soon_threadsafe(set_exception, future, e)
+        return False
+    finally:
+        with connection._operation_lock:
+            if connection._active_operation_id == operation.id:
+                connection._active_operation_id = 0
+        if raw_connection is not None:
+            raw_connection.set_progress_handler(
+                operation.progress_handler, operation.progress_interval
+            )
+
+    if future:
+        future.get_loop().call_soon_threadsafe(set_result, future, result)
+    LOG.debug("operation %s completed", operation.id)
+
+    return result is _STOP_RUNNING_SENTINEL
+
+
+def _handle_operation(
+    connection_ref: ReferenceType["Connection"], operation: _Operation
+) -> bool:
+    connection = connection_ref()
+    if connection is None:
+        return True
+
+    try:
+        return _run_operation(connection, operation)
+    except BaseException:
+        LOG.exception("connection worker operation failed")
+        return False
+
+
+def _connection_worker_thread(
+    connection_ref: ReferenceType["Connection"], tx: _TxQueue
+):
     """
     Execute function calls on a separate thread.
 
@@ -53,26 +133,9 @@ def _connection_worker_thread(tx: _TxQueue):
     """
     while True:
         # Continues running until all queue items are processed,
-        # even after connection is closed (so we can finalize all
-        # futures)
-
-        future, function = tx.get()
-
-        try:
-            LOG.debug("executing %s", function)
-            result = function()
-
-            if future:
-                future.get_loop().call_soon_threadsafe(set_result, future, result)
-            LOG.debug("operation %s completed", function)
-
-            if result is _STOP_RUNNING_SENTINEL:
-                break
-
-        except BaseException as e:  # noqa B036
-            LOG.debug("returning exception %s", e)
-            if future:
-                future.get_loop().call_soon_threadsafe(set_exception, future, e)
+        # even after connection is closed (so we can finalize all futures)
+        if _handle_operation(connection_ref, tx.get()):
+            break
 
 
 class Connection:
@@ -87,7 +150,14 @@ class Connection:
         self._connector = connector
         self._tx: _TxQueue = SimpleQueue()
         self._iter_chunk_size = iter_chunk_size
-        self._thread = Thread(target=_connection_worker_thread, args=(self._tx,))
+        self._operation_lock = Lock()
+        self._active_operation_id = 0
+        self._operation_ids = count(1)
+        self._progress_handler: Optional[Callable[[], Optional[int]]] = None
+        self._progress_interval = 0
+        self._thread = Thread(
+            target=_connection_worker_thread, args=(ref(self), self._tx)
+        )
 
         if loop is not None:
             warn(
@@ -128,8 +198,30 @@ class Connection:
         except Exception:
             future = None
 
-        self._tx.put_nowait((future, close_and_stop))
+        self._tx.put_nowait(
+            _Operation(
+                future=future,
+                function=close_and_stop,
+                id=0,
+            )
+        )
         return future
+
+    def _cancel_operation(self, operation_id: int) -> None:
+        self._cancel_if_active(None, operation_id)
+
+    def _cancel_if_active(
+        self, future: Optional[asyncio.Future], operation_id: int
+    ) -> None:
+        raw_connection = self._connection
+        if raw_connection is None:
+            return
+
+        with self._operation_lock:
+            if self._active_operation_id == operation_id and (
+                future is None or future.cancelled()
+            ):
+                raw_connection.interrupt()
 
     @property
     def _conn(self) -> sqlite3.Connection:
@@ -147,24 +239,55 @@ class Connection:
         cursor = self._conn.execute(sql, parameters)
         return cursor.fetchall()
 
-    async def _execute(self, fn, *args, **kwargs):
+    def _set_progress_handler(
+        self, handler: Optional[Callable[[], Optional[int]]], n: int
+    ) -> None:
+        self._conn.set_progress_handler(handler, n)
+        self._progress_handler = handler
+        self._progress_interval = n if handler is not None else 0
+
+    async def _execute(self, fn, *args, _track_progress: bool = True, **kwargs):
         """Queue a function with the given arguments for execution."""
         if not self._running or not self._connection:
             raise ValueError("Connection closed")
 
         function = partial(fn, *args, **kwargs)
         future = asyncio.get_event_loop().create_future()
+        operation_id = next(self._operation_ids)
 
-        self._tx.put_nowait((future, function))
+        self._tx.put_nowait(
+            _Operation(
+                future,
+                function,
+                operation_id,
+                self._progress_handler if _track_progress else None,
+                self._progress_interval if _track_progress else 0,
+            )
+        )
+        future.add_done_callback(
+            lambda cancelled_future: self._cancel_if_active(
+                cancelled_future, operation_id
+            )
+        )
 
-        return await future
+        try:
+            return await future
+        except asyncio.CancelledError:
+            if not future.done():
+                future.cancel()
+            raise
 
     async def _connect(self) -> "Connection":
         """Connect to the actual sqlite database."""
         if self._connection is None:
             try:
                 future = asyncio.get_event_loop().create_future()
-                self._tx.put_nowait((future, self._connector))
+                operation_id = next(self._operation_ids)
+                self._tx.put_nowait(
+                    _Operation(
+                        future, self._connector, operation_id, None, 0
+                    )
+                )
                 self._connection = await future
             except BaseException:
                 self.stop()
@@ -203,7 +326,7 @@ class Connection:
             return
 
         try:
-            await self._execute(self._conn.close)
+            await self._execute(self._conn.close, _track_progress=False)
         except Exception:
             LOG.info("exception occurred while closing connection")
             raise
@@ -320,9 +443,14 @@ class Connection:
         await self._execute(self._conn.load_extension, path)  # type: ignore
 
     async def set_progress_handler(
-        self, handler: Callable[[], Optional[int]], n: int
+        self, handler: Optional[Callable[[], Optional[int]]], n: int
     ) -> None:
-        await self._execute(self._conn.set_progress_handler, handler, n)
+        await self._execute(
+            self._set_progress_handler,
+            handler,
+            n,
+            _track_progress=False,
+        )
 
     async def set_trace_callback(self, handler: Callable) -> None:
         await self._execute(self._conn.set_trace_callback, handler)

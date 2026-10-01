@@ -19,10 +19,10 @@ class Result(AbstractAsyncContextManager[_T], Coroutine[Any, Any, _T]):
         self._coro = coro
         self._obj: _T
 
-    def send(self, value) -> None:
+    def send(self, value) -> Any:
         return self._coro.send(value)
 
-    def throw(self, typ, val=None, tb=None) -> None:
+    def throw(self, typ, val=None, tb=None) -> Any:
         if val is None:
             return self._coro.throw(typ)
 
