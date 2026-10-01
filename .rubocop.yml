@@ -1,0 +1,43 @@
+AllCops:
+  TargetRubyVersion: 2.5
+  NewCops: enable
+  SuggestExtensions: false
+  Exclude:
+    - gemfiles/*.gemfile
+    - vendor/**/*
+
+Metrics/AbcSize:
+  Max: 25
+
+Metrics/MethodLength:
+  Max: 18
+
+Metrics/BlockLength:
+  Exclude:
+    - spec/**/*_spec.rb
+    - "*.gemspec"
+
+Layout/LineLength:
+  Enabled: false
+
+Gemspec/DevelopmentDependencies:
+  EnforcedStyle: gemspec
+
+Naming/PredicateMethod:
+  Enabled: false
+
+Style/MethodCallWithArgsParentheses:
+  Enabled: true
+  Exclude:
+    - "*.gemspec"
+  AllowedMethods:
+    - raise
+    - fail
+    - yield
+    - to
+    - not_to
+    - to_not
+    - describe
+    - context
+    - it
+    - specify

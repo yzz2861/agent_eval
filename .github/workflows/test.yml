@@ -1,0 +1,127 @@
+---
+permissions: read-all
+name: test
+
+on:
+  push:
+    branches:
+      - "*"
+  pull_request:
+    branches:
+      - "*"
+  schedule:
+    - cron: "0 0 * * 5"
+
+jobs:
+  rubocop:
+    name: RuboCop
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: ruby
+          bundler-cache: true
+      - name: Run RuboCop
+        run: bundle exec rubocop
+  test:
+    name: ${{ matrix.os }} - Ruby ${{ matrix.ruby }} - ${{ matrix.gemfile }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+        ruby:
+          - "2.5"
+          - "2.6"
+          - "2.7"
+          - "3.0"
+          - "3.1"
+          - "3.2"
+          - "3.3"
+          - "3.4"
+          - "4.0"
+        gemfile:
+          - gemfiles/standalone.gemfile
+        experimental: [false]
+        include:
+          - os: ubuntu-latest
+            ruby: "2.5"
+            gemfile: gemfiles/openssl.gemfile
+            experimental: false
+          - os: ubuntu-latest
+            ruby: "truffleruby-head"
+            gemfile: "gemfiles/standalone.gemfile"
+            experimental: true
+          - os: ubuntu-latest
+            ruby: head
+            gemfile: gemfiles/standalone.gemfile
+            experimental: true
+    continue-on-error: ${{ matrix.experimental }}
+    env:
+      BUNDLE_GEMFILE: ${{ matrix.gemfile }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      - name: Run tests
+        run: bundle exec rspec
+
+      - name: Sanitize gemfile path
+        run: echo "SANITIZED_GEMFILE=${{ matrix.gemfile }}" | tr '/' '-' >> $GITHUB_ENV
+
+      - name: Upload test coverage folder for later reporting
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.os }}-${{ matrix.ruby }}-${{ env.SANITIZED_GEMFILE }}
+          path: coverage/*.json
+          retention-days: 1
+
+  coverage:
+    name: Report coverage to Qlty
+    runs-on: ubuntu-latest
+    needs: test
+    if: success()
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download coverage reports from the test job
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+
+      - uses: qltysh/qlty-action/coverage@08a0a862c159eae9b9003081da6663d96efef637 # v2.3.0
+        with:
+          token: ${{ secrets.QLTY_COVERAGE_TOKEN }}
+          files: coverage-*/*.json
+
+  smoke:
+    name: Built GEM smoke test
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          ruby-version: ruby
+      - name: Build GEM
+        run: gem build
+      - name: Install built GEM
+        run: gem install jwt-*.gem
+      - name: Run test
+        run: bin/smoke.rb
