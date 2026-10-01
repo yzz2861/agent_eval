@@ -30,6 +30,7 @@ from werkzeug.wrappers import Response as BaseResponse
 from werkzeug.wsgi import get_host
 
 from . import cli
+from . import json
 from . import typing as ft
 from .ctx import AppContext
 from .globals import _cv_app
@@ -504,7 +505,7 @@ class Flask(App):
             session=session,
             g=g,
         )
-        rv.policies["json.dumps_function"] = self.json.dumps
+        rv.policies["json.dumps_function"] = json.dumps
         return rv
 
     def create_url_adapter(self, request: Request | None) -> MapAdapter | None:
@@ -1326,7 +1327,14 @@ class Flask(App):
                 )
                 status = headers = None
             elif isinstance(rv, (dict, list)):
-                rv = self.json.response(rv)
+                ctx = _cv_app.get(None)
+
+                if ctx is not None and ctx.has_request:
+                    provider = self.get_json_provider(ctx.request.blueprints)
+                else:
+                    provider = self.json
+
+                rv = provider.response(rv)
             elif isinstance(rv, BaseResponse) or callable(rv):
                 # evaluate a WSGI callable, or coerce a different response
                 # class to the correct type

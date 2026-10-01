@@ -6,6 +6,7 @@ from collections import defaultdict
 from functools import update_wrapper
 
 from .. import typing as ft
+from ..json.provider import JSONProvider
 from .scaffold import _endpoint_from_view_func
 from .scaffold import _sentinel
 from .scaffold import Scaffold
@@ -156,6 +157,9 @@ class Blueprint(Scaffold):
         default.
     :param url_defaults: A dict of default values that blueprint routes
         will receive by default.
+    :param json_provider_class: A subclass of :class:`~flask.json.provider.JSONProvider`
+        to use instead of the application's provider. A nested blueprint
+        without one inherits from its nearest parent blueprint.
     :param root_path: By default, the blueprint will automatically set
         this based on ``import_name``. In certain situations this
         automatic detection can fail, so the path can be specified
@@ -171,6 +175,10 @@ class Blueprint(Scaffold):
 
     _got_registered_once = False
 
+    #: The JSON provider class to use for this blueprint, or ``None`` to
+    #: inherit from the nearest parent blueprint or the application.
+    json_provider_class: type[JSONProvider] | None = None
+
     def __init__(
         self,
         name: str,
@@ -183,6 +191,7 @@ class Blueprint(Scaffold):
         url_defaults: dict[str, t.Any] | None = None,
         root_path: str | None = None,
         cli_group: str | None = _sentinel,  # type: ignore[assignment]
+        json_provider_class: type[JSONProvider] | None = None,
     ):
         super().__init__(
             import_name=import_name,
@@ -208,6 +217,10 @@ class Blueprint(Scaffold):
 
         self.url_values_defaults = url_defaults
         self.cli_group = cli_group
+
+        if json_provider_class is not None:
+            self.json_provider_class = json_provider_class
+
         self._blueprints: list[tuple[Blueprint, dict[str, t.Any]]] = []
 
     def _check_setup_finished(self, f_name: str) -> None:
@@ -319,6 +332,9 @@ class Blueprint(Scaffold):
         app.blueprints[name] = self
         self._got_registered_once = True
         state = self.make_setup_state(app, options, first_bp_registration)
+
+        if self.json_provider_class is not None:
+            app.json_providers[name] = self.json_provider_class(app)
 
         if self.has_static_folder:
             state.add_url_rule(

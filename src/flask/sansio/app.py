@@ -236,6 +236,10 @@ class App(Scaffold):
     .. versionadded:: 2.2
     """
 
+    #: The JSON providers created for blueprints that configure one, keyed
+    #: by the full registered blueprint name.
+    json_providers: dict[str, JSONProvider]
+
     #: Options that are passed to the Jinja environment in
     #: :meth:`create_jinja_environment`. Changing these options after
     #: the environment is created (accessing :attr:`jinja_env`) will
@@ -338,6 +342,8 @@ class App(Scaffold):
 
         .. versionadded:: 2.2
         """
+
+        self.json_providers = {}
 
         #: A list of functions that are called by
         #: :meth:`handle_url_build_error` when :meth:`.url_for` raises a
@@ -600,6 +606,25 @@ class App(Scaffold):
         .. versionadded:: 0.11
         """
         return self.blueprints.values()
+
+    def get_json_provider(
+        self, blueprints: t.Sequence[str] | None = None
+    ) -> JSONProvider:
+        """Get the JSON provider for the nearest configured blueprint.
+
+        ``blueprints`` contains the full names from the matched endpoint's
+        blueprint up through each parent. Check each name and, if that exact
+        blueprint did not configure a provider, continue through its parent
+        blueprints.
+        """
+        for blueprint in blueprints or ():
+            for name in _split_blueprint_path(blueprint):
+                provider = self.json_providers.get(name)
+
+                if provider is not None:
+                    return provider
+
+        return self.json
 
     @setupmethod
     def add_url_rule(

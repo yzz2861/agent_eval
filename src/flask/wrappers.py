@@ -8,6 +8,7 @@ from werkzeug.wrappers import Request as RequestBase
 from werkzeug.wrappers import Response as ResponseBase
 
 from . import json
+from .globals import _cv_app
 from .globals import current_app
 from .helpers import _split_blueprint_path
 
@@ -217,6 +218,16 @@ class Request(RequestBase):
                 raise
 
             raise BadRequest() from ebr
+
+    def get_json(
+        self, force: bool = False, silent: bool = False, cache: bool = True
+    ) -> t.Any | None:
+        ctx = _cv_app.get(None)
+
+        if ctx is not None and ctx.has_request and ctx.request is self:
+            self.json_module = ctx.app.get_json_provider(ctx.request.blueprints)
+
+        return super().get_json(force=force, silent=silent, cache=cache)
 
 
 class Response(ResponseBase):

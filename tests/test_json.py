@@ -1,14 +1,276 @@
 import datetime
 import decimal
 import io
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from werkzeug.http import http_date
 
 import flask
+from flask import Blueprint
 from flask import json
 from flask.json.provider import DefaultJSONProvider
+
+
+class LegacyJSONProvider(DefaultJSONProvider):
+    def loads(self, s, **kwargs):
+        rv = super().loads(s, **kwargs)
+
+        if isinstance(rv, dict) and rv.get("format") == "new":
+            return {"format": "legacy", "value": rv["value"]}
+
+        return rv
+
+
+class NewJSONProvider(DefaultJSONProvider):
+    @staticmethod
+    def default(o):
+        if isinstance(o, datetime.date):
+            return o.isoformat()
+
+        if isinstance(o, decimal.Decimal):
+            return float(o)
+
+        return DefaultJSONProvider.default(o)
+
+    def loads(self, s, **kwargs):
+        rv = super().loads(s, **kwargs)
+
+        if isinstance(rv, dict) and rv.get("format") == "new":
+            return {"format": "new", "value": rv["value"].upper()}
+
+        return rv
+
+
+@pytest.fixture
+def blueprint_json_client(app):
+    value_date = datetime.date(2020, 1, 2)
+    value_decimal = decimal.Decimal("1.25")
+
+    parent = Blueprint(
+        "parent", __name__, url_prefix="/legacy", json_provider_class=LegacyJSONProvider
+    )
+    child = Blueprint("child", __name__)
+    configured_child = Blueprint(
+        "configured_child",
+        __name__,
+        json_provider_class=NewJSONProvider,
+    )
+    unconfigured_grandchild = Blueprint("unconfigured_grandchild", __name__)
+
+    @parent.route("/")
+    def parent_view():
+        return flask.jsonify(date=value_date, decimal=value_decimal)
+
+    @parent.route("/dict")
+    def parent_dict_view():
+        return {"date": value_date, "decimal": value_decimal}
+
+    @parent.route("/read", methods=["POST"])
+    def parent_read_view():
+        return flask.request.get_json()
+
+    @parent.route("/template")
+    def parent_template_view():
+        return flask.render_template_string("{{ value|tojson }}", value=value_date)
+
+    @parent.errorhandler(418)
+    def parent_error(error):
+        return {"date": value_date, "decimal": value_decimal}, 418
+
+    @parent.route("/error")
+    def parent_error_view():
+        flask.abort(418)
+
+    @child.route("/inherited")
+    def child_view():
+        return flask.jsonify(date=value_date, decimal=value_decimal)
+
+    @configured_child.route("/new")
+    def configured_child_view():
+        return flask.jsonify(date=value_date, decimal=value_decimal)
+
+    @configured_child.route("/read", methods=["POST"])
+    def configured_child_read_view():
+        return flask.request.get_json()
+
+    @configured_child.route("/template")
+    def configured_child_template_view():
+        return flask.render_template_string("{{ value|tojson }}", value=value_date)
+
+    @configured_child.errorhandler(418)
+    def configured_child_error(error):
+        return {"date": value_date, "decimal": value_decimal}, 418
+
+    @configured_child.errorhandler(ValueError)
+    def configured_child_value_error(error):
+        return {"date": value_date, "decimal": value_decimal}, 400
+
+    @configured_child.route("/error")
+    def configured_child_error_view():
+        flask.abort(418)
+
+    @configured_child.route("/value-error")
+    def configured_child_value_error_view():
+        raise ValueError("boom")
+
+    @unconfigured_grandchild.route("/inherited-new")
+    def unconfigured_grandchild_view():
+        return flask.jsonify(date=value_date, decimal=value_decimal)
+
+    configured_child.register_blueprint(
+        unconfigured_grandchild, url_prefix="/grandchild"
+    )
+    parent.register_blueprint(child, url_prefix="/child")
+    parent.register_blueprint(configured_child, url_prefix="/new-api")
+    app.register_blueprint(parent)
+
+    @app.route("/app")
+    def app_view():
+        return flask.jsonify(date=value_date, decimal=value_decimal)
+
+    @app.errorhandler(404)
+    def not_found(error):
+        return {"date": value_date, "decimal": value_decimal}, 404
+
+    return app.test_client()
+
+
+def test_blueprint_json_provider_jsonify_and_dict(blueprint_json_client):
+    rv = blueprint_json_client.get("/legacy/")
+    assert rv.json == {"date": "Thu, 02 Jan 2020 00:00:00 GMT", "decimal": "1.25"}
+
+    rv = blueprint_json_client.get("/legacy/dict")
+    assert rv.json == {"date": "Thu, 02 Jan 2020 00:00:00 GMT", "decimal": "1.25"}
+
+
+def test_blueprint_json_provider_get_json(blueprint_json_client):
+    rv = blueprint_json_client.post(
+        "/legacy/read",
+        json={"format": "new", "value": "legacy"},
+    )
+    assert rv.json == {"format": "legacy", "value": "legacy"}
+
+
+def test_blueprint_json_provider_error_response(blueprint_json_client):
+    rv = blueprint_json_client.get("/legacy/error")
+    assert rv.status_code == 418
+    assert rv.json == {"date": "Thu, 02 Jan 2020 00:00:00 GMT", "decimal": "1.25"}
+
+
+def test_nested_blueprint_inherits_parent_json_provider(blueprint_json_client):
+    rv = blueprint_json_client.get("/legacy/child/inherited")
+    assert rv.json == {"date": "Thu, 02 Jan 2020 00:00:00 GMT", "decimal": "1.25"}
+
+
+def test_nested_blueprint_uses_nearest_json_provider(blueprint_json_client):
+    rv = blueprint_json_client.get("/legacy/new-api/new")
+    assert rv.json == {"date": "2020-01-02", "decimal": 1.25}
+
+    rv = blueprint_json_client.post(
+        "/legacy/new-api/read",
+        json={"format": "new", "value": "new"},
+    )
+    assert rv.json == {"format": "new", "value": "NEW"}
+
+    rv = blueprint_json_client.get("/legacy/new-api/grandchild/inherited-new")
+    assert rv.json == {"date": "2020-01-02", "decimal": 1.25}
+
+
+def test_nested_blueprint_error_response_uses_nearest_provider(blueprint_json_client):
+    rv = blueprint_json_client.get("/legacy/new-api/error")
+    assert rv.status_code == 418
+    assert rv.json == {"date": "2020-01-02", "decimal": 1.25}
+
+    rv = blueprint_json_client.get("/legacy/new-api/value-error")
+    assert rv.status_code == 400
+    assert rv.json == {"date": "2020-01-02", "decimal": 1.25}
+
+
+def test_app_json_provider_remains_default(blueprint_json_client):
+    rv = blueprint_json_client.get("/app")
+    assert rv.json == {"date": "Thu, 02 Jan 2020 00:00:00 GMT", "decimal": "1.25"}
+
+    rv = blueprint_json_client.get("/missing")
+    assert rv.status_code == 404
+    assert rv.json == {"date": "Thu, 02 Jan 2020 00:00:00 GMT", "decimal": "1.25"}
+
+
+def test_tojson_uses_request_and_app_provider(app, blueprint_json_client):
+    value = datetime.date(2020, 1, 2)
+
+    with app.app_context():
+        assert flask.render_template_string("{{ value|tojson }}", value=value) == (
+            '"Thu, 02 Jan 2020 00:00:00 GMT"'
+        )
+
+    rv = blueprint_json_client.get("/legacy/template")
+    assert rv.data == b'"Thu, 02 Jan 2020 00:00:00 GMT"'
+
+    rv = blueprint_json_client.get("/legacy/new-api/template")
+    assert rv.data == b'"2020-01-02"'
+
+
+def test_blueprint_json_provider_concurrency(app):
+    value_date = datetime.date(2020, 1, 2)
+    value_decimal = decimal.Decimal("1.25")
+    legacy = Blueprint("legacy", __name__, json_provider_class=LegacyJSONProvider)
+    new = Blueprint("new", __name__, json_provider_class=NewJSONProvider)
+
+    @legacy.route("/")
+    def legacy_view():
+        return {"date": value_date, "decimal": value_decimal}
+
+    @new.route("/")
+    def new_view():
+        return {"date": value_date, "decimal": value_decimal}
+
+    app.register_blueprint(legacy, url_prefix="/legacy")
+    app.register_blueprint(new, url_prefix="/new")
+
+    results = {}
+    barrier = threading.Barrier(2)
+
+    def request_json(path, name):
+        client = app.test_client()
+        barrier.wait()
+        results[name] = client.get(path).json
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(request_json, "/legacy/", "legacy"),
+            executor.submit(request_json, "/new/", "new"),
+        ]
+
+        for future in futures:
+            future.result()
+
+    assert results == {
+        "legacy": {
+            "date": "Thu, 02 Jan 2020 00:00:00 GMT",
+            "decimal": "1.25",
+        },
+        "new": {"date": "2020-01-02", "decimal": 1.25},
+    }
+
+
+def test_blueprint_json_provider_class_attribute(app, client):
+    class AttributeBlueprint(Blueprint):
+        json_provider_class = NewJSONProvider
+
+    bp = AttributeBlueprint("bp", __name__)
+
+    @bp.route("/")
+    def view():
+        return flask.jsonify(
+            date=datetime.date(2020, 1, 2),
+            decimal=decimal.Decimal("1.25"),
+        )
+
+    app.register_blueprint(bp)
+    assert client.get("/").json == {"date": "2020-01-02", "decimal": 1.25}
 
 
 @pytest.mark.parametrize("debug", (True, False))

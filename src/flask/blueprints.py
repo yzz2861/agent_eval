@@ -12,6 +12,7 @@ from .sansio.blueprints import BlueprintSetupState as BlueprintSetupState  # noq
 from .sansio.scaffold import _sentinel
 
 if t.TYPE_CHECKING:  # pragma: no cover
+    from .json.provider import JSONProvider
     from .wrappers import Response
 
 
@@ -28,6 +29,7 @@ class Blueprint(SansioBlueprint):
         url_defaults: dict[str, t.Any] | None = None,
         root_path: str | None = None,
         cli_group: str | None = _sentinel,  # type: ignore
+        json_provider_class: type[JSONProvider] | None = None,
     ) -> None:
         super().__init__(
             name,
@@ -40,6 +42,7 @@ class Blueprint(SansioBlueprint):
             url_defaults,
             root_path,
             cli_group,
+            json_provider_class,
         )
 
         #: The Click command group for registering CLI commands for this
