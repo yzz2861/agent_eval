@@ -96,6 +96,7 @@ from tornado.routing import (
     ReversibleRouter,
     ReversibleRuleRouter,
     Rule,
+    RuleRouter,
     URLSpec,
     _RuleList,
 )
@@ -192,8 +193,8 @@ class RequestHandler:
 
     # Will be set in _execute.
     _transforms: list["OutputTransform"]
-    path_args: list[str]
-    path_kwargs: dict[str, str]
+    path_args: list[Any]
+    path_kwargs: dict[str, Any]
 
     def __init__(
         self,
@@ -1744,9 +1745,9 @@ class RequestHandler:
                 "application to use %s" % (name, feature)
             )
 
-    def reverse_url(self, name: str, *args: Any) -> str:
+    def reverse_url(self, name: str, *args: Any, **kwargs: Any) -> str:
         """Alias for `Application.reverse_url`."""
-        return self.application.reverse_url(name, *args)
+        return self.application.reverse_url(name, *args, **kwargs)
 
     def compute_etag(self) -> str | None:
         """Computes the etag header to be used for this request.
@@ -1813,7 +1814,7 @@ class RequestHandler:
         return match
 
     async def _execute(
-        self, transforms: list["OutputTransform"], *args: bytes, **kwargs: bytes
+        self, transforms: list["OutputTransform"], *args: Any, **kwargs: Any
     ) -> None:
         """Executes this request with the given output transforms."""
         self._transforms = transforms
@@ -1828,9 +1829,13 @@ class RequestHandler:
                 except httputil.HTTPInputError as e:
                     raise HTTPError(400, "Invalid body: %s" % e) from e
 
-            self.path_args = [self.decode_argument(arg) for arg in args]
+            self.path_args = [
+                self.decode_argument(arg) if isinstance(arg, bytes) else arg
+                for arg in args
+            ]
             self.path_kwargs = {
-                k: self.decode_argument(v, name=k) for (k, v) in kwargs.items()
+                k: (self.decode_argument(v, name=k) if isinstance(v, bytes) else v)
+                for (k, v) in kwargs.items()
             }
             # If XSRF cookies are turned on, reject form submissions without
             # the proper cookie
@@ -2105,12 +2110,45 @@ class _ApplicationRouter(ReversibleRuleRouter):
     def get_target_delegate(
         self, target: Any, request: httputil.HTTPServerRequest, **target_params: Any
     ) -> httputil.HTTPMessageDelegate | None:
+        visiting = target_params.pop("_application_router_visiting", None)
         if isclass(target) and issubclass(target, RequestHandler):
             return self.application.get_handler_delegate(
                 request, target, **target_params
             )
 
+        if isinstance(target, ReversibleRuleRouter):
+            return self._get_reversible_router_delegate(
+                target,
+                request,
+                visiting=visiting,
+                **target_params,
+            )
+
         return super().get_target_delegate(target, request, **target_params)
+
+    def _get_reversible_router_delegate(
+        self,
+        target: ReversibleRuleRouter,
+        request: httputil.HTTPServerRequest,
+        visiting: ReversibleRuleRouter | None = None,
+        **kwargs: Any,
+    ) -> httputil.HTTPMessageDelegate | None:
+        if visiting is target:
+            return None
+        for rule in target.rules:
+            target_params = rule.matcher.match(request)
+            if target_params is not None:
+                if rule.target_kwargs:
+                    target_params["target_kwargs"] = rule.target_kwargs
+                target_params["_application_router_visiting"] = target
+                delegate = self.get_target_delegate(
+                    rule.target, request, **target_params
+                )
+                if delegate is not None:
+                    return RuleRouter._merge_inherited_target_params(
+                        self, delegate, **kwargs
+                    )
+        return None
 
 
 class Application(ReversibleRouter):
@@ -2371,8 +2409,8 @@ class Application(ReversibleRouter):
         request: httputil.HTTPServerRequest,
         target_class: type[RequestHandler],
         target_kwargs: dict[str, Any] | None = None,
-        path_args: list[bytes] | None = None,
-        path_kwargs: dict[str, bytes] | None = None,
+        path_args: list[Any] | None = None,
+        path_kwargs: dict[str, Any] | None = None,
     ) -> "_HandlerDelegate":
         """Returns `~.httputil.HTTPMessageDelegate` that can serve a request
         for application and `RequestHandler` subclass.
@@ -2388,16 +2426,16 @@ class Application(ReversibleRouter):
             self, request, target_class, target_kwargs, path_args, path_kwargs
         )
 
-    def reverse_url(self, name: str, *args: Any) -> str:
+    def reverse_url(self, name: str, *args: Any, **kwargs: Any) -> str:
         """Returns a URL path for handler named ``name``
 
-        The handler must be added to the application as a named `URLSpec`.
+        The handler must be added to the application as a named rule.
 
-        Args will be substituted for capturing groups in the `URLSpec` regex.
-        They will be converted to strings if necessary, encoded as utf8,
-        and url-escaped.
+        Regular expression rules accept positional arguments; path template
+        rules accept keyword arguments named by the template. Template
+        converters validate and encode the supplied Python values.
         """
-        reversed_url = self.default_router.reverse_url(name, *args)
+        reversed_url = self.default_router.reverse_url(name, *args, **kwargs)
         if reversed_url is not None:
             return reversed_url
 
@@ -2436,8 +2474,8 @@ class _HandlerDelegate(httputil.HTTPMessageDelegate):
         request: httputil.HTTPServerRequest,
         handler_class: type[RequestHandler],
         handler_kwargs: dict[str, Any] | None,
-        path_args: list[bytes] | None,
-        path_kwargs: dict[str, bytes] | None,
+        path_args: list[Any] | None,
+        path_kwargs: dict[str, Any] | None,
     ) -> None:
         self.application = application
         self.connection = request.connection
