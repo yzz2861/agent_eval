@@ -634,6 +634,75 @@ class AsyncSessionTransactionTest(AsyncFixture):
     run_inserts = None
 
     @async_test
+    async def test_on_commit_callbacks_run_in_registration_order(
+        self, async_session
+    ):
+        notifications: List[str] = []
+
+        async_session.on_commit(lambda: notifications.append("sync"))
+
+        async def async_callback():
+            notifications.append("async")
+
+        async_session.on_commit(async_callback)
+
+        await async_session.commit()
+        eq_(notifications, ["sync", "async"])
+
+    @testing.requires.savepoints
+    @async_test
+    async def test_on_commit_callbacks_track_savepoint_hierarchy(
+        self, async_session
+    ):
+        notifications: List[str] = []
+
+        async_session.on_commit(lambda: notifications.append("outer"))
+
+        async with async_session.begin_nested():
+            async_session.on_commit(lambda: notifications.append("committed"))
+
+        savepoint = await async_session.begin_nested().start()
+        async_session.on_commit(lambda: notifications.append("rolled back"))
+        await savepoint.rollback()
+
+        eq_(notifications, [])
+        await async_session.commit()
+        eq_(notifications, ["outer", "committed"])
+
+    @testing.requires.savepoints
+    @async_test
+    async def test_committed_savepoint_callbacks_discard_on_outer_rollback(
+        self, async_session
+    ):
+        notifications: List[str] = []
+
+        async with async_session.begin_nested():
+            async_session.on_commit(lambda: notifications.append("inner"))
+
+        eq_(notifications, [])
+        await async_session.rollback()
+        eq_(notifications, [])
+
+    @async_test
+    async def test_on_commit_callback_error_reports_committed_transaction(
+        self, async_session
+    ):
+        async def callback():
+            raise RuntimeError("notification failure")
+
+        async_session.on_commit(callback)
+
+        with expect_raises_message(
+            exc.InvalidRequestError,
+            "database transaction has already committed successfully",
+        ) as error_info:
+            await async_session.commit()
+
+        is_true(
+            isinstance(error_info.error.__cause__, RuntimeError)
+        )
+
+    @async_test
     async def test_interrupt_ctxmanager_connection(
         self, async_trans_ctx_manager_fixture, async_session
     ):

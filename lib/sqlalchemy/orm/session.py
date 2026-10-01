@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 from enum import Enum
+import inspect as py_inspect
 import itertools
 import sys
 import typing
@@ -172,6 +173,8 @@ JoinTransactionMode = Literal[
     "control_fully",
     "create_savepoint",
 ]
+
+_OnCommitCallback = Callable[[], Any]
 
 
 class _ConnectionCallableProto(Protocol):
@@ -911,6 +914,7 @@ class SessionTransaction(_StateChange, TransactionalContext):
     _key_switches: weakref.WeakKeyDictionary[
         InstanceState[Any], Tuple[Any, Any]
     ]
+    _on_commit_callbacks: List[_OnCommitCallback]
 
     origin: SessionTransactionOrigin
     """Origin of this :class:`_orm.SessionTransaction`.
@@ -949,6 +953,7 @@ class SessionTransaction(_StateChange, TransactionalContext):
         self._parent = parent
         self.nested = nested = origin is SessionTransactionOrigin.BEGIN_NESTED
         self.origin = origin
+        self._on_commit_callbacks = []
 
         if session._close_state is _SessionCloseState.CLOSED:
             raise sa_exc.InvalidRequestError(
@@ -1039,6 +1044,15 @@ class SessionTransaction(_StateChange, TransactionalContext):
     @property
     def _is_transaction_boundary(self) -> bool:
         return self.nested or not self._parent
+
+    @property
+    def _boundary(self) -> SessionTransaction:
+        transaction = self
+        while not transaction._is_transaction_boundary:
+            parent = transaction._parent
+            assert parent is not None
+            transaction = parent
+        return transaction
 
     @_StateChange.declare_states(
         (SessionTransactionState.ACTIVE,), _StateChangeStates.NO_CHANGE
@@ -1162,6 +1176,30 @@ class SessionTransaction(_StateChange, TransactionalContext):
             parent._dirty.update(self._dirty)
             parent._deleted.update(self._deleted)
             parent._key_switches.update(self._key_switches)
+
+    def _merge_on_commit_callbacks(self) -> None:
+        parent = self._parent
+        assert parent is not None
+        parent._boundary._on_commit_callbacks.extend(
+            self._on_commit_callbacks
+        )
+        self._on_commit_callbacks = []
+
+    def _run_on_commit_callbacks(self) -> None:
+        callbacks = self._on_commit_callbacks
+        self._on_commit_callbacks = []
+
+        for callback in callbacks:
+            try:
+                result = callback()
+                if py_inspect.isawaitable(result):
+                    util.await_(result)
+            except Exception as error:
+                raise sa_exc.InvalidRequestError(
+                    "An after-commit callback raised an exception. "
+                    "The database transaction has already committed "
+                    "successfully and cannot be rolled back."
+                ) from error
 
     @_StateChange.declare_states(
         (SessionTransactionState.ACTIVE,), _StateChangeStates.NO_CHANGE
@@ -1341,8 +1379,14 @@ class SessionTransaction(_StateChange, TransactionalContext):
 
             self._remove_snapshot()
 
+            if self.nested:
+                self._merge_on_commit_callbacks()
+
         with self._expect_state(SessionTransactionState.CLOSED):
             self.close()
+
+        if self._parent is None:
+            self._run_on_commit_callbacks()
 
         if _to_root and self._parent:
             self._parent.commit(_to_root=True)
@@ -2034,6 +2078,30 @@ class Session(_SessionClassMethods, EventTarget):
 
         """
         return self.begin(nested=True)
+
+    def on_commit(self, callback: _OnCommitCallback) -> None:
+        """Register a callable to run after the outer transaction commits.
+
+        Callbacks registered inside a SAVEPOINT are retained by that
+        SAVEPOINT.  They are appended to the enclosing transaction's
+        callbacks when the SAVEPOINT is committed and discarded if the
+        SAVEPOINT is rolled back.
+
+        Callbacks run after the outermost database transaction commits
+        successfully, in registration order.  A callback may autobegin or
+        explicitly begin a new transaction.  A callback registered while
+        callbacks are running belongs to that new transaction and is not run
+        during the just-completed transaction.
+        """
+        if not callable(callback):
+            raise sa_exc.ArgumentError("callback must be callable")
+        if not self._is_asyncio and py_inspect.iscoroutinefunction(callback):
+            raise sa_exc.ArgumentError(
+                "coroutine functions are only supported by AsyncSession"
+            )
+
+        transaction = self._autobegin_t()
+        transaction._boundary._on_commit_callbacks.append(callback)
 
     def rollback(self) -> None:
         """Rollback the current transaction in progress.

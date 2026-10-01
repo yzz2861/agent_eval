@@ -104,6 +104,7 @@ _Ts = TypeVarTuple("_Ts")
         "invalidate",
         "merge",
         "merge_all",
+        "on_commit",
         "refresh",
         "rollback",
         "scalar",
@@ -1054,6 +1055,19 @@ class async_scoped_session(Generic[_AS]):
         return await self._proxied.merge_all(
             instances, load=load, options=options
         )
+
+    def on_commit(self, callback: Callable[[], Any]) -> None:
+        r"""Register a sync or awaitable callable to run after commit.
+
+        .. container:: class_bases
+
+            Proxied for the :class:`_asyncio.AsyncSession` class on
+            behalf of the
+            :class:`_asyncio.scoping.async_scoped_session` class.
+
+        """
+
+        return self._proxied.on_commit(callback)
 
     async def refresh(
         self,

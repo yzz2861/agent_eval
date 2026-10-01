@@ -37,6 +37,7 @@ from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_not
+from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.config import Variation
 from sqlalchemy.testing.fixtures import fixture_session
@@ -52,6 +53,141 @@ if TYPE_CHECKING:
 class SessionTransactionTest(fixtures.RemovesEvents, FixtureTest):
     run_inserts = None
     __sparse_driver_backend__ = True
+
+    def test_on_commit_callbacks_run_in_registration_order(self):
+        notifications = []
+        sess = fixture_session()
+
+        sess.on_commit(lambda: notifications.append("first"))
+        sess.on_commit(lambda: notifications.append("second"))
+
+        sess.commit()
+        eq_(notifications, ["first", "second"])
+
+    def test_on_commit_requires_callable(self):
+        sess = fixture_session()
+
+        with expect_raises_message(sa_exc.ArgumentError, "callable"):
+            sess.on_commit("not callable")
+
+        async def callback():
+            pass
+
+        with expect_raises_message(
+            sa_exc.ArgumentError, "coroutine functions are only supported"
+        ):
+            sess.on_commit(callback)
+
+    @testing.requires.savepoints
+    def test_on_commit_callbacks_move_from_committed_savepoint(self):
+        notifications = []
+        sess = fixture_session()
+
+        sess.on_commit(lambda: notifications.append("outer"))
+        with sess.begin_nested():
+            sess.on_commit(lambda: notifications.append("inner-one"))
+        with sess.begin_nested():
+            sess.on_commit(lambda: notifications.append("inner-two"))
+
+        eq_(notifications, [])
+        sess.commit()
+        eq_(notifications, ["outer", "inner-one", "inner-two"])
+
+    @testing.requires.savepoints
+    def test_on_commit_callbacks_discarded_by_savepoint_rollback(self):
+        notifications = []
+        sess = fixture_session()
+
+        savepoint = sess.begin_nested()
+        sess.on_commit(lambda: notifications.append("inner"))
+        savepoint.rollback()
+
+        sess.commit()
+        eq_(notifications, [])
+
+    @testing.requires.savepoints
+    def test_committed_savepoint_callbacks_discarded_by_outer_rollback(self):
+        notifications = []
+        sess = fixture_session()
+
+        with sess.begin_nested():
+            sess.on_commit(lambda: notifications.append("inner"))
+
+        eq_(notifications, [])
+        sess.rollback()
+        eq_(notifications, [])
+
+    def test_on_commit_callbacks_do_not_run_when_commit_fails(self):
+        notifications = []
+        engine = engines.testing_engine()
+
+        def fail_commit(connection):
+            raise RuntimeError("simulated commit failure")
+
+        event.listen(engine, "commit", fail_commit)
+        try:
+            sess = Session(engine)
+            sess.connection()
+            sess.on_commit(lambda: notifications.append("called"))
+
+            with expect_raises_message(
+                RuntimeError, "simulated commit failure"
+            ):
+                sess.commit()
+        finally:
+            event.remove(engine, "commit", fail_commit)
+            engine.dispose()
+
+        eq_(notifications, [])
+
+    def test_on_commit_callback_error_reports_committed_transaction(self):
+        notifications = []
+        sess = fixture_session()
+
+        def callback():
+            notifications.append("called")
+            raise RuntimeError("notification failure")
+
+        sess.on_commit(callback)
+
+        with expect_raises_message(
+            sa_exc.InvalidRequestError,
+            "database transaction has already committed successfully",
+        ) as error_info:
+            sess.commit()
+
+        is_true(
+            isinstance(error_info.error.__cause__, RuntimeError)
+        )
+        eq_(notifications, ["called"])
+
+    def test_on_commit_callback_while_running_belongs_to_new_transaction(self):
+        notifications = []
+        sess = fixture_session()
+
+        def register_second_callback():
+            notifications.append("first")
+            sess.on_commit(lambda: notifications.append("second"))
+
+        sess.on_commit(register_second_callback)
+        sess.commit()
+        eq_(notifications, ["first"])
+
+        sess.commit()
+        eq_(notifications, ["first", "second"])
+
+    def test_on_commit_callback_can_begin_and_commit_new_transaction(self):
+        notifications = []
+        sess = fixture_session()
+
+        def open_new_transaction():
+            notifications.append("first")
+            with sess.begin():
+                sess.on_commit(lambda: notifications.append("second"))
+
+        sess.on_commit(open_new_transaction)
+        sess.commit()
+        eq_(notifications, ["first", "second"])
 
     def test_no_close_transaction_on_flush(self, connection):
         User, users = self.classes.User, self.tables.users

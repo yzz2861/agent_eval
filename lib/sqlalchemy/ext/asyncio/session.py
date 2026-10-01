@@ -87,6 +87,8 @@ _Ts = TypeVarTuple("_Ts")
 _EXECUTE_OPTIONS = util.immutabledict({"prebuffer_rows": True})
 _STREAM_OPTIONS = util.immutabledict({"stream_results": True})
 
+_AsyncOnCommitCallback = Callable[[], Union[None, Awaitable[Any]]]
+
 
 class AsyncAttrs:
     """Mixin class which provides an awaitable accessor for all attributes.
@@ -279,6 +281,7 @@ class AsyncSession(ReversibleProxy[Session]):
         self.sync_session = self._proxied = self._assign_proxied(
             self.sync_session_class(bind=sync_bind, binds=sync_binds, **kw)
         )
+        self.sync_session._is_asyncio = True
 
     @util.memoized_property
     def _translate_binds(
@@ -1267,6 +1270,21 @@ class AsyncSession(ReversibleProxy[Session]):
         """
 
         return AsyncSessionTransaction(self)
+
+    def on_commit(self, callback: _AsyncOnCommitCallback) -> None:
+        """Register a sync or awaitable callable to run after commit.
+
+        The callback belongs to the current transaction level.  Callbacks
+        registered in a committed SAVEPOINT are appended to the enclosing
+        transaction's callbacks, while callbacks in a rolled back SAVEPOINT
+        are discarded.  The retained callbacks run in registration order only
+        after the outermost transaction commits successfully.
+
+        A callback may begin a new transaction.  A callback registered while
+        callbacks are running belongs to that new transaction and is not run
+        during the just-completed transaction.
+        """
+        self.sync_session.on_commit(callback)
 
     def begin_nested(self) -> AsyncSessionTransaction:
         """Return an :class:`_asyncio.AsyncSessionTransaction` object
