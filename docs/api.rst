@@ -18,6 +18,12 @@ Cursors
 .. autoclass:: aiosqlite.cursor.Cursor
     :special-members: __aiter__, __anext__, __aenter__, __aexit__
 
+Blobs
+-----
+
+.. autoclass:: aiosqlite.blob.Blob
+    :special-members: __aiter__, __aenter__, __aexit__, __len__
+
 Errors
 ------
 
@@ -48,4 +54,3 @@ Advanced
 .. autofunction:: register_adapter
 
 .. autofunction:: register_converter
-

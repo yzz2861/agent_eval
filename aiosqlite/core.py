@@ -16,10 +16,11 @@ from threading import Thread
 from typing import Any, Callable, Literal, Optional, Union
 from warnings import warn
 
+from .blob import Blob, BLOB_SUPPORT
 from .context import contextmanager
 from .cursor import Cursor
 
-__all__ = ["connect", "Connection", "Cursor"]
+__all__ = ["connect", "Connection", "Cursor", "Blob"]
 
 AuthorizerCallback = Callable[[int, str, str, str, str], int]
 
@@ -84,6 +85,7 @@ class Connection:
     ) -> None:
         self._running = True
         self._connection: Optional[sqlite3.Connection] = None
+        self._open_blobs: set[Blob] = set()
         self._connector = connector
         self._tx: _TxQueue = SimpleQueue()
         self._iter_chunk_size = iter_chunk_size
@@ -188,6 +190,67 @@ class Connection:
         """Create an aiosqlite cursor wrapping a sqlite3 cursor object."""
         return Cursor(self, await self._execute(self._conn.cursor))
 
+    @contextmanager
+    async def blobopen(
+        self,
+        table: str,
+        column: str,
+        rowid: int,
+        /,
+        *,
+        readonly: bool = False,
+        name: str = "main",
+    ) -> Blob:
+        """
+        Create and return a Blob proxy for incremental blob IO.
+
+        The underlying handle is opened on the connection's thread, and all
+        operations on the returned proxy are executed there. Open handles
+        are closed automatically when the connection is closed.
+
+        Requires Python 3.11 or newer.
+        """
+        if not BLOB_SUPPORT:
+            raise NotImplementedError(
+                "incremental blob IO requires Python 3.11 or newer"
+            )
+        if not self._running or not self._connection:
+            raise ValueError("Connection closed")
+
+        holder: list[Any] = []
+
+        def open_blob() -> tuple[Any, int]:
+            blob = self._conn.blobopen(
+                table, column, rowid, readonly=readonly, name=name
+            )
+            holder.append(blob)
+            return blob, len(blob)
+
+        future = asyncio.get_event_loop().create_future()
+        self._tx.put_nowait((future, open_blob))
+
+        try:
+            raw_blob, length = await future
+        except BaseException:
+            # The wait was cancelled or opening failed; make sure any handle
+            # created on the connection thread is also closed there, rather
+            # than leaking it to the garbage collector.
+            def close_blob() -> None:
+                if holder:
+                    try:
+                        holder[0].close()
+                    except Exception:
+                        LOG.exception(
+                            "exception while closing leaked blob handle"
+                        )
+
+            self._tx.put_nowait((None, close_blob))
+            raise
+
+        blob = Blob(self, raw_blob, length)
+        self._open_blobs.add(blob)
+        return blob
+
     async def commit(self) -> None:
         """Commit the current transaction."""
         await self._execute(self._conn.commit)
@@ -201,6 +264,14 @@ class Connection:
 
         if self._connection is None:
             return
+
+        # Close any open blob handles on the connection thread first,
+        # so that no handle outlives the connection itself.
+        for blob in list(self._open_blobs):
+            try:
+                await blob.close()
+            except Exception:
+                LOG.exception("exception occurred while closing blob handle")
 
         try:
             await self._execute(self._conn.close)
