@@ -3,6 +3,7 @@
 import errno
 import hashlib
 import io
+import multiprocessing as mp
 import os
 import os.path as op
 import pathlib
@@ -650,6 +651,237 @@ def test_evict(cache):
     assert cache.evict('red') == 30
     assert len(cache) == 60
     assert len(cache.check()) == 0
+
+
+def test_multi_tags(cache):
+    cache.set('z', 0, tags=(1, 'mix'))
+    cache.set('a', 1, tags=('user-1', 'v1', 'sales'))
+    cache.set('b', 2, tags=('user-1', 'v1', 'billing'))
+    cache.set('c', 3, tags=('user-2', 'v2', 'sales'))
+
+    assert set(cache.get('a', tags=True)[1]) == {'sales', 'user-1', 'v1'}
+    assert cache.get('a', tag=True)[1] == 'sales'
+    assert cache.evict(tags=(1, 'mix')) == 1
+    assert cache.evict(tags=('user-1', 'v1'), any=True) == 2
+    assert cache.evict(tags=('user-2', 'sales')) == 1
+
+    assert cache.set('a', 1, tags=('user-1', 'v1'))
+    assert cache.set('a', 1, tags=('user-2',))
+    assert cache.get('a', tags=True)[1] == ('user-2',)
+    assert cache.evict('user-1') == 0
+
+    assert cache.set('a', 1, tags=('user-2', 'v1'))
+    assert cache.set('a', 1, tags=())
+    assert cache.get('a', tags=True)[1] == ()
+
+    assert cache.set('legacy', 1, tag='user-1')
+    assert cache.evict('user-1') == 1
+
+    with pytest.raises(ValueError):
+        cache.set('d', 4, tag='one', tags=('two',))
+
+    with pytest.raises(ValueError):
+        cache.set('d', 4, tags=('one', None))
+
+    with pytest.raises(ValueError):
+        cache.evict(tags=(('nested',), 'x'))
+
+    assert len(cache.check()) == 0
+
+
+def test_tags_cleanup_large_values(cache):
+    value = b'x' * cache.disk_min_file_size
+
+    cache.set('a', value, tags=('user', 'v1', 'report'))
+    old_filename = cache.get('a', read=True).name
+
+    cache.set('a', b'y' * cache.disk_min_file_size, tags=('user', 'v2'))
+
+    assert not op.exists(old_filename)
+    assert cache.evict(tags=('user', 'v2')) == 1
+    assert len(cache) == 0
+    assert cache.check() == []
+
+    cache.set('b', value, tags=('expired',))
+    cache.set('c', value, tags=('evicted',))
+    cache.evict('evicted')
+    assert cache.check() == []
+
+
+def test_tags_expire_and_cull():
+    cache_dir = tempfile.mkdtemp()
+    value = b'z' * 2**15
+
+    try:
+        cache = dc.Cache(cache_dir, cull_limit=0, size_limit=2**15)
+
+        cache.set('a', value, expire=0.001, tags=('expired',))
+        time.sleep(0.01)
+        assert cache.expire() == 1
+        assert cache.check() == []
+
+        cache.reset('size_limit', 2**15)
+        cache.set('b', value, tags=('first',))
+        cache.set('c', value, tags=('second',))
+        assert cache.cull() >= 1
+        assert cache.check() == []
+
+        cache.close()
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_tags_upgrade_old_cache():
+    cache_dir = tempfile.mkdtemp()
+
+    try:
+        with sqlite3.connect(op.join(cache_dir, 'cache.db')) as con:
+            con.execute(
+                'CREATE TABLE Settings(key TEXT NOT NULL UNIQUE, value)'
+            )
+            con.executemany(
+                'INSERT INTO Settings VALUES (?, ?)',
+                list(dc.DEFAULT_SETTINGS.items())
+                + list(dc.core.METADATA.items()),
+            )
+            con.execute(
+                'CREATE TABLE Cache ('
+                ' rowid INTEGER PRIMARY KEY, key BLOB, raw INTEGER,'
+                ' store_time REAL, expire_time REAL, access_time REAL,'
+                ' access_count INTEGER DEFAULT 0, tag BLOB,'
+                ' size INTEGER DEFAULT 0, mode INTEGER DEFAULT 0,'
+                ' filename TEXT, value BLOB)'
+            )
+            con.execute(
+                'CREATE UNIQUE INDEX Cache_key_raw ON Cache(key, raw)'
+            )
+            con.execute(
+                'INSERT INTO Cache(key, raw, tag, mode, value)'
+                ' VALUES (?, ?, ?, ?, ?)',
+                (1, True, 'old', dc.core.MODE_RAW, 2),
+            )
+
+        cache = dc.Cache(cache_dir)
+        assert cache._tags_ready
+        assert cache.get(1, tags=True) == (2, ('old',))
+        assert cache.evict('old') == 1
+        assert cache.check() == []
+        cache.close()
+
+        cache = dc.Cache(cache_dir)
+        assert cache._tags_ready
+        cache.close()
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_tags_upgrade_failure_opens(tmp_path):
+    directory = str(tmp_path)
+    with mock.patch.object(
+        dc.Cache,
+        '_setup_tags',
+        side_effect=sqlite3.OperationalError('upgrade failed'),
+    ):
+        cache = dc.Cache(directory)
+
+        assert not cache._tags_ready
+        cache.set('untagged', 1)
+        assert cache['untagged'] == 1
+
+        rows = cache._sql(
+            "SELECT name FROM sqlite_master"
+            " WHERE type = 'table' AND name = 'Tags'"
+        ).fetchall()
+        assert rows == []
+        cache.close()
+
+    cache = dc.Cache(str(tmp_path))
+    assert cache._tags_ready
+    cache.set('tagged', 2, tags=('ok',))
+    assert cache.evict('ok') == 1
+    cache.close()
+
+
+def test_tags_upgrade_ddl_rollback(tmp_path):
+    directory = str(tmp_path)
+    cache = dc.Cache(directory)
+    cache._sql('DROP TABLE Tags')
+    cache._sql('DROP TRIGGER Tags_delete')
+    cache._sql(
+        'CREATE VIEW Tags AS SELECT 1 AS tag'
+    )
+    cache.close()
+
+    cache = dc.Cache(directory)
+    assert not cache._tags_ready
+    assert cache.set('untagged', 1)
+
+    cache._sql('DROP VIEW Tags')
+    cache.close()
+
+    cache = dc.Cache(directory)
+    assert cache._tags_ready
+    cache.set('tagged', 2, tags=('ok',))
+    assert cache.evict('ok') == 1
+    cache.close()
+
+
+def _multi_tag_worker(directory, worker_id, start, deleted, barrier, go):
+    cache = dc.Cache(directory, timeout=60)
+    barrier.wait()
+    go.wait(5)
+
+    for index in range(start, start + 100):
+        cache.set(
+            index,
+            index,
+            retry=True,
+            tags=('worker-%d' % worker_id, 'v1', 'report'),
+        )
+
+    if worker_id == 0:
+        count = cache.evict(tags=('v1', 'report'), any=True, retry=True)
+    else:
+        count = cache.evict('worker-1', retry=True)
+
+    with deleted.get_lock():
+        deleted.value += count
+
+    cache.close()
+
+
+def test_multi_tags_multiprocess(tmp_path):
+    ctx = mp.get_context('fork')
+    barrier = ctx.Barrier(5)
+    go = ctx.Event()
+    deleted = ctx.Value('q', 0)
+    processes = []
+
+    for worker_id in range(4):
+        process = ctx.Process(
+            target=_multi_tag_worker,
+            args=(
+                str(tmp_path),
+                worker_id,
+                worker_id * 100,
+                deleted,
+                barrier,
+                go,
+            ),
+        )
+        process.start()
+        processes.append(process)
+
+    barrier.wait()
+    go.set()
+
+    for process in processes:
+        process.join(60)
+        assert process.exitcode == 0
+
+    with dc.Cache(str(tmp_path)) as cache:
+        assert deleted.value + len(cache) == 400
+        assert cache.check() == []
 
 
 def test_clear(cache):

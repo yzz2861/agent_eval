@@ -259,6 +259,19 @@ Likewise, the tag index may be created or dropped using methods::
 But prefer initializing the cache with a tag index rather than explicitly
 creating or dropping the tag index.
 
+Items can also be associated with multiple tags. Pass either ``tags`` or the
+legacy ``tag`` argument when storing an item. Use :meth:`evict
+<diskcache.Cache.evict>` with ``any=True`` to invalidate items containing any
+of the supplied tags; omit ``any`` to invalidate only items that contain every
+supplied tag::
+
+    cache.set('report-1', report, tags=('user-42', 'version-7', 'sales'))
+    cache.evict(tags=('user-42', 'version-7'))
+    cache.evict(tags=('sales', 'billing'), any=True)
+
+The legacy ``tag`` argument and ``cache.evict(tag)`` call continue to work
+unchanged.
+
 To manually enforce the cache's size limit, use the :meth:`cull
 <diskcache.Cache.cull>` method. :meth:`Cull <diskcache.Cache.cull>` begins by
 removing expired items from the cache and then uses the eviction policy to

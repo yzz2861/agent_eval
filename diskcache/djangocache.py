@@ -72,6 +72,7 @@ class DjangoCache(BaseCache):
         read=False,
         tag=None,
         retry=True,
+        tags=None,
     ):
         """Set a value in the cache if the key does not already exist. If
         timeout is given, that timeout will be used for the key; otherwise the
@@ -86,6 +87,7 @@ class DjangoCache(BaseCache):
         :param int version: key version number (default None, cache parameter)
         :param bool read: read value as bytes from file (default False)
         :param str tag: text to associate with key (default None)
+        :param tags: tags to associate with key (default None)
         :param bool retry: retry if database timeout occurs (default True)
         :return: True if item was added
 
@@ -93,7 +95,15 @@ class DjangoCache(BaseCache):
         # pylint: disable=arguments-differ
         key = self.make_key(key, version=version)
         timeout = self.get_backend_timeout(timeout=timeout)
-        return self._cache.add(key, value, timeout, read, tag, retry)
+        return self._cache.add(
+            key,
+            value,
+            timeout,
+            read,
+            tag=tag,
+            tags=tags,
+            retry=retry,
+        )
 
     def get(
         self,
@@ -104,6 +114,7 @@ class DjangoCache(BaseCache):
         expire_time=False,
         tag=False,
         retry=False,
+        tags=False,
     ):
         """Fetch a given key from the cache. If the key does not exist, return
         default, which itself defaults to None.
@@ -116,13 +127,22 @@ class DjangoCache(BaseCache):
         :param float expire_time: if True, return expire_time in tuple
             (default False)
         :param tag: if True, return tag in tuple (default False)
+        :param tags: if True, return tags in tuple (default False)
         :param bool retry: retry if database timeout occurs (default False)
         :return: value for item if key is found else default
 
         """
         # pylint: disable=arguments-differ
         key = self.make_key(key, version=version)
-        return self._cache.get(key, default, read, expire_time, tag, retry)
+        return self._cache.get(
+            key,
+            default=default,
+            read=read,
+            expire_time=expire_time,
+            tag=tag,
+            retry=retry,
+            tags=tags,
+        )
 
     def read(self, key, version=None):
         """Return file handle corresponding to `key` from Cache.
@@ -145,6 +165,7 @@ class DjangoCache(BaseCache):
         read=False,
         tag=None,
         retry=True,
+        tags=None,
     ):
         """Set a value in the cache. If timeout is given, that timeout will be
         used for the key; otherwise the default cache timeout will be used.
@@ -156,6 +177,7 @@ class DjangoCache(BaseCache):
         :param int version: key version number (default None, cache parameter)
         :param bool read: read value as bytes from file (default False)
         :param str tag: text to associate with key (default None)
+        :param tags: tags to associate with key (default None)
         :param bool retry: retry if database timeout occurs (default True)
         :return: True if item was set
 
@@ -163,7 +185,15 @@ class DjangoCache(BaseCache):
         # pylint: disable=arguments-differ
         key = self.make_key(key, version=version)
         timeout = self.get_backend_timeout(timeout=timeout)
-        return self._cache.set(key, value, timeout, read, tag, retry)
+        return self._cache.set(
+            key,
+            value,
+            timeout,
+            read,
+            tag=tag,
+            tags=tags,
+            retry=retry,
+        )
 
     def touch(self, key, timeout=DEFAULT_TIMEOUT, version=None, retry=True):
         """Touch a key in the cache. If timeout is given, that timeout will be
@@ -190,6 +220,7 @@ class DjangoCache(BaseCache):
         expire_time=False,
         tag=False,
         retry=True,
+        tags=False,
     ):
         """Remove corresponding item for `key` from cache and return value.
 
@@ -203,12 +234,20 @@ class DjangoCache(BaseCache):
         :param float expire_time: if True, return expire_time in tuple
             (default False)
         :param tag: if True, return tag in tuple (default False)
+        :param tags: if True, return tags in tuple (default False)
         :param bool retry: retry if database timeout occurs (default True)
         :return: value for item if key is found else default
 
         """
         key = self.make_key(key, version=version)
-        return self._cache.pop(key, default, expire_time, tag, retry)
+        return self._cache.pop(
+            key,
+            default=default,
+            expire_time=expire_time,
+            tag=tag,
+            retry=retry,
+            tags=tags,
+        )
 
     def delete(self, key, version=None, retry=True):
         """Delete a key from the cache, failing silently.
@@ -327,14 +366,16 @@ class DjangoCache(BaseCache):
         """
         self._cache.drop_tag_index()
 
-    def evict(self, tag):
+    def evict(self, tag=ENOVAL, tags=None, any=False):
         """Remove items with matching `tag` from cache.
 
-        :param str tag: tag identifying items
+        :param tag: tag identifying items
+        :param tags: tags identifying items
+        :param bool any: remove items containing any tag instead of all tags
         :return: count of items removed
 
         """
-        return self._cache.evict(tag)
+        return self._cache.evict(tag, tags=tags, any=any)
 
     def cull(self):
         """Cull items from cache until volume is less than size limit.

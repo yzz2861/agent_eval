@@ -391,6 +391,16 @@ def test_evict(cache):
     assert len(cache.check()) == 0
 
 
+def test_multi_tags(cache):
+    cache.set('a', 1, tags=('user', 'v1', 'report'))
+    cache.set('b', 2, tags=('user', 'v2', 'report'))
+
+    assert set(cache.get('a', tags=True)[1]) == {'report', 'user', 'v1'}
+    assert cache.evict(tags=('user', 'v1')) == 1
+    assert cache.evict(tags=('user', 'report'), any=True) == 1
+    assert cache.check() == []
+
+
 def test_size_limit_with_files(cache):
     shards = 8
     cache.reset('cull_limit', 0)

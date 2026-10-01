@@ -99,7 +99,16 @@ class FanoutCache:
                 stack.enter_context(shard_transaction)
             yield
 
-    def set(self, key, value, expire=None, read=False, tag=None, retry=False):
+    def set(
+        self,
+        key,
+        value,
+        expire=None,
+        read=False,
+        tag=None,
+        retry=False,
+        tags=None,
+    ):
         """Set `key` and `value` item in cache.
 
         When `read` is `True`, `value` should be a file-like object opened
@@ -113,7 +122,8 @@ class FanoutCache:
         :param float expire: seconds until the key expires
             (default None, no expiry)
         :param bool read: read value as raw bytes from file (default False)
-        :param str tag: text to associate with key (default None)
+        :param tag: tag to associate with key (default None)
+        :param tags: tags to associate with key (default None)
         :param bool retry: retry if database timeout occurs (default False)
         :return: True if item was set
 
@@ -121,7 +131,9 @@ class FanoutCache:
         index = self._hash(key) % self._count
         shard = self._shards[index]
         try:
-            return shard.set(key, value, expire, read, tag, retry)
+            return shard.set(
+                key, value, expire, read, tag=tag, tags=tags, retry=retry
+            )
         except Timeout:
             return False
 
@@ -158,7 +170,16 @@ class FanoutCache:
         except Timeout:
             return False
 
-    def add(self, key, value, expire=None, read=False, tag=None, retry=False):
+    def add(
+        self,
+        key,
+        value,
+        expire=None,
+        read=False,
+        tag=None,
+        retry=False,
+        tags=None,
+    ):
         """Add `key` and `value` item to cache.
 
         Similar to `set`, but only add to cache if key not present.
@@ -177,7 +198,8 @@ class FanoutCache:
         :param float expire: seconds until the key expires
             (default None, no expiry)
         :param bool read: read value as bytes from file (default False)
-        :param str tag: text to associate with key (default None)
+        :param tag: tag to associate with key (default None)
+        :param tags: tags to associate with key (default None)
         :param bool retry: retry if database timeout occurs (default False)
         :return: True if item was added
 
@@ -185,7 +207,9 @@ class FanoutCache:
         index = self._hash(key) % self._count
         shard = self._shards[index]
         try:
-            return shard.add(key, value, expire, read, tag, retry)
+            return shard.add(
+                key, value, expire, read, tag=tag, tags=tags, retry=retry
+            )
         except Timeout:
             return False
 
@@ -262,6 +286,7 @@ class FanoutCache:
         expire_time=False,
         tag=False,
         retry=False,
+        tags=False,
     ):
         """Retrieve value from cache. If `key` is missing, return `default`.
 
@@ -274,7 +299,8 @@ class FanoutCache:
             (default False)
         :param float expire_time: if True, return expire_time in tuple
             (default False)
-        :param tag: if True, return tag in tuple (default False)
+        :param tag: if True, return first tag in tuple (default False)
+        :param tags: if True, return tags in tuple (default False)
         :param bool retry: retry if database timeout occurs (default False)
         :return: value for item if key is found else default
 
@@ -282,7 +308,15 @@ class FanoutCache:
         index = self._hash(key) % self._count
         shard = self._shards[index]
         try:
-            return shard.get(key, default, read, expire_time, tag, retry)
+            return shard.get(
+                key,
+                default=default,
+                read=read,
+                expire_time=expire_time,
+                tag=tag,
+                retry=retry,
+                tags=tags,
+            )
         except (Timeout, sqlite3.OperationalError):
             return default
 
@@ -325,7 +359,13 @@ class FanoutCache:
         return key in shard
 
     def pop(
-        self, key, default=None, expire_time=False, tag=False, retry=False
+        self,
+        key,
+        default=None,
+        expire_time=False,
+        tag=False,
+        retry=False,
+        tags=False,
     ):  # noqa: E501
         """Remove corresponding item for `key` from cache and return value.
 
@@ -340,7 +380,8 @@ class FanoutCache:
         :param default: return value if key is missing (default None)
         :param float expire_time: if True, return expire_time in tuple
             (default False)
-        :param tag: if True, return tag in tuple (default False)
+        :param tag: if True, return first tag in tuple (default False)
+        :param tags: if True, return tags in tuple (default False)
         :param bool retry: retry if database timeout occurs (default False)
         :return: value for item if key is found else default
 
@@ -348,7 +389,14 @@ class FanoutCache:
         index = self._hash(key) % self._count
         shard = self._shards[index]
         try:
-            return shard.pop(key, default, expire_time, tag, retry)
+            return shard.pop(
+                key,
+                default=default,
+                expire_time=expire_time,
+                tag=tag,
+                retry=retry,
+                tags=tags,
+            )
         except Timeout:
             return default
 
@@ -440,18 +488,31 @@ class FanoutCache:
         for shard in self._shards:
             shard.drop_tag_index()
 
-    def evict(self, tag, retry=False):
+    def evict(self, tag=ENOVAL, retry=False, tags=None, any=False):
         """Remove items with matching `tag` from cache.
 
         If database timeout occurs then fails silently unless `retry` is set to
         `True` (default `False`).
 
-        :param str tag: tag identifying items
+        :param tag: tag identifying items
+        :param tags: tags identifying items
+        :param bool any: remove items containing any tag instead of all tags
         :param bool retry: retry if database timeout occurs (default False)
         :return: count of items removed
 
         """
-        return self._remove('evict', args=(tag,), retry=retry)
+        total = 0
+        for shard in self._shards:
+            while True:
+                try:
+                    total += shard.evict(
+                        tag, retry=retry, tags=tags, any=any
+                    )
+                except Timeout as timeout:
+                    total += timeout.args[0]
+                else:
+                    break
+        return total
 
     def cull(self, retry=False):
         """Cull items from cache until volume is less than size limit.
