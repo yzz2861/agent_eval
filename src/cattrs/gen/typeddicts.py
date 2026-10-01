@@ -169,7 +169,7 @@ def make_dict_unstructure_fn(
             # regenerated.
             handler = None
             if override.unstruct_hook is not None:
-                handler = override.unstruct_hook
+                handler = converter._adapt_unstructure_hook(override.unstruct_hook)
             else:
                 if isinstance(t, TypeVar):
                     if t.__name__ in mapping:
@@ -362,7 +362,7 @@ def make_dict_structure_fn(
             # regenerated.
             if override.struct_hook is not None:
                 # If the user has requested an override, just use that.
-                handler = override.struct_hook
+                handler = converter._adapt_structure_hook(override.struct_hook)
             else:
                 handler = find_structure_handler(a, t, converter)
 
@@ -439,7 +439,7 @@ def make_dict_structure_fn(
                 t = nrb
 
             if override.struct_hook is not None:
-                handler = override.struct_hook
+                handler = converter._adapt_structure_hook(override.struct_hook)
             else:
                 # For each attribute, we try resolving the type here and now.
                 # If a type is manually overwritten, this function should be
@@ -487,7 +487,7 @@ def make_dict_structure_fn(
                     t = deep_copy_with(t, mapping, cl)
 
                 if override.struct_hook is not None:
-                    handler = override.struct_hook
+                    handler = converter._adapt_structure_hook(override.struct_hook)
                 else:
                     # For each attribute, we try resolving the type here and now.
                     # If a type is manually overwritten, this function should be

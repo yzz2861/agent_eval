@@ -106,15 +106,20 @@ class MultiStrategyDispatch(Generic[Hook]):
     _direct_dispatch: dict[TargetType, Hook]
     _function_dispatch: FunctionDispatch
     _single_dispatch: Any
+    _hook_adapter: Callable[[Hook], Hook]
     dispatch: Callable[[TargetType, BaseConverter], Hook]
 
     def __init__(
-        self, fallback_factory: HookFactory[Hook], converter: BaseConverter
+        self,
+        fallback_factory: HookFactory[Hook],
+        converter: BaseConverter,
+        hook_adapter: Callable[[Hook], Hook] = lambda hook: hook,
     ) -> None:
         self._fallback_factory = fallback_factory
         self._direct_dispatch = {}
         self._function_dispatch = FunctionDispatch(converter)
         self._single_dispatch = singledispatch(_DispatchNotFound)
+        self._hook_adapter = hook_adapter
         self.dispatch = lru_cache(maxsize=None)(self.dispatch_without_caching)
 
     def dispatch_without_caching(self, typ: TargetType) -> Hook:
@@ -122,16 +127,18 @@ class MultiStrategyDispatch(Generic[Hook]):
         try:
             dispatch = self._single_dispatch.dispatch(typ)
             if dispatch is not _DispatchNotFound:
-                return dispatch
+                return self._hook_adapter(dispatch)
         except Exception:  # noqa: S110
             pass
 
         direct_dispatch = self._direct_dispatch.get(typ)
         if direct_dispatch is not None:
-            return direct_dispatch
+            return self._hook_adapter(direct_dispatch)
 
         res = self._function_dispatch.dispatch(typ)
-        return res if res is not None else self._fallback_factory(typ)
+        if res is None:
+            res = self._fallback_factory(typ)
+        return self._hook_adapter(res)
 
     def register_cls_list(self, cls_and_handler, direct: bool = False) -> None:
         """Register a class to direct or singledispatch."""

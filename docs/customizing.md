@@ -70,6 +70,45 @@ The non-decorator approach is still recommended when dealing with lambdas, hooks
 
 ```
 
+### Call Contexts
+
+A converter can serve multiple requests while using the same cached hooks.
+Pass call-specific configuration using the keyword-only `context` argument of
+{meth}`Converter.structure() <cattrs.BaseConverter.structure>` and
+{meth}`Converter.unstructure() <cattrs.BaseConverter.unstructure>`.
+A hook receives that value by explicitly declaring a keyword-only `context` parameter;
+hooks without that parameter keep their original signatures.
+
+```python
+>>> from attrs import define
+>>> from cattrs import Converter
+
+>>> @define
+... class Event:
+...     starts_at: str
+
+>>> converter = Converter()
+>>> converter.register_unstructure_hook(
+...     Event,
+...     lambda event, *, context: {
+...         "starts_at": f"{event.starts_at} [{context['timezone']}]"
+...     },
+... )
+
+>>> event = Event("09:00")
+>>> converter.unstructure(event, context={"timezone": "Asia/Shanghai"})
+{'starts_at': '09:00 [Asia/Shanghai]'}
+>>> converter.unstructure(event, context={"timezone": "UTC"})
+{'starts_at': '09:00 [UTC]'}
+```
+
+The context is propagated through nested and generated hooks.
+Calling `structure` or `unstructure` with another context from inside a hook
+temporarily replaces the outer context and restores it when the nested call returns
+or raises. Contexts are isolated between threads and `asyncio` tasks, and cached
+hooks reuse their conversion functions without retaining the context from a previous
+request.
+
 ### Predicate Hooks
 
 A _predicate_ is a function that takes a type and returns true or false

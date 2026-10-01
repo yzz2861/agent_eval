@@ -72,6 +72,7 @@ from .cols import (
     namedtuple_structure_factory,
     namedtuple_unstructure_factory,
 )
+from .context import MISSING_CONTEXT, _current_context, bind_context, expects_context
 from .disambiguators import create_default_dis_func, is_supported_union
 from .dispatch import (
     HookFactory,
@@ -231,7 +232,9 @@ class BaseConverter:
             self._structure_attrs = self.structure_attrs_fromtuple
 
         self._unstructure_func = MultiStrategyDispatch(
-            unstructure_fallback_factory, self
+            unstructure_fallback_factory,
+            self,
+            self._adapt_unstructure_hook,
         )
         self._unstructure_func.register_cls_list(
             [(bytes, identity), (str, identity), (Path, str)]
@@ -271,7 +274,11 @@ class BaseConverter:
         # Per-instance register of to-attrs converters.
         # Singledispatch dispatches based on the first argument, so we
         # store the function and switch the arguments in self.loads.
-        self._structure_func = MultiStrategyDispatch(structure_fallback_factory, self)
+        self._structure_func = MultiStrategyDispatch(
+            structure_fallback_factory,
+            self,
+            self._adapt_structure_hook,
+        )
         self._structure_func.register_func_list(
             [
                 (
@@ -328,10 +335,38 @@ class BaseConverter:
         self._unstruct_copy_skip = self._unstructure_func.get_num_fns()
         self._struct_copy_skip = self._structure_func.get_num_fns()
 
-    def unstructure(self, obj: Any, unstructure_as: Any = None) -> Any:
-        return self._unstructure_func.dispatch(
+    def unstructure(
+        self,
+        obj: Any,
+        unstructure_as: Any = None,
+        *,
+        context: Any = MISSING_CONTEXT,
+    ) -> Any:
+        """Convert structured data to unstructured data.
+
+        When *context* is provided, it is made available to hooks explicitly
+        declaring a keyword-only ``context`` parameter.
+        """
+        dispatch = self._unstructure_func.dispatch(
             obj.__class__ if unstructure_as is None else unstructure_as
-        )(obj)
+        )
+        if context is MISSING_CONTEXT:
+            return dispatch(obj)
+
+        token = _current_context.set(context)
+        try:
+            return dispatch(obj)
+        finally:
+            _current_context.reset(token)
+
+    def _adapt_unstructure_hook(self, hook: UnstructureHook) -> UnstructureHook:
+        if not expects_context(hook):
+            return hook
+
+        def unstructure_hook_with_context(obj: Any) -> Any:
+            return bind_context(hook, obj)
+
+        return unstructure_hook_with_context
 
     @property
     def unstruct_strat(self) -> UnstructureStrategy:
@@ -596,9 +631,38 @@ class BaseConverter:
         )
         return factory
 
-    def structure(self, obj: UnstructuredValue, cl: type[T]) -> T:
-        """Convert unstructured Python data structures to structured data."""
-        return self._structure_func.dispatch(cl)(obj, cl)
+    def structure(
+        self,
+        obj: UnstructuredValue,
+        cl: type[T],
+        *,
+        context: Any = MISSING_CONTEXT,
+    ) -> T:
+        """Convert unstructured data to structured data.
+
+        When *context* is provided, it is made available to hooks explicitly
+        declaring a keyword-only ``context`` parameter.
+        """
+        dispatch = self._structure_func.dispatch(cl)
+        if context is MISSING_CONTEXT:
+            return dispatch(obj, cl)
+
+        token = _current_context.set(context)
+        try:
+            return dispatch(obj, cl)
+        finally:
+            _current_context.reset(token)
+
+    def _adapt_structure_hook(self, hook: StructureHook) -> StructureHook:
+        if not expects_context(hook):
+            return hook
+
+        def structure_hook_with_context(
+            obj: UnstructuredValue, cl: TargetType
+        ) -> StructuredValue:
+            return bind_context(hook, obj, cl)
+
+        return structure_hook_with_context
 
     def get_structure_hook(self, type: Any, cache_result: bool = True) -> StructureHook:
         """Get the structure hook for the given type.

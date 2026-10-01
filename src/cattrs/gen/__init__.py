@@ -145,7 +145,7 @@ def make_dict_unstructure_fn_from_attrs(
         # regenerated.
         handler = None
         if override.unstruct_hook is not None:
-            handler = override.unstruct_hook
+            handler = converter._adapt_unstructure_hook(override.unstruct_hook)
         else:
             if a.type is not None:
                 t = a.type
@@ -446,7 +446,7 @@ def make_dict_structure_fn_from_attrs(
             # regenerated.
             if override.struct_hook is not None:
                 # If the user has requested an override, just use that.
-                handler = override.struct_hook
+                handler = converter._adapt_structure_hook(override.struct_hook)
             else:
                 handler = find_structure_handler(
                     a, t, converter, _cattrs_prefer_attrib_converters
@@ -590,7 +590,7 @@ def make_dict_structure_fn_from_attrs(
             # regenerated.
             if override.struct_hook is not None:
                 # If the user has requested an override, just use that.
-                handler = override.struct_hook
+                handler = converter._adapt_structure_hook(override.struct_hook)
             else:
                 handler = find_structure_handler(
                     a, t, converter, _cattrs_prefer_attrib_converters
@@ -658,7 +658,7 @@ def make_dict_structure_fn_from_attrs(
                 # regenerated.
                 if override.struct_hook is not None:
                     # If the user has requested an override, just use that.
-                    handler = override.struct_hook
+                    handler = converter._adapt_structure_hook(override.struct_hook)
                 else:
                     handler = find_structure_handler(
                         a, t, converter, _cattrs_prefer_attrib_converters

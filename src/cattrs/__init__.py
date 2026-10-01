@@ -11,7 +11,12 @@ from .errors import (
     StructureHandlerNotFoundError,
 )
 from .gen import override
-from .types import SimpleStructureHook
+from .types import (
+    Context,
+    ContextualStructureHook,
+    ContextualUnstructureHook,
+    SimpleStructureHook,
+)
 from .v import transform_error
 
 __all__ = [
@@ -19,6 +24,9 @@ __all__ = [
     "BaseConverter",
     "BaseValidationError",
     "ClassValidationError",
+    "Context",
+    "ContextualStructureHook",
+    "ContextualUnstructureHook",
     "Converter",
     "ForbiddenExtraKeysError",
     "GenConverter",
