@@ -1,0 +1,63 @@
+# frozen_string_literal: true
+
+require_relative "../spec_helper"
+
+describe "Cache store config when throttling without Rails" do
+  before do
+    Rack::Attack.throttle("by ip", limit: 1, period: 60) do |request|
+      request.ip
+    end
+  end
+
+  unless defined?(Rails)
+    it "gives semantic error if no store was configured" do
+      assert_raises(Rack::Attack::MissingStoreError) do
+        get "/", {}, "REMOTE_ADDR" => "1.2.3.4"
+      end
+    end
+  end
+
+  it "gives semantic error if incompatible store was configured" do
+    warning = "[rack-attack] Configured store Object doesn't respond to #read, #write, #delete, #increment\n"
+    assert_output("", warning) do
+      Rack::Attack.cache.store = Object.new
+    end
+  end
+
+  it "works with any object that responds to #increment" do
+    basic_store_class = Class.new do
+      attr_accessor :counts
+
+      def initialize
+        @counts = {}
+      end
+
+      def read(key)
+        @counts[key]
+      end
+
+      def write(key, count)
+        @counts[key] = count
+      end
+
+      def increment(key, _count, _options)
+        @counts[key] ||= 0
+        @counts[key] += 1
+      end
+
+      def delete(key)
+        @counts.delete(key)
+      end
+    end
+
+    Rack::Attack.cache.store = basic_store_class.new
+
+    get "/", {}, "REMOTE_ADDR" => "1.2.3.4"
+
+    assert_equal 200, last_response.status
+
+    get "/", {}, "REMOTE_ADDR" => "1.2.3.4"
+
+    assert_equal 429, last_response.status
+  end
+end

@@ -1,0 +1,91 @@
+name: build
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+      memcached:
+        image: memcached
+        ports:
+          - 11211:11211
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby:
+          - '4.0'
+          - '3.4'
+          - '3.3'
+          - '3.2'
+          - '3.1'
+          - '3.0'
+          - '2.7'
+        gemfile:
+          - rack_3
+          - rack_2
+          - rails_8_1
+          - rails_8_0
+          - rails_7_2
+          - rails_7_1
+          - rails_7_0
+          - dalli3
+          - redis_5
+          - redis_4
+          - active_support_8_1_redis_cache_store
+          - active_support_8_0_redis_cache_store
+          - active_support_7_2_redis_cache_store
+          - active_support_7_1_redis_cache_store
+          - active_support_7_0_redis_cache_store
+          - redis_store
+        exclude:
+          - gemfile: rails_7_0
+            ruby: '3.4'
+          - gemfile: active_support_7_0_redis_cache_store
+            ruby: '3.4'
+          - gemfile: rails_7_2
+            ruby: '3.0'
+          - gemfile: rails_7_2
+            ruby: '2.7'
+          - gemfile: active_support_7_2_redis_cache_store
+            ruby: '3.0'
+          - gemfile: active_support_7_2_redis_cache_store
+            ruby: '2.7'
+          - gemfile: rails_8_0
+            ruby: '3.1'
+          - gemfile: rails_8_0
+            ruby: '3.0'
+          - gemfile: rails_8_0
+            ruby: '2.7'
+          - gemfile: active_support_8_0_redis_cache_store
+            ruby: '3.1'
+          - gemfile: active_support_8_0_redis_cache_store
+            ruby: '3.0'
+          - gemfile: active_support_8_0_redis_cache_store
+            ruby: '2.7'
+          - gemfile: rails_8_1
+            ruby: '3.1'
+          - gemfile: rails_8_1
+            ruby: '3.0'
+          - gemfile: rails_8_1
+            ruby: '2.7'
+          - gemfile: active_support_8_1_redis_cache_store
+            ruby: '3.1'
+          - gemfile: active_support_8_1_redis_cache_store
+            ruby: '3.0'
+          - gemfile: active_support_8_1_redis_cache_store
+            ruby: '2.7'
+    env:
+      BUNDLE_GEMFILE: gemfiles/${{ matrix.gemfile }}.gemfile
+    steps:
+    - uses: actions/checkout@v7
+    - uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ matrix.ruby }}
+        bundler-cache: true
+    - run: bundle exec rake
+
