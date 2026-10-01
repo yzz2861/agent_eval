@@ -224,6 +224,20 @@ abstraction.
    :members:
    :show-inheritance:
 
+.. autodata:: MAX_MESSAGE_DATA
+
+.. autodata:: MAX_MESSAGE_FDS
+
+.. autofunction:: open_unix_fd_channel_pair
+
+.. autoclass:: UnixFdChannel
+   :members:
+   :show-inheritance:
+
+.. autoclass:: UnixFdMessage
+   :members:
+   :show-inheritance:
+
 .. autofunction:: open_tcp_listeners
 
 .. autofunction:: open_ssl_over_tcp_listeners

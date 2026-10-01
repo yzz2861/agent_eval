@@ -1,0 +1,3 @@
+Add `trio.open_unix_fd_channel_pair`, `trio.UnixFdChannel`, and
+`trio.UnixFdMessage` for sending bounded metadata and open file descriptors
+with message boundaries over connected Unix stream sockets.

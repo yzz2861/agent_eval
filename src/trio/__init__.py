@@ -104,6 +104,13 @@ from ._timeouts import (
     sleep_forever as sleep_forever,
     sleep_until as sleep_until,
 )
+from ._unix_fd_channel import (
+    MAX_MESSAGE_DATA as MAX_MESSAGE_DATA,
+    MAX_MESSAGE_FDS as MAX_MESSAGE_FDS,
+    UnixFdChannel as UnixFdChannel,
+    UnixFdMessage as UnixFdMessage,
+    open_unix_fd_channel_pair as open_unix_fd_channel_pair,
+)
 from ._version import __version__ as __version__
 
 # Not imported by default, but mentioned here so static analysis tools like
