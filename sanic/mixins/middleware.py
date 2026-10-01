@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from functools import partial
 from operator import attrgetter
-from typing import Callable, overload
+from typing import Any, Callable, overload
 
 from sanic.base.meta import SanicMeta
 from sanic.middleware import Middleware, MiddlewareLocation
@@ -13,6 +13,10 @@ from sanic.router import Router
 
 class MiddlewareMixin(metaclass=SanicMeta):
     router: Router
+    request_middleware: deque
+    response_middleware: deque
+    named_request_middleware: dict[str, deque[Any]]
+    named_response_middleware: dict[str, deque[Any]]
 
     def __init__(self, *args, **kwargs) -> None:
         self._future_middleware: list[FutureMiddleware] = []
@@ -183,15 +187,18 @@ class MiddlewareMixin(metaclass=SanicMeta):
             app.finalize_middleware()
             ```
         """
-        for route in self.router.routes:
+        self._finalize_router_middleware(self.router)
+
+    def _finalize_router_middleware(self, router: Router) -> None:
+        for route in router.routes:
             request_middleware = Middleware.convert(
-                self.request_middleware,  # type: ignore
-                self.named_request_middleware.get(route.name, deque()),  # type: ignore  # noqa: E501
+                self.request_middleware,
+                self.named_request_middleware.get(route.name, deque()),
                 location=MiddlewareLocation.REQUEST,
             )
             response_middleware = Middleware.convert(
-                self.response_middleware,  # type: ignore
-                self.named_response_middleware.get(route.name, deque()),  # type: ignore  # noqa: E501
+                self.response_middleware,
+                self.named_response_middleware.get(route.name, deque()),
                 location=MiddlewareLocation.RESPONSE,
             )
             route.extra.request_middleware = deque(
@@ -208,25 +215,28 @@ class MiddlewareMixin(metaclass=SanicMeta):
                     reverse=True,
                 )[::-1]
             )
+
         request_middleware = Middleware.convert(
-            self.request_middleware,  # type: ignore
+            self.request_middleware,
             location=MiddlewareLocation.REQUEST,
         )
         response_middleware = Middleware.convert(
-            self.response_middleware,  # type: ignore
+            self.response_middleware,
             location=MiddlewareLocation.RESPONSE,
         )
-        self.request_middleware = deque(
+        router.request_middleware = deque(
             sorted(
                 request_middleware,
                 key=attrgetter("order"),
                 reverse=True,
             )
         )
-        self.response_middleware = deque(
+        router.response_middleware = deque(
             sorted(
                 response_middleware,
                 key=attrgetter("order"),
                 reverse=True,
             )[::-1]
         )
+        self.request_middleware = router.request_middleware
+        self.response_middleware = router.response_middleware

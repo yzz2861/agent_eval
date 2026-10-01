@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable
 from functools import lru_cache
 from inspect import signature
@@ -28,6 +29,15 @@ class Router(BaseRouter):
     DEFAULT_METHOD = "GET"
     ALLOWED_METHODS = HTTP_METHODS
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.request_middleware: deque = deque()
+        self.response_middleware: deque = deque()
+        self._get_cached = lru_cache(maxsize=ROUTER_CACHE_SIZE)(self._get)
+        self._find_route_by_view_name_cached = lru_cache(
+            maxsize=ROUTER_CACHE_SIZE
+        )(self._find_route_by_view_name_uncached)
+
     def _get(
         self, path: str, method: str, host: str | None
     ) -> tuple[Route, RouteHandler, dict[str, Any]]:
@@ -48,7 +58,6 @@ class Router(BaseRouter):
                 else None,
             ) from None
 
-    @lru_cache(maxsize=ROUTER_CACHE_SIZE)
     def get(  # type: ignore
         self, path: str, method: str, host: str | None
     ) -> tuple[Route, RouteHandler, dict[str, Any]]:
@@ -73,7 +82,7 @@ class Router(BaseRouter):
             Tuple[Route, RouteHandler, Dict[str, Any]]: the route, handler, and match info
         """  # noqa: E501
         __tracebackhide__ = True
-        return self._get(path, method, host)
+        return self._get_cached(path, method, host)
 
     def add(  # type: ignore
         self,
@@ -163,7 +172,6 @@ class Router(BaseRouter):
             return routes[0]
         return routes
 
-    @lru_cache(maxsize=ROUTER_CACHE_SIZE)
     def find_route_by_view_name(
         self, view_name: str, name: str | None = None
     ) -> Route | None:
@@ -176,6 +184,11 @@ class Router(BaseRouter):
         Returns:
             Optional[Route]: the route object
         """  # noqa: E501
+        return self._find_route_by_view_name_cached(view_name, name)
+
+    def _find_route_by_view_name_uncached(
+        self, view_name: str, name: str | None = None
+    ) -> Route | None:
         if not view_name:
             return None
 
@@ -183,9 +196,6 @@ class Router(BaseRouter):
         if not route:
             full_name = self.ctx.app.generate_name(view_name)
             route = self.name_index.get(full_name)
-
-        if not route:
-            return None
 
         return route
 
@@ -250,6 +260,11 @@ class Router(BaseRouter):
                 raise SanicException(
                     f"Invalid route: {route}. Parameter names cannot use '__'."
                 )
+
+    def reset(self) -> None:
+        self._get_cached.cache_clear()
+        self._find_route_by_view_name_cached.cache_clear()
+        super().reset()
 
     def _normalize(self, uri: str, handler: RouteHandler) -> str:
         if "<" not in uri:

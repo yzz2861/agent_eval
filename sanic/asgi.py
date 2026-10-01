@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sanic.compat import Header
 from sanic.exceptions import BadRequest, ServerError
@@ -112,6 +112,7 @@ class ASGIApp:
     ws: WebSocketConnection | None
     stage: Stage
     response: BaseHTTPResponse | None
+    _current_request_token: Any
 
     @classmethod
     async def create(
@@ -128,6 +129,7 @@ class ASGIApp:
         instance.transport.loop = sanic_app.loop
         instance.stage = Stage.IDLE
         instance.response = None
+        instance._current_request_token = None
         instance.sanic_app.state.is_started = True
         setattr(instance.transport, "add_task", sanic_app.loop.create_task)
 
@@ -175,17 +177,23 @@ class ASGIApp:
             instance.transport,
             sanic_app,
         )
-        request_class._current.set(instance.request)
-        instance.request.stream = instance  # type: ignore
-        instance.request_body = True
-        instance.request.conn_info = ConnInfo(instance.transport)
+        current_token = request_class._current.set(instance.request)
+        instance._current_request_token = current_token
+        try:
+            instance.request.stream = instance  # type: ignore
+            instance.request_body = True
+            instance.request.conn_info = ConnInfo(instance.transport)
 
-        await instance.sanic_app.dispatch(
-            "http.lifecycle.request",
-            inline=True,
-            context={"request": instance.request},
-            fail_not_found=False,
-        )
+            await instance.sanic_app.dispatch(
+                "http.lifecycle.request",
+                inline=True,
+                context={"request": instance.request},
+                fail_not_found=False,
+            )
+        except BaseException:
+            request_class._current.reset(instance._current_request_token)
+            instance._current_request_token = None
+            raise
 
         return instance
 
@@ -261,3 +269,7 @@ class ASGIApp:
                 await self.sanic_app.handle_exception(self.request, e)
             except Exception as exc:
                 await self.sanic_app.handle_exception(self.request, exc, False)
+        finally:
+            if self._current_request_token is not None:
+                type(self.request)._current.reset(self._current_request_token)
+                self._current_request_token = None

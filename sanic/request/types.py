@@ -24,6 +24,7 @@ from sanic.models.http_types import Credentials
 if TYPE_CHECKING:
     from sanic.app import Sanic
     from sanic.config import Config
+    from sanic.router import Router
     from sanic.server import ConnInfo
 
 import uuid
@@ -110,6 +111,7 @@ class Request(Generic[sanic_type, ctx_type]):
         "_port",
         "_protocol",
         "_remote_addr",
+        "_router",
         "_request_middleware_started",
         "_response_middleware_started",
         "_scheme",
@@ -199,6 +201,7 @@ class Request(Generic[sanic_type, ctx_type]):
         self.stream: Stream | None = None
         self._match_info: dict[str, Any] = {}
         self._protocol: BaseProtocol | None = None
+        self._router: Router | None = None
 
     def __repr__(self):
         class_name = self.__class__.__name__
@@ -278,6 +281,11 @@ class Request(Generic[sanic_type, ctx_type]):
         if not self._ctx:
             self._ctx = self.make_context()
         return self._ctx
+
+    @property
+    def router(self):
+        """Router selected when this request entered the application."""
+        return self._router or self.app.router
 
     @property
     def stream_id(self) -> int:
@@ -398,7 +406,11 @@ class Request(Generic[sanic_type, ctx_type]):
         try:
             middleware = (
                 self.route and self.route.extra.response_middleware
-            ) or self.app.response_middleware
+            ) or getattr(
+                self.router,
+                "response_middleware",
+                self.app.response_middleware,
+            )
             if middleware and not self._response_middleware_started:
                 self._response_middleware_started = True
                 response = await self.app._run_response_middleware(

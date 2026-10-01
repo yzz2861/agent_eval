@@ -18,6 +18,7 @@ from asyncio.futures import Future
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Coroutine, Iterable, Iterator
 from contextlib import contextmanager, suppress
+from copy import deepcopy
 from enum import Enum
 from functools import partial, wraps
 from inspect import isawaitable
@@ -196,6 +197,7 @@ class Sanic(
         "_task_registry",
         "_test_client",
         "_test_manager",
+        "_route_update_lock",
         "blueprints",
         "certloader_class",
         "config",
@@ -377,6 +379,7 @@ class Sanic(
         self.request_middleware: deque[Middleware] = deque()
         self.response_middleware: deque[Middleware] = deque()
         self.router: Router = router or Router()
+        self._route_update_lock = asyncio.Lock()
         self.shared_ctx: SharedContext = SharedContext()
         self.signal_router: SignalRouter = signal_router or SignalRouter()
         self.sock: socket | None = None
@@ -1003,7 +1006,13 @@ class Sanic(
                 view_name = view_name.replace("static", name)
             kw.update(name=view_name)
 
-        route = self.router.find_route_by_view_name(view_name, **kw)
+        current_request = Request._current.get(None)
+        router = (
+            current_request.router
+            if current_request is not None and current_request.app is self
+            else self.router
+        )
+        route = router.find_route_by_view_name(view_name, **kw)
         if not route:
             raise URLBuildError(
                 f"Endpoint with name `{view_name}` was not found"
@@ -1205,7 +1214,11 @@ class Sanic(
             try:
                 middleware = (
                     request.route and request.route.extra.request_middleware
-                ) or self.request_middleware
+                ) or getattr(
+                    request.router,
+                    "request_middleware",
+                    self.request_middleware,
+                )
                 response = await self._run_request_middleware(
                     request, middleware
                 )
@@ -1289,6 +1302,7 @@ class Sanic(
         """
         __tracebackhide__ = True
 
+        request._router = self.router
         await self.dispatch(
             "http.lifecycle.handle",
             inline=True,
@@ -1311,7 +1325,7 @@ class Sanic(
                 context={"request": request},
             )
             # Fetch handler from router
-            route, handler, kwargs = self.router.get(
+            route, handler, kwargs = request.router.get(
                 request.path,
                 request.method,
                 request.headers.getone("host", None),
@@ -2410,6 +2424,169 @@ class Sanic(
         """
         if hasattr(self, "multiplexer"):
             self.multiplexer.ack()
+
+    async def update_routes(
+        self,
+        routes: Callable[[Sanic], Any]
+        | Blueprint
+        | Iterable[Blueprint]
+        | BlueprintGroup,
+        /,
+        **options: Any,
+    ) -> Router:
+        """Atomically replace the complete route table.
+
+        The replacement is built and finalized on a temporary application.
+        Therefore, an invalid replacement never removes the currently
+        active routes. Requests retain the router selected at entry, even
+        when they call ``url_for`` after the route table has been replaced.
+        """
+        async with self._route_update_lock:
+            candidate = await self._build_route_candidate(routes, options)
+            candidate.router.finalize()
+            candidate.finalize_middleware()
+            self._bind_route_candidate_handlers(candidate)
+            self._validate_route_names(candidate.router)
+            self._activate_route_candidate(candidate)
+            return candidate.router
+
+    async def replace_routes(
+        self,
+        routes: Callable[[Sanic], Any]
+        | Blueprint
+        | Iterable[Blueprint]
+        | BlueprintGroup,
+        /,
+        **options: Any,
+    ) -> Router:
+        """Compatibility-oriented alias for :meth:`update_routes`."""
+        return await self.update_routes(routes, **options)
+
+    async def _build_route_candidate(self, routes, options):
+        registry_name = f"{self.name}-route-candidate-{id(self)}"
+
+        def transactional_blueprint(app, blueprint, /, **kwargs):
+            if not isinstance(blueprint, (Blueprint, BlueprintGroup)):
+                blueprint = tuple(blueprint)
+            Sanic.blueprint(app, deepcopy(blueprint), **kwargs)
+
+        candidate_type = type(
+            "_RouteCandidateApp",
+            (Sanic,),
+            {"blueprint": transactional_blueprint},
+        )
+        candidate = candidate_type(
+            registry_name,
+            config=self.config,
+            configure_logging=False,
+            strict_slashes=self.strict_slashes,
+            request_class=self.request_class,
+        )
+
+        try:
+            candidate.name = self.name
+            candidate.router.ctx.app = self
+            candidate.signal_router.ctx.app = self
+            candidate.router.regex_types.update(self.router.regex_types)
+            candidate.request_middleware = deque(self.request_middleware)
+            candidate.response_middleware = deque(self.response_middleware)
+            blueprint_route_names = {
+                route.name
+                for blueprint in self.blueprints.values()
+                for route in blueprint.routes
+            }
+            candidate.named_request_middleware = {
+                name: deque(middleware)
+                for name, middleware in self.named_request_middleware.items()
+                if name not in blueprint_route_names
+            }
+            candidate.named_response_middleware = {
+                name: deque(middleware)
+                for name, middleware in self.named_response_middleware.items()
+                if name not in blueprint_route_names
+            }
+
+            if callable(routes):
+                result = routes(candidate)
+                if isawaitable(result):
+                    await result
+            else:
+                candidate.blueprint(routes, **options)
+        finally:
+            Sanic._app_registry.pop(registry_name, None)
+
+        for blueprint in candidate._blueprint_order:
+            blueprint._apps = {self}
+
+        return candidate
+
+    def _validate_route_names(self, router: Router) -> None:
+        route_names = [route.extra.ident for route in router.routes]
+        duplicates = {
+            name for name in route_names if route_names.count(name) > 1
+        }
+        if duplicates:
+            raise ServerError(
+                "Duplicate route names detected: "
+                f"{', '.join(duplicates)}. You should rename one or more of "
+                "them explicitly by using the `name` param, or changing the "
+                "implicit name derived from the class and function name."
+            )
+
+    def _bind_route_candidate_handlers(self, candidate: Sanic) -> None:
+        for route in candidate.router.routes:
+            handler = route.handler
+            keywords = getattr(handler, "keywords", None)
+            if keywords is None:
+                continue
+
+            bound_handler = keywords.get("handler")
+            if route.extra.websocket and bound_handler is not None:
+                websocket_handler = partial(
+                    self._websocket_handler,
+                    bound_handler,
+                    subprotocols=keywords.get("subprotocols"),
+                )
+                setattr(
+                    websocket_handler,
+                    "__name__",
+                    bound_handler.__name__,
+                )
+                websocket_handler.is_websocket = True  # type: ignore
+                route.handler = websocket_handler
+
+            if route.extra.static and not route.extra.websocket:
+                file_or_directory = keywords.get("file_or_directory")
+                static_handler = keywords.get("directory_handler")
+            else:
+                file_or_directory = None
+                static_handler = None
+
+            if (
+                route.extra.static
+                and file_or_directory is not None
+                and static_handler is not None
+            ):
+                route.handler = wraps(self._static_request_handler)(
+                    partial(
+                        self._static_request_handler,
+                        **{**keywords, "directory_handler": static_handler},
+                    )
+                )
+
+    def _activate_route_candidate(self, candidate: Sanic) -> None:
+        if candidate.websocket_enabled:
+            self.enable_websocket()
+
+        self.router = candidate.router
+        self.request_middleware = candidate.request_middleware
+        self.response_middleware = candidate.response_middleware
+        self.named_request_middleware = candidate.named_request_middleware
+        self.named_response_middleware = candidate.named_response_middleware
+        self.blueprints = candidate.blueprints
+        self._blueprint_order = candidate._blueprint_order
+        self._future_routes = candidate._future_routes
+        self._future_statics = candidate._future_statics
 
     def set_serving(self, serving: bool) -> None:
         """Set the serving state of the application.
