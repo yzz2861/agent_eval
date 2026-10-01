@@ -13,6 +13,7 @@ from .scaffold import setupmethod
 
 if t.TYPE_CHECKING:  # pragma: no cover
     from .app import App
+    from ..json.provider import JSONProvider
 
 DeferredSetupFunction = t.Callable[["BlueprintSetupState"], None]
 T_after_request = t.TypeVar("T_after_request", bound=ft.AfterRequestCallable[t.Any])
@@ -160,6 +161,13 @@ class Blueprint(Scaffold):
         this based on ``import_name``. In certain situations this
         automatic detection can fail, so the path can be specified
         manually instead.
+    :param json_provider_class: A subclass of
+        :class:`~flask.json.provider.JSONProvider` used for requests that
+        match this blueprint. If not set, the nearest parent blueprint's
+        provider or the application's provider is used.
+
+    .. versionchanged:: 3.2
+        Added the ``json_provider_class`` parameter.
 
     .. versionchanged:: 1.1.0
         Blueprints have a ``cli`` group to register nested CLI commands.
@@ -170,6 +178,12 @@ class Blueprint(Scaffold):
     """
 
     _got_registered_once = False
+
+    json_provider_class: type[JSONProvider] | None = None
+    """A subclass of :class:`~flask.json.provider.JSONProvider` used for
+    requests matching this blueprint. If not set, the nearest parent
+    blueprint's provider, then the application's provider, is used.
+    """
 
     def __init__(
         self,
@@ -183,6 +197,9 @@ class Blueprint(Scaffold):
         url_defaults: dict[str, t.Any] | None = None,
         root_path: str | None = None,
         cli_group: str | None = _sentinel,  # type: ignore[assignment]
+        json_provider_class: type[JSONProvider] | None = (
+            _sentinel  # type: ignore[assignment]
+        ),
     ):
         super().__init__(
             import_name=import_name,
@@ -208,6 +225,8 @@ class Blueprint(Scaffold):
 
         self.url_values_defaults = url_defaults
         self.cli_group = cli_group
+        if json_provider_class is not _sentinel:
+            self.json_provider_class = json_provider_class
         self._blueprints: list[tuple[Blueprint, dict[str, t.Any]]] = []
 
     def _check_setup_finished(self, f_name: str) -> None:
@@ -319,6 +338,9 @@ class Blueprint(Scaffold):
         app.blueprints[name] = self
         self._got_registered_once = True
         state = self.make_setup_state(app, options, first_bp_registration)
+
+        if self.json_provider_class is not None:
+            app.json_providers[name] = self.json_provider_class(app)
 
         if self.has_static_folder:
             state.add_url_rule(

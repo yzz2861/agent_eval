@@ -1,6 +1,7 @@
 import datetime
 import decimal
 import io
+import threading
 import uuid
 
 import pytest
@@ -344,3 +345,211 @@ def test_html_method():
 
     result = json.dumps(ObjectWithHTML())
     assert result == '"<p>test</p>"'
+
+
+class TaggedJSONProvider(DefaultJSONProvider):
+    marker = "blueprint"
+
+    def default(self, o):
+        if isinstance(o, datetime.date):
+            return {"marker": self.marker, "value": o.isoformat()}
+
+        if isinstance(o, decimal.Decimal):
+            return {"marker": self.marker, "value": str(o)}
+
+        return super().default(o)
+
+    def loads(self, s, **kwargs):
+        kwargs.setdefault("parse_float", decimal.Decimal)
+        return super().loads(s, **kwargs)
+
+
+class ParentJSONProvider(TaggedJSONProvider):
+    marker = "parent"
+
+
+class ChildJSONProvider(TaggedJSONProvider):
+    marker = "child"
+
+
+def test_blueprint_json_provider_nesting(app, client):
+    parent = flask.Blueprint(
+        "parent", __name__, json_provider_class=ParentJSONProvider
+    )
+    child = flask.Blueprint(
+        "child", __name__, json_provider_class=ChildJSONProvider
+    )
+    grandchild = flask.Blueprint("grandchild", __name__)
+    value_date = datetime.date(2020, 1, 2)
+    value_decimal = decimal.Decimal("1.23")
+    payload = {"date": value_date, "decimal": value_decimal}
+    template = "{{ data|tojson }}"
+
+    def data():
+        return payload
+
+    def items():
+        return [value_date, value_decimal]
+
+    def jsonified():
+        return flask.jsonify(payload)
+
+    def rendered():
+        return flask.render_template_string(template, data=payload)
+
+    def parsed():
+        body = flask.request.get_json()
+        return {
+            "value": str(body["value"]),
+            "type": type(body["value"]).__name__,
+        }
+
+    def invalid_json(e):
+        return payload, 400
+
+    for blueprint in (parent, child, grandchild):
+        blueprint.get("/data")(data)
+        blueprint.get("/items")(items)
+        blueprint.get("/jsonified")(jsonified)
+        blueprint.get("/rendered")(rendered)
+        blueprint.post("/parsed")(parsed)
+        blueprint.get("/error")(lambda: flask.abort(400))
+        blueprint.register_error_handler(400, invalid_json)
+
+    child.register_blueprint(grandchild, url_prefix="/grandchild")
+    parent.register_blueprint(child, url_prefix="/child")
+    app.register_blueprint(parent, url_prefix="/parent")
+
+    expected = {
+        "/parent/data": "parent",
+        "/parent/child/data": "child",
+        "/parent/child/grandchild/data": "child",
+    }
+
+    for path, marker in expected.items():
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.get_json() == {
+            "date": {"marker": marker, "value": "2020-01-02"},
+            "decimal": {"marker": marker, "value": "1.23"},
+        }
+
+        response = client.get(path.replace("/data", "/items"))
+        assert response.get_json() == [
+            {"marker": marker, "value": "2020-01-02"},
+            {"marker": marker, "value": "1.23"},
+        ]
+
+        response = client.get(path.replace("/data", "/jsonified"))
+        assert response.get_json()["date"]["marker"] == marker
+
+        response = client.get(path.replace("/data", "/rendered"))
+        assert b'"marker": "' + marker.encode() + b'"' in response.data
+
+        response = client.post(
+            path.replace("/data", "/parsed"), json={"value": 1.23}
+        )
+        assert response.get_json() == {"value": "1.23", "type": "Decimal"}
+
+        response = client.get(path.replace("/data", "/error"))
+        assert response.status_code == 400
+        assert response.get_json()["date"]["marker"] == marker
+
+    with app.app_context():
+        rendered = flask.render_template_string(template, data=payload)
+
+    assert '"date": "Thu, 02 Jan 2020 00:00:00 GMT"' in rendered
+    assert '"decimal": "1.23"' in rendered
+
+
+def test_blueprint_json_provider_class_attribute(app, client):
+    class ProviderBlueprint(flask.Blueprint):
+        json_provider_class = ParentJSONProvider
+
+    blueprint = ProviderBlueprint("provider_bp", __name__)
+
+    @blueprint.get("")
+    def data():
+        return {"date": datetime.date(2020, 1, 2)}
+
+    app.register_blueprint(blueprint, url_prefix="/provider")
+
+    response = client.get("/provider")
+    assert response.get_json() == {
+        "date": {"marker": "parent", "value": "2020-01-02"}
+    }
+
+
+def test_unmatched_route_uses_app_json_provider(app, client):
+    value_date = datetime.date(2020, 1, 2)
+    value_decimal = decimal.Decimal("1.23")
+
+    @app.errorhandler(404)
+    def not_found(e):
+        return {"date": value_date, "decimal": value_decimal}, 404
+
+    response = client.get("/missing")
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "date": "Thu, 02 Jan 2020 00:00:00 GMT",
+        "decimal": "1.23",
+    }
+
+
+def test_blueprint_json_provider_concurrency(app):
+    class ConcurrentJSONProvider(TaggedJSONProvider):
+        marker = "blueprint"
+
+    blueprint = flask.Blueprint(
+        "blueprint", __name__, json_provider_class=ConcurrentJSONProvider
+    )
+    value_date = datetime.date(2020, 1, 2)
+    value_decimal = decimal.Decimal("1.23")
+
+    @app.get("/default")
+    def default_data():
+        return {"date": value_date, "decimal": value_decimal}
+
+    @blueprint.get("")
+    def blueprint_data():
+        return {"date": value_date, "decimal": value_decimal}
+
+    app.register_blueprint(blueprint, url_prefix="/blueprint")
+
+    errors = []
+    iterations = 20
+    barrier = threading.Barrier(2, timeout=5)
+
+    def request(path, expected):
+        test_client = app.test_client()
+
+        try:
+            for _ in range(iterations):
+                barrier.wait()
+                response = test_client.get(path)
+                assert response.get_json() == expected
+        except BaseException as error:  # pragma: no cover
+            errors.append(error)
+
+    app_payload = {
+        "date": "Thu, 02 Jan 2020 00:00:00 GMT",
+        "decimal": "1.23",
+    }
+    blueprint_payload = {
+        "date": {"marker": "blueprint", "value": "2020-01-02"},
+        "decimal": {"marker": "blueprint", "value": "1.23"},
+    }
+    threads = [
+        threading.Thread(target=request, args=("/default", app_payload)),
+        threading.Thread(
+            target=request, args=("/blueprint", blueprint_payload)
+        ),
+    ]
+
+    for thread in threads:
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+
+    assert not errors

@@ -339,6 +339,12 @@ class App(Scaffold):
         .. versionadded:: 2.2
         """
 
+        self.json_providers: dict[str, JSONProvider] = {}
+        """Maps registered blueprint names with an explicitly configured JSON
+        provider. Other blueprint names use the nearest configured parent or
+        this application's provider.
+        """
+
         #: A list of functions that are called by
         #: :meth:`handle_url_build_error` when :meth:`.url_for` raises a
         #: :exc:`~werkzeug.routing.BuildError`. Each function is called

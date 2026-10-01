@@ -3,19 +3,32 @@ from __future__ import annotations
 import json as _json
 import typing as t
 
-from ..globals import current_app
+from ..globals import _cv_app
+from ..globals import _no_app_msg
 from .provider import _default
 
 if t.TYPE_CHECKING:  # pragma: no cover
     from ..wrappers import Response
+    from .provider import JSONProvider
+
+
+def _get_json_provider() -> JSONProvider | None:
+    ctx = _cv_app.get(None)
+
+    if ctx is None:
+        return None
+
+    return ctx.app.get_json_provider(
+        ctx.request.blueprints if ctx.has_request else None
+    )
 
 
 def dumps(obj: t.Any, **kwargs: t.Any) -> str:
     """Serialize data as JSON.
 
-    If :data:`~flask.current_app` is available, it will use its
-    :meth:`app.json.dumps() <flask.json.provider.JSONProvider.dumps>`
-    method, otherwise it will use :func:`json.dumps`.
+    If a request or app context is active, use its JSON provider. A request
+    context uses the matched blueprint's provider, including inheritance from
+    the nearest configured parent. Otherwise, use :func:`json.dumps`.
 
     :param obj: The data to serialize.
     :param kwargs: Arguments passed to the ``dumps`` implementation.
@@ -37,8 +50,10 @@ def dumps(obj: t.Any, **kwargs: t.Any) -> str:
         ``app`` can be passed directly, rather than requiring an app
         context for configuration.
     """
-    if current_app:
-        return current_app.json.dumps(obj, **kwargs)
+    provider = _get_json_provider()
+
+    if provider is not None:
+        return provider.dumps(obj, **kwargs)
 
     kwargs.setdefault("default", _default)
     return _json.dumps(obj, **kwargs)
@@ -47,9 +62,9 @@ def dumps(obj: t.Any, **kwargs: t.Any) -> str:
 def dump(obj: t.Any, fp: t.IO[str], **kwargs: t.Any) -> None:
     """Serialize data as JSON and write to a file.
 
-    If :data:`~flask.current_app` is available, it will use its
-    :meth:`app.json.dump() <flask.json.provider.JSONProvider.dump>`
-    method, otherwise it will use :func:`json.dump`.
+    If a request or app context is active, use its JSON provider. A request
+    context uses the matched blueprint's provider, including inheritance from
+    the nearest configured parent. Otherwise, use :func:`json.dump`.
 
     :param obj: The data to serialize.
     :param fp: A file opened for writing text. Should use the UTF-8
@@ -67,8 +82,10 @@ def dump(obj: t.Any, fp: t.IO[str], **kwargs: t.Any) -> None:
         Writing to a binary file, and the ``encoding`` argument, will be
         removed in Flask 2.1.
     """
-    if current_app:
-        current_app.json.dump(obj, fp, **kwargs)
+    provider = _get_json_provider()
+
+    if provider is not None:
+        provider.dump(obj, fp, **kwargs)
     else:
         kwargs.setdefault("default", _default)
         _json.dump(obj, fp, **kwargs)
@@ -77,9 +94,9 @@ def dump(obj: t.Any, fp: t.IO[str], **kwargs: t.Any) -> None:
 def loads(s: str | bytes, **kwargs: t.Any) -> t.Any:
     """Deserialize data as JSON.
 
-    If :data:`~flask.current_app` is available, it will use its
-    :meth:`app.json.loads() <flask.json.provider.JSONProvider.loads>`
-    method, otherwise it will use :func:`json.loads`.
+    If a request or app context is active, use its JSON provider. A request
+    context uses the matched blueprint's provider, including inheritance from
+    the nearest configured parent. Otherwise, use :func:`json.loads`.
 
     :param s: Text or UTF-8 bytes.
     :param kwargs: Arguments passed to the ``loads`` implementation.
@@ -99,8 +116,10 @@ def loads(s: str | bytes, **kwargs: t.Any) -> t.Any:
         ``app`` can be passed directly, rather than requiring an app
         context for configuration.
     """
-    if current_app:
-        return current_app.json.loads(s, **kwargs)
+    provider = _get_json_provider()
+
+    if provider is not None:
+        return provider.loads(s, **kwargs)
 
     return _json.loads(s, **kwargs)
 
@@ -108,9 +127,9 @@ def loads(s: str | bytes, **kwargs: t.Any) -> t.Any:
 def load(fp: t.IO[t.AnyStr], **kwargs: t.Any) -> t.Any:
     """Deserialize data as JSON read from a file.
 
-    If :data:`~flask.current_app` is available, it will use its
-    :meth:`app.json.load() <flask.json.provider.JSONProvider.load>`
-    method, otherwise it will use :func:`json.load`.
+    If a request or app context is active, use its JSON provider. A request
+    context uses the matched blueprint's provider, including inheritance from
+    the nearest configured parent. Otherwise, use :func:`json.load`.
 
     :param fp: A file opened for reading text or UTF-8 bytes.
     :param kwargs: Arguments passed to the ``load`` implementation.
@@ -129,8 +148,10 @@ def load(fp: t.IO[t.AnyStr], **kwargs: t.Any) -> t.Any:
         ``encoding`` will be removed in Flask 2.1. The file must be text
         mode, or binary mode with UTF-8 bytes.
     """
-    if current_app:
-        return current_app.json.load(fp, **kwargs)
+    provider = _get_json_provider()
+
+    if provider is not None:
+        return provider.load(fp, **kwargs)
 
     return _json.load(fp, **kwargs)
 
@@ -141,8 +162,9 @@ def jsonify(*args: t.Any, **kwargs: t.Any) -> Response:
     mimetype. A dict or list returned from a view will be converted to a
     JSON response automatically without needing to call this.
 
-    This requires an active app context, and calls
-    :meth:`app.json.response() <flask.json.provider.JSONProvider.response>`.
+    This requires an active app context. A request context uses the matched
+    blueprint's provider, including inheritance from the nearest configured
+    parent.
 
     In debug mode, the output is formatted with indentation to make it
     easier to read. This may also be controlled by the provider.
@@ -167,4 +189,9 @@ def jsonify(*args: t.Any, **kwargs: t.Any) -> Response:
 
     .. versionadded:: 0.2
     """
-    return current_app.json.response(*args, **kwargs)  # type: ignore[return-value]
+    provider = _get_json_provider()
+
+    if provider is None:
+        raise RuntimeError(_no_app_msg)
+
+    return provider.response(*args, **kwargs)  # type: ignore[return-value]

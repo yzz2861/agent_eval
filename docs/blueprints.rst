@@ -157,6 +157,33 @@ Blueprint-specific before request functions, etc. registered with the
 parent will trigger for the child. If a child does not have an error
 handler that can handle a given exception, the parent's will be tried.
 
+JSON Providers
+``````````````
+
+A blueprint can use its own JSON provider by passing
+``json_provider_class`` when creating it, or by setting the attribute before
+registering the blueprint. Request parsing with ``request.get_json()``,
+dictionary and list view return values, :func:`~flask.json.jsonify`, and
+dictionary and list blueprint error responses all use that provider.
+
+A nested blueprint without a provider uses its nearest parent blueprint's
+provider. If neither the blueprint nor one of its parents configure a
+provider, the application's :attr:`~flask.Flask.json` provider is used. This
+also applies before routing has matched a blueprint, such as a 404 response.
+
+.. code-block:: python
+
+    from flask import Blueprint
+    from flask.json.provider import DefaultJSONProvider
+
+    class APIJSONProvider(DefaultJSONProvider):
+        pass
+
+    api = Blueprint("api", __name__, json_provider_class=APIJSONProvider)
+
+The provider is selected per request. It is safe for concurrent requests;
+Flask never temporarily replaces ``app.json``.
+
 
 Blueprint Resources
 -------------------

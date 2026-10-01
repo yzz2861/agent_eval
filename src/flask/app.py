@@ -30,6 +30,7 @@ from werkzeug.wrappers import Response as BaseResponse
 from werkzeug.wsgi import get_host
 
 from . import cli
+from . import json
 from . import typing as ft
 from .ctx import AppContext
 from .globals import _cv_app
@@ -58,6 +59,7 @@ if t.TYPE_CHECKING:  # pragma: no cover
     from _typeshed.wsgi import StartResponse
     from _typeshed.wsgi import WSGIEnvironment
 
+    from .json.provider import JSONProvider
     from .testing import FlaskClient
     from .testing import FlaskCliRunner
     from .typing import HeadersValue
@@ -504,8 +506,31 @@ class Flask(App):
             session=session,
             g=g,
         )
-        rv.policies["json.dumps_function"] = self.json.dumps
+        rv.policies["json.dumps_function"] = json.dumps
         return rv
+
+    def get_json_provider(self, blueprints: list[str] | None = None) -> JSONProvider:
+        """Get the JSON provider for the given blueprint chain.
+
+        When no chain is passed, use the active request's matched blueprints.
+        Their order is child to parent, so the nearest configured provider is
+        used. Outside a request, or when no blueprint configures a provider,
+        use the application's :attr:`json` provider.
+        """
+        if blueprints is None:
+            ctx = _cv_app.get(None)
+
+            if ctx is not None and ctx.has_request:
+                blueprints = ctx.request.blueprints
+
+        if blueprints:
+            for name in blueprints:
+                provider = self.json_providers.get(name)
+
+                if provider is not None:
+                    return provider
+
+        return self.json
 
     def create_url_adapter(self, request: Request | None) -> MapAdapter | None:
         """Creates a URL adapter for the given request. The URL adapter
@@ -1326,7 +1351,7 @@ class Flask(App):
                 )
                 status = headers = None
             elif isinstance(rv, (dict, list)):
-                rv = self.json.response(rv)
+                rv = self.get_json_provider().response(rv)
             elif isinstance(rv, BaseResponse) or callable(rv):
                 # evaluate a WSGI callable, or coerce a different response
                 # class to the correct type

@@ -344,7 +344,6 @@ class AppContext:
         :param environ: The request data this context represents.
         """
         request = app.request_class(environ)
-        request.json_module = app.json
         return cls(app, request=request)
 
     @property

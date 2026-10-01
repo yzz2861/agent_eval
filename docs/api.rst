@@ -226,9 +226,12 @@ Flask uses Python's built-in :mod:`json` module for handling JSON by
 default. The JSON implementation can be changed by assigning a different
 provider to :attr:`flask.Flask.json_provider_class` or
 :attr:`flask.Flask.json`. The functions provided by ``flask.json`` will
-use methods on ``app.json`` if an app context is active.
+use the active request's blueprint provider or ``app.json``.
 
-Jinja's ``|tojson`` filter is configured to use the app's JSON provider.
+Jinja's ``|tojson`` filter is configured to use the active JSON provider.
+Within a request it uses the provider selected by the matched blueprint,
+including inheritance from the nearest configured parent blueprint. Before a
+route has matched, or outside a request, it uses the application's provider.
 The filter marks the output with ``|safe``. Use it to render data inside
 HTML ``<script>`` tags.
 

@@ -30,6 +30,10 @@ Unreleased
     of only lower case file extensions. :pr:`6012`
 -   Fix parsing IPv6 with port in ``run`` and the test client. :pr:`6096`
 -   Add ``app.query`` route decorator for the HTTP QUERY method.
+-   Blueprints can configure ``json_provider_class``. A nested blueprint
+    inherits the nearest parent provider, and request parsing, automatic JSON
+    responses, ``jsonify``, blueprint error responses, and ``tojson`` select
+    their provider from the matched request without changing ``app.json``.
 
 
 Version 3.1.3
