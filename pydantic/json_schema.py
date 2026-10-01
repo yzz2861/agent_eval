@@ -264,6 +264,11 @@ class GenerateJsonSchema:
 
     schema_dialect = 'https://json-schema.org/draft/2020-12/schema'
 
+    # The key under which the generated definitions are placed in the top-level schema
+    # returned by `models_json_schema`. Subclasses (e.g. `GenerateOpenAPI30JsonSchema`) may
+    # override this to emit definitions at a different location.
+    definitions_key: str = '$defs'
+
     # `self.render_warning_message` will do nothing if its argument `kind` is in `ignored_warning_kinds`;
     # this value can be modified on subclasses to easily control which warnings are emitted
     ignored_warning_kinds: set[JsonSchemaWarningKind] = {'skipped-choice'}
@@ -2808,7 +2813,7 @@ def models_json_schema(
 
     json_schema: dict[str, Any] = {}
     if definitions:
-        json_schema['$defs'] = definitions
+        json_schema[instance.definitions_key] = definitions
     if title:
         json_schema['title'] = title
     if description:
@@ -2818,6 +2823,418 @@ def models_json_schema(
 
 
 # ##### End JSON Schema Generation Functions #####
+
+
+# ##### OpenAPI 3.0 Schema Generation #####
+
+
+@dataclasses.dataclass(frozen=True)
+class OpenAPI30Incompatibility:
+    """A description of a JSON Schema construct that cannot be represented equivalently in OpenAPI 3.0.
+
+    Instances of this class are produced when converting a JSON Schema to the OpenAPI 3.0 subset,
+    either by [`to_openapi_3_0_schema`][pydantic.json_schema.to_openapi_3_0_schema] or by
+    [`GenerateOpenAPI30JsonSchema`][pydantic.json_schema.GenerateOpenAPI30JsonSchema].
+    """
+
+    path: str
+    """The location of the offending subschema, as a JSON Pointer (e.g. `'#/properties/items'`)."""
+
+    keyword: str
+    """The JSON Schema keyword that could not be converted equivalently."""
+
+    message: str
+    """A human-readable description of the incompatibility and of the degradation that was applied."""
+
+
+class OpenAPI30IncompatibilityError(Exception):
+    """Raised when a generated JSON Schema contains constructs that cannot be represented in OpenAPI 3.0.
+
+    This exception is raised by
+    [`GenerateOpenAPI30JsonSchema`][pydantic.json_schema.GenerateOpenAPI30JsonSchema] when
+    `on_incompatible` is `'error'` (the default) and the generated schema contains constructs
+    that have no OpenAPI 3.0 equivalent.
+    """
+
+    def __init__(self, incompatibilities: list[OpenAPI30Incompatibility]) -> None:
+        self.incompatibilities: list[OpenAPI30Incompatibility] = list(incompatibilities)
+        """The constructs that could not be represented in OpenAPI 3.0, with their schema paths."""
+        details = '\n'.join(f'  * {item.path} ({item.keyword}): {item.message}' for item in self.incompatibilities)
+        super().__init__(
+            'The generated JSON Schema contains constructs that cannot be represented in OpenAPI 3.0:\n'
+            f'{details}\n'
+            "Use `on_incompatible='degrade'` to accept the degraded representations instead."
+        )
+
+
+_OPENAPI_30_DEFS_PREFIX = '#/$defs/'
+_OPENAPI_30_DEFINITIONS_PREFIX = '#/definitions/'
+
+# Keywords whose values are instance data or annotations rather than subschemas; the converter
+# must not recurse into them (e.g. a `default` value may be an arbitrary JSON object).
+_OPENAPI_30_DATA_KEYWORDS = frozenset({'enum', 'const', 'default', 'example', 'examples'})
+
+# Keywords with no OpenAPI 3.0 equivalent. They are dropped during conversion and reported
+# through an `OpenAPI30Incompatibility` diagnostic.
+_OPENAPI_30_UNSUPPORTED_KEYWORDS: dict[str, str] = {
+    'patternProperties': 'schemas for properties matched by a pattern cannot be expressed in OpenAPI 3.0',
+    'dependentRequired': 'requirements depending on the presence of other properties cannot be expressed in OpenAPI 3.0',
+    'dependentSchemas': 'schemas depending on the presence of other properties cannot be expressed in OpenAPI 3.0',
+    'propertyNames': 'schemas for property names cannot be expressed in OpenAPI 3.0',
+    'contains': 'schemas requiring specific array items cannot be expressed in OpenAPI 3.0',
+    'minContains': 'constraints on the number of matching array items cannot be expressed in OpenAPI 3.0',
+    'maxContains': 'constraints on the number of matching array items cannot be expressed in OpenAPI 3.0',
+    'unevaluatedProperties': "'unevaluatedProperties' cannot be expressed in OpenAPI 3.0",
+    'unevaluatedItems': "'unevaluatedItems' cannot be expressed in OpenAPI 3.0",
+    'if': 'conditional schemas cannot be expressed in OpenAPI 3.0',
+    'then': 'conditional schemas cannot be expressed in OpenAPI 3.0',
+    'else': 'conditional schemas cannot be expressed in OpenAPI 3.0',
+    'not': 'negated schemas cannot be expressed in OpenAPI 3.0',
+    'contentEncoding': "'contentEncoding' cannot be expressed in OpenAPI 3.0",
+    'contentMediaType': "'contentMediaType' cannot be expressed in OpenAPI 3.0",
+    'contentSchema': "'contentSchema' cannot be expressed in OpenAPI 3.0",
+    '$id': "'$id' cannot be expressed in OpenAPI 3.0",
+    '$anchor': "'$anchor' cannot be expressed in OpenAPI 3.0",
+    '$vocabulary': "'$vocabulary' cannot be expressed in OpenAPI 3.0",
+    '$dynamicRef': "'$dynamicRef' cannot be expressed in OpenAPI 3.0",
+    '$dynamicAnchor': "'$dynamicAnchor' cannot be expressed in OpenAPI 3.0",
+    '$recursiveRef': "'$recursiveRef' cannot be expressed in OpenAPI 3.0",
+    '$recursiveAnchor': "'$recursiveAnchor' cannot be expressed in OpenAPI 3.0",
+}
+
+
+def to_openapi_3_0_schema(json_schema: JsonSchemaValue) -> tuple[JsonSchemaValue, list[OpenAPI30Incompatibility]]:
+    """Convert a JSON Schema (as generated by pydantic, using the draft 2020-12 dialect) into an
+    [OpenAPI 3.0](https://spec.openapis.org/oas/v3.0.3)-compatible schema.
+
+    Constructs that have an OpenAPI 3.0 equivalent are converted while preserving their meaning:
+
+    * `anyOf`/`oneOf` branches and `type` arrays involving `null` are folded into `nullable: true`.
+    * `const` is converted to a single-valued `enum`.
+    * Numeric `exclusiveMinimum`/`exclusiveMaximum` are converted to the OpenAPI 3.0 boolean form.
+    * `$defs` is moved to `definitions`, and local references (including discriminator mappings)
+      are rewritten accordingly.
+    * Sibling keywords of `$ref` are preserved by wrapping the reference in `allOf`.
+
+    Constructs with no OpenAPI 3.0 equivalent (e.g. `prefixItems`, `patternProperties`, `not`) are
+    degraded or dropped, and reported through the returned diagnostics.
+
+    Args:
+        json_schema: The JSON Schema to convert. It is not modified; a converted copy is returned.
+
+    Returns:
+        A tuple of the converted schema and the list of
+        [`OpenAPI30Incompatibility`][pydantic.json_schema.OpenAPI30Incompatibility] diagnostics that
+        were encountered. The converted schema is OpenAPI 3.0-compatible even when the list is
+        non-empty; the diagnostics describe where semantics were degraded, so that callers can
+        choose to raise an error or accept the degradation.
+    """
+    incompatibilities: list[OpenAPI30Incompatibility] = []
+    converted = _to_openapi_3_0(json_schema, '#', incompatibilities)
+    return converted, incompatibilities
+
+
+def _escape_json_pointer_token(token: str) -> str:
+    return token.replace('~', '~0').replace('/', '~1')
+
+
+def _to_openapi_3_0_ref(ref: Any) -> Any:
+    if isinstance(ref, str) and ref.startswith(_OPENAPI_30_DEFS_PREFIX):
+        return _OPENAPI_30_DEFINITIONS_PREFIX + ref[len(_OPENAPI_30_DEFS_PREFIX) :]
+    return ref
+
+
+def _only_null_incompatibility(path: str) -> OpenAPI30Incompatibility:
+    return OpenAPI30Incompatibility(
+        path=path,
+        keyword='type',
+        message='a schema that only allows null cannot be expressed in OpenAPI 3.0; '
+        'degraded to an unconstrained nullable schema',
+    )
+
+
+def _to_openapi_3_0(node: Any, path: str, incompatibilities: list[OpenAPI30Incompatibility]) -> Any:
+    """Recursively convert a JSON Schema node to its OpenAPI 3.0-compatible form.
+
+    Args:
+        node: The schema (or subschema) to convert.
+        path: The JSON Pointer path of the node, used in diagnostics.
+        incompatibilities: A list to which encountered incompatibilities are appended.
+    """
+    if isinstance(node, bool):
+        # Boolean schemas are not part of OpenAPI 3.0 (except for `additionalProperties`,
+        # which is preserved by the caller).
+        if node:
+            return {}
+        incompatibilities.append(
+            OpenAPI30Incompatibility(
+                path=path,
+                keyword='false',
+                message='a "false" schema (matching nothing) cannot be expressed in OpenAPI 3.0; '
+                'it was replaced with an unconstrained schema',
+            )
+        )
+        return {}
+    if not isinstance(node, dict):
+        return node
+
+    result = dict(node)
+
+    # `$schema` and `$comment` have no OpenAPI 3.0 counterpart; dropping them does not alter semantics.
+    result.pop('$schema', None)
+    result.pop('$comment', None)
+
+    # Move `$defs` to `definitions`, the location understood by OpenAPI 3.0 tooling.
+    if '$defs' in result:
+        defs = result.pop('$defs')
+        if isinstance(result.get('definitions'), dict):
+            defs = {**defs, **result['definitions']}
+        result['definitions'] = defs
+
+    # Rewrite local references to point at the new definitions location.
+    if '$ref' in result:
+        result['$ref'] = _to_openapi_3_0_ref(result['$ref'])
+
+    # `const` is equivalent to a single-valued `enum`.
+    if 'const' in result:
+        result['enum'] = [result.pop('const')]
+
+    # OpenAPI 3.0 uses the boolean form of `exclusiveMinimum`/`exclusiveMaximum`.
+    for exclusive_key, bound_key in (('exclusiveMinimum', 'minimum'), ('exclusiveMaximum', 'maximum')):
+        bound = result.get(exclusive_key)
+        if bound is None or isinstance(bound, bool):
+            continue
+        if bound_key in result:
+            incompatibilities.append(
+                OpenAPI30Incompatibility(
+                    path=path,
+                    keyword=exclusive_key,
+                    message=f'{bound_key!r} and {exclusive_key!r} cannot be applied independently in OpenAPI 3.0; '
+                    f'the exclusive bound ({bound!r}) was used for both',
+                )
+            )
+        result[bound_key] = bound
+        result[exclusive_key] = True
+
+    # Fold `null` type arrays into `nullable`, and distribute multi-type arrays over `anyOf`.
+    type_value = result.get('type')
+    if isinstance(type_value, list):
+        remaining_types = [t for t in type_value if t != 'null']
+        if len(remaining_types) != len(type_value):
+            result['nullable'] = True
+        if len(remaining_types) == 1:
+            result['type'] = remaining_types[0]
+        elif not remaining_types:
+            del result['type']
+            incompatibilities.append(_only_null_incompatibility(path))
+        else:
+            del result['type']
+            type_any_of = [{'type': t} for t in remaining_types]
+            if 'anyOf' in result:
+                result['allOf'] = [{'anyOf': result.pop('anyOf')}, {'anyOf': type_any_of}]
+            else:
+                result['anyOf'] = type_any_of
+    elif type_value == 'null':
+        del result['type']
+        result['nullable'] = True
+        incompatibilities.append(_only_null_incompatibility(path))
+
+    # Fold `{'type': 'null'}` union branches into `nullable`.
+    for union_keyword in ('anyOf', 'oneOf'):
+        branches = result.get(union_keyword)
+        if not isinstance(branches, list) or {'type': 'null'} not in branches:
+            continue
+        branches = [branch for branch in branches if branch != {'type': 'null'}]
+        result['nullable'] = True
+        if not branches:
+            del result[union_keyword]
+        elif (
+            len(branches) == 1
+            and isinstance(branches[0], dict)
+            and not (set(branches[0]) & (set(result) - {union_keyword}))
+        ):
+            # A single remaining branch can be inlined into the parent schema.
+            del result[union_keyword]
+            result.update(branches[0])
+        else:
+            result[union_keyword] = branches
+
+    # OpenAPI 3.0 cannot type array positions individually; degrade tuples to a single `items` schema.
+    if 'prefixItems' in result:
+        prefix_items = result.pop('prefixItems')
+        extra_items = result.pop('items', None)
+        if not prefix_items:
+            if extra_items is not None:
+                result['items'] = extra_items
+        elif extra_items is True:
+            # Additional items are unconstrained; the positional item schemas are lost.
+            incompatibilities.append(
+                OpenAPI30Incompatibility(
+                    path=path,
+                    keyword='prefixItems',
+                    message='tuple item schemas cannot be tied to array positions in OpenAPI 3.0; '
+                    'the positional item schemas were dropped',
+                )
+            )
+        elif all(item == prefix_items[0] for item in prefix_items) and extra_items in (None, False):
+            # A homogeneous tuple is equivalent to `items` with `minItems`/`maxItems`.
+            result['items'] = prefix_items[0]
+        else:
+            choices = list(prefix_items)
+            if isinstance(extra_items, dict):
+                choices.append(extra_items)
+            result['items'] = choices[0] if len(choices) == 1 else {'anyOf': choices}
+            incompatibilities.append(
+                OpenAPI30Incompatibility(
+                    path=path,
+                    keyword='prefixItems',
+                    message='tuple item schemas cannot be tied to array positions in OpenAPI 3.0; '
+                    'degraded to "items" accepting any of the item schemas in any position',
+                )
+            )
+
+    # OpenAPI 3.0 supports a single `example` rather than a list of `examples`.
+    examples = result.pop('examples', None)
+    if isinstance(examples, list) and examples and 'example' not in result:
+        result['example'] = examples[0]
+
+    # Drop keywords with no OpenAPI 3.0 equivalent, recording a diagnostic for each.
+    for keyword, reason in _OPENAPI_30_UNSUPPORTED_KEYWORDS.items():
+        if keyword in result:
+            result.pop(keyword)
+            incompatibilities.append(OpenAPI30Incompatibility(path=path, keyword=keyword, message=reason))
+
+    # Rewrite discriminator mappings referencing definitions.
+    discriminator = result.get('discriminator')
+    if isinstance(discriminator, dict) and isinstance(discriminator.get('mapping'), dict):
+        discriminator = dict(discriminator)
+        discriminator['mapping'] = {tag: _to_openapi_3_0_ref(ref) for tag, ref in discriminator['mapping'].items()}
+        result['discriminator'] = discriminator
+
+    # OpenAPI 3.0 ignores keywords next to `$ref`; wrapping the reference in `allOf` preserves them.
+    if '$ref' in result and len(result) > 1:
+        all_of = result.get('allOf')
+        if isinstance(all_of, list):
+            result['allOf'] = [*all_of, {'$ref': result.pop('$ref')}]
+        else:
+            result['allOf'] = [{'$ref': result.pop('$ref')}]
+
+    # Recurse into subschemas.
+    for key in list(result):
+        value = result[key]
+        if key in _OPENAPI_30_DATA_KEYWORDS or key == 'discriminator':
+            continue
+        child_path = f'{path}/{_escape_json_pointer_token(key)}'
+        if key in ('properties', 'definitions'):
+            # The values are mappings of names to subschemas, not subschemas themselves.
+            if isinstance(value, dict):
+                result[key] = {
+                    name: _to_openapi_3_0(
+                        subschema, f'{child_path}/{_escape_json_pointer_token(str(name))}', incompatibilities
+                    )
+                    for name, subschema in value.items()
+                }
+        elif key == 'items' and isinstance(value, bool):
+            result[key] = _to_openapi_3_0(value, child_path, incompatibilities)
+        elif isinstance(value, dict):
+            result[key] = _to_openapi_3_0(value, child_path, incompatibilities)
+        elif isinstance(value, list):
+            result[key] = [
+                _to_openapi_3_0(item, f'{child_path}/{index}', incompatibilities)
+                if isinstance(item, (dict, bool))
+                else item
+                for index, item in enumerate(value)
+            ]
+    return result
+
+
+class GenerateOpenAPI30JsonSchema(GenerateJsonSchema):
+    """!!! abstract "Usage Documentation"
+        [OpenAPI 3.0 compatible schemas](../concepts/json_schema.md#openapi-30-compatible-schemas)
+
+    A JSON Schema generator that produces [OpenAPI 3.0](https://spec.openapis.org/oas/v3.0.3)-compatible
+    schemas, for use with (client) code generators that do not understand newer JSON Schema dialects.
+
+    The schema is first generated as usual (in either `'validation'` or `'serialization'` mode) and
+    then converted to the OpenAPI 3.0 subset; see
+    [`to_openapi_3_0_schema`][pydantic.json_schema.to_openapi_3_0_schema] for the details of the
+    conversion. Recursive models, discriminated unions, default values and field aliases are preserved.
+
+    Constructs that cannot be represented equivalently in OpenAPI 3.0 are reported as
+    [`OpenAPI30Incompatibility`][pydantic.json_schema.OpenAPI30Incompatibility] diagnostics, each
+    carrying the JSON Pointer path of the offending subschema. Whether such constructs cause an
+    error or are silently degraded is controlled by `on_incompatible`.
+
+    Example:
+        ```python
+        from pydantic import BaseModel
+        from pydantic.json_schema import GenerateOpenAPI30JsonSchema
+
+
+        class Model(BaseModel):
+            value: int | None = None
+
+
+        schema = Model.model_json_schema(schema_generator=GenerateOpenAPI30JsonSchema)
+        assert schema['properties']['value'] == {
+            'type': 'integer',
+            'nullable': True,
+            'default': None,
+            'title': 'Value',
+        }
+        ```
+    """
+
+    on_incompatible: Literal['error', 'degrade'] = 'error'
+    """What to do when the generated schema contains constructs with no OpenAPI 3.0 equivalent:
+
+    * `'error'` (the default): raise an
+      [`OpenAPI30IncompatibilityError`][pydantic.json_schema.OpenAPI30IncompatibilityError] listing
+      every incompatible construct.
+    * `'degrade'`: return the degraded schema; the diagnostics are available on the
+      `incompatibilities` attribute.
+    """
+
+    definitions_key: str = 'definitions'
+
+    def __init__(
+        self,
+        by_alias: bool = True,
+        ref_template: str = DEFAULT_REF_TEMPLATE,
+        union_format: Literal['any_of', 'primitive_type_array'] = 'any_of',
+        *,
+        on_incompatible: Literal['error', 'degrade'] | None = None,
+    ) -> None:
+        super().__init__(by_alias=by_alias, ref_template=ref_template, union_format=union_format)
+        if on_incompatible is not None:
+            self.on_incompatible = on_incompatible
+        self.incompatibilities: list[OpenAPI30Incompatibility] = []
+        """The incompatibilities encountered while converting the generated schema to OpenAPI 3.0."""
+
+    def generate(self, schema: CoreSchema, mode: JsonSchemaMode = 'validation') -> JsonSchemaValue:
+        json_schema = super().generate(schema, mode=mode)
+        converted = _to_openapi_3_0(json_schema, '#', self.incompatibilities)
+        self._raise_for_incompatibilities()
+        return self.sort(converted)
+
+    def generate_definitions(
+        self, inputs: Sequence[tuple[JsonSchemaKeyT, JsonSchemaMode, core_schema.CoreSchema]]
+    ) -> tuple[dict[tuple[JsonSchemaKeyT, JsonSchemaMode], JsonSchemaValue], dict[DefsRef, JsonSchemaValue]]:
+        json_schemas_map, definitions = super().generate_definitions(inputs)
+        converted_map = {
+            key: _to_openapi_3_0(json_schema, '#', self.incompatibilities)
+            for key, json_schema in json_schemas_map.items()
+        }
+        converted_definitions = {
+            def_ref: _to_openapi_3_0(definition, f'#/definitions/{def_ref}', self.incompatibilities)
+            for def_ref, definition in definitions.items()
+        }
+        self._raise_for_incompatibilities()
+        return converted_map, converted_definitions
+
+    def _raise_for_incompatibilities(self) -> None:
+        if self.on_incompatible == 'error' and self.incompatibilities:
+            raise OpenAPI30IncompatibilityError(self.incompatibilities)
 
 
 # Decimal JSON Schema pattern utilities.
