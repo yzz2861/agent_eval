@@ -7,6 +7,11 @@ https://github.com/coleifer/peewee/releases
 
 ## master
 
+* Add opt-in itemized result mode for bulk-insert / upsert on SQLite via
+  ``Insert.itemized()``. Each input row is applied in order within a single
+  transaction and ``execute()`` returns an ``ItemizedResult`` per input row
+  indicating whether it was inserted, updated, or skipped, along with the
+  resulting database row.
 * Don't cache ``None`` on unselected FK join trees, see #3083.
 * Some fixes for edge-cases around non-unique aliases and unicode aliases,
   see #3081 and #3078.

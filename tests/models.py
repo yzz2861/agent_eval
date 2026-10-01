@@ -5722,6 +5722,168 @@ class UKVRel(TestModel):
         )
 
 
+
+@skip_unless(IS_SQLITE_35, 'itemized result mode requires sqlite 3.35+')
+class TestItemizedUpsertSqlite(ModelTestCase):
+    database = get_in_memory_db()
+    requires = [KV, UKV, OCTest]
+
+    def assertActions(self, results, expected):
+        self.assertEqual([r.action for r in results], expected)
+        self.assertEqual([r.index for r in results],
+                         list(range(len(expected))))
+
+    def test_insert_update_skip(self):
+        KV.create(key='k1', value=10)
+
+        rows = [
+            {'key': 'k1', 'value': 5},   # WHERE not satisfied -> skip.
+            {'key': 'k2', 'value': 3},   # No conflict -> insert.
+            {'key': 'k1', 'value': 20},  # WHERE satisfied -> update.
+        ]
+        query = (KV.insert_many(rows)
+                 .on_conflict(conflict_target=[KV.key],
+                              update={KV.value: EXCLUDED.value},
+                              where=(EXCLUDED.value > KV.value))
+                 .itemized())
+        results = query.execute()
+
+        self.assertActions(results, [
+            ItemizedResult.SKIP,
+            ItemizedResult.INSERT,
+            ItemizedResult.UPDATE])
+
+        # Skipped rows have no row data; inserted/updated rows reflect the
+        # resulting database row, including the generated primary-key.
+        self.assertIsNone(results[0].row)
+        self.assertEqual(results[1].row, {'id': 2, 'key': 'k2', 'value': 3})
+        self.assertEqual(results[2].row, {'id': 1, 'key': 'k1', 'value': 20})
+
+        data = sorted(KV.select(KV.key, KV.value).tuples())
+        self.assertEqual(data, [('k1', 20), ('k2', 3)])
+
+    def test_composite_key_and_duplicate_inputs(self):
+        UKV.create(key='k1', value='v1', extra='e0')
+
+        # The same conflict key appears twice; each input is applied in
+        # declared order and reported separately.
+        rows = [
+            {'key': 'k1', 'value': 'v1', 'extra': 'e1'},  # update
+            {'key': 'k2', 'value': 'v2', 'extra': 'e2'},  # insert
+            {'key': 'k1', 'value': 'v1', 'extra': 'e3'},  # update
+        ]
+        query = (UKV.insert_many(rows)
+                 .on_conflict(conflict_target=[UKV.key, UKV.value],
+                              preserve=[UKV.extra])
+                 .itemized())
+        results = query.execute()
+
+        self.assertActions(results, [
+            ItemizedResult.UPDATE,
+            ItemizedResult.INSERT,
+            ItemizedResult.UPDATE])
+        self.assertEqual(results[0].row['extra'], 'e1')
+        self.assertEqual(results[2].row['extra'], 'e3')
+
+        data = sorted(UKV.select(UKV.key, UKV.value, UKV.extra).tuples())
+        self.assertEqual(data, [('k1', 'v1', 'e3'), ('k2', 'v2', 'e2')])
+
+    def test_defaults_and_generated_pk(self):
+        rows = [{'a': 'x'}, {'a': 'y', 'b': 5}]
+        results = OCTest.insert_many(rows).itemized().execute()
+
+        self.assertActions(results, [ItemizedResult.INSERT] * 2)
+        # Column defaults and generated primary-keys are reflected.
+        self.assertEqual(results[0].row, {'id': 1, 'a': 'x', 'b': 0, 'c': 0})
+        self.assertEqual(results[1].row, {'id': 2, 'a': 'y', 'b': 5, 'c': 0})
+
+    def test_tuple_rows_with_fields(self):
+        KV.create(key='k1', value=1)
+        rows = [('k1', 2), ('k2', 3)]
+        query = (KV.insert_many(rows, [KV.key, KV.value])
+                 .on_conflict(conflict_target=[KV.key],
+                              preserve=[KV.value])
+                 .itemized())
+        results = query.execute()
+
+        self.assertActions(results, [ItemizedResult.UPDATE,
+                                     ItemizedResult.INSERT])
+        data = sorted(KV.select(KV.key, KV.value).tuples())
+        self.assertEqual(data, [('k1', 2), ('k2', 3)])
+
+    def test_on_conflict_ignore(self):
+        KV.create(key='k1', value=1)
+        rows = [{'key': 'k1', 'value': 2}, {'key': 'k2', 'value': 3}]
+        results = (KV.insert_many(rows)
+                   .on_conflict_ignore()
+                   .itemized()
+                   .execute())
+
+        self.assertActions(results, [ItemizedResult.SKIP,
+                                     ItemizedResult.INSERT])
+        data = sorted(KV.select(KV.key, KV.value).tuples())
+        self.assertEqual(data, [('k1', 1), ('k2', 3)])
+
+    def test_on_conflict_replace(self):
+        KV.create(key='k1', value=1)
+        rows = [{'key': 'k1', 'value': 2}, {'key': 'k2', 'value': 3}]
+        results = (KV.insert_many(rows)
+                   .on_conflict_replace()
+                   .itemized()
+                   .execute())
+
+        self.assertActions(results, [ItemizedResult.INSERT] * 2)
+        data = sorted(KV.select(KV.key, KV.value).tuples())
+        self.assertEqual(data, [('k1', 2), ('k2', 3)])
+
+    def test_explicit_returning_is_used(self):
+        KV.create(key='k1', value=1)
+        rows = [{'key': 'k1', 'value': 2}, {'key': 'k2', 'value': 3}]
+        results = (KV.insert_many(rows)
+                   .on_conflict(conflict_target=[KV.key],
+                                preserve=[KV.value])
+                   .returning(KV.key)
+                   .itemized()
+                   .execute())
+
+        self.assertActions(results, [ItemizedResult.UPDATE,
+                                     ItemizedResult.INSERT])
+        self.assertEqual(results[0].row, {'key': 'k1'})
+        self.assertEqual(results[1].row, {'key': 'k2'})
+
+    def test_rollback_on_integrity_error(self):
+        KV.create(key='k1', value=1)
+        rows = [{'key': 'k2', 'value': 2}, {'key': 'k1', 'value': 3}]
+
+        query = KV.insert_many(rows).itemized()
+        self.assertRaises(IntegrityError, query.execute)
+
+        # The whole batch was rolled back -- even the first row.
+        data = sorted(KV.select(KV.key, KV.value).tuples())
+        self.assertEqual(data, [('k1', 1)])
+
+    def test_rollback_on_missing_value(self):
+        rows = [{'key': 'k2', 'value': 2}, {'value': 3}]
+        query = KV.insert_many(rows).itemized()
+        self.assertRaises(ValueError, query.execute)
+        self.assertEqual(KV.select().count(), 0)
+
+    def test_empty_rows(self):
+        self.assertEqual(KV.insert_many([]).itemized().execute(), [])
+
+    def test_requires_sqlite(self):
+        query = KV.insert_many([{'key': 'k', 'value': 1}]).itemized()
+        self.assertRaises(InterfaceError, query.execute,
+                          PostgresqlDatabase('peewee_test'))
+
+    def test_requires_sqlite_335(self):
+        query = KV.insert_many([{'key': 'k', 'value': 1}]).itemized()
+        self.database.server_version = (3, 34, 0)
+        try:
+            self.assertRaises(InterfaceError, query.execute)
+        finally:
+            del self.database.server_version
+
 @requires_pglike
 class TestUpsertPostgresql(PGOnConflictTests, ModelTestCase):
     @requires_postgresql

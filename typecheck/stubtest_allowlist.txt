@@ -35,3 +35,8 @@ peewee.ForeignKeyField.__init__
 peewee.DecimalField.__init__
 peewee.IdentityField.__init__
 
+# Action constants are set on the runtime namedtuple, but cannot be declared
+# in the stub since ClassVar is not allowed inside a NamedTuple.
+peewee.ItemizedResult.INSERT
+peewee.ItemizedResult.UPDATE
+peewee.ItemizedResult.SKIP

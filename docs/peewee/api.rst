@@ -6488,6 +6488,31 @@ Queries
          # To get the modified row-count:
          rowcount = query.as_rowcount().execute()
 
+   .. method:: itemized(itemized=True)
+
+      :param bool itemized: Whether to enable itemized result mode.
+
+      Opt-in to itemized result mode (SQLite 3.35.0+ only). Instead of
+      executing the batch as a single statement, each input row is applied
+      in order as its own ``INSERT`` (within a single transaction), and
+      ``execute()`` returns a list of :class:`ItemizedResult` -- one per
+      input row, in input order -- indicating whether the row was inserted,
+      updated, or skipped (e.g. an ``ON CONFLICT ... WHERE`` condition was
+      not met), along with the resulting database row. If any row fails,
+      the transaction is rolled back and no changes are applied.
+
+      .. code-block:: python
+
+         results = (KV.insert_many(rows)
+                    .on_conflict(conflict_target=[KV.key],
+                                 preserve=[KV.value])
+                    .itemized()
+                    .execute())
+         for result in results:
+             print(result.index, result.action, result.row)
+
+      See :ref:`itemized-results` for additional discussion.
+
    .. method:: on_conflict_ignore(ignore=True)
 
       :param bool ignore: Whether to add ON CONFLICT IGNORE clause.
@@ -6572,6 +6597,25 @@ Queries
          # updated, as the new value (10) is now less than the value in the
          # original row (11).
 
+
+.. class:: ItemizedResult
+
+   Named-tuple describing the outcome of a single input row of an itemized
+   bulk-insert or upsert (see :meth:`Insert.itemized`).
+
+   .. attribute:: index
+
+      Position of the row in the original input.
+
+   .. attribute:: action
+
+      One of ``ItemizedResult.INSERT``, ``ItemizedResult.UPDATE`` or
+      ``ItemizedResult.SKIP``.
+
+   .. attribute:: row
+
+      Dictionary of the resulting database row (as returned by the
+      ``RETURNING`` clause), or ``None`` when the row was skipped.
 
 .. class:: Delete()
 

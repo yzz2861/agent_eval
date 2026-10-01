@@ -584,6 +584,48 @@ Insert the row, and silently do nothing if a constraint would be violated:
 
 Supported by SQLite, MySQL, and Postgresql.
 
+.. _itemized-results:
+
+Itemized results (SQLite)
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+By default a bulk-insert or upsert is executed as a single statement, which
+is the fastest option. When you need to know the outcome of each individual
+input row, opt-in to itemized result mode with :meth:`Insert.itemized`
+(requires SQLite 3.35.0 or newer):
+
+.. code-block:: python
+
+   rows = [
+       {'key': 'k1', 'value': 5},
+       {'key': 'k2', 'value': 3},
+   ]
+   results = (KV.insert_many(rows)
+              .on_conflict(conflict_target=[KV.key],
+                           preserve=[KV.value])
+              .itemized()
+              .execute())
+
+   for result in results:
+       print(result.index, result.action, result.row)
+
+Each input row is applied in order as its own ``INSERT`` (within a single
+transaction), and ``execute()`` returns a list of :class:`ItemizedResult`,
+one per input row, in input order:
+
+* ``index`` - position of the row in the original input.
+* ``action`` - ``ItemizedResult.INSERT``, ``ItemizedResult.UPDATE`` or
+  ``ItemizedResult.SKIP`` (e.g. an ``ON CONFLICT ... WHERE`` condition was
+  not met, or the row was ignored).
+* ``row`` - a dictionary of the resulting database row, including
+  generated primary-keys and column defaults, or ``None`` when the row
+  was skipped. An explicit :meth:`~Insert.returning` clause is used as-is.
+
+Because rows are applied one-by-one in input order, a batch may contain
+multiple rows that hit the same (possibly composite) conflict key -- each is
+applied and reported separately. If any row fails, the transaction is rolled
+back and no changes are applied.
+
 .. _deleting-records:
 
 Deleting Records

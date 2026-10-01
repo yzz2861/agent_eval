@@ -119,6 +119,7 @@ __all__ = [
     'InterfaceError',
     'InternalError',
     'IPField',
+    'ItemizedResult',
     'JOIN',
     'JSONField',
     'Load',
@@ -2859,6 +2860,23 @@ class Update(_WriteQuery):
             return self.apply_returning(ctx)
 
 
+class ItemizedResult(collections.namedtuple(
+        '_ItemizedResult', ('index', 'action', 'row'))):
+    """
+    The outcome of applying a single input row of an itemized bulk-insert
+    or upsert (see Insert.itemized()).
+
+    * index - position of the row in the original input.
+    * action - one of ItemizedResult.INSERT, .UPDATE or .SKIP.
+    * row - dict of the resulting database row (as returned by the RETURNING
+      clause), or None when the row was skipped.
+    """
+    __slots__ = ()
+    INSERT = 'insert'
+    UPDATE = 'update'
+    SKIP = 'skip'
+
+
 class Insert(_WriteQuery):
     SIMPLE = 0
     QUERY = 1
@@ -2872,6 +2890,7 @@ class Insert(_WriteQuery):
         self._columns = columns
         self._on_conflict = on_conflict
         self._as_rowcount = False
+        self._itemized = False
 
     def where(self, *expressions):
         raise NotImplementedError('INSERT queries cannot have a WHERE clause.')
@@ -2879,6 +2898,21 @@ class Insert(_WriteQuery):
     @Node.copy
     def as_rowcount(self, _as_rowcount=True):
         self._as_rowcount = _as_rowcount
+
+    @Node.copy
+    def itemized(self, itemized=True):
+        """
+        Opt-in to itemized result mode (SQLite only). Instead of executing
+        the batch as a single statement, each input row is applied in order
+        as its own INSERT (within a single transaction), and execute()
+        returns a list of ItemizedResult -- one per input row, in input
+        order -- indicating whether the row was inserted, updated, or
+        skipped (e.g. an ON CONFLICT ... WHERE condition was not met), along
+        with the resulting database row (including generated primary-keys
+        and column defaults). If any row fails, the transaction is rolled
+        back and no changes are applied.
+        """
+        self._itemized = itemized
 
     @Node.copy
     def on_conflict_ignore(self, ignore=True):
@@ -3076,6 +3110,8 @@ class Insert(_WriteQuery):
             return (self.table.primary_key,)
 
     def _execute(self, database):
+        if self._itemized:
+            return self._execute_itemized(database)
         if self._as_rowcount:
             # Strip implicit pk-returning, which breaks rowcount on sqlite.
             if not self._return_cursor:
@@ -3089,6 +3125,205 @@ class Insert(_WriteQuery):
             return super(Insert, self)._execute(database)
         except self.DefaultValuesException:
             pass
+
+    def _execute_itemized(self, database):
+        # Itemized result mode applies each input row individually (in input
+        # order) within a single transaction, reporting the outcome of each
+        # row. This is currently only implemented for SQLite.
+        if not isinstance(database, SqliteDatabase):
+            raise InterfaceError('Itemized result mode is only supported '
+                                 'when using a SQLite database.')
+        if database.server_version < (3, 35, 0):
+            raise InterfaceError('Itemized result mode requires SQLite '
+                                 '3.35.0 or newer (RETURNING clause).')
+
+        insert = self._insert
+        if isinstance(insert, Mapping):
+            rows = [insert]
+        elif isinstance(insert, (SelectQuery, SQL)):
+            raise ValueError('Itemized result mode cannot be used with an '
+                             'INSERT ... SELECT query.')
+        elif insert is None:
+            rows = []
+        else:
+            rows = list(insert)
+        if not rows:
+            return []
+
+        defaults = self.get_default_data()
+        columns = self._itemized_columns(rows, defaults)
+
+        # Determine whether this is an upsert (ON CONFLICT ... DO UPDATE),
+        # in which case we need to know whether the conflicting row already
+        # exists in order to distinguish "insert" from "update".
+        on_conflict = self._on_conflict
+        action = ''
+        if on_conflict is not None and on_conflict._action:
+            action = on_conflict._action.lower()
+        is_upsert = bool(on_conflict) and action in ('', 'update') and \
+                    bool(on_conflict._update or on_conflict._preserve)
+        if is_upsert and on_conflict._conflict_target:
+            target = [self._itemized_target_column(column)
+                      for column in on_conflict._conflict_target]
+        else:
+            target = None
+
+        returning = self._itemized_returning()
+        results = []
+        with database.atomic():
+            for index, row in enumerate(rows):
+                data = self._itemized_row(row, columns, defaults)
+                if target is not None:
+                    existed = self._itemized_exists(database, target, data)
+                else:
+                    existed = None
+
+                # Apply the row individually, reading back the resulting
+                # database row using the RETURNING clause.
+                query = self.clone()
+                query._insert = [data]
+                query._columns = None
+                query._itemized = False
+                query._returning = returning
+                query._return_cursor = True
+                query._row_type = ROW.DICT
+                query._cursor_wrapper = None
+                cursor = query.execute(database)
+                try:
+                    result_row = cursor.iterate(cache=False)
+                except StopIteration:
+                    result_row = None
+
+                if result_row is None:
+                    row_action = ItemizedResult.SKIP
+                elif existed is not None:
+                    row_action = (ItemizedResult.UPDATE if existed
+                                  else ItemizedResult.INSERT)
+                else:
+                    row_action = ItemizedResult.INSERT
+                results.append(ItemizedResult(index, row_action, result_row))
+        return results
+
+    def _itemized_columns(self, rows, defaults):
+        # Resolve the insert columns, mirroring the logic used by
+        # _generate_insert() so that itemized mode accepts the same inputs.
+        if self._columns:
+            columns = []
+            seen = set()
+            for column in self._columns:
+                if isinstance(column, str):
+                    column = getattr(self.table, column)
+                columns.append(column)
+                seen.add(column)
+        else:
+            row = rows[0]
+            if isinstance(row, Mapping):
+                columns = []
+                for column in row:
+                    if isinstance(column, str):
+                        column = getattr(self.table, column)
+                    columns.append(column)
+                seen = set(columns)
+            else:
+                columns = self.get_default_columns()
+                if columns is None:
+                    raise ValueError('Bulk insert must specify columns.')
+                columns = list(columns)
+                seen = set(columns)
+        for column in defaults:
+            if column not in seen:
+                columns.append(column)
+        return columns
+
+    @staticmethod
+    def _itemized_lookups(column):
+        lookups = [column]
+        name = getattr(column, 'name', None)
+        if name is not None:
+            lookups.append(name)
+        column_name = getattr(column, 'column_name', None)
+        if column_name is not None and column_name != name:
+            lookups.append(column_name)
+        return lookups
+
+    def _itemized_row(self, row, columns, defaults):
+        # Normalize a single input row into a {column: value} mapping,
+        # materializing any column defaults so that the values used for the
+        # conflict-key existence check match the values being inserted.
+        is_dict = isinstance(row, Mapping)
+        data = {}
+        for i, column in enumerate(columns):
+            found = False
+            if is_dict:
+                for lookup in self._itemized_lookups(column):
+                    try:
+                        value = row[lookup]
+                    except KeyError:
+                        pass
+                    else:
+                        found = True
+                        break
+            else:
+                try:
+                    value = row[i]
+                except IndexError:
+                    pass
+                else:
+                    found = True
+
+            if not found:
+                if column in defaults:
+                    value = defaults[column]
+                    if callable_(value):
+                        value = value()
+                elif isinstance(column, Field) and column.null:
+                    value = None
+                else:
+                    raise ValueError('Missing value for %s.' % column.name)
+            data[column] = value
+        return data
+
+    def _itemized_target_column(self, column):
+        if isinstance(column, str):
+            if is_model(self.table):
+                try:
+                    return self.table._meta.combined[column]
+                except KeyError:
+                    raise ValueError('Unrecognized conflict target: "%s".'
+                                     % column)
+            return getattr(self.table, column)
+        return column
+
+    def _itemized_exists(self, database, target, data):
+        condition = None
+        for column in target:
+            try:
+                value = data[column]
+            except KeyError:
+                raise ValueError('Unable to determine the value for conflict '
+                                 'target column "%s".' % column.name)
+            expression = (column == value)
+            condition = (expression if condition is None
+                         else condition & expression)
+        query = self.table.select(SQL('1')).where(condition)
+        return bool(query.exists(database))
+
+    def _itemized_returning(self):
+        returning = self._returning
+        pk_returning = self._pk_returning() or ()
+        is_default = bool(returning) and len(returning) == len(pk_returning) \
+            and all(lhs is rhs for lhs, rhs in zip(returning, pk_returning))
+        if returning and not is_default:
+            # An explicit RETURNING clause was specified -- use it as-is.
+            return returning
+        # By default, read back the full row so that generated primary-keys
+        # and column defaults are reflected in the results.
+        if is_model(self.table):
+            return list(self.table._meta.sorted_fields)
+        if self.table._columns:
+            return [Column(self.table, column)
+                    for column in self.table._columns]
+        return [SQL('*')]
 
     def handle_result(self, database, cursor):
         if self._return_cursor:
