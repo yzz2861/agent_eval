@@ -395,6 +395,10 @@ You can ignore missing fields entirely by setting ``partial=True``.
     # OR UserSchema(partial=True).load({'age': 42})
     print(result)  # => {'age': 42}
 
+For finer control over nested schemas and collections, ``partial`` also
+accepts a structured mask (a ``dict``). See :ref:`partial-loading` for
+details.
+
 Specifying defaults
 -------------------
 

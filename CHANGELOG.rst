@@ -6,6 +6,10 @@ Changelog
 
 Features:
 
+- Add support for structured partial masks: ``partial`` now also accepts a
+  ``dict`` keyed by field name, collection index, or the wildcard index
+  ``...``, allowing missing-field rules to target nested schemas and
+  specific collection elements.
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
 Bug fixes:

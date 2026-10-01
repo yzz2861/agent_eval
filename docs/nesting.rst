@@ -168,6 +168,33 @@ You can specify a subset of the fields to allow partial loading using dot delimi
     pprint(result)
     # {'author': {'name': 'Monty'}, 'title': 'Something Completely Different'}
 
+Alternatively, you can pass a structured mask (a ``dict``) as ``partial``.
+Mask keys are field names, collection indices, or the wildcard index ``...``;
+values are either ``True`` (the field may be missing) or a nested mask.
+This allows targeting specific elements of a collection, and field names
+that contain dots are interpreted literally.
+
+.. code-block:: python
+
+    class AddressSchema(Schema):
+        street = fields.String(required=True)
+        city = fields.String(required=True)
+
+
+    class PersonSchema(Schema):
+        addresses = fields.List(fields.Nested(AddressSchema), required=True)
+
+
+    schema = PersonSchema()
+    # The first address may omit "street"; all others must be complete
+    result = schema.load(
+        {"addresses": [{"city": "Springfield"}]},
+        partial={"addresses": {0: {"street": True}}}
+    )
+    # Use {...: {"street": True}} to allow a missing "street" in every address
+
+Invalid mask paths raise a ``ValueError`` before any data is processed.
+
 .. _two-way-nesting:
 
 Two-way nesting

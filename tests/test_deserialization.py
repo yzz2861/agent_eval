@@ -2350,6 +2350,226 @@ class TestValidation:
             PersonSchema().load(data)
         assert "zip_code" in excinfo.value.messages["homeAddress"]
 
+    def test_partial_mask_deserialization(self):
+        class MySchema(Schema):
+            foo = fields.Integer(required=True)
+            bar = fields.Integer(required=True)
+            baz = fields.Integer(required=True)
+
+        result = MySchema().load({"foo": 3}, partial={"bar": True, "baz": True})
+        assert result == {"foo": 3}
+        # Fields not listed in the mask are still required
+        with pytest.raises(ValidationError) as excinfo:
+            MySchema().load({"foo": 3}, partial={"bar": True})
+        assert "baz" in excinfo.value.messages
+        # A mask passed to the constructor is respected
+        result = MySchema(partial={"bar": True, "baz": True}).load({"foo": 3})
+        assert result == {"foo": 3}
+        # An empty mask allows nothing
+        with pytest.raises(ValidationError):
+            MySchema().load({"foo": 3}, partial={})
+
+    def test_partial_mask_validation(self):
+        class MySchema(Schema):
+            foo = fields.Integer(required=True)
+            bar = fields.Integer(required=True)
+
+        assert MySchema().validate({"foo": 3}, partial={"bar": True}) == {}
+        assert MySchema().validate({"foo": 3}) == {
+            "bar": ["Missing data for required field."]
+        }
+
+    def test_partial_mask_only_relaxes_missing_fields(self):
+        class MySchema(Schema):
+            foo = fields.Integer(required=True)
+            bar = fields.Integer(required=True)
+
+        # Explicit null is still validated against allow_none
+        with pytest.raises(ValidationError) as excinfo:
+            MySchema().load({"foo": 1, "bar": None}, partial={"bar": True})
+        assert excinfo.value.messages == {"bar": ["Field may not be null."]}
+        # Present values still run all validators
+        with pytest.raises(ValidationError) as excinfo:
+            MySchema().load({"foo": 1, "bar": "notanint"}, partial={"bar": True})
+        assert "bar" in excinfo.value.messages
+
+    def test_partial_mask_nested(self):
+        class AddressSchema(Schema):
+            zip_code = fields.String(required=True)
+            city = fields.String(required=True)
+
+        class PersonSchema(Schema):
+            address = fields.Nested(AddressSchema, required=True)
+
+        result = PersonSchema().load(
+            {"address": {"city": "Springfield"}},
+            partial={"address": {"zip_code": True}},
+        )
+        assert result == {"address": {"city": "Springfield"}}
+        # The nested field itself is still required
+        with pytest.raises(ValidationError):
+            PersonSchema().load({}, partial={"address": {"zip_code": True}})
+        # unless the field itself is marked in the mask
+        assert PersonSchema().load({}, partial={"address": True}) == {}
+
+    def test_partial_mask_field_name_with_dot(self):
+        schema_class = Schema.from_dict(
+            {
+                "a.b": fields.Integer(required=True),
+                "c": fields.Integer(required=True),
+            }
+        )
+        # The mask key is the literal field name, not a nested path
+        result = schema_class().load({"c": 1}, partial={"a.b": True})
+        assert result == {"c": 1}
+
+    def test_partial_mask_list_indices(self):
+        class AddressSchema(Schema):
+            street = fields.String(required=True)
+            city = fields.String(required=True)
+
+        class PersonSchema(Schema):
+            addresses = fields.List(fields.Nested(AddressSchema), required=True)
+
+        data = {
+            "addresses": [
+                # index 0 may omit the street
+                {"city": "Springfield"},
+                # index 1 still requires a complete address
+                {"city": "Shelbyville"},
+            ]
+        }
+        partial = {"addresses": {0: {"street": True}}}
+        with pytest.raises(ValidationError) as excinfo:
+            PersonSchema().load(data, partial=partial)
+        assert excinfo.value.messages == {
+            "addresses": {1: {"street": ["Missing data for required field."]}}
+        }
+        data["addresses"][1]["street"] = "Evergreen Terrace"
+        assert PersonSchema().load(data, partial=partial) == data
+
+    def test_partial_mask_wildcard_index(self):
+        class AddressSchema(Schema):
+            street = fields.String(required=True)
+            city = fields.String(required=True)
+
+        class PersonSchema(Schema):
+            addresses = fields.List(fields.Nested(AddressSchema), required=True)
+
+        data = {"addresses": [{"city": "Springfield"}, {"city": "Shelbyville"}]}
+        result = PersonSchema().load(
+            data, partial={"addresses": {...: {"street": True}}}
+        )
+        assert result == data
+
+    def test_partial_mask_index_merged_with_wildcard(self):
+        class ItemSchema(Schema):
+            x = fields.Integer(required=True)
+            y = fields.Integer(required=True)
+
+        class MySchema(Schema):
+            items = fields.List(fields.Nested(ItemSchema), required=True)
+
+        data = {"items": [{"x": 1}, {"y": 2}]}
+        # The wildcard allows a missing y everywhere; index 1 additionally
+        # allows a missing x
+        result = MySchema().load(
+            data, partial={"items": {...: {"y": True}, 1: {"x": True}}}
+        )
+        assert result == data
+
+    def test_partial_mask_many_schema(self):
+        class ItemSchema(Schema):
+            x = fields.Integer(required=True)
+            y = fields.Integer(required=True)
+
+        schema = ItemSchema(many=True)
+        result = schema.load([{"x": 1}, {"x": 2, "y": 3}], partial={0: {"y": True}})
+        assert result == [{"x": 1}, {"x": 2, "y": 3}]
+        result = ItemSchema().load(
+            [{"x": 1, "y": 2}, {"x": 3}], many=True, partial={...: {"y": True}}
+        )
+        assert result == [{"x": 1, "y": 2}, {"x": 3}]
+
+    def test_partial_mask_nested_many(self):
+        class ItemSchema(Schema):
+            x = fields.Integer(required=True)
+
+        class MySchema(Schema):
+            items = fields.Nested(ItemSchema, many=True, required=True)
+
+        result = MySchema().load(
+            {"items": [{}, {"x": 1}]}, partial={"items": {0: {"x": True}}}
+        )
+        assert result == {"items": [{}, {"x": 1}]}
+
+    def test_partial_mask_with_data_key(self):
+        class AddressSchema(Schema):
+            zip_code = fields.String(required=True)
+            city = fields.String(required=True)
+
+        class PersonSchema(Schema):
+            address = fields.Nested(
+                AddressSchema, data_key="homeAddress", required=True
+            )
+
+        data = {"homeAddress": {"city": "Springfield"}}
+        # The mask is keyed by attribute name, not data_key
+        result = PersonSchema().load(data, partial={"address": {"zip_code": True}})
+        assert result == {"address": {"city": "Springfield"}}
+        with pytest.raises(ValueError, match="unknown field 'homeAddress'"):
+            PersonSchema().load(data, partial={"homeAddress": {"zip_code": True}})
+        # Errors are still reported under the data_key
+        with pytest.raises(ValidationError) as excinfo:
+            PersonSchema().load(data)
+        assert "zip_code" in excinfo.value.messages["homeAddress"]
+
+    @pytest.mark.parametrize(
+        "partial",
+        [
+            {"unknown": True},  # unknown field
+            {"foo": {"bar": True}},  # sub-mask on a non-nested field
+            {"foo": "yes"},  # invalid mask value
+            {0: {"foo": True}},  # index on a non-collection schema
+            {...: {"foo": True}},  # wildcard on a non-collection schema
+            {True: {"foo": True}},  # bool is not a valid index
+            {1.5: True},  # invalid key type
+        ],
+    )
+    def test_partial_mask_invalid_paths_raise_config_error(self, partial):
+        class MySchema(Schema):
+            foo = fields.Integer(required=True)
+
+        with pytest.raises(ValueError, match="Invalid partial mask"):
+            MySchema().load({"foo": 1}, partial=partial)
+
+    @pytest.mark.parametrize(
+        "partial",
+        [
+            {"items": {"name": True}},  # field name key on a collection
+            {"items": {0: "yes"}},  # invalid mask value
+            {"items": {0: {"unknown": True}}},  # unknown nested field
+        ],
+    )
+    def test_partial_mask_invalid_collection_paths_raise_config_error(self, partial):
+        class ItemSchema(Schema):
+            name = fields.String(required=True)
+
+        class MySchema(Schema):
+            items = fields.List(fields.Nested(ItemSchema))
+
+        with pytest.raises(ValueError, match="Invalid partial mask"):
+            MySchema().load({"items": []}, partial=partial)
+
+    def test_partial_mask_invalid_path_raised_before_processing_data(self):
+        class MySchema(Schema):
+            foo = fields.Integer(required=True)
+
+        # The input itself is invalid, but the configuration error is
+        # raised before any data is processed
+        with pytest.raises(ValueError, match="Invalid partial mask"):
+            MySchema().load("not a mapping", partial={"unknown": True})
+
 
 @pytest.mark.parametrize("FieldClass", ALL_FIELDS)
 def test_required_field_failure(FieldClass):

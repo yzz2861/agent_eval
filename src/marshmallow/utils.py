@@ -30,6 +30,41 @@ def is_collection(obj) -> typing.TypeGuard[typing.Iterable]:
     return is_iterable_but_not_string(obj) and not isinstance(obj, Mapping)
 
 
+def is_partial_mask(obj) -> typing.TypeGuard[Mapping]:
+    """Return True if ``obj`` is a structured partial mask."""
+    return isinstance(obj, Mapping)
+
+
+def merge_partial_masks(base, override):
+    """Recursively merge two structured partial masks.
+
+    ``override`` takes precedence over ``base``. Either argument may be
+    ``None`` (no mask), ``True`` (the whole subtree is partial) or a mapping.
+    """
+    if base is True or override is True:
+        return True
+    if base is None:
+        return override
+    if override is None:
+        return base
+    merged = dict(base)
+    for key, value in override.items():
+        merged[key] = (
+            merge_partial_masks(merged[key], value) if key in merged else value
+        )
+    return merged
+
+
+def partial_mask_for_index(mask: Mapping, index: int):
+    """Return the sub-mask of a structured partial mask for a collection index.
+
+    Combines the mask for the specific ``index`` with the wildcard (``...``)
+    mask, with the index-specific mask taking precedence. Returns ``None`` if
+    neither applies.
+    """
+    return merge_partial_masks(mask.get(...), mask.get(index))
+
+
 # https://stackoverflow.com/a/27596917
 def is_aware(datetime: dt.datetime) -> bool:
     return (

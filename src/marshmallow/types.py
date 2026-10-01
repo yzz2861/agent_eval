@@ -8,11 +8,22 @@
 from __future__ import annotations
 
 import typing
+from types import EllipsisType
 
 T = typing.TypeVar("T")
 
 #: A type that can be either a sequence of strings or a set of strings
 StrSequenceOrSet: typing.TypeAlias = typing.Sequence[str] | typing.AbstractSet[str]
+
+#: A structured mask for partial deserialization.
+#:
+#: Keys are schema field names (attribute names, not ``data_key`` values),
+#: collection indices (``int``), or the wildcard index ``...`` (Ellipsis),
+#: which applies to every element of a collection. Values are either ``True``
+#: (the field may be missing) or another mask for a nested structure.
+PartialMask: typing.TypeAlias = dict[
+    str | int | EllipsisType, "typing.Literal[True] | PartialMask"
+]
 
 #: Type for validator functions
 Validator: typing.TypeAlias = typing.Callable[[typing.Any], typing.Any]
@@ -38,7 +49,7 @@ class SchemaValidator(typing.Protocol):
         output: typing.Any,
         original_data: typing.Any = ...,
         *,
-        partial: bool | StrSequenceOrSet | None = None,
+        partial: bool | StrSequenceOrSet | PartialMask | None = None,
         unknown: UnknownOption | None = None,
         many: bool = False,
     ) -> None: ...
