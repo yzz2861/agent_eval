@@ -33,6 +33,23 @@ DEFAULT_CONFIG = {
     "ACCESS_LOG": False,
     "AUTO_EXTEND": True,
     "AUTO_RELOAD": False,
+    "COMPRESS": False,
+    "COMPRESS_LEVEL": 6,
+    "COMPRESS_MIMETYPES": (
+        "application/atom+xml",
+        "application/javascript",
+        "application/json",
+        "application/rss+xml",
+        "application/xhtml+xml",
+        "application/xml",
+        "image/svg+xml",
+        "text/css",
+        "text/html",
+        "text/javascript",
+        "text/plain",
+        "text/xml",
+    ),
+    "COMPRESS_MIN_SIZE": 512,
     "EVENT_AUTOREGISTER": False,
     "DEPRECATION_FILTER": "once",
     "FORWARDED_FOR_HEADER": "X-Forwarded-For",
@@ -138,6 +155,10 @@ class Config(dict, metaclass=DescriptorMeta):
     ACCESS_LOG: bool
     AUTO_EXTEND: bool
     AUTO_RELOAD: bool
+    COMPRESS: bool
+    COMPRESS_LEVEL: int
+    COMPRESS_MIMETYPES: tuple[str, ...]
+    COMPRESS_MIN_SIZE: int
     EVENT_AUTOREGISTER: bool
     DEPRECATION_FILTER: FilterWarningType
     FORWARDED_FOR_HEADER: str

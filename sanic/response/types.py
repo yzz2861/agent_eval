@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, AnyStr, Callable, TypeVar
 
 from sanic.compat import Header
+from sanic.compression import prepare_response_compression
 from sanic.cookies import CookieJar
 from sanic.cookies.response import Cookie, SameSite
 from sanic.exceptions import SanicException, ServerError
@@ -33,6 +34,7 @@ class BaseHTTPResponse:
         "stream",
         "status",
         "headers",
+        "_compression_prepared",
         "_cookies",
     )
 
@@ -45,6 +47,7 @@ class BaseHTTPResponse:
         self.stream: Http | ASGIApp | HTTPReceiver | None = None
         self.status: int = None
         self.headers = Header({})
+        self._compression_prepared = False
         self._cookies: CookieJar | None = None
 
     def __repr__(self):
@@ -116,6 +119,13 @@ class BaseHTTPResponse:
                 "allowed to be sent."
             )
         data = data.encode() if hasattr(data, "encode") else data or b""  # type: ignore
+        if not self._compression_prepared:
+            prepare_response_compression(
+                self,
+                data,  # type: ignore
+                bool(end_stream),
+            )
+            self._compression_prepared = True
         await self.stream.send(
             data,  # type: ignore
             end_stream=end_stream or False,
