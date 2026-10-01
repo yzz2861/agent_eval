@@ -541,6 +541,7 @@ def __init__(
     self,
     *args,
     connection_init_wait_timeout: timedelta = timedelta(minutes=1),
+    on_subscription_authorize: OnSubscriptionAuthorize | None = None,
     **kwargs,
 ):
     ...
@@ -554,6 +555,27 @@ Initializes the websocket handler.
 `connection_init_wait_timeout`: a `timedelta` with timeout for new
 websocket connections before first message is received. Defaults to
 60 seconds.
+
+`on_subscription_authorize`: an optional sync or async callback called before
+each subscription event. A falsey return value, or an exception, stops only
+that subscription.
+
+
+### `notify_subscription_authorization_changed`
+
+```python
+def notify_subscription_authorization_changed(
+    self,
+    websocket: WebSocket,
+    operation_id: str | None = None,
+) -> None:
+    ...
+```
+
+Schedules an authorization re-check for one subscription or every subscription
+on the given WebSocket. Re-checks are coalesced so a slow check cannot cause
+unbounded event buffering for an operation. Call it on the WebSocket event
+loop; from another thread, schedule it with `loop.call_soon_threadsafe(...)`.
 
 
 ### Methods

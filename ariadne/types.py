@@ -47,6 +47,7 @@ __all__ = [
     "OnDisconnect",
     "OnOperation",
     "OnComplete",
+    "OnSubscriptionAuthorize",
     "Extension",
     "SchemaBindable",
 ]
@@ -478,6 +479,7 @@ class Operation:
     id: str
     name: str | None
     generator: AsyncGenerator
+    context_value: Any = None
 
 
 """Type of `on_connect` option of GraphQL websocket servers.
@@ -526,6 +528,14 @@ Called with two arguments:
 `Operation`: an object with closed subscription's data.
 """
 OnComplete = Callable[[WebSocket, Operation], Any]
+
+"""Type of subscription authorization re-check callback.
+
+Callback evaluated before a subscription event is sent to the client, or when
+the application explicitly requests a re-check. A falsey return value stops
+only the checked operation.
+"""
+OnSubscriptionAuthorize = Callable[[WebSocket, Operation], Any]
 
 
 class Extension:

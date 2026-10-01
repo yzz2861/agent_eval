@@ -6,4 +6,5 @@ For released versions, see the [Releases](https://github.com/mirumee/ariadne/rel
 
 ## Unreleased
 
+- Added subscription authorization re-checks to the `graphql-transport-ws` handler, with per-operation cancellation and bounded re-check buffering.
 

@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import Mock
 
 import pytest
@@ -6,6 +7,7 @@ from graphql.language import OperationType
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from ariadne import QueryType, SubscriptionType, make_executable_schema
 from ariadne.asgi import GraphQL
 from ariadne.asgi.handlers import GraphQLTransportWSHandler
 from ariadne.exceptions import WebSocketConnectionError
@@ -905,3 +907,363 @@ def test_http_handler_not_set_graphql_transport_ws(
                     },
                 }
             )
+
+
+def test_subscription_authorization_is_rechecked_before_each_event():
+    subscription = SubscriptionType()
+    calls = {}
+
+    @subscription.source("number")
+    async def number_source(*_):
+        for number in range(10):
+            yield {"number": number}
+            await asyncio.sleep(0.01)
+
+    @subscription.field("number")
+    def resolve_number(result, *_):
+        return result["number"]
+
+    def authorize_subscription(websocket, operation):
+        assert operation.context_value["request"] is websocket
+        calls[operation.id] = calls.get(operation.id, 0) + 1
+        return operation.id != "revoked" or calls[operation.id] == 1
+
+    schema = make_executable_schema(
+        "type Query { _unused: Boolean } type Subscription { number: Int! }",
+        QueryType(),
+        subscription,
+    )
+    handler = GraphQLTransportWSHandler(
+        on_subscription_authorize=authorize_subscription
+    )
+    client = TestClient(GraphQL(schema, websocket_handler=handler))
+
+    events = {"revoked": 0, "allowed": 0}
+    with client.websocket_connect("/", ["graphql-transport-ws"]) as ws:
+        ws.send_json({"type": handler.GQL_CONNECTION_INIT})
+        assert ws.receive_json()["type"] == handler.GQL_CONNECTION_ACK
+
+        for operation_id in events:
+            ws.send_json(
+                {
+                    "type": handler.GQL_SUBSCRIBE,
+                    "id": operation_id,
+                    "payload": {"query": "subscription { number }"},
+                }
+            )
+
+        revoked_completed = False
+        while not revoked_completed:
+            message = ws.receive_json()
+            if message["type"] == handler.GQL_NEXT:
+                events[message["id"]] += 1
+            if message["type"] == handler.GQL_COMPLETE and message["id"] == "revoked":
+                revoked_completed = True
+
+        ws.portal.call(asyncio.sleep, 0.02)
+        message = ws.receive_json()
+        if message["type"] == handler.GQL_NEXT:
+            events[message["id"]] += 1
+        assert events == {"revoked": 1, "allowed": 1}
+        ws.send_json({"type": handler.GQL_COMPLETE, "id": "allowed"})
+
+
+def test_async_subscription_authorization_does_not_buffer_source_events():
+    subscription = SubscriptionType()
+    pulled_events = []
+
+    @subscription.source("number")
+    async def number_source(*_):
+        for number in range(5):
+            pulled_events.append(number)
+            yield {"number": number}
+
+    @subscription.field("number")
+    def resolve_number(result, *_):
+        return result["number"]
+
+    schema = make_executable_schema(
+        "type Query { _unused: Boolean } type Subscription { number: Int! }",
+        QueryType(),
+        subscription,
+    )
+    authorization_started = asyncio.Event()
+    authorization_gate = asyncio.Event()
+    authorization_calls = 0
+
+    async def authorize_subscription(websocket, operation):
+        nonlocal authorization_calls
+        authorization_calls += 1
+        if authorization_calls == 1:
+            return True
+        authorization_started.set()
+        await authorization_gate.wait()
+        return False
+
+    handler = GraphQLTransportWSHandler(
+        on_subscription_authorize=authorize_subscription
+    )
+    client = TestClient(GraphQL(schema, websocket_handler=handler))
+
+    with client.websocket_connect("/", ["graphql-transport-ws"]) as ws:
+        ws.send_json({"type": handler.GQL_CONNECTION_INIT})
+        assert ws.receive_json()["type"] == handler.GQL_CONNECTION_ACK
+        ws.send_json(
+            {
+                "type": handler.GQL_SUBSCRIBE,
+                "id": "test",
+                "payload": {"query": "subscription { number }"},
+            }
+        )
+
+        message = ws.receive_json()
+        assert message["type"] == handler.GQL_NEXT
+        assert message["payload"] == {"data": {"number": 0}}
+
+        ws.portal.call(authorization_started.wait)
+        ws.portal.call(asyncio.sleep, 0.05)
+        assert pulled_events == [0]
+
+        ws.portal.call(authorization_gate.set)
+        message = ws.receive_json()
+        assert message == {"type": handler.GQL_COMPLETE, "id": "test"}
+
+
+def test_application_can_request_subscription_authorization_recheck():
+    subscription = SubscriptionType()
+    active_websocket = None
+    source_gate = asyncio.Event()
+
+    @subscription.source("status")
+    async def status_source(*_):
+        yield {"status": "ready"}
+        await source_gate.wait()
+
+    @subscription.field("status")
+    def resolve_status(result, *_):
+        return result["status"]
+
+    authorization_allowed = True
+
+    def on_operation(websocket, operation):
+        nonlocal active_websocket
+        active_websocket = websocket
+
+    schema = make_executable_schema(
+        "type Query { _unused: Boolean } type Subscription { status: String! }",
+        QueryType(),
+        subscription,
+    )
+    handler = GraphQLTransportWSHandler(
+        on_operation=on_operation,
+        on_subscription_authorize=lambda *_: authorization_allowed,
+    )
+    client = TestClient(GraphQL(schema, websocket_handler=handler))
+
+    with client.websocket_connect("/", ["graphql-transport-ws"]) as ws:
+        ws.send_json({"type": handler.GQL_CONNECTION_INIT})
+        assert ws.receive_json()["type"] == handler.GQL_CONNECTION_ACK
+        ws.send_json(
+            {
+                "type": handler.GQL_SUBSCRIBE,
+                "id": "test",
+                "payload": {"query": "subscription { status }"},
+            }
+        )
+
+        message = ws.receive_json()
+        assert message == {
+            "type": handler.GQL_NEXT,
+            "id": "test",
+            "payload": {"data": {"status": "ready"}},
+        }
+
+        ws.portal.call(asyncio.sleep, 0.05)
+        authorization_allowed = False
+        ws.portal.call(
+            lambda: handler.notify_subscription_authorization_changed(
+                active_websocket, "test"
+            )
+        )
+
+        message = ws.receive_json()
+        assert message == {"type": handler.GQL_COMPLETE, "id": "test"}
+        ws.portal.call(source_gate.set)
+
+
+def test_application_recheck_terminates_only_unauthorized_subscription():
+    subscription = SubscriptionType()
+    source_gate = asyncio.Event()
+
+    @subscription.source("status")
+    async def status_source(*_):
+        yield {"status": "ready"}
+        await source_gate.wait()
+
+    @subscription.field("status")
+    def resolve_status(result, *_):
+        return result["status"]
+
+    active_websocket = None
+    permissions = {"revoked": True, "allowed": True}
+
+    def on_operation(websocket, operation):
+        nonlocal active_websocket
+        active_websocket = websocket
+
+    schema = make_executable_schema(
+        "type Query { _unused: Boolean } type Subscription { status: String! }",
+        QueryType(),
+        subscription,
+    )
+    handler = GraphQLTransportWSHandler(
+        on_operation=on_operation,
+        on_subscription_authorize=lambda _, operation: permissions[operation.id],
+    )
+    client = TestClient(GraphQL(schema, websocket_handler=handler))
+
+    with client.websocket_connect("/", ["graphql-transport-ws"]) as ws:
+        ws.send_json({"type": handler.GQL_CONNECTION_INIT})
+        ws.receive_json()
+        for operation_id in permissions:
+            ws.send_json(
+                {
+                    "type": handler.GQL_SUBSCRIBE,
+                    "id": operation_id,
+                    "payload": {"query": "subscription { status }"},
+                }
+            )
+            message = ws.receive_json()
+            assert message["id"] == operation_id
+            assert message["payload"] == {"data": {"status": "ready"}}
+
+        ws.portal.call(asyncio.sleep, 0.05)
+        permissions["revoked"] = False
+        ws.portal.call(
+            lambda: handler.notify_subscription_authorization_changed(active_websocket)
+        )
+
+        message = ws.receive_json()
+        assert message == {"type": handler.GQL_COMPLETE, "id": "revoked"}
+
+        ws.send_json({"type": handler.GQL_COMPLETE, "id": "allowed"})
+        ws.portal.call(source_gate.set)
+
+
+def test_subscription_authorization_exception_terminates_only_operation():
+    subscription = SubscriptionType()
+    calls = {}
+
+    @subscription.source("number")
+    async def number_source(*_):
+        for number in range(5):
+            yield {"number": number}
+            await asyncio.sleep(0.01)
+
+    @subscription.field("number")
+    def resolve_number(result, *_):
+        return result["number"]
+
+    def authorize_subscription(websocket, operation):
+        calls[operation.id] = calls.get(operation.id, 0) + 1
+        if operation.id == "broken" and calls[operation.id] == 2:
+            raise ValueError("Authorization unavailable")
+        return True
+
+    schema = make_executable_schema(
+        "type Query { _unused: Boolean } type Subscription { number: Int! }",
+        QueryType(),
+        subscription,
+    )
+    handler = GraphQLTransportWSHandler(
+        on_subscription_authorize=authorize_subscription
+    )
+    client = TestClient(GraphQL(schema, websocket_handler=handler))
+
+    events = {"broken": 0, "healthy": 0}
+    with client.websocket_connect("/", ["graphql-transport-ws"]) as ws:
+        ws.send_json({"type": handler.GQL_CONNECTION_INIT})
+        assert ws.receive_json()["type"] == handler.GQL_CONNECTION_ACK
+        for operation_id in events:
+            ws.send_json(
+                {
+                    "type": handler.GQL_SUBSCRIBE,
+                    "id": operation_id,
+                    "payload": {"query": "subscription { number }"},
+                }
+            )
+
+        completed = False
+        while not completed:
+            message = ws.receive_json()
+            if message["type"] == handler.GQL_NEXT:
+                events[message["id"]] += 1
+            completed = (
+                message["type"] == handler.GQL_COMPLETE and message["id"] == "broken"
+            )
+
+        ws.portal.call(asyncio.sleep, 0.02)
+        message = ws.receive_json()
+        if message["type"] == handler.GQL_NEXT:
+            events[message["id"]] += 1
+        assert events == {"broken": 1, "healthy": 1}
+        ws.send_json({"type": handler.GQL_COMPLETE, "id": "healthy"})
+
+
+def test_concurrent_complete_and_disconnect_clean_subscription_once():
+    subscription = SubscriptionType()
+    completed_operations = []
+    closed_generators = []
+
+    @subscription.source("status")
+    async def status_source(*_):
+        yield {"status": "ready"}
+
+    @subscription.field("status")
+    def resolve_status(result, *_):
+        return result["status"]
+
+    def on_operation(websocket, operation):
+        original_aclose = operation.generator.aclose
+
+        async def close_generator():
+            closed_generators.append(operation.id)
+            return await original_aclose()
+
+        operation.generator.aclose = close_generator
+
+    def on_complete(websocket, operation):
+        completed_operations.append(operation.id)
+
+    gate = asyncio.Event()
+
+    async def authorize_subscription(*_):
+        await gate.wait()
+        return True
+
+    schema = make_executable_schema(
+        "type Query { _unused: Boolean } type Subscription { status: String! }",
+        QueryType(),
+        subscription,
+    )
+    handler = GraphQLTransportWSHandler(
+        on_operation=on_operation,
+        on_complete=on_complete,
+        on_subscription_authorize=authorize_subscription,
+    )
+    client = TestClient(GraphQL(schema, websocket_handler=handler))
+
+    with client.websocket_connect("/", ["graphql-transport-ws"]) as ws:
+        ws.send_json({"type": handler.GQL_CONNECTION_INIT})
+        ws.receive_json()
+        ws.send_json(
+            {
+                "type": handler.GQL_SUBSCRIBE,
+                "id": "test",
+                "payload": {"query": "subscription { status }"},
+            }
+        )
+        ws.send_json({"type": handler.GQL_COMPLETE, "id": "test"})
+
+    assert completed_operations == ["test"]
+    assert closed_generators == ["test"]

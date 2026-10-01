@@ -410,6 +410,40 @@ def on_connect(websocket, params: Any):
 ```
 
 
+## Re-checking subscription authorization
+
+`connection_init` authenticates the WebSocket when it opens, but permissions can change while a subscription remains active. `GraphQLTransportWSHandler` supports an `on_subscription_authorize` callback that is invoked before the first event and before every later event:
+
+```python
+def on_subscription_authorize(websocket, operation: Operation) -> bool:
+    subject = operation.context_value["subject"]
+    return permission_service.can_subscribe(subject, operation.name)
+
+
+graphql = GraphQL(
+    schema,
+    websocket_handler=GraphQLTransportWSHandler(
+        on_subscription_authorize=on_subscription_authorize,
+    ),
+)
+```
+
+The callback can be synchronous or asynchronous. Returning a falsey value, or raising an exception, sends `complete` for only that operation. Other authorized subscriptions on the same WebSocket continue receiving events.
+
+Applications can also request a check after an external permission change:
+
+```python
+websocket_handler.notify_subscription_authorization_changed(websocket)
+websocket_handler.notify_subscription_authorization_changed(
+    websocket, operation_id="notifications"
+)
+```
+
+While an asynchronous check is waiting, Ariadne does not continue pulling events from that subscription's source iterator. Re-check requests are coalesced, so at most one additional check can be queued while another is running. A second `connection_init` message is not a refresh operation and is rejected by the protocol handler.
+
+A runnable example with a local permission switch is available in `examples/graphql_transport_ws_subscription_authorization_example.py`.
+
+
 ## `on_operation` and `on_complete`
 
 > **Warning:** This feature is considered experimental. It was implemented for feature parity with an older version of Apollo Server. Its final shape (or presence in future Ariadne releases) is not decided yet. Generally you should try using `on_connect` and `on_disconnect` first before using these features.

@@ -163,5 +163,6 @@ Shortcut for `graphql_app.websocket_handler.handle_websocket(...)`.
 - `OnConnect`
 - `OnDisconnect`
 - `OnOperation`
+- `OnSubscriptionAuthorize`
 - `Operation`
 - `WebSocketConnectionError`

@@ -464,6 +464,31 @@ Called with two arguments:
 - - - - -
 
 
+## `OnSubscriptionAuthorize`
+
+```python
+OnSubscriptionAuthorize = Callable[[WebSocket, Operation], Any]
+```
+
+Type of `on_subscription_authorize` option of `GraphQLTransportWSHandler`.
+
+Callback evaluated before each subscription event and when the application
+requests an authorization re-check. It may be synchronous or asynchronous.
+A falsey return value stops only the checked subscription; other authorized
+subscriptions on the same WebSocket remain active.
+
+Called with two arguments:
+
+`WebSocket`: the HTTP framework specific representation of websocket connection.
+
+[`Operation`](types-reference#operation): the active subscription. Its
+`context_value` attribute contains the operation context resolved when the
+subscription started.
+
+
+- - - - -
+
+
 ## `Operation`
 
 ```python

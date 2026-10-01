@@ -7,6 +7,7 @@ from ..types import (
     OnConnect,
     OnDisconnect,
     OnOperation,
+    OnSubscriptionAuthorize,
     Operation,
 )
 from .graphql import GraphQL
@@ -20,6 +21,7 @@ __all__ = [
     "OnConnect",
     "OnDisconnect",
     "OnOperation",
+    "OnSubscriptionAuthorize",
     "Operation",
     "WebSocketConnectionError",
 ]
