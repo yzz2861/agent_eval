@@ -80,6 +80,7 @@ def test_graphql_http_server_skips_subscription_handlers_when_data_is_list(
     )
 
     assert handler.handle_called is False
-    # Data is list so subscription_handlers block is skipped; graphql then validates
-    # and rejects list data, returning 400.
-    assert response.status_code == HTTPStatus.BAD_REQUEST
+    # Data is list so subscription_handlers block is skipped and it is
+    # executed as a regular batch request.
+    assert response.status_code == HTTPStatus.OK
+    assert response.json() == [{"data": {"__typename": "Query"}}]

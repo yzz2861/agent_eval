@@ -47,6 +47,9 @@ class GraphQL:
         logger: None | str | Logger | LoggerAdapter = None,
         error_formatter: ErrorFormatter = format_error,
         execution_context_class: type[ExecutionContext] | None = None,
+        batch_requests: bool = True,
+        max_batch_size: int = 10,
+        batch_query_concurrency: int = 10,
         http_handler: GraphQLHTTPHandler | None = None,
         websocket_handler: GraphQLWebsocketHandlerBase | None = None,
     ) -> None:
@@ -102,6 +105,17 @@ class GraphQL:
         this server to execute the GraphQL queries. Defaults to standard
         context type implemented by the `graphql`.
 
+        `batch_requests`: a `bool` controlling if JSON request bodies containing
+        a list of GraphQL operations should be executed as a batch. Defaults to
+        `True`.
+
+        `max_batch_size`: an `int` with maximum number of operations allowed in
+        a single batch request. Defaults to `10`.
+
+        `batch_query_concurrency`: an `int` with maximum number of query
+        operations from a batch that can execute concurrently. Mutations always
+        execute serially in their input order. Defaults to `10`.
+
         `http_handler`: an instance of `GraphQLHTTPHandler` class implementing
         the HTTP requests handling logic for this server. If not set,
         an instance of `GraphQLHTTPHandler` is used.
@@ -114,7 +128,11 @@ class GraphQL:
         if http_handler:
             self.http_handler = http_handler
         else:
-            self.http_handler = GraphQLHTTPHandler()
+            self.http_handler = GraphQLHTTPHandler(
+                batch_requests=batch_requests,
+                max_batch_size=max_batch_size,
+                batch_query_concurrency=batch_query_concurrency,
+            )
 
         if websocket_handler:
             self.websocket_handler = websocket_handler

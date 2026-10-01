@@ -30,6 +30,9 @@ def __init__(
     middleware: Middlewares | None = None,
     middleware_manager_class: type[MiddlewareManager] | None = None,
     subscription_handlers: list[SubscriptionHandler] | None = None,
+    batch_requests: bool = True,
+    max_batch_size: int = 10,
+    batch_query_concurrency: int = 10,
 ) -> None:
     ...
 ```
@@ -56,6 +59,17 @@ if [`extensions`](types-reference#extensions) or `middleware` options are set.
 handle GraphQL subscriptions over HTTP. Handlers are tried in order; the
 first handler whose `supports()` method returns `True` handles the
 request. Defaults to no handlers.
+
+`batch_requests`: a `bool` controlling whether JSON request bodies containing
+a list of GraphQL operations are executed as a batch. Defaults to `True`.
+
+`max_batch_size`: an `int` with maximum number of operations allowed in one
+batch request. Empty batches and over-limit batches are rejected before
+operations execute. Defaults to `10`.
+
+`batch_query_concurrency`: an `int` with maximum number of query operations
+from a batch that may execute concurrently. Mutations always execute serially
+in their input order. Defaults to `10`.
 
 
 ### Methods

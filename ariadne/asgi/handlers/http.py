@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from http import HTTPStatus
 from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, cast
 
-from graphql import DocumentNode, MiddlewareManager
+from graphql import DocumentNode, GraphQLError, MiddlewareManager, get_operation_ast
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
@@ -18,7 +19,7 @@ from ...constants import (
 from ...exceptions import HttpBadRequestError, HttpError
 from ...explorer import Explorer
 from ...file_uploads import combine_multipart_data
-from ...graphql import graphql
+from ...graphql import graphql, handle_graphql_errors, parse_query, validate_data
 from ...types import (
     ContextValue,
     ExtensionList,
@@ -46,6 +47,9 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         middleware: Middlewares | None = None,
         middleware_manager_class: type[MiddlewareManager] | None = None,
         subscription_handlers: list[SubscriptionHandler] | None = None,
+        batch_requests: bool = True,
+        max_batch_size: int = 10,
+        batch_query_concurrency: int = 10,
     ) -> None:
         """Initializes the HTTP handler.
 
@@ -67,6 +71,16 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         `subscription_handlers`: a list of `SubscriptionHandler` instances to
         handle GraphQL subscriptions. Handlers are tried in order; the first
         handler whose `supports()` method returns `True` handles the request.
+
+        `batch_requests`: a `bool` controlling if JSON request bodies containing
+        a list of operations are executed as a batch. Defaults to `True`.
+
+        `max_batch_size`: an `int` with maximum number of operations allowed in
+        one batch request. Defaults to `10`.
+
+        `batch_query_concurrency`: an `int` with maximum number of query
+        operations from a batch that can execute concurrently. Mutations always
+        execute serially in their input order. Defaults to `10`.
         """
         super().__init__()
 
@@ -76,6 +90,14 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         self.subscription_handlers: list[SubscriptionHandler] = (
             subscription_handlers or []
         )
+        self.batch_requests = batch_requests
+        self.max_batch_size = max_batch_size
+        self.batch_query_concurrency = batch_query_concurrency
+
+        if max_batch_size < 1:
+            raise ValueError("max_batch_size must be greater than 0")
+        if batch_query_concurrency < 1:
+            raise ValueError("batch_query_concurrency must be greater than 0")
 
     async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
         """An entrypoint for the GraphQL HTTP handler.
@@ -220,6 +242,32 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
                         error_formatter=self.error_formatter,
                     )
 
+        if isinstance(data, list):
+            try:
+                content_type = request.headers.get("Content-Type", "")
+                content_type = content_type.split(";")[0]
+                if not self.batch_requests:
+                    raise HttpBadRequestError("Batch requests are disabled")
+                if content_type != DATA_TYPE_JSON:
+                    raise HttpBadRequestError(
+                        f"Batch requests must use {DATA_TYPE_JSON}"
+                    )
+                if not data:
+                    raise HttpBadRequestError(
+                        "Batch request must contain at least one operation"
+                    )
+                if len(data) > self.max_batch_size:
+                    raise HttpBadRequestError(
+                        "Batch request exceeds the maximum of "
+                        f"{self.max_batch_size} operations"
+                    )
+                return await self.execute_batch_graphql_request(request, data)
+            except HttpError as error:
+                return PlainTextResponse(
+                    error.message or error.status,
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
+
         success, result = await self.execute_graphql_query(request, data)
         return await self.create_json_response(request, result, success)
 
@@ -358,14 +406,14 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
         `query_document`: an already parsed GraphQL query. Setting this option
         will prevent `graphql` from parsing `query` string from `data` second time.
         """
+        if self.schema is None:
+            raise TypeError("schema is not set, call configure method to initialize it")
+
         if context_value is None:
             context_value = await self.get_context_for_request(request, data)
 
         extensions = await self.get_extensions_for_request(request, context_value)
         middleware = await self.get_middleware_for_request(request, context_value)
-
-        if self.schema is None:
-            raise TypeError("schema is not set, call configure method to initialize it")
 
         if isinstance(request, Request):
             require_query = request.method == "GET"
@@ -390,6 +438,124 @@ class GraphQLHTTPHandler(GraphQLHttpHandlerBase):
             middleware=middleware,
             middleware_manager_class=self.middleware_manager_class,
             execution_context_class=self.execution_context_class,
+        )
+
+    async def execute_batch_graphql_request(
+        self,
+        request: Request,
+        data: list[Any],
+    ) -> Response:
+        if self.schema is None:
+            raise TypeError("schema is not set, call configure method to initialize it")
+
+        prepared_operations = []
+        results: list[dict | None] = [None] * len(data)
+
+        for index, operation_data in enumerate(data):
+            try:
+                validate_data(operation_data)
+                query_document = self.parse_batch_operation(operation_data)
+                operation = get_operation_ast(
+                    query_document,
+                    operation_data.get("operationName"),
+                )
+            except GraphQLError as error:
+                _, results[index] = self.handle_batch_graphql_error(error)
+                continue
+
+            prepared_operations.append(
+                {
+                    "index": index,
+                    "data": operation_data,
+                    "document": query_document if self.query_parser is None else None,
+                    "is_mutation": bool(
+                        operation and operation.operation.name == "MUTATION"
+                    ),
+                }
+            )
+
+        execute_task = asyncio.create_task(
+            self.execute_batch_graphql_queries(request, prepared_operations, results)
+        )
+
+        async def wait_for_disconnect() -> None:
+            while True:
+                message = await request.receive()
+                if message["type"] == "http.disconnect":
+                    return
+
+        disconnect_task = asyncio.create_task(wait_for_disconnect())
+
+        try:
+            done, _ = await asyncio.wait(
+                {execute_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except BaseException:
+            execute_task.cancel()
+            disconnect_task.cancel()
+            await asyncio.gather(
+                execute_task,
+                disconnect_task,
+                return_exceptions=True,
+            )
+            raise
+
+        if disconnect_task.done() and not disconnect_task.exception():
+            execute_task.cancel()
+            await execute_task
+            raise asyncio.CancelledError()
+
+        disconnect_task.cancel()
+        await asyncio.gather(disconnect_task, return_exceptions=True)
+        await execute_task
+
+        return JSONResponse(cast(list[dict], results))
+
+    async def execute_batch_graphql_queries(
+        self,
+        request: Request,
+        operations: list[dict[str, Any]],
+        results: list[dict | None],
+    ) -> None:
+        query_semaphore = asyncio.Semaphore(self.batch_query_concurrency)
+        mutation_lock = asyncio.Lock()
+        query_tasks: list[asyncio.Task[None]] = []
+        mutation_tasks: list[asyncio.Task[None]] = []
+
+        async def execute_query(operation: dict[str, Any]) -> None:
+            async with query_semaphore:
+                await execute_batch_operation(operation)
+
+        async def execute_mutation(operation: dict[str, Any]) -> None:
+            async with mutation_lock:
+                await execute_batch_operation(operation)
+
+        async def execute_batch_operation(operation: dict[str, Any]) -> None:
+            _, result = await self.execute_graphql_query(
+                request,
+                operation["data"],
+                query_document=operation["document"],
+            )
+            results[operation["index"]] = result
+
+        for operation in operations:
+            if operation["is_mutation"]:
+                mutation_tasks.append(asyncio.create_task(execute_mutation(operation)))
+            else:
+                query_tasks.append(asyncio.create_task(execute_query(operation)))
+
+        await asyncio.gather(*query_tasks, *mutation_tasks)
+
+    def parse_batch_operation(self, data: dict[str, Any]) -> DocumentNode:
+        return parse_query(None, None, data)
+
+    def handle_batch_graphql_error(self, error: GraphQLError) -> GraphQLResult:
+        return handle_graphql_errors(
+            [error],
+            logger=self.logger,
+            error_formatter=self.error_formatter,
+            debug=self.debug,
         )
 
     async def get_extensions_for_request(

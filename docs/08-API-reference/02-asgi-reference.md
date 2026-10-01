@@ -37,6 +37,9 @@ def __init__(
     logger: None | str | Logger | LoggerAdapter = None,
     error_formatter: ErrorFormatter = format_error,
     execution_context_class: type[ExecutionContext] | None = None,
+    batch_requests: bool = True,
+    max_batch_size: int = 10,
+    batch_query_concurrency: int = 10,
     http_handler: GraphQLHTTPHandler | None = None,
     websocket_handler: GraphQLWebsocketHandlerBase | None = None,
 ) -> None:
@@ -94,6 +97,17 @@ implemented by Ariadne is used.
 `execution_context_class`: custom `ExecutionContext` type to use by
 this server to execute the GraphQL queries. Defaults to standard
 context type implemented by the `graphql`.
+
+`batch_requests`: a `bool` controlling whether JSON request bodies containing
+a list of GraphQL operations are executed as a batch. Defaults to `True`.
+
+`max_batch_size`: an `int` with maximum number of operations allowed in one
+batch request. Empty batches and over-limit batches are rejected with a `400`
+response before operations execute. Defaults to `10`.
+
+`batch_query_concurrency`: an `int` with maximum number of query operations
+from a batch that may execute concurrently. Mutations always execute serially
+in their input order. Defaults to `10`.
 
 `http_handler`: an instance of [[`GraphQLHTTPHandler`](asgi-handlers-reference#graphqlhttphandler)](asgi-handlers-reference#graphqlhttphandler) class implementing
 the HTTP requests handling logic for this server. If not set,

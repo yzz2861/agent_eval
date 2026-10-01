@@ -1,6 +1,11 @@
 import json
 from http import HTTPStatus
 
+from starlette.testclient import TestClient
+
+from ariadne.asgi import GraphQL
+from ariadne.asgi.handlers import GraphQLHTTPHandler
+
 
 def test_attempt_parse_request_missing_content_type_raises_bad_request_error(
     client, snapshot
@@ -33,8 +38,10 @@ def test_attempt_parse_json_scalar_request_raises_graphql_bad_request_error(
 
 
 def test_attempt_parse_json_array_request_raises_graphql_bad_request_error(
-    client, snapshot
+    schema, snapshot
 ):
+    app = GraphQL(schema, http_handler=GraphQLHTTPHandler(batch_requests=False))
+    client = TestClient(app)
     response = client.post("/", json=[1, 2, 3])
     assert response.status_code == HTTPStatus.BAD_REQUEST
     assert snapshot == response.text

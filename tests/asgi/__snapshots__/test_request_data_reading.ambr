@@ -1,6 +1,6 @@
 # serializer version: 1
 # name: test_attempt_parse_json_array_request_raises_graphql_bad_request_error
-  '{"errors":[{"message":"Operation data should be a JSON object"}]}'
+  'Batch requests are disabled'
 # ---
 # name: test_attempt_parse_json_scalar_request_raises_graphql_bad_request_error
   '{"errors":[{"message":"Operation data should be a JSON object"}]}'

@@ -36,6 +36,37 @@ $ uvicorn myasgi:application
 See the [reference](../API-reference/asgi-reference#constructor).
 
 
+## JSON batch requests
+
+The ASGI application accepts a JSON array containing multiple GraphQL operation
+objects in a single `POST` request. Batch requests are enabled by default and
+return a JSON array with one result for every input item, using the same order
+as the request.
+
+Each operation gets its own context value, middleware list, and extension
+instances. Sharing the HTTP request object does not share per-operation data
+such as DataLoader registries. Query operations run concurrently up to the
+configured limit. Mutation operations run serially in their input order.
+
+Subscription operations are not supported in batch requests and are returned
+as per-item GraphQL errors. Empty batches and batches larger than the configured
+limit are rejected with `400 Bad Request` before any operation is executed.
+
+Batch requests can be disabled or limited when creating the application:
+
+```python
+application = GraphQL(
+    schema,
+    batch_requests=False,  # Or True, the default
+    max_batch_size=20,
+    batch_query_concurrency=5,
+)
+```
+
+Batch requests require the `application/json` content type. Multipart requests
+continue to use the single-operation file upload protocol.
+
+
 ## The `request` instance
 
 The ASGI application creates its own `request` object, an instance of the `Request` class from the [Starlette](https://github.com/encode/starlette/blob/0.36.1/starlette/requests.py#L199). It's `scope` and `receive` attributes are populated from the received request.
