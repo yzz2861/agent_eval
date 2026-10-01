@@ -40,6 +40,26 @@ API Reference
 .. autoclass:: jwt.api_jws.PyJWS
     :members:
 
+JWS JSON Serialization
+~~~~~~~~~~~~~~~~~~~~~~
+
+:meth:`jwt.api_jws.PyJWS.encode_general` creates the General JWS JSON
+Serialization with one or more independent signatures. Each signer provides its
+own protected and unprotected headers, key, and algorithm. Use
+:meth:`jwt.api_jws.PyJWS.encode_flattened` for the single-signature Flattened
+serialization.
+
+Verification independently validates every signature and reports each result in
+``signatures``. ``required_signers`` identifies the ``kid`` values that must
+validate, while ``minimum_signers`` requires that number of distinct valid
+signers. Repeated signatures from the same ``kid`` count once. If the caller's
+policy is not met, ``decode_json()`` raises and the complete result hides the
+payload by setting it to ``None``.
+
+Signing keys are supplied by ``kid`` with the ``keys`` argument, for example
+``keys={"kid-a": (key_a, ["RS256"]), "kid-b": (key_b, ["ES256"])}``. Each
+algorithm allow-list is applied independently to the corresponding signature.
+
 Algorithms
 ----------
 

@@ -1,8 +1,54 @@
-from typing import Any, Callable, TypedDict
+from __future__ import annotations
+
+from typing import Any, Callable, Literal, TypedDict
 
 JWKDict = dict[str, Any]
 
 HashlibHash = Callable[..., Any]
+JSONHeader = dict[str, Any]
+JSONSerialization = Literal["general", "flattened"]
+
+
+class JWSSigner(TypedDict, total=False):
+    """Signer input for a JWS JSON Serialization signature."""
+
+    key: Any
+    key_getter: Callable[[], Any]
+    algorithm: str
+    alg: str
+    kid: str
+    protected: JSONHeader
+    header: JSONHeader
+    protected_headers: JSONHeader
+    unprotected_headers: JSONHeader
+    headers: JSONHeader
+
+
+class JWSJSONSignatureResult(TypedDict, total=False):
+    """Verification result for one signature in a JWS JSON Serialization."""
+
+    index: int
+    kid: str | None
+    protected: JSONHeader
+    header: JSONHeader
+    signature: bytes
+    valid: bool | None
+    status: str
+    error: str | None
+    error_type: str | None
+
+
+class JWSJSONDecodeResult(TypedDict, total=False):
+    """Result of decoding a JWS JSON Serialization."""
+
+    payload: bytes | None
+    verified: bool
+    valid_signers: list[str]
+    required_signers: list[str]
+    missing_signers: list[str]
+    minimum_signers: int | None
+    distinct_valid_signers: int
+    signatures: list[JWSJSONSignatureResult]
 
 
 class SigOptions(TypedDict, total=False):

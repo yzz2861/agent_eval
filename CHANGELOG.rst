@@ -7,6 +7,14 @@ This project adheres to `Semantic Versioning <https://semver.org/>`__.
 `Unreleased <https://github.com/jpadilla/pyjwt/compare/2.15.0...HEAD>`__
 -------------------------------------------------------------------------
 
+Added
+~~~~~
+
+- Add RFC 7515 General and Flattened JWS JSON Serialization encoding and
+  decoding to ``PyJWS``, including independent per-signature headers,
+  algorithm allow-lists, validation statuses, and caller-defined signer
+  policies.
+
 `v2.15.0 <https://github.com/jpadilla/pyjwt/compare/2.14.0...2.15.0>`__
 -----------------------------------------------------------------------
 

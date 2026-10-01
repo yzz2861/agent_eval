@@ -1272,3 +1272,313 @@ class TestJWS:
             jwt.PyJWK.from_dict(
                 {"kty": "oct", "k": "", "kid": "active", "alg": "HS256"}
             )
+
+
+class TestJWSJSONSerialization:
+    @crypto_required
+    def test_general_round_trip_with_mixed_algorithm_types(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        with open(key_path("testkey_rsa.priv"), "rb") as private_file:
+            private_key = load_pem_private_key(private_file.read(), password=None)
+        assert isinstance(private_key, RSAPrivateKey)
+        public_key = private_key.public_key()
+
+        token = jws.encode_general(
+            payload,
+            [
+                {
+                    "key": private_key,
+                    "protected": {"alg": "RS256", "kid": "rsa"},
+                },
+                {"key": "hmac-secret", "protected": {"kid": "hmac"}},
+            ],
+        )
+
+        decoded = jws.decode_json(
+            token,
+            keys={
+                "rsa": (public_key, ["RS256"]),
+                "hmac": ("hmac-secret", ["HS256"]),
+            },
+            required_signers=["rsa", "hmac"],
+        )
+
+        assert decoded == payload
+
+    def test_general_round_trip_with_independent_headers(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token = jws.encode_general(
+            payload,
+            [
+                {
+                    "key": "secret-a",
+                    "protected": {"kid": "a"},
+                    "header": {"cty": "example"},
+                },
+                {
+                    "key": "secret-b",
+                    "protected": {"kid": "b"},
+                    "header": {"custom": "value"},
+                },
+            ],
+        )
+        message = json.loads(token)
+
+        assert "signatures" in message
+        assert len(message["signatures"]) == 2
+
+        result = jws.verify_json_signatures(
+            token,
+            keys={
+                "a": {"key": "secret-a", "algorithms": ["HS256"]},
+                "b": {"key": "secret-b", "algorithms": ["HS256"]},
+            },
+            required_signers=["a", "b"],
+        )
+
+        assert result["verified"] is True
+        assert result["payload"] == payload
+        assert result["valid_signers"] == ["a", "b"]
+        assert [signature["status"] for signature in result["signatures"]] == [
+            "valid",
+            "valid",
+        ]
+
+    def test_flattened_round_trip(self, jws: PyJWS, payload: bytes) -> None:
+        token = jws.encode_flattened(
+            payload,
+            key="secret-a",
+            algorithm="HS256",
+            protected_headers={"kid": "a"},
+            unprotected_headers={"cty": "example"},
+        )
+        message = json.loads(token)
+
+        assert "signatures" not in message
+        assert message["signature"]
+        assert json.loads(base64url_decode(message["protected"]))["kid"] == "a"
+
+        decoded = jws.decode_json(
+            token,
+            keys={"a": ("secret-a", ["HS256"])},
+            required_signers=["a"],
+        )
+
+        assert decoded == payload
+
+    def test_auto_serialization_and_forced_decoders(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        flattened = jws.encode_json(
+            payload,
+            [{"key": "secret-a", "protected": {"kid": "a"}}],
+            serialization="auto",
+        )
+        general = jws.encode_json(
+            payload,
+            [
+                {"key": "secret-a", "protected": {"kid": "a"}},
+                {"key": "secret-b", "protected": {"kid": "b"}},
+            ],
+            serialization="auto",
+        )
+        keys = {
+            "a": ("secret-a", ["HS256"]),
+            "b": ("secret-b", ["HS256"]),
+        }
+
+        assert "signatures" not in json.loads(flattened)
+        assert len(json.loads(general)["signatures"]) == 2
+        assert (
+            jws.decode_flattened(
+                flattened, keys=keys, required_kids=["a"]
+            )
+            == payload
+        )
+        assert (
+            jws.decode_general(general, keys=keys, min_signers=2)
+            == payload
+        )
+
+        with pytest.raises(DecodeError, match="General"):
+            jws.decode_general(flattened, keys=keys, min_signers=1)
+        with pytest.raises(DecodeError, match="Flattened"):
+            jws.decode_flattened(general, keys=keys, min_signers=1)
+
+    def test_flattened_round_trip_with_default_key_and_no_kid(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token = jws.encode_flattened(payload, key="secret-a", algorithm="HS256")
+
+        decoded = jws.decode_json(
+            token,
+            "secret-a",
+            ["HS256"],
+            minimum_signers=1,
+        )
+
+        assert decoded == payload
+
+    def test_required_signer_policy_keeps_bad_signature_status_and_payload(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token = jws.encode_general(
+            payload,
+            [
+                {"key": "secret-a", "protected": {"kid": "a"}},
+                {"key": "secret-b", "protected": {"kid": "b"}},
+            ],
+        )
+        result = jws.verify_json_signatures(
+            token,
+            keys={
+                "a": ("secret-a", ["HS256"]),
+                "b": ("wrong", ["HS256"]),
+            },
+            required_signers=["a", "b"],
+        )
+
+        assert result["verified"] is False
+        assert result["payload"] is None
+        assert result["missing_signers"] == ["b"]
+        assert result["signatures"][0]["valid"] is True
+        assert result["signatures"][1]["valid"] is False
+        assert result["signatures"][1]["error_type"] == "InvalidSignatureError"
+
+        with pytest.raises(InvalidSignatureError, match="policy"):
+            jws.decode_json(
+                token,
+                keys={
+                    "a": ("secret-a", ["HS256"]),
+                    "b": ("wrong", ["HS256"]),
+                },
+                required_signers=["a", "b"],
+            )
+
+    def test_minimum_distinct_signers_does_not_count_duplicate_kid(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token = jws.encode_general(
+            payload,
+            [
+                {"key": "secret-a", "protected": {"kid": "a"}},
+                {"key": "secret-a", "protected": {"kid": "a"}},
+            ],
+        )
+        result = jws.verify_json_signatures(
+            token,
+            keys={"a": ("secret-a", ["HS256"])},
+            minimum_signers=2,
+        )
+
+        assert result["verified"] is False
+        assert result["payload"] is None
+        assert result["distinct_valid_signers"] == 1
+        assert all(signature["valid"] for signature in result["signatures"])
+
+    def test_algorithm_allowlist_is_enforced_per_signature(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token = jws.encode_general(
+            payload,
+            [{"key": "secret-a", "protected": {"kid": "a"}}],
+        )
+
+        result = jws.verify_json_signatures(
+            token,
+            keys={"a": ("secret-a", ["HS384"])},
+            minimum_signers=1,
+        )
+
+        assert result["verified"] is False
+        assert result["signatures"][0]["error_type"] == "InvalidAlgorithmError"
+
+    def test_algorithm_must_be_in_protected_header(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token_dict = {
+            "payload": base64url_encode(payload).decode(),
+            "protected": "",
+            "header": {"alg": "HS256", "kid": "a"},
+            "signature": "",
+        }
+
+        result = jws.verify_json_signatures(
+            token_dict,
+            keys={"a": ("secret", ["HS256"])},
+            minimum_signers=1,
+        )
+
+        assert result["verified"] is False
+        assert result["signatures"][0]["error_type"] == "InvalidAlgorithmError"
+
+    def test_duplicate_protected_and_unprotected_header_names_are_rejected(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token_dict = json.loads(jws.encode_flattened(
+            payload,
+            key="secret",
+            algorithm="HS256",
+            protected_headers={"kid": "a"},
+        ))
+        token_dict["header"] = {"kid": "a"}
+
+        result = jws.verify_json_signatures(
+            token_dict,
+            keys={"a": ("secret", ["HS256"])},
+            minimum_signers=1,
+        )
+
+        assert result["verified"] is False
+        error = result["signatures"][0]["error"]
+        assert error is not None
+        assert "Duplicate JWS header parameter" in error
+
+    def test_duplicate_json_member_name_is_rejected(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token = jws.encode_flattened(
+            payload,
+            key="secret",
+            algorithm="HS256",
+        )
+        token = token.replace(
+            '"signature"', '"signature":"","signature"', 1
+        )
+
+        with pytest.raises(DecodeError, match="Duplicate JSON member"):
+            jws.verify_json_signatures(
+                token,
+                keys={"_": ("secret", ["HS256"])},
+                minimum_signers=1,
+            )
+
+    def test_one_malformed_signature_does_not_prevent_other_status(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token_dict = json.loads(
+            jws.encode_general(
+                payload,
+                [
+                    {"key": "secret-a", "protected": {"kid": "a"}},
+                    {"key": "secret-b", "protected": {"kid": "b"}},
+                ],
+            )
+        )
+        token_dict["signatures"][1]["signature"] = "not-base64!"
+
+        result = jws.verify_json_signatures(
+            token_dict,
+            keys={
+                "a": ("secret-a", ["HS256"]),
+                "b": ("secret-b", ["HS256"]),
+            },
+            minimum_signers=1,
+        )
+
+        assert result["verified"] is True
+        assert result["payload"] == payload
+        assert result["signatures"][0]["status"] == "valid"
+        assert result["signatures"][1]["status"] == "invalid"
