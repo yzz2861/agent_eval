@@ -14,6 +14,7 @@ from .core import (
     Disk,
     EmptyDirWarning,
     JSONDisk,
+    QuotaExceeded,
     Timeout,
     UnknownFileWarning,
 )
@@ -43,6 +44,7 @@ __all__ = [
     'Index',
     'JSONDisk',
     'Lock',
+    'QuotaExceeded',
     'RLock',
     'Timeout',
     'UNKNOWN',

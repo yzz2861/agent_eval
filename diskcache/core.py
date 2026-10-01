@@ -11,6 +11,7 @@ import os
 import os.path as op
 import pickle
 import pickletools
+import sys
 import sqlite3
 import struct
 import tempfile
@@ -58,7 +59,12 @@ DEFAULT_SETTINGS = {
     'sqlite_synchronous': 1,  # NORMAL
     'disk_min_file_size': 2**15,  # 32kb
     'disk_pickle_protocol': pickle.HIGHEST_PROTOCOL,
+    'strict_size_limit': 0,  # False
+    'size_exceed_policy': 'reject',  # or 'wait'
+    'reserve_ttl': 60.0,  # seconds
 }
+
+SIZE_EXCEED_POLICIES = ('reject', 'wait')
 
 METADATA = {
     'count': 0,
@@ -176,13 +182,15 @@ class Disk:
         else:
             return pickle.load(io.BytesIO(key))
 
-    def store(self, value, read, key=UNKNOWN):
+    def store(self, value, read, key=UNKNOWN, reserve=None):
         """Convert `value` to fields size, mode, filename, and value for Cache
         table.
 
         :param value: value to convert
         :param bool read: True when value is file-like object
         :param key: key for item (default UNKNOWN)
+        :param callable reserve: called with (size, filename) to reserve space
+            before an external value file is written (default None)
         :return: (size, mode, filename, value) tuple for Cache table
 
         """
@@ -204,18 +212,29 @@ class Disk:
                 return 0, MODE_RAW, None, sqlite3.Binary(value)
             else:
                 filename, full_path = self.filename(key, value)
+                if reserve is not None:
+                    reserve(len(value), filename)
                 self._write(full_path, io.BytesIO(value), 'xb')
                 return len(value), MODE_BINARY, filename, None
         elif type_value is str:
             filename, full_path = self.filename(key, value)
+            if reserve is not None:
+                reserve(len(value.encode('UTF-8')), filename)
             self._write(full_path, io.StringIO(value), 'x', 'UTF-8')
             size = op.getsize(full_path)
             return size, MODE_TEXT, filename, None
         elif read:
-            reader = ft.partial(value.read, 2**22)
             filename, full_path = self.filename(key, value)
-            iterator = iter(reader, b'')
-            size = self._write(full_path, iterator, 'xb')
+            chunk_size = 2**22
+
+            def iterator():
+                reader = ft.partial(value.read, chunk_size)
+                for chunk in iter(reader, b''):
+                    if reserve is not None:
+                        reserve(len(chunk), filename)
+                    yield chunk
+
+            size = self._write(full_path, iterator(), 'xb')
             return size, MODE_BINARY, filename, None
         else:
             result = pickle.dumps(value, protocol=self.pickle_protocol)
@@ -224,6 +243,8 @@ class Disk:
                 return 0, MODE_PICKLE, None, sqlite3.Binary(result)
             else:
                 filename, full_path = self.filename(key, value)
+                if reserve is not None:
+                    reserve(len(result), filename)
                 self._write(full_path, io.BytesIO(result), 'xb')
                 return len(result), MODE_PICKLE, filename, None
 
@@ -359,11 +380,11 @@ class JSONDisk(Disk):
         data = super().get(key, raw)
         return json.loads(zlib.decompress(data).decode('utf-8'))
 
-    def store(self, value, read, key=UNKNOWN):
+    def store(self, value, read, key=UNKNOWN, reserve=None):
         if not read:
             json_bytes = json.dumps(value).encode('utf-8')
             value = zlib.compress(json_bytes, self.compress_level)
-        return super().store(value, read, key=key)
+        return super().store(value, read, key=key, reserve=reserve)
 
     def fetch(self, mode, filename, value, read):
         data = super().fetch(mode, filename, value, read)
@@ -374,6 +395,18 @@ class JSONDisk(Disk):
 
 class Timeout(Exception):
     """Database timeout expired."""
+
+
+class QuotaExceeded(Exception):
+    """Raised when a write exceeds the strict space budget.
+
+    Enabled by the ``strict_size_limit`` setting. When the
+    ``size_exceed_policy`` setting is ``reject`` (the default), writes that
+    cannot fit within ``size_limit`` raise this error instead of spilling
+    onto disk first. When the policy is ``wait``, writes wait for space and
+    raise :class:`Timeout` when the cache timeout expires.
+
+    """
 
 
 class UnknownFileWarning(UserWarning):
@@ -412,6 +445,50 @@ def args_to_key(base, args, kwargs, typed, ignore):
             key += tuple(type(value) for _, value in sorted_items)
 
     return key
+
+
+class _Reservation:
+    """Space reservation against a strict cache size budget.
+
+    Reservations are persisted in the Reserve table so that the budget is
+    enforced across threads and processes. Each writer owns one row keyed by
+    process and thread identifier.
+
+    """
+
+    __slots__ = ('cache', 'pid', 'tid', 'bytes', 'filename', 'deadline',
+                 'active')
+
+    def __init__(self, cache, now):
+        self.cache = cache
+        self.pid = os.getpid()
+        self.tid = threading.get_ident()
+        self.bytes = 0
+        self.filename = None
+        self.deadline = now + cache.timeout
+        self.active = False
+
+    def __call__(self, size, filename):
+        """Reserve an additional *size* bytes for external *filename*."""
+        delta = size
+        self.bytes += size
+        self.active = True
+        self.filename = filename
+        self.cache._reserve_add(
+            self.pid, self.tid, self.bytes, delta, filename,
+            self.deadline,
+        )
+
+    def commit(self):
+        """Release the reservation after the Cache row is committed."""
+        self.cache._reserve_release(self.pid, self.tid)
+
+    def abort(self):
+        """Release the reservation and remove a partially written file."""
+        if self.active:
+            self.cache._reserve_abort(
+                self.pid, self.tid, self.filename,
+            )
 
 
 class Cache:
@@ -576,6 +653,21 @@ class Cache:
             ' UPDATE Settings SET value = value - OLD.size'
             ' WHERE key = "size"; END'
         )
+
+        # Setup Reserve table used to coordinate the strict space budget
+        # across threads and processes.
+
+        sql(
+            'CREATE TABLE IF NOT EXISTS Reserve ('
+            ' pid INTEGER NOT NULL,'
+            ' tid INTEGER NOT NULL,'
+            ' updated REAL NOT NULL,'
+            ' bytes INTEGER NOT NULL DEFAULT 0,'
+            ' filename TEXT,'
+            ' PRIMARY KEY (pid, tid))'
+        )
+
+        self._reserve_recover()
 
         # Create tag index if requested.
 
@@ -764,12 +856,22 @@ class Cache:
         :param bool retry: retry if database timeout occurs (default False)
         :return: True if item was set
         :raises Timeout: if database timeout occurs
+        :raises QuotaExceeded: if strict_size_limit is enabled, the reject
+            policy is set, and the write exceeds the space budget
 
         """
         now = time.time()
         db_key, raw = self._disk.put(key)
         expire_time = None if expire is None else now + expire
-        size, mode, filename, db_value = self._disk.store(value, read, key=key)
+        reserve = self._reserve_context()
+        try:
+            size, mode, filename, db_value = self._disk.store(
+                value, read, key=key, reserve=reserve,
+            )
+        except BaseException:
+            if reserve is not None:
+                reserve.abort()
+            raise
         columns = (expire_time, tag, size, mode, filename, db_value)
 
         # The order of SELECT, UPDATE, and INSERT is important below.
@@ -793,23 +895,31 @@ class Cache:
         # INSERT OR REPLACE aka UPSERT is not used because the old filename may
         # need cleanup.
 
-        with self._transact(retry, filename) as (sql, cleanup):
-            rows = sql(
-                'SELECT rowid, filename FROM Cache'
-                ' WHERE key = ? AND raw = ?',
-                (db_key, raw),
-            ).fetchall()
+        try:
+            with self._transact(retry, filename) as (sql, cleanup):
+                rows = sql(
+                    'SELECT rowid, filename FROM Cache'
+                    ' WHERE key = ? AND raw = ?',
+                    (db_key, raw),
+                ).fetchall()
 
-            if rows:
-                ((rowid, old_filename),) = rows
-                cleanup(old_filename)
-                self._row_update(rowid, now, columns)
-            else:
-                self._row_insert(db_key, raw, now, columns)
+                if rows:
+                    ((rowid, old_filename),) = rows
+                    cleanup(old_filename)
+                    self._row_update(rowid, now, columns)
+                else:
+                    self._row_insert(db_key, raw, now, columns)
 
-            self._cull(now, sql, cleanup)
+                self._cull(now, sql, cleanup)
 
-            return True
+                if reserve is not None:
+                    reserve.commit()
+
+                return True
+        except BaseException:
+            if reserve is not None:
+                reserve.abort()
+            raise
 
     def __setitem__(self, key, value):
         """Set corresponding `value` for `key` in cache.
@@ -924,6 +1034,266 @@ class Cache:
             for (filename,) in rows:
                 cleanup(filename)
 
+    def _reserve_context(self):
+        """Return a reservation callable, or None when budget is disabled."""
+        if not self.strict_size_limit:  # pylint: disable=no-member
+            return None
+        now = time.time()
+        return _Reservation(self, now)
+
+    def _reserve_recover(self):
+        """Reclaim reservations left behind by failed or crashed writers."""
+        stale = self._reserve_sweep()
+        for filename in stale:
+            self._disk.remove(filename)
+
+    @staticmethod
+    def _reserve_owner_alive(pid, tid):
+        """Return True when the reservation owner may still be writing."""
+        if pid != os.getpid():
+            if sys.platform == 'win32':
+                # os.kill is not a reliable liveness probe on Windows. Rely
+                # on the reserve_ttl lease instead.
+                return True
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            except OSError:
+                return False
+            return True
+
+        # Same process: the writing thread holds the reservation until the
+        # value file is registered in Cache.
+        for thread in threading.enumerate():
+            if thread.ident == tid or (
+                getattr(thread, 'native_id', None) == tid
+            ):
+                return True
+        return False
+
+    def _reserve_sweep(self, sql=None, delete=True):
+        """Return filenames of stale reservations.
+
+        Reservations whose lease has expired and whose owner is no longer
+        alive are deleted. Files still referenced by Cache rows are never
+        removed: their reservation is simply accounting cruft to discard.
+
+        """
+        ttl = self.reserve_ttl  # pylint: disable=no-member
+        cutoff = time.time() - ttl
+        execute = self._sql if sql is not None else self._sql_retry
+        rows = execute(
+            'SELECT pid, tid, filename FROM Reserve'
+            ' WHERE updated < ?',
+            (cutoff,),
+        ).fetchall()
+
+        stale = []
+
+        for pid, tid, filename in rows:
+            if self._reserve_owner_alive(pid, tid):
+                # The owner renews its own lease on every chunk it writes.
+                # Leave the row untouched: sweeping must not give budget back
+                # for a reservation that is still in use.
+                continue
+            else:
+                stale.append((pid, tid, filename))
+
+        filenames = []
+
+        for pid, tid, filename in stale:
+            if delete:
+                execute(
+                    'DELETE FROM Reserve WHERE pid = ? AND tid = ?',
+                    (pid, tid),
+                )
+
+                if filename is not None:
+                    referenced = execute(
+                        'SELECT 1 FROM Cache WHERE filename = ? LIMIT 1',
+                        (filename,),
+                    ).fetchall()
+                    if not referenced:
+                        filenames.append(filename)
+            elif filename is not None:
+                referenced = execute(
+                    'SELECT 1 FROM Cache WHERE filename = ? LIMIT 1',
+                    (filename,),
+                ).fetchall()
+                if not referenced:
+                    filenames.append(filename)
+
+        return filenames
+
+    def _reserve_evict_rows(self, sql, select_template, query_args, now, remove):
+        """Delete Cache rows returned by *select_template* until deficit met.
+
+        The select must return (rowid, filename, size); the final bound
+        parameter is the batch size. Returns the bytes freed. Unlike normal
+        culling, cull_limit is ignored because the strict budget must be
+        enforced.
+
+        """
+        batch = 32
+        deficit = query_args[-1]
+        args = query_args[:-1]
+        delete_template = select_template.replace(
+            'rowid, filename, size', 'rowid',
+        )
+        freed = 0
+
+        while freed < deficit:
+            rows = sql(select_template, args + (batch,)).fetchall()
+            if not rows:
+                break
+
+            sql(
+                'DELETE FROM Cache WHERE rowid IN (%s)' % delete_template,
+                args + (batch,),
+            )
+            for _rowid, filename, size in rows:
+                remove(filename)
+                freed += size
+
+        return freed
+
+    def _reserve_evict_expired(self, sql, deficit, now, remove):
+        select = (
+            'SELECT rowid, filename, size FROM Cache'
+            ' WHERE expire_time IS NOT NULL AND expire_time < ?'
+            ' ORDER BY expire_time LIMIT ?'
+        )
+        return self._reserve_evict_rows(
+            sql, select, (now, deficit), now, remove,
+        )
+
+    def _reserve_evict_policy(self, sql, deficit, now, remove):
+        select_policy = EVICTION_POLICY[self.eviction_policy]['cull']
+        if select_policy is None:
+            return 0
+        select = select_policy.format(
+            fields='rowid, filename, size', now=now,
+        )
+        return self._reserve_evict_rows(
+            sql, select, (deficit,), now, remove,
+        )
+
+    def _reserve_add(self, pid, tid, total, delta, filename, deadline):
+        """Reserve *delta* more bytes, evicting or waiting by policy."""
+        while True:
+            now = time.time()
+            committed_remove = []
+            stale = []
+            policy = self.size_exceed_policy  # pylint: disable=no-member
+
+            try:
+                while True:
+                    try:
+                        self._sql('BEGIN IMMEDIATE')
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if str(exc) != 'database is locked':
+                            raise
+                        if time.time() > deadline:
+                            raise Timeout(
+                                'timed out waiting for cache space'
+                            ) from None
+                        time.sleep(0.001)
+                sql = self._sql
+
+                stale = self._reserve_sweep(sql)
+
+                ((used,),) = sql(
+                    'SELECT COALESCE(value, 0) FROM Settings'
+                    ' WHERE key = ?',
+                    ('size',),
+                ).fetchall()
+                ((reserved,),) = sql(
+                    'SELECT COALESCE(SUM(bytes), 0) FROM Reserve'
+                ).fetchall()
+
+                deficit = used + reserved + delta - self.size_limit
+
+                if deficit > 0:
+                    freed = self._reserve_evict_expired(
+                        sql, deficit, now, committed_remove.append,
+                    )
+                    deficit -= freed
+
+                    if deficit > 0 and policy == 'wait':
+                        self._reserve_evict_policy(
+                            sql, deficit, now, committed_remove.append,
+                        )
+
+                    ((used,),) = sql(
+                        'SELECT COALESCE(value, 0) FROM Settings'
+                        ' WHERE key = ?',
+                        ('size',),
+                    ).fetchall()
+
+                if used + reserved + delta > self.size_limit:
+                    sql('ROLLBACK')
+                else:
+                    row = sql(
+                        'SELECT 1 FROM Reserve WHERE pid = ? AND tid = ?',
+                        (pid, tid),
+                    ).fetchall()
+
+                    if row:
+                        sql(
+                            'UPDATE Reserve SET'
+                            ' updated = ?, bytes = ?, filename = ?'
+                            ' WHERE pid = ? AND tid = ?',
+                            (now, total, filename, pid, tid),
+                        )
+                    else:
+                        sql(
+                            'INSERT INTO Reserve'
+                            ' (pid, tid, updated, bytes, filename)'
+                            ' VALUES (?, ?, ?, ?, ?)',
+                            (pid, tid, now, total, filename),
+                        )
+
+                    sql('COMMIT')
+                    break
+            except BaseException:
+                with cl.suppress(sqlite3.Error):
+                    self._sql('ROLLBACK')
+                raise
+
+            if policy == 'reject':
+                available = max(self.size_limit - used, 0)
+                raise QuotaExceeded(
+                    'strict size limit of %d bytes exceeded; %d bytes'
+                    ' available and %d requested'
+                    % (self.size_limit, available, delta)
+                )
+
+            if time.time() > deadline:
+                raise Timeout('timed out waiting for cache space') from None
+            time.sleep(0.01)
+
+        for name in committed_remove:
+            if name is not None:
+                self._disk.remove(name)
+        for name in stale:
+            self._disk.remove(name)
+
+    def _reserve_release(self, pid, tid):
+        self._sql_retry(
+            'DELETE FROM Reserve WHERE pid = ? AND tid = ?', (pid, tid),
+        )
+
+    def _reserve_abort(self, pid, tid, filename):
+        self._sql_retry(
+            'DELETE FROM Reserve WHERE pid = ? AND tid = ?', (pid, tid),
+        )
+        if filename is not None:
+            self._disk.remove(filename)
+
     def touch(self, key, expire=None, retry=False):
         """Touch `key` in cache and update `expire` time.
 
@@ -984,36 +1354,56 @@ class Cache:
         :param bool retry: retry if database timeout occurs (default False)
         :return: True if item was added
         :raises Timeout: if database timeout occurs
+        :raises QuotaExceeded: if strict_size_limit is enabled, the reject
+            policy is set, and the write exceeds the space budget
 
         """
         now = time.time()
         db_key, raw = self._disk.put(key)
         expire_time = None if expire is None else now + expire
-        size, mode, filename, db_value = self._disk.store(value, read, key=key)
+        reserve = self._reserve_context()
+        try:
+            size, mode, filename, db_value = self._disk.store(
+                value, read, key=key, reserve=reserve,
+            )
+        except BaseException:
+            if reserve is not None:
+                reserve.abort()
+            raise
         columns = (expire_time, tag, size, mode, filename, db_value)
 
-        with self._transact(retry, filename) as (sql, cleanup):
-            rows = sql(
-                'SELECT rowid, filename, expire_time FROM Cache'
-                ' WHERE key = ? AND raw = ?',
-                (db_key, raw),
-            ).fetchall()
+        try:
+            with self._transact(retry, filename) as (sql, cleanup):
+                rows = sql(
+                    'SELECT rowid, filename, expire_time FROM Cache'
+                    ' WHERE key = ? AND raw = ?',
+                    (db_key, raw),
+                ).fetchall()
 
-            if rows:
-                ((rowid, old_filename, old_expire_time),) = rows
+                if rows:
+                    ((rowid, old_filename, old_expire_time),) = rows
 
-                if old_expire_time is None or old_expire_time > now:
-                    cleanup(filename)
-                    return False
+                    if old_expire_time is None or old_expire_time > now:
+                        cleanup(filename)
+                        if reserve is not None:
+                            reserve.commit()
+                        return False
 
-                cleanup(old_filename)
-                self._row_update(rowid, now, columns)
-            else:
-                self._row_insert(db_key, raw, now, columns)
+                    cleanup(old_filename)
+                    self._row_update(rowid, now, columns)
+                else:
+                    self._row_insert(db_key, raw, now, columns)
 
-            self._cull(now, sql, cleanup)
+                self._cull(now, sql, cleanup)
 
-            return True
+                if reserve is not None:
+                    reserve.commit()
+
+                return True
+        except BaseException:
+            if reserve is not None:
+                reserve.abort()
+            raise
 
     def incr(self, key, delta=1, default=0, retry=False):
         """Increment value by delta for item with key.
@@ -1434,6 +1824,8 @@ class Cache:
         :param bool retry: retry if database timeout occurs (default False)
         :return: key for item in cache
         :raises Timeout: if database timeout occurs
+        :raises QuotaExceeded: if strict_size_limit is enabled, the reject
+            policy is set, and the write exceeds the space budget
 
         """
         if prefix is None:
@@ -1446,7 +1838,15 @@ class Cache:
         now = time.time()
         raw = True
         expire_time = None if expire is None else now + expire
-        size, mode, filename, db_value = self._disk.store(value, read)
+        reserve = self._reserve_context()
+        try:
+            size, mode, filename, db_value = self._disk.store(
+                value, read, reserve=reserve,
+            )
+        except BaseException:
+            if reserve is not None:
+                reserve.abort()
+            raise
         columns = (expire_time, tag, size, mode, filename, db_value)
         order = {'back': 'DESC', 'front': 'ASC'}
         select = (
@@ -1455,34 +1855,42 @@ class Cache:
             ' ORDER BY key %s LIMIT 1'
         ) % order[side]
 
-        with self._transact(retry, filename) as (sql, cleanup):
-            rows = sql(select, (min_key, max_key, raw)).fetchall()
+        try:
+            with self._transact(retry, filename) as (sql, cleanup):
+                rows = sql(select, (min_key, max_key, raw)).fetchall()
 
-            if rows:
-                ((key,),) = rows
+                if rows:
+                    ((key,),) = rows
+
+                    if prefix is not None:
+                        num = int(key[(key.rfind('-') + 1) :])
+                    else:
+                        num = key
+
+                    if side == 'back':
+                        num += 1
+                    else:
+                        assert side == 'front'
+                        num -= 1
+                else:
+                    num = 500000000000000
 
                 if prefix is not None:
-                    num = int(key[(key.rfind('-') + 1) :])
+                    db_key = '{0}-{1:015d}'.format(prefix, num)
                 else:
-                    num = key
+                    db_key = num
 
-                if side == 'back':
-                    num += 1
-                else:
-                    assert side == 'front'
-                    num -= 1
-            else:
-                num = 500000000000000
+                self._row_insert(db_key, raw, now, columns)
+                self._cull(now, sql, cleanup)
 
-            if prefix is not None:
-                db_key = '{0}-{1:015d}'.format(prefix, num)
-            else:
-                db_key = num
+                if reserve is not None:
+                    reserve.commit()
 
-            self._row_insert(db_key, raw, now, columns)
-            self._cull(now, sql, cleanup)
-
-            return db_key
+                return db_key
+        except BaseException:
+            if reserve is not None:
+                reserve.abort()
+            raise
 
     def pull(
         self,
@@ -2017,6 +2425,20 @@ class Cache:
                             (size, 'size'),
                         )
 
+                # Check reservations against active owners. Reservations
+                # past their lease are reclaimed when fix is requested.
+
+                stale = self._reserve_sweep(sql, delete=fix)
+                if not fix:
+                    for filename in stale:
+                        warnings.warn(
+                            'stale reservation: %s'
+                            % op.join(self._directory, filename)
+                        )
+                else:
+                    for filename in stale:
+                        self._disk.remove(filename)
+
             return warns
 
     def create_tag_index(self):
@@ -2400,6 +2822,13 @@ class Cache:
         """
         sql = self._sql
         sql_retry = self._sql_retry
+
+        if key == 'size_exceed_policy' and value is not ENOVAL:
+            if value not in SIZE_EXCEED_POLICIES:
+                raise ValueError(
+                    'size_exceed_policy must be one of %s'
+                    % (SIZE_EXCEED_POLICIES,)
+                )
 
         if value is ENOVAL:
             select = 'SELECT value FROM Settings WHERE key = ?'

@@ -698,6 +698,21 @@ are updated using :meth:`reset <diskcache.Cache.reset>`. Attributes are set
 during initialization when passed as keyword arguments.
 
 * `size_limit`, default one gigabyte. The maximum on-disk size of the cache.
+* `strict_size_limit`, default False. When enabled, space for external value
+  files is reserved *before* the files are written so that concurrent writers
+  cannot overflow the disk by exceeding the size limit. Reservations are
+  coordinated in SQLite and are shared between threads and processes. When a
+  write fails, is cancelled, or its process crashes, reservations are
+  reclaimed after `reserve_ttl` seconds.
+* `size_exceed_policy`, default "reject". Determines what happens when a
+  strictly budgeted write does not fit. With "reject" the write raises
+  QuotaExceeded without spilling onto disk. With "wait" the write evicts
+  items (honoring the eviction policy) and otherwise waits for other writers
+  to finish, raising Timeout after the cache timeout expires.
+* `reserve_ttl`, default sixty seconds. Lease in seconds granted to an
+  active reservation. Slow streaming writes renew the lease as chunks are
+  written. Reservations older than the lease whose owner is gone are treated
+  as stale and reclaimed.
 * `cull_limit`, default ten. The maximum number of keys to cull when adding a
   new item. Set to zero to disable automatic culling. Some systems may disable
   automatic culling in exchange for a cron-like job that regularly calls
