@@ -13,7 +13,7 @@ def test_messages_have_namedtuple_methods(stub_broker):
     msg1 = add.message(1, 2)
     assert msg1.asdict() == msg1._asdict()
 
-    assert msg1._field_defaults == {}
+    assert msg1._field_defaults == {"actor_version": None}
     assert msg1._fields == (
         "queue_name",
         "actor_name",
@@ -22,6 +22,7 @@ def test_messages_have_namedtuple_methods(stub_broker):
         "options",
         "message_id",
         "message_timestamp",
+        "actor_version",
     )
 
     msg2 = msg1._replace(queue_name="example")

@@ -67,6 +67,11 @@ class Message(Generic[R]):
     Parameters:
       queue_name(str): The name of the queue the message belongs to.
       actor_name(str): The name of the actor that will receive the message.
+      actor_version(str): The version of the actor that will receive
+        the message.  ``None`` means the message was sent without an
+        explicit actor version (e.g. by an older version of dramatiq);
+        how such messages are dispatched is controlled by the broker's
+        ``unversioned_message_policy``.
       args(tuple): Positional arguments that are passed to the actor.
       kwargs(dict): Keyword arguments that are passed to the actor.
       options(dict): Arbitrary options passed to the broker and middleware.
@@ -82,6 +87,7 @@ class Message(Generic[R]):
     options: dict[str, Any]
     message_id: str = dataclasses.field(default_factory=generate_unique_id)
     message_timestamp: int = dataclasses.field(default_factory=lambda: int(time.time() * 1000))
+    actor_version: Optional[str] = None
 
     def __post_init__(self):
         # For backwards-compatibility, enforce that `args' is a tuple.

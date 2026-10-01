@@ -98,7 +98,7 @@ class Retries(Middleware):
         if exception is None:
             return
 
-        actor = broker.get_actor(message.actor_name)
+        actor = broker.get_actor_for_message(message)
         throws = message.options.get("throws") or actor.options.get("throws")
         if throws and isinstance(exception, throws):
             self.logger.info("Aborting message %r.", message.message_id)

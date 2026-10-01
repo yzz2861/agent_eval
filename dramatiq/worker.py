@@ -384,7 +384,7 @@ class ConsumerThread(Thread):
                 self.delay_queue.put(_WorkQueueItem(message.options.get("eta", 0), message))
 
             else:
-                actor = self.broker.get_actor(message.actor_name)
+                actor = self.broker.get_actor_for_message(message)
                 self.logger.debug("Pushing message %r onto work queue.", message.message_id)
                 self.work_queue.put(_WorkQueueItem(actor.priority, message))
         except ActorNotFound as e:
@@ -556,7 +556,7 @@ class WorkerThread(Thread):
 
             res = None
             if not message.failed:
-                actor = self.broker.get_actor(message.actor_name)
+                actor = self.broker.get_actor_for_message(message)
                 res = actor(*message.args, **message.kwargs)
                 if (
                     res is not None

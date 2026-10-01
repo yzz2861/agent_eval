@@ -8,6 +8,21 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 -------------
 
+Added
+^^^^^
+
+* Added support for registering multiple explicit versions of an actor
+  under the same ``actor_name`` via the new ``actor_version`` argument
+  of the |actor| decorator.  Messages record the version of the actor
+  they were sent with and workers dispatch them to that exact version,
+  so messages enqueued before a deployment (including their retries and
+  pipeline successors) keep running the implementation they were sent
+  to, even after the default version is changed with
+  ``Broker.set_default_actor``.  How messages without a version (e.g.
+  sent by older versions of dramatiq) and messages with an unregistered
+  version are dispatched is configurable via the broker's
+  ``unversioned_message_policy`` and ``unknown_version_policy``.
+
 
 `2.2.1`_ -- 2026-09-01
 ----------------------

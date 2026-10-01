@@ -55,6 +55,9 @@ class Actor(Generic[P, R]):
       fn(callable): The underlying callable.
       broker(Broker): The broker this actor is bound to.
       actor_name(str): The actor's name.
+      actor_version(str): The actor's explicit version.  Multiple
+        actors may share the same ``actor_name`` as long as their
+        versions differ.  ``None`` means the actor is unversioned.
       queue_name(str): The actor's queue.
       priority(int): The actor's priority.
       options(dict): Arbitrary options that are passed to the broker
@@ -67,17 +70,21 @@ class Actor(Generic[P, R]):
         *,
         broker: Broker,
         actor_name: str,
+        actor_version: Optional[str] = None,
         queue_name: str,
         priority: int,
         options: dict[str, Any],
     ) -> None:
-        if actor_name in broker.actors:
-            raise ValueError(f"An actor named {actor_name!r} is already registered.")
+        if actor_version in broker.actor_versions.get(actor_name, {}):
+            if actor_version is None:
+                raise ValueError(f"An actor named {actor_name!r} is already registered.")
+            raise ValueError(f"An actor named {actor_name!r} with version {actor_version!r} is already registered.")
 
         self.logger = get_logger(fn.__module__ or "_", actor_name)
         self.fn: Callable[P, R] = async_to_sync(fn) if iscoroutinefunction(fn) else fn  # type: ignore[assignment]
         self.broker = broker
         self.actor_name = actor_name
+        self.actor_version = actor_version
         self.queue_name = queue_name
         self.priority = priority
         self.options = options
@@ -132,6 +139,7 @@ class Actor(Generic[P, R]):
         return Message(
             queue_name=self.queue_name,
             actor_name=self.actor_name,
+            actor_version=self.actor_version,
             args=args,
             kwargs=kwargs or {},
             options=options,
@@ -229,6 +237,7 @@ def actor(
     queue_name: str = "default",
     priority: int = 0,
     actor_name: Optional[str] = None,
+    actor_version: Optional[str] = None,
     broker: Optional[Broker] = None,
     actor_class: Callable[..., Actor[Any, Any]] = Actor,
     **options: Any,
@@ -241,6 +250,7 @@ def actor(
     *,
     actor_class: Callable[..., Actor[P, R]] = Actor,
     actor_name: Optional[str] = None,
+    actor_version: Optional[str] = None,
     queue_name: str = "default",
     priority: int = 0,
     broker: Optional[Broker] = None,
@@ -276,6 +286,12 @@ def actor(
         :class:`Actor` but can be any callable as long as it returns an
         actor and takes the same arguments as the :class:`Actor` class.
       actor_name(str): The name of the actor.
+      actor_version(str): An explicit version for the actor.  Multiple
+        actors may be registered under the same ``actor_name`` as long
+        as each declares a distinct version.  Messages sent through an
+        actor record its version so that workers keep dispatching them
+        to that exact version, even if the default version changes
+        after they were enqueued.
       queue_name(str): The name of the queue to use.
       priority(int): The actor's global priority.  If two tasks have
         been pulled on a worker concurrently and one has a higher
@@ -310,6 +326,7 @@ def actor(
         return actor_class(
             fn,
             actor_name=actor_name,
+            actor_version=actor_version,
             queue_name=queue_name,
             priority=priority,
             broker=broker,

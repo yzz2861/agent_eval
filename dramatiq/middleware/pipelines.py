@@ -47,7 +47,7 @@ class Pipelines(Middleware):
         if exception is not None or message.failed:
             return
 
-        actor = broker.get_actor(message.actor_name)
+        actor = broker.get_actor_for_message(message)
         message_data = message.options.get("pipe_target")
         if message_data is not None:
             next_message = Message(**message_data)

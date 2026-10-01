@@ -98,9 +98,15 @@ class RedisBroker(Broker):
         heartbeat_timeout=DEFAULT_HEARTBEAT_TIMEOUT,
         dead_message_ttl=DEFAULT_DEAD_MESSAGE_TTL,
         client=None,
+        unversioned_message_policy="default",
+        unknown_version_policy="error",
         **parameters,
     ):
-        super().__init__(middleware=middleware)
+        super().__init__(
+            middleware=middleware,
+            unversioned_message_policy=unversioned_message_policy,
+            unknown_version_policy=unknown_version_policy,
+        )
 
         if url:
             parameters["connection_pool"] = redis.ConnectionPool.from_url(url)

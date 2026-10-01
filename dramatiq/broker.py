@@ -34,6 +34,14 @@ if TYPE_CHECKING:
 #: The global broker instance.
 global_broker: Optional[Broker] = None
 
+#: The valid values for the broker's message version policies.
+#:
+#: * ``"default"``: dispatch the message to the default version of
+#:   the actor and log a warning.
+#: * ``"error"``: raise :class:`ActorNotFound`, causing the message
+#:   to be rejected (moved to the dead-letter queue).
+MESSAGE_VERSION_POLICIES = frozenset({"default", "error"})
+
 
 def get_broker() -> Broker:
     """Get the global broker instance.
@@ -89,26 +97,76 @@ class Broker:
         expected to declare *all* middleware.  Most of the time,
         you'll want to use :meth:`.add_middleware` instead.
         See :ref:`customizing-middleware` for details.
+      unversioned_message_policy(str): How to dispatch messages that
+        don't declare an actor version (e.g. messages enqueued by an
+        older version of dramatiq) when no unversioned actor is
+        registered under that name.  One of ``"default"`` (run the
+        default version of the actor and log a warning) or
+        ``"error"`` (reject the message).  Defaults to ``"default"``.
+      unknown_version_policy(str): How to dispatch messages that
+        declare an actor version that isn't registered on this
+        broker.  Same values as ``unversioned_message_policy``.
+        Defaults to ``"error"``.
 
     Attributes:
       actor_options(set[str]): The names of all the options actors may
         overwrite when they are declared.
+      actors(dict[str, Actor]): Maps actor names to their *default*
+        version.  The default version is the one new messages are
+        dispatched to when they don't carry an explicit version.
+      actor_versions(dict[str, dict[str, Actor]]): Maps actor names
+        to all of their registered versions.
     """
 
-    def __init__(self, middleware: Optional[list[Middleware]] = None) -> None:
+    def __init__(
+        self,
+        middleware: Optional[list[Middleware]] = None,
+        *,
+        unversioned_message_policy: str = "default",
+        unknown_version_policy: str = "error",
+    ) -> None:
         self.logger = get_logger(__name__, type(self))
         self.actors: dict[str, Actor] = {}
+        self.actor_versions: dict[str, dict[Any, Actor]] = {}
         self.queues: Any = {}  # Subclasses make this a set!
         self.delay_queues: set[str] = set()
 
         self.actor_options: set[str] = set()
         self.middleware: list[Middleware] = []
+        self.unversioned_message_policy = unversioned_message_policy
+        self.unknown_version_policy = unknown_version_policy
 
         if middleware is None:
             middleware = [m() for m in default_middleware]
 
         for m in middleware:
             self.add_middleware(m)
+
+    @property
+    def unversioned_message_policy(self) -> str:
+        return self._unversioned_message_policy
+
+    @unversioned_message_policy.setter
+    def unversioned_message_policy(self, policy: str) -> None:
+        if policy not in MESSAGE_VERSION_POLICIES:
+            raise ValueError(
+                f"Invalid unversioned_message_policy {policy!r}. "
+                f"Expected one of: {', '.join(sorted(MESSAGE_VERSION_POLICIES))}."
+            )
+        self._unversioned_message_policy = policy
+
+    @property
+    def unknown_version_policy(self) -> str:
+        return self._unknown_version_policy
+
+    @unknown_version_policy.setter
+    def unknown_version_policy(self, policy: str) -> None:
+        if policy not in MESSAGE_VERSION_POLICIES:
+            raise ValueError(
+                f"Invalid unknown_version_policy {policy!r}. "
+                f"Expected one of: {', '.join(sorted(MESSAGE_VERSION_POLICIES))}."
+            )
+        self._unknown_version_policy = policy
 
     def emit_before(self, signal: str, *args: Any, **kwargs: Any) -> None:
         signal = "before_" + signal
@@ -211,15 +269,26 @@ class Broker:
         raise NotImplementedError
 
     def declare_actor(self, actor: Actor) -> None:  # pragma: no cover
-        """Declare a new actor on this broker.  Declaring an Actor
-        twice replaces the first actor with the second by name.
+        """Declare a new actor on this broker.  Multiple actors
+        may share a name as long as each one declares a distinct
+        ``actor_version``; declaring the same
+        name and version twice raises a ``ValueError``.  The first
+        version declared under a name becomes its default version.
 
         Parameters:
           actor(Actor): The actor being declared.
         """
         self.emit_before("declare_actor", actor)
         self.declare_queue(actor.queue_name)
-        self.actors[actor.actor_name] = actor
+        versions = self.actor_versions.setdefault(actor.actor_name, {})
+        if actor.actor_version in versions:
+            raise ValueError(
+                f"An actor named {actor.actor_name!r} with version {actor.actor_version!r} is already registered."
+            )
+        versions[actor.actor_version] = actor
+        # The first version declared under a name becomes its default
+        # version until it is explicitly changed via set_default_actor.
+        self.actors.setdefault(actor.actor_name, actor)
         self.emit_after("declare_actor", actor)
 
     def declare_queue(self, queue_name: str) -> None:  # pragma: no cover
@@ -243,11 +312,13 @@ class Broker:
         """
         raise NotImplementedError
 
-    def get_actor(self, actor_name: str) -> Actor:  # pragma: no cover
+    def get_actor(self, actor_name: str, actor_version: Any = None) -> Actor:  # pragma: no cover
         """Look up an actor by its name.
 
         Parameters:
           actor_name(str): The name to look up.
+          actor_version: The version to look up.  If not given, the
+            default version of the actor is returned.
 
         Raises:
           ActorNotFound: If the actor was never declared.
@@ -256,9 +327,85 @@ class Broker:
           Actor: The actor.
         """
         try:
-            return self.actors[actor_name]
+            if actor_version is None:
+                return self.actors[actor_name]
+            return self.actor_versions[actor_name][actor_version]
         except KeyError:
             raise ActorNotFound(actor_name) from None
+
+    def set_default_actor(self, actor_name: str, actor_version: Any = None) -> None:
+        """Change the default version of an actor.  The default
+        version is the one that new messages are dispatched to when
+        they don't carry an explicit actor version.  Messages that
+        have already been enqueued (including their retries) keep
+        executing the version they were sent with.
+
+        Parameters:
+          actor_name(str): The name of the actor.
+          actor_version: The version to make the default.
+
+        Raises:
+          ActorNotFound: If no actor with that name and version was
+            declared.
+        """
+        try:
+            self.actors[actor_name] = self.actor_versions[actor_name][actor_version]
+        except KeyError:
+            raise ActorNotFound(f"{actor_name} (version {actor_version!r})") from None
+
+    def get_actor_for_message(self, message: Message) -> Actor:
+        """Look up the actor a message should be dispatched to.
+
+        Messages that carry an explicit actor version are dispatched
+        to that exact version.  Messages without a version (e.g. sent
+        by an older version of dramatiq) and messages whose version is
+        no longer registered are handled according to the broker's
+        ``unversioned_message_policy`` and ``unknown_version_policy``
+        respectively.
+
+        Parameters:
+          message(Message): The message to look up the actor for.
+
+        Raises:
+          ActorNotFound: If the actor was never declared, or the
+            applicable policy is ``"error"`` and the message's
+            version couldn't be resolved.
+
+        Returns:
+          Actor: The actor the message should be dispatched to.
+        """
+        actor_name = message.actor_name
+        actor_version = message.actor_version
+        versions = self.actor_versions.get(actor_name)
+        if versions is None:
+            raise ActorNotFound(actor_name)
+
+        if actor_version is None:
+            if None in versions:
+                # The actor itself is unversioned, so the message
+                # can be matched exactly; no policy applies.
+                return versions[None]
+            if self.unversioned_message_policy == "error":
+                raise ActorNotFound(f"{actor_name} (unversioned message)")
+            self.logger.warning(
+                "Message %r doesn't declare an actor version; dispatching it to the default version of actor %r.",
+                message.message_id,
+                actor_name,
+            )
+            return self.actors[actor_name]
+
+        try:
+            return versions[actor_version]
+        except KeyError:
+            if self.unknown_version_policy == "error":
+                raise ActorNotFound(f"{actor_name} (version {actor_version!r})") from None
+            self.logger.warning(
+                "Message %r declares unknown version %r of actor %r; dispatching it to the default version.",
+                message.message_id,
+                actor_version,
+                actor_name,
+            )
+            return self.actors[actor_name]
 
     def get_declared_actors(self) -> set[str]:  # pragma: no cover
         """Get all declared actors.
@@ -398,6 +545,7 @@ class MessageProxy:
         options: dict[str, Any]
         message_id: str
         message_timestamp: int
+        actor_version: Optional[str]
 
     def __init__(self, message: Message) -> None:
         self.failed = False

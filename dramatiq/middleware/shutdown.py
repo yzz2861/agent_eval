@@ -86,7 +86,7 @@ class ShutdownNotifications(Middleware):
         self.manager.shutdown()
 
     def before_process_message(self, broker, message):
-        actor = broker.get_actor(message.actor_name)
+        actor = broker.get_actor_for_message(message)
 
         if self.should_notify(actor, message):
             self.manager.add_notification()

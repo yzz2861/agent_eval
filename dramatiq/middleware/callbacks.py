@@ -39,7 +39,7 @@ class Callbacks(Middleware):
         }
 
     def after_process_message(self, broker, message, *, result=None, exception=None):
-        actor = broker.get_actor(message.actor_name)
+        actor = broker.get_actor_for_message(message)
         if exception is None:
             target_actor_name = message.options.get("on_success") or actor.options.get("on_success")
             if target_actor_name:

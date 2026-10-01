@@ -113,9 +113,15 @@ class RabbitmqBroker(Broker):
         middleware: Optional[list[Middleware]] = None,
         max_priority: Optional[int] = None,
         parameters: Optional[list[dict[str, Any]]] = None,
+        unversioned_message_policy: str = "default",
+        unknown_version_policy: str = "error",
         **kwargs: Any,
     ):
-        super().__init__(middleware=middleware)
+        super().__init__(
+            middleware=middleware,
+            unversioned_message_policy=unversioned_message_policy,
+            unknown_version_policy=unknown_version_policy,
+        )
 
         if max_priority is not None and not (0 < max_priority <= 255):
             raise ValueError("max_priority must be a value between 0 and 255")
