@@ -73,8 +73,9 @@ To access the current session you can use the :data:`.session` proxy.
     This is a proxy. See :ref:`context-visibility` for more information.
 
     The session object works like a dict but tracks assignment and access to its
-    keys. It cannot track modifications to mutable values, you need to set
-    :attr:`~.SessionMixin.modified` manually when modifying a list, dict, etc.
+    keys. It does not track modifications to mutable values by default, so you
+    need to set :attr:`~.SessionMixin.modified` manually when modifying a list,
+    dict, etc.
 
     .. code-block:: python
 
@@ -82,6 +83,13 @@ To access the current session you can use the :data:`.session` proxy.
           session["numbers"].append(42)
           # so mark it as modified yourself
           session.modified = True
+
+    To track nested modifications, assign
+    :class:`~flask.sessions.TrackedSecureCookieSessionInterface` to the app::
+
+        from flask.sessions import TrackedSecureCookieSessionInterface
+
+        app.session_interface = TrackedSecureCookieSessionInterface()
 
     The session is persisted across requests using a cookie. By default the
     users's browser will clear the cookie when it is closed. Set
@@ -105,7 +113,13 @@ implementation that Flask is using.
 .. autoclass:: SecureCookieSessionInterface
    :members:
 
+.. autoclass:: TrackedSecureCookieSessionInterface
+   :members:
+
 .. autoclass:: SecureCookieSession
+   :members:
+
+.. autoclass:: TrackedSecureCookieSession
    :members:
 
 .. autoclass:: NullSession

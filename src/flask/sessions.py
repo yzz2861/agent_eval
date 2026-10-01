@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections.abc as c
 import hashlib
 import typing as t
+import weakref
 from collections.abc import MutableMapping
 from datetime import datetime
 from datetime import timezone
@@ -19,6 +20,273 @@ if t.TYPE_CHECKING:  # pragma: no cover
     from .app import Flask
     from .wrappers import Request
     from .wrappers import Response
+
+
+class _SessionTracker:
+    __slots__ = ("root",)
+
+    def __init__(self, session: SecureCookieSession) -> None:
+        self.root = weakref.ref(session)
+
+    def modified(self, container: object) -> None:
+        root = self.root()
+
+        if root is not None and _is_reachable(root, container):
+            root.modified = True
+
+
+class _TrackedMapping(dict[str, t.Any]):
+    _tracker: _SessionTracker
+
+    def __setitem__(self, key: str, value: t.Any) -> None:
+        assert self._tracker is not None
+        super().__setitem__(key, _track_value(value, self._tracker, {}))
+
+    def setdefault(self, key: str, default: t.Any = None) -> t.Any:
+        assert self._tracker is not None
+        if key in self:
+            return dict.__getitem__(self, key)
+
+        value = super().setdefault(key, _track_value(default, self._tracker, {}))
+        return value
+
+    def update(
+        self,
+        other: c.Mapping[str, t.Any] | c.Iterable[tuple[str, t.Any]] = (),
+        /,
+        **kwargs: t.Any,
+    ) -> None:
+        assert self._tracker is not None
+        converted: dict[str, t.Any] = {}
+        seen: dict[int, t.Any] = {}
+
+        if isinstance(other, c.Mapping):
+            items = other.items()
+        else:
+            items = other
+
+        for key, value in items:
+            converted[key] = _track_value(value, self._tracker, seen)
+
+        for key, value in kwargs.items():
+            converted[key] = _track_value(value, self._tracker, seen)
+
+        super().update(converted)
+
+    def __ior__(
+        self, other: c.Mapping[str, t.Any] | c.Iterable[tuple[str, t.Any]]
+    ) -> _TrackedMapping:
+        self.update(other)
+        return self
+
+
+class _TrackedDict(_TrackedMapping, CallbackDict[str, t.Any]):
+    @classmethod
+    def _wrap(
+        cls,
+        value: c.Mapping[str, t.Any] | c.Iterable[tuple[str, t.Any]],
+        tracker: _SessionTracker,
+        seen: dict[int, t.Any],
+    ) -> _TrackedDict:
+        def on_update(self: _TrackedDict) -> None:
+            assert self._tracker is not None
+            self._tracker.modified(self)
+
+        wrapped = cls.__new__(cls)
+        CallbackDict.__init__(wrapped, None, on_update)
+        wrapped._tracker = tracker
+        seen[id(value)] = wrapped
+
+        if isinstance(value, c.Mapping):
+            items: c.Iterable[tuple[t.Any, t.Any]] = value.items()
+        else:
+            items = value
+
+        for key, item in items:
+            dict.__setitem__(wrapped, key, _track_value(item, tracker, seen))
+
+        return wrapped
+
+
+class _TrackedList(list[t.Any]):
+    __slots__ = ("_tracker",)
+    _tracker: _SessionTracker
+
+    def __init__(self, tracker: _SessionTracker) -> None:
+        super().__init__()
+        self._tracker = tracker
+
+    @classmethod
+    def _wrap(
+        cls, value: c.Iterable[t.Any], tracker: _SessionTracker, seen: dict[int, t.Any]
+    ) -> _TrackedList:
+        wrapped = cls(tracker)
+        seen[id(value)] = wrapped
+        list.extend(wrapped, (_track_value(item, tracker, seen) for item in value))
+        return wrapped
+
+    def _modified(self) -> None:
+        assert self._tracker is not None
+        self._tracker.modified(self)
+
+    def append(self, value: t.Any) -> None:
+        assert self._tracker is not None
+        list.append(self, _track_value(value, self._tracker, {}))
+        self._modified()
+
+    def extend(self, values: c.Iterable[t.Any]) -> None:
+        assert self._tracker is not None
+        values = tuple(values)
+        seen: dict[int, t.Any] = {}
+        list.extend(
+            self, (_track_value(value, self._tracker, seen) for value in values)
+        )
+        self._modified()
+
+    def insert(self, index: int, value: t.Any) -> None:
+        assert self._tracker is not None
+        list.insert(self, index, _track_value(value, self._tracker, {}))
+        self._modified()
+
+    def remove(self, value: t.Any) -> None:
+        list.remove(self, value)
+        self._modified()
+
+    def pop(self, index: int = -1) -> t.Any:
+        value = list.pop(self, index)
+        self._modified()
+        return value
+
+    def clear(self) -> None:
+        list.clear(self)
+        self._modified()
+
+    def __setitem__(self, index: int | slice, value: t.Any) -> None:
+        assert self._tracker is not None
+        if isinstance(index, slice):
+            seen: dict[int, t.Any] = {}
+            value = [_track_value(item, self._tracker, seen) for item in value]
+        else:
+            value = _track_value(value, self._tracker, {})
+
+        list.__setitem__(self, index, value)
+        self._modified()
+
+    def __delitem__(self, index: int | slice) -> None:
+        list.__delitem__(self, index)
+        self._modified()
+
+    def sort(self, *args: t.Any, **kwargs: t.Any) -> None:
+        list.sort(self, *args, **kwargs)
+        self._modified()
+
+    def reverse(self) -> None:
+        list.reverse(self)
+        self._modified()
+
+    def __iadd__(self, values: c.Iterable[t.Any]) -> _TrackedList:
+        self.extend(values)
+        return self
+
+    def __imul__(self, count: int) -> _TrackedList:
+        if count <= 0:
+            list.clear(self)
+            self._modified()
+            return self
+
+        list.__imul__(self, count)
+        self._modified()
+        return self
+
+
+def _track_value(
+    value: t.Any, tracker: _SessionTracker | None, seen: dict[int, t.Any] | None = None
+) -> t.Any:
+    if tracker is None:
+        return value
+
+    if seen is not None and id(value) in seen:
+        return seen[id(value)]
+
+    if isinstance(value, (_TrackedMapping, _TrackedList)) and value._tracker is tracker:
+        return value
+
+    if isinstance(value, c.Mapping):
+        return _TrackedDict._wrap(value, tracker, seen if seen is not None else {})
+
+    if isinstance(value, list):
+        return _TrackedList._wrap(value, tracker, seen if seen is not None else {})
+
+    if isinstance(value, tuple):
+        if seen is None:
+            seen = {}
+
+        return tuple(_track_value(item, tracker, seen) for item in value)
+
+    return value
+
+
+def _is_reachable(root: object, target: object) -> bool:
+    pending = [root]
+    visited: set[int] = set()
+
+    while pending:
+        value = pending.pop()
+        value_id = id(value)
+
+        if value_id in visited:
+            continue
+
+        visited.add(value_id)
+
+        if value is target:
+            return True
+
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+
+    return False
+
+
+def _check_circular(value: t.Any) -> None:
+    active: set[int] = set()
+    finished: set[int] = set()
+
+    def children(item: t.Any) -> c.Iterable[t.Any]:
+        if isinstance(item, dict):
+            return item.values()
+
+        if isinstance(item, (list, tuple)):
+            return item
+
+        return ()
+
+    active.add(id(value))
+    pending: list[tuple[t.Any, c.Iterator[t.Any]]] = [(value, iter(children(value)))]
+
+    while pending:
+        current, iterator = pending[-1]
+
+        try:
+            child = next(iterator)
+        except StopIteration:
+            active.remove(id(current))
+            finished.add(id(current))
+            pending.pop()
+            continue
+
+        child_id = id(child)
+
+        if child_id in active:
+            raise ValueError("Circular reference detected in session data.")
+
+        if child_id in finished or not isinstance(child, (dict, list, tuple)):
+            continue
+
+        active.add(child_id)
+        pending.append((child, iter(children(child))))
 
 
 class SessionMixin(MutableMapping[str, t.Any]):
@@ -61,23 +329,67 @@ class SecureCookieSession(CallbackDict[str, t.Any], SessionMixin):
     :attr:`accessed` attributes. It cannot reliably track whether a
     session is new (vs. empty), so :attr:`new` remains hard coded to
     ``False``.
+
+    Pass ``track_nested_modifications=True``, or use
+    :class:`TrackedSecureCookieSession`, to track modifications to nested
+    dictionaries and lists as well.
     """
 
     #: When data is changed, this is set to ``True``. Only the session
-    #: dictionary itself is tracked; if the session contains mutable
-    #: data (for example a nested dict) then this must be set to
-    #: ``True`` manually when modifying that data. The session cookie
-    #: will only be written to the response if this is ``True``.
+    #: dictionary itself is tracked by default. Nested data is tracked by
+    #: :class:`TrackedSecureCookieSession`, or ``modified`` can be set to
+    #: ``True`` manually. The session cookie is only written if this is
+    #: ``True``.
     modified = False
+
+    def __new__(
+        cls,
+        initial: c.Mapping[str, t.Any] | None = None,
+        track_nested_modifications: bool = False,
+    ) -> SecureCookieSession:
+        if track_nested_modifications and cls is SecureCookieSession:
+            return TrackedSecureCookieSession(initial)
+
+        return super().__new__(cls)
 
     def __init__(
         self,
         initial: c.Mapping[str, t.Any] | None = None,
+        track_nested_modifications: bool = False,
     ) -> None:
         def on_update(self: te.Self) -> None:
             self.modified = True
 
         super().__init__(initial, on_update)
+
+
+class TrackedSecureCookieSession(_TrackedMapping, SecureCookieSession):
+    """A secure cookie session that tracks nested dictionary and list changes."""
+
+    _tracker: _SessionTracker
+
+    def __init__(
+        self,
+        initial: c.Mapping[str, t.Any] | None = None,
+        track_nested_modifications: bool = True,
+    ) -> None:
+        if getattr(self, "_tracker", None) is not None:
+            return
+
+        def on_update(self: SecureCookieSession) -> None:
+            self.modified = True
+
+        CallbackDict.__init__(self, None, on_update)
+        self._tracker = _SessionTracker(self)
+
+        if initial is not None:
+            converted: dict[str, t.Any] = {}
+            seen: dict[int, t.Any] = {}
+
+            for key, value in initial.items():
+                converted[key] = _track_value(value, self._tracker, seen)
+
+            dict.update(self, converted)
 
 
 class NullSession(SecureCookieSession):
@@ -299,6 +611,16 @@ class SecureCookieSessionInterface(SessionInterface):
     #: such as datetime objects or tuples.
     serializer = session_json_serializer
     session_class = SecureCookieSession
+    tracked_session_class = TrackedSecureCookieSession
+    track_nested_modifications = False
+
+    def _make_session(
+        self, data: c.Mapping[str, t.Any] | None = None
+    ) -> SecureCookieSession:
+        if self.track_nested_modifications:
+            return self.tracked_session_class(data)
+
+        return self.session_class(data)
 
     def get_signing_serializer(self, app: Flask) -> URLSafeTimedSerializer | None:
         if not app.secret_key:
@@ -326,13 +648,13 @@ class SecureCookieSessionInterface(SessionInterface):
             return None
         val = request.cookies.get(self.get_cookie_name(app))
         if not val:
-            return self.session_class()
+            return self._make_session()
         max_age = int(app.permanent_session_lifetime.total_seconds())
         try:
             data = s.loads(val, max_age=max_age)
-            return self.session_class(data)
+            return self._make_session(data)
         except BadSignature:
-            return self.session_class()
+            return self._make_session()
 
     def save_session(
         self, app: Flask, session: SessionMixin, response: Response
@@ -370,7 +692,10 @@ class SecureCookieSessionInterface(SessionInterface):
             return
 
         expires = self.get_expiration_time(app, session)
-        val = self.get_signing_serializer(app).dumps(dict(session))  # type: ignore[union-attr]
+        data = dict(session)
+        if isinstance(session, TrackedSecureCookieSession):
+            _check_circular(data)
+        val = self.get_signing_serializer(app).dumps(data)  # type: ignore[union-attr]
         response.set_cookie(
             name,
             val,
@@ -383,3 +708,9 @@ class SecureCookieSessionInterface(SessionInterface):
             samesite=samesite,
         )
         response.vary.add("Cookie")
+
+
+class TrackedSecureCookieSessionInterface(SecureCookieSessionInterface):
+    """Secure cookie session interface that tracks nested data changes."""
+
+    track_nested_modifications = True
