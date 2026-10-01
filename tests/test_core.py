@@ -3,6 +3,7 @@
 import errno
 import hashlib
 import io
+import multiprocessing as mp
 import os
 import os.path as op
 import pathlib
@@ -652,6 +653,190 @@ def test_evict(cache):
     assert len(cache.check()) == 0
 
 
+def test_multiple_tags(cache):
+    cache.set(0, 0, tags=('user', 'v1', 'report-a'))
+    cache.set(1, 1, tags=('user', 'v2', 'report-b'))
+    cache.set(2, 2, tags=('other', 'v1', 'report-c'))
+    cache.set(3, 3, tags=['user', 'v1'])
+
+    cache.reset('statistics', 1)
+    assert cache.get(0, tag=True) == (0, 'user')
+    assert cache.get(0, tags=True) == (0, ('user', 'v1', 'report-a'))
+    cache.reset('statistics', 0)
+    assert cache.pop(1, tags=True) == (1, ('user', 'v2', 'report-b'))
+    cache.set(1, 1, tags=('user', 'v2', 'report-b'))
+
+    assert cache.evict(tags=('v1',)) == 3
+    assert cache.evict(tags=('user', 'v2'), match_all=True) == 1
+    assert len(cache) == 0
+
+
+def test_invalid_tags(cache):
+    with pytest.raises(TypeError):
+        cache.set(0, 0, tags='user')
+    with pytest.raises(ValueError):
+        cache.set(1, 1, tag='user', tags=('v1',))
+    with pytest.raises(ValueError):
+        cache.set(2, 2, tags=('user', None))
+
+
+def test_tag_operations_clean_relations_and_files(cache):
+    value = b'x' * 40000
+    cache.set('delete', value, tags=('delete', 'v1'))
+    cache.set('evict', value, tags=('evict', 'v1'))
+    cache.set('overwrite', value, tags=('old',))
+    cache.set('overwrite', b'y' * 40000, tags=('new',))
+    cache.set('expire', value, tags=('expire',), expire=1e-9)
+
+    assert cache.evict('old') == 0
+    assert cache.delete('delete')
+    assert cache.evict('evict') == 1
+    assert cache.expire() == 1
+
+    cache.reset('size_limit', 2**16)
+    for index in range(5):
+        cache.set(('cull', index), value, tags=('cull', str(index)))
+    cache.cull()
+
+    with sqlite3.connect(op.join(cache.directory, 'cache.db')) as connection:
+        orphaned = connection.execute(
+            'SELECT COUNT(*) FROM Tags'
+            ' LEFT JOIN Cache ON Cache.rowid = Tags.rowid'
+            ' WHERE Cache.rowid IS NULL'
+        ).fetchone()[0]
+        missing = connection.execute(
+            'SELECT COUNT(*) FROM Cache'
+            ' LEFT JOIN Tags ON Tags.rowid = Cache.rowid'
+            ' WHERE Cache.tag IS NOT NULL AND Tags.rowid IS NULL'
+        ).fetchone()[0]
+
+    assert orphaned == 0
+    assert missing == 0
+    assert cache.check(fix=True) == []
+
+
+def _tag_writer(directory, operations):
+    with dc.Cache(directory, timeout=60) as cache:
+        value = b'w' * 40000
+        for index in range(operations):
+            cache.set(
+                1_000_000 + index % 100,
+                value,
+                tags=('writer', str(index)),
+                retry=True,
+            )
+
+
+def _tag_evictor(directory, tags, iterations, queue):
+    with dc.Cache(directory, timeout=60) as cache:
+        removed = 0
+        for _ in range(iterations):
+            removed += cache.evict(tags=tags, retry=True)
+        queue.put(removed)
+
+
+def test_multiprocess_tag_evict_counts_and_files():
+    directory = tempfile.mkdtemp()
+
+    try:
+        with dc.Cache(directory, timeout=60) as cache:
+            value = b'v' * 40000
+            for key in range(300):
+                cache.set(
+                    key,
+                    value,
+                    tags=('user', 'v%d' % (key % 3), 'r%d' % (key % 4)),
+                )
+
+        context = mp.get_context('fork')
+        queue = context.Queue()
+        writers = [
+            context.Process(target=_tag_writer, args=(directory, 100))
+            for _ in range(4)
+        ]
+        evictors = [
+            context.Process(
+                target=_tag_evictor,
+                args=(directory, pair, 5, queue),
+            )
+            for pair in (('v0', 'v1'), ('v1', 'v2'), ('v2', 'v0'))
+        ]
+
+        for process in writers + evictors:
+            process.start()
+        for process in writers + evictors:
+            process.join()
+            assert process.exitcode == 0
+
+        removed = 0
+        while not queue.empty():
+            removed += queue.get()
+
+        with dc.Cache(directory, timeout=60) as cache:
+            assert removed == 300
+            assert len(cache) == 100
+            assert cache.check(fix=True) == []
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_old_cache_upgrades_and_failed_upgrade_rolls_back():
+    directory = tempfile.mkdtemp()
+
+    try:
+        with dc.Cache(directory) as cache:
+            cache.set('old', 1, tag='v1')
+
+        with sqlite3.connect(op.join(directory, 'cache.db')) as connection:
+            connection.execute('DROP TRIGGER Tags_cache_delete')
+            connection.execute('DROP INDEX Tags_rowid')
+            connection.execute('DROP TABLE Tags')
+            connection.commit()
+
+        class FailingTagCache(dc.Cache):
+            fail_backfill = True
+
+            @property
+            def _sql(self):
+                execute = super()._sql
+
+                def retry(statement, *args, **kwargs):
+                    if (
+                        self.fail_backfill
+                        and statement.lstrip().startswith(
+                            'INSERT OR IGNORE INTO Tags'
+                        )
+                    ):
+                        raise sqlite3.OperationalError('upgrade failed')
+                    return execute(statement, *args, **kwargs)
+
+                return retry
+
+        with FailingTagCache(directory) as cache:
+            assert cache.get('old', tag=True) == (1, 'v1')
+            assert cache.evict('v1') == 1
+            cache.set('legacy', 2, tag='v2')
+            assert cache.get('legacy', tag=True) == (2, 'v2')
+
+        FailingTagCache.fail_backfill = False
+
+        with sqlite3.connect(op.join(directory, 'cache.db')) as connection:
+            names = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE name LIKE 'Tags%'"
+                )
+            }
+        assert names == set()
+
+        with dc.Cache(directory) as cache:
+            assert cache.get('legacy', tags=True) == (2, ('v2',))
+            assert cache.evict('v2') == 1
+            assert cache.check() == []
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 def test_clear(cache):
     for value in range(100):
         cache[value] = value
@@ -1277,8 +1462,7 @@ def test_rsync():
 def test_custom_eviction_policy(cache):
     dc.EVICTION_POLICY['lru-gt-1s'] = {
         'init': (
-            'CREATE INDEX IF NOT EXISTS Cache_access_time ON'
-            ' Cache (access_time)'
+            'CREATE INDEX IF NOT EXISTS Cache_access_time ON' ' Cache (access_time)'
         ),
         'get': 'access_time = {now}',
         'cull': (

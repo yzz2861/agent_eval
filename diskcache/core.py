@@ -99,6 +99,8 @@ EVICTION_POLICY = {
     },
 }
 
+TAG_COLLECTIONS = (list, tuple, set, frozenset)
+
 
 class Disk:
     """Cache key and value serialization for SQLite database and files."""
@@ -577,6 +579,13 @@ class Cache:
             ' WHERE key = "size"; END'
         )
 
+        try:
+            self._create_tags()
+        except sqlite3.Error:
+            # The upgrade is transactional. Failed upgrades leave the
+            # previous schema in place and the next open retries.
+            pass
+
         # Create tag index if requested.
 
         if self.tag_index:  # pylint: disable=no-member
@@ -736,6 +745,9 @@ class Cache:
                 assert self._txn_id == tid
                 self._txn_id = None
                 sql('ROLLBACK')
+            for name in filenames:
+                if name is not None:
+                    _disk_remove(name)
             raise
         else:
             if begin:
@@ -746,7 +758,88 @@ class Cache:
                 if name is not None:
                     _disk_remove(name)
 
-    def set(self, key, value, expire=None, read=False, tag=None, retry=False):
+    def _create_tags(self):
+        sql = self._sql
+        start = time.time()
+
+        while True:
+            try:
+                sql('BEGIN IMMEDIATE')
+                break
+            except sqlite3.OperationalError as error:
+                if str(error) != 'database is locked':
+                    raise
+                if time.time() - start > 60:
+                    raise
+                time.sleep(0.001)
+
+        try:
+            sql(
+                'CREATE TABLE IF NOT EXISTS Tags ('
+                ' id INTEGER PRIMARY KEY,'
+                ' tag BLOB NOT NULL,'
+                ' rowid INTEGER NOT NULL,'
+                ' UNIQUE(tag, rowid))'
+            )
+            sql('CREATE INDEX IF NOT EXISTS Tags_rowid ON Tags(rowid)')
+            sql(
+                'CREATE TRIGGER IF NOT EXISTS Tags_cache_delete'
+                ' AFTER DELETE ON Cache FOR EACH ROW BEGIN'
+                ' DELETE FROM Tags WHERE rowid = OLD.rowid; END'
+            )
+            sql(
+                'INSERT OR IGNORE INTO Tags(tag, rowid)'
+                ' SELECT tag, rowid FROM Cache WHERE tag IS NOT NULL'
+            )
+            sql('COMMIT')
+        except BaseException:
+            with cl.suppress(sqlite3.Error):
+                self._sql('ROLLBACK')
+            raise
+
+    @staticmethod
+    def _normalize_tags(tag, tags):
+        if tags is None:
+            if tag is None:
+                return ()
+            values = tag if isinstance(tag, TAG_COLLECTIONS) else (tag,)
+        else:
+            if tag is not None:
+                raise ValueError('tag and tags cannot both be set')
+            if not isinstance(tags, TAG_COLLECTIONS):
+                raise TypeError(
+                    'tags must be a list, tuple, set, or frozenset'
+                )
+            values = tags
+
+        result = []
+        seen = set()
+
+        for value in values:
+            if value is None:
+                raise ValueError('tags cannot contain None')
+            marker = (type(value), value)
+            if marker not in seen:
+                seen.add(marker)
+                result.append(value)
+
+        return tuple(result)
+
+    def _replace_tags(self, sql, rowid, tags):
+        try:
+            sql('DELETE FROM Tags WHERE rowid = ?', (rowid,))
+        except sqlite3.OperationalError as error:
+            if len(tags) <= 1 and str(error) == 'no such table: Tags':
+                return
+            raise
+
+        for value in tags:
+            sql('INSERT INTO Tags(tag, rowid) VALUES (?, ?)', (value, rowid))
+
+    def set(
+        self, key, value, expire=None, read=False, tag=None,
+        retry=False, tags=None,
+    ):
         """Set `key` and `value` item in cache.
 
         When `read` is `True`, `value` should be a file-like object opened
@@ -760,7 +853,8 @@ class Cache:
         :param float expire: seconds until item expires
             (default None, no expiry)
         :param bool read: read value as bytes from file (default False)
-        :param str tag: text to associate with key (default None)
+        :param tag: tag or collection of tags to associate with key
+        :param tuple tags: collection of tags to associate with key
         :param bool retry: retry if database timeout occurs (default False)
         :return: True if item was set
         :raises Timeout: if database timeout occurs
@@ -770,7 +864,9 @@ class Cache:
         db_key, raw = self._disk.put(key)
         expire_time = None if expire is None else now + expire
         size, mode, filename, db_value = self._disk.store(value, read, key=key)
-        columns = (expire_time, tag, size, mode, filename, db_value)
+        tags = self._normalize_tags(tag, tags)
+        primary_tag = tags[0] if tags else None
+        columns = (expire_time, primary_tag, size, mode, filename, db_value)
 
         # The order of SELECT, UPDATE, and INSERT is important below.
         #
@@ -804,8 +900,10 @@ class Cache:
                 ((rowid, old_filename),) = rows
                 cleanup(old_filename)
                 self._row_update(rowid, now, columns)
+                self._replace_tags(sql, rowid, tags)
             else:
-                self._row_insert(db_key, raw, now, columns)
+                rowid = self._row_insert(db_key, raw, now, columns)
+                self._replace_tags(sql, rowid, tags)
 
             self._cull(now, sql, cleanup)
 
@@ -854,7 +952,7 @@ class Cache:
     def _row_insert(self, key, raw, now, columns):
         sql = self._sql
         expire_time, tag, size, mode, filename, value = columns
-        sql(
+        cursor = sql(
             'INSERT INTO Cache('
             ' key, raw, store_time, expire_time, access_time,'
             ' access_count, tag, size, mode, filename, value'
@@ -873,6 +971,7 @@ class Cache:
                 value,
             ),
         )
+        return cursor.lastrowid
 
     def _cull(self, now, sql, cleanup, limit=None):
         cull_limit = self.cull_limit if limit is None else limit
@@ -912,16 +1011,18 @@ class Cache:
         if select_policy is None or self.volume() < self.size_limit:
             return
 
-        select_filename = select_policy.format(fields='filename', now=now)
+        select_filename = select_policy.format(
+            fields='rowid, filename', now=now
+        )
         rows = sql(select_filename, (cull_limit,)).fetchall()
 
         if rows:
             delete = 'DELETE FROM Cache WHERE rowid IN (%s)' % (
-                select_policy.format(fields='rowid', now=now)
+                ','.join(str(row[0]) for row in rows)
             )
-            sql(delete, (cull_limit,))
+            sql(delete)
 
-            for (filename,) in rows:
+            for _, filename in rows:
                 cleanup(filename)
 
     def touch(self, key, expire=None, retry=False):
@@ -961,7 +1062,10 @@ class Cache:
 
         return False
 
-    def add(self, key, value, expire=None, read=False, tag=None, retry=False):
+    def add(
+        self, key, value, expire=None, read=False, tag=None,
+        retry=False, tags=None,
+    ):
         """Add `key` and `value` item to cache.
 
         Similar to `set`, but only add to cache if key not present.
@@ -980,7 +1084,8 @@ class Cache:
         :param float expire: seconds until the key expires
             (default None, no expiry)
         :param bool read: read value as bytes from file (default False)
-        :param str tag: text to associate with key (default None)
+        :param tag: tag or collection of tags to associate with key
+        :param tuple tags: collection of tags to associate with key
         :param bool retry: retry if database timeout occurs (default False)
         :return: True if item was added
         :raises Timeout: if database timeout occurs
@@ -990,7 +1095,9 @@ class Cache:
         db_key, raw = self._disk.put(key)
         expire_time = None if expire is None else now + expire
         size, mode, filename, db_value = self._disk.store(value, read, key=key)
-        columns = (expire_time, tag, size, mode, filename, db_value)
+        tags = self._normalize_tags(tag, tags)
+        primary_tag = tags[0] if tags else None
+        columns = (expire_time, primary_tag, size, mode, filename, db_value)
 
         with self._transact(retry, filename) as (sql, cleanup):
             rows = sql(
@@ -1008,8 +1115,10 @@ class Cache:
 
                 cleanup(old_filename)
                 self._row_update(rowid, now, columns)
+                self._replace_tags(sql, rowid, tags)
             else:
-                self._row_insert(db_key, raw, now, columns)
+                rowid = self._row_insert(db_key, raw, now, columns)
+                self._replace_tags(sql, rowid, tags)
 
             self._cull(now, sql, cleanup)
 
@@ -1128,6 +1237,7 @@ class Cache:
         expire_time=False,
         tag=False,
         retry=False,
+        tags=False,
     ):
         """Retrieve value from cache. If `key` is missing, return `default`.
 
@@ -1141,6 +1251,7 @@ class Cache:
         :param bool expire_time: if True, return expire_time in tuple
             (default False)
         :param bool tag: if True, return tag in tuple (default False)
+        :param bool tags: if True, return all tags in tuple (default False)
         :param bool retry: retry if database timeout occurs (default False)
         :return: value for item or default if key not found
         :raises Timeout: if database timeout occurs
@@ -1159,6 +1270,11 @@ class Cache:
         elif expire_time or tag:
             default = (default, None)
 
+        if tags:
+            default = (
+                (*default, ()) if isinstance(default, tuple) else (default, ())
+            )
+
         if not self.statistics and update_column is None:
             # Fast path, no transaction necessary.
 
@@ -1168,6 +1284,15 @@ class Cache:
                 return default
 
             ((rowid, db_expire_time, db_tag, mode, filename, db_value),) = rows
+
+            if tags:
+                db_tags = tuple(
+                    value
+                    for (value,) in self._sql(
+                        'SELECT tag FROM Tags WHERE rowid = ? ORDER BY id',
+                        (rowid,),
+                    ).fetchall()
+                )
 
             try:
                 value = self._disk.fetch(mode, filename, db_value, read)
@@ -1195,6 +1320,15 @@ class Cache:
                     (rowid, db_expire_time, db_tag, mode, filename, db_value),
                 ) = rows  # noqa: E127
 
+                if tags:
+                    db_tags = tuple(
+                        value
+                        for (value,) in sql(
+                            'SELECT tag FROM Tags WHERE rowid = ? ORDER BY id',
+                            (rowid,),
+                        ).fetchall()
+                    )
+
                 try:
                     value = self._disk.fetch(mode, filename, db_value, read)
                 except IOError:
@@ -1212,6 +1346,13 @@ class Cache:
                 if update_column is not None:
                     sql(update % update_column.format(now=now), (rowid,))
 
+        if tags:
+            result = (value,)
+            if expire_time:
+                result += (db_expire_time,)
+            if tag:
+                result += (db_tag,)
+            return result + (db_tags,)
         if expire_time and tag:
             return (value, db_expire_time, db_tag)
         elif expire_time:
@@ -1272,7 +1413,8 @@ class Cache:
         return bool(rows)
 
     def pop(
-        self, key, default=None, expire_time=False, tag=False, retry=False
+        self, key, default=None, expire_time=False, tag=False,
+        retry=False, tags=False,
     ):  # noqa: E501
         """Remove corresponding item for `key` from cache and return value.
 
@@ -1288,6 +1430,7 @@ class Cache:
         :param bool expire_time: if True, return expire_time in tuple
             (default False)
         :param bool tag: if True, return tag in tuple (default False)
+        :param bool tags: if True, return all tags in tuple (default False)
         :param bool retry: retry if database timeout occurs (default False)
         :return: value for item or default if key not found
         :raises Timeout: if database timeout occurs
@@ -1305,6 +1448,11 @@ class Cache:
         elif expire_time or tag:
             default = default, None
 
+        if tags:
+            default = (
+                (*default, ()) if isinstance(default, tuple) else (default, ())
+            )
+
         with self._transact(retry) as (sql, _):
             rows = sql(select, (db_key, raw, time.time())).fetchall()
 
@@ -1312,6 +1460,17 @@ class Cache:
                 return default
 
             ((rowid, db_expire_time, db_tag, mode, filename, db_value),) = rows
+
+            db_tags = ()
+
+            if tags:
+                db_tags = tuple(
+                    value
+                    for (value,) in sql(
+                        'SELECT tag FROM Tags WHERE rowid = ? ORDER BY id',
+                        (rowid,),
+                    ).fetchall()
+                )
 
             sql('DELETE FROM Cache WHERE rowid = ?', (rowid,))
 
@@ -1324,6 +1483,13 @@ class Cache:
             if filename is not None:
                 self._disk.remove(filename)
 
+        if tags:
+            result = (value,)
+            if expire_time:
+                result += (db_expire_time,)
+            if tag:
+                result += (db_tag,)
+            return result + (db_tags,)
         if expire_time and tag:
             return value, db_expire_time, db_tag
         elif expire_time:
@@ -1393,6 +1559,7 @@ class Cache:
         read=False,
         tag=None,
         retry=False,
+        tags=None,
     ):
         """Push `value` onto `side` of queue identified by `prefix` in cache.
 
@@ -1430,7 +1597,8 @@ class Cache:
         :param float expire: seconds until the key expires
             (default None, no expiry)
         :param bool read: read value as bytes from file (default False)
-        :param str tag: text to associate with key (default None)
+        :param tag: tag or collection of tags to associate with key
+        :param tuple tags: collection of tags to associate with key
         :param bool retry: retry if database timeout occurs (default False)
         :return: key for item in cache
         :raises Timeout: if database timeout occurs
@@ -1447,7 +1615,9 @@ class Cache:
         raw = True
         expire_time = None if expire is None else now + expire
         size, mode, filename, db_value = self._disk.store(value, read)
-        columns = (expire_time, tag, size, mode, filename, db_value)
+        tags = self._normalize_tags(tag, tags)
+        primary_tag = tags[0] if tags else None
+        columns = (expire_time, primary_tag, size, mode, filename, db_value)
         order = {'back': 'DESC', 'front': 'ASC'}
         select = (
             'SELECT key FROM Cache'
@@ -1479,7 +1649,8 @@ class Cache:
             else:
                 db_key = num
 
-            self._row_insert(db_key, raw, now, columns)
+            rowid = self._row_insert(db_key, raw, now, columns)
+            self._replace_tags(sql, rowid, tags)
             self._cull(now, sql, cleanup)
 
             return db_key
@@ -1793,7 +1964,8 @@ class Cache:
             return key, value
 
     def memoize(
-        self, name=None, typed=False, expire=None, tag=None, ignore=()
+        self, name=None, typed=False, expire=None, tag=None, ignore=(),
+        tags=None,
     ):
         """Memoizing cache decorator.
 
@@ -1853,6 +2025,7 @@ class Cache:
         :param float expire: seconds until arguments expire
             (default None, no expiry)
         :param str tag: text to associate with arguments (default None)
+        :param tuple tags: collection of tags to associate with arguments
         :param set ignore: positional or keyword args to ignore (default ())
         :return: callable decorator
 
@@ -1874,7 +2047,10 @@ class Cache:
                 if result is ENOVAL:
                     result = func(*args, **kwargs)
                     if expire is None or expire > 0:
-                        self.set(key, result, expire, tag=tag, retry=True)
+                        self.set(
+                            key, result, expire, tag=tag, tags=tags,
+                            retry=True,
+                        )
 
                 return result
 
@@ -2044,7 +2220,7 @@ class Cache:
         sql('DROP INDEX IF EXISTS Cache_tag_rowid')
         self.reset('tag_index', 0)
 
-    def evict(self, tag, retry=False):
+    def evict(self, tag=ENOVAL, retry=False, tags=None, match_all=False):
         """Remove items with matching `tag` from cache.
 
         Removing items is an iterative process. In each iteration, a subset of
@@ -2057,19 +2233,66 @@ class Cache:
         Raises :exc:`Timeout` error when database timeout occurs and `retry` is
         `False` (default).
 
-        :param str tag: tag identifying items
+        :param tag: tag or collection of tags identifying items
+        :param tuple tags: collection of tags identifying items
+        :param bool match_all: require every tag when multiple tags are given
         :param bool retry: retry if database timeout occurs (default False)
         :return: count of rows removed
         :raises Timeout: if database timeout occurs
 
         """
-        select = (
-            'SELECT rowid, filename FROM Cache'
-            ' WHERE tag = ? AND rowid > ?'
-            ' ORDER BY rowid LIMIT ?'
+        if tag is ENOVAL:
+            if tags is None:
+                raise TypeError('evict requires tag or tags')
+            values = self._normalize_tags(None, tags)
+        else:
+            if tags is not None:
+                raise ValueError('tag and tags cannot both be set')
+            values = self._normalize_tags(tag, None)
+
+        if not values:
+            return 0
+
+        placeholders = ','.join('?' for _ in values)
+        legacy_tag = tags is None and len(values) == 1
+
+        if legacy_tag:
+            select = (
+                'SELECT rowid, filename FROM Cache'
+                ' WHERE tag = ? AND rowid > ?'
+                ' ORDER BY rowid LIMIT ?'
+            )
+            args = [values[0], 0, 100]
+        elif match_all:
+            select = (
+                'SELECT Cache.rowid, Cache.filename FROM Cache'
+                ' JOIN Tags ON Tags.rowid = Cache.rowid'
+                ' WHERE Tags.tag IN (%s) AND Cache.rowid > ?'
+                ' GROUP BY Cache.rowid'
+                ' HAVING COUNT(DISTINCT Tags.tag) = ?'
+                ' ORDER BY Cache.rowid LIMIT ?'
+            ) % placeholders
+            args = [*values, 0, len(values), 100]
+        elif len(values) > 1:
+            select = (
+                'SELECT DISTINCT Cache.rowid, Cache.filename FROM Cache'
+                ' JOIN Tags ON Tags.rowid = Cache.rowid'
+                ' WHERE Tags.tag IN (%s) AND Cache.rowid > ?'
+                ' ORDER BY Cache.rowid LIMIT ?'
+            ) % placeholders
+            args = [*values, 0, 100]
+        else:
+            select = (
+                'SELECT Cache.rowid, Cache.filename FROM Cache'
+                ' JOIN Tags ON Tags.rowid = Cache.rowid'
+                ' WHERE Tags.tag = ? AND Cache.rowid > ?'
+                ' ORDER BY Cache.rowid LIMIT ?'
+            )
+            args = [values[0], 0, 100]
+
+        return self._select_delete(
+            select, args, arg_index=len(values), retry=retry
         )
-        args = [tag, 0, 100]
-        return self._select_delete(select, args, arg_index=1, retry=retry)
 
     def expire(self, now=None, retry=False):
         """Remove expired items from cache.
@@ -2129,7 +2352,9 @@ class Cache:
         if select_policy is None:
             return 0
 
-        select_filename = select_policy.format(fields='filename', now=now)
+        select_filename = select_policy.format(
+            fields='rowid, filename', now=now
+        )
 
         try:
             while self.volume() > self.size_limit:
@@ -2140,13 +2365,12 @@ class Cache:
                         break
 
                     count += len(rows)
-                    delete = (
-                        'DELETE FROM Cache WHERE rowid IN (%s)'
-                        % select_policy.format(fields='rowid', now=now)
+                    delete = 'DELETE FROM Cache WHERE rowid IN (%s)' % (
+                        ','.join(str(row[0]) for row in rows)
                     )
-                    sql(delete, (10,))
+                    sql(delete)
 
-                    for (filename,) in rows:
+                    for _, filename in rows:
                         cleanup(filename)
         except Timeout:
             raise Timeout(count) from None
