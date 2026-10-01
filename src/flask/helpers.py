@@ -197,6 +197,15 @@ def make_response(*args: t.Any) -> Response:
     return current_app.make_response(args)
 
 
+def subrequest(*args: t.Any, **kwargs: t.Any) -> Response:
+    """Dispatch a subrequest to the current application. See
+    :meth:`~flask.Flask.subrequest`.
+
+    .. versionadded:: 3.2
+    """
+    return current_app.subrequest(*args, **kwargs)
+
+
 def url_for(
     endpoint: str,
     *,

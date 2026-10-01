@@ -388,6 +388,15 @@ The following configuration values are used internally by Flask:
     ``4093``. Larger cookies may be silently ignored by browsers. Set to
     ``0`` to disable the warning.
 
+.. py:data:: SUBREQUEST_MAX_DEPTH
+
+    Maximum number of nested :meth:`~flask.Flask.subrequest` calls that may be
+    active at one time.
+
+    Default: ``5``
+
+    .. versionadded:: 3.2
+
 .. py:data:: PROVIDE_AUTOMATIC_OPTIONS
 
     Set to ``False`` to disable the automatic addition of OPTIONS

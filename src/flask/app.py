@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import collections.abc as cabc
+import contextvars
+import copy
 import inspect
 import os
 import sys
@@ -80,6 +82,10 @@ def _make_timedelta(value: timedelta | int | None) -> timedelta | None:
 
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
 
+_cv_subrequest_depth: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "flask.subrequest_depth", default=0
+)
+
 
 # Other methods may call the overridden method with the new ctx arg. Remove it
 # and call the method with the remaining args.
@@ -105,6 +111,56 @@ def add_ctx(f: F) -> F:
         return f(self, *args, **kwargs)
 
     return update_wrapper(wrapper, f)  # type: ignore[return-value]
+
+
+class _SubrequestResponseStream:
+    def __init__(
+        self,
+        response: t.Iterable[str | bytes],
+        context: contextvars.Context,
+        finalize: t.Callable[[BaseException | None], None],
+        error: BaseException | None = None,
+    ) -> None:
+        self._response = response
+        self._iterator = iter(response)
+        self._context = context
+        self._finalize = finalize
+        self._error = error
+        self._closed = False
+        self._completed = False
+
+    def __iter__(self) -> _SubrequestResponseStream:
+        return self
+
+    def __next__(self) -> str | bytes:
+        try:
+            return self._context.run(next, self._iterator)
+        except StopIteration:
+            self._completed = True
+            self.close(self._error)
+            raise
+        except BaseException:
+            self._error = sys.exc_info()[1]
+            self.close(self._error)
+            raise
+
+    def close(self, exc: BaseException | None = None) -> None:
+        if self._closed:
+            return
+
+        self._closed = True
+        if exc is None and self._error is None and not self._completed:
+            exc = GeneratorExit()
+
+        response_close = getattr(self._response, "close", None)
+        try:
+            if response_close is not None:
+                self._context.run(response_close)
+        finally:
+            self._context.run(self._cleanup, exc or self._error)
+
+    def _cleanup(self, exc: BaseException | None) -> None:
+        self._finalize(exc)
 
 
 class Flask(App):
@@ -227,6 +283,7 @@ class Flask(App):
             "MAX_CONTENT_LENGTH": None,
             "MAX_FORM_MEMORY_SIZE": 500_000,
             "MAX_FORM_PARTS": 1_000,
+            "SUBREQUEST_MAX_DEPTH": 5,
             "SEND_FILE_MAX_AGE_DEFAULT": None,
             "TRAP_BAD_REQUEST_ERRORS": None,
             "TRAP_HTTP_EXCEPTIONS": False,
@@ -1565,6 +1622,111 @@ class Flask(App):
             builder.close()
 
         return self.request_context(environ)
+
+    def _copy_session(self, session: t.Any, /) -> t.Any:
+        try:
+            return type(session)(session)
+        except TypeError:
+            copied = copy.copy(session)
+
+            if hasattr(copied, "on_update"):
+                copied.on_update = session.on_update
+
+            return copied
+
+    def subrequest(
+        self,
+        *args: t.Any,
+        inherit_session: bool = True,
+        **kwargs: t.Any,
+    ) -> Response:
+        """Dispatch another request to this application without using network.
+
+        The request goes through the same routing, request callbacks, error
+        handlers, and response callbacks as a WSGI request. It runs with its
+        own request, application data, and session. By default the session is
+        initialized with a copy of the current session, but changes and
+        response cookies only affect the returned response.
+
+        Takes the same arguments as
+        :class:`~werkzeug.test.EnvironBuilder`.
+
+        :param inherit_session: Initialize the subrequest's session with a copy
+            of the current session. Modifications still apply only to the
+            subrequest. Set to ``False`` to start with an empty session.
+
+        .. versionadded:: 3.2
+        """
+        if _cv_subrequest_depth.get() >= self.config["SUBREQUEST_MAX_DEPTH"]:
+            raise RuntimeError("Maximum subrequest nesting depth exceeded.")
+
+        from .testing import EnvironBuilder
+
+        builder = EnvironBuilder(self, *args, **kwargs)
+
+        try:
+            environ = builder.get_environ()
+        finally:
+            builder.close()
+
+        ctx = self.request_context(environ)
+        parent_ctx = _cv_app.get(None)
+
+        if (
+            inherit_session
+            and parent_ctx is not None
+            and parent_ctx.has_request
+            and not self.session_interface.is_null_session(parent_ctx._get_session())
+        ):
+            ctx._session = self._copy_session(parent_ctx._get_session())
+            ctx._session.accessed = False
+            if hasattr(ctx._session, "modified"):
+                ctx._session.modified = False
+
+        def dispatch() -> Response:
+            _cv_subrequest_depth.set(_cv_subrequest_depth.get() + 1)
+
+            def finalize(exc: BaseException | None) -> None:
+                depth = _cv_subrequest_depth.get()
+
+                try:
+                    ctx.pop(exc)
+                finally:
+                    _cv_subrequest_depth.set(max(depth - 1, 0))
+
+            error: BaseException | None = None
+
+            try:
+                try:
+                    ctx.push()
+                    response = self.full_dispatch_request(ctx)
+                except Exception as e:
+                    error = e
+                    response = self.handle_exception(ctx, e)
+                except BaseException as e:
+                    error = e
+                    raise
+            except BaseException:
+                finalize(error)
+                raise
+
+            if not response.is_sequence:
+                stream = _SubrequestResponseStream(
+                    response.response,
+                    subrequest_context,
+                    finalize,
+                    error,
+                )
+                response.response = stream
+                response.close = stream.close  # type: ignore[method-assign]
+                return response
+
+            finalize(error)
+            return response
+
+        subrequest_context = contextvars.copy_context()
+        response = subrequest_context.run(dispatch)
+        return response
 
     def wsgi_app(
         self, environ: WSGIEnvironment, start_response: StartResponse
