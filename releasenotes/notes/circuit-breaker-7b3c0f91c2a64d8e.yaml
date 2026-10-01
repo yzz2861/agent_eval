@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Adds a shareable circuit breaker for synchronous and asynchronous retry
+    calls, including fast rejection while open, bounded half-open probes,
+    injectable clock and initial state, caller-controlled failure predicates,
+    and generation-safe outcome accounting.

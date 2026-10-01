@@ -23,6 +23,7 @@ import tenacity
 from tenacity import (
     AttemptManager,
     BaseRetrying,
+    CircuitBreakerPermit,
     DoAttempt,
     DoSleep,
     RetryCallState,
@@ -33,6 +34,7 @@ from tenacity import (
     before_nothing,
 )
 from tenacity._utils import override
+from tenacity.circuit import _is_cancellation
 
 # Import all built-in retry strategies for easier usage.
 from .retry import (
@@ -93,6 +95,8 @@ class AsyncRetrying(BaseRetrying):
         | None = None,
         name: str | None = None,
         enabled: bool = True,
+        circuit_breaker: tenacity.CircuitBreaker | None = None,
+        failure_predicate: t.Callable[["RetryCallState"], t.Any] | None = None,
     ) -> None:
         super().__init__(
             sleep=sleep,  # type: ignore[arg-type]
@@ -107,6 +111,8 @@ class AsyncRetrying(BaseRetrying):
             retry_error_callback=retry_error_callback,
             name=name,
             enabled=enabled,
+            circuit_breaker=circuit_breaker,
+            failure_predicate=failure_predicate,
         )
 
     @override
@@ -119,26 +125,51 @@ class AsyncRetrying(BaseRetrying):
                 return await fn(*args, **kwargs)  # type: ignore[no-any-return]
             return fn(*args, **kwargs)  # type: ignore[return-value]
 
-        self.begin()
+        permit: CircuitBreakerPermit | None = None
+        if self.circuit_breaker is not None:
+            permit = self.circuit_breaker.acquire()
 
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
-        while True:
-            do = await self.iter(retry_state=retry_state)
-            if isinstance(do, DoAttempt):
-                try:
-                    if is_async:
-                        result = await fn(*args, **kwargs)
+        try:
+            self.begin()
+            while True:
+                do = await self.iter(retry_state=retry_state)
+                if isinstance(do, DoAttempt):
+                    try:
+                        if is_async:
+                            result = await fn(*args, **kwargs)
+                        else:
+                            result = fn(*args, **kwargs)
+                    except BaseException:
+                        retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
                     else:
-                        result = fn(*args, **kwargs)
-                except BaseException:
-                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                        retry_state.set_result(result)
+                elif isinstance(do, DoSleep):
+                    retry_state.prepare_for_next_attempt()
+                    await self.sleep(do)  # type: ignore[misc]
                 else:
-                    retry_state.set_result(result)
-            elif isinstance(do, DoSleep):
-                retry_state.prepare_for_next_attempt()
-                await self.sleep(do)  # type: ignore[misc]
-            else:
-                return do  # type: ignore[no-any-return]
+                    if permit is not None and self.retry_error_callback is not None:
+                        retry_state.set_result(do)
+                        await permit.arecord_retry_state(
+                            retry_state, self.failure_predicate
+                        )
+                    return do  # type: ignore[no-any-return]
+        except BaseException as exc:
+            if permit is not None:
+                if _is_cancellation(exc):
+                    permit.record_cancellation()
+                elif retry_state.outcome is not None:
+                    await permit.arecord_retry_state(
+                        retry_state, self.failure_predicate
+                    )
+                elif not isinstance(exc, Exception):
+                    permit.record_cancellation()
+                else:
+                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    await permit.arecord_retry_state(
+                        retry_state, self.failure_predicate
+                    )
+            raise
 
     @override
     def _add_action_func(self, fn: t.Callable[..., t.Any]) -> None:
@@ -188,6 +219,9 @@ class AsyncRetrying(BaseRetrying):
 
         self.begin()
         self._retry_state = RetryCallState(self, fn=None, args=(), kwargs={})
+        self._circuit_permit: CircuitBreakerPermit | None = None
+        if self.circuit_breaker is not None:
+            self._circuit_permit = self.circuit_breaker.acquire()
         return self
 
     async def __anext__(self) -> AttemptManager:
@@ -200,17 +234,38 @@ class AsyncRetrying(BaseRetrying):
             self._disabled_iter_done = True
             return AttemptManager(retry_state=self._retry_state)
 
-        while True:
-            do = await self.iter(retry_state=self._retry_state)
-            if do is None:
-                raise StopAsyncIteration
-            if isinstance(do, DoAttempt):
-                return AttemptManager(retry_state=self._retry_state)
-            if isinstance(do, DoSleep):
-                self._retry_state.prepare_for_next_attempt()
-                await self.sleep(do)  # type: ignore[misc]
-            else:
-                raise StopAsyncIteration
+        try:
+            while True:
+                do = await self.iter(retry_state=self._retry_state)
+                if do is None:
+                    raise StopAsyncIteration
+                if isinstance(do, DoAttempt):
+                    return AttemptManager(retry_state=self._retry_state)
+                if isinstance(do, DoSleep):
+                    self._retry_state.prepare_for_next_attempt()
+                    await self.sleep(do)  # type: ignore[misc]
+                else:
+                    if (
+                        self._circuit_permit is not None
+                        and self.retry_error_callback is not None
+                    ):
+                        self._retry_state.set_result(do)
+                        await self._circuit_permit.arecord_retry_state(
+                            self._retry_state, self.failure_predicate
+                        )
+                    raise StopAsyncIteration
+        except BaseException as exc:
+            permit = self._circuit_permit
+            if permit is not None and not permit.recorded:
+                if _is_cancellation(exc):
+                    permit.record_cancellation()
+                elif self._retry_state.outcome is not None:
+                    await permit.arecord_retry_state(
+                        self._retry_state, self.failure_predicate
+                    )
+                elif not isinstance(exc, Exception):
+                    permit.record_cancellation()
+            raise
 
     @override
     def wraps(self, fn: t.Callable[P, R]) -> _RetryDecorated[P, R]:

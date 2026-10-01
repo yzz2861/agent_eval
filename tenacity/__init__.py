@@ -36,6 +36,14 @@ from .before import before_log, before_nothing
 
 # Import all built-in before sleep strategies for easier usage.
 from .before_sleep import before_sleep_log, before_sleep_nothing
+from .circuit import (
+    CircuitBreaker,
+    CircuitBreakerError,
+    CircuitBreakerOpenError,
+    CircuitBreakerPermit,
+    CircuitState,
+    _is_cancellation,
+)
 
 # Import all nap strategies for easier usage.
 from .nap import sleep, sleep_using_event
@@ -261,6 +269,8 @@ class BaseRetrying(ABC):
         retry_error_callback: t.Callable[["RetryCallState"], t.Any] | None = None,
         name: str | None = None,
         enabled: bool = True,
+        circuit_breaker: CircuitBreaker | None = None,
+        failure_predicate: t.Callable[["RetryCallState"], t.Any] | None = None,
     ) -> None:
         self.sleep = sleep
         self.stop = stop
@@ -275,6 +285,8 @@ class BaseRetrying(ABC):
         self.retry_error_callback = retry_error_callback
         self._name = name
         self.enabled = enabled
+        self.circuit_breaker = circuit_breaker
+        self.failure_predicate = failure_predicate
 
     def copy(
         self,
@@ -290,8 +302,12 @@ class BaseRetrying(ABC):
         retry_error_callback: t.Callable[["RetryCallState"], t.Any]
         | object
         | None = _unset,
+        failure_predicate: t.Callable[["RetryCallState"], t.Any]
+        | object
+        | None = _unset,
         name: str | object | None = _unset,
         enabled: bool | object = _unset,
+        circuit_breaker: CircuitBreaker | None | object = _unset,
     ) -> "Self":
         """Copy this object with some parameters changed if needed."""
         return self.__class__(
@@ -307,8 +323,10 @@ class BaseRetrying(ABC):
             retry_error_callback=_first_set(
                 retry_error_callback, self.retry_error_callback
             ),
+            failure_predicate=_first_set(failure_predicate, self.failure_predicate),
             name=_first_set(name, self._name),
             enabled=_first_set(enabled, self.enabled),
+            circuit_breaker=_first_set(circuit_breaker, self.circuit_breaker),
         )
 
     # No @override: object.__getstate__ only exists from Python 3.11 on.
@@ -505,18 +523,37 @@ class BaseRetrying(ABC):
                 raise retry_state.outcome.exception()  # type: ignore[misc]
             return
 
-        self.begin()
+        permit: CircuitBreakerPermit | None = None
+        if self.circuit_breaker is not None:
+            permit = self.circuit_breaker.acquire()
 
         retry_state = RetryCallState(self, fn=None, args=(), kwargs={})
-        while True:
-            do = self.iter(retry_state=retry_state)
-            if isinstance(do, DoAttempt):
-                yield AttemptManager(retry_state=retry_state)
-            elif isinstance(do, DoSleep):
-                retry_state.prepare_for_next_attempt()
-                self.sleep(do)
-            else:
-                break
+        try:
+            self.begin()
+            while True:
+                do = self.iter(retry_state=retry_state)
+                if isinstance(do, DoAttempt):
+                    yield AttemptManager(retry_state=retry_state)
+                elif isinstance(do, DoSleep):
+                    retry_state.prepare_for_next_attempt()
+                    self.sleep(do)
+                else:
+                    if permit is not None and self.retry_error_callback is not None:
+                        retry_state.set_result(do)
+                        permit.record_retry_state(retry_state, self.failure_predicate)
+                    break
+        except BaseException as exc:
+            if permit is not None:
+                if _is_cancellation(exc):
+                    permit.record_cancellation()
+                elif retry_state.outcome is not None:
+                    permit.record_retry_state(retry_state, self.failure_predicate)
+                elif not isinstance(exc, Exception):
+                    permit.record_cancellation()
+                else:
+                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    permit.record_retry_state(retry_state, self.failure_predicate)
+            raise
 
     @abstractmethod
     def __call__(
@@ -541,23 +578,42 @@ class Retrying(BaseRetrying):
         if not self.enabled:
             return fn(*args, **kwargs)
 
-        self.begin()
+        permit: CircuitBreakerPermit | None = None
+        if self.circuit_breaker is not None:
+            permit = self.circuit_breaker.acquire()
 
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
-        while True:
-            do = self.iter(retry_state=retry_state)
-            if isinstance(do, DoAttempt):
-                try:
-                    result = fn(*args, **kwargs)
-                except BaseException:
-                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+        try:
+            self.begin()
+            while True:
+                do = self.iter(retry_state=retry_state)
+                if isinstance(do, DoAttempt):
+                    try:
+                        result = fn(*args, **kwargs)
+                    except BaseException:
+                        retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    else:
+                        retry_state.set_result(result)
+                elif isinstance(do, DoSleep):
+                    retry_state.prepare_for_next_attempt()
+                    self.sleep(do)
                 else:
-                    retry_state.set_result(result)
-            elif isinstance(do, DoSleep):
-                retry_state.prepare_for_next_attempt()
-                self.sleep(do)
-            else:
-                return do  # type: ignore[no-any-return]
+                    if permit is not None and self.retry_error_callback is not None:
+                        retry_state.set_result(do)
+                        permit.record_retry_state(retry_state, self.failure_predicate)
+                    return do  # type: ignore[no-any-return]
+        except BaseException as exc:
+            if permit is not None:
+                if _is_cancellation(exc):
+                    permit.record_cancellation()
+                elif retry_state.outcome is not None:
+                    permit.record_retry_state(retry_state, self.failure_predicate)
+                elif not isinstance(exc, Exception):
+                    permit.record_cancellation()
+                else:
+                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    permit.record_retry_state(retry_state, self.failure_predicate)
+            raise
 
 
 class Future(futures.Future[t.Any]):
@@ -747,6 +803,8 @@ def retry(
     retry_error_callback: t.Callable[["RetryCallState"], t.Any | t.Awaitable[t.Any]]
     | None = ...,
     enabled: bool = ...,
+    circuit_breaker: CircuitBreaker | None = ...,
+    failure_predicate: t.Callable[["RetryCallState"], t.Any] | None = ...,
 ) -> _AsyncRetryDecorator: ...
 
 
@@ -765,6 +823,8 @@ def retry(
     retry_error_callback: t.Callable[["RetryCallState"], t.Any | t.Awaitable[t.Any]]
     | None = None,
     enabled: bool = True,
+    circuit_breaker: CircuitBreaker | None = None,
+    failure_predicate: t.Callable[["RetryCallState"], t.Any] | None = None,
 ) -> t.Callable[[t.Callable[P, R]], _RetryDecorated[P, R]]: ...
 
 
@@ -817,6 +877,11 @@ __all__ = [
     "AttemptManager",
     "BaseAction",
     "BaseRetrying",
+    "CircuitBreaker",
+    "CircuitBreakerError",
+    "CircuitBreakerOpenError",
+    "CircuitBreakerPermit",
+    "CircuitState",
     "DoAttempt",
     "DoSleep",
     "Future",

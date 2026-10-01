@@ -17,8 +17,15 @@ import typing
 
 from tornado import gen
 
-from tenacity import BaseRetrying, DoAttempt, DoSleep, RetryCallState
+from tenacity import (
+    BaseRetrying,
+    CircuitBreakerPermit,
+    DoAttempt,
+    DoSleep,
+    RetryCallState,
+)
 from tenacity._utils import override
+from tenacity.circuit import _is_cancellation
 
 if typing.TYPE_CHECKING:
     from tornado.concurrent import Future
@@ -45,20 +52,39 @@ class TornadoRetrying(BaseRetrying):
         *args: typing.Any,
         **kwargs: typing.Any,
     ) -> "typing.Generator[typing.Any, typing.Any, _RetValT]":
-        self.begin()
+        permit: CircuitBreakerPermit | None = None
+        if self.circuit_breaker is not None:
+            permit = self.circuit_breaker.acquire()
 
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
-        while True:
-            do = self.iter(retry_state=retry_state)
-            if isinstance(do, DoAttempt):
-                try:
-                    result = yield fn(*args, **kwargs)
-                except BaseException:
-                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+        try:
+            self.begin()
+            while True:
+                do = self.iter(retry_state=retry_state)
+                if isinstance(do, DoAttempt):
+                    try:
+                        result = yield fn(*args, **kwargs)
+                    except BaseException:
+                        retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    else:
+                        retry_state.set_result(result)
+                elif isinstance(do, DoSleep):
+                    retry_state.prepare_for_next_attempt()
+                    yield self.sleep(do)
                 else:
-                    retry_state.set_result(result)
-            elif isinstance(do, DoSleep):
-                retry_state.prepare_for_next_attempt()
-                yield self.sleep(do)
-            else:
-                raise gen.Return(do)
+                    if permit is not None and self.retry_error_callback is not None:
+                        retry_state.set_result(do)
+                        permit.record_retry_state(retry_state, self.failure_predicate)
+                    raise gen.Return(do)
+        except BaseException as exc:
+            if permit is not None:
+                if _is_cancellation(exc):
+                    permit.record_cancellation()
+                elif retry_state.outcome is not None:
+                    permit.record_retry_state(retry_state, self.failure_predicate)
+                elif not isinstance(exc, Exception):
+                    permit.record_cancellation()
+                else:
+                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                    permit.record_retry_state(retry_state, self.failure_predicate)
+            raise

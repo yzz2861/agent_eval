@@ -64,6 +64,7 @@ Features
 - Customize retrying on expected returned result
 - Retry on coroutines
 - Retry code block with context manager
+- Share a circuit breaker across sync and async calls
 
 
 Installation

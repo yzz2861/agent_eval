@@ -20,6 +20,12 @@ Retry Main API
 .. autoclass:: tenacity.RetryCallState
    :members:
 
+Circuit Breaker
+---------------
+
+.. automodule:: tenacity.circuit
+   :members:
+
 After Functions
 ---------------
 
