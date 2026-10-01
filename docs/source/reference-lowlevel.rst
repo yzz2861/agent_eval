@@ -56,6 +56,36 @@ Global statistics
 .. autoclass:: RunStatistics()
 
 
+Wait relationship diagnostics
+-----------------------------
+
+Wait relationship tracking is opt-in. While the context manager is active,
+Trio records the resource associated with each task when it blocks. The
+snapshot does not inspect stack frames or local variables; unrecognized waits
+are reported as unknown resources.
+
+Only wait chains with complete lock-owner evidence are reported as certain
+cycles. Memory channel waits and capacity waits never imply a cycle by
+themselves.
+
+.. autofunction:: wait_diagnostics
+
+.. autoclass:: WaitDiagnostics()
+   :members: snapshot
+
+.. autoclass:: WaitDiagnosticsSnapshot()
+
+.. autoclass:: WaitTaskSnapshot()
+
+.. autoclass:: WaitResourceSnapshot()
+
+.. autoclass:: WaitEdgeSnapshot()
+
+.. autoclass:: WaitCycleSnapshot()
+
+.. autoclass:: BorrowerSnapshot()
+
+
 .. _trio_contexts:
 
 Checking for Trio
@@ -616,6 +646,8 @@ Task API
 
    Its public members are mostly useful for introspection and
    debugging:
+
+   .. autoattribute:: id
 
    .. attribute:: name
 

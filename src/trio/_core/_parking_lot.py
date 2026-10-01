@@ -81,11 +81,13 @@ import outcome
 
 from .. import _core
 from .._util import final
+from . import _wait_diagnostics
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from ._run import Task
+    from ._wait_diagnostics import WaitInfo
 
 
 GLOBAL_PARKING_LOT_BREAKER: dict[Task, list[ParkingLot]] = {}
@@ -166,7 +168,7 @@ class ParkingLot:
     # line (for false wakeups), then we could have it return a ticket that
     # abstracts the "place in line" concept.
     @_core.enable_ki_protection
-    async def park(self) -> None:
+    async def park(self, *, wait_info: WaitInfo | None = None) -> None:
         """Park the current task until woken by a call to :meth:`unpark` or
         :meth:`unpark_all`.
 
@@ -187,7 +189,7 @@ class ParkingLot:
             del task.custom_sleep_data._parked[task]
             return _core.Abort.SUCCEEDED
 
-        await _core.wait_task_rescheduled(abort_fn)
+        await _core.wait_task_rescheduled(abort_fn, wait_info=wait_info)
 
     def _pop_several(self, count: int | float) -> Iterator[Task]:  # noqa: PYI041
         if isinstance(count, float):
@@ -228,6 +230,7 @@ class ParkingLot:
         new_lot: ParkingLot,
         *,
         count: int | float = 1,  # noqa: PYI041
+        wait_info: WaitInfo | None = None,
     ) -> None:
         """Move parked tasks from one :class:`ParkingLot` object to another.
 
@@ -266,15 +269,23 @@ class ParkingLot:
         for task in self._pop_several(count):
             new_lot._parked[task] = None
             task.custom_sleep_data = new_lot
+            diagnostics = _wait_diagnostics.current_wait_diagnostics()
+            if diagnostics is not None and task in diagnostics.waits:
+                diagnostics.add_wait(task, wait_info)
 
-    def repark_all(self, new_lot: ParkingLot) -> None:
+    def repark_all(
+        self,
+        new_lot: ParkingLot,
+        *,
+        wait_info: WaitInfo | None = None,
+    ) -> None:
         """Move all parked tasks from one :class:`ParkingLot` object to
         another.
 
         See :meth:`repark` for details.
 
         """
-        return self.repark(new_lot, count=len(self))
+        return self.repark(new_lot, count=len(self), wait_info=wait_info)
 
     def break_lot(self, task: Task | None = None) -> None:
         """Break this lot, with ``task`` noted as the task that broke it.

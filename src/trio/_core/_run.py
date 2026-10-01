@@ -56,6 +56,7 @@ from ._traps import (
     cancel_shielded_checkpoint,
     wait_task_rescheduled,
 )
+from ._wait_diagnostics import WaitDiagnostics
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup
@@ -1524,6 +1525,11 @@ class Task(metaclass=NoPublicConstructor):  # type: ignore[explicit-any]
         return f"<Task {self.name!r} at {id(self):#x}>"
 
     @property
+    def id(self) -> int:
+        """A stable integer identifier for this task for the run's lifetime."""
+        return self._counter
+
+    @property
     def parent_nursery(self) -> Nursery | None:
         """The nursery this task is inside (or None if this is the "init"
         task).
@@ -1814,6 +1820,11 @@ class Runner:  # type: ignore[explicit-any]
     # Guest mode stuff
     is_guest: bool = False
     guest_tick_scheduled: bool = False
+    _wait_diagnostics: WaitDiagnostics | None = attrs.field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def force_guest_tick_asap(self) -> None:
         if self.guest_tick_scheduled:
@@ -1920,6 +1931,8 @@ class Runner:  # type: ignore[explicit-any]
 
         assert task._runner is self
         assert task._next_send_fn is None
+        if self._wait_diagnostics is not None:
+            self._wait_diagnostics.remove_wait(task)
         task._next_send_fn = task.coro.send
         task._next_send = next_send
         task._abort_func = None
@@ -2009,6 +2022,8 @@ class Runner:  # type: ignore[explicit-any]
         return task
 
     def task_exited(self, task: Task, outcome: Outcome[object]) -> None:
+        if self._wait_diagnostics is not None:
+            self._wait_diagnostics.remove_wait(task)
         if task._child_nurseries:
             for nursery in task._child_nurseries:
                 nursery.cancel_scope._cancel(
@@ -2897,6 +2912,8 @@ def unrolled_run(
                         runner.reschedule(task)
                     elif type(msg) is WaitTaskRescheduled:
                         task._cancel_points += 1
+                        if runner._wait_diagnostics is not None:
+                            runner._wait_diagnostics.add_wait(task, msg.wait_info)
                         task._abort_func = msg.abort_func
                         # KI is "outside" all cancel scopes, so check for it
                         # before checking for regular cancellation:

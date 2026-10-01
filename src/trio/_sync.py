@@ -350,7 +350,9 @@ class CapacityLimiter(AsyncContextManagerMixin):
             task = trio.lowlevel.current_task()
             self._pending_borrowers[task] = borrower
             try:
-                await self._lot.park()
+                await self._lot.park(
+                    wait_info=_core.CapacityLimiterWait(self),
+                )
             except trio.Cancelled:
                 self._pending_borrowers.pop(task)
                 raise
@@ -608,7 +610,7 @@ class _LockImpl(AsyncContextManagerMixin):
                 # NOTE: it's important that the contended acquire path is just
                 # "_lot.park()", because that's how Condition.wait() acquires the
                 # lock as well.
-                await self._lot.park()
+                await self._lot.park(wait_info=_core.LockWait(self))
             except trio.BrokenResourceError:
                 raise trio.BrokenResourceError(
                     f"Owner of this lock exited without releasing: {self._owner}",
@@ -852,7 +854,11 @@ class Condition(AsyncContextManagerMixin):
         """
         if trio.lowlevel.current_task() is not self._lock._owner:
             raise RuntimeError("must hold the lock to notify")
-        self._lot.repark(self._lock._lot, count=n)
+        self._lot.repark(
+            self._lock._lot,
+            count=n,
+            wait_info=_core.LockWait(self._lock),
+        )
 
     def notify_all(self) -> None:
         """Wake all tasks that are currently blocked in :meth:`wait`.
@@ -863,7 +869,10 @@ class Condition(AsyncContextManagerMixin):
         """
         if trio.lowlevel.current_task() is not self._lock._owner:
             raise RuntimeError("must hold the lock to notify")
-        self._lot.repark_all(self._lock._lot)
+        self._lot.repark_all(
+            self._lock._lot,
+            wait_info=_core.LockWait(self._lock),
+        )
 
     def statistics(self) -> ConditionStatistics:
         r"""Return an object containing debugging information.

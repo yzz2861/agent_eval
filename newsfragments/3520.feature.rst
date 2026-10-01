@@ -1,0 +1,1 @@
+Added opt-in trio.lowlevel.wait_diagnostics for structured snapshots of task waits, resource ownership, and confirmed lock cycles.

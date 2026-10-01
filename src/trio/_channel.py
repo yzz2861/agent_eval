@@ -17,7 +17,14 @@ from outcome import Error, Value
 import trio
 
 from ._abc import ReceiveChannel, ReceiveType, SendChannel, SendType, T
-from ._core import Abort, BrokenResourceError, RaiseCancelT, Task, enable_ki_protection
+from ._core import (
+    Abort,
+    BrokenResourceError,
+    MemoryChannelWait,
+    RaiseCancelT,
+    Task,
+    enable_ki_protection,
+)
 from ._util import (
     MultipleExceptionError,
     NoPublicConstructor,
@@ -253,7 +260,10 @@ class MemorySendChannel(SendChannel[SendType], metaclass=NoPublicConstructor):
             del self._state.send_tasks[task]
             return trio.lowlevel.Abort.SUCCEEDED
 
-        await trio.lowlevel.wait_task_rescheduled(abort_fn)
+        await trio.lowlevel.wait_task_rescheduled(
+            abort_fn,
+            wait_info=MemoryChannelWait(self._state, "channel_send"),
+        )
 
     # Return type must be stringified or use a TypeVar
     @enable_ki_protection
@@ -409,7 +419,10 @@ class MemoryReceiveChannel(ReceiveChannel[ReceiveType], metaclass=NoPublicConstr
 
         # Not strictly guaranteed to return ReceiveType, but will do so unless
         # you intentionally reschedule with a bad value.
-        return await trio.lowlevel.wait_task_rescheduled(abort_fn)  # type: ignore[no-any-return]
+        return await trio.lowlevel.wait_task_rescheduled(  # type: ignore[no-any-return]
+            abort_fn,
+            wait_info=MemoryChannelWait(self._state, "channel_receive"),
+        )
 
     @enable_ki_protection
     def clone(self) -> MemoryReceiveChannel[ReceiveType]:

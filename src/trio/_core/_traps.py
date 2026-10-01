@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Generator
 
     from ._run import Task
+    from ._wait_diagnostics import WaitInfo
 
 RaiseCancelT: TypeAlias = Callable[[], NoReturn]
 
@@ -39,6 +40,7 @@ class CancelShieldedCheckpoint:
 @attrs.frozen(slots=False)
 class WaitTaskRescheduled:
     abort_func: Callable[[RaiseCancelT], Abort]
+    wait_info: WaitInfo | None = None
 
 
 # Not exported in the trio._core namespace, but imported directly by _run.
@@ -114,6 +116,8 @@ class Abort(enum.Enum):
 # with a bad value.
 async def wait_task_rescheduled(  # type: ignore[explicit-any]
     abort_func: Callable[[RaiseCancelT], Abort],
+    *,
+    wait_info: WaitInfo | None = None,
 ) -> Any:
     """Put the current task to sleep, with cancellation support.
 
@@ -213,7 +217,7 @@ async def wait_task_rescheduled(  # type: ignore[explicit-any]
        above about how you should use a higher-level API if at all possible?
 
     """
-    return (await _async_yield(WaitTaskRescheduled(abort_func))).unwrap()
+    return (await _async_yield(WaitTaskRescheduled(abort_func, wait_info))).unwrap()
 
 
 async def permanently_detach_coroutine_object(
