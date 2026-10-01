@@ -5,6 +5,10 @@ This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
 
 **UNRELEASED**
 
+- Added the ``RWLock`` reader-writer lock, allowing multiple concurrent readers or a
+  single exclusive writer on both asyncio and Trio, with writer-preferring fairness,
+  cancellation-safe ownership transfer, reentrant-use and upgrade/downgrade detection,
+  and ``statistics()``
 - Fixed ``sleep()`` treating a negative delay (including ``-inf``) inconsistently
   across backends (asyncio returned immediately; Trio raised ``ValueError``) by
   raising ``ValueError`` on all backends

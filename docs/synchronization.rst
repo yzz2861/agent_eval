@@ -127,6 +127,36 @@ Example::
    to the task never yielding control back to to the event loop if use the lock in a
    loop that does not have other yield points.
 
+Read-write locks
+^^^^^^^^^^^^^^^^
+
+Read-write locks (:class:`RWLock`) allow multiple tasks to hold the lock for reading
+at the same time, while only one task at a time can hold it for writing. Use the
+:attr:`~RWLock.reader` and :attr:`~RWLock.writer` asynchronous context managers to
+guard read-only and mutating sections, respectively::
+
+    from anyio import RWLock, create_task_group, run
+
+    index = {}
+    rwlock = RWLock()
+
+    async def query(key):
+        async with rwlock.reader:
+            return index.get(key)
+
+    async def update(key, value):
+        async with rwlock.writer:
+            index[key] = value
+
+Once a writer starts waiting, readers arriving afterwards wait in line so that the
+writer cannot be starved by a continuous stream of readers. If the waiting writer
+cancels, the readers queued ahead of it are woken up together. When the last active
+reader leaves, exactly one waiting writer is admitted.
+
+The lock is not reentrant, and upgrading a read lock to a write lock (or downgrading
+a write lock to a read lock) is not supported; these misuse patterns raise
+:class:`RuntimeError` immediately instead of deadlocking.
+
 Conditions
 ----------
 

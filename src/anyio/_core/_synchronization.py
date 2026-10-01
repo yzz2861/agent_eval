@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import TypeVar
 
-from ..lowlevel import checkpoint_if_cancelled
+from ..lowlevel import cancel_shielded_checkpoint, checkpoint_if_cancelled
 from ._eventloop import get_async_backend
-from ._exceptions import BusyResourceError, NoEventLoopError
+from ._exceptions import BusyResourceError, NoEventLoopError, WouldBlock
 from ._tasks import CancelScope
 from ._testing import TaskInfo, get_current_task
 
@@ -83,6 +83,25 @@ class SemaphoreStatistics:
     """
 
     tasks_waiting: int
+
+
+@dataclass(frozen=True)
+class RWLockStatistics:
+    """
+    :ivar tuple reader_owners: tasks currently holding the lock for reading
+    :ivar ~anyio.TaskInfo writer_owner: task currently holding the lock for writing
+        (or ``None`` if the lock is not held for writing)
+    :ivar int tasks_waiting_to_read: number of tasks waiting on
+        :meth:`~.RWLock.acquire_read`
+    :ivar int tasks_waiting_to_write: number of tasks waiting on
+        :meth:`~.RWLock.acquire_write`
+
+    """
+
+    reader_owners: tuple[TaskInfo, ...]
+    writer_owner: TaskInfo | None
+    tasks_waiting_to_read: int
+    tasks_waiting_to_write: int
 
 
 class Event:
@@ -380,6 +399,268 @@ class Condition:
         .. versionadded:: 3.0
         """
         return ConditionStatistics(len(self._waiters), self._lock.statistics())
+
+
+class RWLockSide:
+    """
+    A reusable asynchronous context manager for one side of a :class:`RWLock`.
+
+    Instances are returned by :attr:`RWLock.reader` and :attr:`RWLock.writer`.
+
+    .. versionadded:: 4.16
+
+    """
+
+    __slots__ = "_lock", "_write"
+
+    def __init__(self, lock: RWLock, write: bool) -> None:
+        self._lock = lock
+        self._write = write
+
+    async def __aenter__(self) -> None:
+        if self._write:
+            await self._lock.acquire_write()
+        else:
+            await self._lock.acquire_read()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if self._write:
+            self._lock.release_write()
+        else:
+            self._lock.release_read()
+
+
+class RWLock:
+    """
+    A reader-writer lock.
+
+    Multiple tasks can hold the lock for reading concurrently, but only one task at a
+    time can hold it for writing, and no readers are admitted while a writer holds the
+    lock.
+
+    Once a writer has started waiting, readers arriving afterwards cannot keep
+    acquiring the lock ahead of it. Readers that are already waiting are woken up in a
+    batch when the writer ahead of them cancels or otherwise gives up, and when the
+    last active reader leaves, exactly one waiting writer is admitted.
+
+    The lock is not reentrant and does not support upgrading a read lock to a write
+    lock (or vice versa). Attempting any of these, or releasing a side of the lock that
+    the current task is not holding, raises :class:`RuntimeError` immediately.
+
+    .. versionadded:: 4.16
+
+    """
+
+    __slots__ = (
+        "__weakref__",
+        "_reader_owners",
+        "_reader_side",
+        "_waiters",
+        "_writer_owner",
+        "_writer_side",
+    )
+
+    def __init__(self) -> None:
+        self._reader_owners: set[TaskInfo] = set()
+        self._writer_owner: TaskInfo | None = None
+        self._waiters: deque[tuple[bool, TaskInfo, Event]] = deque()
+        self._reader_side = RWLockSide(self, write=False)
+        self._writer_side = RWLockSide(self, write=True)
+
+    @property
+    def reader(self) -> RWLockSide:
+        """An asynchronous context manager that acquires/release the read lock."""
+        return self._reader_side
+
+    @property
+    def writer(self) -> RWLockSide:
+        """An asynchronous context manager that acquires/release the write lock."""
+        return self._writer_side
+
+    def _writer_waiting(self) -> bool:
+        return any(write for write, task, event in self._waiters if not event.is_set())
+
+    def _grant(self) -> None:
+        """Grant ownership to as many waiters as fairness allows (internal lock held)."""
+        while self._waiters:
+            write, task, event = self._waiters[0]
+            if write:
+                if self._writer_owner is not None or self._reader_owners:
+                    break
+
+                self._waiters.popleft()
+                self._writer_owner = task
+            else:
+                # Readers at the head of the queue are admitted together. A writer at
+                # the head is handled by the branch above; writers further back do not
+                # block readers that arrived before them.
+                if self._writer_owner is not None:
+                    break
+
+                self._waiters.popleft()
+                self._reader_owners.add(task)
+
+            event.set()
+
+    def _abort_waiter(self, write: bool, event: Event) -> None:
+        task = get_current_task()
+        if event.is_set():
+            # Ownership was granted concurrently with the cancellation. It must not be
+            # lost, so release it as if the lock had been acquired and released.
+            if write:
+                self._writer_owner = None
+            else:
+                self._reader_owners.discard(task)
+
+            self._grant()
+        else:
+            self._waiters.remove((write, task, event))
+
+            # Removing a writer from the head of the queue may admit the readers
+            # behind it in a batch.
+            if write:
+                self._grant()
+
+    def _check_read_acquire(self, task: TaskInfo) -> None:
+        if self._writer_owner == task:
+            raise RuntimeError(
+                "Attempted to acquire the read lock while already holding the write "
+                "lock; RWLock does not support downgrading"
+            )
+        if task in self._reader_owners:
+            raise RuntimeError("Attempted to acquire an already held read lock")
+
+    def _check_write_acquire(self, task: TaskInfo) -> None:
+        if self._writer_owner == task:
+            raise RuntimeError("Attempted to acquire an already held write lock")
+        if task in self._reader_owners:
+            raise RuntimeError(
+                "Attempted to acquire the write lock while already holding the read "
+                "lock; RWLock does not support upgrading"
+            )
+
+    async def acquire_read(self) -> None:
+        """Acquire the read lock, blocking if necessary."""
+        task = get_current_task()
+        self._check_read_acquire(task)
+        if self._writer_owner is None and not self._writer_waiting():
+            await checkpoint_if_cancelled()
+            self._reader_owners.add(task)
+            try:
+                await cancel_shielded_checkpoint()
+            except BaseException:
+                self._reader_owners.discard(task)
+                raise
+
+            return
+
+        event = Event()
+        item = (False, task, event)
+        self._waiters.append(item)
+        try:
+            await event.wait()
+        except BaseException:
+            self._abort_waiter(False, event)
+            raise
+
+    async def acquire_write(self) -> None:
+        """Acquire the write lock, blocking if necessary."""
+        task = get_current_task()
+        self._check_write_acquire(task)
+        if self._writer_owner is None and not self._reader_owners and not self._waiters:
+            await checkpoint_if_cancelled()
+            self._writer_owner = task
+            try:
+                await cancel_shielded_checkpoint()
+            except BaseException:
+                self._writer_owner = None
+                raise
+
+            return
+
+        event = Event()
+        item = (True, task, event)
+        self._waiters.append(item)
+        try:
+            await event.wait()
+        except BaseException:
+            self._abort_waiter(True, event)
+            raise
+
+    def acquire_read_nowait(self) -> None:
+        """
+        Acquire the read lock, without blocking.
+
+        :raises ~anyio.WouldBlock: if the operation would block
+
+        """
+        task = get_current_task()
+        self._check_read_acquire(task)
+        if self._writer_owner is not None or self._writer_waiting():
+            raise WouldBlock
+
+        self._reader_owners.add(task)
+
+    def acquire_write_nowait(self) -> None:
+        """
+        Acquire the write lock, without blocking.
+
+        :raises ~anyio.WouldBlock: if the operation would block
+
+        """
+        task = get_current_task()
+        self._check_write_acquire(task)
+        if self._writer_owner is not None or self._reader_owners or self._waiters:
+            raise WouldBlock
+
+        self._writer_owner = task
+
+    def release_read(self) -> None:
+        """Release the read lock held by the current task."""
+        task = get_current_task()
+        if task not in self._reader_owners:
+            raise RuntimeError("The current task is not holding the read lock")
+
+        self._reader_owners.remove(task)
+        if not self._reader_owners:
+            self._grant()
+
+    def release_write(self) -> None:
+        """Release the write lock held by the current task."""
+        if self._writer_owner != get_current_task():
+            raise RuntimeError("The current task is not holding the write lock")
+
+        self._writer_owner = None
+        self._grant()
+
+    def locked(self) -> bool:
+        """Return ``True`` if the lock is currently held for reading or writing."""
+        return self._writer_owner is not None or bool(self._reader_owners)
+
+    def statistics(self) -> RWLockStatistics:
+        """Return statistics about the current state of this lock."""
+        tasks_waiting_to_read = 0
+        tasks_waiting_to_write = 0
+        for write, _task, event in self._waiters:
+            if event.is_set():
+                continue
+
+            if write:
+                tasks_waiting_to_write += 1
+            else:
+                tasks_waiting_to_read += 1
+
+        return RWLockStatistics(
+            tuple(self._reader_owners),
+            self._writer_owner,
+            tasks_waiting_to_read,
+            tasks_waiting_to_write,
+        )
 
 
 class Semaphore:
