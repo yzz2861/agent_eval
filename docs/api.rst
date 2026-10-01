@@ -73,8 +73,9 @@ To access the current session you can use the :data:`.session` proxy.
     This is a proxy. See :ref:`context-visibility` for more information.
 
     The session object works like a dict but tracks assignment and access to its
-    keys. It cannot track modifications to mutable values, you need to set
-    :attr:`~.SessionMixin.modified` manually when modifying a list, dict, etc.
+    keys. By default, it does not track modifications to mutable values; set
+    :attr:`~.SessionMixin.modified` manually when modifying a nested list, dict, etc. Pass
+    ``track_modifications=True`` when instantiating :class:`~.sessions.SecureCookieSession` to track those nested changes.
 
     .. code-block:: python
 

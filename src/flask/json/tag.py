@@ -46,6 +46,7 @@ from __future__ import annotations
 import typing as t
 from base64 import b64decode
 from base64 import b64encode
+from contextvars import ContextVar
 from datetime import datetime
 from uuid import UUID
 
@@ -55,6 +56,8 @@ from werkzeug.http import parse_date
 
 from ..json import dumps
 from ..json import loads
+
+_tag_seen: ContextVar[frozenset[int] | None] = ContextVar("_tag_seen", default=None)
 
 
 class JSONTag:
@@ -109,7 +112,9 @@ class TagDict(JSONTag):
 
     def to_json(self, value: t.Any) -> t.Any:
         key = next(iter(value))
-        return {f"{key}__": self.serializer.tag(value[key])}
+        return {
+            f"{key}__": self.serializer._tag(value[key], _tag_seen.get() or frozenset())
+        }
 
     def to_python(self, value: t.Any) -> t.Any:
         key = next(iter(value))
@@ -125,7 +130,10 @@ class PassDict(JSONTag):
     def to_json(self, value: t.Any) -> t.Any:
         # JSON objects may only have string keys, so don't bother tagging the
         # key here.
-        return {k: self.serializer.tag(v) for k, v in value.items()}
+        return {
+            k: self.serializer._tag(v, _tag_seen.get() or frozenset())
+            for k, v in value.items()
+        }
 
     tag = to_json
 
@@ -138,7 +146,9 @@ class TagTuple(JSONTag):
         return isinstance(value, tuple)
 
     def to_json(self, value: t.Any) -> t.Any:
-        return [self.serializer.tag(item) for item in value]
+        return [
+            self.serializer._tag(item, _tag_seen.get() or frozenset()) for item in value
+        ]
 
     def to_python(self, value: t.Any) -> t.Any:
         return tuple(value)
@@ -151,7 +161,9 @@ class PassList(JSONTag):
         return isinstance(value, list)
 
     def to_json(self, value: t.Any) -> t.Any:
-        return [self.serializer.tag(item) for item in value]
+        return [
+            self.serializer._tag(item, _tag_seen.get() or frozenset()) for item in value
+        ]
 
     tag = to_json
 
@@ -288,11 +300,37 @@ class TaggedJSONSerializer:
 
     def tag(self, value: t.Any) -> t.Any:
         """Convert a value to a tagged representation if necessary."""
-        for tag in self.order:
-            if tag.check(value):
-                return tag.tag(value)
+        seen = _tag_seen.get()
 
-        return value
+        if seen is not None:
+            return self._tag(value, seen)
+
+        token = _tag_seen.set(frozenset())
+
+        try:
+            return self._tag(value, frozenset())
+        finally:
+            _tag_seen.reset(token)
+
+    def _tag(self, value: t.Any, seen: frozenset[int]) -> t.Any:
+        if isinstance(value, (dict, list)):
+            value_id = id(value)
+
+            if value_id in seen:
+                raise ValueError("Circular reference detected")
+
+            seen = seen | {value_id}
+
+        token = _tag_seen.set(seen)
+
+        try:
+            for tag in self.order:
+                if tag.check(value):
+                    return tag.tag(value)
+
+            return value
+        finally:
+            _tag_seen.reset(token)
 
     def untag(self, value: dict[str, t.Any]) -> t.Any:
         """Convert a tagged representation back to the original type."""
