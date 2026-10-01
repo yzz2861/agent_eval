@@ -41,6 +41,14 @@ class Operation:
     def describe(self) -> str:
         return self.__class__.__name__
 
+    def signature(self) -> tuple[Any, ...]:
+        values = {
+            key: value
+            for key, value in vars(self).items()
+            if not callable(value) and not isinstance(value, type) and not key.startswith("_")
+        }
+        return (type(self).__module__, type(self).__qualname__, repr(values))
+
     async def run(
         self,
         app_label: str,
@@ -1139,6 +1147,70 @@ class RunPython(TortoiseOperation):
     @staticmethod
     def noop(apps: StateApps, schema_editor: BaseSchemaEditor) -> None:
         return None
+
+
+class RunPythonBatched(TortoiseOperation):
+    """Run resumable data work in independently committed batches."""
+
+    reduces_to_sql = False
+    reversible = False
+    atomic = False
+
+    def __init__(
+        self,
+        code,
+        initial_cursor: Any = None,
+        *,
+        lock_timeout: float = 300.0,
+    ) -> None:
+        if not callable(code):
+            raise ValueError("RunPythonBatched must be supplied with a callable")
+        if lock_timeout <= 0:
+            raise ValueError("lock_timeout must be greater than zero")
+        self.code = code
+        self.initial_cursor = initial_cursor
+        self.lock_timeout = lock_timeout
+
+    def describe(self) -> str:
+        return "Run resumable batched Python code"
+
+    def signature(self) -> tuple[Any, ...]:
+        try:
+            source = inspect.getsource(self.code)
+        except (OSError, TypeError):
+            source = repr(self.code)
+        return (
+            type(self).__module__,
+            type(self).__qualname__,
+            getattr(self.code, "__module__", None),
+            getattr(self.code, "__qualname__", getattr(self.code, "__name__", None)),
+            source,
+            repr(self.initial_cursor),
+            self.lock_timeout,
+        )
+
+    async def database_forward(
+        self,
+        app_label: str,
+        old_state: State,
+        new_state: State,
+        state_editor: BaseSchemaEditor | None = None,
+    ) -> None:
+        if not state_editor:
+            return
+        context = getattr(state_editor, "migration_context", None)
+        if context is None:
+            raise RuntimeError("RunPythonBatched must be run by the migration executor")
+        await context.run_batched_operation(self, old_state.apps, state_editor)
+
+    async def database_backward(
+        self,
+        app_label: str,
+        old_state: State,
+        new_state: State,
+        state_editor: BaseSchemaEditor | None = None,
+    ) -> None:
+        raise NotImplementedError("RunPythonBatched cannot be reversed")
 
 
 class CreateSchema(TortoiseOperation):

@@ -17,6 +17,7 @@ from tortoise.migrations.operations import (
     CreateModel,
     RenameField,
     RunPython,
+    RunPythonBatched,
 )
 from tortoise.migrations.writer import MigrationWriter
 
@@ -548,3 +549,28 @@ def test_writer_format_runpython(tmp_path: Path, monkeypatch) -> None:
         """
     )
     _write_migration(tmp_path, monkeypatch, "0008_runpython", operations, expected)
+
+
+def _runpython_batched_forward(apps, schema_editor, cursor):
+    return None
+
+
+def test_writer_format_runpython_batched(tmp_path: Path, monkeypatch) -> None:
+    operations = [RunPythonBatched(_runpython_batched_forward, initial_cursor=0, lock_timeout=60)]
+    expected = textwrap.dedent(
+        """\
+        from tortoise import migrations
+        from tortoise.migrations import operations as ops
+        from tests.migrations.test_writer import _runpython_batched_forward
+
+        class Migration(migrations.Migration):
+            operations = [
+                ops.RunPythonBatched(
+                    code=_runpython_batched_forward,
+                    initial_cursor=0,
+                    lock_timeout=60,
+                ),
+            ]
+        """
+    )
+    _write_migration(tmp_path, monkeypatch, "0009_runpython_batched", operations, expected)

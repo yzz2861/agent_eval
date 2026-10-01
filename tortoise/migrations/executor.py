@@ -8,6 +8,8 @@ from tortoise.backends.base.client import BaseDBAsyncClient
 from tortoise.migrations.graph import MigrationGraph, MigrationKey
 from tortoise.migrations.loader import MigrationLoader
 from tortoise.migrations.migration import Migration
+from tortoise.migrations.operations import RunPythonBatched
+from tortoise.migrations.progress import BatchingMigrationContext
 from tortoise.migrations.recorder import MigrationRecorder
 from tortoise.migrations.schema_editor import (
     AsyncpgSchemaEditor,
@@ -60,6 +62,7 @@ class MigrationExecutor:
         recorder_schema_editor = self._schema_editor(atomic=False)
         self._logger.debug("Ensuring migration schema")
         await self.recorder.ensure_schema(recorder_schema_editor)
+        await self.recorder.ensure_progress_schema(recorder_schema_editor)
 
         self._logger.debug("Loading applied migrations")
         applied = set(await self.recorder.applied_migrations())
@@ -104,17 +107,63 @@ class MigrationExecutor:
                     state_cache = await self._project_state(applied)
                 if not fake:
                     self._emit(progress, "apply_start", key)
-                    schema_editor = self._schema_editor(atomic=step.migration.atomic)
-                    if schema_editor.atomic_migration:
-                        async with in_transaction(self.connection.connection_name) as txn_client:
-                            schema_editor.client = txn_client
+                    batched_operations = [
+                        operation
+                        for operation in step.migration.operations
+                        if isinstance(operation, RunPythonBatched)
+                    ]
+                    if batched_operations:
+                        self._validate_batched_migration(step.migration, batched_operations)
+                        schema_editor = self._schema_editor(atomic=False)
+                        if not self.connection.capabilities.supports_transactions:
+                            raise RuntimeError(
+                                f"Migration {key} requires transactions for resumable batches"
+                            )
+                        if dry_run:
                             await step.migration.apply(
                                 state_cache, dry_run=dry_run, schema_editor=schema_editor
                             )
+                        else:
+                            checksum = step.migration.checksum()
+                            lock_timeout = min(
+                                operation.lock_timeout for operation in batched_operations
+                            )
+                            lock_token = await self.recorder.acquire_migration_lock(
+                                key.app_label,
+                                key.name,
+                                checksum,
+                                lock_timeout=lock_timeout,
+                            )
+                            try:
+                                schema_editor.migration_context = BatchingMigrationContext(
+                                    recorder=self.recorder,
+                                    key=key,
+                                    checksum=checksum,
+                                    lock_token=lock_token,
+                                    lock_timeout=lock_timeout,
+                                )
+                                await step.migration.apply(
+                                    state_cache, dry_run=dry_run, schema_editor=schema_editor
+                                )
+                            finally:
+                                schema_editor.migration_context = None
+                                await self.recorder.release_migration_lock(
+                                    key.app_label, key.name, lock_token
+                                )
                     else:
-                        await step.migration.apply(
-                            state_cache, dry_run=dry_run, schema_editor=schema_editor
-                        )
+                        schema_editor = self._schema_editor(atomic=step.migration.atomic)
+                        if schema_editor.atomic_migration:
+                            async with in_transaction(
+                                self.connection.connection_name
+                            ) as txn_client:
+                                schema_editor.client = txn_client
+                                await step.migration.apply(
+                                    state_cache, dry_run=dry_run, schema_editor=schema_editor
+                                )
+                        else:
+                            await step.migration.apply(
+                                state_cache, dry_run=dry_run, schema_editor=schema_editor
+                            )
                     self._emit(progress, "apply_done", key)
                 if not dry_run:
                     await self.recorder.record_applied(key.app_label, key.name)
@@ -152,6 +201,22 @@ class MigrationExecutor:
         if dialect == "postgres":
             return BasePostgresSchemaEditor(self.connection, atomic=atomic, collect_sql=collect_sql)
         return BaseSchemaEditor(self.connection, atomic=atomic, collect_sql=collect_sql)
+
+    @staticmethod
+    def _validate_batched_migration(
+        migration: Migration, batched_operations: list[RunPythonBatched]
+    ) -> None:
+        if migration.atomic:
+            raise ValueError(
+                f"Migration {migration.app_label}.{migration.name} uses RunPythonBatched and "
+                "must set atomic=False so each batch can commit independently"
+            )
+        if len(batched_operations) != len(migration.operations):
+            raise ValueError(
+                f"Migration {migration.app_label}.{migration.name} mixes RunPythonBatched with "
+                "operations that cannot provide resumable progress; put those operations in "
+                "a separate migration"
+            )
 
     async def collect_sql(
         self,

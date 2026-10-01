@@ -37,6 +37,7 @@ from tortoise.migrations.operations import (
     RenameIndex,
     RenameModel,
     RunPython,
+    RunPythonBatched,
     SQLOperation,
 )
 
@@ -434,6 +435,17 @@ class MigrationWriter:
                 lines.append(f"{indent}    reverse_code={reverse_expr},")
             if operation.atomic is not None:
                 lines.append(f"{indent}    atomic={operation.atomic!r},")
+            lines.append(f"{indent}),")
+            return lines
+        if isinstance(operation, RunPythonBatched):
+            code_expr = render_value(operation.code, imports)
+            lines = [
+                f"{indent}ops.RunPythonBatched(",
+                f"{indent}    code={code_expr},",
+                f"{indent}    initial_cursor={render_value(operation.initial_cursor, imports)},",
+            ]
+            if operation.lock_timeout != 300.0:
+                lines.append(f"{indent}    lock_timeout={operation.lock_timeout!r},")
             lines.append(f"{indent}),")
             return lines
         raise ValueError(f"Unsupported operation type: {type(operation)!r}")

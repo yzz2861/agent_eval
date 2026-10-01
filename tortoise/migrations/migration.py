@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import sys
+
 from tortoise.migrations.operations import Operation
 from tortoise.migrations.schema_editor.base import BaseSchemaEditor
 from tortoise.migrations.schema_generator.state import State
@@ -21,6 +25,38 @@ class Migration:
         self.dependencies = list(self.__class__.dependencies)
         self.run_before = list(self.__class__.run_before)
         self.replaces = list(self.__class__.replaces)
+
+    def checksum(self) -> str:
+        cls = type(self)
+        module = sys.modules.get(cls.__module__)
+        source: bytes | None = None
+        file_path = getattr(module, "__file__", None)
+        if file_path:
+            try:
+                with open(file_path, "rb") as migration_file:
+                    source = migration_file.read()
+            except OSError:
+                source = None
+
+        digest = hashlib.sha256()
+        if source is not None:
+            digest.update(source)
+        digest.update(
+            json.dumps(
+                {
+                    "app_label": self.app_label,
+                    "name": self.name,
+                    "dependencies": self.dependencies,
+                    "run_before": self.run_before,
+                    "replaces": self.replaces,
+                    "atomic": self.atomic,
+                    "operations": [operation.signature() for operation in self.operations],
+                },
+                default=repr,
+                sort_keys=True,
+            ).encode()
+        )
+        return digest.hexdigest()
 
     async def run_operations(
         self,
@@ -47,9 +83,12 @@ class Migration:
         need_old_state = (collect_sql and schema_editor) or (
             not dry_run and schema_editor is not None
         )
-        for operation in self.operations:
+        for index, operation in enumerate(self.operations):
             old_state = state.clone() if need_old_state else None
             operation.state_forward(self.app_label, state)
+            context = getattr(schema_editor, "migration_context", None)
+            if context is not None:
+                context.operation_index = index
             if collect_sql and schema_editor:
                 schema_editor.collected_sql.append("--")
                 schema_editor.collected_sql.append(f"-- {operation.describe()}")
@@ -108,11 +147,17 @@ class Migration:
                 new_state = new_state.clone()
                 old_state = new_state.clone()
                 operation.state_forward(self.app_label, new_state)
+                context = getattr(schema_editor, "migration_context", None)
+                if context is not None:
+                    context.operation_index = len(to_run)
                 to_run.insert(0, (operation, old_state, new_state))
             else:
                 operation.state_forward(self.app_label, new_state)
 
-        for operation, to_state, from_state in to_run:
+        for index, (operation, to_state, from_state) in enumerate(to_run):
+            context = getattr(schema_editor, "migration_context", None)
+            if context is not None:
+                context.operation_index = index
             if collect_sql and schema_editor:
                 schema_editor.collected_sql.append("--")
                 schema_editor.collected_sql.append(f"-- {operation.describe()}")

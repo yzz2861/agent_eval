@@ -14,6 +14,7 @@ from tortoise.migrations.operations import (
     RenameField,
     RenameModel,
     RunPython,
+    RunPythonBatched,
     SQLOperation,
     TortoiseOperation,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "RenameField",
     "RenameModel",
     "RunPython",
+    "RunPythonBatched",
     "SQLOperation",
     "TortoiseOperation",
 ]

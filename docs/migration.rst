@@ -215,6 +215,71 @@ directly. This is more efficient for bulk operations but database-specific.
         reverse_sql="DELETE FROM post WHERE title IN ('First', 'Second')",
     )
 
+Resumable batched data migrations
+---------------------------------
+
+Use ``RunPythonBatched`` for a large data backfill that must continue from the
+last committed batch after the process is interrupted. The handler receives the
+historical apps, schema editor, and the cursor saved after the previous batch.
+It processes one batch and returns the next stable cursor. Return ``None`` when
+there is no more data.
+
+The cursor must be JSON-serializable and stable as rows are inserted, updated,
+or deleted. For example, use an immutable primary key greater-than predicate;
+do not use row offsets. The containing migration must set ``atomic=False`` so
+that each batch is an independent, committed transaction.
+
+.. code-block:: python
+
+    from tortoise.migrations import RunPythonBatched
+    from tortoise.migrations.migration import Migration
+
+    async def backfill_posts(apps, schema_editor, cursor):
+        Post = apps.get_model("blog.Post")
+        last_id = cursor or 0
+        posts = await Post.filter(id__gt=last_id).order_by("id").limit(1000)
+        for post in posts:
+            post.search_text = f"{post.title} {post.body}"
+        await Post.bulk_update(posts, ["search_text"])
+        if not posts:
+            return None
+        return posts[-1].id
+
+    class Migration(Migration):
+        atomic = False
+        dependencies = [("blog", "0002_add_search_text")]
+        operations = [
+            RunPythonBatched(
+                backfill_posts,
+                initial_cursor=None,
+                lock_timeout=300,
+            )
+        ]
+
+For every batch, Tortoise runs the data changes, cursor update, and migration
+lease renewal in one database transaction. Commit therefore makes the data and
+progress visible together; a rollback hides both. Progress is stored in
+``tortoise_migration_progress``.
+
+A migration-level lease and row lock prevent two executors from advancing the
+same migration. ``lock_timeout`` is in seconds and must be longer than the
+maximum duration of one batch. Every batch transaction reclaims its lease row
+before invoking the handler and holds that row lock until commit or rollback.
+After a process dies, another executor can take over only after the lease
+expires and the database releases the interrupted transaction.
+
+The checkpoint is tied to a checksum of the migration definition. If the file or
+the batched handler changes after progress has been saved, Tortoise refuses to
+reuse the old breakpoint. Write a new migration for the new transformation
+instead of editing an interrupted migration.
+
+``RunPythonBatched`` is forward-only and cannot be reversed. Reverse data
+changes, when possible, must be modeled explicitly with a separate reversible
+``RunPython`` or ``RunSQL`` migration. Recoverable batching is not available for
+schema operations, raw ``RunSQL`` statements, or other operations that cannot
+save a cursor. Migrations that do not contain ``RunPythonBatched`` retain their
+previous atomic behavior.
+
 Choosing between RunPython and RunSQL
 --------------------------------------
 
