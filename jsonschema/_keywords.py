@@ -13,15 +13,31 @@ from jsonschema._utils import (
 from jsonschema.exceptions import FormatError, ValidationError
 
 
+def _explanation_source_pointer(base, keyword, index=None):
+    from jsonschema._explanation import json_pointer
+
+    segments = (*base, keyword)
+    if index is not None:
+        segments = (*segments, index)
+    return json_pointer(segments)
+
+
 def patternProperties(validator, patternProperties, instance, schema):
     if not validator.is_type(instance, "object"):
         return
 
+    collector = getattr(validator, "_explanation_collector", None)
     for pattern, subschema in patternProperties.items():
         for k, v in instance.items():
             if re.search(pattern, k):
+                if collector is not None:
+                    collector.annotate_property(k)
                 yield from validator.descend(
-                    v, subschema, path=k, schema_path=pattern,
+                    v,
+                    subschema,
+                    path=k,
+                    schema_path=pattern,
+                    explanation_commit_on_success=True,
                 )
 
 
@@ -38,11 +54,24 @@ def additionalProperties(validator, aP, instance, schema):
         return
 
     extras = set(find_additional_properties(instance, schema))
+    collector = getattr(validator, "_explanation_collector", None)
 
     if validator.is_type(aP, "object"):
         for extra in extras:
-            yield from validator.descend(instance[extra], aP, path=extra)
+            if collector is not None:
+                before = set(collector.stack[-1].properties)
+            yield from validator.descend(
+                instance[extra],
+                aP,
+                path=extra,
+                explanation_commit_on_success=True,
+            )
+            if collector is not None and extra not in before:
+                collector.annotate_property(extra)
     elif not aP and extras:
+        if collector is not None:
+            for extra in extras:
+                collector.annotate_property(extra)
         if "patternProperties" in schema:
             verb = "does" if len(extras) == 1 else "do"
             joined = ", ".join(repr(each) for each in sorted(extras))
@@ -66,6 +95,10 @@ def items(validator, items, instance, schema):
     if extra <= 0:
         return
 
+    collector = getattr(validator, "_explanation_collector", None)
+    if collector is not None:
+        for index in range(prefix, total):
+            collector.annotate_item(index)
     if items is False:
         rest = instance[prefix:] if extra != 1 else instance[prefix]
         item = "items" if prefix != 1 else "item"
@@ -79,6 +112,7 @@ def items(validator, items, instance, schema):
                 instance=instance[index],
                 schema=items,
                 path=index,
+                explanation_commit_on_success=True,
             )
 
 
@@ -96,10 +130,25 @@ def contains(validator, contains, instance, schema):
     max_contains = schema.get("maxContains", len(instance))
 
     contains_validator = validator.evolve(schema=contains)
+    collector = getattr(validator, "_explanation_collector", None)
 
-    for each in instance:
-        if contains_validator.is_valid(each):
+    for index, each in enumerate(instance):
+        if collector is not None:
+            errors = list(
+                validator.descend(
+                    each,
+                    contains,
+                    explanation_commit_on_success=True,
+                ),
+            )
+            matched = not errors
+        else:
+            matched = contains_validator.is_valid(each)
+
+        if matched:
             matches += 1
+            if collector is not None:
+                collector.annotate_item(index)
             if matches > max_contains:
                 yield ValidationError(
                     "Too many items match the given schema "
@@ -262,7 +311,15 @@ def dependentSchemas(validator, dependentSchemas, instance, schema):
         if property not in instance:
             continue
         yield from validator.descend(
-            instance, dependency, schema_path=property,
+            instance,
+            dependency,
+            schema_path=property,
+            explanation_source=(
+                "dependentSchemas",
+                property,
+                None,
+                f"/dependentSchemas/{property}",
+            ),
         )
 
 
@@ -276,7 +333,11 @@ def ref(validator, ref, instance, schema):
 
 
 def dynamicRef(validator, dynamicRef, instance, schema):
-    yield from validator._validate_reference(ref=dynamicRef, instance=instance)
+    yield from validator._validate_reference(
+        ref=dynamicRef,
+        instance=instance,
+        keyword="$dynamicRef",
+    )
 
 
 def type(validator, types, instance, schema):
@@ -291,13 +352,17 @@ def properties(validator, properties, instance, schema):
     if not validator.is_type(instance, "object"):
         return
 
+    collector = getattr(validator, "_explanation_collector", None)
     for property, subschema in properties.items():
         if property in instance:
+            if collector is not None:
+                collector.annotate_property(property)
             yield from validator.descend(
                 instance[property],
                 subschema,
                 path=property,
                 schema_path=property,
+                explanation_commit_on_success=True,
             )
 
 
@@ -330,14 +395,52 @@ def maxProperties(validator, mP, instance, schema):
 
 
 def allOf(validator, allOf, instance, schema):
+    collector = getattr(validator, "_explanation_collector", None)
     for index, subschema in enumerate(allOf):
-        yield from validator.descend(instance, subschema, schema_path=index)
+        source = None
+        if collector is not None:
+            source = (
+                "allOf",
+                index,
+                None,
+                _explanation_source_pointer(
+                    validator._explanation_schema_path,
+                    "allOf",
+                    index,
+                ),
+            )
+        yield from validator.descend(
+            instance,
+            subschema,
+            schema_path=index,
+            explanation_source=source,
+            explanation_commit_on_success=True,
+        )
 
 
 def anyOf(validator, anyOf, instance, schema):
     all_errors = []
+    collector = getattr(validator, "_explanation_collector", None)
     for index, subschema in enumerate(anyOf):
-        errs = list(validator.descend(instance, subschema, schema_path=index))
+        source = None
+        if collector is not None:
+            source = (
+                "anyOf",
+                index,
+                None,
+                _explanation_source_pointer(
+                    validator._explanation_schema_path,
+                    "anyOf",
+                    index,
+                ),
+            )
+        errs = list(validator.descend(
+            instance,
+            subschema,
+            schema_path=index,
+            explanation_source=source,
+            explanation_commit_on_success=True,
+        ))
         if not errs:
             break
         all_errors.extend(errs)
@@ -349,27 +452,41 @@ def anyOf(validator, anyOf, instance, schema):
 
 
 def oneOf(validator, oneOf, instance, schema):
-    subschemas = enumerate(oneOf)
     all_errors = []
-    for index, subschema in subschemas:
-        errs = list(validator.descend(instance, subschema, schema_path=index))
+    valid_subschemas = []
+    collector = getattr(validator, "_explanation_collector", None)
+    for index, subschema in enumerate(oneOf):
+        source = None
+        if collector is not None:
+            source = (
+                "oneOf",
+                index,
+                None,
+                _explanation_source_pointer(
+                    validator._explanation_schema_path,
+                    "oneOf",
+                    index,
+                ),
+            )
+        errs = list(validator.descend(
+            instance,
+            subschema,
+            schema_path=index,
+            explanation_source=source,
+            explanation_commit_on_success=True,
+        ))
         if not errs:
-            first_valid = subschema
-            break
-        all_errors.extend(errs)
-    else:
+            valid_subschemas.append(subschema)
+        else:
+            all_errors.extend(errs)
+
+    if not valid_subschemas:
         yield ValidationError(
             f"{instance!r} is not valid under any of the given schemas",
             context=all_errors,
         )
-
-    more_valid = [
-        each for _, each in subschemas
-        if validator.evolve(schema=each).is_valid(instance)
-    ]
-    if more_valid:
-        more_valid.append(first_valid)
-        reprs = ", ".join(repr(schema) for schema in more_valid)
+    elif len(valid_subschemas) > 1:
+        reprs = ", ".join(repr(schema) for schema in valid_subschemas)
         yield ValidationError(f"{instance!r} is valid under each of {reprs}")
 
 
@@ -380,21 +497,79 @@ def not_(validator, not_schema, instance, schema):
 
 
 def if_(validator, if_schema, instance, schema):
-    if validator.evolve(schema=if_schema).is_valid(instance):
+    collector = getattr(validator, "_explanation_collector", None)
+    if collector is not None:
+        if_errors = list(validator.descend(
+            instance,
+            if_schema,
+            schema_path="if",
+            explanation_source=(
+                "if",
+                "if",
+                None,
+                _explanation_source_pointer(
+                    validator._explanation_schema_path,
+                    "if",
+                ),
+            ),
+        ))
+        condition_valid = not if_errors
+    else:
+        condition_valid = validator.evolve(schema=if_schema).is_valid(instance)
+
+    if condition_valid:
         if "then" in schema:
             then = schema["then"]
-            yield from validator.descend(instance, then, schema_path="then")
+            source = None
+            if collector is not None:
+                source = (
+                    "if",
+                    "then",
+                    None,
+                    _explanation_source_pointer(
+                        validator._explanation_schema_path,
+                        "then",
+                    ),
+                )
+            yield from validator.descend(
+                instance,
+                then,
+                schema_path="then",
+                explanation_source=source,
+                explanation_commit_on_success=True,
+            )
     elif "else" in schema:
         else_ = schema["else"]
-        yield from validator.descend(instance, else_, schema_path="else")
+        source = None
+        if collector is not None:
+            source = (
+                "if",
+                "else",
+                None,
+                _explanation_source_pointer(
+                    validator._explanation_schema_path,
+                    "else",
+                ),
+            )
+        yield from validator.descend(
+            instance,
+            else_,
+            schema_path="else",
+            explanation_source=source,
+            explanation_commit_on_success=True,
+        )
 
 
 def unevaluatedItems(validator, unevaluatedItems, instance, schema):
     if not validator.is_type(instance, "array"):
         return
-    evaluated_item_indexes = find_evaluated_item_indexes_by_schema(
-        validator, instance, schema,
-    )
+    collector = getattr(validator, "_explanation_collector", None)
+    if collector is not None:
+        evaluated_item_indexes = set(collector.stack[-1].items)
+    else:
+        evaluated_item_indexes = find_evaluated_item_indexes_by_schema(
+            validator, instance, schema,
+        )
     unevaluated_items = [
         item for index, item in enumerate(instance)
         if index not in evaluated_item_indexes
@@ -407,21 +582,29 @@ def unevaluatedItems(validator, unevaluatedItems, instance, schema):
 def unevaluatedProperties(validator, unevaluatedProperties, instance, schema):
     if not validator.is_type(instance, "object"):
         return
-    evaluated_keys = find_evaluated_property_keys_by_schema(
-        validator, instance, schema,
-    )
+    collector = getattr(validator, "_explanation_collector", None)
+    if collector is not None:
+        evaluated_keys = set(collector.stack[-1].properties)
+    else:
+        evaluated_keys = find_evaluated_property_keys_by_schema(
+            validator, instance, schema,
+        )
     unevaluated_keys = []
     for property in instance:
         if property not in evaluated_keys:
+            before = len(unevaluated_keys)
             for _ in validator.descend(
                 instance[property],
                 unevaluatedProperties,
                 path=property,
                 schema_path=property,
+                explanation_commit_on_success=True,
             ):
                 # FIXME: Include context for each unevaluated property
                 #        indicating why it's invalid under the subschema.
                 unevaluated_keys.append(property)  # noqa: PERF401
+            if collector is not None and len(unevaluated_keys) == before:
+                collector.annotate_property(property)
 
     if unevaluated_keys:
         if unevaluatedProperties is False:
@@ -440,10 +623,14 @@ def prefixItems(validator, prefixItems, instance, schema):
     if not validator.is_type(instance, "array"):
         return
 
+    collector = getattr(validator, "_explanation_collector", None)
     for (index, item), subschema in zip(enumerate(instance), prefixItems):
+        if collector is not None:
+            collector.annotate_item(index)
         yield from validator.descend(
             instance=item,
             schema=subschema,
             schema_path=index,
             path=index,
+            explanation_commit_on_success=True,
         )

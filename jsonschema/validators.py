@@ -22,6 +22,7 @@ import referencing.exceptions
 import referencing.jsonschema
 
 from jsonschema import (
+    _explanation,
     _format,
     _keywords,
     _legacy_keywords,
@@ -131,6 +132,68 @@ def _warn_for_remote_retrieve(uri: str):
 _REMOTE_WARNING_REGISTRY = SPECIFICATIONS.combine(
     referencing.Registry(retrieve=_warn_for_remote_retrieve),  # type: ignore[call-arg]
 )
+
+
+def _schema_pointer_for_target(root_schema, target):
+    if not isinstance(root_schema, Mapping):
+        return ""
+
+    def visit(schema, segments):
+        if schema is target:
+            return segments
+        if not isinstance(schema, Mapping):
+            return None
+        for keyword, value in schema.items():
+            if keyword in {"$id", "$schema", "default", "examples"}:
+                continue
+            if isinstance(value, Mapping):
+                found = visit(value, (*segments, keyword))
+                if found is not None:
+                    return found
+            elif isinstance(value, Sequence) and not isinstance(value, str):
+                for index, each in enumerate(value):
+                    if isinstance(each, Mapping):
+                        found = visit(each, (*segments, keyword, index))
+                        if found is not None:
+                            return found
+        return None
+
+    segments = visit(root_schema, ())
+    return _explanation.json_pointer(segments or ())
+
+
+def _resolved_reference_uri(resolver, ref):
+    base_uri = getattr(resolver, "_base_uri", "")
+    uri, fragment = urldefrag(urljoin(base_uri, ref))
+    if not fragment:
+        return uri
+    if fragment.startswith("/"):
+        return uri + "#" + fragment
+    return uri + "#" + fragment
+
+
+def _resolved_reference_path(resolver, ref, root_schema, resolved_schema):
+    _, fragment = urldefrag(urljoin(getattr(resolver, "_base_uri", ""), ref))
+    if fragment.startswith("/"):
+        base_uri = getattr(resolver, "_base_uri", "")
+        root_uri, _ = urldefrag(base_uri)
+        current_uri, _ = urldefrag(urljoin(base_uri, ref))
+        if current_uri == root_uri:
+            return tuple(
+                unquote(segment)
+                for segment in fragment[1:].split("/")
+                if segment
+            )
+    pointer = _schema_pointer_for_target(root_schema, resolved_schema)
+    return tuple(unquote(segment) for segment in pointer.split("/") if segment)
+
+
+def _legacy_reference_uri(resolver, ref):
+    base_uri = getattr(resolver, "resolution_scope", "")
+    uri, fragment = urldefrag(urljoin(base_uri, ref))
+    if not fragment:
+        return uri
+    return uri + "#" + fragment
 
 
 def create(
@@ -243,6 +306,24 @@ def create(
         _resolver = field(
             alias="_resolver",
             default=None,
+            kw_only=True,
+            repr=False,
+        )
+        _explanation_collector = field(
+            default=None,
+            alias="_explanation_collector",
+            kw_only=True,
+            repr=False,
+        )
+        _explanation_instance_path = field(
+            default=(),
+            alias="_explanation_instance_path",
+            kw_only=True,
+            repr=False,
+        )
+        _explanation_schema_path = field(
+            default=(),
+            alias="_explanation_schema_path",
             kw_only=True,
             repr=False,
         )
@@ -378,20 +459,99 @@ def create(
                 )
                 return
 
-            for validator, k, v in validators:
-                errors = validator(self, v, instance, _schema) or ()
-                for error in errors:
-                    # set details if not already set by the called fn
-                    error._set(
-                        validator=k,
-                        validator_value=v,
-                        instance=instance,
-                        schema=_schema,
-                        type_checker=self.TYPE_CHECKER,
+            collector = self._explanation_collector
+            if collector is None:
+                yield from self._iter_keyword_errors(
+                    instance, _schema, validators,
+                )
+                return
+
+            deferred = [
+                each for each in validators
+                if each[1] in {"unevaluatedItems", "unevaluatedProperties"}
+            ]
+            immediate = [each for each in validators if each not in deferred]
+            with collector.schema(
+                instance_path=self._explanation_instance_path,
+                schema_path=self._explanation_schema_path,
+            ) as frame:
+                errors = list(
+                    self._iter_keyword_errors(
+                        instance, _schema, immediate, frame, self,
+                    ),
+                )
+                errors.extend(
+                    self._iter_keyword_errors(
+                        instance, _schema, deferred, frame, self,
+                    ),
+                )
+            yield from errors
+
+        def explain_errors(
+            self,
+            instance,
+            *,
+            limit=_explanation.DEFAULT_EXPLANATION_LIMIT,
+            include_values=False,
+        ):
+            collector = _explanation.ExplanationCollector(
+                limit=limit,
+                include_values=include_values,
+            )
+            explained = self.evolve(
+                _explanation_collector=collector,
+                _explanation_instance_path=(),
+                _explanation_schema_path=(),
+            )
+            errors = list(explained.iter_errors(instance))
+            collector.explanation.valid = not errors
+            return errors, collector.explanation
+
+        def _iter_keyword_errors(
+            self, instance, schema, validators, frame=None, validator_self=None,
+        ):
+            validator_self = validator_self or self
+            for validator_fn, keyword, value in validators:
+                if frame is None:
+                    errors = (
+                        validator_fn(validator_self, value, instance, schema)
+                        or ()
                     )
-                    if k not in {"if", "$ref"}:
-                        error.schema_path.appendleft(k)
-                    yield error
+                    for error in errors:
+                        validator_self._set_error_details(
+                            error, keyword, value, instance, schema,
+                        )
+                        yield error
+                    continue
+
+                with frame.collector.keyword(keyword) as (state, messages):
+                    errors = list(
+                        validator_fn(
+                            validator_self, value, instance, schema,
+                        )
+                        or (),
+                    )
+                    state["error_count"] = len(errors)
+                    for error in errors:
+                        validator_self._set_error_details(
+                            error, keyword, value, instance, schema,
+                        )
+                        if frame.collector.include_values:
+                            messages.append(error.message)
+                    yield from errors
+
+        def _set_error_details(
+            self, error, keyword, value, instance, schema,
+        ):
+            error._set(
+                validator=keyword,
+                validator_value=value,
+                instance=instance,
+                schema=schema,
+                type_checker=self.TYPE_CHECKER,
+            )
+            if keyword not in {"if", "$ref"}:
+                error.schema_path.appendleft(keyword)
 
         def descend(
             self,
@@ -400,11 +560,18 @@ def create(
             path=None,
             schema_path=None,
             resolver=None,
+            explanation_source=None,
+            explanation_commit_on_success=False,
+            explanation_schema_uri=None,
+            explanation_recursive_key=None,
+            explanation_target_path=None,
         ):
             if schema is True:
                 return
-            elif schema is False:
-                yield exceptions.ValidationError(
+
+            boolean_error = None
+            if schema is False:
+                boolean_error = exceptions.ValidationError(
                     f"False schema does not allow {instance!r}",
                     validator=None,
                     validator_value=None,
@@ -413,8 +580,33 @@ def create(
                     path=() if path is None else (path,),
                     schema_path=() if schema_path is None else (schema_path,),
                 )
+
+            if self._explanation_collector is None:
+                if boolean_error is not None:
+                    yield boolean_error
+                else:
+                    yield from self._descend_without_explanation(
+                        instance, schema, path, schema_path, resolver,
+                    )
                 return
 
+            yield from self._descend_with_explanation(
+                instance,
+                schema,
+                path,
+                schema_path,
+                resolver,
+                explanation_source,
+                explanation_commit_on_success,
+                explanation_schema_uri,
+                explanation_recursive_key,
+                explanation_target_path,
+                boolean_error,
+            )
+
+        def _descend_without_explanation(
+            self, instance, schema, path, schema_path, resolver,
+        ):
             if self._ref_resolver is not None:
                 evolved = self.evolve(schema=schema)
             else:
@@ -425,27 +617,116 @@ def create(
                 evolved = self.evolve(schema=schema, _resolver=resolver)
 
             for k, v in applicable_validators(schema):
-                validator = evolved.VALIDATORS.get(k)
-                if validator is None:
+                validator_fn = evolved.VALIDATORS.get(k)
+                if validator_fn is None:
                     continue
-
-                errors = validator(evolved, v, instance, schema) or ()
-                for error in errors:
-                    # set details if not already set by the called fn
-                    error._set(
-                        validator=k,
-                        validator_value=v,
-                        instance=instance,
-                        schema=schema,
-                        type_checker=evolved.TYPE_CHECKER,
-                    )
-                    if k not in {"if", "$ref"}:
-                        error.schema_path.appendleft(k)
+                for error in validator_fn(evolved, v, instance, schema) or ():
+                    evolved._set_error_details(error, k, v, instance, schema)
                     if path is not None:
                         error.path.appendleft(path)
                     if schema_path is not None:
                         error.schema_path.appendleft(schema_path)
                     yield error
+
+        def _descend_with_explanation(
+            self,
+            instance,
+            schema,
+            path,
+            schema_path,
+            resolver,
+            explanation_source,
+            explanation_commit_on_success,
+            explanation_schema_uri,
+            explanation_recursive_key,
+            explanation_target_path,
+            boolean_error,
+        ):
+            collector = self._explanation_collector
+            child_instance_path = self._explanation_instance_path
+            child_schema_path = self._explanation_schema_path
+            if path is not None:
+                child_instance_path = (*child_instance_path, path)
+            if (
+                explanation_schema_uri is None
+                and schema_path is not None
+                and explanation_source is None
+            ):
+                child_schema_path = (*child_schema_path, schema_path)
+            elif explanation_target_path is not None:
+                child_schema_path = explanation_target_path
+            elif (
+                explanation_schema_uri is None
+                and explanation_source is not None
+                and schema_path is not None
+            ):
+                child_schema_path = (
+                    *self._explanation_schema_path,
+                    explanation_source[0],
+                    schema_path,
+                )
+
+            if self._ref_resolver is not None:
+                evolved = self.evolve(schema=schema)
+            else:
+                if resolver is None and schema is not False:
+                    resolver = self._resolver.in_subresource(
+                        specification.create_resource(schema),
+                    )
+                evolved = self.evolve(schema=schema, _resolver=resolver)
+
+            evolved = evolved.evolve(
+                _explanation_collector=collector,
+                _explanation_instance_path=child_instance_path,
+                _explanation_schema_path=child_schema_path,
+            )
+            with collector.schema(
+                instance_path=child_instance_path,
+                schema_path=child_schema_path,
+                report_schema_path=self._explanation_schema_path,
+                schema_uri=explanation_schema_uri,
+                source=explanation_source,
+                commit_on_success=explanation_commit_on_success,
+                recursive_key=explanation_recursive_key,
+            ) as frame:
+                if frame is _explanation.RecursionStopped:
+                    return
+                if boolean_error is not None:
+                    frame.error_count += 1
+                    yield boolean_error
+                    return
+
+                keyword_validators = [
+                    (fn, k, v)
+                    for k, v in applicable_validators(schema)
+                    if (fn := evolved.VALIDATORS.get(k)) is not None
+                ]
+                deferred = [
+                    each for each in keyword_validators
+                    if each[1] in {
+                        "unevaluatedItems",
+                        "unevaluatedProperties",
+                    }
+                ]
+                immediate = [
+                    each for each in keyword_validators if each not in deferred
+                ]
+                errors = list(
+                    evolved._iter_keyword_errors(
+                        instance, schema, immediate, frame, evolved,
+                    ),
+                )
+                errors.extend(
+                    evolved._iter_keyword_errors(
+                        instance, schema, deferred, frame, evolved,
+                    ),
+                )
+                for error in errors:
+                    if path is not None:
+                        error.path.appendleft(path)
+                    if schema_path is not None:
+                        error.schema_path.appendleft(schema_path)
+                yield from errors
 
         def validate(self, *args, **kwargs):
             for error in self.iter_errors(*args, **kwargs):
@@ -458,29 +739,93 @@ def create(
                 exc = exceptions.UnknownType(type, instance, self.schema)
                 raise exc from None
 
-        def _validate_reference(self, ref, instance):
+        def _validate_reference(self, ref, instance, keyword="$ref"):
             if self._ref_resolver is None:
                 try:
                     resolved = self._resolver.lookup(ref)
                 except referencing.exceptions.Unresolvable as err:
                     raise exceptions._WrappedReferencingError(err) from err
 
+                if self._explanation_collector is None:
+                    return self.descend(
+                        instance,
+                        resolved.contents,
+                        resolver=resolved.resolver,
+                    )
+
+                resolved_uri = _resolved_reference_uri(self._resolver, ref)
+                resolved_path = _resolved_reference_path(
+                    self._resolver,
+                    ref,
+                    self.schema,
+                    resolved.contents,
+                )
                 return self.descend(
                     instance,
                     resolved.contents,
                     resolver=resolved.resolver,
+                    explanation_source=(
+                        keyword,
+                        None,
+                        resolved_uri,
+                        _explanation.json_pointer(
+                            self._explanation_schema_path + (keyword,),
+                        ),
+                    ),
+                    explanation_schema_uri=resolved_uri,
+                    explanation_recursive_key=(id(resolved.contents), ref),
+                    explanation_target_path=(
+                        resolved_path
+                        if self._explanation_schema_path
+                        else ()
+                    ),
                 )
             else:
                 resolve = getattr(self._ref_resolver, "resolve", None)
                 if resolve is None:
                     with self._ref_resolver.resolving(ref) as resolved:
-                        return self.descend(instance, resolved)
+                        if self._explanation_collector is None:
+                            return self.descend(instance, resolved)
+                        resolved_uri = _legacy_reference_uri(
+                            self._ref_resolver,
+                            ref,
+                        )
+                        return self.descend(
+                            instance,
+                            resolved,
+                            explanation_source=(
+                                keyword,
+                                None,
+                                resolved_uri,
+                                _explanation.json_pointer(
+                                    self._explanation_schema_path + (keyword,),
+                                ),
+                            ),
+                            explanation_schema_uri=resolved_uri,
+                            explanation_recursive_key=(id(resolved), ref),
+                        )
                 else:
                     scope, resolved = resolve(ref)
                     self._ref_resolver.push_scope(scope)
 
                     try:
-                        return list(self.descend(instance, resolved))
+                        if self._explanation_collector is None:
+                            return list(self.descend(instance, resolved))
+                        resolved_uri = urljoin(scope, urldefrag(ref)[1])
+                        return list(self.descend(
+                            instance,
+                            resolved,
+                            explanation_source=(
+                                keyword,
+                                None,
+                                resolved_uri,
+                                _explanation.json_pointer(
+                                    self._explanation_schema_path + (keyword,),
+                                ),
+                            ),
+                            explanation_schema_uri=resolved_uri,
+                            explanation_recursive_key=(id(resolved), ref),
+                        ))
                     finally:
                         self._ref_resolver.pop_scope()
 

@@ -236,6 +236,14 @@ def recursiveRef(validator, recursiveRef, instance, schema):
         instance,
         resolved.contents,
         resolver=resolved.resolver,
+        explanation_source=(
+            "$recursiveRef",
+            None,
+            recursiveRef,
+            "$recursiveRef",
+        ),
+        explanation_schema_uri=recursiveRef,
+        explanation_recursive_key=(id(resolved.contents), recursiveRef),
     )
 
 
