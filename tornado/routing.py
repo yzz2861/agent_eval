@@ -176,11 +176,13 @@ For more information on application-level routing see docs for `~.web.Applicatio
 """
 
 import re
+import uuid
 from collections.abc import Awaitable, Sequence
 from functools import partial
 from re import Pattern
 from typing import (
     Any,
+    NamedTuple,
     Union,
     overload,
 )
@@ -649,6 +651,336 @@ class PathMatches(Matcher):
                 pieces.append(unescaped_fragment)
 
         return "".join(pieces), self.regex.groups
+
+
+class Converter:
+    """Base class for `PathTemplate` parameter converters.
+
+    A converter is responsible for translating a path parameter in both
+    directions: ``to_python`` transforms the (percent-decoded) string
+    captured from the request path into the value passed to the handler,
+    and ``to_url`` transforms a value passed to ``reverse_url`` back into
+    the string that will be placed (after percent-encoding) into the url.
+
+    Subclasses must set ``regex`` to a regular expression fragment that
+    matches the *percent-encoded* form of the parameter within the
+    request path (it must not contain any capturing groups; lookaround
+    and non-capturing groups are fine).
+
+    Conversion failures must be reported by raising `ValueError`, which
+    is treated as "this rule does not match" (or, when reversing, as an
+    invalid argument). Any other exception is considered a programming
+    error in the converter itself and is propagated to the caller.
+
+    .. versionadded:: 6.6
+    """
+
+    regex = "[^/]+"
+
+    def to_python(self, value: str) -> Any:
+        """Converts a string captured from the request path to a Python value."""
+        return value
+
+    def to_url(self, value: Any) -> str:
+        """Converts a Python value to its canonical string form for use in a url."""
+        return str(value)
+
+
+class StringConverter(Converter):
+    """The default converter; matches a single path segment."""
+
+    regex = "[^/]+"
+
+    def to_python(self, value: str) -> str:
+        return value
+
+    def to_url(self, value: Any) -> str:
+        if not isinstance(value, str):
+            value = str(value)
+        return value
+
+
+class IntConverter(Converter):
+    """Matches a non-negative integer and converts it to `int`."""
+
+    regex = "[0-9]+"
+
+    def to_python(self, value: str) -> int:
+        return int(value)
+
+    def to_url(self, value: Any) -> str:
+        return str(int(value))
+
+
+class UUIDConverter(Converter):
+    """Matches a canonical UUID string and converts it to `uuid.UUID`."""
+
+    regex = (
+        "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+        "-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    )
+
+    def to_python(self, value: str) -> uuid.UUID:
+        return uuid.UUID(value)
+
+    def to_url(self, value: Any) -> str:
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        return str(uuid.UUID(str(value)))
+
+
+class PathConverter(Converter):
+    """Matches the rest of the path, including any slashes."""
+
+    regex = ".+"
+
+    def to_python(self, value: str) -> str:
+        return value
+
+    def to_url(self, value: Any) -> str:
+        if not isinstance(value, str):
+            value = str(value)
+        return value
+
+
+class _TemplateParameter(NamedTuple):
+    name: str
+    converter: Converter
+    optional: bool
+
+
+class PathTemplate(Matcher):
+    """Matches request paths against a template with named parameters.
+
+    A template is a path in which ``<name>`` or ``<converter:name>``
+    placeholders match a single path segment and capture it as a named
+    parameter::
+
+        Rule(PathTemplate("/users/<int:user_id>"), UserHandler, name="user")
+
+    The final parameter may be marked optional with a trailing ``?``,
+    which makes the whole final path segment optional (the parameter is
+    passed as ``None`` when it is absent)::
+
+        Rule(PathTemplate("/files/<uuid:file_id>/<path:file_path>?"), FileHandler)
+
+    Matched values are converted by the parameter's `Converter` and the
+    resulting Python objects (not byte strings) are passed to the
+    handler, so ``user_id`` above arrives as an `int`. If a converter
+    raises `ValueError` the rule simply does not match.
+
+    The following converters are registered by default: ``str`` (the
+    default when no converter is given), ``int``, ``uuid`` and ``path``
+    (which matches the rest of the path including slashes). Additional
+    converters may be registered with `register_converter` or passed to
+    the constructor.
+
+    Templates are reversible: `~.ReversibleRuleRouter.reverse_url` (and
+    therefore `tornado.web.Application.reverse_url` and
+    `tornado.web.RequestHandler.reverse_url`) builds the url from the
+    parameter values, validating each value with its converter and
+    percent-encoding it exactly once. Reversing fails with a
+    `ValueError` if a required parameter is missing, if too many
+    arguments are given, or if a value cannot round-trip through the
+    template (for example a ``str`` parameter containing a slash).
+
+    .. versionadded:: 6.6
+    """
+
+    default_converters: dict[str, Converter] = {
+        "str": StringConverter(),
+        "int": IntConverter(),
+        "uuid": UUIDConverter(),
+        "path": PathConverter(),
+    }
+
+    _parameter_re = re.compile(
+        r"<(?:([A-Za-z_][A-Za-z0-9_]*):)?([A-Za-z_][A-Za-z0-9_]*)>(\?)?"
+    )
+
+    @classmethod
+    def register_converter(cls, name: str, converter: Converter) -> None:
+        """Registers a converter under ``name`` for all templates created
+        afterwards."""
+        cls.default_converters[name] = converter
+
+    def __init__(
+        self,
+        template: str,
+        converters: dict[str, Converter] | None = None,
+    ) -> None:
+        self.template = template
+        self.converters = dict(self.default_converters)
+        if converters:
+            self.converters.update(converters)
+
+        # Tokenize the template into ("lit", text) and ("param", parameter)
+        # tokens. Literal and parameter tokens always alternate.
+        self._tokens: list[tuple[str, Any]] = []
+        self._params: list[_TemplateParameter] = []
+        pos = 0
+        for match in self._parameter_re.finditer(template):
+            self._add_literal(template[pos : match.start()])
+            converter_name, name, optional = match.groups()
+            try:
+                converter = self.converters[converter_name or "str"]
+            except KeyError:
+                raise ValueError(
+                    "unknown converter %r in url template %r"
+                    % (converter_name, template)
+                ) from None
+            param = _TemplateParameter(name, converter, optional is not None)
+            if any(p.name == name for p in self._params):
+                raise ValueError(
+                    "duplicate parameter %r in url template %r" % (name, template)
+                )
+            self._params.append(param)
+            self._tokens.append(("param", param))
+            pos = match.end()
+        self._add_literal(template[pos:])
+
+        optional_params = [p for p in self._params if p.optional]
+        if optional_params:
+            # The tokens always end with a (possibly empty) literal, so
+            # the final parameter is the last or next-to-last token.
+            last_param = self._tokens[-1]
+            if last_param == ("lit", ""):
+                last_param = self._tokens[-2]
+            if len(optional_params) > 1 or last_param != (
+                "param",
+                optional_params[0],
+            ):
+                raise ValueError(
+                    "only the final parameter of a url template "
+                    "may be optional: %r" % template
+                )
+
+        # Compile the template into a regular expression. The optional
+        # trailing parameter, together with the "/" that introduces
+        # its segment (if any), is wrapped in a non-capturing optional
+        # group.
+        parts = []
+        for kind, value in self._tokens:
+            if kind == "lit":
+                parts.append(re.escape(value))
+            else:
+                group = "(?P<%s>%s)" % (value.name, value.converter.regex)
+                if value.optional:
+                    prefix = ""
+                    if parts and parts[-1].endswith("/"):
+                        parts[-1] = parts[-1][:-1]
+                        prefix = "/"
+                    parts.append("(?:%s%s)?" % (prefix, group))
+                else:
+                    parts.append(group)
+        self.regex = re.compile("^%s$" % "".join(parts))
+
+    def _add_literal(self, text: str) -> None:
+        if "<" in text or ">" in text:
+            raise ValueError(
+                "malformed parameter in url template %r" % self.template
+            )
+        self._tokens.append(("lit", text))
+
+    def match(self, request: httputil.HTTPServerRequest) -> dict[str, Any] | None:
+        return self._match_path(request.path)
+
+    def _match_path(self, path: str) -> dict[str, Any] | None:
+        match = self.regex.match(path)
+        if match is None:
+            return None
+        path_kwargs: dict[str, Any] = {}
+        for param in self._params:
+            raw = match.group(param.name)
+            if raw is None:
+                # The optional trailing parameter is absent.
+                value = None
+            else:
+                unquoted = url_unescape(raw, encoding="utf-8", plus=False)
+                try:
+                    value = param.converter.to_python(unquoted)
+                except ValueError:
+                    # Conversion failure means this rule does not match.
+                    # Other exceptions are programming errors in the
+                    # converter and are propagated.
+                    return None
+            path_kwargs[param.name] = value
+        return dict(path_kwargs=path_kwargs)
+
+    def reverse(self, *args: Any) -> str | None:
+        required = [p for p in self._params if not p.optional]
+        if len(args) < len(required):
+            raise ValueError(
+                "not enough arguments for url template %r: "
+                "expected at least %d, got %d"
+                % (self.template, len(required), len(args))
+            )
+        if len(args) > len(self._params):
+            raise ValueError(
+                "too many arguments for url template %r: "
+                "expected at most %d, got %d"
+                % (self.template, len(self._params), len(args))
+            )
+
+        values: dict[str, str | None] = {}
+        for param in self._params[len(args) :]:
+            values[param.name] = None
+        for param, arg in zip(self._params, args):
+            if arg is None:
+                if not param.optional:
+                    raise ValueError(
+                        "parameter %r of url template %r is not optional"
+                        % (param.name, self.template)
+                    )
+                values[param.name] = None
+            else:
+                values[param.name] = param.converter.to_url(arg)
+
+        # Build the path, percent-encoding each parameter value exactly
+        # once (literal template text is used as-is).
+        parts = []
+        for kind, value in self._tokens:
+            if kind == "lit":
+                parts.append(value)
+            else:
+                encoded = values[value.name]
+                if encoded is None:
+                    # An omitted optional parameter: drop the "/"
+                    # that introduces its segment (if any).
+                    if parts and parts[-1].endswith("/"):
+                        parts[-1] = parts[-1][:-1]
+                        if not parts[-1]:
+                            parts.pop()
+                else:
+                    parts.append(url_escape(utf8(encoded), plus=False))
+        path = "".join(parts)
+
+        # Verify that the built url maps back to the same parameter
+        # values, rejecting values that cannot round-trip (such as a
+        # slash in a single-segment parameter).
+        matched = self._match_path(path)
+        if matched is not None:
+            matched_kwargs = matched["path_kwargs"]
+            for param, arg in zip(self._params, args):
+                encoded = values[param.name]
+                if encoded is None:
+                    continue
+                round_tripped = matched_kwargs[param.name]
+                if round_tripped == arg:
+                    continue
+                if round_tripped == param.converter.to_python(encoded):
+                    continue
+                matched = None
+                break
+        if matched is None:
+            raise ValueError(
+                "arguments %r cannot be reversed with url template %r"
+                % (args, self.template)
+            )
+        return path
+
+    def __repr__(self) -> str:
+        return "%s(%r)" % (self.__class__.__name__, self.template)
 
 
 class URLSpec(Rule):

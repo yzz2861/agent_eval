@@ -192,8 +192,8 @@ class RequestHandler:
 
     # Will be set in _execute.
     _transforms: list["OutputTransform"]
-    path_args: list[str]
-    path_kwargs: dict[str, str]
+    path_args: list[Any]
+    path_kwargs: dict[str, Any]
 
     def __init__(
         self,
@@ -1828,9 +1828,20 @@ class RequestHandler:
                 except httputil.HTTPInputError as e:
                     raise HTTPError(400, "Invalid body: %s" % e) from e
 
-            self.path_args = [self.decode_argument(arg) for arg in args]
+            # Path args are usually bytes to be decoded, but matchers
+            # such as PathTemplate may pass already-converted Python
+            # values through unchanged.
+            self.path_args = [
+                self.decode_argument(arg) if isinstance(arg, (bytes, str)) else arg
+                for arg in args
+            ]
             self.path_kwargs = {
-                k: self.decode_argument(v, name=k) for (k, v) in kwargs.items()
+                k: (
+                    self.decode_argument(v, name=k)
+                    if isinstance(v, (bytes, str))
+                    else v
+                )
+                for (k, v) in kwargs.items()
             }
             # If XSRF cookies are turned on, reject form submissions without
             # the proper cookie
