@@ -596,6 +596,185 @@ class Serializer(BaseSerializer, metaclass=SerializerMetaclass):
         return ReturnDict(ret, serializer=self)
 
 
+class PolymorphicSerializer(Serializer):
+    serializer_type_field_name = 'type'
+    serializer_types = {}
+
+    default_error_messages = {
+        'invalid': _('Invalid data. Expected a dictionary, but got {datatype}.'),
+        'required_type': _('This field is required.'),
+        'invalid_type': _('"{type}" is not a valid discriminator value.'),
+    }
+
+    def __new__(cls, *args, **kwargs):
+        if kwargs.pop('many', False):
+            return cls.many_init(*args, **kwargs)
+        return super(BaseSerializer, cls).__new__(cls, *args, **kwargs)
+
+    @classmethod
+    def many_init(cls, *args, **kwargs):
+        child = cls(*args, **kwargs)
+        return PolymorphicListSerializer(child=child, *args, **kwargs)
+
+    @classmethod
+    def get_serializer_types(cls):
+        if isinstance(cls.serializer_types, Mapping):
+            serializer_types = cls.serializer_types
+        else:
+            items = list(cls.serializer_types)
+            labels = [label for label, _ in items]
+            duplicate_labels = sorted({
+                label for label in labels
+                if labels.count(label) > 1
+            })
+            if duplicate_labels:
+                raise ValueError(
+                    'Polymorphic serializer labels must be unique: {}'.format(
+                        ', '.join(map(str, duplicate_labels))
+                    )
+                )
+            try:
+                serializer_types = dict(cls.serializer_types)
+            except (TypeError, ValueError):
+                raise TypeError('serializer_types must be a mapping.')
+
+        if not serializer_types:
+            raise ValueError('serializer_types must not be empty.')
+
+        labels = list(serializer_types)
+        duplicate_labels = sorted({
+            label for label in labels
+            if labels.count(label) > 1
+        })
+        if duplicate_labels:
+            raise ValueError(
+                'Polymorphic serializer labels must be unique: {}'.format(
+                    ', '.join(map(str, duplicate_labels))
+                )
+            )
+
+        return serializer_types
+
+    @classmethod
+    def get_serializer_class_for_type(cls, label):
+        serializer_type = cls.get_serializer_types()[label]
+        if isinstance(serializer_type, tuple):
+            serializer_type = serializer_type[0]
+        if isinstance(serializer_type, type):
+            return serializer_type
+        return serializer_type.__class__
+
+    def get_discriminator_label(self, data):
+        if data is empty:
+            raise ValidationError({
+                self.serializer_type_field_name: [
+                    ErrorDetail(self.error_messages['required_type'], code='required')
+                ]
+            })
+        if not isinstance(data, Mapping):
+            message = self.error_messages['invalid'].format(
+                datatype=type(data).__name__
+            )
+            raise ValidationError({
+                api_settings.NON_FIELD_ERRORS_KEY: [
+                    ErrorDetail(message, code='invalid')
+                ]
+            })
+
+        label = data.get(self.serializer_type_field_name, empty)
+        if label is empty:
+            raise ValidationError({
+                self.serializer_type_field_name: [
+                    ErrorDetail(self.error_messages['required_type'], code='required')
+                ]
+            })
+        if label not in self.get_serializer_types():
+            message = self.error_messages['invalid_type'].format(type=label)
+            raise ValidationError({
+                self.serializer_type_field_name: [
+                    ErrorDetail(message, code='invalid_type')
+                ]
+            })
+        return label
+
+    def get_serializer_for_type(self, label, *args, **kwargs):
+        serializer_class = self.get_serializer_class_for_type(label)
+        return serializer_class(*args, **kwargs)
+
+    def get_type_for_instance(self, instance):
+        if isinstance(instance, Mapping):
+            label = instance.get(self.serializer_type_field_name, empty)
+        else:
+            label = getattr(instance, self.serializer_type_field_name, empty)
+        if label not in self.get_serializer_types():
+            message = self.error_messages['invalid_type'].format(type=label)
+            raise ValidationError({
+                self.serializer_type_field_name: [
+                    ErrorDetail(message, code='invalid_type')
+                ]
+            })
+        return label
+
+    def get_serializer_for_instance(self, instance):
+        label = self.get_type_for_instance(instance)
+        return self.get_serializer_for_type(
+            label, instance=instance, context=self.context, partial=self.partial
+        )
+
+    def run_validation(self, data=empty):
+        is_empty_value, data = self.validate_empty_values(data)
+        if is_empty_value:
+            return data
+
+        try:
+            label = self.get_discriminator_label(data)
+            serializer = self.get_serializer_for_type(
+                label, data=data, context=self.context, partial=self.partial
+            )
+            value = serializer.run_validation(data)
+        except ValidationError as exc:
+            raise ValidationError(detail=as_serializer_error(exc))
+        self._selected_serializer = serializer
+        return value
+
+    def to_representation(self, instance):
+        label = self.get_type_for_instance(instance)
+        serializer = self.get_serializer_for_instance(instance)
+        representation = serializer.to_representation(instance)
+        representation.setdefault(self.serializer_type_field_name, label)
+        return representation
+
+    def create(self, validated_data):
+        return self._selected_serializer.create(validated_data)
+
+    def update(self, instance, validated_data):
+        return self._selected_serializer.update(instance, validated_data)
+
+    def save(self, **kwargs):
+        assert hasattr(self, '_errors'), (
+            'You must call `.is_valid()` before calling `.save()`.'
+        )
+        assert not self.errors, (
+            'You cannot call `.save()` on a serializer with invalid data.'
+        )
+        validated_data = {**self.validated_data, **kwargs}
+        if self.instance is not None:
+            self.instance = self.update(self.instance, validated_data)
+        else:
+            self.instance = self.create(validated_data)
+        assert self.instance is not None, (
+            '`create()` or `update()` did not return an object instance.'
+        )
+        return self.instance
+
+    @property
+    def fields(self):
+        selected_serializer = getattr(self, '_selected_serializer', None)
+        if selected_serializer is not None:
+            return selected_serializer.fields
+        return {}
+
+
 # There's some replication of `ListField` here,
 # but that's probably better than obfuscating the call hierarchy.
 
@@ -829,6 +1008,56 @@ class ListSerializer(BaseSerializer):
         if isinstance(ret, dict):
             return ReturnDict(ret, serializer=self)
         return ReturnList(ret, serializer=self)
+
+
+class PolymorphicListSerializer(ListSerializer):
+    def __init__(self, *args, **kwargs):
+        self._validated_children = []
+        super().__init__(*args, **kwargs)
+
+    def get_serializer_types(self):
+        return self.child.get_serializer_types()
+
+    def get_discriminator_label(self, data):
+        return self.child.get_discriminator_label(data)
+
+    def get_serializer_for_type(self, label, *args, **kwargs):
+        return self.child.get_serializer_for_type(label, *args, **kwargs)
+
+    def run_child_validation(self, data):
+        index = self._validated_index
+        self._validated_index += 1
+        label = self.get_discriminator_label(data)
+        child = self.get_serializer_for_type(
+            label, data=data, context=self.context, partial=self.partial
+        )
+        value = child.run_validation(data)
+        self._validated_children[index] = child
+        return value
+
+    def run_validation(self, data=empty):
+        self._validated_children = {}
+        self._validated_index = 0
+        try:
+            value = super().run_validation(data)
+        finally:
+            self._validated_index = 0
+        self._validated_children = [
+            self._validated_children[index]
+            for index in sorted(self._validated_children)
+        ]
+        return value
+
+    def to_representation(self, data):
+        iterable = data.all() if isinstance(data, models.manager.BaseManager) else data
+        return [self.child.to_representation(item) for item in iterable]
+
+    def create(self, validated_data):
+        self._validated_children = getattr(self, '_validated_children', [])
+        return [
+            child.create(attrs)
+            for child, attrs in zip(self._validated_children, validated_data)
+        ]
 
 
 # ModelSerializer & HyperlinkedModelSerializer

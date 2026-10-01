@@ -21,6 +21,69 @@ from .inspectors import ViewInspector
 from .utils import get_pk_description, is_list_view
 
 
+class ComponentRegistry:
+    def __init__(self):
+        self.components = {}
+        self.serializer_info = {}
+        self.polymorphic_serializers = set()
+        self.current_direction = None
+
+    def register(self, serializer, content=None, name=None, explicit=False, direction=None):
+        serializer_class = serializer.__class__
+        component_key = (serializer_class, direction)
+        for existing_name, info in self.serializer_info.items():
+            if info[0] == component_key:
+                return existing_name
+
+        if name is None:
+            name = self.get_default_name(serializer)
+
+        if name in self.components:
+            has_other_direction = any(
+                existing_class is serializer_class and
+                existing_direction not in (None, direction)
+                for existing_class, existing_direction in self.serializer_info.values()
+            )
+            if direction is not None and has_other_direction:
+                name = f'{name}{direction.title()}'
+            suffix = 2
+            while name in self.components:
+                name = f'{name}{suffix}'
+                suffix += 1
+
+        self.serializer_info[name] = (component_key, explicit)
+        if content is None:
+            self.components[name] = {}
+        else:
+            self.components[name] = content
+        return name
+
+    def get_default_name(self, serializer):
+        component_name = serializer.__class__.__name__
+        return re.sub('serializer', '', component_name, flags=re.IGNORECASE)
+
+    def resolve_name(self, serializer, direction):
+        default_name = self.get_default_name(serializer)
+        default_key = (serializer.__class__, direction)
+        if default_name in self.serializer_info and (
+            self.serializer_info[default_name][0] == default_key or
+            self.serializer_info[default_name][0][0] is serializer.__class__
+        ):
+            return default_name
+        for name, (key, _) in self.serializer_info.items():
+            serializer_class, component_direction = key
+            if serializer_class is serializer.__class__ and (
+                component_direction == direction or
+                component_direction is None
+            ):
+                return name
+        return self.register(serializer, direction=direction)
+
+    def update(self, name, serializer, content, explicit=False, direction=None):
+        self.components[name] = content
+        self.serializer_info[name] = ((serializer.__class__, direction), explicit)
+
+
 class SchemaGenerator(BaseSchemaGenerator):
 
     def get_info(self):
@@ -70,21 +133,51 @@ class SchemaGenerator(BaseSchemaGenerator):
 
         # Iterate endpoints generating per method path operations.
         paths = {}
+        component_classes = {}
         _, view_endpoints = self._get_paths_and_endpoints(None if public else request)
         for path, method, view in view_endpoints:
             if not self.has_view_permissions(path, method, view):
                 continue
 
-            operation = view.schema.get_operation(path, method)
-            components = view.schema.get_components(path, method)
-            for k in components.keys():
-                if k not in components_schemas:
-                    continue
-                if components_schemas[k] == components[k]:
-                    continue
-                warnings.warn(f'Schema component "{k}" has been overridden with a different value.')
+            operation, components, component_info = view.schema.get_operation_with_components(
+                path, method
+            )
+            for component_name, content in components.items():
+                component_key, explicit = component_info.get(
+                    component_name, ((None, None), False)
+                )
+                serializer_class, _ = component_key
+                if component_name in components_schemas:
+                    existing_key = component_classes.get(component_name)
+                    if component_key[0] is not None and existing_key == component_key:
+                        continue
+                    if explicit:
+                        if components_schemas[component_name] != content:
+                            warnings.warn(
+                                f'Schema component "{component_name}" has been '
+                                'overridden with a different value.'
+                            )
+                        continue
 
-            components_schemas.update(components)
+                    canonical_name = component_name
+                    suffix = 2
+                    while canonical_name in components_schemas:
+                        candidate = f'{component_name}{suffix}'
+                        if candidate not in components_schemas:
+                            canonical_name = candidate
+                            break
+                        suffix += 1
+                    operation = self._rename_component_reference(
+                        operation, component_name, canonical_name
+                    )
+                    component_info[canonical_name] = (
+                        component_key, explicit
+                    )
+                    component_name = canonical_name
+
+                components_schemas[component_name] = content
+                if serializer_class is not None:
+                    component_classes[component_name] = component_key
 
             # Normalize path for any provided mount url.
             if path.startswith('/'):
@@ -109,6 +202,28 @@ class SchemaGenerator(BaseSchemaGenerator):
             }
 
         return schema
+
+    def _rename_component_reference(self, value, old_name, new_name):
+        if isinstance(value, list):
+            return [
+                self._rename_component_reference(item, old_name, new_name)
+                for item in value
+            ]
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                old_reference = f'#/components/schemas/{old_name}'
+                new_reference = f'#/components/schemas/{new_name}'
+                if key == '$ref' and item == old_reference:
+                    result[key] = new_reference
+                elif isinstance(item, str) and item == old_reference:
+                    result[key] = new_reference
+                else:
+                    result[key] = self._rename_component_reference(
+                        item, old_name, new_name
+                    )
+            return result
+        return value
 
 # View Inspectors
 
@@ -138,7 +253,15 @@ class AutoSchema(ViewInspector):
         'delete': 'destroy',
     }
 
-    def get_operation(self, path, method):
+    def get_operation_with_components(self, path, method):
+        components, component_info = self.get_components_with_info(path, method)
+        registry = getattr(self, '_last_component_registry', ComponentRegistry())
+        operation = self.get_operation(path, method, registry)
+        return operation, components, component_info
+
+    def get_operation(self, path, method, registry=None):
+        if registry is None:
+            registry = ComponentRegistry()
         operation = {}
 
         operation['operationId'] = self.get_operation_id(path, method)
@@ -150,10 +273,10 @@ class AutoSchema(ViewInspector):
         parameters += self.get_filter_parameters(path, method)
         operation['parameters'] = parameters
 
-        request_body = self.get_request_body(path, method)
+        request_body = self.get_request_body(path, method, registry)
         if request_body:
             operation['requestBody'] = request_body
-        operation['responses'] = self.get_responses(path, method)
+        operation['responses'] = self.get_responses(path, method, registry)
         operation['tags'] = self.get_tags(path, method)
 
         return operation
@@ -185,26 +308,111 @@ class AutoSchema(ViewInspector):
         """
         Return components with their properties from the serializer.
         """
-
         if method.lower() == 'delete':
             return {}
 
         request_serializer = self.get_request_serializer(path, method)
         response_serializer = self.get_response_serializer(path, method)
+        registry = ComponentRegistry()
+        self._last_component_registry = registry
 
-        components = {}
+        endpoint_serializers = []
+        if method.lower() in ('post', 'put', 'patch'):
+            endpoint_serializers.append((request_serializer, 'request', 0))
+        endpoint_serializers.append((response_serializer, 'response', 0))
 
-        if isinstance(request_serializer, serializers.Serializer):
-            component_name = self.get_component_name(request_serializer)
-            content = self.map_serializer(request_serializer)
-            components.setdefault(component_name, content)
+        for endpoint_serializer, direction, depth in endpoint_serializers:
+            serializer = self._unwrap_serializer(endpoint_serializer)
+            if not isinstance(serializer, serializers.Serializer):
+                continue
+            registry.current_direction = direction
+            if isinstance(serializer, serializers.PolymorphicSerializer):
+                self._register_polymorphic_components(serializer, direction, registry)
+            else:
+                component_name = self.get_component_name(serializer)
+                explicit = self.component_name is not None
+                component_name = registry.register(
+                    serializer,
+                    explicit=explicit,
+                    name=component_name,
+                    direction=None,
+                )
+                content = self.map_serializer(serializer, registry=registry, depth=depth)
+                registry.update(
+                    component_name,
+                    serializer,
+                    content,
+                    explicit=explicit,
+                    direction=None,
+                )
 
-        if isinstance(response_serializer, serializers.Serializer):
-            component_name = self.get_component_name(response_serializer)
-            content = self.map_serializer(response_serializer)
-            components.setdefault(component_name, content)
+        return registry.components
 
-        return components
+    def get_components_with_info(self, path, method):
+        components = self.get_components(path, method)
+        if not components:
+            return components, {}
+        registry = self._last_component_registry
+        return components, registry.serializer_info
+
+    def _unwrap_serializer(self, serializer):
+        if isinstance(serializer, serializers.ListSerializer):
+            return serializer.child
+        return serializer
+
+    def _register_polymorphic_components(self, serializer, direction, registry):
+        poly_key = (serializer.__class__, direction)
+        if poly_key in registry.polymorphic_serializers:
+            return
+        registry.polymorphic_serializers.add(poly_key)
+        registry.current_direction = direction
+        for label in serializer.get_serializer_types():
+            branch = serializer.get_serializer_for_type(
+                label, context=getattr(serializer, '_context', {})
+            )
+            component_name = self._register_polymorphic_branch(
+                branch, registry, {}, direction
+            )
+            content = self.map_serializer(branch, registry=registry, depth=1)
+            properties = content.setdefault('properties', {})
+            type_property = properties.setdefault(
+                serializer.serializer_type_field_name,
+                {'type': 'string'}
+            )
+            type_property['enum'] = [label]
+            required = content.setdefault('required', [])
+            if serializer.serializer_type_field_name not in required:
+                required.append(serializer.serializer_type_field_name)
+            component_name = registry.resolve_name(branch, direction)
+            registry.update(
+                component_name, branch, content, direction=direction
+            )
+        registry.current_direction = None
+
+    def _register_polymorphic_branch(self, branch, registry, content, direction):
+        for name, (key, _) in registry.serializer_info.items():
+            existing_class, existing_direction = key
+            if existing_class is not branch.__class__:
+                continue
+            if existing_direction == direction or registry.components.get(name) == content:
+                return name
+
+        component_name = registry.get_default_name(branch)
+        if component_name in registry.components:
+            directional_name = f'{component_name}{direction.title()}'
+            if directional_name not in registry.components:
+                component_name = directional_name
+            else:
+                suffix = 2
+                while f'{component_name}{suffix}' in registry.components:
+                    suffix += 1
+                component_name = f'{component_name}{suffix}'
+
+        registry.components[component_name] = content
+        registry.serializer_info[component_name] = (
+            (branch.__class__, direction), False
+        )
+        return component_name
 
     def _to_camel_case(self, snake_str):
         components = snake_str.split('_')
@@ -363,16 +571,27 @@ class AutoSchema(ViewInspector):
             mapping['type'] = type
         return mapping
 
-    def map_field(self, field):
+    def map_field(self, field, registry=None, depth=0):
 
         # Nested Serializers, `many` or not.
         if isinstance(field, serializers.ListSerializer):
+            child = self._unwrap_serializer(field.child)
+            if registry is not None and depth > 0:
+                return {
+                    'type': 'array',
+                    'items': self._map_nested_serializer(child, registry, depth)
+                }
             return {
                 'type': 'array',
-                'items': self.map_serializer(field.child)
+                'items': self.map_serializer(field.child, registry=registry, depth=depth)
             }
         if isinstance(field, serializers.Serializer):
-            data = self.map_serializer(field)
+            if (
+                isinstance(field, serializers.PolymorphicSerializer) or
+                (registry is not None and depth > 0)
+            ):
+                return self._map_nested_serializer(field, registry, depth)
+            data = self.map_serializer(field, registry=registry, depth=depth)
             data['type'] = 'object'
             return data
 
@@ -380,11 +599,11 @@ class AutoSchema(ViewInspector):
         if isinstance(field, serializers.ManyRelatedField):
             return {
                 'type': 'array',
-                'items': self.map_field(field.child_relation)
+                'items': self.map_field(field.child_relation, registry, depth)
             }
         if isinstance(field, serializers.PrimaryKeyRelatedField):
             if getattr(field, "pk_field", False):
-                return self.map_field(field=field.pk_field)
+                return self.map_field(field=field.pk_field, registry=registry, depth=depth)
             model = getattr(field.queryset, 'model', None)
             if model is not None:
                 model_field = model._meta.pk
@@ -411,7 +630,7 @@ class AutoSchema(ViewInspector):
                 'items': {},
             }
             if not isinstance(field.child, _UnvalidatedField):
-                mapping['items'] = self.map_field(field.child)
+                mapping['items'] = self.map_field(field.child, registry, depth)
             return mapping
 
         # DateField and DateTimeField type is string
@@ -516,13 +735,64 @@ class AutoSchema(ViewInspector):
         }
         return {'type': FIELD_CLASS_SCHEMA_TYPE.get(field.__class__, 'string')}
 
+    def _map_nested_serializer(self, serializer, registry, depth):
+        serializer = self._unwrap_serializer(serializer)
+        if isinstance(serializer, serializers.PolymorphicSerializer):
+            return self.map_polymorphic_serializer(
+                serializer, registry, registry.current_direction
+            )
+
+        component_name = registry.resolve_name(
+            serializer, registry.current_direction
+        )
+        if component_name not in registry.serializer_info:
+            registry.register(serializer, direction=registry.current_direction)
+        content = self.map_serializer(serializer, registry, depth + 1)
+        registry.update(
+            component_name, serializer, content,
+            direction=registry.current_direction
+        )
+        return {'$ref': f'#/components/schemas/{component_name}'}
+
+    def map_polymorphic_serializer(self, serializer, registry=None, direction=None):
+        if registry is None:
+            registry = ComponentRegistry()
+        previous_direction = registry.current_direction
+        if direction is not None:
+            registry.current_direction = direction
+
+        poly_key = (serializer.__class__, direction)
+        if poly_key not in registry.polymorphic_serializers:
+            self._register_polymorphic_components(serializer, direction, registry)
+
+        registry.current_direction = previous_direction
+
+        def reference_for_label(label):
+            branch = serializer.get_serializer_for_type(label)
+            component_name = registry.resolve_name(branch, direction)
+            return f'#/components/schemas/{component_name}'
+
+        return {
+            'oneOf': [
+                {'$ref': reference_for_label(label)}
+                for label in serializer.get_serializer_types()
+            ],
+            'discriminator': {
+                'propertyName': serializer.serializer_type_field_name,
+                'mapping': {
+                    label: reference_for_label(label)
+                    for label in serializer.get_serializer_types()
+                }
+            }
+        }
+
     def _map_min_max(self, field, content):
         if field.max_value is not None:
             content['maximum'] = field.max_value
         if field.min_value is not None:
             content['minimum'] = field.min_value
 
-    def map_serializer(self, serializer):
+    def map_serializer(self, serializer, registry=None, depth=0):
         # Assuming we have a valid serializer instance.
         required = []
         properties = {}
@@ -534,7 +804,7 @@ class AutoSchema(ViewInspector):
             if field.required and not serializer.partial:
                 required.append(self.get_field_name(field))
 
-            schema = self.map_field(field)
+            schema = self.map_field(field, registry, depth)
             if field.read_only:
                 schema['readOnly'] = True
             if field.write_only:
@@ -655,18 +925,37 @@ class AutoSchema(ViewInspector):
     def get_reference(self, serializer):
         return {'$ref': f'#/components/schemas/{self.get_component_name(serializer)}'}
 
-    def get_request_body(self, path, method):
+    def get_serializer_schema(self, serializer, registry):
+        if isinstance(serializer, serializers.ListSerializer):
+            child = self._unwrap_serializer(serializer.child)
+            if isinstance(child, serializers.PolymorphicSerializer):
+                direction = registry.current_direction
+                return {
+                    'type': 'array',
+                    'items': self.map_polymorphic_serializer(child, registry, direction)
+                }
+        serializer = self._unwrap_serializer(serializer)
+        if isinstance(serializer, serializers.PolymorphicSerializer):
+            direction = registry.current_direction
+            return self.map_polymorphic_serializer(serializer, registry, direction)
+        return self.get_reference(serializer)
+
+    def get_request_body(self, path, method, registry=None):
         if method not in ('PUT', 'PATCH', 'POST'):
             return {}
+        if registry is None:
+            registry = ComponentRegistry()
 
         self.request_media_types = self.map_parsers(path, method)
+        if registry is not None:
+            registry.current_direction = 'request'
 
         serializer = self.get_request_serializer(path, method)
 
         if not isinstance(serializer, serializers.Serializer):
             item_schema = {}
         else:
-            item_schema = self.get_reference(serializer)
+            item_schema = self.get_serializer_schema(serializer, registry)
 
         return {
             'content': {
@@ -675,22 +964,26 @@ class AutoSchema(ViewInspector):
             }
         }
 
-    def get_responses(self, path, method):
+    def get_responses(self, path, method, registry=None):
         if method == 'DELETE':
             return {
                 '204': {
                     'description': ''
                 }
             }
+        if registry is None:
+            registry = ComponentRegistry()
 
         self.response_media_types = self.map_renderers(path, method)
+        if registry is not None:
+            registry.current_direction = 'response'
 
         serializer = self.get_response_serializer(path, method)
 
         if not isinstance(serializer, serializers.Serializer):
             item_schema = {}
         else:
-            item_schema = self.get_reference(serializer)
+            item_schema = self.get_serializer_schema(serializer, registry)
 
         if is_list_view(path, method, self.view):
             response_schema = {

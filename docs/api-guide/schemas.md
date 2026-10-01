@@ -317,6 +317,74 @@ This saves you having to create a custom subclass per-view for a commonly used o
 Not all `AutoSchema` methods expose related `__init__()` kwargs, but those for
 the more commonly needed options do.
 
+### Polymorphic request and response bodies
+
+Use `PolymorphicSerializer` when one action can accept or return several
+serializer shapes selected by a discriminator field. Declare the labels in
+`serializer_types`; labels must be unique and an unknown label results in a
+validation error rather than falling back to the first serializer.
+
+    from rest_framework import generics, serializers
+
+
+    class WriteCatSerializer(serializers.Serializer):
+        type = serializers.ChoiceField(choices=['cat'])
+        name = serializers.CharField()
+        secret = serializers.CharField(write_only=True)
+
+
+    class WriteDogSerializer(serializers.Serializer):
+        type = serializers.ChoiceField(choices=['dog'])
+        name = serializers.CharField()
+        owner = serializers.CharField(write_only=True)
+
+
+    class ReadCatSerializer(serializers.Serializer):
+        type = serializers.ChoiceField(choices=['cat'])
+        name = serializers.CharField()
+        identifier = serializers.IntegerField(read_only=True)
+
+
+    class ReadDogSerializer(serializers.Serializer):
+        type = serializers.ChoiceField(choices=['dog'])
+        name = serializers.CharField()
+        family = serializers.CharField(read_only=True)
+
+
+    class WritePetSerializer(serializers.PolymorphicSerializer):
+        serializer_types = {
+            'cat': WriteCatSerializer,
+            'dog': WriteDogSerializer,
+        }
+
+
+    class ReadPetSerializer(serializers.PolymorphicSerializer):
+        serializer_types = {
+            'cat': ReadCatSerializer,
+            'dog': ReadDogSerializer,
+        }
+
+
+    class PetSchema(AutoSchema):
+        def get_request_serializer(self, path, method):
+            return WritePetSerializer()
+
+        def get_response_serializer(self, path, method):
+            return ReadPetSerializer()
+
+
+    class PetView(generics.GenericAPIView):
+        serializer_class = WritePetSerializer
+        schema = PetSchema()
+
+The generated operation uses OpenAPI `oneOf` with a `discriminator` named
+`type`. Request and response components are generated separately, so
+`read_only` and `write_only` fields remain on their correct side. The same
+mechanism also works with `many=True`; list and pagination wrappers are applied
+around the `oneOf` items schema. Recursive serializers terminate as component
+references, and serializer classes that produce the same component name are
+given distinct component names.
+
 ### `AutoSchema` methods
 
 #### `get_components()`
