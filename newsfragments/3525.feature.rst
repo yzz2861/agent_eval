@@ -1,0 +1,1 @@
+Added :func:`trio.to_thread.open_worker_thread`, an asynchronous context manager that runs submitted synchronous calls sequentially on one dedicated thread.

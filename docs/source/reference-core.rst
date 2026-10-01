@@ -1923,6 +1923,11 @@ Putting blocking I/O into worker threads
 
 .. autofunction:: trio.to_thread.run_sync
 
+.. autofunction:: trio.to_thread.open_worker_thread
+
+.. autoclass:: trio.to_thread.WorkerThread
+   :members: run_sync, aclose
+
 .. autofunction:: trio.to_thread.current_default_thread_limiter
 
 

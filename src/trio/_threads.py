@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import contextlib
 import contextvars
 import inspect
@@ -19,6 +20,8 @@ from ._core import (
     RunVar,
     TrioToken,
     checkpoint,
+    checkpoint_if_cancelled,
+    current_task,
     disable_ki_protection,
     enable_ki_protection,
     start_thread_soon,
@@ -36,6 +39,9 @@ if TYPE_CHECKING:
     Ts = TypeVarTuple("Ts")
 
 RetT = TypeVar("RetT")
+_active_worker_thread_cvar: contextvars.ContextVar[WorkerThread] = (
+    contextvars.ContextVar("trio_active_worker_thread")
+)
 
 
 class _ParentTaskData(threading.local):
@@ -46,6 +52,7 @@ class _ParentTaskData(threading.local):
     abandon_on_cancel: bool
     cancel_register: list[RaiseCancelT | None]
     task_register: list[trio.lowlevel.Task | None]
+    worker_thread: WorkerThread | None
 
 
 PARENT_TASK_DATA = _ParentTaskData()
@@ -153,6 +160,7 @@ class ThreadPlaceholder:
 class Run(Generic[RetT]):  # type: ignore[explicit-any]
     afn: Callable[..., Awaitable[RetT]]  # type: ignore[explicit-any]
     args: tuple[object, ...]
+    worker: WorkerThread | None = attrs.field(init=False, default=None)
     context: contextvars.Context = attrs.field(
         init=False,
         factory=contextvars.copy_context,
@@ -212,6 +220,7 @@ class Run(Generic[RetT]):  # type: ignore[explicit-any]
 class RunSync(Generic[RetT]):  # type: ignore[explicit-any]
     fn: Callable[..., RetT]  # type: ignore[explicit-any]
     args: tuple[object, ...]
+    worker: WorkerThread | None = attrs.field(init=False, default=None)
     context: contextvars.Context = attrs.field(
         init=False,
         factory=contextvars.copy_context,
@@ -220,6 +229,20 @@ class RunSync(Generic[RetT]):  # type: ignore[explicit-any]
         init=False,
         factory=stdlib_queue.SimpleQueue,
     )
+
+    def __attrs_post_init__(self) -> None:
+        object.__setattr__(
+            self, "worker", getattr(PARENT_TASK_DATA, "worker_thread", None),
+        )
+        if self.worker is not None:
+            self.context.run(_active_worker_thread_cvar.set, self.worker)
+
+    def __attrs_post_init__(self) -> None:
+        object.__setattr__(
+            self, "worker", getattr(PARENT_TASK_DATA, "worker_thread", None),
+        )
+        if self.worker is not None:
+            self.context.run(_active_worker_thread_cvar.set, self.worker)
 
     @disable_ki_protection
     def unprotected_fn(self) -> RetT:
@@ -458,6 +481,244 @@ async def to_thread_run_sync(
             del msg_from_thread
 
 
+_worker_shutdown = object()
+
+
+def _worker_abort_failed(raise_cancel: RaiseCancelT) -> trio.lowlevel.Abort:
+    return trio.lowlevel.Abort.FAILED
+
+
+@attrs.define(eq=False, slots=False)
+class _WorkerCall(Generic[RetT]):  # type: ignore[explicit-any]
+    fn: Callable[[], RetT]  # type: ignore[explicit-any]
+    context: contextvars.Context = attrs.field(
+        init=False, factory=contextvars.copy_context,
+    )
+    task: trio.lowlevel.Task = attrs.field(init=False, factory=current_task)
+    cancel_register: list[RaiseCancelT | None] = attrs.field(init=False, default=None)
+    abandon_on_cancel: bool = attrs.field(init=False, default=False)
+    result: outcome.Outcome[RetT] | None = attrs.field(init=False, default=None)
+    state: str = attrs.field(init=False, default="queued")
+
+
+class WorkerThread:
+    """A dedicated thread running synchronous calls in FIFO order."""
+
+    def __init__(
+        self,
+        *,
+        initializer: Callable[[], object] | None = None,
+        destructor: Callable[[], object] | None = None,
+        thread_name: str | None = None,
+    ) -> None:
+        self._initializer = initializer
+        self._destructor = destructor
+        self._thread_name = thread_name
+        self._queue: deque[_WorkerCall[Any] | object] = deque()
+        self._condition = threading.Condition()
+        self._closed = False
+        self._thread: threading.Thread | None = None
+        self._exit_result: outcome.Outcome[None] | None = None
+        self._exit_done = threading.Event()
+
+    async def __aenter__(self) -> WorkerThread:
+        await checkpoint_if_cancelled()
+        task = trio.lowlevel.current_task()
+        token = trio.lowlevel.current_trio_token()
+        cancel_register: list[RaiseCancelT | None] = [None]
+        name = self._thread_name or f"trio-worker-thread-{next(_thread_counter)}"
+
+        def deliver_init(result: outcome.Outcome[object]) -> None:
+            with contextlib.suppress(trio.RunFinishedError):
+                token.run_sync_soon(
+                    trio.lowlevel.reschedule, task, outcome.Value(result),
+                )
+
+        def worker() -> None:
+            PARENT_TASK_DATA.token = token
+            PARENT_TASK_DATA.abandon_on_cancel = False
+            PARENT_TASK_DATA.cancel_register = cancel_register
+            PARENT_TASK_DATA.task_register = [task]
+            PARENT_TASK_DATA.worker_thread = self
+            self._thread = threading.current_thread()
+            try:
+                init_result = (
+                    outcome.capture(self._initializer)
+                    if self._initializer is not None
+                    else outcome.Value(None)
+                )
+                deliver_init(init_result)
+                if isinstance(init_result, outcome.Error):
+                    raise init_result.error
+                while True:
+                    with self._condition:
+                        while not self._queue:
+                            self._condition.wait()
+                        item = self._queue.popleft()
+                    if item is _worker_shutdown:
+                        break
+                    assert isinstance(item, _WorkerCall)
+                    if item.state != "cancelled":
+                        self._run_call(item, token)
+                if self._destructor is not None:
+                    self._destructor()
+                exit_result: outcome.Outcome[None] = outcome.Value(None)
+            except BaseException as exception:
+                exit_result = outcome.Error(exception)
+            finally:
+                self._exit_result = exit_result
+                self._exit_done.set()
+                del PARENT_TASK_DATA.token
+                del PARENT_TASK_DATA.abandon_on_cancel
+                del PARENT_TASK_DATA.cancel_register
+                del PARENT_TASK_DATA.task_register
+                del PARENT_TASK_DATA.worker_thread
+
+        thread = threading.Thread(target=worker, name=name, daemon=True)
+        with _track_active_thread():
+            thread.start()
+
+            def abort(raise_cancel: RaiseCancelT) -> trio.lowlevel.Abort:
+                cancel_register[0] = raise_cancel
+                return trio.lowlevel.Abort.FAILED
+
+            try:
+                (await trio.lowlevel.wait_task_rescheduled(abort)).unwrap()
+            except BaseException:
+                with trio.CancelScope(shield=True):
+                    await self._shutdown()
+                raise
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Stop accepting calls and wait for thread cleanup."""
+        await self._shutdown()
+
+    async def run_sync(
+        self,
+        sync_fn: Callable[[Unpack[Ts]], RetT],
+        *args: Unpack[Ts],
+        abandon_on_cancel: bool = False,
+    ) -> RetT:
+        """Run ``sync_fn`` sequentially on the dedicated worker thread."""
+        await checkpoint_if_cancelled()
+        abandon = bool(abandon_on_cancel)
+        if inspect.iscoroutinefunction(sync_fn) or inspect.isasyncgenfunction(sync_fn):
+            raise TypeError("Trio expected a synchronous function")
+        try:
+            active_worker = _active_worker_thread_cvar.get()
+        except LookupError:
+            active_worker = None
+        if active_worker is self:
+            raise RuntimeError(
+                "cannot submit another call to the same WorkerThread while its "
+                "current synchronous call is running",
+            )
+        call: _WorkerCall[RetT] = _WorkerCall(lambda: sync_fn(*args))
+        call.abandon_on_cancel = abandon
+        with self._condition:
+            if self._closed:
+                raise trio.ClosedResourceError("this worker thread has already closed")
+            self._queue.append(call)
+            self._condition.notify()
+
+        def abort(raise_cancel: RaiseCancelT) -> trio.lowlevel.Abort:
+            call.cancel_register[0] = raise_cancel
+            with self._condition:
+                if call.state == "queued":
+                    call.state = "cancelled"
+                    self._queue.remove(call)
+                    return trio.lowlevel.Abort.SUCCEEDED
+                if abandon:
+                    call.state = "abandoned"
+                    return trio.lowlevel.Abort.SUCCEEDED
+                return trio.lowlevel.Abort.FAILED
+
+        message = await trio.lowlevel.wait_task_rescheduled(abort)
+        assert message is call
+        assert call.result is not None
+        return call.result.unwrap()
+
+    def _run_call(self, call: _WorkerCall[Any], token: TrioToken) -> None:
+        with self._condition:
+            call.state = "running"
+        cancel_register: list[RaiseCancelT | None] = [None]
+        task_register: list[trio.lowlevel.Task | None] = [call.task]
+        old_cancel = PARENT_TASK_DATA.cancel_register
+        old_task = PARENT_TASK_DATA.task_register
+        old_abandon = PARENT_TASK_DATA.abandon_on_cancel
+        old_worker = PARENT_TASK_DATA.worker_thread
+        PARENT_TASK_DATA.cancel_register = cancel_register
+        PARENT_TASK_DATA.task_register = task_register
+        PARENT_TASK_DATA.abandon_on_cancel = call.abandon_on_cancel
+        PARENT_TASK_DATA.worker_thread = self
+        context_token: contextvars.Token[WorkerThread] | None = None
+        try:
+            call.context.run(current_async_library_cvar.set, None)
+            context_token = call.context.run(  # type: ignore[func-returns-value]
+                _active_worker_thread_cvar.set, self,
+            )
+            result = outcome.capture(call.context.run, call.fn)
+        finally:
+            if context_token is not None:
+                call.context.run(  # type: ignore[func-returns-value]
+                    _active_worker_thread_cvar.reset, context_token,
+                )
+            PARENT_TASK_DATA.worker_thread = old_worker
+            PARENT_TASK_DATA.cancel_register = old_cancel
+            PARENT_TASK_DATA.task_register = old_task
+            PARENT_TASK_DATA.abandon_on_cancel = old_abandon
+            if call.state != "cancelled":
+                call.state = "finished"
+            if call.state == "finished":
+                call.result = result
+                token.run_sync_soon(
+                    trio.lowlevel.reschedule, call.task, outcome.Value(call),
+                )
+
+    async def _shutdown(self) -> None:
+        if self._exit_result is not None:
+            self._exit_result.unwrap()
+            return
+        with self._condition:
+            if not self._closed:
+                self._closed = True
+                self._queue.append(_worker_shutdown)
+                self._condition.notify_all()
+        if self._thread is not None:
+            task = trio.lowlevel.current_task()
+            token = trio.lowlevel.current_trio_token()
+            event = self._exit_done
+
+            def wake() -> None:
+                event.wait()
+                token.run_sync_soon(
+                    trio.lowlevel.reschedule, task, outcome.Value(None),
+                )
+
+            threading.Thread(target=wake, daemon=True).start()
+            await trio.lowlevel.wait_task_rescheduled(_worker_abort_failed)
+        assert self._exit_result is not None
+        self._exit_result.unwrap()
+
+
+def open_worker_thread(
+    *,
+    initializer: Callable[[], object] | None = None,
+    destructor: Callable[[], object] | None = None,
+    thread_name: str | None = None,
+) -> WorkerThread:
+    """Open a :class:`WorkerThread` asynchronous context manager."""
+    return WorkerThread(
+        initializer=initializer,
+        destructor=destructor,
+        thread_name=thread_name,
+    )
+
+
 def from_thread_check_cancelled() -> None:
     """Raise `trio.Cancelled` if the associated Trio task entered a cancelled status.
 
@@ -500,6 +761,16 @@ def _send_message_to_trio(
     message_to_trio: Run[RetT] | RunSync[RetT],
 ) -> RetT:
     """Shared logic of from_thread functions"""
+    worker = getattr(PARENT_TASK_DATA, "worker_thread", None)
+    if worker is not None:
+        try:
+            if _active_worker_thread_cvar.get() is worker:
+                raise RuntimeError(
+                    "cannot submit another call to the same WorkerThread while its "
+                    "current synchronous call is still running",
+                )
+        except LookupError:
+            pass
     token_provided = trio_token is not None
 
     if not token_provided:

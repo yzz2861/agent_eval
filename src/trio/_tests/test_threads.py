@@ -17,6 +17,7 @@ from typing import (
 import pytest
 import sniffio
 
+import trio
 from .. import (
     CancelScope,
     CapacityLimiter,
@@ -35,6 +36,7 @@ from .._threads import (
     from_thread_check_cancelled,
     from_thread_run,
     from_thread_run_sync,
+    open_worker_thread,
     to_thread_run_sync,
     wait_all_threads_completed,
 )
@@ -337,6 +339,96 @@ async def test_run_in_worker_thread() -> None:
         await to_thread_run_sync(g)
     print(excinfo.value.args)
     assert excinfo.value.args[0] != trio_thread
+
+
+async def test_open_worker_thread_lifecycle_and_ordering() -> None:
+    record: list[tuple[str, int]] = []
+    gate = threading.Event()
+    started = threading.Event()
+
+    def initialize() -> None:
+        record.append(("init", threading.get_ident()))
+
+    def touch(name: str) -> int:
+        record.append((name, threading.get_ident()))
+        if name == "block":
+            started.set()
+            gate.wait()
+        return threading.get_ident()
+
+    def destroy() -> None:
+        record.append(("destroy", threading.get_ident()))
+
+    async with trio.to_thread.open_worker_thread(
+        initializer=initialize,
+        destructor=destroy,
+    ) as worker:
+        async with _core.open_nursery() as nursery:
+            nursery.start_soon(worker.run_sync, touch, "block")
+            while not started.wait(0.01):
+                await sleep(0)
+            nursery.start_soon(worker.run_sync, touch, "after")
+            await wait_all_tasks_blocked()
+            assert [item[0] for item in record] == ["init", "block"]
+            gate.set()
+        ident = await worker.run_sync(touch, "returned")
+
+    assert [item[0] for item in record] == [
+        "init",
+        "block",
+        "after",
+        "returned",
+        "destroy",
+    ]
+    assert len({item[1] for item in record}) == 1
+    assert ident != threading.get_ident()
+
+
+async def test_open_worker_thread_contextvars() -> None:
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("worker-session")
+    var.set("first")
+
+    async with open_worker_thread() as worker:
+        assert await worker.run_sync(var.get) == "first"
+        var.set("second")
+        assert await worker.run_sync(var.get) == "second"
+        assert sniffio.current_async_library() == "trio"
+        await worker.run_sync(
+            partial(pytest.raises, sniffio.AsyncLibraryNotFoundError),
+        )
+
+
+async def test_open_worker_thread_queued_cancellation() -> None:
+    async with open_worker_thread() as worker:
+        scope = _core.CancelScope()
+        # Force the call to be queued in Trio before the worker sees it.
+        scope.cancel()
+        with scope, pytest.raises(_core.Cancelled):
+            await worker.run_sync(int)
+        assert await worker.run_sync(int, "7") == 7
+
+
+async def test_open_worker_thread_exception() -> None:
+    async with open_worker_thread() as worker:
+        with pytest.raises(ValueError, match="boom"):
+            def raise_boom() -> None:
+                raise ValueError("boom")
+
+            await worker.run_sync(raise_boom)
+        assert await worker.run_sync(int, "7") == 7
+
+
+async def test_open_worker_thread_reentrant_call_rejected() -> None:
+    async with open_worker_thread() as worker:
+
+        def reenter() -> None:
+            async def submit_inner() -> None:
+                await worker.run_sync(threading.get_ident)
+
+            with pytest.raises(RuntimeError, match="same WorkerThread"):
+                from_thread_run(submit_inner)
+
+        await worker.run_sync(reenter)
 
 
 async def test_run_in_worker_thread_cancellation() -> None:
