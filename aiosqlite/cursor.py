@@ -27,49 +27,71 @@ class Cursor:
             for row in rows:
                 yield row
 
-    async def _execute(self, fn, *args, **kwargs):
+    async def _execute(self, fn, *args, timeout=None, **kwargs):
         """Execute the given function on the shared connection's thread."""
-        return await self._conn._execute(fn, *args, **kwargs)
+        return await self._conn._execute(fn, *args, timeout=timeout, **kwargs)
 
     async def execute(
-        self, sql: str, parameters: Optional[Iterable[Any]] = None
+        self,
+        sql: str,
+        parameters: Optional[Iterable[Any]] = None,
+        *,
+        timeout: Optional[float] = None,
     ) -> "Cursor":
         """Execute the given query."""
         if parameters is None:
             parameters = []
-        await self._execute(self._cursor.execute, sql, parameters)
+        await self._execute(
+            self._cursor.execute, sql, parameters, timeout=timeout
+        )
         return self
 
     async def executemany(
-        self, sql: str, parameters: Iterable[Iterable[Any]]
+        self,
+        sql: str,
+        parameters: Iterable[Iterable[Any]],
+        *,
+        timeout: Optional[float] = None,
     ) -> "Cursor":
         """Execute the given multiquery."""
-        await self._execute(self._cursor.executemany, sql, parameters)
+        await self._execute(
+            self._cursor.executemany, sql, parameters, timeout=timeout
+        )
         return self
 
-    async def executescript(self, sql_script: str) -> "Cursor":
+    async def executescript(
+        self, sql_script: str, *, timeout: Optional[float] = None
+    ) -> "Cursor":
         """Execute a user script."""
-        await self._execute(self._cursor.executescript, sql_script)
+        await self._execute(
+            self._cursor.executescript, sql_script, timeout=timeout
+        )
         return self
 
-    async def fetchone(self) -> Optional[sqlite3.Row]:
+    async def fetchone(
+        self, *, timeout: Optional[float] = None
+    ) -> Optional[sqlite3.Row]:
         """Fetch a single row."""
-        return await self._execute(self._cursor.fetchone)
+        return await self._execute(self._cursor.fetchone, timeout=timeout)
 
-    async def fetchmany(self, size: Optional[int] = None) -> Iterable[sqlite3.Row]:
+    async def fetchmany(
+        self, size: Optional[int] = None, *, timeout: Optional[float] = None
+    ) -> Iterable[sqlite3.Row]:
         """Fetch up to `cursor.arraysize` number of rows."""
         args: tuple[int, ...] = ()
         if size is not None:
             args = (size,)
-        return await self._execute(self._cursor.fetchmany, *args)
+        return await self._execute(self._cursor.fetchmany, *args, timeout=timeout)
 
-    async def fetchall(self) -> Iterable[sqlite3.Row]:
+    async def fetchall(
+        self, *, timeout: Optional[float] = None
+    ) -> Iterable[sqlite3.Row]:
         """Fetch all remaining rows."""
-        return await self._execute(self._cursor.fetchall)
+        return await self._execute(self._cursor.fetchall, timeout=timeout)
 
-    async def close(self) -> None:
+    async def close(self, *, timeout: Optional[float] = None) -> None:
         """Close the cursor."""
-        await self._execute(self._cursor.close)
+        await self._execute(self._cursor.close, timeout=timeout)
 
     @property
     def rowcount(self) -> int:

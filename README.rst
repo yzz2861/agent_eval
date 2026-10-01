@@ -80,6 +80,23 @@ execution thread, and provide context managers to handle automatically closing
 connections.  Cursors are similarly proxies to the real cursors, and provide
 async iterators to query results.
 
+Query helpers accept an optional per-operation ``timeout``. The deadline starts
+when the operation is queued. If it expires before the worker starts the
+operation, that operation is skipped entirely. If SQLite is already executing
+the operation, aiosqlite interrupts that operation and waits for SQLite to
+return before raising ``asyncio.TimeoutError``. Cancelling the awaiting task
+follows the same rules, so a late cancellation cannot interrupt a later
+operation on the same connection.
+
+.. code-block:: python
+
+    try:
+        await db.execute(long_query, timeout=1.0)
+    except asyncio.TimeoutError:
+        # The interrupted statement has stopped, but the connection and its
+        # transaction remain available.
+        await db.rollback()
+
 
 License
 -------

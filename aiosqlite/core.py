@@ -9,10 +9,11 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import AsyncIterator, Generator, Iterable
+from enum import Enum
 from functools import partial
 from pathlib import Path
 from queue import Empty, Queue, SimpleQueue
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any, Callable, Literal, Optional, Union
 from warnings import warn
 
@@ -42,7 +43,129 @@ def set_exception(fut: asyncio.Future, e: BaseException) -> None:
 
 
 _STOP_RUNNING_SENTINEL = object()
-_TxQueue = SimpleQueue[tuple[Optional[asyncio.Future], Callable[[], Any]]]
+
+
+class _OperationState(Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed out"
+    DONE = "done"
+
+
+class _Operation:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        function: Callable[[], Any],
+        loop: asyncio.AbstractEventLoop,
+        timeout: Optional[float] = None,
+    ) -> None:
+        self._connection = connection
+        self._function = function
+        self._loop = loop
+        self.future: asyncio.Future = loop.create_future()
+        self._complete: asyncio.Future = loop.create_future()
+        self._lock = Lock()
+        self._state = _OperationState.PENDING
+        self._timed_out = False
+        self._deadline_handle: Optional[asyncio.TimerHandle] = None
+
+        if timeout is not None:
+            self._deadline_handle = loop.call_later(
+                max(timeout, 0.0), self._timeout
+            )
+
+    def _cancel_deadline(self) -> None:
+        handle, self._deadline_handle = self._deadline_handle, None
+        if handle is not None:
+            try:
+                self._loop.call_soon_threadsafe(handle.cancel)
+            except RuntimeError:
+                pass
+
+    def _set_complete(self) -> None:
+        self._loop.call_soon_threadsafe(set_result, self._complete, None)
+
+    def _finish(
+        self,
+        *,
+        result: Any = None,
+        exception: Optional[BaseException] = None,
+    ) -> None:
+        with self._lock:
+            if self._state != _OperationState.RUNNING:
+                return
+
+            timed_out = self._timed_out
+            self._state = _OperationState.DONE
+            self._cancel_deadline()
+            complete = self._set_complete
+
+        if timed_out and (
+            exception is None or isinstance(exception, sqlite3.OperationalError)
+        ):
+            exception = asyncio.TimeoutError()
+            result = None
+
+        complete()
+        if exception is None:
+            self._loop.call_soon_threadsafe(set_result, self.future, result)
+        else:
+            self._loop.call_soon_threadsafe(set_exception, self.future, exception)
+
+    def run(self) -> None:
+        with self._lock:
+            if self._state != _OperationState.PENDING:
+                return
+            self._state = _OperationState.RUNNING
+
+        try:
+            result = self._function()
+        except BaseException as exception:  # noqa: B036
+            self._finish(exception=exception)
+        else:
+            self._finish(result=result)
+
+    def cancel(self) -> None:
+        cancelled = False
+        with self._lock:
+            if self._state == _OperationState.PENDING:
+                self._state = _OperationState.CANCELLED
+                self._cancel_deadline()
+                cancelled = True
+            elif self._state == _OperationState.RUNNING:
+                self._connection.interrupt()
+                return
+            else:
+                return
+
+        if cancelled and not self.future.done():
+            self.future.set_result(None)
+        if cancelled:
+            self._complete.set_result(None)
+
+    def _timeout(self) -> None:
+        with self._lock:
+            if self._state == _OperationState.PENDING:
+                self._state = _OperationState.TIMED_OUT
+                self._deadline_handle = None
+                timed_out = True
+            elif self._state == _OperationState.RUNNING:
+                self._timed_out = True
+                self._connection.interrupt()
+                return
+            else:
+                return
+
+        if timed_out and not self.future.done():
+            self.future.set_exception(asyncio.TimeoutError())
+        if timed_out:
+            self._complete.set_result(None)
+
+
+_TxWork = Union[_Operation, tuple[Optional[asyncio.Future], Callable[[], Any]]]
+_TxQueue = SimpleQueue[_TxWork]
 
 
 def _connection_worker_thread(tx: _TxQueue):
@@ -56,7 +179,13 @@ def _connection_worker_thread(tx: _TxQueue):
         # even after connection is closed (so we can finalize all
         # futures)
 
-        future, function = tx.get()
+        item = tx.get()
+
+        if isinstance(item, _Operation):
+            item.run()
+            continue
+
+        future, function = item
 
         try:
             LOG.debug("executing %s", function)
@@ -147,17 +276,25 @@ class Connection:
         cursor = self._conn.execute(sql, parameters)
         return cursor.fetchall()
 
-    async def _execute(self, fn, *args, **kwargs):
+    async def _execute(
+        self, fn, *args, timeout: Optional[float] = None, **kwargs
+    ):
         """Queue a function with the given arguments for execution."""
         if not self._running or not self._connection:
             raise ValueError("Connection closed")
 
         function = partial(fn, *args, **kwargs)
-        future = asyncio.get_event_loop().create_future()
+        loop = asyncio.get_event_loop()
+        operation = _Operation(self._connection, function, loop, timeout)
 
-        self._tx.put_nowait((future, function))
+        self._tx.put_nowait(operation)
 
-        return await future
+        try:
+            return await operation.future
+        except asyncio.CancelledError:
+            operation.cancel()
+            await operation._complete
+            raise
 
     async def _connect(self) -> "Connection":
         """Connect to the actual sqlite database."""
@@ -184,17 +321,19 @@ class Connection:
         await self.close()
 
     @contextmanager
-    async def cursor(self) -> Cursor:
+    async def cursor(self, *, timeout: Optional[float] = None) -> Cursor:
         """Create an aiosqlite cursor wrapping a sqlite3 cursor object."""
-        return Cursor(self, await self._execute(self._conn.cursor))
+        return Cursor(
+            self, await self._execute(self._conn.cursor, timeout=timeout)
+        )
 
-    async def commit(self) -> None:
+    async def commit(self, *, timeout: Optional[float] = None) -> None:
         """Commit the current transaction."""
-        await self._execute(self._conn.commit)
+        await self._execute(self._conn.commit, timeout=timeout)
 
-    async def rollback(self) -> None:
+    async def rollback(self, *, timeout: Optional[float] = None) -> None:
         """Roll back the current transaction."""
-        await self._execute(self._conn.rollback)
+        await self._execute(self._conn.rollback, timeout=timeout)
 
     async def close(self) -> None:
         """Complete queued queries/cursors and close the connection."""
@@ -215,44 +354,72 @@ class Connection:
 
     @contextmanager
     async def execute(
-        self, sql: str, parameters: Optional[Iterable[Any]] = None
+        self,
+        sql: str,
+        parameters: Optional[Iterable[Any]] = None,
+        *,
+        timeout: Optional[float] = None,
     ) -> Cursor:
         """Helper to create a cursor and execute the given query."""
         if parameters is None:
             parameters = []
-        cursor = await self._execute(self._conn.execute, sql, parameters)
+        cursor = await self._execute(
+            self._conn.execute, sql, parameters, timeout=timeout
+        )
         return Cursor(self, cursor)
 
     @contextmanager
     async def execute_insert(
-        self, sql: str, parameters: Optional[Iterable[Any]] = None
+        self,
+        sql: str,
+        parameters: Optional[Iterable[Any]] = None,
+        *,
+        timeout: Optional[float] = None,
     ) -> Optional[sqlite3.Row]:
         """Helper to insert and get the last_insert_rowid."""
         if parameters is None:
             parameters = []
-        return await self._execute(self._execute_insert, sql, parameters)
+        return await self._execute(
+            self._execute_insert, sql, parameters, timeout=timeout
+        )
 
     @contextmanager
     async def execute_fetchall(
-        self, sql: str, parameters: Optional[Iterable[Any]] = None
+        self,
+        sql: str,
+        parameters: Optional[Iterable[Any]] = None,
+        *,
+        timeout: Optional[float] = None,
     ) -> Iterable[sqlite3.Row]:
         """Helper to execute a query and return all the data."""
         if parameters is None:
             parameters = []
-        return await self._execute(self._execute_fetchall, sql, parameters)
+        return await self._execute(
+            self._execute_fetchall, sql, parameters, timeout=timeout
+        )
 
     @contextmanager
     async def executemany(
-        self, sql: str, parameters: Iterable[Iterable[Any]]
+        self,
+        sql: str,
+        parameters: Iterable[Iterable[Any]],
+        *,
+        timeout: Optional[float] = None,
     ) -> Cursor:
         """Helper to create a cursor and execute the given multiquery."""
-        cursor = await self._execute(self._conn.executemany, sql, parameters)
+        cursor = await self._execute(
+            self._conn.executemany, sql, parameters, timeout=timeout
+        )
         return Cursor(self, cursor)
 
     @contextmanager
-    async def executescript(self, sql_script: str) -> Cursor:
+    async def executescript(
+        self, sql_script: str, *, timeout: Optional[float] = None
+    ) -> Cursor:
         """Helper to create a cursor and execute a user script."""
-        cursor = await self._execute(self._conn.executescript, sql_script)
+        cursor = await self._execute(
+            self._conn.executescript, sql_script, timeout=timeout
+        )
         return Cursor(self, cursor)
 
     async def interrupt(self) -> None:
@@ -260,7 +427,13 @@ class Connection:
         return self._conn.interrupt()
 
     async def create_function(
-        self, name: str, num_params: int, func: Callable, deterministic: bool = False
+        self,
+        name: str,
+        num_params: int,
+        func: Callable,
+        deterministic: bool = False,
+        *,
+        timeout: Optional[float] = None,
     ) -> None:
         """
         Create user-defined function that can be later used
@@ -279,6 +452,7 @@ class Connection:
             num_params,
             func,
             deterministic=deterministic,
+            timeout=timeout,
         )
 
     @property
@@ -313,22 +487,43 @@ class Connection:
     def total_changes(self) -> int:
         return self._conn.total_changes
 
-    async def enable_load_extension(self, value: bool) -> None:
-        await self._execute(self._conn.enable_load_extension, value)  # type: ignore
+    async def enable_load_extension(
+        self, value: bool, *, timeout: Optional[float] = None
+    ) -> None:
+        await self._execute(  # type: ignore
+            self._conn.enable_load_extension, value, timeout=timeout
+        )
 
-    async def load_extension(self, path: str):
-        await self._execute(self._conn.load_extension, path)  # type: ignore
+    async def load_extension(
+        self, path: str, *, timeout: Optional[float] = None
+    ):
+        await self._execute(  # type: ignore
+            self._conn.load_extension, path, timeout=timeout
+        )
 
     async def set_progress_handler(
-        self, handler: Callable[[], Optional[int]], n: int
+        self,
+        handler: Callable[[], Optional[int]],
+        n: int,
+        *,
+        timeout: Optional[float] = None,
     ) -> None:
-        await self._execute(self._conn.set_progress_handler, handler, n)
+        await self._execute(
+            self._conn.set_progress_handler, handler, n, timeout=timeout
+        )
 
-    async def set_trace_callback(self, handler: Callable) -> None:
-        await self._execute(self._conn.set_trace_callback, handler)
+    async def set_trace_callback(
+        self, handler: Callable, *, timeout: Optional[float] = None
+    ) -> None:
+        await self._execute(
+            self._conn.set_trace_callback, handler, timeout=timeout
+        )
 
     async def set_authorizer(
-        self, authorizer_callback: Optional[AuthorizerCallback]
+        self,
+        authorizer_callback: Optional[AuthorizerCallback],
+        *,
+        timeout: Optional[float] = None,
     ) -> None:
         """
         Set an authorizer callback to control database access.
@@ -369,7 +564,9 @@ class Connection:
 
             Pass ``None`` to remove the authorizer.
         """
-        await self._execute(self._conn.set_authorizer, authorizer_callback)
+        await self._execute(
+            self._conn.set_authorizer, authorizer_callback, timeout=timeout
+        )
 
     async def iterdump(self) -> AsyncIterator[str]:
         """
@@ -421,6 +618,7 @@ class Connection:
         progress: Optional[Callable[[int, int, int], None]] = None,
         name: str = "main",
         sleep: float = 0.250,
+        timeout: Optional[float] = None,
     ) -> None:
         """
         Make a backup of the current database to the target database.
@@ -437,6 +635,7 @@ class Connection:
             progress=progress,
             name=name,
             sleep=sleep,
+            timeout=timeout,
         )
 
 

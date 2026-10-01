@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from sqlite3 import OperationalError
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Event, Thread
 from unittest import IsolatedAsyncioTestCase, SkipTest
 from unittest.mock import patch
 
@@ -16,6 +16,15 @@ from .helpers import setup_logger
 
 
 class SmokeTest(IsolatedAsyncioTestCase):
+    LONG_RECURSIVE_QUERY = """
+        WITH RECURSIVE counter(value) AS (
+            SELECT 1
+            UNION ALL
+            SELECT value + 1 FROM counter WHERE value < 100000000
+        )
+        SELECT COUNT(*) FROM counter
+    """
+
     @classmethod
     def setUpClass(cls):
         setup_logger()
@@ -295,6 +304,96 @@ class SmokeTest(IsolatedAsyncioTestCase):
                 await db.execute(
                     "create table test_progress_handler (i integer primary key asc, k integer)"
                 )
+
+    async def test_timeout_interrupts_running_operation(self):
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("BEGIN")
+            progress_calls = 0
+            progress_started = Event()
+
+            def progress_handler():
+                nonlocal progress_calls
+                progress_calls += 1
+                progress_started.set()
+
+            await db.set_progress_handler(progress_handler, 1)
+
+            for _ in range(2):
+                calls_before = progress_calls
+                with self.assertRaises(asyncio.TimeoutError):
+                    await db.execute(self.LONG_RECURSIVE_QUERY, timeout=0.05)
+                self.assertTrue(db.in_transaction)
+                self.assertGreater(progress_calls, calls_before)
+
+            rows = await db.execute_fetchall("SELECT 1")
+            self.assertEqual(rows, [(1,)])
+            self.assertTrue(db.in_transaction)
+            self.assertGreater(progress_calls, 0)
+
+            await db.rollback()
+            self.assertFalse(db.in_transaction)
+
+    async def test_queued_timeout_does_not_execute(self):
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("BEGIN")
+            progress_started = Event()
+            await db.set_progress_handler(progress_started.set, 1)
+
+            running = asyncio.ensure_future(
+                db.execute(self.LONG_RECURSIVE_QUERY, timeout=1)
+            )
+            while not progress_started.is_set():
+                await asyncio.sleep(0.001)
+
+            queued = asyncio.ensure_future(
+                db.execute(
+                    "CREATE TABLE queued_timeout (id INTEGER)", timeout=0.01
+                )
+            )
+            with self.assertRaises(asyncio.TimeoutError):
+                await queued
+
+            running.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await running
+
+            tables = await db.execute_fetchall(
+                "SELECT name FROM sqlite_master WHERE name = ?",
+                ["queued_timeout"],
+            )
+            self.assertEqual(tables, [])
+            await db.rollback()
+
+    async def test_late_cancel_does_not_interrupt_next_operation(self):
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("BEGIN")
+
+            completed = asyncio.ensure_future(db.execute_fetchall("SELECT 1"))
+            await completed
+            self.assertTrue(completed.done())
+
+            progress_started = Event()
+            await db.set_progress_handler(progress_started.set, 1)
+            running = asyncio.ensure_future(
+                db.execute(self.LONG_RECURSIVE_QUERY)
+            )
+            while not progress_started.is_set():
+                await asyncio.sleep(0.001)
+
+            completed.cancel()
+            self.assertEqual(completed.result(), [(1,)])
+            await asyncio.sleep(0)
+            self.assertFalse(running.done())
+
+            running.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await running
+
+            rows = await db.execute_fetchall("SELECT 1")
+            self.assertEqual(rows, [(1,)])
+            self.assertTrue(db.in_transaction)
+            await db.rollback()
+            self.assertFalse(db.in_transaction)
 
     async def test_create_function(self):
         """Assert that after creating a custom function, it can be used"""
