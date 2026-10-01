@@ -170,6 +170,52 @@ QuerySet also supports aggregation and database functions through ``.annotate()`
 
 Check `examples <https://github.com/tortoise/tortoise-orm/tree/master/examples>`_ to see it all in work
 
+Streaming results
+=================
+
+Awaiting (or plain ``async for`` over) a QuerySet loads the whole result list into memory at once.
+For large result sets use ``.stream(batch_size)`` instead, which keeps a database cursor open and
+fetches/instantiates rows one batch at a time. When a batch is handed to the consumer, no later
+rows have been read yet, so a slow consumer naturally limits how much data is pulled from the
+database.
+
+.. code-block:: python3
+
+    async for batch in Tournament.all().order_by("id").stream(100):
+        for tournament in batch:
+            await process(tournament)
+
+``.values()`` and ``.values_list()`` support streaming as well, yielding batches of dicts/tuples:
+
+.. code-block:: python3
+
+    async for batch in Event.all().values_list("name", flat=True).stream(500):
+        await ingest(batch)
+
+Relations from ``prefetch_related()`` are loaded **per batch** - one query per relation, never one
+per row - and are fully attached before the batch is yielded:
+
+.. code-block:: python3
+
+    async with Tournament.all().prefetch_related("events__participants").stream(100) as stream:
+        async for tournaments in stream:
+            for tournament in tournaments:
+                ...
+
+Use the result as an async context manager to guarantee immediate cleanup. Closing the iterator
+(breaking out of the loop, task cancellation, or an error while converting a field) or exiting the
+context closes the cursor and returns the connection, so the next query can reuse it right away.
+Inside a transaction the stream uses the transaction connection and is bound to the transaction
+lifetime:
+
+.. code-block:: python3
+
+    async with in_transaction() as connection:
+        async with Tournament.all().using_db(connection).stream(100) as stream:
+            async for batch in stream:
+                ...
+        # The connection is free again for further queries in this transaction
+
 .. _foreign_key:
 
 Foreign Key

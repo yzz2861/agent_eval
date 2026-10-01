@@ -15,6 +15,7 @@ Added
 ^^^^^
 - ``Q.__bool__()`` so ``Q`` objects with no filters/children (including nested empty ``Q`` children) are falsy. (#2227)
 - PostgreSQL ``password`` credential now accepts a sync or async callable, resolved once per new connection, to support short-lived credentials such as AWS RDS/Aurora IAM tokens and Azure Entra ID tokens. (#2261)
+- ``QuerySet.stream(batch_size)`` (and ``values()``/``values_list()`` streaming) iterates query results in batches over a lazily-read cursor instead of awaiting the whole result list. Rows are fetched per batch (applying backpressure to slow consumers), ``prefetch_related`` relations are loaded once per batch with no per-row queries, and the cursor/connection is released on close, cancellation, error or context exit. Streams opened inside a transaction share the transaction connection and its lifetime.
 
 Changed
 ^^^^^^^

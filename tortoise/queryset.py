@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import types
 from collections import defaultdict
 from collections.abc import AsyncIterator, Callable, Collection, Generator, Iterable, Sequence
@@ -51,6 +52,155 @@ MODEL = TypeVar("MODEL", bound="Model")
 PRIMARY_KEY = TypeVar("PRIMARY_KEY")
 T_co = TypeVar("T_co", covariant=True)
 SINGLE = TypeVar("SINGLE", bound=bool)
+
+
+class _BatchStream(Protocol[T_co]):
+    """Internal protocol: an opened, lazily-read batch source."""
+
+    async def fetch_batch(self) -> list[T_co]: ...
+
+    async def aclose(self) -> None: ...
+
+
+class StreamingResult(Generic[T_co]):
+    """
+    Batched streaming result of a QuerySet.
+
+    Yields lists of rows (model instances, dicts or scalars) of at most
+    ``batch_size`` items.  Unlike ``async for`` on a QuerySet, rows are read
+    from the database lazily: when the first batch is produced the remaining
+    batches have not been fetched yet, and a slow consumer stalls further
+    reads instead of buffering the whole result set.
+
+    The result can be consumed either as an async iterator or as an async
+    context manager.  Closing the iterator (``break``/cancellation) or
+    exiting the context closes the server cursor and releases the connection,
+    so it is immediately usable by the next query.  Inside a transaction the
+    stream shares the transaction's connection and is bound to the
+    transaction's lifetime.
+
+    .. code-block:: python3
+
+        async with Tournament.all().stream(100) as stream:
+            async for batch in stream:
+                process(batch)
+    """
+
+    __slots__ = ("_factory", "_batch_size", "_stream", "_closed")
+
+    def __init__(
+        self,
+        factory: Callable[[int], _BatchStream[T_co]],
+        batch_size: int,
+    ) -> None:
+        self._factory = factory
+        self._batch_size = batch_size
+        self._stream: _BatchStream[T_co] | None = None
+        self._closed = False
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
+
+    def __aiter__(self):
+        # Return an async generator wrapper instead of ``self``: when the
+        # consuming task is cancelled (or breaks out of ``async for``), Python
+        # finalises the generator, whose ``finally`` closes the open cursor
+        # synchronously. The state machine below still owns the actual fetch.
+        return self._iterate()
+
+    async def _iterate(self):
+        try:
+            while True:
+                yield await self.__anext__()
+        except StopAsyncIteration:
+            return
+        finally:
+            await self.aclose()
+
+    async def __anext__(self) -> list[T_co]:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._stream is None:
+            self._stream = self._factory(self._batch_size)
+        try:
+            batch = await self._stream.fetch_batch()
+        except BaseException:
+            # Cancellation while fetching, an error converting rows, or any
+            # other failure: close the cursor and release the connection. The
+            # wrapping async generator's finally does the same when the
+            # consuming task itself is cancelled.
+            await self.aclose()
+            raise
+        if not batch:
+            await self.aclose()
+            raise StopAsyncIteration
+        return batch
+
+    async def __aenter__(self) -> StreamingResult[T_co]:
+        return self
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        stream = self._stream
+        if stream is not None:
+            await stream.aclose()
+            self._stream = None
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.aclose()
+
+
+class _RowsBatchStream(_BatchStream[T_co]):
+    """Batch source for ``values()`` / ``values_list()`` streaming queries."""
+
+    __slots__ = (
+        "_db",
+        "_sql",
+        "_values",
+        "_batch_size",
+        "_convert",
+        "_context",
+        "_cursor",
+        "_closed",
+    )
+
+    def __init__(
+        self,
+        db: BaseDBAsyncClient,
+        sql: str,
+        values: list | None,
+        batch_size: int,
+        convert: Callable[[Any], T_co],
+    ) -> None:
+        self._db = db
+        self._sql = sql
+        self._values = values
+        self._batch_size = batch_size
+        self._convert = convert
+        self._context = None
+        self._cursor = None
+        self._closed = False
+
+    async def fetch_batch(self) -> list[T_co]:
+        if self._cursor is None:
+            self._context = self._db.execute_query_stream(self._sql, self._values)
+            self._cursor = await self._context.__aenter__()
+        raw_rows = await self._cursor.fetchmany(self._batch_size)
+        if not raw_rows:
+            return []
+        return [self._convert(row) for row in raw_rows]
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._cursor is not None:
+            await self._cursor.aclose()
+            self._cursor = None
+            self._context = None
 
 
 class QuerySetSingle(Protocol[T_co]):
@@ -1326,6 +1476,56 @@ class QuerySet(AwaitableQuery[MODEL]):
         for val in await self:
             yield val
 
+    def stream(self, batch_size: int = 100) -> StreamingResult[MODEL]:
+        """
+        Iterate over the QuerySet results in batches without loading the whole
+        result set into memory.
+
+        Returns a :class:`StreamingResult` that yields lists of at most
+        *batch_size* model instances.  Each batch is fetched from a lazily
+        read cursor; when a batch is handed to the consumer no further rows
+        have been read yet, so a slow consumer naturally applies backpressure.
+        ``prefetch_related`` relations are loaded per batch - a single query
+        per relation - and attached before the batch is yielded, so there are
+        no per-row queries.
+
+        Use it as an async context manager to guarantee cursor/connection
+        cleanup, or rely on async-generator finalization when breaking out of
+        ``async for`` / on cancellation::
+
+            async for batch in Tournament.all().stream(100):
+                ...
+
+            async with Tournament.all().stream(100) as stream:
+                async for batch in stream:
+                    ...
+
+        :param batch_size: Maximum number of rows fetched and instantiated per
+            batch (also the prefetch chunk size).
+        :raises ParamsError: If batch_size is not positive.
+        """
+        if batch_size <= 0:
+            raise ParamsError("batch_size should be a positive number")
+
+        def _open(batch_size: int) -> _BatchStream[MODEL]:
+            if self._db is None:
+                self._db = self._choose_db(self._select_for_update)
+            self._make_query()
+            executor = self._db.executor_class(
+                model=self.model,
+                db=self._db,
+                prefetch_map=self._prefetch_map,
+                prefetch_queries=self._prefetch_queries,
+                select_related_idx=self._select_related_idx,  # type: ignore
+            )
+            return executor.execute_select_stream(
+                *self.query.get_parameterized_sql(),
+                custom_fields=list(self._annotations.keys()),
+                batch_size=batch_size,
+            )
+
+        return StreamingResult(_open, batch_size)
+
     async def _execute(self) -> list[MODEL]:
         instance_list = await self._db.executor_class(
             model=self.model,
@@ -1862,6 +2062,42 @@ class ValuesListQuery(FieldSelectQuery, Generic[SINGLE]):
         for val in await self:
             yield val
 
+    def stream(self, batch_size: int = 100) -> StreamingResult[Any]:
+        """
+        Stream ``values_list`` results in batches without reading the whole
+        result set into memory.
+
+        Works like :meth:`QuerySet.stream`, but each batch is a list of tuples
+        (or scalars with ``flat=True``).
+
+        :param batch_size: Maximum number of rows fetched per batch.
+        :raises ParamsError: If batch_size is not positive.
+        """
+        if batch_size <= 0:
+            raise ParamsError("batch_size should be a positive number")
+
+        def _open(batch_size: int) -> _BatchStream[Any]:
+            self._choose_db_if_not_chosen()
+            self._make_query()
+            columns = [
+                (key, self.resolve_to_python_value(self.model, name))
+                for key, name in self.fields.items()
+            ]
+            if self._flat:
+                func = columns[0][1]
+
+                def convert(row: Any) -> Any:
+                    return func(row["0"])
+            else:
+
+                def convert(row: Any) -> Any:
+                    return tuple(func(row[column]) for column, func in columns)
+
+            sql, values = self.query.get_parameterized_sql()
+            return _RowsBatchStream(self._db, sql, values, batch_size, convert)
+
+        return StreamingResult(_open, batch_size)
+
     async def _execute(self) -> list[Any] | tuple:
         _, result = await self._db.execute_query(*self.query.get_parameterized_sql())
         columns = [
@@ -1991,6 +2227,39 @@ class ValuesQuery(FieldSelectQuery, Generic[SINGLE]):
     async def __aiter__(self: ValuesQuery[Any]) -> AsyncIterator[dict[str, Any]]:
         for val in await self:
             yield val
+
+    def stream(self, batch_size: int = 100) -> StreamingResult[dict[str, Any]]:
+        """
+        Stream ``values`` results in batches without reading the whole result
+        set into memory.
+
+        Works like :meth:`QuerySet.stream`, but each batch is a list of dicts.
+
+        :param batch_size: Maximum number of rows fetched per batch.
+        :raises ParamsError: If batch_size is not positive.
+        """
+        if batch_size <= 0:
+            raise ParamsError("batch_size should be a positive number")
+
+        def _open(batch_size: int) -> _BatchStream[dict[str, Any]]:
+            self._choose_db_if_not_chosen()
+            self._make_query()
+            columns = [
+                (alias, self.resolve_to_python_value(self.model, field_name))
+                for alias, field_name in self._fields_for_select.items()
+            ]
+            sql, values = self.query.get_parameterized_sql()
+            column_funcs = [(alias, func) for alias, func in columns]
+
+            def convert(row: Any) -> dict[str, Any]:
+                result = dict(row)
+                for alias, func in column_funcs:
+                    result[alias] = func(result[alias])
+                return result
+
+            return _RowsBatchStream(self._db, sql, values, batch_size, convert)
+
+        return StreamingResult(_open, batch_size)
 
     async def _execute(self) -> list[dict] | dict:
         result = await self._db.execute_query_dict(*self.query.get_parameterized_sql())

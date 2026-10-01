@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Sequence
 from contextlib import _AsyncGeneratorContextManager
 from ssl import SSLContext
 from typing import Any, TypeVar, cast
@@ -186,6 +187,34 @@ class PsycopgClient(postgres_client.BasePostgresClient):
     async def execute_query_dict(self, query: str, values: list | None = None) -> list[dict]:
         rowcount, rows = await self.execute_query(query, values, row_factory=psycopg.rows.dict_row)
         return rows
+
+    def execute_query_stream(  # type: ignore[override]
+        self, query: str, values: list | None = None
+    ):
+        return base_client.PooledStreamContext(
+            self, PsycopgStreamingCursor, query, values
+        )
+
+
+class PsycopgStreamingCursor(base_client.PooledStreamingCursor[psycopg.AsyncConnection]):
+    """Lazy cursor backed by a named PostgreSQL server-side cursor."""
+
+    async def _open_cursor(self, query: str, values: list | None) -> None:
+        self.client.log.debug("%s: %s", query, values)
+        cursor_name = f"tortoise_stream_{uuid.uuid4().hex}"
+        # A named cursor is a server-side cursor: execute() transfers the query
+        # plan only, rows are pulled by fetchmany in batches.
+        self.cursor = self.connection.cursor(
+            name=cursor_name, row_factory=psycopg.rows.dict_row
+        )
+        await self.cursor.execute(query, values)
+
+    async def fetchmany(self, size: int) -> Sequence[dict]:
+        return await self.cursor.fetchmany(size)
+
+    async def _close_cursor(self) -> None:
+        if self.cursor is not None and not self.cursor.closed:
+            await self.cursor.close()
 
     async def _expire_connections(self) -> None:
         if self._pool:  # pragma: nobranch

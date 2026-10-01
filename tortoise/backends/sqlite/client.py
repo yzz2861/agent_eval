@@ -13,8 +13,10 @@ from pypika_tortoise import SQLLiteQuery
 
 from tortoise.backends.base.client import (
     BaseDBAsyncClient,
+    BaseStreamingCursor,
     Capabilities,
     ConnectionWrapper,
+    HeldConnectionWrapper,
     NestedTransactionContext,
     TransactionalDBClient,
     TransactionContext,
@@ -162,11 +164,116 @@ class SqliteClient(BaseDBAsyncClient):
             self.log.debug("%s: %s", query, values)
             return list(map(dict, await connection.execute_fetchall(query, values)))
 
+    def execute_query_stream(  # type: ignore[override]
+        self, query: str, values: list | None = None
+    ):
+        query = query.replace("\x00", "'||CHAR(0)||'")
+        return _SqliteStreamContext(self, query, values)
+
     @translate_exceptions
     async def execute_script(self, query: str) -> None:
         async with self.acquire_connection() as connection:
             self.log.debug(query)
             await connection.executescript(query)
+
+
+class _SqliteStreamClient(SqliteClient):
+    """Minimal client that runs queries on a connection already held by a stream.
+
+    The SQLite client serialises access with a lock.  A streaming cursor keeps
+    that lock while it is open, so the per-batch prefetch queries cannot go
+    through the regular ``acquire_connection`` path (the lock is not reentrant).
+    They instead reuse the held physical connection directly; aiosqlite itself
+    serialises operations through its worker thread.
+    """
+
+    def __init__(self, lock_owner: SqliteClient, connection: aiosqlite.Connection) -> None:
+        self.connection_name = lock_owner.connection_name
+        self.log = lock_owner.log
+        self.fetch_inserted = lock_owner.fetch_inserted
+        self.capabilities = lock_owner.capabilities
+        self._connection = connection
+        self._lock = asyncio.Lock()
+        self.filename = getattr(lock_owner, "filename", ":memory:")
+        self.pragmas = getattr(lock_owner, "pragmas", {})
+        self._parent = getattr(lock_owner, "_parent", lock_owner)
+
+    def acquire_connection(self) -> HeldConnectionWrapper:
+        return HeldConnectionWrapper(self._connection)
+
+
+class SqliteStreamingCursor(BaseStreamingCursor[aiosqlite.Connection]):
+    """Streaming cursor for the aiosqlite backend."""
+
+    def __init__(
+        self,
+        lock_owner: SqliteClient,
+        connection: aiosqlite.Connection,
+        cursor: aiosqlite.Cursor,
+        lock: asyncio.Lock,
+    ) -> None:
+        self.client = lock_owner
+        self.connection = connection
+        self.cursor = cursor
+        self._lock = lock
+        self._closed = False
+        self.sibling_client = _SqliteStreamClient(lock_owner, connection)
+
+    async def fetchmany(self, size: int) -> Sequence[dict]:
+        return await self.cursor.fetchmany(size)
+
+    async def _close_cursor(self) -> None:
+        try:
+            await self.cursor.close()
+        except sqlite3.ProgrammingError:
+            # The underlying connection may already have been closed by the
+            # time a discarded stream is finalised during interpreter/ORM
+            # shutdown; the cursor is gone in that case.
+            pass
+
+    def _release_connection(self) -> None:
+        self._lock.release()
+
+
+class _SqliteStreamContext:
+    """Async context manager that opens a :class:`SqliteStreamingCursor`.
+
+    Implemented as a regular class (instead of an async generator) so that
+    closing the cursor directly does not leave a suspended generator that
+    releases the lock a second time when garbage collected.
+    """
+
+    __slots__ = ("_client", "_query", "_values", "_stream")
+
+    def __init__(self, client: SqliteClient, query: str, values: list | None) -> None:
+        self._client = client
+        self._query = query
+        self._values = values
+        self._stream: SqliteStreamingCursor | None = None
+
+    async def __aenter__(self) -> SqliteStreamingCursor:
+        client = self._client
+        await client._lock.acquire()
+        try:
+            wrapper = client.acquire_connection()
+            await wrapper.ensure_connection()
+            connection = wrapper.connection
+            client.log.debug("%s: %s", self._query, self._values)
+            try:
+                cursor = await connection.execute(self._query, self._values)
+            except sqlite3.OperationalError as exc:
+                raise OperationalError(exc)
+            except sqlite3.IntegrityError as exc:
+                raise IntegrityError(exc)
+        except BaseException:
+            client._lock.release()
+            raise
+        self._stream = SqliteStreamingCursor(client, connection, cursor, client._lock)
+        return self._stream
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self._stream is not None:
+            await self._stream.aclose()
 
 
 class SqliteTransactionContext(TransactionContext):

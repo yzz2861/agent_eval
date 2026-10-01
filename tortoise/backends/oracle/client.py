@@ -18,11 +18,13 @@ from tortoise.backends.base.client import (
     Capabilities,
     ConnectionWrapper,
     PoolConnectionWrapper,
+    PooledStreamContext,
     TransactionContext,
     TransactionContextPooled,
 )
 from tortoise.backends.odbc.client import (
     ODBCClient,
+    ODBCStreamingCursor,
     ODBCTransactionWrapper,
     translate_exceptions,
 )
@@ -63,6 +65,9 @@ class OracleClient(ODBCClient):
 
     def acquire_connection(self) -> ConnectionWrapper | PoolConnectionWrapper:
         return OraclePoolConnectionWrapper(self, self._pool_init_lock)
+
+    def execute_query_stream(self, query: str, values: list | None = None):  # type: ignore[override]
+        return OraclePooledStreamContext(self, ODBCStreamingCursor, query, values)
 
     async def db_create(self) -> None:
         await self.create_connection(with_db=False)
@@ -124,6 +129,32 @@ class OraclePoolConnectionWrapper(PoolConnectionWrapper):
             )
             connection.current_schema = client.user
         return connection
+
+
+class OraclePooledStreamContext(PooledStreamContext):
+    """Stream context that applies the Oracle session setup like normal queries."""
+
+    async def __aenter__(self) -> ODBCStreamingCursor:
+        client = cast(OracleClient, self._client)
+        owner = getattr(client, "_parent", None)
+        if owner is not None and not isinstance(
+            client.acquire_connection(), PoolConnectionWrapper
+        ):
+            return cast(ODBCStreamingCursor, await super().__aenter__())
+        # Non-transactional pooled connection: use the Oracle-specific wrapper
+        # that sets CURRENT_SCHEMA / NLS formats instead of the plain acquire.
+        wrapper = OraclePoolConnectionWrapper(client, client._pool_init_lock)
+        await wrapper.ensure_connection()
+        connection = await wrapper.__aenter__()
+        sibling = self._sibling_client(connection)
+        stream = self._cursor_cls(client, connection, sibling)
+        try:
+            await stream._open_cursor(self._query, self._values)
+        except BaseException:
+            await stream.aclose()
+            raise
+        self._stream = stream
+        return stream
 
 
 class TransactionWrapper(ODBCTransactionWrapper, OracleClient):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextlib
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Generic, TypeAlias, TypeVar, cast
@@ -15,6 +16,9 @@ from tortoise.exceptions import TransactionManagementError
 from tortoise.log import db_client_logger
 
 T_conn = TypeVar("T_conn")  # Instance of client connection, such as: asyncpg.Connection()
+
+#: Async context manager that yields an open :class:`BaseStreamingCursor`.
+StreamContext: TypeAlias = "contextlib.AbstractAsyncContextManager[BaseStreamingCursor[Any]]"
 
 #: A callable returning a password, awaited first if it returns an awaitable.
 PasswordFactory: TypeAlias = Callable[[], "str | Awaitable[str]"]
@@ -238,6 +242,20 @@ class BaseDBAsyncClient(abc.ABC):
         """
         raise NotImplementedError()  # pragma: nocoverage
 
+    def execute_query_stream(
+        self, query: str, values: list | None = None
+    ) -> "StreamContext":
+        """
+        Open a streaming cursor for a RAW select query.
+
+        Returns an async context manager that yields a
+        :class:`BaseStreamingCursor`.  Rows are fetched lazily with
+        ``fetchmany``, so the connection stays busy only while the result is
+        being consumed; closing the cursor releases the connection (or the
+        transaction's lock) immediately.
+        """
+        raise NotImplementedError()  # pragma: nocoverage
+
     async def execute_script(self, query: str) -> None:
         """
         Executes a RAW SQL script with multiple statements, and returns nothing.
@@ -432,3 +450,207 @@ class PoolConnectionWrapper(Generic[T_conn]):
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         # release the connection back to the pool
         await self.client._pool.release(self.connection)
+
+
+class HeldConnectionWrapper(Generic[T_conn]):
+    """Connection wrapper that hands out a connection that is already held.
+
+    A streaming cursor keeps its connection (and any pool slot or transaction
+    lock associated with it) for its whole lifetime.  Queries issued while the
+    cursor is open - e.g. the per-batch prefetch queries - must reuse the very
+    same physical connection instead of trying to acquire it again, otherwise
+    non-reentrant locks would deadlock and pool slots would leak.
+    """
+
+    __slots__ = ("connection",)
+
+    def __init__(self, connection: T_conn) -> None:
+        self.connection: T_conn = connection
+
+    async def __aenter__(self) -> T_conn:
+        return self.connection
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        return None
+
+
+class BaseStreamingCursor(abc.ABC, Generic[T_conn]):
+    """An open server-side (or driver) cursor that yields rows in batches.
+
+    The cursor owns its resources (open driver cursor, acquired connection,
+    pool slot/transaction lock) until :meth:`aclose` is called.  ``fetchmany``
+    reads at most *size* rows at a time, so a slow consumer never causes rows
+    beyond the current batch to be fetched.  ``sibling_client`` is a DB client
+    that executes queries on the same held connection and is used by the ORM
+    to run the prefetch queries for the current batch.
+    """
+
+    connection: T_conn
+    cursor: Any
+    sibling_client: "BaseDBAsyncClient"
+    _closed: bool = False
+
+    @abc.abstractmethod
+    async def fetchmany(self, size: int) -> Sequence[dict]:
+        """Fetch up to *size* rows without materialising the whole result."""
+
+    @abc.abstractmethod
+    async def _close_cursor(self) -> None:
+        """Backend-specific cleanup of the driver cursor."""
+
+    def _release_connection(self) -> Any:
+        """Release the held connection (pool slot/lock). May return an awaitable."""
+        return None
+
+    async def aclose(self) -> None:
+        """Close the cursor and release the connection back to the pool/lock."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self._close_cursor()
+        finally:
+            released = self._release_connection()
+            if inspect.isawaitable(released):
+                await released
+
+    async def __aenter__(self) -> "BaseStreamingCursor[T_conn]":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.aclose()
+
+
+class PooledStreamingCursor(BaseStreamingCursor[T_conn]):
+    """Streaming cursor for backends whose connections come from a pool.
+
+    A pool connection is acquired when the stream opens and released back to
+    the pool when the cursor closes.  Subclasses implement the driver-specific
+    cursor creation/fetch/close primitives.
+    """
+
+    def __init__(
+        self,
+        client: "BaseDBAsyncClient",
+        connection: T_conn,
+        sibling_client: "BaseDBAsyncClient",
+        release_connection: Any = None,
+    ) -> None:
+        self.client = client
+        self.connection = connection
+        self.sibling_client = sibling_client
+        self._release_callback = release_connection
+        self.cursor: Any = None
+        self._closed = False
+
+    @abc.abstractmethod
+    async def _open_cursor(self, query: str, values: list | None) -> None:
+        """Open the driver cursor and execute *query*."""
+
+    async def _release_connection(self) -> Any:
+        if self._release_callback is not None:
+            return self._release_callback()
+        pool_owner = getattr(self.client, "_parent", None) or self.client
+        pool = getattr(pool_owner, "_pool", None)
+        if pool is not None:
+            return pool.release(self.connection)
+        return None
+
+
+class PooledStreamContext(Generic[T_conn]):
+    """Opens a :class:`PooledStreamingCursor` subclass over a pooled connection."""
+
+    def __init__(
+        self,
+        client: "BaseDBAsyncClient",
+        cursor_cls: type[PooledStreamingCursor[T_conn]],
+        query: str,
+        values: list | None,
+    ) -> None:
+        self._client = client
+        self._cursor_cls = cursor_cls
+        self._query = query
+        self._values = values
+        self._stream: PooledStreamingCursor[T_conn] | None = None
+
+    async def __aenter__(self) -> PooledStreamingCursor[T_conn]:
+        owner = getattr(self._client, "_parent", None)
+        if owner is not None and not isinstance(
+            self._client.acquire_connection(), PoolConnectionWrapper
+        ):
+            # Inside a transaction the wrapper already owns a single
+            # connection guarded by its (non-reentrant) lock.  Reuse that
+            # connection directly instead of trying to acquire it again.
+            # Closing the stream releases the transaction wrapper's lock
+            # (but not the physical connection, which the transaction owns).
+            connection = self._client._connection
+            await self._client._lock.acquire()
+            in_transaction = True
+        else:
+            wrapper = self._client.acquire_connection()
+            await wrapper.ensure_connection()
+            connection = await wrapper.__aenter__()
+            in_transaction = False
+        sibling = self._sibling_client(connection)
+        release = self._release_transaction_lock if in_transaction else None
+        stream = self._cursor_cls(self._client, connection, sibling, release)
+        try:
+            await stream._open_cursor(self._query, self._values)
+        except BaseException:
+            await stream.aclose()
+            raise
+        self._stream = stream
+        return stream
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self._stream is not None:
+            await self._stream.aclose()
+
+    def _sibling_client(self, connection: T_conn) -> "BaseDBAsyncClient":
+        """Return a client that executes queries on the already held connection."""
+        owner = getattr(self._client, "_parent", None) or self._client
+        return _HeldConnectionClient(owner, self._client, connection)
+
+    def _release_transaction_lock(self) -> Any:
+        """Release only the transaction wrapper's serialization lock.
+
+        The physical connection belongs to the transaction and is returned to
+        the pool when the transaction commits/rolls back, not when the stream
+        closes.
+        """
+        wrapper = self._client.acquire_connection()
+        if isinstance(wrapper, ConnectionWrapper):
+            wrapper._lock.release()
+        return None
+
+
+class _HeldConnectionClient:
+    """Proxy DB client that reuses a connection held by an open stream.
+
+    It delegates everything to *owner* but hands out *connection* from
+    ``acquire_connection`` so per-batch prefetch queries participate in the
+    same transaction/connection instead of acquiring the pool slot a second
+    time.
+    """
+
+    __slots__ = ("_owner", "_transaction_client", "_connection")
+
+    def __init__(
+        self,
+        owner: "BaseDBAsyncClient",
+        transaction_client: "BaseDBAsyncClient",
+        connection: Any,
+    ) -> None:
+        self._owner = owner
+        self._transaction_client = transaction_client
+        self._connection = connection
+
+    @property
+    def _parent(self) -> BaseDBAsyncClient:
+        return self._owner
+
+    def acquire_connection(self) -> HeldConnectionWrapper:
+        return HeldConnectionWrapper(self._connection)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._transaction_client, item)

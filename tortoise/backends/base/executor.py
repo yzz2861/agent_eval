@@ -115,6 +115,14 @@ class BaseExecutor:
         custom_fields: list | None = None,
     ) -> list:
         _, raw_results = await self.db.execute_query(sql, values)
+        instance_list = await self._instances_from_rows(list(raw_results), custom_fields)
+        await self._execute_prefetch_queries(instance_list)
+        return instance_list
+
+    async def _instances_from_rows(
+        self, raw_results: Sequence, custom_fields: list | None = None
+    ) -> list:
+        """Build model instances from raw DB rows (including select_related rows)."""
         instance_list = []
         if self.select_related_idx:
             _split_cache: dict[str, str] = {}
@@ -159,8 +167,23 @@ class BaseExecutor:
                 for field in custom_fields:
                     object.__setattr__(instance, field, row[field])
             instance_list.append(instance)
-        await self._execute_prefetch_queries(instance_list)
         return instance_list
+
+    def execute_select_stream(
+        self,
+        sql: str,
+        values: list | None = None,
+        custom_fields: list | None = None,
+        batch_size: int = 100,
+    ):
+        """Yield batches of model instances from a lazily-read server cursor.
+
+        Relations from ``prefetch_related`` are loaded once per batch, with a
+        single query per relation, before the batch is handed to the consumer.
+        Rows beyond the current batch are never read until the consumer asks
+        for the next one.
+        """
+        return _ModelBatchStream(self, sql, values, custom_fields, batch_size)
 
     async def execute_union(
         self, sql: str, app_field: str, model_field: str, models: set[type[Model]]
@@ -536,9 +559,12 @@ class BaseExecutor:
         related_query.resolve_ordering(
             related_query.model, related_query.model._meta.basetable, [], {}
         )
-        related_object_list = await related_query.filter(
+        related_object_queryset = related_query.filter(
             **{f"{k}__in": v for k, v in related_objects_for_fetch.items()}
         )
+        if related_object_queryset._db is not self.db:
+            related_object_queryset._db = self.db
+        related_object_list = await related_object_queryset
 
         related_object_map: dict[str, list] = {}
         for entry in related_object_list:
@@ -576,9 +602,12 @@ class BaseExecutor:
                 )
             )
 
-        related_object_list = await related_query.filter(
+        related_object_queryset = related_query.filter(
             **{f"{k}__in": v for k, v in related_objects_for_fetch.items()}
         )
+        if related_object_queryset._db is not self.db:
+            related_object_queryset._db = self.db
+        related_object_list = await related_object_queryset
 
         related_object_map = {}
         for entry in related_object_list:
@@ -715,7 +744,13 @@ class BaseExecutor:
                 else:
                     k += "__in"
                 conditions[k] = v
-            related_object_list = await related_queryset.filter(**conditions)
+            related_object_queryset = related_queryset.filter(**conditions)
+            # ``.filter`` clones the queryset and may revert ``_db`` to the
+            # one configured on a user-supplied Prefetch queryset; rebind it
+            # so the query uses the held streaming/transaction connection.
+            if related_object_queryset._db is not self.db:
+                related_object_queryset._db = self.db
+            related_object_list = await related_object_queryset
             if len(model_to_field) > 1:
                 related_object_map = {
                     getattr(obj, model_to_field[obj.__class__]): obj for obj in related_object_list
@@ -738,9 +773,16 @@ class BaseExecutor:
                 relation_field = self.model._meta.fields_map[field_name]
                 related_model: type[Model] = relation_field.related_model  # type: ignore
                 related_query = related_model.all().using_db(self.db)
-                related_query.query = copy(related_query.model._meta.basequery)  # type:ignore[assignment]
+                related_query.query = copy(  # type:ignore[assignment]
+                    related_query.model._meta.basequery
+                )
             if forwarded_prefetches:
                 related_query = related_query.prefetch_related(*forwarded_prefetches)
+            # Prefetch queries must run on the same connection the streaming
+            # cursor is holding (or inside the current transaction), otherwise
+            # they would block on the stream's unreleased connection/lock.
+            if related_query._db is not self.db:
+                related_query._db = self.db
             self._prefetch_queries.setdefault(field_name, []).append((to_attr, related_query))
 
     async def _do_prefetch(
@@ -793,3 +835,69 @@ class BaseExecutor:
         cls, filter_func: Callable, filter_info: FilterInfoDict | None = None
     ) -> Callable | None:
         return cls.FILTER_FUNC_OVERRIDE.get(filter_func)
+
+
+class _ModelBatchStream:
+    """Stateful model-instance batch source backed by an open streaming cursor.
+
+    The cursor (and its connection/pool slot/transaction lock) is opened on the
+    first batch and released synchronously by :meth:`aclose`, which is
+    triggered by ``StreamingResult`` on break/cancellation/error.
+    """
+
+    __slots__ = (
+        "_owner",
+        "_sql",
+        "_values",
+        "_custom_fields",
+        "_batch_size",
+        "_context",
+        "_cursor",
+        "_executor",
+        "_closed",
+    )
+
+    def __init__(self, owner: BaseExecutor, sql, values, custom_fields, batch_size) -> None:
+        self._owner = owner
+        self._sql = sql
+        self._values = values
+        self._custom_fields = custom_fields
+        self._batch_size = batch_size
+        self._context = None
+        self._cursor = None
+        self._executor: BaseExecutor | None = None
+        self._closed = False
+
+    async def fetch_batch(self) -> list:
+        if self._cursor is None:
+            self._context = self._owner.db.execute_query_stream(self._sql, self._values)
+            self._cursor = await self._context.__aenter__()
+            self._executor = self._owner.__class__(
+                model=self._owner.model,
+                db=self._cursor.sibling_client,
+                prefetch_map=self._owner.prefetch_map,
+                prefetch_queries=self._owner._prefetch_queries,
+                select_related_idx=self._owner.select_related_idx,
+            )
+        raw_rows = await self._cursor.fetchmany(self._batch_size)
+        if not raw_rows:
+            return []
+        await asyncio.sleep(0)
+        assert self._executor is not None
+        instance_list = await self._executor._instances_from_rows(
+            list(raw_rows), self._custom_fields
+        )
+        await self._executor._execute_prefetch_queries(instance_list)
+        return instance_list
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        cursor = self._cursor
+        if cursor is not None:
+            try:
+                await cursor.aclose()
+            finally:
+                self._cursor = None
+                self._context = None

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from functools import wraps
 from itertools import count
 from typing import Any, SupportsInt, TypeVar
@@ -25,6 +25,8 @@ from tortoise.backends.base.client import (
     ConnectionWrapper,
     NestedTransactionContext,
     PoolConnectionWrapper,
+    PooledStreamContext,
+    PooledStreamingCursor,
     TransactionalDBClient,
     TransactionContext,
     TransactionContextPooled,
@@ -223,6 +225,42 @@ class MySQLClient(BaseDBAsyncClient):
 
     async def execute_query_dict(self, query: str, values: list | None = None) -> list[dict]:
         return (await self.execute_query(query, values))[1]
+
+    def execute_query_stream(  # type: ignore[override]
+        self, query: str, values: list | None = None
+    ):
+        return PooledStreamContext(self, MySQLStreamingCursor, query, values)
+
+
+class MySQLStreamingCursor(PooledStreamingCursor[Any]):
+    """Lazy cursor using MySQL's unbuffered (server-side) cursor.
+
+    The default aiomysql/asyncmy cursor buffers the whole result set on the
+    client.  Using the server-side cursor class makes the driver issue
+    ``fetchmany`` network round trips instead, so rows are not read ahead of
+    the consumer.
+    """
+
+    async def _open_cursor(self, query: str, values: list | None) -> None:
+        self.client.log.debug("%s: %s", query, values)
+        cursor_class = _server_side_dict_cursor()
+        self.cursor = await self.connection.cursor(cursor_class)
+        await self.cursor.execute(query, values)
+
+    async def fetchmany(self, size: int) -> Sequence[dict]:
+        return await self.cursor.fetchmany(size)
+
+    async def _close_cursor(self) -> None:
+        if self.cursor is not None:
+            await self.cursor.close()
+
+
+def _server_side_dict_cursor() -> Any:
+    try:
+        from asyncmy.cursors import SSDictCursor
+    except ImportError:
+        from pymysql.cursors import SSDictCursor
+    return SSDictCursor
 
     @translate_exceptions
     async def execute_script(self, query: str) -> None:

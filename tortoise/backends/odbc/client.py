@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from functools import wraps
 from typing import Any, TypeVar
 
@@ -14,6 +14,8 @@ from tortoise.backends.base.client import (
     ConnectionWrapper,
     NestedTransactionContext,
     PoolConnectionWrapper,
+    PooledStreamContext,
+    PooledStreamingCursor,
     TransactionalDBClient,
     TransactionContext,
 )
@@ -156,6 +158,34 @@ class ODBCClient(BaseDBAsyncClient, ABC):
 
     async def execute_query_dict(self, query: str, values: list | None = None) -> list[dict]:
         return (await self.execute_query(query, values))[1]
+
+    def execute_query_stream(  # type: ignore[override]
+        self, query: str, values: list | None = None
+    ):
+        return PooledStreamContext(self, ODBCStreamingCursor, query, values)
+
+
+class ODBCStreamingCursor(PooledStreamingCursor[Any]):
+    """Lazy cursor for pyodbc-backed (MSSQL/Oracle) drivers."""
+
+    async def _open_cursor(self, query: str, values: list | None) -> None:
+        self.client.log.debug("%s: %s", query, values)
+        self.cursor = await self.connection.cursor()
+        if values:
+            await self.cursor.execute(query, values)
+        else:
+            await self.cursor.execute(query)
+
+    async def fetchmany(self, size: int) -> Sequence[dict]:
+        rows = await self.cursor.fetchmany(size)
+        if not rows:
+            return []
+        fields = [column[0] for column in self.cursor.description]
+        return [dict(zip(fields, row)) for row in rows]
+
+    async def _close_cursor(self) -> None:
+        if self.cursor is not None:
+            await self.cursor.close()
 
     @translate_exceptions
     async def execute_script(self, query: str) -> None:

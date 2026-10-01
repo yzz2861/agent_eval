@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, TypeVar, cast
 
 import asyncpg
@@ -12,6 +12,8 @@ from tortoise.backends.asyncpg.schema_generator import AsyncpgSchemaGenerator
 from tortoise.backends.base.client import (
     ConnectionWrapper,
     NestedTransactionContext,
+    PooledStreamContext,
+    PooledStreamingCursor,
     TransactionalDBClient,
     TransactionContext,
     TransactionContextPooled,
@@ -152,6 +154,30 @@ class AsyncpgDBClient(BasePostgresClient):
             params = [query, *values] if values else [query]
             results = await connection.fetch(*params)
             return [dict(i) for i in results]
+
+    def execute_query_stream(  # type: ignore[override]
+        self, query: str, values: list | None = None
+    ):
+        return PooledStreamContext(self, AsyncpgStreamingCursor, query, values)
+
+
+class AsyncpgStreamingCursor(PooledStreamingCursor[asyncpg.Connection]):
+    """Lazy cursor using asyncpg's native portal-based cursor."""
+
+    async def _open_cursor(self, query: str, values: list | None) -> None:
+        self.log.debug("%s: %s", query, values)
+        params = [query, *values] if values else [query]
+        # prefetch=1 keeps asyncpg from buffering the whole result; the portal
+        # fetches rows on demand when ``fetchmany`` is called.
+        self.cursor = await self.connection.cursor(*params, prefetch=1)
+
+    async def fetchmany(self, size: int) -> Sequence[dict]:
+        records = await self.cursor.fetch(size)
+        return records
+
+    async def _close_cursor(self) -> None:
+        if self.cursor is not None:
+            await self.cursor.close()
 
 
 class TransactionWrapper(AsyncpgDBClient, TransactionalDBClient):
