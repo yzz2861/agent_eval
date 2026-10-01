@@ -1,0 +1,56 @@
+name: Testing
+
+on:
+  push:
+  pull_request:
+
+# GitHub Actions notes
+# - outcome in step name so we can see it without having to expand logs
+# - every step must define a `uses` or `run` key
+
+jobs:
+  test:
+    name: ruby ${{ matrix.ruby }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby:
+          - '3.3'
+          - '3.4'
+          - '4.0'
+          - head
+          - jruby
+          - jruby-head
+          - truffleruby
+          - truffleruby-head
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: ruby/setup-ruby@v1
+      continue-on-error: ${{ matrix.allow-failure || false }}
+      id: setup
+      with:
+        ruby-version: ${{ matrix.ruby }}
+
+    - name: "setup-ruby: ${{ steps.setup.outcome }}"
+      run: echo ""
+
+    - name: Install gems
+      continue-on-error: ${{ matrix.allow-failure || false }}
+      id: bundle
+      run: bundle install
+
+    - name: "bundle install: ${{ steps.bundle.outcome }}"
+      run: echo ""
+
+    - name: Run tests
+      continue-on-error: ${{ matrix.allow-failure || false }}
+      id: test
+      run: bundle exec rake
+      env:
+        COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
+
+    - name: "bundle exec rake outcome: ${{ steps.test.outcome }}"
+      run: echo ""
