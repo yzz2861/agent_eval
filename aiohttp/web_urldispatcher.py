@@ -340,7 +340,11 @@ class Resource(AbstractResource):
         self._routes[route.method] = route
 
     async def resolve(self, request: Request) -> _Resolve:
-        if (match_dict := self._match(request.rel_url.path_safe)) is None:
+        path = request.rel_url.path_safe
+        # CONNECT uses authority-form and has no path component.
+        if not path and request.method == hdrs.METH_CONNECT:
+            path = "/"
+        if (match_dict := self._match(path)) is None:
             return None, set()
         if route := self._routes.get(request.method, self._any_route):
             return UrlMappingMatchInfo(match_dict, route), self._allowed_methods
@@ -1006,6 +1010,10 @@ class UrlDispatcher(AbstractRouter, Mapping[str, AbstractResource]):
         # registered for the same canonical path, we resolve them in a linear
         # fashion to ensure registration order is respected.
         url_part = request.rel_url.path_safe
+        # CONNECT uses authority-form, which has no path component; route
+        # it as "/" so a single CONNECT route can handle every authority.
+        if not url_part and request.method == hdrs.METH_CONNECT:
+            url_part = "/"
         while url_part:
             for candidate in resource_index.get(url_part, ()):
                 match_dict, allowed = await candidate.resolve(request)

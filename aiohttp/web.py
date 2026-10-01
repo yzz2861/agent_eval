@@ -129,6 +129,7 @@ from .web_urldispatcher import (
     UrlMappingMatchInfo,
     View,
 )
+from .web_tunnel import TunnelResponse
 from .web_ws import WebSocketReady, WebSocketResponse, WSMsgType
 
 __all__ = (
@@ -256,6 +257,8 @@ __all__ = (
     "UrlDispatcher",
     "UrlMappingMatchInfo",
     "View",
+    # web_tunnel
+    "TunnelResponse",
     # web_ws
     "WebSocketReady",
     "WebSocketResponse",

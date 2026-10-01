@@ -1,0 +1,3 @@
+Added :class:`~aiohttp.web.TunnelResponse` for taking over an accepted
+HTTP/1.1 ``CONNECT`` connection as a back-pressured, bidirectional byte
+tunnel with independent EOF handling -- by :user:`bill`.

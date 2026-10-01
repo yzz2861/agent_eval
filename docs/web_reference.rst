@@ -1456,6 +1456,88 @@ and :ref:`aiohttp-web-signals` handlers::
    .. seealso:: :meth:`WebSocketResponse.can_prepare`
 
 
+.. class:: TunnelResponse(*, status=200, reason=None)
+   :canonical: aiohttp.web_tunnel.TunnelResponse
+
+   Bidirectional byte tunnel for an accepted HTTP/1.1 ``CONNECT`` request,
+   inherited from :class:`StreamResponse`.
+
+   Return it from a request handler after authorizing the request and call
+   :meth:`prepare` to send the success status line.  Once prepared the HTTP
+   parser is detached: subsequent bytes are delivered by :meth:`read`,
+   :meth:`readany` and async iteration, while :meth:`write` sends raw bytes
+   back.  Both directions honor transport flow control, and either side may
+   signal EOF independently with :meth:`write_eof`.
+
+   The tunnel does not connect to the authority in the request target; use
+   the request data (e.g. ``request.rel_url.host``) to make and police that
+   outbound connection yourself.  Reject a request by returning a normal
+   error response instead of preparing the tunnel.
+
+   .. code-block:: python
+
+      async def handler(request):
+          if not authorized(request):
+              return web.Response(status=403)
+          upstream = await open_upstream(request.rel_url.host)
+          tunnel = web.TunnelResponse()
+          await tunnel.prepare(request)
+          async for chunk in tunnel:
+              upstream.write(chunk)
+              await tunnel.write(await upstream.read())
+          await tunnel.write_eof()
+          return tunnel
+
+   .. method:: prepare(request)
+      :async:
+
+      Send the success response and take over the connection.
+
+      :raises web.HTTPBadRequest: if *request* is not a ``CONNECT`` request.
+
+   .. method:: read(n=-1)
+      :async:
+
+      Read up to *n* bytes (or all currently buffered bytes with the default)
+      from the client side of the tunnel.  Returns ``b""`` at client EOF.
+
+   .. method:: readany()
+      :async:
+
+      Read the next available chunk from the client as soon as it arrives.
+
+   .. method:: readexactly(n)
+      :async:
+
+      Read exactly *n* bytes, raising
+      :class:`asyncio.IncompleteReadError` on early client EOF.
+
+   .. method:: write(data)
+      :async:
+
+      Write raw *data* to the client, waiting for write backpressure.
+
+   .. method:: write_eof(data=b"")
+      :async:
+
+      Half-close the server-to-client direction without stopping reads.
+
+   .. method:: wait_eof()
+      :async:
+
+      Wait until the client signals EOF.
+
+   .. method:: close()
+
+      Close the tunneled connection immediately.
+
+   .. attribute:: closed
+
+      ``True`` after :meth:`close` or a sent server EOF.
+
+   The object is also an async iterator over :meth:`readany` chunks.
+
+
 .. function:: json_response([data], *, text=None, body=None, \
                             status=200, reason=None, headers=None, \
                             content_type='application/json', \

@@ -29,7 +29,6 @@ from .http import (
     HttpVersion10,
     RawRequestMessage,
     StreamWriter,
-    WebSocketReader,
 )
 from .log import access_logger, server_logger
 from .streams import EMPTY_PAYLOAD, StreamReader
@@ -199,6 +198,8 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         "_request_in_progress",
         "_logging_enabled",
         "_cache",
+        "_tunnel",
+        "_pending_eof",
     )
 
     def __init__(
@@ -298,6 +299,8 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         self._force_close = False
         self._request_in_progress = False
         self._cache: dict[str, Any] = {}
+        self._tunnel: Any = None
+        self._pending_eof = False
 
     def __repr__(self) -> str:
         return "<{} {}>".format(
@@ -441,16 +444,31 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         self._task_handler = None
 
         if self._payload_parser is not None:
-            self._payload_parser.feed_eof()
+            if self._tunnel is not None:
+                # Wake any tunnel read with the disconnection error
+                # instead of treating an abrupt loss as a clean EOF.
+                self._tunnel._set_exception(
+                    ConnectionResetError("Tunnel connection lost")
+                )
+            else:
+                self._payload_parser.feed_eof()
             self._payload_parser = None
+        self._tunnel = None
 
     def set_parser(
         self,
-        parser: WebSocketReader,
+        parser: Any,
         data_received_cb: Callable[[], None] | None = None,
+        *,
+        raw_stream: bool = False,
     ) -> None:
-        assert self._payload_parser is None
+        """Install the parser that owns the connection after an upgrade.
 
+        WebSocket upgrades leave the HTTP payload parser unset; a CONNECT
+        request instead owns an until-EOF payload parser, so any previously
+        buffered tunnel bytes do not get re-parsed as HTTP messages.
+        """
+        previous_parser = self._payload_parser
         self._payload_parser = parser
         self._data_received_cb = data_received_cb
 
@@ -460,15 +478,43 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
             # upgraded protocol still takes effect.
             self.resume_reading(resume_parser=False)
 
-        if self._message_tail:
-            self._payload_parser.feed_data(self._message_tail)
-            self._message_tail = b""
+        if previous_parser is None:
+            # The HTTP parser stopped at the upgrade boundary; hand it any
+            # bytes that arrived after the request and were buffered here.
+            tail, self._message_tail = self._message_tail, b""
+            if tail:
+                self._payload_parser.feed_data(tail)
+        elif self._message_tail:
+            # Replacing an active payload parser: feed buffered bytes too.
+            tail, self._message_tail = self._message_tail, b""
+            self._payload_parser.feed_data(tail)
+
+        # Only a raw CONNECT tunnel consumes a bare transport EOF; a
+        # WebSocket upgrade must not receive one in its frame queue.
+        if self._pending_eof and raw_stream:
+            self._payload_parser.feed_eof()
+            self._pending_eof = False
 
         if self._buffer_paused:
             self._resume_reading_if_drained()
 
-    def eof_received(self) -> None:
-        pass
+    def set_tunnel(self, tunnel: Any) -> None:
+        """Mark the connection as taken over by a CONNECT tunnel."""
+        self._tunnel = tunnel
+
+    def eof_received(self) -> bool | None:
+        self._pending_eof = True
+        # A taken-over CONNECT tunnel supports an independent client EOF:
+        # deliver it to the byte reader but keep the write direction open
+        # so the application can finish sending its side. asyncio then
+        # closes the transport only once it too has written EOF.
+        if self._tunnel is not None and self._payload_parser is not None:
+            self._payload_parser.feed_eof()
+            self._pending_eof = False
+            transport = self.transport
+            if transport is not None and transport.can_write_eof():
+                return True
+        return None
 
     def data_received(self, data: bytes) -> None:
         if self._force_close or self._close:
@@ -799,8 +845,22 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
                 # notify server about keep-alive
                 self._keepalive = bool(resp.keep_alive)
 
+                # A taken-over CONNECT connection is a byte tunnel now:
+                # wait for its client side to finish before releasing it
+                # instead of lingering/discarding the "request body".
+                if self._tunnel is not None and resp is self._tunnel:
+                    if not payload.is_eof() and not self._force_close:
+                        with suppress(asyncio.CancelledError):
+                            await payload.wait_eof()
+                    payload.set_exception(_PAYLOAD_ACCESS_ERROR)
+                    self._tunnel = None
+                elif request.method == "CONNECT":
+                    # A rejected tunnel still owns an until-EOF byte stream;
+                    # there is no HTTP body to linger on, so close at once.
+                    payload.set_exception(_PAYLOAD_ACCESS_ERROR)
+                    self.close()
                 # check payload
-                if not payload.is_eof():
+                elif not payload.is_eof():
                     lingering_time = self._lingering_time
                     # Could be force closed while awaiting above tasks.
                     if not self._force_close and lingering_time:  # type: ignore[redundant-expr]
@@ -897,6 +957,12 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
             prepare_meth = resp.prepare
         try:
             await prepare_meth(request)
+            if self._tunnel is resp:
+                # A successful CONNECT response has no HTTP body and the
+                # connection is now a tunnel; write_eof() there is the
+                # application's explicit half-close, not the end of HTTP.
+                await self.log_access(request, resp, start_time)
+                return resp, False
             await resp.write_eof()
         except ConnectionError:
             await self.log_access(request, resp, start_time)

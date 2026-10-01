@@ -1358,6 +1358,43 @@ The toolbar is ready to use. Enjoy!!!
 .. _aiohttp-debugtoolbar: https://github.com/aio-libs/aiohttp_debugtoolbar
 
 
+HTTP CONNECT tunnels
+--------------------
+
+A handler can accept an HTTP/1.1 ``CONNECT`` request and take over the
+connection as a raw, bidirectional byte stream with
+:class:`~aiohttp.web.TunnelResponse`::
+
+    async def connect_handler(request):
+        if request.headers.get("X-Auth") != "ok":
+            return web.Response(status=403)
+        tunnel = web.TunnelResponse()
+        await tunnel.prepare(request)
+        async for chunk in tunnel:
+            await tunnel.write(chunk)
+        await tunnel.write_eof()
+        return tunnel
+
+
+    app.router.add_route("CONNECT", "/", connect_handler)
+
+``CONNECT`` uses the authority-form request target, which has no path; route
+the method on ``"/"`` and read the target host/port from
+``request.rel_url.host`` and ``request.rel_url.port``.
+
+After ``prepare`` succeeds the connection is no longer parsed as HTTP:
+bytes that arrived with the request headers are available from the tunnel
+reader without being lost, ``write``/``read`` honor transport flow control,
+and the two directions can be EOFed independently.  A tunnel is released
+when the handler finishes, the client disconnects, the task is cancelled, or
+the application shuts down.  To refuse a tunnel, return a regular HTTP error
+response; the connection then follows ordinary HTTP close semantics.
+
+aiohttp only performs the takeover: authorizing the request and choosing and
+connecting to the upstream authority are the application's responsibility.
+A runnable demo lives in ``examples/connect_tunnel_echo.py``.
+
+
 Dev Tools
 ---------
 

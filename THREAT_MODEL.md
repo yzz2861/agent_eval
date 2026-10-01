@@ -30,7 +30,7 @@ Key public APIs (non-exhaustive):
 
 | Surface | Entry points |
 | --- | --- |
-| Server | `aiohttp.web.Application`, `web.RouteTableDef`, `web.run_app`, `web.AppRunner`, `web.WebSocketResponse`, `web.FileResponse` |
+| Server | `aiohttp.web.Application`, `web.RouteTableDef`, `web.run_app`, `web.AppRunner`, `web.WebSocketResponse`, `web.TunnelResponse`, `web.FileResponse` |
 | Client | `aiohttp.ClientSession`, `aiohttp.TCPConnector`, `aiohttp.ClientResponse`, `aiohttp.WSMessage`, `aiohttp.BasicAuth` |
 | Shared | `aiohttp.MultipartReader`/`MultipartWriter`, `aiohttp.CookieJar`, `aiohttp.TraceConfig`, `aiohttp.resolver.AsyncResolver` |
 
@@ -166,6 +166,13 @@ request/status line, header block, chunked transfer-encoding, content-length
 framing, trailers — and the surface where parsed values flow into the rest of
 the library. Out of scope here: WebSocket framing ([§5.3](#53-websocket-framing--per-message-deflate)), multipart bodies
 ([§5.4](#54-multipart-parsing--encoding)), compression ([§5.5](#55-compression-codecs)), HTTP-writer-side framing ([§5.2](#52-http1-writer)).
+
+`web.TunnelResponse` only switches the post-response stream after a parsed
+HTTP/1.1 `CONNECT`: request-line/header limits still apply to the request,
+and authorizing the target as well as connecting to it are application
+responsibilities. Bytes that arrived with the request headers are delivered
+to the tunnel reader rather than re-parsed, and a rejected `CONNECT` stays a
+plain HTTP error response.
 
 **Components covered.**
 
