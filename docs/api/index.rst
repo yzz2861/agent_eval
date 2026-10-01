@@ -16,6 +16,7 @@ Framework Reference
    middleware
    cors
    hooks
+   querybinding
    routing
    inspect
    util

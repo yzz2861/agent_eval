@@ -4,6 +4,7 @@ import unittest.mock
 import pytest
 
 import falcon
+import falcon.asgi
 import falcon.testing
 
 
@@ -317,3 +318,61 @@ class TestMsgspec:
         resp7 = client.simulate_get('/notes')
         assert resp7.status_code == 200
         assert resp7.json == {}
+
+
+class TestQueryBinding:
+    @pytest.fixture
+    def recipe(self, util):
+        return util.load_module('examples/recipes/query_binding_main.py')
+
+    def test_bound_types(self, recipe):
+        result = falcon.testing.simulate_get(
+            recipe.app,
+            '/search',
+            query_string='q=falcon&tags=web&tags=api&page=2&'
+            'filter[price][min]=10&filter[in_stock]=true',
+        )
+        assert result.status_code == 200
+        bound = result.json
+        assert bound['q'] == {'type': 'str', 'value': 'falcon'}
+        assert bound['page'] == {'type': 'int', 'value': '2'}
+        assert bound['per_page'] == {'type': 'int', 'value': '20'}
+        assert bound['tags'] == {'type': 'list', 'value': "['web', 'api']"}
+        assert bound['updated_since'] == {'type': 'NoneType', 'value': 'None'}
+        assert bound['filter'] == {
+            'type': 'SearchFilters',
+            'value': 'SearchFilters(price=PriceFilter(min=10.0, max=None), '
+            'in_stock=True)',
+        }
+
+    def test_binding_error(self, recipe):
+        result = falcon.testing.simulate_get(
+            recipe.app, '/search', query_string='page=abc&bogus=1'
+        )
+        assert result.status_code == 400
+        description = result.json['description']
+        assert 'q: missing required parameter' in description
+        assert "page: could not convert 'abc'" in description
+        assert 'bogus: unknown parameter' in description
+
+    @pytest.mark.parametrize(
+        'query_string',
+        [
+            'q=falcon&tags=web&tags=api&page=2&filter[price][min]=10',
+            'q=falcon&tags[]=',
+            'q=falcon&tags=',
+            'q=falcon',
+        ],
+    )
+    def test_wsgi_and_asgi_agree(self, recipe, query_string):
+        asgi_app = falcon.asgi.App()
+        asgi_app.add_route('/search', recipe.AsyncSearchResource())
+
+        wsgi_result = falcon.testing.simulate_get(
+            recipe.app, '/search', query_string=query_string
+        )
+        asgi_result = falcon.testing.simulate_get(
+            asgi_app, '/search', query_string=query_string
+        )
+        assert asgi_result.status_code == wsgi_result.status_code == 200
+        assert asgi_result.json == wsgi_result.json

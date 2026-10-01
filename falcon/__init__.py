@@ -31,6 +31,7 @@ __all__ = (
     'App',
     'after',
     'before',
+    'bind_query',
     'BoundedStream',
     'CORSMiddleware',
     'HTTPError',
@@ -45,6 +46,9 @@ __all__ = (
     'RequestOptions',
     'Response',
     'ResponseOptions',
+    'query_field',
+    'QueryBindingError',
+    'QueryParamError',
     # Public constants
     'HTTP_METHODS',
     'WEBDAV_METHODS',
@@ -414,6 +418,10 @@ from falcon.hooks import before
 from falcon.http_error import HTTPError
 from falcon.http_status import HTTPStatus
 from falcon.middleware import CORSMiddleware
+from falcon.querybinding import bind_query
+from falcon.querybinding import query_field
+from falcon.querybinding import QueryBindingError
+from falcon.querybinding import QueryParamError
 from falcon.redirects import HTTPFound
 from falcon.redirects import HTTPMovedPermanently
 from falcon.redirects import HTTPPermanentRedirect

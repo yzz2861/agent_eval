@@ -10,5 +10,6 @@ Recipes
    output-csv
    plain-text-handler
    pretty-json
+   query-binding
    raw-url-path
    request-id
