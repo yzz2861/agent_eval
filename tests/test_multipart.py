@@ -3,10 +3,303 @@ from __future__ import annotations
 import io
 import tempfile
 import typing
+from email.parser import BytesParser
+from email.policy import default
 
+import anyio
 import pytest
 
 import httpx
+from httpx._transports.base import AsyncBaseTransport
+
+
+class StreamingAsyncTransport(AsyncBaseTransport):
+    def __init__(
+        self, handler: typing.Callable[[httpx.Request], httpx.Response]
+    ) -> None:
+        self.handler = handler
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        async for _chunk in request.stream:
+            pass
+        return self.handler(request)
+
+
+def parse_multipart_request(request: httpx.Request) -> list[dict[str, typing.Any]]:
+    boundary = request.headers["Content-Type"].split("boundary=", 1)[1].encode()
+    body = (
+        b"Content-Type: multipart/form-data; boundary="
+        + boundary
+        + b"\r\n\r"
+        + request.content
+    )
+    message = BytesParser(policy=default).parsebytes(body)
+    return [
+        {
+            "name": part.get_param("name", header="content-disposition"),
+            "filename": part.get_filename(),
+            "content": part.get_payload(decode=True) or b"",
+        }
+        for part in message.iter_parts()
+    ]
+
+
+@pytest.mark.anyio
+async def test_multipart_async_file_with_mixed_fields() -> None:
+    async def file_content() -> typing.AsyncIterator[bytes]:
+        yield b"async-"
+        await anyio.sleep(0)
+        yield b"content"
+
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(200, content=request.content)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await client.post(
+            "http://example.org/upload",
+            data={"field": "value", "repeated": ["one", "two"]},
+            files=[
+                ("bytes_file", b"bytes"),
+                ("bytesio_file", io.BytesIO(b"bytesio")),
+                ("async_file", ("async.txt", file_content(), "text/plain")),
+                ("repeated", ("a", b"first")),
+                ("repeated", ("b", b"second")),
+            ],
+        )
+
+    assert response.status_code == 200
+    request = seen_requests[0]
+    assert "Content-Length" not in request.headers
+    assert request.headers["Transfer-Encoding"] == "chunked"
+
+    parts = parse_multipart_request(request)
+    assert [(part["name"], part["filename"]) for part in parts] == [
+        ("field", None),
+        ("repeated", None),
+        ("repeated", None),
+        ("bytes_file", "upload"),
+        ("bytesio_file", "upload"),
+        ("async_file", "async.txt"),
+        ("repeated", "a"),
+        ("repeated", "b"),
+    ]
+    assert [part["content"] for part in parts] == [
+        b"value",
+        b"one",
+        b"two",
+        b"bytes",
+        b"bytesio",
+        b"async-content",
+        b"first",
+        b"second",
+    ]
+
+
+@pytest.mark.anyio
+async def test_multipart_async_file_allows_concurrent_heartbeat() -> None:
+    heartbeats = 0
+
+    async def heartbeat() -> None:
+        nonlocal heartbeats
+        while True:
+            await anyio.sleep(0)
+            heartbeats += 1
+
+    async def slow_file_content() -> typing.AsyncIterator[bytes]:
+        for index in range(5):
+            await anyio.sleep(0)
+            yield bytes([index])
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(heartbeat)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200))
+        ) as client:
+            response = await client.post(
+                "http://example.org/upload",
+                files={"file": slow_file_content()},
+            )
+            assert response.status_code == 200
+
+        task_group.cancel_scope.cancel()
+
+    assert heartbeats > 0
+
+
+@pytest.mark.anyio
+async def test_multipart_async_file_closes_source_on_send_failure() -> None:
+    send_failed = anyio.Event()
+    source_closed = anyio.Event()
+
+    async def file_content() -> typing.AsyncIterator[bytes]:
+        try:
+            yield b"content"
+            await send_failed.wait()
+        finally:
+            source_closed.set()
+
+    class FailingTransport(AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            async for chunk in request.stream:
+                if b"content" in chunk:
+                    send_failed.set()
+                    raise httpx.WriteError("send failed")
+            raise AssertionError("unreachable")
+
+    async with httpx.AsyncClient(transport=FailingTransport()) as client:
+        with pytest.raises(httpx.HTTPError):
+            await client.post(
+                "http://example.org/upload",
+                files={"file": file_content()},
+            )
+
+    assert source_closed.is_set()
+
+
+@pytest.mark.anyio
+async def test_multipart_async_file_closes_source_on_cancellation() -> None:
+    started = anyio.Event()
+    source_closed = anyio.Event()
+
+    async def file_content() -> typing.AsyncIterator[bytes]:
+        try:
+            yield b"content"
+            started.set()
+            await anyio.sleep_forever()
+        finally:
+            source_closed.set()
+
+    class CancellingTransport(AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            async for chunk in request.stream:
+                if b"content" in chunk:
+                    await started.wait()
+                    raise anyio.get_cancelled_exc_class()("cancelled")
+            raise AssertionError("unreachable")
+
+    with anyio.move_on_after(0):
+        async with httpx.AsyncClient(transport=CancellingTransport()) as client:
+            await client.post(
+                "http://example.org/upload",
+                files={"file": file_content()},
+            )
+
+    assert source_closed.is_set()
+
+
+@pytest.mark.anyio
+async def test_multipart_async_file_cannot_be_redirected() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/redirect":
+            return httpx.Response(307, headers={"location": "/target"})
+        return httpx.Response(200)
+
+    async def file_content() -> typing.AsyncIterator[bytes]:
+        yield b"content"  # pragma: no cover
+
+    async with httpx.AsyncClient(transport=StreamingAsyncTransport(handler)) as client:
+        with pytest.raises(httpx.StreamConsumed):
+            await client.post(
+                "http://example.org/redirect",
+                files={"file": file_content()},
+                follow_redirects=True,
+            )
+
+
+@pytest.mark.anyio
+async def test_multipart_replayable_fields_keep_content_length() -> None:
+    with tempfile.TemporaryFile() as upload:
+        upload.write(b"disk content")
+        upload.seek(0)
+        request = httpx.Request(
+            "POST",
+            "http://example.org/upload",
+            data={"field": "value"},
+            files={
+                "bytes": b"bytes",
+                "bytesio": io.BytesIO(b"bytesio"),
+                "disk": upload,
+            },
+            headers={"Content-Type": "multipart/form-data; boundary=BOUNDARY"},
+        )
+        body = await request.aread()
+
+        assert "Transfer-Encoding" not in request.headers
+        assert request.headers["Content-Length"] == str(len(body))
+
+
+@pytest.mark.anyio
+async def test_multipart_async_file_cannot_be_authenticated_again() -> None:
+    class RetryAuth(httpx.Auth):
+        async def async_auth_flow(
+            self, request: httpx.Request
+        ) -> typing.AsyncGenerator[httpx.Request, httpx.Response]:
+            yield request
+            yield request
+
+    async def file_content() -> typing.AsyncIterator[bytes]:
+        yield b"content"  # pragma: no cover
+
+    async with httpx.AsyncClient(
+        transport=StreamingAsyncTransport(lambda request: httpx.Response(200)),
+        auth=RetryAuth(),
+    ) as client:
+        with pytest.raises(httpx.StreamConsumed):
+            await client.post(
+                "http://example.org/upload",
+                files={"file": file_content()},
+            )
+
+
+@pytest.mark.anyio
+async def test_multipart_custom_async_iterator_cannot_be_replayed() -> None:
+    class CustomAsyncIterator:
+        def __init__(self) -> None:
+            self.chunks = [b"content"]
+
+        def __aiter__(self) -> "CustomAsyncIterator":
+            return self
+
+        async def __anext__(self) -> bytes:
+            if not self.chunks:
+                raise StopAsyncIteration
+            return self.chunks.pop(0)
+
+    request = httpx.Request(
+        "POST",
+        "http://example.org/upload",
+        files={"file": CustomAsyncIterator()},
+    )
+
+    async for _chunk in request.stream:
+        pass
+
+    with pytest.raises(httpx.StreamConsumed):
+        async for _chunk in request.stream:
+            pass
+
+
+def test_multipart_async_file_rejected_by_sync_client() -> None:
+    async def file_content() -> typing.AsyncIterator[bytes]:
+        yield b"content"  # pragma: no cover
+
+    request = httpx.Request(
+        "POST",
+        "http://example.org/upload",
+        files={"file": file_content()},
+    )
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(AssertionError("request was sent"))
+        )
+    )
+
+    with pytest.raises(TypeError, match="AsyncClient"):
+        client.send(request)
 
 
 def echo_request_content(request: httpx.Request) -> httpx.Response:

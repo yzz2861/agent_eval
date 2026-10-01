@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ._types import (
     AsyncByteStream,
+    AsyncIterable,
     FileContent,
     FileTypes,
     RequestData,
@@ -167,12 +168,20 @@ class FileField:
         self.filename = filename
         self.file = fileobj
         self.headers = headers
+        self.is_async = self._is_async_file(fileobj)
+        self._async_iterator: typing.AsyncIterator[bytes] | None = None
+
+    def _is_async_file(self, fileobj: typing.Any) -> bool:
+        return isinstance(fileobj, AsyncIterable) or hasattr(fileobj, "aread")
 
     def get_length(self) -> int | None:
         headers = self.render_headers()
 
         if isinstance(self.file, (str, bytes)):
             return len(headers) + len(to_bytes(self.file))
+
+        if self.is_async:
+            return None
 
         file_length = peek_filelike_length(self.file)
 
@@ -201,6 +210,11 @@ class FileField:
         return self._headers
 
     def render_data(self) -> typing.Iterator[bytes]:
+        if self.is_async:
+            raise TypeError(
+                "Multipart file uploads with async content require an AsyncClient."
+            )
+
         if isinstance(self.file, (str, bytes)):
             yield to_bytes(self.file)
             return
@@ -220,8 +234,46 @@ class FileField:
         yield self.render_headers()
         yield from self.render_data()
 
+    async def _aclose_async_render(self) -> None:
+        if self._async_iterator is not None:
+            iterator = self._async_iterator
+            self._async_iterator = None
+            aclose = getattr(iterator, "aclose", None)
+            if aclose is not None:
+                await aclose()
+        elif not isinstance(self.file, AsyncIterable):
+            aclose = getattr(self.file, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
-class MultipartStream(SyncByteStream, AsyncByteStream):
+    async def arender(self) -> typing.AsyncIterator[bytes]:
+        yield self.render_headers()
+        if not self.is_async:
+            for chunk in self.render_data():
+                yield chunk
+            return
+
+        fileobj = self.file
+        try:
+            if hasattr(fileobj, "aread") and not isinstance(fileobj, AsyncIterable):
+                chunk = await fileobj.aread(self.CHUNK_SIZE)
+                while chunk:
+                    yield to_bytes(chunk)
+                    chunk = await fileobj.aread(self.CHUNK_SIZE)
+            else:
+                self._async_iterator = fileobj.__aiter__()
+                try:
+                    while True:
+                        chunk = await self._async_iterator.__anext__()
+                        yield to_bytes(chunk)
+                except StopAsyncIteration:
+                    self._async_iterator = None
+        except BaseException:
+            await self._aclose_async_render()
+            raise
+
+
+class BaseMultipartStream:
     """
     Request content as streaming multipart encoded form data.
     """
@@ -241,8 +293,9 @@ class MultipartStream(SyncByteStream, AsyncByteStream):
         )
         self.fields = list(self._iter_fields(data, files))
 
+    @classmethod
     def _iter_fields(
-        self, data: RequestData, files: RequestFiles
+        cls, data: RequestData, files: RequestFiles
     ) -> typing.Iterator[FileField | DataField]:
         for name, value in data.items():
             if isinstance(value, (tuple, list)):
@@ -291,6 +344,36 @@ class MultipartStream(SyncByteStream, AsyncByteStream):
             return {"Transfer-Encoding": "chunked", "Content-Type": content_type}
         return {"Content-Length": str(content_length), "Content-Type": content_type}
 
+    def _initialize_stream_state(self) -> None:
+        pass
+
+
+class MultipartStream(BaseMultipartStream, SyncByteStream, AsyncByteStream):
+    @classmethod
+    def build(
+        cls,
+        data: RequestData,
+        files: RequestFiles,
+        boundary: bytes | None = None,
+    ) -> "MultipartStream | AsyncMultipartStream":
+        if boundary is None:
+            boundary = os.urandom(16).hex().encode("ascii")
+
+        fields = list(cls._iter_fields(data, files))
+        stream_cls = (
+            AsyncMultipartStream
+            if any(isinstance(field, FileField) and field.is_async for field in fields)
+            else MultipartStream
+        )
+        stream = stream_cls.__new__(stream_cls)
+        stream.boundary = boundary
+        stream.content_type = "multipart/form-data; boundary=%s" % boundary.decode(
+            "ascii"
+        )
+        stream.fields = fields
+        stream._initialize_stream_state()
+        return stream
+
     def __iter__(self) -> typing.Iterator[bytes]:
         for chunk in self.iter_chunks():
             yield chunk
@@ -298,3 +381,95 @@ class MultipartStream(SyncByteStream, AsyncByteStream):
     async def __aiter__(self) -> typing.AsyncIterator[bytes]:
         for chunk in self.iter_chunks():
             yield chunk
+
+
+class AsyncMultipartStreamIterator:
+    def __init__(self, stream: AsyncMultipartStream) -> None:
+        self._stream = stream
+        self._iterator = stream.iter_chunks().__aiter__()
+
+    async def __anext__(self) -> bytes:
+        try:
+            chunk = await self._iterator.__anext__()
+        except StopAsyncIteration:
+            self._stream._active_iterator = None
+            raise
+        self._stream._is_stream_consumed = True
+        return chunk
+
+    def __aiter__(self) -> AsyncMultipartStreamIterator:
+        return self
+
+    async def aclose(self) -> None:
+        await self._iterator.aclose()
+
+
+class AsyncMultipartStream(BaseMultipartStream, AsyncByteStream):
+    def __init__(
+        self,
+        data: RequestData,
+        files: RequestFiles,
+        boundary: bytes | None = None,
+    ) -> None:
+        super().__init__(data=data, files=files, boundary=boundary)
+        self._initialize_stream_state()
+
+    def _initialize_stream_state(self) -> None:
+        self._is_stream_consumed = False
+        self._is_non_replayable = any(
+            isinstance(field, FileField) and field.is_async for field in self.fields
+        )
+        self._active_field: FileField | None = None
+        self._field_render: typing.AsyncIterator[bytes] | None = None
+        self._active_iterator: AsyncMultipartStreamIterator | None = None
+
+    def get_content_length(self) -> int | None:
+        return MultipartStream.get_content_length(self)
+
+    def get_headers(self) -> dict[str, str]:
+        return MultipartStream.get_headers(self)
+
+    def __aiter__(self) -> AsyncMultipartStreamIterator:
+        if self._is_stream_consumed and self._is_non_replayable:
+            from ._exceptions import StreamConsumed
+
+            raise StreamConsumed()
+
+        iterator = AsyncMultipartStreamIterator(self)
+        self._active_iterator = iterator
+        return iterator
+
+    async def iter_chunks(self) -> typing.AsyncIterator[bytes]:
+        try:
+            for field in self.fields:
+                yield b"--%s\r\n" % self.boundary
+                if isinstance(field, FileField):
+                    self._active_field = field
+                    self._field_render = field.arender()
+                    async for chunk in self._field_render:
+                        yield chunk
+                else:
+                    yield field.render_headers()
+                    yield field.render_data()
+                yield b"\r\n"
+            yield b"--%s--\r\n" % self.boundary
+        finally:
+            await self._close_active_field()
+
+    async def _close_active_field(self) -> None:
+        field_render = self._field_render
+        if field_render is not None:
+            await field_render.aclose()
+            self._field_render = None
+        if self._active_field is not None:
+            field = self._active_field
+            self._active_field = None
+            await field._aclose_async_render()
+
+    async def aclose(self) -> None:
+        iterator = self._active_iterator
+        if iterator is not None:
+            self._active_iterator = None
+            await iterator.aclose()
+        else:
+            await self._close_active_field()

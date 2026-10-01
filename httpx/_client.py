@@ -1006,12 +1006,17 @@ class Client(BaseClient):
         start = time.perf_counter()
 
         if not isinstance(request.stream, SyncByteStream):
-            raise RuntimeError(
-                "Attempted to send an async request with a sync Client instance."
+            raise TypeError(
+                "Attempted to send an async request with a sync Client instance. "
+                "Use AsyncClient for async request content."
             )
 
-        with request_context(request=request):
-            response = transport.handle_request(request)
+        try:
+            with request_context(request=request):
+                response = transport.handle_request(request)
+        except BaseException:
+            request.stream.close()
+            raise
 
         assert isinstance(response.stream, SyncByteStream)
 
@@ -1726,8 +1731,12 @@ class AsyncClient(BaseClient):
                 "Attempted to send a sync request with an AsyncClient instance."
             )
 
-        with request_context(request=request):
-            response = await transport.handle_async_request(request)
+        try:
+            with request_context(request=request):
+                response = await transport.handle_async_request(request)
+        except BaseException:
+            await request.stream.aclose()
+            raise
 
         assert isinstance(response.stream, AsyncByteStream)
         response.request = request
