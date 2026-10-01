@@ -37,6 +37,7 @@ from tortoise.migrations.operations import (
     RenameIndex,
     RenameModel,
     RunPython,
+    RunPythonBatched,
     SQLOperation,
 )
 
@@ -423,6 +424,23 @@ class MigrationWriter:
                 f"{indent}    values={values_expr},",
                 f"{indent}),",
             ]
+        if isinstance(operation, RunPythonBatched):
+            process_expr = render_value(operation.process_batch, imports)
+            lines = [
+                f"{indent}ops.RunPythonBatched(",
+                f"{indent}    key={operation.key!r},",
+                f"{indent}    process_batch={process_expr},",
+            ]
+            if operation.initial_cursor is not None:
+                cursor_expr = render_value(operation.initial_cursor, imports)
+                lines.append(f"{indent}    initial_cursor={cursor_expr},")
+            if operation.reverse_code is not None:
+                reverse_expr = render_value(operation.reverse_code, imports)
+                lines.append(f"{indent}    reverse_code={reverse_expr},")
+            if operation.explicit_fingerprint is not None:
+                lines.append(f"{indent}    fingerprint={operation.explicit_fingerprint!r},")
+            lines.append(f"{indent}),")
+            return lines
         if isinstance(operation, RunPython):
             code_expr = render_value(operation.code, imports)
             lines = [

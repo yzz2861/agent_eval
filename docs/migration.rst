@@ -261,6 +261,89 @@ Example combining both:
 Atomic control
 --------------
 
+Resumable batched data migrations
+---------------------------------
+
+``RunPythonBatched`` handles large data migrations that must survive
+interruption. The caller provides a stable cursor and a per-batch function;
+the framework persists progress after every committed batch and resumes from
+the last committed batch on the next run.
+
+.. code-block:: python
+
+    from tortoise.migrations import RunPythonBatched
+    from tortoise.migrations.migration import Migration
+
+    BATCH_SIZE = 500
+
+    async def backfill_batch(apps, schema_editor, cursor):
+        start = cursor if cursor is not None else 0
+        Post = apps.get_model("blog", "Post")
+        posts = await Post.filter(id__gt=start, summary__isnull=True).order_by("id")[:BATCH_SIZE]
+        if not posts:
+            return None  # no work left: the operation is done
+        for post in posts:
+            post.summary = post.title[:200]
+            await post.save()
+        return posts[-1].id  # cursor of the next batch
+
+    class Migration(Migration):
+        atomic = False  # required: every batch commits separately
+        dependencies = [("blog", "0001_initial")]
+        operations = [
+            RunPythonBatched(
+                key="backfill-summary",
+                process_batch=backfill_batch,
+                initial_cursor=0,
+            )
+        ]
+
+The contract:
+
+- ``process_batch(apps, schema_editor, cursor)`` applies one batch and returns
+  the cursor for the next batch, or ``None`` when no work remains. Cursors
+  must be JSON-serializable (for example a primary key or an offset).
+- Each batch runs in its own transaction together with its checkpoint update,
+  so a batch's data changes and its progress record always commit or roll
+  back together. A crash can therefore never leave committed data without
+  recorded progress, nor recorded progress without committed data.
+- Progress is stored in the ``tortoise_migration_progress`` table (created
+  automatically) and removed when the operation completes.
+- Because batches commit individually, the hosting migration must set
+  ``atomic = False``; running inside an atomic migration raises an error.
+  Regular atomic migrations are unaffected.
+
+Definition changes and checkpoints
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A checkpoint is bound to a fingerprint of the operation definition (the
+``key``, the ``initial_cursor``, and the source of ``process_batch``; pass
+``fingerprint="..."`` to control it explicitly). If the definition changed,
+the old checkpoint is not reused: the run raises
+``CheckpointMismatchError``. Either restore the previous definition, or
+delete the stale row from ``tortoise_migration_progress`` to restart the
+operation from scratch.
+
+Concurrency
+~~~~~~~~~~~
+
+An executor claims a checkpoint row before advancing it. If a second
+executor tries to run the same operation of the same migration, it fails
+with ``ConcurrentMigrationError`` instead of duplicating work. The claim is
+released when the run ends; if a crashed executor left a stale lock behind
+(inspect ``locked_by``/``locked_at``), clear it manually before retrying.
+
+Reverse migrations and non-resumable operations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Reverse execution is *not* resumable: when ``reverse_code`` is provided it
+runs once, in a single transaction, and any leftover checkpoint for the
+operation is dropped. Without ``reverse_code`` the operation is
+irreversible. All other operations (schema operations, ``RunPython``,
+``RunSQL``) do not support resume; only ``RunPythonBatched`` checkpoints
+progress.
+
+
 ``RunPython`` and ``RunSQL`` support an ``atomic`` parameter (default ``True``) to control transaction wrapping.
 Set ``atomic=False`` for SQLite ``RunSQL`` operations to prevent connection deadlocks, or for PostgreSQL
 ``CREATE INDEX CONCURRENTLY`` which cannot run inside transactions.

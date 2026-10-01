@@ -154,9 +154,25 @@ class Migration:
             and supports_transactions
         ):
             async with in_transaction(schema_editor.client.connection_name):
-                await operation.database_forward(
-                    self.app_label, old_state, new_state, schema_editor
-                )
+                await self._database_forward(operation, old_state, new_state, schema_editor)
+        else:
+            await self._database_forward(operation, old_state, new_state, schema_editor)
+
+    async def _database_forward(
+        self,
+        operation: Operation,
+        old_state: State,
+        new_state: State,
+        schema_editor: BaseSchemaEditor,
+    ) -> None:
+        if getattr(operation, "needs_migration_name", False):
+            await operation.database_forward(  # type: ignore[call-arg]
+                self.app_label,
+                old_state,
+                new_state,
+                schema_editor,
+                migration_name=self.name,
+            )
         else:
             await operation.database_forward(self.app_label, old_state, new_state, schema_editor)
 
@@ -178,8 +194,24 @@ class Migration:
             and supports_transactions
         ):
             async with in_transaction(schema_editor.client.connection_name):
-                await operation.database_backward(
-                    self.app_label, old_state, new_state, schema_editor
-                )
+                await self._database_backward(operation, old_state, new_state, schema_editor)
+        else:
+            await self._database_backward(operation, old_state, new_state, schema_editor)
+
+    async def _database_backward(
+        self,
+        operation: Operation,
+        old_state: State,
+        new_state: State,
+        schema_editor: BaseSchemaEditor,
+    ) -> None:
+        if getattr(operation, "needs_migration_name", False):
+            await operation.database_backward(  # type: ignore[call-arg]
+                self.app_label,
+                old_state,
+                new_state,
+                schema_editor,
+                migration_name=self.name,
+            )
         else:
             await operation.database_backward(self.app_label, old_state, new_state, schema_editor)

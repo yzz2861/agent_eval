@@ -13,6 +13,7 @@ Changelog
 
 Added
 ^^^^^
+ ``RunPythonBatched`` migration operation for resumable batched data migrations: the caller provides a stable cursor and a per-batch function, each batch commits together with its checkpoint in one transaction, and an interrupted run resumes from the last committed batch. Checkpoints are bound to a fingerprint of the migration definition and protected by an executor lock.
 - ``Q.__bool__()`` so ``Q`` objects with no filters/children (including nested empty ``Q`` children) are falsy. (#2227)
 - PostgreSQL ``password`` credential now accepts a sync or async callable, resolved once per new connection, to support short-lived credentials such as AWS RDS/Aurora IAM tokens and Azure Entra ID tokens. (#2261)
 

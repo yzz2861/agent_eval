@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import inspect
+import json
+import os
+import socket
 from copy import deepcopy
+from hashlib import sha256
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from uuid import uuid4
 
 from tortoise import BaseDBAsyncClient, Model
+from tortoise.exceptions import IntegrityError
 from tortoise.fields import Field
 from tortoise.fields.relational import (
     ForeignKeyFieldInstance,
@@ -13,10 +19,17 @@ from tortoise.fields.relational import (
 )
 from tortoise.indexes import Index
 from tortoise.migrations.constraints import CheckConstraint, UniqueConstraint
-from tortoise.migrations.exceptions import IncompatibleStateError
+from tortoise.migrations.exceptions import (
+    CheckpointMismatchError,
+    ConcurrentMigrationError,
+    IncompatibleStateError,
+    TortoiseMigrationError,
+)
+from tortoise.migrations.progress import MigrationProgressRecorder
 from tortoise.migrations.schema_editor.base import BaseSchemaEditor
 from tortoise.migrations.schema_generator.state import ModelState, State
 from tortoise.migrations.schema_generator.state_apps import StateApps
+from tortoise.transactions import in_transaction
 
 if TYPE_CHECKING:
     from tortoise.fields.base import Field as BaseField
@@ -1139,6 +1152,213 @@ class RunPython(TortoiseOperation):
     @staticmethod
     def noop(apps: StateApps, schema_editor: BaseSchemaEditor) -> None:
         return None
+
+
+class RunPythonBatched(TortoiseOperation):
+    """Resumable, batched data migration.
+
+    The caller supplies a stable ``initial_cursor`` and a ``process_batch``
+    callable. The framework persists the cursor returned by each committed
+    batch in the ``tortoise_migration_progress`` table, so an interrupted run
+    resumes from the last committed batch instead of starting over.
+
+    Each batch runs in its own transaction together with its checkpoint
+    update, so a batch's data changes and its progress record always commit
+    (or roll back) atomically.
+
+    ``process_batch(apps, schema_editor, cursor)`` must apply one batch of
+    changes and return the cursor of the next batch, or ``None`` when no work
+    remains. Cursors must be JSON-serializable.
+
+    Because batches commit individually, the hosting migration must set
+    ``atomic = False``. Reverse migrations are *not* resumable: when
+    ``reverse_code`` is provided it runs once, in a single transaction.
+    """
+
+    reduces_to_sql = False
+    atomic = False
+    needs_migration_name = True
+
+    def __init__(
+        self,
+        key: str,
+        process_batch,
+        *,
+        initial_cursor: Any = None,
+        reverse_code=None,
+        fingerprint: str | None = None,
+    ) -> None:
+        if not key or not isinstance(key, str):
+            raise ValueError("RunPythonBatched requires a non-empty string key")
+        if not callable(process_batch):
+            raise ValueError("RunPythonBatched must be supplied with a callable process_batch")
+        if reverse_code is not None and not callable(reverse_code):
+            raise ValueError("RunPythonBatched must be supplied with callable arguments")
+        if fingerprint is not None and not isinstance(fingerprint, str):
+            raise ValueError("RunPythonBatched fingerprint must be a string")
+        try:
+            json.dumps(initial_cursor)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("RunPythonBatched initial_cursor must be JSON-serializable") from exc
+        self.key = key
+        self.process_batch = process_batch
+        self.initial_cursor = initial_cursor
+        self.reverse_code = reverse_code
+        self.explicit_fingerprint = fingerprint
+        self.reversible = reverse_code is not None
+
+    def describe(self) -> str:
+        return f"Run batched data migration {self.key!r}"
+
+    def state_forward(self, app_label: str, state: State) -> None:
+        return None
+
+    def fingerprint(self) -> str:
+        """Stable identity of this operation's definition.
+
+        A stored checkpoint is only reused when the fingerprint still matches,
+        so editing the batch function, the initial cursor, or the key
+        invalidates old checkpoints instead of silently resuming with a
+        different definition.
+        """
+        if self.explicit_fingerprint is not None:
+            return self.explicit_fingerprint
+        digest = sha256()
+        digest.update(self.key.encode())
+        digest.update(json.dumps(self.initial_cursor, sort_keys=True).encode())
+        try:
+            source = inspect.getsource(self.process_batch)
+        except (OSError, TypeError):
+            source = f"{self.process_batch.__module__}.{self.process_batch.__qualname__}"
+        digest.update(source.encode())
+        return digest.hexdigest()
+
+    async def database_forward(
+        self,
+        app_label: str,
+        old_state: State,
+        new_state: State,
+        state_editor: BaseSchemaEditor | None = None,
+        *,
+        migration_name: str | None = None,
+    ) -> None:
+        if not state_editor or state_editor.collect_sql:
+            return
+        if migration_name is None:
+            raise TortoiseMigrationError(
+                "RunPythonBatched must be executed through a Migration so its "
+                "progress can be tracked"
+            )
+        if state_editor.atomic_migration:
+            raise TortoiseMigrationError(
+                "RunPythonBatched commits every batch separately and cannot run "
+                "inside an atomic migration; set atomic = False on the Migration"
+            )
+        connection = state_editor.client
+        if not connection.capabilities.supports_transactions:
+            raise TortoiseMigrationError(
+                "RunPythonBatched requires transaction support so each batch and "
+                "its checkpoint commit atomically"
+            )
+
+        recorder = MigrationProgressRecorder(connection)
+        await recorder.ensure_schema(state_editor)
+        fingerprint = self.fingerprint()
+        owner = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex}"
+
+        checkpoint = await recorder.get_checkpoint(app_label, migration_name, self.key)
+        if checkpoint is None:
+            try:
+                await recorder.create_checkpoint(
+                    app_label, migration_name, self.key, fingerprint, owner
+                )
+            except IntegrityError:
+                raise ConcurrentMigrationError(
+                    f"Migration ({app_label}, {migration_name}) operation {self.key!r} is "
+                    "already being advanced by another executor"
+                ) from None
+            cursor = self.initial_cursor
+            batches_done = 0
+        else:
+            if checkpoint["fingerprint"] != fingerprint:
+                raise CheckpointMismatchError(
+                    f"Migration ({app_label}, {migration_name}) operation {self.key!r} has a "
+                    "stored checkpoint for a different migration definition. Restore the "
+                    "previous definition, or delete the row from "
+                    f"{recorder.table_name!r} to restart the operation from scratch."
+                )
+            if not await recorder.claim(app_label, migration_name, self.key, owner):
+                raise ConcurrentMigrationError(
+                    f"Migration ({app_label}, {migration_name}) operation {self.key!r} is "
+                    f"locked by executor {checkpoint['locked_by']!r}; if that executor is "
+                    "no longer running, clear the lock in "
+                    f"{recorder.table_name!r} before retrying"
+                )
+            stored_cursor = checkpoint["cursor"]
+            cursor = json.loads(stored_cursor) if stored_cursor is not None else self.initial_cursor
+            batches_done = checkpoint["batches_done"]
+
+        try:
+            while True:
+                async with in_transaction(connection.connection_name) as txn:
+                    state_editor.client = txn
+                    try:
+                        result = self.process_batch(old_state.apps, state_editor, cursor)
+                        next_cursor = await result if inspect.isawaitable(result) else result
+                    finally:
+                        state_editor.client = connection
+                    batches_done += 1
+                    if next_cursor is None:
+                        await recorder.clear(app_label, migration_name, self.key, client=txn)
+                    else:
+                        await recorder.save_progress(
+                            app_label,
+                            migration_name,
+                            self.key,
+                            json.dumps(next_cursor),
+                            batches_done,
+                            client=txn,
+                        )
+                if next_cursor is None:
+                    break
+                cursor = next_cursor
+        finally:
+            await recorder.release(app_label, migration_name, self.key, owner)
+
+    async def database_backward(
+        self,
+        app_label: str,
+        old_state: State,
+        new_state: State,
+        state_editor: BaseSchemaEditor | None = None,
+        *,
+        migration_name: str | None = None,
+    ) -> None:
+        if not state_editor:
+            return
+        if self.reverse_code is None:
+            raise NotImplementedError("RunPythonBatched reverse_code is not set")
+        connection = state_editor.client
+        recorder = MigrationProgressRecorder(connection)
+        await recorder.ensure_schema(state_editor)
+        supports_transactions = connection.capabilities.supports_transactions
+        if supports_transactions and not state_editor.atomic_migration:
+            async with in_transaction(connection.connection_name) as txn:
+                state_editor.client = txn
+                try:
+                    result = self.reverse_code(old_state.apps, state_editor)
+                    if inspect.isawaitable(result):
+                        await result
+                finally:
+                    state_editor.client = connection
+                if migration_name is not None:
+                    await recorder.clear(app_label, migration_name, self.key, client=txn)
+        else:
+            result = self.reverse_code(old_state.apps, state_editor)
+            if inspect.isawaitable(result):
+                await result
+            if migration_name is not None:
+                await recorder.clear(app_label, migration_name, self.key)
 
 
 class CreateSchema(TortoiseOperation):

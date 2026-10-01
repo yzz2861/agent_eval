@@ -7,6 +7,30 @@ from tortoise.migrations.graph import MigrationKey
 from tortoise.models import Model
 
 
+async def ensure_table_schema(schema_editor, model: type[Model], table_name: str) -> None:
+    """Create the table for ``model`` if it does not exist yet."""
+    sql_data = schema_editor._get_model_sql_data(model)
+    statement = sql_data.table_sql
+    if schema_editor.DIALECT in {"sqlite", "postgres", "mysql"}:
+        statement = statement.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1)
+        await schema_editor.client.execute_script(statement)
+        return
+    if schema_editor.DIALECT == "mssql":
+        statement = (
+            f"IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '{table_name}')\n"  # nosec B608
+            f"BEGIN\n{statement}\nEND"
+        )
+        await schema_editor.client.execute_script(statement)
+        return
+    try:
+        await schema_editor.client.execute_script(statement)
+    except Exception as exc:  # pragma: nocoverage - best effort for non-IF-NOT-EXISTS backends
+        message = str(exc).lower()
+        if "already exists" in message or "ora-00955" in message:
+            return
+        raise
+
+
 class MigrationRecorder:
     def __init__(self, connection, *, table_name: str = "tortoise_migrations") -> None:
         self.connection = connection
@@ -48,26 +72,7 @@ class MigrationRecorder:
         return MigrationRecord
 
     async def ensure_schema(self, schema_editor) -> None:
-        sql_data = schema_editor._get_model_sql_data(self.model)
-        statement = sql_data.table_sql
-        if schema_editor.DIALECT in {"sqlite", "postgres", "mysql"}:
-            statement = statement.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1)
-            await schema_editor.client.execute_script(statement)
-            return
-        if schema_editor.DIALECT == "mssql":
-            statement = (
-                f"IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '{self.table_name}')\n"  # nosec B608
-                f"BEGIN\n{statement}\nEND"
-            )
-            await schema_editor.client.execute_script(statement)
-            return
-        try:
-            await schema_editor.client.execute_script(statement)
-        except Exception as exc:  # pragma: nocoverage - best effort for non-IF-NOT-EXISTS backends
-            message = str(exc).lower()
-            if "already exists" in message or "ora-00955" in message:
-                return
-            raise
+        await ensure_table_schema(schema_editor, self.model, self.table_name)
 
     async def applied_migrations(self) -> list[MigrationKey]:
         query = (
