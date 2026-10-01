@@ -332,6 +332,7 @@ cdef class HttpParser:
         list    _raw_headers
         bint    _upgraded
         bint    _pending_upgrade
+        bint    _connect_tunnel
         list    _messages
         bint    _more_data_available
         bint    _paused
@@ -409,6 +410,7 @@ cdef class HttpParser:
         self._read_until_eof = read_until_eof
         self._upgraded = False
         self._pending_upgrade = False
+        self._connect_tunnel = False
         self._auto_decompress = auto_decompress
         self._content_encoding = None
         self._lax = False
@@ -493,10 +495,14 @@ cdef class HttpParser:
         headers = HeadersDictProxy(CIMultiDict(self._headers))
 
         if self._cparser.type == cparser.HTTP_REQUEST:
+            self._connect_tunnel = (
+                self._cparser.method == cparser.HTTP_CONNECT
+                and http_version == HttpVersion11
+            )
             if http_version == HttpVersion11 and hdrs.HOST not in headers:
                 raise BadHttpMessage("Missing 'Host' header in request.")
             h_upg = headers.get("upgrade", "")
-            if (upgrade and h_upg.isascii() and h_upg.lower() in ALLOWED_UPGRADES) or self._cparser.method == cparser.HTTP_CONNECT:
+            if upgrade and h_upg.isascii() and h_upg.lower() in ALLOWED_UPGRADES:
                 # https://www.rfc-editor.org/info/rfc9110/#section-7.8-15
                 # Defer the protocol switch until the complete request has been
                 # received.
@@ -534,7 +540,6 @@ cdef class HttpParser:
             self._response_with_body
             and (
                 ULLONG_MAX > self._cparser.content_length > 0 or chunked or
-                self._cparser.method == cparser.HTTP_CONNECT or
                 (self._cparser.status_code >= 199 and
                  self._cparser.content_length == 0 and
                  self._read_until_eof)
@@ -680,6 +685,11 @@ cdef class HttpParser:
                 # A supported upgrade whose request body has now been fully read.
                 self._upgraded = True
                 self._pending_upgrade = False
+            elif self._connect_tunnel:
+                # CONNECT has no body. The boundary is retained until the
+                # handler accepts or rejects it; only acceptance installs a
+                # raw byte parser.
+                self._upgraded = True
         elif errno is cparser.HPE_PAUSED:
             cparser.llhttp_resume(self._cparser)
             pos = cparser.llhttp_get_error_pos(self._cparser) - base
@@ -821,6 +831,7 @@ cdef int cb_on_message_begin(cparser.llhttp_t* parser) except? -1:
     pyparser._headers = []
     pyparser._seen_singletons = set()
     pyparser._raw_headers = []
+    pyparser._connect_tunnel = False
     PyByteArray_Resize(pyparser._buf, 0)
     pyparser._path = None
     pyparser._reason = None

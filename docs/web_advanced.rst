@@ -246,6 +246,41 @@ The following example shows custom routing based on the *HTTP Accept* header::
    chooser.reg_acceptor('application/json', handle_json)
    chooser.reg_acceptor('application/xml', handle_xml)
 
+.. _aiohttp-web-connect-tunnels:
+
+HTTP CONNECT tunnels
+--------------------
+
+:class:`TunnelResponse` takes over an HTTP/1.1 connection after authorization
+has succeeded. Its :meth:`~TunnelResponse.prepare` method returns a
+:class:`TunnelConnection`; bytes that arrived together with the CONNECT
+request are already available on that channel and are not parsed as HTTP::
+
+   async def connect(request):
+       if not authorized(request):
+           raise web.HTTPForbidden(text="denied")
+
+       host = request.url.host
+       port = request.url.port
+       # Application code is responsible for validating host and port before
+       # connecting to the destination.
+       remote_reader, remote_writer = await asyncio.open_connection(host, port)
+
+       tunnel_response = web.TunnelResponse()
+       tunnel = await tunnel_response.prepare(request)
+       to_remote = asyncio.create_task(copy(tunnel, remote_writer))
+       from_remote = asyncio.create_task(copy(remote_reader, tunnel))
+       await asyncio.gather(to_remote, from_remote)
+       return tunnel_response
+
+Reading and writing honor asyncio flow control. Each side can send EOF
+independently through :meth:`TunnelConnection.write_eof`; client disconnect,
+handler cancellation, and application shutdown terminate the tunnel and release
+the connection. If authorization fails, return or raise a normal HTTP error
+response instead of preparing :class:`TunnelResponse`; aiohttp does not select
+or connect to the destination on your behalf. A runnable local echo example is
+available in ``examples/web_connect_tunnel.py``.
+
 .. _aiohttp-web-static-file-handling:
 
 Static file handling

@@ -30,7 +30,7 @@ Key public APIs (non-exhaustive):
 
 | Surface | Entry points |
 | --- | --- |
-| Server | `aiohttp.web.Application`, `web.RouteTableDef`, `web.run_app`, `web.AppRunner`, `web.WebSocketResponse`, `web.FileResponse` |
+| Server | `aiohttp.web.Application`, `web.RouteTableDef`, `web.run_app`, `web.AppRunner`, `web.WebSocketResponse`, `web.TunnelResponse`/`web.TunnelConnection`, `web.FileResponse` |
 | Client | `aiohttp.ClientSession`, `aiohttp.TCPConnector`, `aiohttp.ClientResponse`, `aiohttp.WSMessage`, `aiohttp.BasicAuth` |
 | Shared | `aiohttp.MultipartReader`/`MultipartWriter`, `aiohttp.CookieJar`, `aiohttp.TraceConfig`, `aiohttp.resolver.AsyncResolver` |
 
@@ -252,6 +252,7 @@ into `StreamReader`) is then handed to `web_protocol.RequestHandler` and
 | 1.12 | Cython ⇄ pure-Python divergence | T / S | Behaviour differences between llhttp and the Python fallback may produce parser-confusion if a deployment unintentionally switches backends (e.g. a user installs without compiled extensions). | Med |
 | 1.13 | Vendored llhttp version drift | S / T | An upstream llhttp CVE not picked up by aiohttp's vendoring cadence remains exploitable until `make generate-llhttp` is re-run and released. | Medium |
 | 1.14 | Build/regen of llhttp (`make generate-llhttp`) | S / T | Local tampering or supply-chain compromise of the npm `llhttp` package gets baked into the vendored C. Covered in [§5.19](#519-build--release-supply-chain) but originates here. | Medium |
+| 1.15 | CONNECT tunnel boundary | T / E | If a CONNECT header boundary were consumed as an HTTP body or tail bytes were reparsed as pipelined HTTP after acceptance, an untrusted client could smuggle tunnel bytes or pin memory before authorization. | Medium |
 
 **Mitigations.**
 
@@ -271,6 +272,7 @@ into `StreamReader`) is then handed to `web_protocol.RequestHandler` and
 | 1.12 | Cython ⇄ pure-Python divergence | `tests/test_http_parser.py` parameterises tests over `REQUEST_PARSERS` / `RESPONSE_PARSERS` (pure-Python always; Cython when the extension imports). The high-leverage attack vectors are already covered under both backends: CL+TE (`test_content_length_transfer_encoding`), CL×N (`test_duplicate_singleton_header_rejected`), obs-fold (`test_reject_obsolete_line_folding`, `test_http_response_parser_obs_line_folding*`), CR/LF/NUL (`test_bad_headers`, `test_http_response_parser_null_byte_in_header_value`, `test_http_response_parser_bad_crlf`), version regex (`test_http_request_parser_bad_version*`, `test_http_response_parser_bad_version*`), bare-LF line endings (`test_reject_bare_lf_no_cross_request_leak`), control characters in the request target (`test_http_request_parser_ctl_in_request_target`). | None. When new attack vectors emerge, add them to the parameterised tests. |
 | 1.13 | llhttp version drift | Manual upgrade via `make generate-llhttp`; vendor pinned in `vendor/llhttp/package.json`. | Track upstream releases (e.g. via Dependabot rule for `vendor/llhttp/package.json`), bump on every llhttp release, regenerate in CI. |
 | 1.14 | npm-side compromise of `llhttp` | The vendored output is checked into git, so a compromise during a future regen would be detectable in PR review. See [§5.19](#519-build--release-supply-chain). | **Make the llhttp build reproducible: pin Node.js version, commit the npm lockfile, and on every bump verify the regenerated C against upstream's release tarballs before committing.** |
+| 1.15 | CONNECT tunnel boundary | Both request parsers treat CONNECT as having no HTTP body and retain the boundary without consuming later bytes. The raw until-EOF reader is installed only when `TunnelResponse.prepare` accepts a 2xx HTTP/1.1 CONNECT response; rejected requests replay buffered bytes as normal HTTP. Pending pre-acceptance tail is bounded by `read_bufsize` through the existing upgrade-tail pause. Destination selection, authorization, and outbound policy remain handler responsibilities. | Keep CONNECT behavior shared between Python and Cython parser tests; never install the tunnel parser before application authorization. |
 
 **Past advisories / hardening (recap).**
 

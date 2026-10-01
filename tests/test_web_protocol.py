@@ -1,9 +1,13 @@
 import asyncio
+from contextlib import suppress
 from unittest import mock
 
 import pytest
 
-from aiohttp.http import WebSocketReader
+from aiohttp import hdrs
+from aiohttp import web
+from aiohttp.http import StreamWriter, WebSocketReader
+from aiohttp.streams import StreamReader
 from aiohttp.web_protocol import RequestHandler
 from aiohttp.web_request import BaseRequest
 from aiohttp.web_server import Server
@@ -49,6 +53,155 @@ def test_data_received_calls_data_received_cb(
 
     cb.assert_called_once()
     dummy_reader[1].feed_data.assert_called_once_with(b"x")
+
+
+class _FakeTunnelTransport(asyncio.Transport):
+    def __init__(self) -> None:
+        self.written = bytearray()
+        self.closed = False
+        self.read_paused = False
+        self.eof_written = False
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+
+    def writelines(self, data: list[bytes]) -> None:
+        for chunk in data:
+            self.write(chunk)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def is_closing(self) -> bool:
+        return self.closed
+
+    def pause_reading(self) -> None:
+        self.read_paused = True
+        self.paused = True
+
+    def resume_reading(self) -> None:
+        self.read_paused = False
+        self.paused = False
+
+    def write_eof(self) -> None:
+        self.eof_written = True
+
+    def get_extra_info(self, name: str, default: object = None) -> object:
+        return default
+
+
+async def test_connect_tunnel_acceptance_preserves_merged_tail() -> None:
+    accepted = asyncio.Event()
+
+    async def handler(request: web.Request) -> web.TunnelResponse:
+        response = web.TunnelResponse()
+        tunnel = await response.prepare(request)
+        accepted.set()
+        first = await tunnel.readany()
+        await tunnel.write(first)
+        await tunnel.write_eof()
+        return response
+
+    manager = Server(handler)
+    proto = RequestHandler(
+        manager, loop=asyncio.get_running_loop(), access_log=None
+    )
+    transport = _FakeTunnelTransport()
+    proto.connection_made(transport)
+    proto.data_received(
+        b"CONNECT echo.local:4000 HTTP/1.1\r\nHost: echo.local\r\n\r\nabc"
+    )
+    await asyncio.wait_for(accepted.wait(), timeout=5)
+    proto.eof_received()
+    for _ in range(100):
+        if transport.closed:
+            break
+        await asyncio.sleep(0)
+    assert b"HTTP/1.1 200" in transport.written
+    assert transport.written.endswith(b"abc")
+    assert transport.eof_written
+
+
+async def test_connect_tunnel_rejection_replays_tail_as_http() -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        if request.method == hdrs.METH_CONNECT:
+            return web.Response(status=403, text="no")
+        return web.Response(text="ok")
+
+    manager = Server(handler)
+    proto = RequestHandler(
+        manager, loop=asyncio.get_running_loop(), access_log=None
+    )
+    transport = _FakeTunnelTransport()
+    proto.connection_made(transport)
+    try:
+        proto.data_received(
+            b"CONNECT echo.local:4000 HTTP/1.1\r\nHost: echo.local\r\n\r\n"
+            b"GET / HTTP/1.1\r\nHost: echo.local\r\n\r\n"
+        )
+        for _ in range(100):
+            if b"HTTP/1.1 200" in transport.written:
+                break
+            await asyncio.sleep(0)
+        assert b"HTTP/1.1 403" in transport.written
+        assert b"HTTP/1.1 200" in transport.written
+    finally:
+        with suppress(Exception):
+            proto.connection_lost(None)
+
+
+async def test_connect_tunnel_read_backpressure() -> None:
+    accepted = asyncio.Event()
+
+    async def handler(request: web.Request) -> web.TunnelResponse:
+        response = web.TunnelResponse()
+        tunnel = await response.prepare(request)
+        accepted.set()
+        await tunnel.read()
+        return response
+
+    manager = Server(handler)
+    proto = RequestHandler(
+        manager,
+        loop=asyncio.get_running_loop(),
+        access_log=None,
+        read_bufsize=64,
+    )
+    transport = _FakeTunnelTransport()
+    proto.connection_made(transport)
+    proto.data_received(
+        b"CONNECT echo.local:4000 HTTP/1.1\r\nHost: echo\r\n\r\n"
+    )
+    await accepted.wait()
+
+    proto.data_received(b"x" * 200)
+    assert transport.read_paused
+    data = await proto._payload_parser.payload.read(200)
+    assert data == b"x" * 200
+    assert not transport.read_paused
+
+
+async def test_connect_tunnel_write_backpressure() -> None:
+    manager = Server(mock.AsyncMock())
+    proto = RequestHandler(
+        manager, loop=asyncio.get_running_loop(), access_log=None
+    )
+    transport = _FakeTunnelTransport()
+    proto.connection_made(transport)
+    writer = StreamWriter(proto, asyncio.get_running_loop())
+    reader = StreamReader(proto, limit=64, loop=asyncio.get_running_loop())
+    tunnel = web.TunnelConnection(reader, writer)
+    proto.pause_writing()
+
+    write = asyncio.ensure_future(tunnel.write(b"x" * 70000))
+    await asyncio.sleep(0)
+    assert not write.done()
+    proto.resume_writing()
+    await asyncio.wait_for(write, timeout=5)
+    assert transport.written.endswith(b"x" * 70000)
+
+    await tunnel.write_eof()
+    assert transport.eof_written
 
 
 def test_pause_reading_for_buffer_without_transport(

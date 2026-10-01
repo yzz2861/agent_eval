@@ -116,6 +116,7 @@ from .web_runner import (
     UnixSite,
 )
 from .web_server import Server
+from .web_tunnel import TunnelConnection, TunnelResponse
 from .web_urldispatcher import (
     AbstractResource,
     AbstractRoute,
@@ -244,6 +245,9 @@ __all__ = (
     "NamedPipeSite",
     # web_server
     "Server",
+    # web_tunnel
+    "TunnelConnection",
+    "TunnelResponse",
     # web_urldispatcher
     "AbstractResource",
     "AbstractRoute",

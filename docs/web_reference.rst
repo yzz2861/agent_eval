@@ -961,6 +961,99 @@ and :ref:`aiohttp-web-signals` handlers::
       :attr:`~aiohttp.StreamResponse.body`, represented as :class:`str`.
 
 
+.. class:: TunnelResponse(*, status=200, reason=None, headers=None)
+   :canonical: aiohttp.web_tunnel.TunnelResponse
+
+   Successful HTTP/1.1 CONNECT response. Only use it for accepted
+   ``CONNECT`` requests; rejected authorization should return a normal HTTP
+   error response such as :class:`HTTPForbidden`.
+
+   .. method:: prepare(request)
+      :async:
+
+      Sends the successful CONNECT response and takes over the connection as
+      a raw byte stream. Returns :class:`TunnelConnection`. Bytes received
+      with the CONNECT headers are queued and delivered to the returned
+      channel instead of being parsed as another HTTP message.
+
+      Raise or return a normal error response instead if the request is not a
+      ``CONNECT`` request, is not HTTP/1.1, or the status is not 2xx.
+
+   .. attribute:: tunnel
+
+      The established :class:`TunnelConnection`, or ``None`` before
+      :meth:`prepare` completes.
+
+
+.. class:: TunnelConnection
+   :canonical: aiohttp.web_tunnel.TunnelConnection
+
+   Bidirectional byte channel for an established CONNECT tunnel. Reads and
+   writes apply transport flow control. The interface does not connect to or
+   validate the destination; the handler must do that before preparing
+   :class:`TunnelResponse`.
+
+   .. method:: read(n=-1)
+      :async:
+
+      Read up to *n* bytes. If *n* is omitted or negative, read the next
+      available bytes rather than buffering the entire stream, returning an
+      empty bytes object at EOF.
+
+   .. method:: readany()
+      :async:
+
+      Read the next available bytes without waiting for a fixed size.
+
+   .. method:: readexactly(n)
+      :async:
+
+      Read exactly *n* bytes.
+
+   .. method:: iter_chunked(n)
+
+      Return an asynchronous iterator that yields chunks of *n* bytes.
+
+   .. method:: iter_any()
+
+      Return an asynchronous iterator that yields bytes as received.
+
+   .. method:: write(data)
+      :async:
+
+      Write byte-ish data and wait when the write buffer needs to drain.
+
+   .. method:: drain()
+      :async:
+
+      Wait for buffered writes to be accepted by the transport.
+
+   .. method:: write_eof()
+      :async:
+
+      Half-close the write direction without closing the read direction.
+      Support depends on the transport; TLS transports may not support
+      half-closing.
+
+   .. method:: close()
+
+      Close the connection.
+
+   .. method:: wait_closed()
+      :async:
+
+      Wait until the client reaches EOF.
+
+   .. method:: get_extra_info(name, default=None)
+
+      Return transport-specific information, such as ``peername`` or
+      ``sslcontext``.
+
+   .. attribute:: closed
+
+      ``True`` when the underlying transport is closing or closed.
+
+
 .. class:: FileResponse(*, path, chunk_size=256*1024, status=200, reason=None, headers=None, text_charset=None)
    :canonical: aiohttp.web_fileresponse.FileResponse
 

@@ -1159,7 +1159,37 @@ def test_headers_connect(parser: HttpRequestParser) -> None:
     messages, upgrade, tail = parser.feed_data(text)
     msg, payload = messages[0]
     assert upgrade
-    assert isinstance(payload, streams.StreamReader)
+    assert payload is streams.EMPTY_PAYLOAD
+
+
+def test_connect_tail_is_buffered_until_accepted(parser: HttpRequestParser) -> None:
+    text = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\nabc"
+    messages, upgraded, tail = parser.feed_data(text)
+    _, payload = messages[0]
+    assert upgraded
+    assert payload is streams.EMPTY_PAYLOAD
+    assert tail == b"abc"
+
+
+def test_http_10_connect_is_not_tunnel(parser: HttpRequestParser) -> None:
+    text = b"CONNECT example.com:443 HTTP/1.0\r\n\r\n"
+    messages, upgraded, tail = parser.feed_data(text)
+    assert upgraded is False
+    assert tail == b""
+    assert messages[0][1] is streams.EMPTY_PAYLOAD
+
+
+def test_connect_tail_is_buffered_when_connection_closes(
+    parser: HttpRequestParser,
+) -> None:
+    text = (
+        b"CONNECT example.com:443 HTTP/1.1\r\n"
+        b"Host: example.com\r\nConnection: close\r\n\r\nabc"
+    )
+    messages, upgraded, tail = parser.feed_data(text)
+    assert upgraded
+    assert messages[0][1] is streams.EMPTY_PAYLOAD
+    assert tail == b"abc"
 
 
 def test_url_absolute(parser: HttpRequestParser) -> None:

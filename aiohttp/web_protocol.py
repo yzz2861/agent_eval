@@ -15,6 +15,7 @@ import yarl
 from multidict import CIMultiDict
 from propcache import under_cached_property
 
+from . import hdrs
 from .abc import AbstractAccessLogger, AbstractAsyncAccessLogger, AbstractStreamWriter
 from .base_protocol import BaseProtocol
 from .helpers import (
@@ -31,6 +32,7 @@ from .http import (
     StreamWriter,
     WebSocketReader,
 )
+from .http_parser import HeadersParser, HttpPayloadParser
 from .log import access_logger, server_logger
 from .streams import EMPTY_PAYLOAD, StreamReader
 from .tcp_helpers import tcp_keepalive
@@ -189,6 +191,7 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         "_task_handler",
         "_payload_parser",
         "_data_received_cb",
+        "_tunnel_active",
         "logger",
         "access_log",
         "access_logger",
@@ -264,6 +267,7 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         self._messages: deque[_MsgType] = deque()
         self._message_tail = b""
         self._data_received_cb: Callable[[], None] | None = None
+        self._tunnel_active = False
 
         self._waiter: asyncio.Future[None] | None = None
         self._handler_waiter: asyncio.Future[None] | None = None
@@ -446,7 +450,7 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
 
     def set_parser(
         self,
-        parser: WebSocketReader,
+        parser: WebSocketReader | HttpPayloadParser,
         data_received_cb: Callable[[], None] | None = None,
     ) -> None:
         assert self._payload_parser is None
@@ -467,8 +471,26 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         if self._buffer_paused:
             self._resume_reading_if_drained()
 
-    def eof_received(self) -> None:
-        pass
+    def eof_received(self) -> bool | None:
+        if self._tunnel_active and self._payload_parser is not None:
+            self._payload_parser.feed_eof()
+            self._tunnel_active = False
+            return self.ssl_context is None
+        return None
+
+    def start_tunnel(self) -> StreamReader:
+        assert self._upgraded
+        assert self._payload_parser is None
+
+        reader = StreamReader(self, limit=self._read_bufsize, loop=self._loop)
+        payload_parser = HttpPayloadParser(
+            reader,
+            method=hdrs.METH_CONNECT,
+            headers_parser=HeadersParser(self.max_field_size),
+        )
+        self.set_parser(payload_parser)
+        self._tunnel_active = True
+        return reader
 
     def data_received(self, data: bytes) -> None:
         if self._force_close or self._close:
@@ -520,9 +542,12 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         elif data:
             if self._data_received_cb is not None:
                 self._data_received_cb()
-            eof, tail = self._payload_parser.feed_data(data)
-            if eof:
-                self.close()
+            if self._tunnel_active:
+                self._payload_parser.feed_data(data)
+            else:
+                eof, tail = self._payload_parser.feed_data(data)
+                if eof:
+                    self.close()
 
     def _resume_reading_if_drained(self) -> None:
         # Tested empty-first so a read_bufsize of 0 cannot wedge the connection.
@@ -880,7 +905,8 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         """
         request._finish()
 
-        self._replay_message_tail()
+        if not getattr(resp, "_tunnel_accepted", False):
+            self._replay_message_tail()
         try:
             prepare_meth = resp.prepare
         except AttributeError:

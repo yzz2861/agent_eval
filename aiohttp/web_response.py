@@ -88,6 +88,8 @@ class StreamResponse(
     _must_be_empty_body: bool | None = None
     _body_length = 0
     _send_headers_immediately = True
+    _tunnel_response = False
+    _tunnel_accepted = False
 
     def __init__(
         self,

@@ -461,27 +461,12 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 # Defer any requested upgrade until the
                                 # complete request has been read.
                                 self._pending_upgrade = upgraded
-                        elif method == METH_CONNECT:
-                            assert isinstance(msg, RawRequestMessage)
-                            payload = StreamReader(
-                                self.protocol,
-                                timer=self.timer,
-                                loop=loop,
-                                limit=self._limit,
-                            )
+                        elif (
+                            method == METH_CONNECT
+                            and msg.version == HttpVersion11
+                        ):
+                            payload = EMPTY_PAYLOAD
                             self._upgraded = True
-                            self._payload_parser = HttpPayloadParser(
-                                payload,
-                                method=msg.method,
-                                compression=msg.compression,
-                                auto_decompress=self._auto_decompress,
-                                lax=self.lax,
-                                headers_parser=self._headers_parser,
-                                max_line_size=self.max_line_size,
-                                max_field_size=self.max_field_size,
-                                max_trailers=max_trailers,
-                                limit=self._limit,
-                            )
                         elif not empty_body and length is None and self.read_until_eof:
                             payload = StreamReader(
                                 self.protocol,
