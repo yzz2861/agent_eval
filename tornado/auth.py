@@ -71,24 +71,125 @@ Example usage for Google OAuth:
 
 import base64
 import binascii
+import dataclasses
+import datetime
 import hashlib
 import hmac
 import re
+import secrets
 import time
 import urllib.parse
 import uuid
 import warnings
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from tornado import escape, httpclient
+from tornado import locks
 from tornado.httputil import url_concat
 from tornado.util import unicode_type
-from tornado.web import RequestHandler
+from tornado.web import HTTPError, RequestHandler
 
 
 class AuthError(Exception):
     pass
+
+
+class OAuth2PKCEError(AuthError, HTTPError):
+    """An OAuth 2.0 PKCE login failure that has a safe HTTP response."""
+
+    def __init__(
+        self,
+        message: str,
+        *args: Any,
+        status_code: int = 400,
+        provider_error: str | None = None,
+    ) -> None:
+        AuthError.__init__(self, message)
+        HTTPError.__init__(self, status_code, message, *args)
+        self.provider_error = provider_error
+
+
+@dataclasses.dataclass(frozen=True)
+class OAuth2PKCEConfig:
+    """Configuration for an OAuth 2.0 authorization-code/PKCE login.
+
+    ``redirect_uri`` is stored on the server with the login state and is
+    reused for the token request. A ``redirect_uri`` value supplied to the
+    callback request is intentionally ignored.
+    """
+
+    client_id: str
+    redirect_uri: str
+    authorize_url: str | None = None
+    access_token_url: str | None = None
+    client_secret: str | None = None
+    scope: str | Iterable[str] | None = None
+    state_ttl: datetime.timedelta = datetime.timedelta(minutes=10)
+    extra_authorize_params: dict[str, str] = dataclasses.field(default_factory=dict)
+    extra_token_params: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.state_ttl <= datetime.timedelta(0):
+            raise ValueError("state_ttl must be positive")
+
+
+@dataclasses.dataclass(frozen=True)
+class OAuth2PKCEState:
+    """Server-side state for one authorization attempt."""
+
+    verifier: str
+    redirect_uri: str
+    expires_at: datetime.datetime
+    initiator_id: str
+    client_id: str
+    access_token_url: str
+    client_secret: str | None = None
+    extra_token_params: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def is_expired(self, now: datetime.datetime | None = None) -> bool:
+        if now is None:
+            now = datetime.datetime.now(datetime.UTC)
+        return self.expires_at <= now
+
+
+class OAuth2PKCEStateStore(Protocol):
+    """Storage interface for one-time PKCE login state."""
+
+    async def save(self, state: str, entry: OAuth2PKCEState) -> None: ...
+
+    async def consume(self, state: str) -> OAuth2PKCEState | None: ...
+
+
+class InMemoryOAuth2PKCEStateStore:
+    """A process-local, coroutine-safe one-time PKCE state store.
+
+    This implementation is suitable for local development and single-process
+    applications. Multi-process deployments should provide a shared store
+    whose ``consume`` operation is atomic.
+    """
+
+    def __init__(self) -> None:
+        self._states: dict[str, OAuth2PKCEState] = {}
+        self._lock = locks.Lock()
+
+    def _prune_expired(self) -> None:
+        now = datetime.datetime.now(datetime.UTC)
+        expired = [
+            state for state, entry in self._states.items() if entry.is_expired(now)
+        ]
+        for state in expired:
+            del self._states[state]
+
+    async def save(self, state: str, entry: OAuth2PKCEState) -> None:
+        async with self._lock:
+            self._prune_expired()
+            self._states[state] = entry
+
+    async def consume(self, state: str) -> OAuth2PKCEState | None:
+        async with self._lock:
+            self._prune_expired()
+            return self._states.pop(state, None)
 
 
 class OpenIdMixin:
@@ -567,11 +668,34 @@ class OAuth2Mixin:
     See `FacebookGraphMixin` or `GoogleOAuth2Mixin` below for example
     implementations.
 
+    For authorization-code login with PKCE, configure one
+    `OAuth2PKCEConfig` and call `oauth2_pkce_authorize_redirect` when a
+    login starts, then call `oauth2_pkce_complete_login` in the redirect
+    handler::
+
+        config = OAuth2PKCEConfig(
+            client_id="my-client",
+            redirect_uri="https://example.com/login/callback",
+            authorize_url="https://provider.example/authorize",
+            access_token_url="https://provider.example/token",
+        )
+
+        class LoginHandler(tornado.web.RequestHandler, OAuth2Mixin):
+            async def get(self):
+                if self.get_query_argument("state", ""):
+                    token = await self.oauth2_pkce_complete_login(config)
+                    # Persist the application session using token here.
+                else:
+                    await self.oauth2_pkce_authorize_redirect(config)
+
     Class attributes:
 
     * ``_OAUTH_AUTHORIZE_URL``: The service's authorization url.
     * ``_OAUTH_ACCESS_TOKEN_URL``:  The service's access token url.
     """
+
+    _OAUTH_PKCE_SETTINGS_KEY = "oauth2_pkce"
+    _OAUTH_PKCE_COOKIE_PREFIX = "_oauth2_pkce_state_"
 
     def authorize_redirect(
         self,
@@ -613,6 +737,221 @@ class OAuth2Mixin:
             args["scope"] = " ".join(scope)
         url = self._OAUTH_AUTHORIZE_URL  # type: ignore
         handler.redirect(url_concat(url, args))
+
+    def oauth2_pkce_get_config(
+        self, config: OAuth2PKCEConfig | None = None
+    ) -> OAuth2PKCEConfig:
+        """Return explicit config or the handler's OAuth2 PKCE setting."""
+        if config is not None:
+            return config
+        handler = cast(RequestHandler, self)
+        configured = handler.settings.get(self._OAUTH_PKCE_SETTINGS_KEY)
+        if not isinstance(configured, OAuth2PKCEConfig):
+            raise RuntimeError(
+                "An OAuth2PKCEConfig must be passed or configured as "
+                + repr(self._OAUTH_PKCE_SETTINGS_KEY)
+            )
+        return configured
+
+    def _oauth2_pkce_state_store(self) -> OAuth2PKCEStateStore:
+        handler = cast(RequestHandler, self)
+        store = handler.settings.get("oauth2_pkce_state_store")
+        if store is None:
+            store = getattr(handler.application, "_oauth2_pkce_state_store", None)
+        if store is None:
+            store = InMemoryOAuth2PKCEStateStore()
+            setattr(handler.application, "_oauth2_pkce_state_store", store)
+        return cast(OAuth2PKCEStateStore, store)
+
+    @staticmethod
+    def _oauth2_pkce_challenge(verifier: str) -> str:
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+    @staticmethod
+    def _oauth2_pkce_cookie_path(redirect_uri: str) -> str:
+        return urllib.parse.urlsplit(redirect_uri).path or "/"
+
+    def _oauth2_pkce_cookie_kwargs(self, redirect_uri: str) -> dict[str, Any]:
+        return {
+            "path": self._oauth2_pkce_cookie_path(redirect_uri),
+            "httponly": True,
+            "samesite": "Lax",
+            "secure": urllib.parse.urlsplit(redirect_uri).scheme == "https",
+        }
+
+    def _oauth2_pkce_cookie_name(self, state: str) -> str:
+        return self._OAUTH_PKCE_COOKIE_PREFIX + state
+
+    async def oauth2_pkce_authorize_redirect(
+        self, config: OAuth2PKCEConfig | None = None
+    ) -> None:
+        """Start an authorization-code login with S256 PKCE.
+
+        The code verifier and configured ``redirect_uri`` remain on the
+        server. A fresh, signed, HttpOnly cookie containing a random
+        initiator identifier is set for this state only, so parallel logins
+        in the same browser have separate cookies and state records.
+        """
+        config = self.oauth2_pkce_get_config(config)
+        authorize_url = config.authorize_url or cast(
+            str | None, getattr(self, "_OAUTH_AUTHORIZE_URL", None)
+        )
+        access_token_url = config.access_token_url or cast(
+            str | None, getattr(self, "_OAUTH_ACCESS_TOKEN_URL", None)
+        )
+        if authorize_url is None or access_token_url is None:
+            raise RuntimeError("OAuth2 PKCE requires authorize and access token URLs")
+
+        verifier = secrets.token_urlsafe(64)
+        state = secrets.token_urlsafe(32)
+        initiator_id = secrets.token_urlsafe(32)
+        now = datetime.datetime.now(datetime.UTC)
+        entry = OAuth2PKCEState(
+            verifier=verifier,
+            redirect_uri=config.redirect_uri,
+            expires_at=now + config.state_ttl,
+            initiator_id=initiator_id,
+            client_id=config.client_id,
+            access_token_url=access_token_url,
+            client_secret=config.client_secret,
+            extra_token_params=dict(config.extra_token_params),
+        )
+        await self._oauth2_pkce_state_store().save(state, entry)
+
+        handler = cast(RequestHandler, self)
+        handler.set_signed_cookie(
+            self._oauth2_pkce_cookie_name(state),
+            initiator_id,
+            expires_days=config.state_ttl.total_seconds() / 86400,
+            **self._oauth2_pkce_cookie_kwargs(config.redirect_uri),
+        )
+
+        extra_params: dict[str, Any] = dict(config.extra_authorize_params)
+        reserved_params = {
+            "response_type",
+            "client_id",
+            "redirect_uri",
+            "scope",
+            "state",
+            "code_challenge",
+            "code_challenge_method",
+        }
+        conflicting_params = reserved_params.intersection(extra_params)
+        if conflicting_params:
+            raise RuntimeError(
+                "Reserved OAuth2 parameters cannot be overridden: "
+                + ", ".join(sorted(conflicting_params))
+            )
+        extra_params.update(
+            {
+                "state": state,
+                "code_challenge": self._oauth2_pkce_challenge(verifier),
+                "code_challenge_method": "S256",
+            }
+        )
+        scope = config.scope
+        if isinstance(scope, str):
+            scope = [scope]
+        self.authorize_redirect(
+            redirect_uri=config.redirect_uri,
+            client_id=config.client_id,
+            scope=list(scope) if scope is not None else None,
+            extra_params=extra_params,
+        )
+
+    async def oauth2_pkce_complete_login(
+        self, config: OAuth2PKCEConfig | None = None
+    ) -> dict[str, Any]:
+        """Validate a callback and exchange its code for a token.
+
+        The callback state is checked against a signed browser cookie, the
+        server-side state record is consumed atomically, and the verifier and
+        redirect URI saved by this login are used for the token request.
+        Raise `OAuth2PKCEError` for invalid, expired, replayed, rejected, or
+        otherwise failed logins.
+        """
+        config = self.oauth2_pkce_get_config(config)
+        handler = cast(RequestHandler, self)
+        state = handler.get_query_argument("state", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", state):
+            raise OAuth2PKCEError("Invalid or expired OAuth login state.")
+
+        cookie_name = self._oauth2_pkce_cookie_name(state)
+        initiator_cookie = handler.get_signed_cookie(
+            cookie_name,
+            max_age_days=config.state_ttl.total_seconds() / 86400,
+        )
+        if initiator_cookie is None:
+            raise OAuth2PKCEError("Invalid or expired OAuth login state.")
+
+        entry = await self._oauth2_pkce_state_store().consume(state)
+        try:
+            if entry is None or entry.is_expired():
+                raise OAuth2PKCEError("Invalid or expired OAuth login state.")
+            if initiator_cookie != entry.initiator_id.encode("ascii"):
+                raise OAuth2PKCEError("OAuth login initiator does not match.")
+            if (
+                entry.client_id != config.client_id
+                or entry.redirect_uri != config.redirect_uri
+                or (
+                    config.access_token_url is not None
+                    and entry.access_token_url != config.access_token_url
+                )
+            ):
+                raise OAuth2PKCEError("OAuth login configuration does not match.")
+
+            provider_error = handler.get_query_argument("error", None)
+            if provider_error is not None:
+                status_code = 403 if provider_error == "access_denied" else 400
+                raise OAuth2PKCEError(
+                    "OAuth authorization was rejected by the provider.",
+                    status_code=status_code,
+                    provider_error=provider_error,
+                )
+
+            code = handler.get_query_argument("code", None)
+            if not code:
+                raise OAuth2PKCEError("OAuth authorization response is invalid.")
+
+            token_args: dict[str, str] = {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": entry.redirect_uri,
+                "client_id": entry.client_id,
+                "code_verifier": entry.verifier,
+            }
+            if entry.client_secret is not None:
+                token_args["client_secret"] = entry.client_secret
+            token_args.update(entry.extra_token_params)
+            try:
+                response = await self.get_auth_http_client().fetch(
+                    entry.access_token_url,
+                    method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    body=urllib.parse.urlencode(token_args),
+                )
+                token = escape.json_decode(response.body)
+            except (httpclient.HTTPClientError, ValueError) as error:
+                raise OAuth2PKCEError(
+                    "OAuth token exchange failed.", status_code=502
+                ) from error
+
+            if (
+                not isinstance(token, dict)
+                or not isinstance(token.get("access_token"), str)
+                or not token["access_token"]
+            ):
+                raise OAuth2PKCEError(
+                    "OAuth token response is invalid.", status_code=502
+                )
+            return cast(dict[str, Any], token)
+        finally:
+            if entry is not None:
+                handler.clear_cookie(
+                    cookie_name,
+                    **self._oauth2_pkce_cookie_kwargs(entry.redirect_uri),
+                )
 
     def _oauth_request_token_url(
         self,

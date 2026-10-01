@@ -30,6 +30,18 @@
    .. autoclass:: OAuth2Mixin
       :members:
 
+   .. autoclass:: OAuth2PKCEConfig
+      :members:
+
+   .. autoclass:: OAuth2PKCEState
+      :members:
+
+   .. autoclass:: InMemoryOAuth2PKCEStateStore
+      :members:
+
+   .. autoclass:: OAuth2PKCEError
+      :members:
+
    Google
    ------
 
