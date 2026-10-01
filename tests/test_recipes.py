@@ -1,3 +1,5 @@
+import importlib.util
+import sys
 import types
 import unittest.mock
 
@@ -78,6 +80,57 @@ class TestOutputCSV:
         result = falcon.testing.simulate_get(app, '/report')
         assert result.status_code == 200
         assert result.text.startswith(expected_head)
+
+
+class TestDataclassQuery:
+    def test_search_model(self, asgi, app_kind):
+        model_name = 'examples.recipes.dataclass_query_model'
+        examples = types.ModuleType('examples')
+        examples.__path__ = ['examples']
+        recipes = types.ModuleType('examples.recipes')
+        recipes.__path__ = ['examples/recipes']
+        sys.modules['examples'] = examples
+        sys.modules['examples.recipes'] = recipes
+        model_spec = importlib.util.spec_from_file_location(
+            model_name, 'examples/recipes/dataclass_query_model.py'
+        )
+        assert model_spec is not None
+        assert model_spec.loader is not None
+        model = importlib.util.module_from_spec(model_spec)
+        sys.modules[model_name] = model
+        model_spec.loader.exec_module(model)
+        recipe_name = f'examples.recipes.dataclass_query_{app_kind}'
+        recipe_path = f'examples/recipes/dataclass_query_{app_kind}.py'
+        recipe_spec = importlib.util.spec_from_file_location(recipe_name, recipe_path)
+        assert recipe_spec is not None
+        assert recipe_spec.loader is not None
+        recipe = importlib.util.module_from_spec(recipe_spec)
+        recipe_spec.loader.exec_module(recipe)
+
+        try:
+            result = falcon.testing.simulate_get(
+                recipe.app,
+                '/search',
+                query_string=(
+                    'q=falcon&page=2&active=true&tags=python&tags=web'
+                    '&created-on=2026-10-01&filter[price][min]=10'
+                    '&filter[price][max]=50'
+                ),
+            )
+        finally:
+            sys.modules.pop('examples', None)
+            sys.modules.pop('examples.recipes', None)
+            sys.modules.pop(model_name, None)
+
+        assert result.status == falcon.HTTP_200
+        assert result.json == {
+            'q': 'falcon',
+            'page': 2,
+            'active': True,
+            'tags': ['python', 'web'],
+            'created_on': '2026-10-01',
+            'filter': {'price': {'min': 10, 'max': 50}},
+        }
 
 
 class TestPrettyJSON:

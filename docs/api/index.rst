@@ -6,6 +6,7 @@ Framework Reference
 
    app
    request_and_response
+   query
    websocket
    cookies
    status

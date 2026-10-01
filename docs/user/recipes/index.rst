@@ -4,6 +4,7 @@ Recipes
 .. toctree::
    :maxdepth: 2
 
+   dataclass-query
    header-name-case
    msgspec-integration
    multipart-mixed

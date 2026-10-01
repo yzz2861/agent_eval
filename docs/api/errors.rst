@@ -108,6 +108,12 @@ Predefined Errors
 .. autoclass:: falcon.HTTPBadRequest
     :members:
 
+.. autoclass:: falcon.QueryErrorDetail
+    :members:
+
+.. autoclass:: falcon.QueryBindingError
+    :members:
+
 .. autoclass:: falcon.HTTPInvalidHeader
     :members:
 

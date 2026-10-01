@@ -33,6 +33,8 @@ __all__ = (
     'before',
     'BoundedStream',
     'CORSMiddleware',
+    'bind_query',
+    'bind_query_model',
     'HTTPError',
     'HTTPStatus',
     'HTTPFound',
@@ -89,6 +91,7 @@ __all__ = (
     'mediatypes',
     'misc',
     'parse_header',
+    'query_field',
     'reader',
     'runs_sync',
     'secure_filename',
@@ -149,6 +152,8 @@ __all__ = (
     'MultipartParseError',
     'OperationNotAllowed',
     'PayloadTypeError',
+    'QueryBindingError',
+    'QueryErrorDetail',
     'UnsupportedError',
     'UnsupportedScopeError',
     'WebSocketDisconnected',
@@ -403,6 +408,8 @@ from falcon.errors import MediaValidationError
 from falcon.errors import MultipartParseError
 from falcon.errors import OperationNotAllowed
 from falcon.errors import PayloadTypeError
+from falcon.errors import QueryBindingError
+from falcon.errors import QueryErrorDetail
 from falcon.errors import UnsupportedError
 from falcon.errors import UnsupportedScopeError
 from falcon.errors import WebSocketDisconnected
@@ -414,6 +421,9 @@ from falcon.hooks import before
 from falcon.http_error import HTTPError
 from falcon.http_status import HTTPStatus
 from falcon.middleware import CORSMiddleware
+from falcon.query import bind_query
+from falcon.query import bind_query_model
+from falcon.query import query_field
 from falcon.redirects import HTTPFound
 from falcon.redirects import HTTPMovedPermanently
 from falcon.redirects import HTTPPermanentRedirect

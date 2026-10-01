@@ -37,8 +37,10 @@ package namespace::
 from __future__ import annotations
 
 from collections.abc import Iterable
+from collections.abc import MutableMapping
+import dataclasses
 from datetime import datetime
-from typing import Any, TYPE_CHECKING, Union
+from typing import Any, cast, TYPE_CHECKING, Union
 
 from falcon.http_error import HTTPError
 import falcon.status_codes as status
@@ -47,6 +49,7 @@ from falcon.util.misc import dt_to_http
 
 if TYPE_CHECKING:
     from falcon._typing import HeaderArg
+    from falcon._typing import Link
     from falcon.typing import Headers
 
 
@@ -98,6 +101,8 @@ __all__ = (
     'MultipartParseError',
     'OperationNotAllowed',
     'PayloadTypeError',
+    'QueryBindingError',
+    'QueryErrorDetail',
     'UnsupportedError',
     'UnsupportedScopeError',
     'WebSocketDisconnected',
@@ -143,6 +148,17 @@ class DelimiterError(OSError):
 
 class PayloadTypeError(TypeError):
     """The WebSocket message payload was not of the expected type."""
+
+
+@dataclasses.dataclass(frozen=True)
+class QueryErrorDetail:
+    """Describe one invalid query parameter."""
+
+    path: str
+    """Parameter path, including nested brackets (e.g. ``filter[price][min]``)."""
+
+    description: str
+    """Human-readable explanation of why the parameter is invalid."""
 
 
 class WebSocketDisconnected(ConnectionError):
@@ -2683,6 +2699,57 @@ class MediaValidationError(HTTPBadRequest):
             headers=headers,
             **kwargs,
         )
+
+
+class QueryBindingError(HTTPBadRequest):
+    """One or more query parameters could not be bound to a model.
+
+    Args:
+        errors: Parameter-level errors to include in the response.
+
+    Keyword Args:
+        title: Human-friendly error title.
+        description: Human-friendly error description.
+        headers: Extra response headers to set.
+    """
+
+    __slots__ = ('errors',)
+
+    errors: tuple[QueryErrorDetail, ...]
+    """Details for each reported query parameter error."""
+
+    def __init__(
+        self,
+        errors: Iterable[QueryErrorDetail],
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        headers: HeaderArg | None = None,
+        **kwargs: HTTPErrorKeywordArguments,
+    ) -> None:
+        self.errors = tuple(errors)
+
+        if description is None:
+            description = 'One or more query parameters are invalid.'
+
+        super().__init__(
+            title=title,
+            description=description,
+            headers=headers,
+            **kwargs,
+        )
+
+    def to_dict(
+        self, obj_type: type[MutableMapping[str, str | int | None | Link]] = dict
+    ) -> MutableMapping[str, str | int | None | Link]:
+        """Return the error together with parameter-level details."""
+
+        obj = cast('MutableMapping[str, Any]', super().to_dict(obj_type))
+        obj['errors'] = [
+            {'path': error.path, 'description': error.description}
+            for error in self.errors
+        ]
+        return cast('MutableMapping[str, str | int | None | Link]', obj)
 
 
 class MultipartParseError(MediaMalformedError):
