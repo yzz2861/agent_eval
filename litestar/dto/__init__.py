@@ -1,3 +1,4 @@
+from ._unloaded import register_unloaded_fields_checker
 from .base_dto import AbstractDTO
 from .config import DTOConfig
 from .data_structures import DTOData, DTOFieldDefinition
@@ -17,4 +18,5 @@ __all__ = (
     "MsgspecDTO",
     "RenameStrategy",
     "dto_field",
+    "register_unloaded_fields_checker",
 )

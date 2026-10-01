@@ -10,7 +10,7 @@ import linecache
 import re
 import secrets
 import textwrap
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Collection, Generator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
@@ -31,6 +31,7 @@ from litestar.dto._types import (
     TransferType,
     UnionType,
 )
+from litestar.exceptions.dto_exceptions import UnloadedFieldException
 from litestar.utils.helpers import unique_name_for_scope
 
 if TYPE_CHECKING:
@@ -172,6 +173,8 @@ class DTOCodegenBackend(DTOBackend):
             is_data_field=self.is_data_field,
             field_definition=field_definition,
             attribute_accessor=self.attribute_accessor,
+            unloaded_fields_strategy=self.unloaded_fields_strategy,
+            unloaded_fields_getter=self.dto_factory.get_unloaded_fields if self.unloaded_fields_strategy else None,
         )
 
 
@@ -185,13 +188,29 @@ class TransferFunctionFactory:
         is_data_field: bool,
         nested_as_dict: bool,
         attribute_accessor: Callable[[object, str], Any],
+        unloaded_fields_strategy: str | None = None,
+        unloaded_fields_getter: Callable[[Any], Collection[str]] | None = None,
     ) -> None:
         self.attribute_accessor = attribute_accessor
         self.is_data_field = is_data_field
+        self.unloaded_fields_strategy = unloaded_fields_strategy
+        self.unloaded_fields_getter = unloaded_fields_getter
         self._fn_locals: dict[str, Any] = {
             "Mapping": Mapping,
             "UNSET": UNSET,
         }
+        if unloaded_fields_strategy:
+            self._unloaded_fields_getter_name: str | None = self._add_to_fn_globals(
+                "get_unloaded_fields", unloaded_fields_getter
+            )
+            self._unloaded_field_exception_name: str | None = None
+            if unloaded_fields_strategy == "raise":
+                self._unloaded_field_exception_name = self._add_to_fn_globals(
+                    "UnloadedFieldException", UnloadedFieldException
+                )
+        else:
+            self._unloaded_fields_getter_name = None
+            self._unloaded_field_exception_name = None
         if attribute_accessor is not getattr:
             self.attribute_accessor_name: str | None = self._add_to_fn_globals("__getattr_impl", attribute_accessor)
         else:
@@ -219,7 +238,12 @@ class TransferFunctionFactory:
         fn_name: str = "func",
     ) -> Callable[[Any], Any]:
         """Wrap the current body contents in a function definition and turn it into a callable object"""
-        source = f"def {fn_name}({source_value_name}):\n{self._body} return {return_value_name}"
+        if self._unloaded_field_exception_name is not None:
+            # when raising for unloaded fields, generated functions accept the dot-separated
+            # path of the source object, so that raised exceptions carry the full field path
+            source = f"def {fn_name}({source_value_name}, __path_prefix__=''):\n{self._body} return {return_value_name}"
+        else:
+            source = f"def {fn_name}({source_value_name}):\n{self._body} return {return_value_name}"
         ctx: dict[str, Any] = {**self._fn_locals}
 
         # add the function to linecache, to get better stacktraces when an error occurs
@@ -312,11 +336,15 @@ class TransferFunctionFactory:
         destination_type: type[Any],
         is_data_field: bool,
         attribute_accessor: Callable[[object, str], Any],
+        unloaded_fields_strategy: str | None = None,
+        unloaded_fields_getter: Callable[[Any], Collection[str]] | None = None,
     ) -> Callable[[Any], Any]:
         factory = cls(
             is_data_field=is_data_field,
             nested_as_dict=destination_type is dict,
             attribute_accessor=attribute_accessor,
+            unloaded_fields_strategy=unloaded_fields_strategy,
+            unloaded_fields_getter=unloaded_fields_getter,
         )
         tmp_return_type_name = factory._create_local_name("tmp_return_type")
         source_instance_name = factory._create_local_name("source_instance")
@@ -336,11 +364,15 @@ class TransferFunctionFactory:
         transfer_type: TransferType,
         is_data_field: bool,
         attribute_accessor: Callable[[object, str], Any],
+        unloaded_fields_strategy: str | None = None,
+        unloaded_fields_getter: Callable[[Any], Collection[str]] | None = None,
     ) -> Callable[[Any], Any]:
         factory = cls(
             is_data_field=is_data_field,
             nested_as_dict=False,
             attribute_accessor=attribute_accessor,
+            unloaded_fields_strategy=unloaded_fields_strategy,
+            unloaded_fields_getter=unloaded_fields_getter,
         )
         tmp_return_type_name = factory._create_local_name("tmp_return_type")
         source_value_name = factory._create_local_name("source_value")
@@ -361,12 +393,16 @@ class TransferFunctionFactory:
         is_data_field: bool,
         field_definition: FieldDefinition | None = None,
         attribute_accessor: Callable[[object, str], Any],
+        unloaded_fields_strategy: str | None = None,
+        unloaded_fields_getter: Callable[[Any], Collection[str]] | None = None,
     ) -> Callable[[Any], Any]:
         if field_definition and field_definition.is_non_string_collection:
             factory = cls(
                 is_data_field=is_data_field,
                 nested_as_dict=False,
                 attribute_accessor=attribute_accessor,
+                unloaded_fields_strategy=unloaded_fields_strategy,
+                unloaded_fields_getter=unloaded_fields_getter,
             )
             source_value_name = factory._create_local_name("source_value")
             return_value_name = factory._create_local_name("tmp_return_value")
@@ -384,6 +420,8 @@ class TransferFunctionFactory:
             field_definitions=field_definitions,
             is_data_field=is_data_field,
             attribute_accessor=attribute_accessor,
+            unloaded_fields_strategy=unloaded_fields_strategy,
+            unloaded_fields_getter=unloaded_fields_getter,
         )
 
     def _create_transfer_data_body_nested(
@@ -401,11 +439,22 @@ class TransferFunctionFactory:
             field_definition=field_definition.inner_types[0],
             field_definitions=field_definitions,
             attribute_accessor=self.attribute_accessor,
+            unloaded_fields_strategy=self.unloaded_fields_strategy,
+            unloaded_fields_getter=self.unloaded_fields_getter,
         )
         transfer_func_name = self._add_to_fn_globals("transfer_data", transfer_func)
         if field_definition.is_mapping:
+            if self._unloaded_field_exception_name is not None:
+                self._add_stmt(
+                    f"{assignment_target} = {origin_name}((key, {transfer_func_name}(item, __path_prefix__ + str(key) + '.')) for key, item in {source_data_name}.items())"
+                )
+            else:
+                self._add_stmt(
+                    f"{assignment_target} = {origin_name}((key, {transfer_func_name}(item)) for key, item in {source_data_name}.items())"
+                )
+        elif self._unloaded_field_exception_name is not None:
             self._add_stmt(
-                f"{assignment_target} = {origin_name}((key, {transfer_func_name}(item)) for key, item in {source_data_name}.items())"
+                f"{assignment_target} = {origin_name}({transfer_func_name}(item, __path_prefix__ + str(_i) + '.') for _i, item in enumerate({source_data_name}))"
             )
         else:
             self._add_stmt(
@@ -419,6 +468,7 @@ class TransferFunctionFactory:
         destination_type_name: str,
         field_definitions: tuple[TransferDTOFieldDefinition, ...],
         destination_type_is_dict: bool,
+        path_prefix_expr: str = "__path_prefix__",
     ) -> None:
         local_dict_name = self._create_local_name("unstructured_data")
         self._add_stmt(f"{local_dict_name} = {{}}")
@@ -444,16 +494,28 @@ class TransferFunctionFactory:
                 if source_type == "mapping":
                     block_expr = f"if isinstance({source_instance_name}, Mapping):"
                     access_item = self._access_mapping_item
+                    unloaded_fields_name = None
                 else:
                     block_expr = "else:"
                     access_item = self._access_attribute
+                    unloaded_fields_name = (
+                        self._create_local_name("unloaded_fields")
+                        if self._unloaded_fields_getter_name is not None
+                        else None
+                    )
 
                 with self._start_block(expr=block_expr):
+                    if unloaded_fields_name is not None and self._unloaded_fields_getter_name is not None:
+                        self._add_stmt(
+                            f"{unloaded_fields_name} = {self._unloaded_fields_getter_name}({source_instance_name})"
+                        )
                     self._create_transfer_instance_data_inner(
                         local_dict_name=local_dict_name,
                         field_definitions=field_definitions,
                         access_field_safe=access_item,
                         source_instance_name=source_instance_name,
+                        unloaded_fields_name=unloaded_fields_name,
+                        path_prefix_expr=path_prefix_expr,
                     )
 
         # if the destination type is a dict we can reuse our temporary dictionary of
@@ -470,13 +532,25 @@ class TransferFunctionFactory:
         field_definitions: tuple[TransferDTOFieldDefinition, ...],
         access_field_safe: FieldAccessManager,
         source_instance_name: str,
+        unloaded_fields_name: str | None = None,
+        path_prefix_expr: str = "__path_prefix__",
     ) -> None:
         for field_definition in field_definitions:
-            with access_field_safe(
-                source_name=source_instance_name,
-                field_name=field_definition.name,
-                expect_optional=field_definition.is_partial or field_definition.is_optional,
-            ) as source_value_expr:
+            if unloaded_fields_name is not None and self._unloaded_field_exception_name is not None:
+                self._add_stmt(
+                    f"if '{field_definition.name}' in {unloaded_fields_name}: "
+                    f"raise {self._unloaded_field_exception_name}({path_prefix_expr} + '{field_definition.name}')"
+                )
+            with (
+                self._start_block(f"if '{field_definition.name}' not in {unloaded_fields_name}:")
+                if unloaded_fields_name is not None and self.unloaded_fields_strategy == "omit"
+                else nullcontext(),
+                access_field_safe(
+                    source_name=source_instance_name,
+                    field_name=field_definition.name,
+                    expect_optional=field_definition.is_partial or field_definition.is_optional,
+                ) as source_value_expr,
+            ):
                 if self.is_data_field and field_definition.is_partial:
                     # we assign the source value to a name here, so we can skip
                     # getting it twice from the source instance
@@ -494,6 +568,7 @@ class TransferFunctionFactory:
                         nested_as_dict=self.nested_as_dict,
                         source_value_name=source_value_name,
                         assignment_target=f"{local_dict_name}['{field_definition.name}']",
+                        path_prefix_expr=f"({path_prefix_expr} + '{field_definition.name}.')",
                     )
 
     def _create_transfer_type_data_body(
@@ -502,6 +577,7 @@ class TransferFunctionFactory:
         nested_as_dict: bool,
         source_value_name: str,
         assignment_target: str,
+        path_prefix_expr: str = "__path_prefix__",
     ) -> None:
         if isinstance(transfer_type, SimpleType) and transfer_type.nested_field_info:
             if nested_as_dict:
@@ -517,6 +593,7 @@ class TransferFunctionFactory:
                 source_instance_name=source_value_name,
                 destination_type_name=self._add_to_fn_globals("destination_type", destination_type),
                 destination_type_is_dict=destination_type is dict,
+                path_prefix_expr=path_prefix_expr,
             )
             return
 
@@ -525,6 +602,7 @@ class TransferFunctionFactory:
                 transfer_type=transfer_type,
                 source_value_name=source_value_name,
                 assignment_target=assignment_target,
+                path_prefix_expr=path_prefix_expr,
             )
             return
 
@@ -535,11 +613,18 @@ class TransferFunctionFactory:
                     is_data_field=self.is_data_field,
                     transfer_type=transfer_type.inner_type,
                     attribute_accessor=self.attribute_accessor,
+                    unloaded_fields_strategy=self.unloaded_fields_strategy,
+                    unloaded_fields_getter=self.unloaded_fields_getter,
                 )
                 transfer_type_data_name = self._add_to_fn_globals("transfer_type_data", transfer_type_data_fn)
-                self._add_stmt(
-                    f"{assignment_target} = {origin_name}({transfer_type_data_name}(item) for item in {source_value_name})"
-                )
+                if self._unloaded_field_exception_name is not None:
+                    self._add_stmt(
+                        f"{assignment_target} = {origin_name}({transfer_type_data_name}(item, {path_prefix_expr} + str(_i) + '.') for _i, item in enumerate({source_value_name}))"
+                    )
+                else:
+                    self._add_stmt(
+                        f"{assignment_target} = {origin_name}({transfer_type_data_name}(item) for item in {source_value_name})"
+                    )
                 return
 
             self._add_stmt(f"{assignment_target} = {origin_name}({source_value_name})")
@@ -552,11 +637,18 @@ class TransferFunctionFactory:
                     is_data_field=self.is_data_field,
                     transfer_type=transfer_type.value_type,
                     attribute_accessor=self.attribute_accessor,
+                    unloaded_fields_strategy=self.unloaded_fields_strategy,
+                    unloaded_fields_getter=self.unloaded_fields_getter,
                 )
                 transfer_type_data_name = self._add_to_fn_globals("transfer_type_data", transfer_type_data_fn)
-                self._add_stmt(
-                    f"{assignment_target} = {origin_name}((key, {transfer_type_data_name}(item)) for key, item in {source_value_name}.items())"
-                )
+                if self._unloaded_field_exception_name is not None:
+                    self._add_stmt(
+                        f"{assignment_target} = {origin_name}((key, {transfer_type_data_name}(item, {path_prefix_expr} + str(key) + '.')) for key, item in {source_value_name}.items())"
+                    )
+                else:
+                    self._add_stmt(
+                        f"{assignment_target} = {origin_name}((key, {transfer_type_data_name}(item)) for key, item in {source_value_name}.items())"
+                    )
                 return
 
             self._add_stmt(f"{assignment_target} = {origin_name}({source_value_name})")
@@ -569,6 +661,7 @@ class TransferFunctionFactory:
         transfer_type: UnionType,
         source_value_name: str,
         assignment_target: str,
+        path_prefix_expr: str = "__path_prefix__",
     ) -> None:
         def _handle_transfer_instance(simple_type_: SimpleType, conditional_: str) -> None:
             if simple_type_.field_definition.is_none_type:
@@ -603,6 +696,7 @@ class TransferFunctionFactory:
                         field_definitions=field_definitions,
                         source_instance_name=source_value_name,
                         tmp_return_type_name=assignment_target,
+                        path_prefix_expr=path_prefix_expr,
                     )
                 else:
                     self._add_stmt(f"{assignment_target} = {source_value_name}")

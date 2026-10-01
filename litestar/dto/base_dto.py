@@ -13,6 +13,7 @@ from typing_extensions import TypedDict
 
 from litestar.dto._backend import DTOBackend
 from litestar.dto._codegen_backend import DTOCodegenBackend
+from litestar.dto._unloaded import detect_unloaded_fields
 from litestar.dto.config import DTOConfig
 from litestar.dto.data_structures import DTOData
 from litestar.dto.types import RenameStrategy
@@ -146,6 +147,29 @@ class AbstractDTO(Generic[T]):
         Returns:
             ``True`` if ``field_definition`` represents a nested model field.
         """
+
+    @classmethod
+    def get_unloaded_fields(cls, instance: Any) -> Collection[str]:
+        """Return the names of fields on ``instance`` that are not currently loaded.
+
+        This is called by the DTO backends during serialization when
+        :attr:`DTOConfig.unloaded_fields_strategy <litestar.dto.DTOConfig.unloaded_fields_strategy>`
+        is set, *before* the value of a field is read from the instance. Implementations
+        must not read the value of any potentially unloaded attribute on the instance,
+        as doing so may trigger I/O (e.g. a SQL query) as a side effect.
+
+        The default implementation delegates to the checkers registered via
+        :func:`register_unloaded_fields_checker <litestar.dto.register_unloaded_fields_checker>`,
+        which supports SQLAlchemy ORM instances out of the box. DTO adapters for other
+        object types may override this method to provide their own detection.
+
+        Args:
+            instance: The model instance being serialized.
+
+        Returns:
+            Names of the fields that are not currently loaded on the instance.
+        """
+        return detect_unloaded_fields(instance)
 
     @classmethod
     def is_supported_model_type_field(cls, field_definition: FieldDefinition) -> bool:

@@ -75,6 +75,43 @@ DTOs can similarly be defined on :class:`Routers <litestar.router.Router>` and
 :class:`The application <litestar.app.Litestar>` itself.
 
 
+Handling unloaded fields
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+When serializing ORM objects, reading an attribute that has not been loaded yet - a
+deferred column, an expired attribute or a lazy relationship - may trigger I/O, such
+as a SQL query, as an undesired side effect. Setting
+:attr:`DTOConfig.unloaded_fields_strategy <litestar.dto.DTOConfig.unloaded_fields_strategy>`
+instructs the DTO to check whether a field has been loaded on the source object
+*before* reading it, and to apply a strategy if it has not:
+
+- ``"omit"``: Unloaded fields are omitted from the serialized output.
+- ``"raise"``: An :class:`UnloadedFieldException <litestar.exceptions.UnloadedFieldException>`
+  is raised, carrying the dot-separated path of the unloaded field, e.g.
+  ``"books.0.summary"``.
+
+.. code-block:: python
+
+    from advanced_alchemy.extensions.litestar import SQLAlchemyDTO
+    from litestar.dto import DTOConfig
+
+
+    class AuthorDTO(SQLAlchemyDTO[Author]):
+        config = DTOConfig(unloaded_fields_strategy="omit")
+
+
+Fields that have been loaded with a value of ``None`` are not considered unloaded and
+are serialized as usual. The strategy only applies when serializing model instances,
+i.e. on the response path; parsing of incoming data is not affected.
+
+SQLAlchemy ORM instances are supported out of the box. Support for other object types
+can be added by registering a checker with
+:func:`register_unloaded_fields_checker <litestar.dto.register_unloaded_fields_checker>`,
+or by overriding
+:meth:`AbstractDTO.get_unloaded_fields <litestar.dto.AbstractDTO.get_unloaded_fields>`
+on the DTO adapter.
+
+
 Improving performance with the codegen backend
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

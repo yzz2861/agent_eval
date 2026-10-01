@@ -6,6 +6,21 @@
 .. changelog:: 3.0.0
     :date: 2364-01-27
 
+    .. change:: Add ``unloaded_fields_strategy`` to ``DTOConfig``
+        :type: feature
+
+        Serializing ORM objects with a DTO no longer needs to trigger I/O - such as a
+        SQL query - when a field has not been loaded on the source object. Setting
+        :attr:`DTOConfig.unloaded_fields_strategy <litestar.dto.DTOConfig.unloaded_fields_strategy>`
+        to ``"omit"`` omits unloaded fields from the serialized output, while ``"raise"``
+        raises an :class:`UnloadedFieldException <litestar.exceptions.UnloadedFieldException>`
+        carrying the dot-separated path of the field.
+
+        SQLAlchemy ORM instances are supported out of the box; other object types can be
+        supported by registering a checker with
+        :func:`register_unloaded_fields_checker <litestar.dto.register_unloaded_fields_checker>`
+        or by overriding ``AbstractDTO.get_unloaded_fields`` on the DTO adapter.
+
     .. change:: Add support for ``leeway`` parameter in JWT security backends
         :type: feature
         :pr: 5037

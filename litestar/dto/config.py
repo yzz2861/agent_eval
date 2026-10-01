@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from litestar.exceptions import ImproperlyConfiguredException
 
@@ -58,9 +58,38 @@ class DTOConfig:
     """Use the experimental codegen backend"""
     forbid_unknown_fields: bool = False
     """Raise an exception for fields present in the raw data that are not defined on the model"""
+    unloaded_fields_strategy: Literal["omit", "raise"] | None = None
+    """Strategy to apply when a field of the source object has not been loaded.
+
+    When set, the DTO asks its adapter (see
+    :meth:`AbstractDTO.get_unloaded_fields <litestar.dto.AbstractDTO.get_unloaded_fields>`)
+    whether a field has been loaded on the source object *before* reading it, ensuring
+    that serialization never triggers I/O - such as a SQL query - as a side effect.
+
+    The following strategies are supported:
+
+    - ``"omit"``: Unloaded fields are omitted from the serialized output.
+    - ``"raise"``: An :class:`UnloadedFieldException <litestar.exceptions.UnloadedFieldException>`
+      is raised, carrying the dot-separated path of the unloaded field.
+
+    Fields that have been loaded with a value of ``None`` are not considered unloaded.
+
+    Notes:
+        - The strategy only applies when serializing model instances (i.e. on the
+          response path), not when parsing incoming data.
+        - SQLAlchemy ORM instances are supported out of the box. Other object types
+          can be supported by registering a checker with
+          :func:`register_unloaded_fields_checker <litestar.dto.register_unloaded_fields_checker>`
+          or by overriding ``AbstractDTO.get_unloaded_fields`` on the DTO adapter.
+    """
 
     def __post_init__(self) -> None:
         if self.include and self.exclude:
             raise ImproperlyConfiguredException(
                 "'include' and 'exclude' are mutually exclusive options, please use one of them"
+            )
+        if self.unloaded_fields_strategy not in (None, "omit", "raise"):
+            raise ImproperlyConfiguredException(
+                "'unloaded_fields_strategy' must be one of 'omit', 'raise' or None, "
+                f"got '{self.unloaded_fields_strategy}'"
             )
