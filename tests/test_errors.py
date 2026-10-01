@@ -6,11 +6,13 @@ import pytest
 
 from cattrs._compat import ExceptionGroup
 from cattrs.errors import (
+    AmbiguousUnionError,
     BaseValidationError,
     ClassValidationError,
     ForbiddenExtraKeysError,
     IterableValidationError,
     StructureHandlerNotFoundError,
+    UnionValidationError,
 )
 
 
@@ -33,6 +35,16 @@ from cattrs.errors import (
             ClassValidationError,
             ("ClassValidation Message", [ValueError("Test ClassValidation")], int),
         ),
+        (
+            UnionValidationError,
+            (
+                "UnionValidation Message",
+                [ValueError("Test UnionValidation")],
+                int,
+                [str],
+            ),
+        ),
+        (AmbiguousUnionError, ("AmbiguousUnion Message", int, (str,))),
     ],
 )
 def test_errors_pickling(

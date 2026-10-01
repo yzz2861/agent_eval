@@ -76,6 +76,35 @@ class IterableValidationError(BaseValidationError):
         return excs_with_notes, other_excs
 
 
+class UnionValidationError(BaseValidationError):
+    """Raised when no union member can structure the input."""
+
+    types: tuple[Any, ...]
+
+    def __new__(
+        cls, message: str, excs: Sequence[Exception], cl: type, types: Sequence[Any]
+    ) -> Self:
+        obj = super().__new__(cls, message, excs, cl)
+        obj.types = tuple(types)
+        return obj
+
+    def derive(self, excs: Sequence[Exception]) -> Self:
+        return self.__class__(self.message, excs, self.cl, self.types)
+
+
+class AmbiguousUnionError(CattrsError):
+    """Raised when more than one union member can structure the input."""
+
+    def __init__(self, message: str, cl: type, types: Sequence[Any]) -> None:
+        super().__init__(message, cl, tuple(types))
+        self.message = message
+        self.cl = cl
+        self.types = tuple(types)
+
+    def __str__(self) -> str:
+        return self.message
+
+
 class AttributeValidationNote(str):
     """Attached as a note to an exception when an attribute fails structuring."""
 

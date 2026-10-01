@@ -681,14 +681,17 @@ class BaseConverter:
         )
 
     def _gen_attrs_union_structure(
-        self, cl: Any, use_literals: bool = True
+        self, cl: Any, use_literals: bool = True, use_unique_fields: bool = True
     ) -> Callable[[Any, type[T]], type[T] | None]:
         """
         Generate a structuring function for a union of attrs classes (and maybe None).
 
         :param use_literals: Whether to consider literal fields.
+        :param use_unique_fields: Whether to fall back to unique required fields.
         """
-        dis_fn = self._get_dis_func(cl, use_literals=use_literals)
+        dis_fn = self._get_dis_func(
+            cl, use_literals=use_literals, use_unique_fields=use_unique_fields
+        )
         has_none = NoneType in cl.__args__
 
         if has_none:
@@ -988,6 +991,7 @@ class BaseConverter:
         self,
         union: Any,
         use_literals: bool = True,
+        use_unique_fields: bool = True,
         overrides: dict[str, AttributeOverride] | None = None,
     ) -> Callable[[Any], type]:
         """Fetch or try creating a disambiguation function for a union."""
@@ -1008,6 +1012,7 @@ class BaseConverter:
             self,
             *union_types,
             use_literals=use_literals,
+            use_unique_fields=use_unique_fields,
             overrides=overrides if overrides is not None else "from_converter",
         )
 

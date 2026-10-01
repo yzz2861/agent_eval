@@ -39,6 +39,7 @@ def create_default_dis_func(
     converter: BaseConverter,
     *classes: type[AttrsInstance],
     use_literals: bool = True,
+    use_unique_fields: bool = True,
     overrides: (
         dict[str, AttributeOverride] | Literal["from_converter"]
     ) = "from_converter",
@@ -49,6 +50,7 @@ def create_default_dis_func(
 
     :param use_literals: Whether to try using fields annotated as literals for
         disambiguation.
+    :param use_unique_fields: Whether to fall back to unique required fields.
     :param overrides: Attribute overrides to apply.
 
     .. versionchanged:: 24.1.0
@@ -117,6 +119,9 @@ def create_default_dis_func(
                 return final_mapping[data[best_discriminator]]
 
             return dis_func
+
+    if not use_unique_fields:
+        raise TypeError("Could not disambiguate using a literal field.")
 
     # next, attempt for unique keys
 

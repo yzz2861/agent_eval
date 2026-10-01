@@ -11,6 +11,10 @@ The third number is for emergencies when we need to start branches for older rel
 
 Our backwards-compatibility policy can be found [here](https://github.com/python-attrs/cattrs/blob/main/.github/SECURITY.md).
 
+## Unreleased
+
+- Add {func}`configure_strict_union <cattrs.strategies.configure_strict_union>`, an opt-in union strategy that returns a candidate only when exactly one hook succeeds, reports ambiguous successful candidates, and preserves per-branch errors with candidate types and paths. Literal-based disambiguation remains preferred, and nested unions, generics, and `None` members are supported.
+
 ## 26.2.1 (2026-09-26)
 
 - Fix heterogeneous tuples and `NamedTuple`s with a member type containing a quote in its `repr`, like `tuple[Literal["a"], int]`, crashing structuring code generation with `SyntaxError`; the index note is now embedded with `repr`.

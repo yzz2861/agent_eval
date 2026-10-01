@@ -130,6 +130,28 @@ Refund for 1!
 
 ```
 
+## Strict Union Strategy
+
+_Found at {py:func}`cattrs.strategies.configure_strict_union`._
+
+The strict union strategy is useful when several _attrs_ or dataclass members have very similar shapes, so choosing the first hook that succeeds could silently produce the wrong type.
+
+When a shared `Literal` discriminator field is available, that explicit discriminator is used exactly like the default union strategy.
+Otherwise, the strategy structures the payload with every candidate hook.
+
+- If exactly one candidate succeeds, that result is returned.
+- If multiple candidates succeed, an `AmbiguousUnionError` is raised.
+- If no candidate succeeds, a `UnionValidationError` retains each branch's validation error.
+
+Candidate types and attribute paths are attached to the errors, and `transform_error` includes them in the resulting messages.
+Nested unions, generic classes, and `None` members are supported.
+
+```python
+>>> configure_strict_union(A | B, converter)
+```
+
+This strategy is opt-in; the default union conversion strategy remains unchanged.
+
 ## Include Subclasses Strategy
 
 _Found at {py:func}`cattrs.strategies.include_subclasses`._
