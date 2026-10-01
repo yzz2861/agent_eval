@@ -10,6 +10,12 @@ from .worker_context import AsyncioSingleTask, WorkerContext
 from ..config import Config
 from ..events import Closed, Event, RawData, Updated
 from ..protocol import ProtocolWrapper
+from ..proxy_protocol import (
+    ProxyProtocolError,
+    ProxyProtocolNegotiator,
+    ProxyProtocolData,
+    proxy_protocol_scope_extension,
+)
 from ..typing import AppWrapper, ConnectionState, LifespanState
 from ..utils import parse_socket_addr
 
@@ -54,6 +60,15 @@ class TCPServer:
                 ssl = False
                 alpn_protocol = "http/1.1"
 
+            scope_extensions: dict[str, dict] = {}
+            initial_data = b""
+            if not ssl:
+                proxy_data, initial_data = await self._read_proxy_protocol_preamble(client)
+                if proxy_data is not None:
+                    scope_extensions = proxy_protocol_scope_extension(proxy_data)
+                    if proxy_data.command == "proxy":
+                        client = proxy_data.client
+
             async with TaskGroup(self.loop) as task_group:
                 self._task_group = task_group
                 self.protocol = ProtocolWrapper(
@@ -67,11 +82,12 @@ class TCPServer:
                     server,
                     self.protocol_send,
                     alpn_protocol,
+                    scope_extensions,
                 )
                 await self.protocol.initiate()
                 await self.idle_task.restart(task_group, self._idle_timeout)
-                await self._read_data()
-        except OSError:
+                await self._read_data(initial_data)
+        except (OSError, ProxyProtocolError, asyncio.TimeoutError, TimeoutError):
             pass
         finally:
             await self._close()
@@ -92,10 +108,40 @@ class TCPServer:
             else:
                 await self.idle_task.stop()
 
-    async def _read_data(self) -> None:
+    async def _read_proxy_protocol_preamble(
+        self, client: tuple[str, int] | None
+    ) -> tuple[ProxyProtocolData | None, bytes]:
+        if not self.config.proxy_protocol_trusted_sources:
+            return None, b""
+
+        negotiator = ProxyProtocolNegotiator(
+            self.config.is_trusted_proxy_protocol_source(client)
+        )
+        deadline = self.loop.time() + self.config.proxy_protocol_timeout
+        while True:
+            data = await self._read_proxy_protocol_bytes(deadline)
+            if data == b"":
+                raise ProxyProtocolError("Connection closed before the PROXY protocol preamble")
+
+            proxy_data, remainder = negotiator.feed(data)
+            if proxy_data is not None:
+                return proxy_data, remainder
+            if remainder is not None:
+                return None, remainder
+
+    async def _read_proxy_protocol_bytes(self, deadline: float) -> bytes:
+        return await asyncio.wait_for(
+            self.reader.read(MAX_RECV), max(0.0, deadline - self.loop.time())
+        )
+
+    async def _read_data(self, initial_data: bytes = b"") -> None:
+        data = initial_data
         while not self.reader.at_eof():
             try:
-                data = await asyncio.wait_for(self.reader.read(MAX_RECV), self.config.read_timeout)
+                if data == b"":
+                    data = await asyncio.wait_for(
+                        self.reader.read(MAX_RECV), self.config.read_timeout
+                    )
             except (
                 ConnectionError,
                 OSError,
@@ -106,6 +152,7 @@ class TCPServer:
                 break
             else:
                 await self.protocol.handle(RawData(data))
+                data = b""
 
         await self.protocol.handle(Closed())
 

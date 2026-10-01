@@ -22,6 +22,7 @@ class ProtocolWrapper:
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
         alpn_protocol: str | None = None,
+        scope_extensions: dict[str, dict] | None = None,
     ) -> None:
         self.app = app
         self.config = config
@@ -32,6 +33,7 @@ class ProtocolWrapper:
         self.server = server
         self.send = send
         self.state = state
+        self.scope_extensions = scope_extensions or {}
         self.protocol: H11Protocol | H2Protocol
         if alpn_protocol == "h2":
             self.protocol = H2Protocol(
@@ -44,6 +46,7 @@ class ProtocolWrapper:
                 self.client,
                 self.server,
                 self.send,
+                self.scope_extensions,
             )
         else:
             self.protocol = H11Protocol(
@@ -56,6 +59,7 @@ class ProtocolWrapper:
                 self.client,
                 self.server,
                 self.send,
+                self.scope_extensions,
             )
 
     async def initiate(self) -> None:
@@ -75,6 +79,7 @@ class ProtocolWrapper:
                 self.client,
                 self.server,
                 self.send,
+                self.scope_extensions,
             )
             await self.protocol.initiate()
             if error.data != b"":
@@ -90,6 +95,7 @@ class ProtocolWrapper:
                 self.client,
                 self.server,
                 self.send,
+                self.scope_extensions,
             )
             await self.protocol.initiate(error.headers, error.settings)
             if error.data != b"":

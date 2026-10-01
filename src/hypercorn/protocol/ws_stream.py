@@ -174,6 +174,7 @@ class WSStream:
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
         stream_id: int,
+        scope_extensions: dict[str, dict] | None = None,
     ) -> None:
         self.app = app
         self.app_put: Callable | None = None
@@ -192,6 +193,7 @@ class WSStream:
         self.start_time: float
         self.state = ASGIWebsocketState.HANDSHAKE
         self.stream_id = stream_id
+        self.scope_extensions = scope_extensions or {}
 
         self.connection: Connection
         self.handshake: Handshake
@@ -221,7 +223,10 @@ class WSStream:
                 "server": self.server,
                 "state": event.state.copy(),  # type: ignore[typeddict-item]
                 "subprotocols": self.handshake.subprotocols or [],
-                "extensions": {"websocket.http.response": {}},
+                "extensions": {
+                    **self.scope_extensions,
+                    "websocket.http.response": {},
+                },
             }
 
             if not valid_server_name(self.config, event):

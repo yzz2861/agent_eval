@@ -83,3 +83,24 @@ def test_verify_mode_conversion(monkeypatch: MonkeyPatch) -> None:
 
     hypercorn.__main__.main(["--verify-mode", "CERT_REQUIRED", "asgi:App"])
     run_multiple.assert_called()
+
+
+def test_proxy_protocol_trusted_sources(monkeypatch: MonkeyPatch) -> None:
+    run_multiple = Mock()
+    monkeypatch.setattr(hypercorn.__main__, "run", run_multiple)
+
+    hypercorn.__main__.main(
+        [
+            "--proxy-protocol-trusted-source",
+            "10.0.0.1",
+            "--proxy-protocol-trusted-source",
+            "10.0.1.0/24",
+            "asgi:App",
+        ]
+    )
+
+    config = run_multiple.call_args_list[0][0][0]
+    assert [str(value) for value in config.proxy_protocol_trusted_sources] == [
+        "10.0.0.1/32",
+        "10.0.1.0/24",
+    ]

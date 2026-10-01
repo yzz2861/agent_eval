@@ -90,6 +90,7 @@ class H2Protocol:
         client: tuple[str, int] | None,
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
+        scope_extensions: dict[str, dict] | None = None,
     ) -> None:
         self.app = app
         self.client = client
@@ -116,6 +117,7 @@ class H2Protocol:
         self.send = send
         self.server = server
         self.ssl = ssl
+        self.scope_extensions = scope_extensions or {}
         self.streams: dict[int, HTTPStream | WSStream] = {}
         # The below are used by the sending task
         self.has_data = self.context.event_class()
@@ -334,6 +336,7 @@ class H2Protocol:
                 self.server,
                 self.stream_send,
                 request.stream_id,
+                self.scope_extensions,
             )
         else:
             self.streams[request.stream_id] = HTTPStream(
@@ -346,6 +349,7 @@ class H2Protocol:
                 self.server,
                 self.stream_send,
                 request.stream_id,
+                self.scope_extensions,
             )
         self.stream_buffers[request.stream_id] = StreamBuffer(self.context.event_class)
         try:

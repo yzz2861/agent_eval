@@ -58,6 +58,7 @@ class HTTPStream:
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
         stream_id: int,
+        scope_extensions: dict[str, dict] | None = None,
     ) -> None:
         self.app = app
         self.client = client
@@ -73,6 +74,7 @@ class HTTPStream:
         self.state = ASGIHTTPState.REQUEST
         self.stream_id = stream_id
         self.task_group = task_group
+        self.scope_extensions = scope_extensions or {}
 
     @property
     def idle(self) -> bool:
@@ -98,7 +100,7 @@ class HTTPStream:
                 "client": self.client,
                 "server": self.server,
                 "state": event.state.copy(),  # type: ignore[typeddict-item]
-                "extensions": {},
+                "extensions": {**self.scope_extensions},
             }
 
             if event.http_version in TRAILERS_VERSIONS:

@@ -11,6 +11,7 @@ import types
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from ssl import (
     create_default_context,
     OP_NO_COMPRESSION,
@@ -37,6 +38,7 @@ SECONDS = 1.0
 
 FilePath = bytes | os.PathLike | str
 SocketKind = int | socket.SocketKind
+IPNetwork = IPv4Network | IPv6Network
 
 
 @dataclass
@@ -60,6 +62,7 @@ class Config:
     _quic_bind: list[str] = []
     _quic_addresses: list[tuple] = []
     _log: Logger | None = None
+    _proxy_protocol_trusted_sources: list[IPNetwork] = []
     _root_path: str = ""
 
     access_log_format = '%(h)s %(l)s %(l)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
@@ -98,6 +101,7 @@ class Config:
     max_requests_jitter: int = 0
     pid_path: str | None = None
     server_names: list[str] = []
+    proxy_protocol_timeout = 5 * SECONDS
     shutdown_timeout = 60 * SECONDS
     ssl_handshake_timeout = 60 * SECONDS
     startup_timeout = 60 * SECONDS
@@ -166,6 +170,28 @@ class Config:
     @root_path.setter
     def root_path(self, value: str) -> None:
         self._root_path = value.rstrip("/")
+
+    @property
+    def proxy_protocol_trusted_sources(self) -> list[IPNetwork]:
+        return self._proxy_protocol_trusted_sources
+
+    @proxy_protocol_trusted_sources.setter
+    def proxy_protocol_trusted_sources(self, value: list[str] | str) -> None:
+        values = [value] if isinstance(value, str) else value
+        self._proxy_protocol_trusted_sources = [
+            ip_network(item, strict=False) for item in values
+        ]
+
+    def is_trusted_proxy_protocol_source(self, client: tuple[str, int] | None) -> bool:
+        if client is None:
+            return False
+
+        try:
+            address = ip_address(client[0])
+        except ValueError:
+            return False
+
+        return any(address in network for network in self.proxy_protocol_trusted_sources)
 
     def create_ssl_context(self) -> SSLContext | None:
         if not self.ssl_enabled:

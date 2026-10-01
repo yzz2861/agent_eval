@@ -162,6 +162,13 @@ def main(sys_args: list[str] | None = None) -> int:
         action="append",
     )
     parser.add_argument(
+        "--proxy-protocol-trusted-source",
+        dest="proxy_protocol_trusted_sources",
+        help="Accept PROXY protocol v2 on insecure connections from this host or CIDR network.",
+        default=[],
+        action="append",
+    )
+    parser.add_argument(
         "--reload",
         help="Enable automatic reloads on code changes",
         action="store_true",
@@ -306,6 +313,8 @@ def main(sys_args: list[str] | None = None) -> int:
         config.insecure_bind = args.insecure_binds
     if len(args.quic_binds) > 0:
         config.quic_bind = args.quic_binds
+    if len(args.proxy_protocol_trusted_sources) > 0:
+        config.proxy_protocol_trusted_sources = args.proxy_protocol_trusted_sources
     if len(args.server_names) > 0:
         config.server_names = args.server_names
 
