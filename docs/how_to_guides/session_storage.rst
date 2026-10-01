@@ -6,9 +6,44 @@ Session Storage
 It is often useful to store information relevant to a user of the app
 for the duration of that usage session. For example the user may
 choose to want to save a option or be remembered as logged in. This
-information can either be stored client side or server side and Quart
-provides a system to store the information client side via Secure
-Cookie Sessions.
+information can either be stored client side or server side. Quart
+provides client-side Secure Cookie Sessions by default, plus an
+optional server-side interface with SQLite as a reference storage.
+
+Server-side Sessions
+--------------------
+
+Server-side sessions put only an opaque random identifier in the cookie
+and retain the mapping in a :class:`~quart.sessions.SessionStore`. Use
+:class:`~quart.sessions.ServerSideSessionInterface` to enable the
+SQLite reference store,
+
+.. code-block:: python
+
+    from quart import Quart
+    from quart import ServerSideSessionInterface
+    from quart import SQLiteSessionStore
+
+    app = Quart(__name__)
+    app.session_interface = ServerSideSessionInterface(
+        SQLiteSessionStore("sessions.db")
+    )
+
+Each request saves the version and field versions read at its start.
+At the end of the request, changed top-level keys are committed
+optimistically. Changes to distinct top-level keys are merged in one
+transaction. If another request changed or deleted one of the same
+top-level keys, the losing request returns ``409 Conflict`` and its
+response does not update the cookie. Deleting a key counts as changing
+that key, while nested values are compared as part of their whole
+top-level key.
+
+``session.clear()`` deletes an empty session. A late request that read
+the session before logout receives a conflict and cannot recreate it.
+Calling ``session.rotate()`` changes the opaque identifier under the
+same optimistic concurrency rule. Reads without modifications do not
+write or extend the stored session. Expired records are treated as
+missing and cannot be revived by a stale request.
 
 Secure Cookie Sessions
 ----------------------

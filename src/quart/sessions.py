@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+import copy
 import hashlib
+import json
+import os
+import sqlite3
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
+from datetime import timedelta
 from datetime import UTC
+import secrets
 from typing import TYPE_CHECKING
+from typing import Any
+from typing import Protocol
 
 from flask.sessions import NullSession as NullSession  # noqa: F401
 from flask.sessions import SecureCookieSession as SecureCookieSession  # noqa: F401
@@ -20,6 +31,80 @@ from .wrappers import Response
 
 if TYPE_CHECKING:
     from .app import Quart  # noqa
+
+
+class SessionConflict(Exception):
+    """Raised when a session field was changed by a concurrent request."""
+
+    def __init__(self, fields: set[str]) -> None:
+        super().__init__(f"Concurrent session modifications to {sorted(fields)}")
+        self.fields = fields
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRecord:
+    sid: str
+    version: int
+    data: dict[str, Any]
+    field_versions: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionCommitResult:
+    sid: str
+    version: int
+    deleted: bool = False
+
+
+class SessionStore(Protocol):
+    async def load(self, sid: str) -> SessionRecord | None: ...
+
+    async def commit(
+        self,
+        sid: str | None,
+        base_version: int | None,
+        base_field_versions: Mapping[str, int],
+        changes: Mapping[str, Any],
+        deletions: set[str],
+        *,
+        expires: datetime | None,
+        rotate: bool,
+        delete: bool,
+        sid_was_loaded: bool = False,
+    ) -> SessionCommitResult: ...
+
+
+class ServerSideSession(SecureCookieSession):
+    """A session snapshot with optimistic-concurrency metadata."""
+
+    def __init__(
+        self,
+        data: Mapping[str, Any] | None = None,
+        *,
+        sid: str | None = None,
+        version: int | None = None,
+        field_versions: Mapping[str, int] | None = None,
+        original: Mapping[str, Any] | None = None,
+        store: SessionStore | None = None,
+        loaded: bool = False,
+    ) -> None:
+        super().__init__(copy.deepcopy(dict(data or {})))
+        self.sid = sid
+        self.version = version
+        self.field_versions = dict(field_versions or {})
+        self.original = copy.deepcopy(
+            dict(original if original is not None else data or {})
+        )
+        self.store = store
+        self.loaded = loaded
+        self.rotate_sid = False
+        self.modified = False
+        self.accessed = False
+
+    def rotate(self) -> None:
+        """Request a new opaque session identifier on save."""
+        self.rotate_sid = True
+        self.modified = True
 
 
 class SessionInterface:
@@ -249,3 +334,397 @@ class SecureCookieSessionInterface(SessionInterface):
             samesite=samesite,
         )
         response.vary.add("Cookie")
+
+
+class ServerSideSessionInterface(SessionInterface):
+    """Store session data server side and put only an ID in the cookie."""
+
+    session_class = ServerSideSession
+
+    def __init__(self, store: SessionStore) -> None:
+        self.store = store
+
+    def new_session(self) -> ServerSideSession:
+        return self.session_class(store=self.store)
+
+    def _get_expiration_datetime(
+        self, app: Quart, session: SessionMixin
+    ) -> datetime:
+        lifetime = app.permanent_session_lifetime
+        if not isinstance(lifetime, timedelta):
+            lifetime = timedelta(seconds=lifetime)
+        return datetime.now(UTC) + lifetime
+
+    async def open_session(
+        self, app: Quart, request: BaseRequestWebsocket
+    ) -> ServerSideSession:
+        cookie = request.cookies.get(self.get_cookie_name(app))
+        if cookie is None:
+            return self.new_session()
+
+        record = await self.store.load(cookie)
+        if record is None:
+            return self.new_session()
+
+        return self.session_class(
+            record.data,
+            sid=record.sid,
+            version=record.version,
+            field_versions=record.field_versions,
+            original=record.data,
+            store=self.store,
+            loaded=True,
+        )
+
+    async def save_session(
+        self,
+        app: Quart,
+        session: SessionMixin,
+        response: Response | WerkzeugResponse | None,
+    ) -> None:
+        if not isinstance(session, self.session_class):
+            raise TypeError("ServerSideSessionInterface requires a ServerSideSession")
+
+        if response is None:
+            return
+
+        name = self.get_cookie_name(app)
+        if session.accessed:
+            response.vary.add("Cookie")
+
+        changes: dict[str, Any] = {}
+        for key, value in session.items():
+            if key not in session.original or session.original[key] != value:
+                changes[key] = copy.deepcopy(value)
+        deletions = {
+            key
+            for key in session.original
+            if key not in session
+        }
+
+        if not changes and not deletions and not session.rotate_sid:
+            return
+
+        delete = not session
+        expires = self._get_expiration_datetime(app, session)
+        try:
+            result = await self.store.commit(
+                session.sid,
+                session.version,
+                session.field_versions,
+                changes,
+                deletions,
+                expires=expires,
+                rotate=session.rotate_sid,
+                delete=delete,
+                sid_was_loaded=session.loaded,
+            )
+        except SessionConflict:
+            response.status_code = 409
+            return
+
+        if result.deleted:
+            response.delete_cookie(
+                name,
+                domain=self.get_cookie_domain(app),
+                partitioned=self.get_cookie_partitioned(app),
+                path=self.get_cookie_path(app),
+                secure=self.get_cookie_secure(app),
+                samesite=self.get_cookie_samesite(app),
+                httponly=self.get_cookie_httponly(app),
+            )
+            return
+
+        response.set_cookie(
+            name,
+            result.sid,
+            expires=self.get_expiration_time(app, session),
+            httponly=self.get_cookie_httponly(app),
+            domain=self.get_cookie_domain(app),
+            partitioned=self.get_cookie_partitioned(app),
+            path=self.get_cookie_path(app),
+            secure=self.get_cookie_secure(app),
+            samesite=self.get_cookie_samesite(app),
+        )
+
+
+class SQLiteSessionStore:
+    """A SQLite reference implementation of the server-side session store."""
+
+    def __init__(self, path: str | os.PathLike[str] = "sessions.db") -> None:
+        self._path = os.fspath(path)
+        self._connection = sqlite3.connect(
+            self._path, check_same_thread=False, isolation_level=None
+        )
+        self._connection.row_factory = sqlite3.Row
+        self._lock = asyncio.Lock()
+        with self._connection:
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    sid TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    data TEXT NOT NULL,
+                    field_versions TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+                """
+            )
+
+    async def load(self, sid: str) -> SessionRecord | None:
+        async with self._lock:
+            return await asyncio.to_thread(self._load, sid)
+
+    async def commit(
+        self,
+        sid: str | None,
+        base_version: int | None,
+        base_field_versions: Mapping[str, int],
+        changes: Mapping[str, Any],
+        deletions: set[str],
+        *,
+        expires: datetime | None,
+        rotate: bool,
+        delete: bool,
+        sid_was_loaded: bool = False,
+    ) -> SessionCommitResult:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._commit,
+                sid,
+                base_version,
+                dict(base_field_versions),
+                dict(changes),
+                set(deletions),
+                expires,
+                rotate,
+                delete,
+                sid_was_loaded,
+            )
+
+    def close(self) -> None:
+        self._connection.close()
+
+    async def __aenter__(self) -> SQLiteSessionStore:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        self.close()
+
+    def _load(self, sid: str) -> SessionRecord | None:
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                "SELECT sid, version, data, field_versions, expires_at "
+                "FROM sessions WHERE sid = ?",
+                (sid,),
+            ).fetchone()
+            if row is None:
+                pass
+            elif self._parse_datetime(row["expires_at"]) <= datetime.now(UTC):
+                self._connection.execute(
+                    "DELETE FROM sessions WHERE sid = ?", (sid,)
+                )
+                row = None
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+        if row is None:
+            return None
+        return SessionRecord(
+            sid=row["sid"],
+            version=row["version"],
+            data=session_json_serializer.loads(row["data"]),
+            field_versions=json.loads(row["field_versions"]),
+        )
+
+    def _commit(
+        self,
+        sid: str | None,
+        base_version: int | None,
+        base_field_versions: dict[str, int],
+        changes: dict[str, Any],
+        deletions: set[str],
+        expires: datetime | None,
+        rotate: bool,
+        delete: bool,
+        sid_was_loaded: bool = False,
+    ) -> SessionCommitResult:
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = None
+            if sid is not None:
+                row = self._connection.execute(
+                    "SELECT sid, version, data, field_versions, expires_at "
+                    "FROM sessions WHERE sid = ?",
+                    (sid,),
+                ).fetchone()
+                if row is not None and self._parse_datetime(
+                    row["expires_at"]
+                ) <= datetime.now(UTC):
+                    self._connection.execute(
+                        "DELETE FROM sessions WHERE sid = ?", (sid,)
+                    )
+                    row = None
+
+            if row is None:
+                result = self._commit_missing(
+                    sid,
+                    base_version,
+                    changes,
+                    deletions,
+                    expires,
+                    delete,
+                    sid_was_loaded,
+                )
+            else:
+                result = self._update_existing(
+                    row,
+                    sid,
+                    base_version,
+                    base_field_versions,
+                    changes,
+                    deletions,
+                    expires,
+                    rotate,
+                )
+            self._connection.execute("COMMIT")
+            return result
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def _commit_missing(
+        self,
+        sid: str | None,
+        base_version: int | None,
+        changes: dict[str, Any],
+        deletions: set[str],
+        expires: datetime | None,
+        delete: bool,
+        sid_was_loaded: bool,
+    ) -> SessionCommitResult:
+        if sid_was_loaded and not delete:
+            raise SessionConflict(set(changes) | deletions)
+        if delete or not changes:
+            return SessionCommitResult(sid or "", 0, True)
+        if expires is None:
+            raise ValueError("A non-empty session requires an expiration datetime")
+
+        new_sid = secrets.token_urlsafe(32)
+        version = 1
+        field_versions = dict.fromkeys(changes, version)
+        self._insert(new_sid, version, changes, field_versions, expires)
+        return SessionCommitResult(new_sid, version)
+
+    def _update_existing(
+        self,
+        row: sqlite3.Row,
+        sid: str | None,
+        base_version: int | None,
+        base_field_versions: dict[str, int],
+        changes: dict[str, Any],
+        deletions: set[str],
+        expires: datetime | None,
+        rotate: bool,
+    ) -> SessionCommitResult:
+        current_field_versions: dict[str, int] = json.loads(row["field_versions"])
+        conflicts = self._conflicts(
+            base_field_versions,
+            current_field_versions,
+            set(changes) | deletions,
+        )
+        if row["version"] != base_version and not changes and not deletions and rotate:
+            conflicts = set(current_field_versions)
+        if conflicts:
+            raise SessionConflict(conflicts)
+        if expires is None:
+            raise ValueError("A non-empty session requires an expiration datetime")
+
+        data = session_json_serializer.loads(row["data"])
+        data.update(changes)
+        for key in deletions:
+            data.pop(key, None)
+
+        if not data:
+            self._connection.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
+            return SessionCommitResult(sid or "", row["version"] + 1, True)
+
+        new_version = row["version"] + 1
+        field_versions = current_field_versions
+        field_versions.update(dict.fromkeys(changes, new_version))
+        for key in deletions:
+            field_versions.pop(key, None)
+
+        new_sid = secrets.token_urlsafe(32) if rotate else sid
+        if rotate:
+            self._connection.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
+            self._insert(new_sid, new_version, data, field_versions, expires)
+        else:
+            self._update(sid, new_version, data, field_versions, expires)
+        return SessionCommitResult(new_sid, new_version)
+
+    @staticmethod
+    def _conflicts(
+        base_field_versions: Mapping[str, int],
+        current_field_versions: Mapping[str, int],
+        fields: set[str] | None = None,
+    ) -> set[str]:
+        keys = fields if fields is not None else set(base_field_versions) | set(
+            current_field_versions
+        )
+        return {
+            key
+            for key in keys
+            if base_field_versions.get(key, 0) != current_field_versions.get(key, 0)
+        }
+
+    def _insert(
+        self,
+        sid: str | None,
+        version: int,
+        data: Mapping[str, Any],
+        field_versions: Mapping[str, int],
+        expires: datetime,
+    ) -> None:
+        self._connection.execute(
+            "INSERT INTO sessions (sid, version, data, field_versions, expires_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                sid,
+                version,
+                session_json_serializer.dumps(dict(data)),
+                json.dumps(dict(field_versions), separators=(",", ":")),
+                expires.astimezone(UTC).isoformat(),
+            ),
+        )
+
+    def _update(
+        self,
+        sid: str | None,
+        version: int,
+        data: Mapping[str, Any],
+        field_versions: Mapping[str, int],
+        expires: datetime,
+    ) -> None:
+        self._connection.execute(
+            "UPDATE sessions SET version = ?, data = ?, field_versions = ?, "
+            "expires_at = ? WHERE sid = ?",
+            (
+                version,
+                session_json_serializer.dumps(dict(data)),
+                json.dumps(dict(field_versions), separators=(",", ":")),
+                expires.astimezone(UTC).isoformat(),
+                sid,
+            ),
+        )
+
+    @staticmethod
+    def _parse_datetime(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
