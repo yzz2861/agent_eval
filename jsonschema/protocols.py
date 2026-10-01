@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     import referencing.jsonschema
 
     from jsonschema import _typing
+    from jsonschema._contradictions import ContradictionResult
     from jsonschema.exceptions import ValidationError
     import jsonschema
     import jsonschema.validators
@@ -166,6 +167,12 @@ class Validator(Protocol):
         False
 
         """
+
+    def check_contradiction(
+        self,
+        search_budget: int = 1000,
+    ) -> ContradictionResult:
+        """Conservatively check whether the current schema is satisfiable."""
 
     def iter_errors(self, instance: Any) -> Iterable[ValidationError]:
         r"""

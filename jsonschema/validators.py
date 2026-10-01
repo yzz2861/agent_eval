@@ -22,6 +22,7 @@ import referencing.exceptions
 import referencing.jsonschema
 
 from jsonschema import (
+    _contradictions,
     _format,
     _keywords,
     _legacy_keywords,
@@ -500,6 +501,16 @@ def create(
 
             error = next(self.iter_errors(instance), None)
             return error is None
+
+        def check_contradiction(
+            self,
+            search_budget: int = _contradictions.DEFAULT_SEARCH_BUDGET,
+        ):
+            return _contradictions.check_contradiction(
+                self.schema,
+                self,
+                search_budget=search_budget,
+            )
 
     evolve_fields = [
         (field.name, field.alias)

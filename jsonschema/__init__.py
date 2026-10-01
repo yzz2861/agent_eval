@@ -11,6 +11,15 @@ for you.
 import warnings
 
 from jsonschema._format import FormatChecker
+from jsonschema._contradictions import (
+    CONSTRUCTIBLE,
+    CONTRADICTORY,
+    UNKNOWN,
+    Conflict,
+    ContradictionResult,
+    UnsupportedKeyword,
+    check_contradiction,
+)
 from jsonschema._types import TypeChecker
 from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import (
@@ -115,6 +124,13 @@ __all__ = [
     "FormatChecker",
     "SchemaError",
     "TypeChecker",
+    "CONSTRUCTIBLE",
+    "CONTRADICTORY",
+    "UNKNOWN",
+    "Conflict",
+    "ContradictionResult",
+    "UnsupportedKeyword",
     "ValidationError",
+    "check_contradiction",
     "validate",
 ]
