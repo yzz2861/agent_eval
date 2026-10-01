@@ -572,6 +572,49 @@ Full example:
 
 .. seealso:: :meth:`Insert.on_conflict` and :class:`OnConflict`.
 
+.. _upsert_row_results:
+
+Per-row results for bulk upserts
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. note:: This feature requires SQLite 3.35+ or Postgresql.
+
+When bulk-upserting with ``insert_many`` it is sometimes necessary to
+know, for each input row, which row it corresponds to and whether it was
+inserted, updated, or skipped (because a ``DO UPDATE ... WHERE`` condition
+was not satisfied, or ``DO NOTHING`` ignored it). Appending
+:meth:`~Insert.as_row_results` opts into this slower mode, which applies the
+input rows one-by-one, in order, inside a single transaction:
+
+.. code-block:: python
+
+   results = (User.insert_many(rows)
+              .on_conflict(conflict_target=[User.email],
+                           preserve=[User.last_login])
+              .as_row_results()
+              .execute())
+   for result in results:
+       print(result.status, result.row)
+
+The returned list contains one :class:`RowResult` per input row, **in input
+order** (no assumptions are made about the order of ``RETURNING`` rows).
+``result.status`` is one of ``'inserted'``, ``'updated'`` or
+``'skipped'``, and ``result.row`` holds the row's ``RETURNING`` data (the
+primary key by default, or whatever was passed to :meth:`~Insert.returning`).
+For skipped rows, ``result.row`` is the pre-existing row.
+
+Some things to be aware of:
+
+* The conflict key may be a composite unique key, and the same key may
+  appear multiple times in the input - rows are applied in the given order
+  and reported individually.
+* To map results back to inputs when a conflict occurs, specify a
+  ``conflict_target``, or include primary-key values in the row data (the
+  primary key is used as a fallback conflict key).
+* Column defaults (including callables) are evaluated per-row, and generated
+  primary-keys are reported for inserted rows.
+* If any row fails, the whole batch is rolled back.
+
 ``on_conflict_ignore``
 ^^^^^^^^^^^^^^^^^^^^^^
 

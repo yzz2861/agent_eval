@@ -137,6 +137,7 @@ __all__ = [
     'Proxy',
     'QualifiedNames',
     'QueryEvent',
+    'RowResult',
     'SchemaManager',
     'SmallIntegerField',
     'Select',
@@ -2859,6 +2860,31 @@ class Update(_WriteQuery):
             return self.apply_returning(ctx)
 
 
+class RowResult(object):
+    # Outcome for a single input row of a bulk insert/upsert executed with
+    # as_row_results(). "status" is one of "inserted", "updated" or
+    # "skipped"; "row" holds the corresponding RETURNING data (or the
+    # pre-existing row when the input was skipped).
+    INSERTED = 'inserted'
+    UPDATED = 'updated'
+    SKIPPED = 'skipped'
+    __slots__ = ('status', 'row')
+
+    def __init__(self, status, row=None):
+        self.status = status
+        self.row = row
+
+    def __repr__(self):
+        return 'RowResult(%s, %r)' % (self.status, self.row)
+
+    def __eq__(self, other):
+        return (isinstance(other, RowResult) and
+                self.status == other.status and self.row == other.row)
+
+    def __ne__(self, other):
+        return not self == other
+
+
 class Insert(_WriteQuery):
     SIMPLE = 0
     QUERY = 1
@@ -2872,6 +2898,7 @@ class Insert(_WriteQuery):
         self._columns = columns
         self._on_conflict = on_conflict
         self._as_rowcount = False
+        self._as_row_results = False
 
     def where(self, *expressions):
         raise NotImplementedError('INSERT queries cannot have a WHERE clause.')
@@ -2879,6 +2906,10 @@ class Insert(_WriteQuery):
     @Node.copy
     def as_rowcount(self, _as_rowcount=True):
         self._as_rowcount = _as_rowcount
+
+    @Node.copy
+    def as_row_results(self, _as_row_results=True):
+        self._as_row_results = _as_row_results
 
     @Node.copy
     def on_conflict_ignore(self, ignore=True):
@@ -3075,7 +3106,208 @@ class Insert(_WriteQuery):
         if self.table._primary_key:
             return (self.table.primary_key,)
 
+    def _pk_conflict_target(self):
+        if self.table._primary_key:
+            return (self.table.primary_key,)
+
+    def _execute_row_results(self, database):
+        if self._query_type == Insert.QUERY:
+            raise ValueError('as_row_results() is not supported for '
+                             'INSERT ... SELECT queries.')
+        if not database.returning_clause and not (
+                isinstance(database, SqliteDatabase) and
+                database.server_version >= (3, 35, 0)):
+            raise InterfaceError('as_row_results() requires database '
+                                 'support for the RETURNING clause.')
+
+        rows = self._row_result_rows(database)
+        if not rows:
+            return []
+
+        returning = self._returning or self._pk_returning()
+        if not returning:
+            raise ValueError('as_row_results() requires a RETURNING clause '
+                             'or primary-key to identify rows.')
+
+        # Without an ON CONFLICT clause no row can be skipped, so there is
+        # no need to map inputs to a conflict key.
+        conflict_fields = None
+        if self._on_conflict is not None:
+            conflict_fields = self._row_result_conflict_fields(
+                self._on_conflict, rows)
+
+        # Each input row is applied in order, within a single transaction,
+        # so that any failure rolls the whole batch back.
+        results = []
+        with database.atomic():
+            for row in rows:
+                results.append(self._execute_row_result(
+                    database, row, conflict_fields, returning))
+        return results
+
+    def _row_result_rows(self, database):
+        # Materialize the input rows and normalize each into a dict of
+        # {column: value}, applying any defaults exactly once per row. This
+        # mirrors the column/value resolution of _generate_insert().
+        if isinstance(self._insert, Mapping) and not self._columns:
+            rows = [self._insert]
+        else:
+            rows = list(self._insert)
+        if not rows:
+            return []
+
+        ctx = database.get_sql_context()
+        defaults = self.get_default_data()
+        if self._columns:
+            columns = []
+            seen = set()
+            for column in self._columns:
+                if isinstance(column, str):
+                    column = getattr(self.table, column)
+                columns.append(column)
+                seen.add(column)
+            for col in sorted(defaults, key=lambda obj: obj.get_sort_key(ctx)):
+                if col not in seen:
+                    columns.append(col)
+        else:
+            if not isinstance(rows[0], Mapping):
+                raise ValueError('Bulk insert must specify columns.')
+            accum = []
+            for column in rows[0]:
+                if isinstance(column, str):
+                    column = getattr(self.table, column)
+                accum.append(column)
+            column_set = set(accum)
+            for col in (set(defaults) - column_set):
+                accum.append(col)
+            columns = sorted(accum, key=lambda obj: obj.get_sort_key(ctx))
+
+        value_lookups = {}
+        nullable_columns = set()
+        for column in columns:
+            lookups = [column, column.name]
+            if isinstance(column, Field):
+                if column.name != column.column_name:
+                    lookups.append(column.column_name)
+                if column.null:
+                    nullable_columns.add(column)
+            value_lookups[column] = lookups
+
+        normalized = []
+        for row in rows:
+            is_dict = isinstance(row, Mapping)
+            norm_row = {}
+            for i, column in enumerate(columns):
+                try:
+                    if is_dict:
+                        for lookup in value_lookups[column]:
+                            try:
+                                val = row[lookup]
+                            except KeyError:
+                                pass
+                            else:
+                                break
+                        else:
+                            raise KeyError
+                    else:
+                        val = row[i]
+                except (KeyError, IndexError):
+                    if column in defaults:
+                        val = defaults[column]
+                        if callable_(val):
+                            val = val()
+                    elif column in nullable_columns:
+                        val = None
+                    else:
+                        raise ValueError('Missing value for %s.' % column.name)
+                norm_row[column] = val
+            normalized.append(norm_row)
+        return normalized
+
+    def _row_result_conflict_fields(self, on_conflict, rows):
+        if on_conflict._conflict_constraint is not None:
+            raise ValueError('as_row_results() does not support '
+                             'conflict_constraint.')
+        if on_conflict._conflict_target:
+            fields = []
+            for column in on_conflict._conflict_target:
+                if isinstance(column, str):
+                    column = getattr(self.table, column)
+                if not isinstance(column, (Field, Column)):
+                    raise ValueError('as_row_results() requires the conflict '
+                                     'target be composed of fields/columns.')
+                fields.append(column)
+            return fields
+
+        # No explicit conflict target. If every row provides primary-key
+        # values, we can map results back using the primary key.
+        conflict_fields = self._pk_conflict_target()
+        if conflict_fields and all(
+                all(field in row for field in conflict_fields)
+                for row in rows):
+            return list(conflict_fields)
+
+        # For "ignore"-style conflict resolution rows are only ever inserted
+        # or skipped, so the pre-insert lookup can be safely omitted.
+        action = (on_conflict._action or '').lower()
+        if action in ('', 'ignore', 'nothing') and not (
+                on_conflict._preserve or on_conflict._update):
+            return None
+
+        raise ValueError('as_row_results() requires a conflict target or '
+                         'primary-key values to map results back to input '
+                         'rows.')
+
+    def _execute_row_result(self, database, row, conflict_fields, returning):
+        existing = None
+        if conflict_fields is not None:
+            key_values = []
+            for field in conflict_fields:
+                try:
+                    key_values.append(row[field])
+                except KeyError:
+                    raise ValueError('as_row_results() cannot determine the '
+                                     'conflict-key value for "%s".'
+                                     % field.name)
+            existing = self._select_conflict_row(database, conflict_fields,
+                                                 key_values, returning)
+
+        # Apply the single row, capturing the RETURNING data. An empty
+        # RETURNING result means the row was skipped (e.g. DO NOTHING or an
+        # unsatisfied DO UPDATE ... WHERE clause).
+        query = self.clone()
+        query._as_row_results = False
+        query._insert = [row]
+        query._columns = None
+        query._returning = returning
+        query._return_cursor = True
+        cursor = query.execute(database)
+        rows = cursor[:1]
+        if rows:
+            status = (RowResult.UPDATED if existing is not None
+                      else RowResult.INSERTED)
+            return RowResult(status, rows[0])
+        return RowResult(RowResult.SKIPPED, existing)
+
+    def _select_conflict_row(self, database, conflict_fields, key_values,
+                             returning):
+        cond = reduce(operator.and_, [field == value for field, value in
+                                      zip(conflict_fields, key_values)])
+        query = self.table.select(*returning).where(cond)
+        row_type = self._row_type or self.default_row_type
+        if row_type == ROW.TUPLE:
+            query = query.tuples()
+        elif row_type == ROW.DICT:
+            query = query.dicts()
+        elif row_type == ROW.NAMED_TUPLE:
+            query = query.namedtuples()
+        elif row_type == ROW.CONSTRUCTOR:
+            query = query.objects(self._constructor)
+        return query.first(database)
+
     def _execute(self, database):
+        if self._as_row_results:
+            return self._execute_row_results(database)
         if self._as_rowcount:
             # Strip implicit pk-returning, which breaks rowcount on sqlite.
             if not self._return_cursor:
@@ -8880,6 +9112,9 @@ class ModelInsert(_ModelWriteQueryHelper, Insert):
                 self._returning = self._pk_returning()
 
     def _pk_returning(self):
+        return self.model._meta.get_primary_keys() or None
+
+    def _pk_conflict_target(self):
         return self.model._meta.get_primary_keys() or None
 
     def returning(self, *returning):

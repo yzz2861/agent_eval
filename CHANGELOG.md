@@ -7,6 +7,10 @@ https://github.com/coleifer/peewee/releases
 
 ## master
 
+* Add ``Insert.as_row_results()``, an opt-in mode for bulk inserts/upserts
+  that returns a ``RowResult`` (``inserted`` / ``updated`` /
+  ``skipped``, plus the corresponding row) for each input row, in input
+  order. Requires ``RETURNING`` support (SQLite 3.35+, Postgresql).
 * Don't cache ``None`` on unselected FK join trees, see #3083.
 * Some fixes for edge-cases around non-unique aliases and unicode aliases,
   see #3081 and #3078.

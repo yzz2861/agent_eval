@@ -6446,6 +6446,23 @@ Queries
          WHERE ("users"."username" = "vl"."username")
 
 
+.. class:: RowResult
+
+   Outcome of a single input row from a bulk insert/upsert executed with
+   :meth:`Insert.as_row_results`.
+
+   .. attribute:: status
+
+      One of ``RowResult.INSERTED`` (``'inserted'``),
+      ``RowResult.UPDATED`` (``'updated'``) or
+      ``RowResult.SKIPPED`` (``'skipped'``).
+
+   .. attribute:: row
+
+      The ``RETURNING`` data for the corresponding row (a primary-key
+      tuple by default). For skipped rows this is the pre-existing row, or
+      ``None`` if it could not be determined.
+
 .. class:: Insert(table, insert=None, columns=None, on_conflict=None, **kwargs)
 
    :param Table table: Table to INSERT data into.
@@ -6487,6 +6504,34 @@ Queries
 
          # To get the modified row-count:
          rowcount = query.as_rowcount().execute()
+
+   .. method:: as_row_results(_as_row_results=True)
+
+      :param bool _as_row_results: Whether to return a per-row result list.
+
+      Execute the insert/upsert one input row at a time (within a single
+      transaction) and return a list of :class:`RowResult`, one per input
+      row **in input order**. Each result reports whether the row was
+      ``inserted``, ``updated`` or ``skipped`` (e.g. by ``DO NOTHING`` or an
+      unsatisfied ``DO UPDATE ... WHERE`` clause), along with the
+      corresponding ``RETURNING`` data (the primary key by default).
+
+      .. code-block:: python
+
+         results = (User.insert_many(rows)
+                    .on_conflict(conflict_target=[User.email],
+                                 preserve=[User.last_login])
+                    .as_row_results()
+                    .execute())
+         for result in results:
+             print(result.status, result.row)
+
+      .. note::
+         This mode requires ``RETURNING`` support (SQLite 3.35+, Postgresql)
+         and incurs additional queries, so it is opt-in. To map results back
+         to input rows when a conflict occurs, specify a ``conflict_target``
+         (composite targets are supported) or provide primary-key values in
+         the row data. If any row fails, the whole batch is rolled back.
 
    .. method:: on_conflict_ignore(ignore=True)
 

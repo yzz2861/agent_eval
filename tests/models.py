@@ -5267,6 +5267,12 @@ class KV(TestModel):
     value = IntegerField()
 
 
+class KVD(TestModel):
+    key = CharField(unique=True)
+    value = IntegerField(default=0)
+    token = CharField(default=lambda: uuid.uuid4().hex)
+
+
 class PGOnConflictTests(OnConflictTests):
     @requires_upsert
     def test_update(self):
@@ -5521,6 +5527,220 @@ class PGOnConflictTests(OnConflictTests):
          .execute())
         self.assertEqual(
             list(KVCon.select(KVCon.key, KVCon.value).tuples()), [('k1', 1)])
+
+
+@skip_unless(IS_SQLITE_35, 'requires sqlite with RETURNING support')
+class TestInsertRowResults(ModelTestCase):
+    requires = [KV]
+
+    def assertStatuses(self, results, *statuses):
+        self.assertEqual([result.status for result in results],
+                         list(statuses))
+
+    def test_insert_update_skip(self):
+        KV.create(key='k1', value=1)
+        KV.create(key='k2', value=2)
+
+        rows = [
+            {'key': 'k1', 'value': 10},  # 10 > 1, updated.
+            {'key': 'k3', 'value': 3},  # No conflict, inserted.
+            {'key': 'k2', 'value': 1},  # 1 > 2 is false, skipped.
+        ]
+        results = (KV.insert_many(rows)
+                   .on_conflict(conflict_target=[KV.key],
+                                update={KV.value: EXCLUDED.value},
+                                where=EXCLUDED.value > KV.value)
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.UPDATED, RowResult.INSERTED,
+                            RowResult.SKIPPED)
+
+        # Each result identifies the row the input corresponds to, and the
+        # skipped row reports the pre-existing row.
+        self.assertEqual([r.row for r in results], [(1,), (3,), (2,)])
+        self.assertEqual(KV.get(KV.key == 'k1').value, 10)
+        self.assertEqual(KV.get(KV.key == 'k2').value, 2)  # Unchanged.
+        self.assertEqual(KV.get(KV.key == 'k3').value, 3)
+
+    def test_results_follow_input_order(self):
+        rows = [{'key': key, 'value': i}
+                for i, key in enumerate(('k3', 'k1', 'k2'))]
+        results = (KV.insert_many(rows)
+                   .on_conflict_ignore()
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.INSERTED, RowResult.INSERTED,
+                            RowResult.INSERTED)
+        keys = [KV.get_by_id(result.row[0]).key for result in results]
+        self.assertEqual(keys, ['k3', 'k1', 'k2'])
+
+    @requires_models(Emp)
+    def test_composite_conflict_target(self):
+        Emp.create(first='huey', last='cat', empno='123')
+        Emp.create(first='zaizee', last='cat', empno='124')
+
+        rows = [
+            {'first': 'huey', 'last': 'cat', 'empno': '999'},
+            {'first': 'new', 'last': 'guy', 'empno': '500'},
+            {'first': 'zaizee', 'last': 'cat', 'empno': '888'},
+        ]
+        results = (Emp.insert_many(rows)
+                   .on_conflict(conflict_target=(Emp.first, Emp.last),
+                                preserve=(Emp.empno,))
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.UPDATED, RowResult.INSERTED,
+                            RowResult.UPDATED)
+
+        # Updates preserve the original row (and its primary-key).
+        self.assertEqual([r.row for r in results], [(1,), (3,), (2,)])
+        data = list(Emp.select(Emp.first, Emp.empno).order_by(Emp.id).tuples())
+        self.assertEqual(data, [('huey', '999'), ('zaizee', '888'),
+                                ('new', '500')])
+
+    def test_duplicate_keys_in_input(self):
+        rows = [{'key': 'k1', 'value': 1},
+                {'key': 'k1', 'value': 2},
+                {'key': 'k1', 'value': 3}]
+        results = (KV.insert_many(rows)
+                   .on_conflict(conflict_target=[KV.key],
+                                preserve=[KV.value])
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.INSERTED, RowResult.UPDATED,
+                            RowResult.UPDATED)
+        self.assertEqual([r.row for r in results], [(1,), (1,), (1,)])
+        self.assertEqual(KV.get(KV.key == 'k1').value, 3)
+
+        results = (KV.insert_many(rows[:2])
+                   .on_conflict_ignore()
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.SKIPPED, RowResult.SKIPPED)
+
+    @requires_models(KVD)
+    def test_defaults_applied_per_row(self):
+        rows = [{'key': 'k1'}, {'key': 'k2'}]
+        results = (KVD.insert_many(rows)
+                   .on_conflict(conflict_target=[KVD.key],
+                                preserve=[KVD.value])
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.INSERTED, RowResult.INSERTED)
+
+        # Column defaults (including callables) are evaluated for each row.
+        k1, k2 = KVD.select().order_by(KVD.key)
+        self.assertEqual((k1.value, k2.value), (0, 0))
+        self.assertTrue(k1.token)
+        self.assertNotEqual(k1.token, k2.token)
+
+    @requires_models(KVCon)
+    def test_batch_rolls_back_on_error(self):
+        KVCon.create(key='k1', value=1)
+
+        # The second row conflicts on the "value" constraint, which is not
+        # the conflict target - the error aborts and rolls back the batch.
+        query = (KVCon.insert_many([{'key': 'k2', 'value': 2},
+                                    {'key': 'k3', 'value': 1}])
+                 .on_conflict(action='nothing', conflict_target=[KVCon.key])
+                 .as_row_results())
+        self.assertRaises(IntegrityError, query.execute)
+        self.assertEqual(KVCon.select().count(), 1)
+
+    def test_ignore_without_conflict_target(self):
+        KV.create(key='k1', value=1)
+        rows = [{'key': 'k1', 'value': 2}, {'key': 'k2', 'value': 3}]
+        results = (KV.insert_many(rows)
+                   .on_conflict_ignore()
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.SKIPPED, RowResult.INSERTED)
+        self.assertEqual(results[0].row, None)
+        self.assertEqual(results[1].row, (2,))
+
+    def test_primary_key_fallback_conflict_target(self):
+        KV.create(id=1, key='k1', value=1)
+        rows = [{'id': 1, 'key': 'k1', 'value': 2},
+                {'id': 2, 'key': 'k2', 'value': 3}]
+        results = (KV.insert_many(rows)
+                   .on_conflict_ignore()
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.SKIPPED, RowResult.INSERTED)
+        self.assertEqual([r.row for r in results], [(1,), (2,)])
+
+    def test_no_conflict_plain_insert(self):
+        rows = [{'key': 'k1', 'value': 1}, {'key': 'k2', 'value': 2}]
+        results = KV.insert_many(rows).as_row_results().execute()
+        self.assertStatuses(results, RowResult.INSERTED, RowResult.INSERTED)
+        self.assertEqual([r.row for r in results], [(1,), (2,)])
+
+    def test_empty_rows(self):
+        results = (KV.insert_many([])
+                   .on_conflict_ignore()
+                   .as_row_results()
+                   .execute())
+        self.assertEqual(results, [])
+
+    def test_many_rows_exceeding_variable_limit(self):
+        # Row-at-a-time execution is not subject to the bound-variable limit
+        # that constrains multi-row INSERT statements.
+        rows = ({'key': 'k%s' % i, 'value': i} for i in range(1100))
+        results = (KV.insert_many(rows)
+                   .on_conflict_ignore()
+                   .as_row_results()
+                   .execute())
+        self.assertEqual(len(results), 1100)
+        self.assertTrue(all(r.status == RowResult.INSERTED for r in results))
+        self.assertEqual(KV.select().count(), 1100)
+
+    def test_tuple_rows_with_fields(self):
+        KV.create(key='k1', value=1)
+        rows = [('k1', 10), ('k2', 2)]
+        results = (KV.insert_many(rows, fields=[KV.key, KV.value])
+                   .on_conflict(conflict_target=[KV.key],
+                                preserve=[KV.value])
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.UPDATED, RowResult.INSERTED)
+        self.assertEqual([r.row for r in results], [(1,), (2,)])
+
+    @requires_models(Emp)
+    def test_custom_returning(self):
+        Emp.create(first='huey', last='cat', empno='123')
+        rows = [{'first': 'huey', 'last': 'cat', 'empno': '999'}]
+        results = (Emp.insert_many(rows)
+                   .on_conflict(conflict_target=(Emp.first, Emp.last),
+                                preserve=(Emp.empno,))
+                   .returning(Emp)
+                   .as_row_results()
+                   .execute())
+        self.assertStatuses(results, RowResult.UPDATED)
+        emp = results[0].row
+        self.assertTrue(isinstance(emp, Emp))
+        self.assertEqual((emp.id, emp.first, emp.empno), (1, 'huey', '999'))
+
+    def test_insert_select_unsupported(self):
+        query = (KV.insert_from(KV.select(KV.key, KV.value),
+                                [KV.key, KV.value])
+                 .as_row_results())
+        self.assertRaises(ValueError, query.execute)
+
+    def test_fast_mode_unchanged(self):
+        # Without as_row_results(), execute() behaves as before.
+        res = (KV.insert_many([{'key': 'k1', 'value': 1},
+                               {'key': 'k2', 'value': 2}])
+               .on_conflict_ignore()
+               .execute())
+        self.assertFalse(isinstance(res, list))
+        self.assertEqual(KV.select().count(), 2)
+
+        n = (KV.insert_many([{'key': 'k1', 'value': 3},
+                             {'key': 'k3', 'value': 3}])
+             .on_conflict_ignore()
+             .as_rowcount()
+             .execute())
+        self.assertEqual(n, 1)
 
 
 @requires_mysql
