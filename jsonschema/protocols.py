@@ -206,6 +206,36 @@ class Validator(Protocol):
 
         """
 
+    def fill_defaults(self, instance: Any) -> jsonschema.FilledDefaultsResult:
+        """
+        Return a copy of ``instance`` with missing properties filled in.
+
+        :kw:`default` is an annotation and is never applied while
+        validating, so the given instance is left unchanged. This method
+        instead explicitly fills in *missing* object properties from the
+        schema's ``default`` annotations. A property whose value is
+        explicitly ``null`` is not considered missing and is preserved.
+
+        Defaults declared by the branches of :kw:`allOf` (or by a
+        reference and its sibling schema) are merged; differing values for
+        the same location raise `jsonschema.DefaultConflictError`.
+        Defaults within :kw:`anyOf` or :kw:`oneOf` are applied only when
+        exactly a single branch validates the instance. Conditional
+        branches (:kw:`if`/:kw:`then`/:kw:`else`), references and nested
+        objects are handled until the outcome is stable, with cyclic
+        defaults detected and reported via `jsonschema.DefaultFillLoopError`.
+
+        After filling, the result is validated against the schema; if it is
+        invalid, `jsonschema.ValidationError` is raised rather than
+        returning an incomplete value.
+
+        Returns:
+
+            jsonschema.FilledDefaultsResult:
+
+                the filled copy and the schema source of each added value
+        """
+
     def evolve(self, **kwargs) -> Validator:
         """
         Create a new validator like this one, but with given changes.

@@ -20,6 +20,7 @@ from jsonschema.validators import (
     Draft7Validator,
     Draft201909Validator,
     Draft202012Validator,
+    fill_defaults,
     validate,
 )
 
@@ -54,6 +55,15 @@ def __getattr__(name):
         )
         from jsonschema.exceptions import ErrorTree
         return ErrorTree
+    elif name in {
+        "FilledDefault",
+        "FilledDefaultsResult",
+        "DefaultFillError",
+        "DefaultConflictError",
+        "DefaultFillLoopError",
+    }:
+        from jsonschema import _defaults
+        return getattr(_defaults, name)
     elif name == "FormatError":
         warnings.warn(
             "Importing FormatError directly from the jsonschema package "
@@ -113,8 +123,14 @@ __all__ = [
     "Draft201909Validator",
     "Draft202012Validator",
     "FormatChecker",
+    "FilledDefault",
+    "FilledDefaultsResult",
+    "DefaultFillError",
+    "DefaultConflictError",
+    "DefaultFillLoopError",
     "SchemaError",
     "TypeChecker",
     "ValidationError",
+    "fill_defaults",
     "validate",
 ]

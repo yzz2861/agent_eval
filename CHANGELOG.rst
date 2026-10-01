@@ -1,6 +1,7 @@
 v4.27.0
 =======
 
+* Add an explicit ``jsonschema.fill_defaults`` (and ``Validator.fill_defaults``) for producing a copy of an instance with missing object properties filled in from ``default`` annotations, including handling of references, conditional and composed branches, nested objects, conflict and cyclic-default detection, and final validation of the filled result.
 * Improve ``best_match`` for ``anyOf`` / ``oneOf`` errors: the most relevant error is now found within each subschema separately before the deepest of those is picked (#1257, #1300).
   In particular an applicator with a single subschema now produces the same best match as the bare subschema would.
   ``relevance`` no longer considers an error's position amongst its siblings.

@@ -501,6 +501,44 @@ def create(
             error = next(self.iter_errors(instance), None)
             return error is None
 
+        def fill_defaults(self, instance):
+            """
+            Produce a copy of ``instance`` with missing defaults filled in.
+
+            :kw:`default` is an annotation and is not applied during normal
+            validation; the given instance is never mutated. This method
+            explicitly fills in *missing* object properties (a property
+            explicitly present with a value of ``null`` is not considered
+            missing) using the ``default`` annotations declared by the
+            schema.
+
+            The returned `jsonschema.FilledDefaultsResult` exposes both the
+            filled copy and, for every value newly added, the schema path at
+            which the used ``default`` was declared.
+
+            Defaults from the branches of :kw:`allOf` are merged, and a
+            `jsonschema.DefaultConflictError` is raised if they disagree.
+            Defaults within :kw:`anyOf` or :kw:`oneOf` are only applied when
+            exactly one branch validates the instance. Conditional branches
+            (:kw:`if`/:kw:`then`/:kw:`else`), references and nested objects
+            are handled until the result stabilizes, with protection against
+            cyclic defaults.
+
+            The filled instance is finally validated against the schema; if
+            it is invalid, the corresponding
+            `jsonschema.ValidationError` is raised rather than returning a
+            partially filled value.
+
+            Arguments:
+
+            instance:
+
+                the instance to fill defaults into (left unchanged)
+            """
+            from jsonschema._defaults import fill_defaults
+
+            return fill_defaults(self, instance)
+
     evolve_fields = [
         (field.name, field.alias)
         for field in fields(Validator)
@@ -1332,6 +1370,62 @@ def validate(instance, schema, cls=None, *args, **kwargs):  # noqa: D417
     error = exceptions.best_match(validator.iter_errors(instance))
     if error is not None:
         raise error
+
+
+def fill_defaults(instance, schema, cls=None, *args, **kwargs):
+    """
+    Fill in missing object properties from :kw:`default` annotations.
+
+    :kw:`default` is purely an annotation and is never applied by
+    :func:`validate`; this function is the explicit opt-in to produce a
+    copy of ``instance`` with missing properties filled in. The original
+    ``instance`` is never mutated.
+
+    A property is only filled when it is *missing*; an explicitly present
+    ``null`` is left untouched.
+
+    Arguments:
+
+    instance:
+
+        the instance to fill (unchanged)
+
+    schema:
+
+        the schema declaring ``default`` annotations
+
+    cls:
+
+        the validator class to use; if unprovided it is determined from the
+        schema as in :func:`validate`
+
+    Returns:
+
+    jsonschema.FilledDefaultsResult:
+
+        the filled copy together with a mapping from each newly added
+        value's instance path to a `jsonschema.FilledDefault` recording its
+        value and the schema path of its ``default`` source
+
+    Raises:
+
+    jsonschema.DefaultConflictError:
+
+        if applicable subschemas (e.g. the branches of :kw:`allOf`) declare
+        conflicting defaults for one missing property
+
+    jsonschema.ValidationError:
+
+        if the filled instance is not valid under the schema
+    """
+    from jsonschema._defaults import fill_defaults as _fill_defaults
+
+    if cls is None:
+        cls = validator_for(schema)
+
+    cls.check_schema(schema)
+    validator = cls(schema, *args, **kwargs)
+    return _fill_defaults(validator, instance)
 
 
 def validator_for(

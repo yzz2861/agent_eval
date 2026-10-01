@@ -44,6 +44,61 @@ The Validator Protocol
 All of the `versioned validators <versioned-validators>` that are included with `jsonschema` adhere to the protocol, and any `extensions of these validators <jsonschema.validators.extend>` will as well.
 For more information on `creating <jsonschema.validators.create>` or `extending <jsonschema.validators.extend>` validators see `creating-validators`.
 
+Filling in Defaults
+-------------------
+
+The :kw:`default` keyword is purely an *annotation*: calling `validate` or
+`Validator.validate` never modifies an instance, even when a schema declares a
+``default``. If you want to explicitly apply defaults, use
+`fill_defaults` (or the matching `Validator.fill_defaults` method):
+
+.. code:: python
+
+    >>> schema = {
+    ...     "type": "object",
+    ...     "properties": {"a": {"default": 1}, "b": {"default": 2}},
+    ... }
+    >>> result = jsonschema.fill_defaults({}, schema)
+    >>> result.instance
+    {"a": 1, "b": 2}
+
+Only *missing* object properties are added; a property that is explicitly
+present, including one whose value is ``null``, is left untouched. The input
+is never mutated -- a deep copy is returned. ``result.defaults`` maps the
+instance path of every newly added value to a `FilledDefault` recording both
+the inserted value and the schema path at which its ``default`` was declared:
+
+.. code:: python
+
+    >>> result.defaults[("a",)].schema_path
+    ("properties", "a", "default")
+
+Defaults from the branches of :kw:`allOf` are merged; when two applicable
+subschemas declare *different* defaults for the same missing property, a
+`DefaultConflictError` is raised. Defaults within :kw:`anyOf` or
+:kw:`oneOf` are only used when exactly one branch unambiguously matches the
+instance. Conditional branches (:kw:`if`/:kw:`then`/:kw:`else`), references
+and nested objects are followed until the result is stable, with cyclic
+defaults reported as a `DefaultFillLoopError`. The filled instance is
+finally validated against the schema, so a `ValidationError` is raised
+instead of returning a partially-filled result that is invalid.
+
+.. autofunction:: fill_defaults
+
+.. autoclass:: FilledDefault
+    :members:
+    :noindex:
+
+.. autoclass:: FilledDefaultsResult
+    :members:
+    :noindex:
+
+.. autoexception:: DefaultConflictError
+    :noindex:
+
+.. autoexception:: DefaultFillLoopError
+    :noindex:
+
 Type Checking
 -------------
 
