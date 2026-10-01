@@ -87,6 +87,67 @@ class UniqueTogetherModel(models.Model):
         )
 
 
+class BulkUniqueModel(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    group = models.IntegerField()
+    color = models.CharField(max_length=32)
+    category = models.CharField(max_length=32, null=True, blank=True)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["group", "color"],
+                name="bulk_unique_group_color",
+            ),
+            models.UniqueConstraint(
+                fields=["group", "category"],
+                name="bulk_unique_group_category",
+            ),
+            models.UniqueConstraint(
+                Lower("name"),
+                name="bulk_unique_lower_name",
+            ),
+            models.UniqueConstraint(
+                "color",
+                name="bulk_unique_named_when_group_1",
+                condition=models.Q(active=True),
+            ),
+        ]
+
+
+class BulkUniquePlainModel(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    group = models.IntegerField()
+    color = models.CharField(max_length=32)
+    category = models.CharField(max_length=32, null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["group", "color"],
+                name="bulk_plain_unique_group_color",
+            ),
+            models.UniqueConstraint(
+                fields=["group", "category"],
+                name="bulk_plain_unique_group_category",
+            ),
+        ]
+
+
+class BulkUniqueCustomMessageModel(models.Model):
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["name"],
+                name="bulk_custom_message_unique",
+                violation_error_message="Custom bulk unique message.",
+            )
+        ]
+
+
 class UniqueForDateModel(models.Model):
     start_date = models.DateField()
     end_date = models.DateTimeField()
