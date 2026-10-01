@@ -1,0 +1,18 @@
+.. change::
+    :tags: feature, orm, asyncio
+    :tickets: 13605
+
+    Added :meth:`_orm.Session.post_commit`, which registers a zero-
+    argument callback to be invoked only after the outermost database
+    transaction has committed successfully.  Callbacks are associated with
+    the transaction level in which they are registered: callbacks
+    registered within a SAVEPOINT that is later rolled back are discarded,
+    while those within a successfully released SAVEPOINT are merged into
+    the enclosing transaction and run only if the outer transaction
+    commits.  Registration order is preserved.  If a callback raises after
+    the (already irreversible) commit, the exception is wrapped in
+    :class:`_orm.exc.PostCommitCallbackError` to make clear that the
+    database commit has already occurred.  For
+    :class:`_asyncio.AsyncSession`,
+    :meth:`_asyncio.AsyncSession.post_commit` additionally accepts
+    coroutine functions and other callables returning awaitables.

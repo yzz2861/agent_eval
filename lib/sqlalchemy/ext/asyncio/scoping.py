@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from typing import Any
+from typing import Awaitable
 from typing import Callable
 from typing import Generic
 from typing import Iterable
@@ -104,6 +105,7 @@ _Ts = TypeVarTuple("_Ts")
         "invalidate",
         "merge",
         "merge_all",
+        "post_commit",
         "refresh",
         "rollback",
         "scalar",
@@ -1054,6 +1056,26 @@ class async_scoped_session(Generic[_AS]):
         return await self._proxied.merge_all(
             instances, load=load, options=options
         )
+
+    def post_commit(
+        self, callback: Callable[[], Union[Any, Awaitable[Any]]]
+    ) -> None:
+        r"""Proxied for the :class:`_asyncio.AsyncSession` class on behalf of
+        the :class:`_asyncio.scoping.async_scoped_session` class.
+
+        .. container:: class_bases
+
+            Proxied for the :class:`_asyncio.AsyncSession` class on
+            behalf of the :class:`_asyncio.scoping.async_scoped_session` class.
+
+        .. seealso::
+
+            :meth:`_asyncio.AsyncSession.post_commit` - main documentation
+            for "post_commit"
+
+        """
+
+        return self._proxied.post_commit(callback)
 
     async def refresh(
         self,

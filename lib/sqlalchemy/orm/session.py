@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 from enum import Enum
+import inspect as _py_inspect
 import itertools
 import sys
 import typing
@@ -78,6 +79,7 @@ from ..engine import Engine
 from ..engine.util import TransactionalContext
 from ..event import dispatcher
 from ..event import EventTarget
+from ..util.concurrency import in_greenlet
 from ..inspection import inspect
 from ..inspection import Inspectable
 from ..sql import coercions
@@ -142,6 +144,7 @@ _Ts = TypeVarTuple("_Ts")
 __all__ = [
     "Session",
     "SessionTransaction",
+    "PostCommitCallback",
     "sessionmaker",
     "ORMExecuteState",
     "close_all_sessions",
@@ -172,6 +175,19 @@ JoinTransactionMode = Literal[
     "control_fully",
     "create_savepoint",
 ]
+
+PostCommitCallback = Callable[[], Any]
+"""A zero-argument callback registered via
+:meth:`_orm.Session.post_commit`.
+
+For the synchronous :class:`_orm.Session` the callable must be a plain
+synchronous function; its return value is ignored.  For
+:class:`_asyncio.AsyncSession`, the callable may additionally be a
+coroutine function or otherwise return an awaitable.
+
+.. versionadded:: 2.1.3
+
+"""
 
 
 class _ConnectionCallableProto(Protocol):
@@ -912,6 +928,8 @@ class SessionTransaction(_StateChange, TransactionalContext):
         InstanceState[Any], Tuple[Any, Any]
     ]
 
+    _post_commit_callbacks: List[PostCommitCallback]
+
     origin: SessionTransactionOrigin
     """Origin of this :class:`_orm.SessionTransaction`.
 
@@ -949,6 +967,13 @@ class SessionTransaction(_StateChange, TransactionalContext):
         self._parent = parent
         self.nested = nested = origin is SessionTransactionOrigin.BEGIN_NESTED
         self.origin = origin
+
+        # post-commit callbacks registered via Session.post_commit() while
+        # this transaction level is active.  These are merged into the
+        # parent level when a SAVEPOINT is released, and discarded if this
+        # level is rolled back.  Only the list on the outermost transaction
+        # is invoked once the real database COMMIT has succeeded.
+        self._post_commit_callbacks = []
 
         if session._close_state is _SessionCloseState.CLOSED:
             raise sa_exc.InvalidRequestError(
@@ -1341,8 +1366,39 @@ class SessionTransaction(_StateChange, TransactionalContext):
 
             self._remove_snapshot()
 
+        if self._parent is None:
+            # outermost transaction: the real database COMMIT succeeded
+            # above.  Hand the merged callbacks to the Session; they are
+            # dispatched after close() below, once this transaction object
+            # is fully finished, so callbacks may autobegin and work in a
+            # new transaction.  Dispatch happens for every path that
+            # commits the outermost transaction, including Session.commit(),
+            # the SessionTransaction context manager and two-phase flows.
+            # For an AsyncSession the dispatcher is temporarily suppressed
+            # here; the awaitables are instead awaited by AsyncSession once
+            # greenlet_spawn() returns.
+            self.session._post_commit_pending.extend(
+                self._post_commit_callbacks
+            )
+        else:
+            # this level (a SAVEPOINT, or an internal subtransaction)
+            # completed successfully; merge its callbacks into the
+            # enclosing transaction.  Appending preserves registration
+            # order: anything registered on the parent before this level
+            # began comes first, then the callbacks registered within the
+            # level.  Levels nested within this one were already appended
+            # here in turn, so callbacks propagate to the outermost
+            # transaction in overall registration order.
+            self._parent._post_commit_callbacks.extend(
+                self._post_commit_callbacks
+            )
+        self._post_commit_callbacks = []
+
         with self._expect_state(SessionTransactionState.CLOSED):
             self.close()
+
+        if self._parent is None:
+            self.session._dispatch_post_commit_callbacks()
 
         if _to_root and self._parent:
             self._parent.commit(_to_root=True)
@@ -1420,6 +1476,13 @@ class SessionTransaction(_StateChange, TransactionalContext):
         _StateChangeStates.ANY, SessionTransactionState.CLOSED
     )
     def close(self, invalidate: bool = False) -> None:
+        # discard any post-commit callbacks still owned by this level.
+        # Callbacks of a successfully released SAVEPOINT were already
+        # merged into the parent at commit time; anything left here
+        # belongs to a level that is being rolled back, closed or
+        # invalidated without committing and must never run.
+        self._post_commit_callbacks = []
+
         if self.nested:
             self.session._nested_transaction = (
                 self._previous_nested_transaction
@@ -1824,6 +1887,17 @@ class Session(_SessionClassMethods, EventTarget):
         self._warn_on_events = False
         self._transaction = None
         self._nested_transaction = None
+
+        # callbacks that became runnable when the outermost database
+        # transaction committed successfully; drained by Session.commit()
+        # (synchronously), or by AsyncSession.commit() which also supports
+        # awaitable callbacks.
+        self._post_commit_pending: List[PostCommitCallback] = []
+
+        # whether Session.commit() invokes pending post-commit callbacks
+        # itself.  AsyncSession temporarily disables this so callbacks can
+        # be awaited in the event loop thread after greenlet_spawn() returns.
+        self._post_commit_dispatch_enabled: bool = True
         self.hash_key = _new_sessionid()
         self.autobegin = autobegin
         self.autoflush = autoflush
@@ -2056,6 +2130,10 @@ class Session(_SessionClassMethods, EventTarget):
         else:
             self._transaction.rollback(_to_root=True)
 
+        # no commit occurred (or will occur); drop anything that may have
+        # been staged for post-commit dispatch.
+        self._post_commit_pending = []
+
     def commit(self) -> None:
         """Flush pending changes and commit the current transaction.
 
@@ -2093,6 +2171,135 @@ class Session(_SessionClassMethods, EventTarget):
             trans = self._autobegin_t()
 
         trans.commit(_to_root=True)
+
+    def post_commit(self, callback: PostCommitCallback) -> None:
+        """Register a callback to be invoked after the current transaction
+        has been committed successfully at the database level.
+
+        The callback belongs to the transaction level in which it is
+        registered:
+
+        * When registered inside a SAVEPOINT
+          (:meth:`_orm.Session.begin_nested`) that is later rolled back,
+          callbacks registered within that SAVEPOINT (and within any nested
+          SAVEPOINTs that were not released first) are discarded and are
+          **never** invoked.
+
+        * When a SAVEPOINT is released successfully, its callbacks are merged
+          into the enclosing transaction.  They are ultimately only invoked
+          if the outermost database transaction commits.
+
+        * Callbacks are only invoked once the outermost real database
+          ``COMMIT`` has succeeded.  If the commit itself fails, or the
+          outermost transaction is rolled back, no callback is invoked.
+
+        Callbacks are invoked in the order in which they were registered.
+
+        If no transaction is in progress, the :class:`.Session` autobegins a
+        new transaction (when :paramref:`_orm.Session.autobegin` is enabled,
+        which is the default); the callback then belongs to that transaction.
+
+        The callback must be a zero-argument synchronous callable for a
+        plain :class:`.Session`; its return value is ignored.  Use
+        :meth:`_asyncio.AsyncSession.post_commit` for coroutine functions or
+        other awaitable-returning callbacks.
+
+        .. warning::
+
+            By the time the callback is invoked the database transaction has
+            **already committed**; the changes can no longer be rolled back.
+            If a callback raises, the exception is wrapped in a
+            :class:`_orm.exc.PostCommitCallbackError` to make this fact
+            explicit; the original exception is available as its
+            ``__cause__`` and in the
+            :attr:`_orm.exc.PostCommitCallbackError.original` attribute.
+            Remaining callbacks are still invoked, and a single exception
+            (or a :class:`ExceptionGroup` when more than one callback failed)
+            is raised after all callbacks have been processed.
+
+        Callbacks that register additional post-commit callbacks during
+        dispatch do not append to the dispatch in progress.  Without an
+        active transaction the registration instead autobegins a **new**
+        transaction; the newly registered callback therefore only runs after
+        that subsequent transaction commits, not as part of the dispatch
+        that just completed.
+
+        .. versionadded:: 2.1.3
+
+        """
+
+        trans = self._transaction
+        if trans is None:
+            trans = self._autobegin_t()
+        trans._post_commit_callbacks.append(callback)
+
+    def _dispatch_post_commit_callbacks(self) -> None:
+        """Invoke callbacks that became runnable after a successful outermost
+        commit.
+
+        No-op when dispatch is suppressed (an :class:`_asyncio.AsyncSession`
+        drains the pending list itself once ``greenlet_spawn`` has returned,
+        so awaitable callbacks can be awaited in the event loop thread).
+
+        The pending list is detached before invocation so that callbacks
+        which register further callbacks (thereby autobeginning a new
+        transaction) don't mutate the dispatch in progress.
+
+        """
+
+        if (
+            not self._post_commit_dispatch_enabled
+            or in_greenlet()
+        ):
+            # AsyncSession drains the pending list itself after the
+            # greenlet returns, so that awaitable callbacks can be awaited
+            # in the event loop thread.
+            return
+
+        callbacks = self._post_commit_pending
+        self._post_commit_pending = []
+
+        if not callbacks:
+            return
+
+        errors: List[BaseException] = []
+        for callback in callbacks:
+            try:
+                self._invoke_post_commit_callback(callback)
+            except BaseException as error:
+                errors.append(error)
+
+        if not errors:
+            return
+        elif len(errors) == 1:
+            raise errors[0] from errors[0].__cause__
+        else:
+            group = ExceptionGroup(
+                "post-commit callbacks raised exceptions after the "
+                "database transaction had already been committed",
+                errors,
+            )
+            raise group from errors[0].__cause__
+
+    def _invoke_post_commit_callback(
+        self, callback: PostCommitCallback
+    ) -> None:
+        try:
+            result = callback()
+        except exc.PostCommitCallbackError:
+            raise
+        except BaseException as error:
+            raise exc.PostCommitCallbackError(callback, error) from error
+        if _py_inspect.isawaitable(result):
+            close = getattr(result, "close", None)
+            if close is not None:
+                close()
+            error = sa_exc.InvalidRequestError(
+                "An awaitable post-commit callback %r was registered on a "
+                "synchronous Session; awaitable callbacks require an "
+                "AsyncSession." % (callback,)
+            )
+            raise exc.PostCommitCallbackError(callback, error) from error
 
     def prepare(self) -> None:
         """Prepare the current transaction in progress for two phase commit.
@@ -2706,6 +2913,7 @@ class Session(_SessionClassMethods, EventTarget):
         if not is_reset and self._close_state is _SessionCloseState.ACTIVE:
             self._close_state = _SessionCloseState.CLOSED
         self.expunge_all()
+        self._post_commit_pending = []
         if self._transaction is not None:
             for transaction in self._transaction._iterate_self_and_parents():
                 transaction.close(invalidate)

@@ -2807,3 +2807,215 @@ class LegacyJoinIntoAnExternalTransactionTest(
         # Session above (including calls to commit())
         # is rolled back.
         self.trans.rollback()
+
+
+class PostCommitCallbackTest(fixtures.RemovesEvents, FixtureTest):
+    run_inserts = None
+    __sparse_driver_backend__ = True
+
+    def test_invoked_after_commit_in_registration_order(self):
+        calls = []
+        session = fixture_session()
+        session.post_commit(lambda: calls.append("a"))
+        session.post_commit(lambda: calls.append("b"))
+        session.commit()
+        eq_(calls, ["a", "b"])
+
+    def test_not_invoked_on_rollback(self):
+        calls = []
+        session = fixture_session()
+        session.post_commit(lambda: calls.append("a"))
+        session.rollback()
+        eq_(calls, [])
+
+    def test_not_invoked_when_commit_fails(self):
+        calls = []
+        users = self.tables.users
+        self.mapper_registry.map_imperatively(self.classes.User, users)
+
+        session = Session(bind=testing.db)
+        session.execute(text("insert into users (id, name) values (1, 'x')"))
+        session.post_commit(lambda: calls.append("a"))
+
+        def fail_commit(conn):
+            raise RuntimeError("commit failed")
+
+        event.listen(testing.db, "commit", fail_commit)
+        try:
+            assert_raises_message(
+                RuntimeError, "commit failed", session.commit
+            )
+        finally:
+            event.remove(testing.db, "commit", fail_commit)
+            session.close()
+        eq_(calls, [])
+
+    def test_only_runs_once(self):
+        calls = []
+        session = fixture_session()
+        session.post_commit(lambda: calls.append("a"))
+        session.commit()
+        session.rollback()
+        session.commit()
+        eq_(calls, ["a"])
+
+    @testing.requires.savepoints
+    def test_savepoint_callbacks_merge_on_release(self):
+        calls = []
+        session = fixture_session()
+        session.post_commit(lambda: calls.append("outer-before"))
+        with session.begin_nested():
+            session.post_commit(lambda: calls.append("inner"))
+            with session.begin_nested():
+                session.post_commit(lambda: calls.append("inner-inner"))
+        session.post_commit(lambda: calls.append("outer-after"))
+        session.commit()
+        eq_(
+            calls,
+            ["outer-before", "inner", "inner-inner", "outer-after"],
+        )
+
+    @testing.requires.savepoints
+    def test_savepoint_rollback_discards_callbacks(self):
+        # inner savepoint succeeds, but the outer transaction ultimately
+        # rolls back - the notification list must remain empty.
+        calls = []
+        session = fixture_session()
+        session.post_commit(lambda: calls.append("outer"))
+        with session.begin_nested():
+            session.post_commit(lambda: calls.append("inner-ok"))
+        try:
+            with session.begin_nested():
+                session.post_commit(lambda: calls.append("inner-bad"))
+                raise ValueError("boom")
+        except ValueError:
+            pass
+        session.rollback()
+        eq_(calls, [])
+
+    @testing.requires.savepoints
+    def test_savepoint_rollback_outer_still_commits(self):
+        calls = []
+        session = fixture_session()
+        session.post_commit(lambda: calls.append("outer-before"))
+        try:
+            with session.begin_nested():
+                session.post_commit(lambda: calls.append("inner"))
+                raise ValueError("boom")
+        except ValueError:
+            pass
+        session.post_commit(lambda: calls.append("outer-after"))
+        session.commit()
+        eq_(calls, ["outer-before", "outer-after"])
+
+    def test_callback_exception_wraps_and_continues(self):
+        calls = []
+        session = fixture_session()
+
+        def boom():
+            raise ValueError("nope")
+
+        session.post_commit(boom)
+        session.post_commit(lambda: calls.append("still ran"))
+
+        try:
+            session.commit()
+        except orm_exc.PostCommitCallbackError as error:
+            assert isinstance(error.original, ValueError)
+            assert error.__cause__ is error.original
+            assert "already been committed" in str(error)
+        else:
+            assert False, "expected PostCommitCallbackError"
+        eq_(calls, ["still ran"])
+
+    def test_multiple_callback_exceptions_raise_exceptiongroup(self):
+        session = fixture_session()
+
+        def boom_one():
+            raise ValueError("one")
+
+        def boom_two():
+            raise KeyError("two")
+
+        session.post_commit(boom_one)
+        session.post_commit(boom_two)
+        try:
+            session.commit()
+        except BaseException as error:
+            assert type(error).__name__ == "ExceptionGroup"
+            eq_(len(error.exceptions), 2)
+        else:
+            assert False, "expected ExceptionGroup"
+
+    def test_reregistration_during_dispatch_uses_new_transaction(self):
+        calls = []
+        session = fixture_session()
+
+        def first():
+            calls.append("first")
+            session.post_commit(lambda: calls.append("second"))
+
+        session.post_commit(first)
+        session.commit()
+        eq_(calls, ["first"])
+        session.commit()
+        eq_(calls, ["first", "second"])
+
+    def test_callback_may_begin_new_transaction(self):
+        calls = []
+        session = fixture_session()
+
+        def callback():
+            calls.append("callback")
+            with session.begin_nested():
+                pass
+            session.commit()
+
+        session.post_commit(callback)
+        session.commit()
+        eq_(calls, ["callback"])
+
+    def test_async_callback_on_sync_session_is_rejected(self):
+        import asyncio
+
+        session = fixture_session()
+
+        async def callback():
+            await asyncio.sleep(0)
+
+        session.post_commit(callback)
+        try:
+            session.commit()
+        except orm_exc.PostCommitCallbackError as error:
+            assert isinstance(error.original, sa_exc.InvalidRequestError)
+        else:
+            assert False, "expected PostCommitCallbackError"
+
+    def test_autobegin_when_no_transaction(self):
+        calls = []
+        session = fixture_session()
+        session.post_commit(lambda: calls.append("a"))
+        assert session.in_transaction()
+        session.commit()
+        eq_(calls, ["a"])
+
+    def test_begin_context_manager_dispatches(self):
+        calls = []
+        session = fixture_session()
+        with session.begin():
+            session.post_commit(lambda: calls.append("a"))
+        eq_(calls, ["a"])
+
+    @testing.requires.savepoints
+    def test_begin_context_manager_nested_rollback(self):
+        calls = []
+        session = fixture_session()
+        with session.begin():
+            session.post_commit(lambda: calls.append("outer"))
+            try:
+                with session.begin_nested():
+                    session.post_commit(lambda: calls.append("inner"))
+                    raise ValueError("boom")
+            except ValueError:
+                pass
+        eq_(calls, ["outer"])

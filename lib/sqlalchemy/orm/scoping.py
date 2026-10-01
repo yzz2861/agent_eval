@@ -135,6 +135,7 @@ __all__ = ["scoped_session"]
         "bulk_update_mappings",
         "merge",
         "merge_all",
+        "post_commit",
         "query",
         "refresh",
         "rollback",
@@ -1624,6 +1625,24 @@ class scoped_session(Generic[_S]):
         """  # noqa: E501
 
         return self._proxied.merge_all(instances, load=load, options=options)
+
+    def post_commit(self, callback: Callable[[], Any]) -> None:
+        r"""Proxied for the :class:`_orm.Session` class on behalf of the
+        :class:`_orm.scoping.scoped_session` class.
+
+        .. container:: class_bases
+
+            Proxied for the :class:`_orm.Session` class on
+            behalf of the :class:`_orm.scoping.scoped_session` class.
+
+        .. seealso::
+
+            :meth:`_orm.Session.post_commit` - main documentation for
+            "post_commit"
+
+        """
+
+        return self._proxied.post_commit(callback)
 
     @overload
     def query(self, _entity: _EntityType[_O]) -> Query[_O]: ...

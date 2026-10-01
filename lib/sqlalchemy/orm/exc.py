@@ -65,6 +65,38 @@ class FlushError(sa_exc.SQLAlchemyError):
     """A invalid condition was detected during flush()."""
 
 
+class PostCommitCallbackError(sa_exc.SQLAlchemyError):
+    """Wraps an exception raised by a post-commit callback registered via
+    :meth:`.Session.post_commit`.
+
+    The database transaction has **already been committed successfully** by
+    the time the wrapped callback was invoked; the failure is therefore not
+    reversible and the changes persisted in the database can no longer be
+    rolled back.
+
+    The original exception raised by the callback is available as
+    ``__cause__`` (i.e. via :func:`raise ... from`) as well as in the
+    :attr:`.PostCommitCallbackError.original` attribute.
+
+    .. versionadded:: 2.1.3
+
+    """
+
+    def __init__(self, callback: object, original: BaseException):
+        self.callback = callback
+        """The post-commit callback that raised an exception."""
+
+        self.original = original
+        """The original exception raised by the callback."""
+
+        super().__init__(
+            "A post-commit callback %r raised an exception after the "
+            "database transaction had already been committed successfully; "
+            "the commit cannot be rolled back.  Original exception: %r"
+            % (callback, original)
+        )
+
+
 class MappedAnnotationError(sa_exc.ArgumentError):
     """Raised when ORM annotated declarative cannot interpret the
     expression present inside of the :class:`.Mapped` construct.

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect as _py_inspect
 from typing import Any
 from typing import Awaitable
 from typing import Callable
@@ -16,6 +17,7 @@ from typing import Dict
 from typing import Generic
 from typing import Iterable
 from typing import Iterator
+from typing import List
 from typing import Mapping
 from typing import NoReturn
 from typing import Optional
@@ -38,6 +40,7 @@ from .result import AsyncScalarResult
 from ... import util
 from ...orm import close_all_sessions as _sync_close_all_sessions
 from ...orm import object_session
+from ...orm import exc as orm_exc
 from ...orm import Session
 from ...orm import SessionTransaction
 from ...orm import state as _instance_state
@@ -595,9 +598,15 @@ class AsyncSession(ReversibleProxy[Session]):
             :ref:`session_run_sync`
         '''  # noqa: E501
 
-        return await greenlet_spawn(
+        result = await greenlet_spawn(
             fn, self.sync_session, *arg, _require_await=False, **kw
         )
+        # the sync callable may have committed the outermost transaction
+        # (e.g. via Session.commit() or a SessionTransaction context
+        # manager); dispatch its post-commit callbacks, awaiting any
+        # awaitable ones, now that we're back in the event loop thread.
+        await self._dispatch_post_commit_callbacks()
+        return result
 
     @overload
     async def execute(
@@ -1300,12 +1309,135 @@ class AsyncSession(ReversibleProxy[Session]):
     async def commit(self) -> None:
         """Commit the current transaction in progress.
 
+        Once the underlying database transaction has committed successfully,
+        any callbacks registered via :meth:`_asyncio.AsyncSession.post_commit`
+        are invoked (and awaited, when awaitable) in registration order.
+
         .. seealso::
 
             :meth:`_orm.Session.commit` - main documentation for
             "commit"
         """
-        await greenlet_spawn(self.sync_session.commit)
+        await self._run_async_commit(self.sync_session.commit)
+
+    async def _run_async_commit(self, sync_operation: Callable[[], Any]):
+        """Run a synchronous operation that may commit the outermost
+        transaction (e.g. ``SessionTransaction.commit()`` or its context
+        manager ``__exit__``), suppressing in-greenlet post-commit dispatch
+        so that awaitable callbacks are awaited afterwards in the event
+        loop thread.
+        """
+
+        sync_session = self.sync_session
+        previous = sync_session._post_commit_dispatch_enabled
+        sync_session._post_commit_dispatch_enabled = False
+        try:
+            await greenlet_spawn(sync_operation)
+        finally:
+            sync_session._post_commit_dispatch_enabled = previous
+        await self._dispatch_post_commit_callbacks()
+
+    def post_commit(
+        self, callback: Callable[[], Union[Any, Awaitable[Any]]]
+    ) -> None:
+        """Register a callback to be invoked after the current transaction
+        has been committed successfully at the database level.
+
+        The callback belongs to the transaction level in which it is
+        registered.  Callbacks registered inside a SAVEPOINT
+        (:meth:`_asyncio.AsyncSession.begin_nested`) are discarded when that
+        SAVEPOINT is rolled back; when the SAVEPOINT is released successfully
+        they are merged into the enclosing transaction and only invoked if
+        the outermost database transaction ultimately commits.
+
+        Callbacks are invoked in registration order, after the outermost
+        real database ``COMMIT`` has succeeded.  The callable may be a plain
+        synchronous function or a coroutine function / any callable returning
+        an awaitable; awaitable results are awaited.  Non-awaitable return
+        values are ignored.
+
+        If no transaction is in progress, the :class:`_asyncio.AsyncSession`
+        autobegins a new transaction and the callback belongs to it.
+
+        .. warning::
+
+            By the time the callback is invoked the database transaction has
+            **already committed**; the changes can no longer be rolled back.
+            If a callback raises (or the awaited coroutine raises), the
+            exception is wrapped in a
+            :class:`_orm.exc.PostCommitCallbackError` to make this fact
+            explicit; the original exception is available as its
+            ``__cause__`` and in the
+            :attr:`_orm.exc.PostCommitCallbackError.original` attribute.
+            Remaining callbacks are still processed; when more than one
+            fails, they are raised as an :class:`ExceptionGroup`.
+
+        Callbacks that register further post-commit callbacks during
+        dispatch do not extend the dispatch in progress.  The registration
+        autobegins a **new** transaction, and the new callback only runs once
+        that subsequent transaction commits.  Callbacks may themselves begin
+        and work within a new transaction on the session; this is
+        independent of the just-completed commit.
+
+        .. versionadded:: 2.1.3
+
+        .. seealso::
+
+            :meth:`_orm.Session.post_commit`
+
+        """
+
+        self.sync_session.post_commit(callback)
+
+    async def _dispatch_post_commit_callbacks(self) -> None:
+        """Await post-commit callbacks in the event loop thread."""
+
+        pending = self.sync_session._post_commit_pending
+        callbacks = list(pending)
+        pending.clear()
+
+        if not callbacks:
+            return
+
+        errors: List[BaseException] = []
+        for callback in callbacks:
+            try:
+                result = callback()
+                if _py_inspect.isawaitable(result):
+                    try:
+                        await result
+                    except BaseException as error:
+                        errors.append(
+                            self._wrap_callback_error(callback, error)
+                        )
+            except BaseException as error:
+                if isinstance(error, orm_exc.PostCommitCallbackError):
+                    errors.append(error)
+                else:
+                    errors.append(
+                        self._wrap_callback_error(callback, error)
+                    )
+
+        if not errors:
+            return
+        elif len(errors) == 1:
+            raise errors[0] from errors[0].__cause__
+        else:
+            group = ExceptionGroup(
+                "post-commit callbacks raised exceptions after the "
+                "database transaction had already been committed",
+                errors,
+            )
+            raise group from errors[0].__cause__
+
+    @staticmethod
+    def _wrap_callback_error(
+        callback: Callable[[], Any], error: BaseException
+    ) -> orm_exc.PostCommitCallbackError:
+        try:
+            raise orm_exc.PostCommitCallbackError(callback, error) from error
+        except orm_exc.PostCommitCallbackError as wrapped:
+            return wrapped
 
     async def close(self) -> None:
         """Close out the transactional resources and ORM objects used by this
@@ -2173,7 +2305,9 @@ class AsyncSessionTransaction(
     async def commit(self) -> None:
         """Commit this :class:`_asyncio.AsyncTransaction`."""
 
-        await greenlet_spawn(self._sync_transaction().commit)
+        await self.session._run_async_commit(
+            self._sync_transaction().commit
+        )
 
     @classmethod
     def _regenerate_proxy_for_target(  # type: ignore[override]
@@ -2205,9 +2339,16 @@ class AsyncSessionTransaction(
         return self
 
     async def __aexit__(self, type_: Any, value: Any, traceback: Any) -> None:
-        await greenlet_spawn(
-            self._sync_transaction().__exit__, type_, value, traceback
-        )
+        if type_ is None and self._sync_transaction().is_active:
+
+            def _exit() -> None:
+                self._sync_transaction().__exit__(type_, value, traceback)
+
+            await self.session._run_async_commit(_exit)
+        else:
+            await greenlet_spawn(
+                self._sync_transaction().__exit__, type_, value, traceback
+            )
 
 
 def async_object_session(instance: object) -> Optional[AsyncSession]:

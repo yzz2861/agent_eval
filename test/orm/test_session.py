@@ -2539,6 +2539,7 @@ class SessionInterface(fixtures.MappedTest):
             "get",
             "get_one",
             "bind_table",
+            "post_commit",
         }
         specials = {"__iter__", "__contains__"}
         ok = set()

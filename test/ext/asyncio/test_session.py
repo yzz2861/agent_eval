@@ -29,6 +29,7 @@ from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import exc as orm_exc
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.testing import async_test
@@ -1005,6 +1006,186 @@ class AsyncSessionTransactionTest(AsyncFixture):
         is_true(connection_rec._is_hard_or_soft_invalidated())
 
         eq_(async_session.in_transaction(), False)
+
+
+class AsyncPostCommitCallbackTest(AsyncFixture):
+    run_inserts = None
+
+    @async_test
+    async def test_sync_and_awaitable_callbacks_run_in_order(
+        self, async_session
+    ):
+        calls = []
+
+        async def acb(tag):
+            calls.append(tag)
+
+        async_session.post_commit(lambda: calls.append("s1"))
+        async_session.post_commit(lambda: acb("a1"))
+        async_session.post_commit(lambda: acb("a2"))
+        async_session.post_commit(lambda: calls.append("s2"))
+        await async_session.commit()
+        eq_(calls, ["s1", "a1", "a2", "s2"])
+
+    @async_test
+    async def test_not_invoked_on_rollback(self, async_session):
+        calls = []
+        async_session.post_commit(lambda: calls.append("a"))
+        await async_session.rollback()
+        eq_(calls, [])
+
+    @async_test
+    @testing.requires.savepoints
+    async def test_savepoint_callbacks_merge_on_release(
+        self, async_session
+    ):
+        calls = []
+
+        async def acb(tag):
+            calls.append(tag)
+
+        async_session.post_commit(lambda: calls.append("outer-before"))
+        async with async_session.begin_nested():
+            async_session.post_commit(lambda: acb("inner"))
+            async with async_session.begin_nested():
+                async_session.post_commit(
+                    lambda: calls.append("inner-inner")
+                )
+        async_session.post_commit(lambda: acb("outer-after"))
+        await async_session.commit()
+        eq_(
+            calls,
+            ["outer-before", "inner", "inner-inner", "outer-after"],
+        )
+
+    @async_test
+    @testing.requires.savepoints
+    async def test_savepoint_rollback_then_outer_rollback_is_empty(
+        self, async_session
+    ):
+        # inner savepoint succeeds then outer rolls back: list is empty
+        calls = []
+        async_session.post_commit(lambda: calls.append("outer"))
+        async with async_session.begin_nested():
+            async_session.post_commit(lambda: calls.append("released"))
+        try:
+            async with async_session.begin_nested():
+                async_session.post_commit(lambda: calls.append("rolled"))
+                raise ValueError("boom")
+        except ValueError:
+            pass
+        await async_session.rollback()
+        eq_(calls, [])
+
+    @async_test
+    @testing.requires.savepoints
+    async def test_savepoint_rollback_outer_commits(self, async_session):
+        calls = []
+        async_session.post_commit(lambda: calls.append("outer-before"))
+        try:
+            async with async_session.begin_nested():
+                async_session.post_commit(lambda: calls.append("inner"))
+                raise ValueError("boom")
+        except ValueError:
+            pass
+        async_session.post_commit(lambda: calls.append("outer-after"))
+        await async_session.commit()
+        eq_(calls, ["outer-before", "outer-after"])
+
+    @async_test
+    async def test_failing_awaitable_callback_wrapped(self, async_session):
+        calls = []
+
+        async def boom():
+            raise ValueError("nope")
+
+        async def later():
+            calls.append("still ran")
+
+        async_session.post_commit(boom)
+        async_session.post_commit(later)
+        try:
+            await async_session.commit()
+        except orm_exc.PostCommitCallbackError as error:
+            assert isinstance(error.original, ValueError)
+            assert error.__cause__ is error.original
+            assert "already been committed" in str(error)
+        else:
+            assert False, "expected PostCommitCallbackError"
+        eq_(calls, ["still ran"])
+
+    @async_test
+    async def test_reregistration_uses_new_transaction(self, async_session):
+        calls = []
+
+        async def second():
+            calls.append("second")
+
+        async def first():
+            calls.append("first")
+            async_session.post_commit(second)
+
+        async_session.post_commit(first)
+        await async_session.commit()
+        eq_(calls, ["first"])
+        await async_session.commit()
+        eq_(calls, ["first", "second"])
+
+    @async_test
+    async def test_not_invoked_when_commit_fails(self, async_engine):
+        calls = []
+
+        def fail_commit(conn):
+            raise RuntimeError("commit failed")
+
+        event.listen(async_engine.sync_engine, "commit", fail_commit)
+        async_session = AsyncSession(async_engine)
+        try:
+            await async_session.execute(select(1))
+            async_session.post_commit(lambda: calls.append("a"))
+            try:
+                await async_session.commit()
+            except RuntimeError as error:
+                assert "commit failed" in str(error)
+            else:
+                assert False, "expected RuntimeError"
+        finally:
+            event.remove(
+                async_engine.sync_engine, "commit", fail_commit
+            )
+            await async_session.close()
+        eq_(calls, [])
+
+    @async_test
+    async def test_begin_context_manager_dispatches(self, async_engine):
+        calls = []
+
+        async def acb(tag):
+            calls.append(tag)
+
+        async with AsyncSession(async_engine) as session:
+            async with session.begin():
+                session.post_commit(lambda: calls.append("sync"))
+                session.post_commit(lambda: acb("async"))
+        eq_(calls, ["sync", "async"])
+
+    @async_test
+    @testing.requires.savepoints
+    async def test_begin_context_manager_nested_rollback(
+        self, async_engine
+    ):
+        calls = []
+
+        async with AsyncSession(async_engine) as session:
+            async with session.begin():
+                session.post_commit(lambda: calls.append("outer"))
+                try:
+                    async with session.begin_nested():
+                        session.post_commit(lambda: calls.append("inner"))
+                        raise ValueError("boom")
+                except ValueError:
+                    pass
+        eq_(calls, ["outer"])
 
 
 class AsyncCascadesTest(AsyncFixture):

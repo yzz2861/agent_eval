@@ -216,6 +216,65 @@ without the need for refreshing it from the database.
 
     :meth:`_engine.Connection.begin_nested` -  Core SAVEPOINT API
 
+.. _session_post_commit_callbacks:
+
+Post-Commit Callbacks
+----------------------
+
+The :meth:`_orm.Session.post_commit` method registers a zero-argument
+callable that is invoked only **after the outermost database transaction has
+been committed successfully**.  It is intended for actions such as sending
+notifications that must never be emitted if the database changes are
+ultimately rolled back::
+
+    notifications = []
+
+    session = Session(engine)
+    session.post_commit(lambda: notifications.append("committed"))
+    session.commit()  # callbacks run now
+
+A callback is associated with the **transaction level at which it is
+registered**.  This is important when using SAVEPOINTs:
+
+* A callback registered inside a :meth:`_orm.Session.begin_nested` block
+  that is rolled back is **discarded** and will never run, even if the
+  enclosing transaction later commits.
+* When a SAVEPOINT is released successfully, its callbacks are merged into
+  the enclosing transaction.  They only run if the outermost transaction
+  ultimately commits.
+* If the commit itself fails (for example the database raises during
+  ``COMMIT``), no callbacks are run.
+
+Callbacks always run in registration order.
+
+.. warning::
+
+    By the time the callbacks run, the database transaction is **already
+    committed** - the changes can no longer be rolled back.  If a callback
+    raises, it is wrapped in
+    :class:`_orm.exc.PostCommitCallbackError` (with the original exception
+    available as ``error.original`` / ``error.__cause__``) so that it is
+    clear this is *not* a recoverable commit failure.  Remaining callbacks
+    are still invoked; if several fail, an :class:`ExceptionGroup` is
+    raised.
+
+Callbacks that register further callbacks while they are being dispatched
+do not extend the dispatch that is already running.  Registration without
+an active transaction autobegins a **new** transaction, so the new callback
+only runs once that subsequent transaction commits.  A callback may itself
+begin and commit a new transaction.
+
+For :class:`_asyncio.AsyncSession`,
+:meth:`_asyncio.AsyncSession.post_commit` additionally accepts coroutine
+functions and other callables that return an awaitable, which are awaited
+in order after the commit.
+
+.. seealso::
+
+    :meth:`_orm.Session.post_commit`
+
+    :class:`_orm.exc.PostCommitCallbackError`
+
 .. _orm_session_vs_engine:
 
 Session-level vs. Engine level transaction control
@@ -711,4 +770,3 @@ data changes throughout the test are reverted::
 
 The above recipe is part of SQLAlchemy's own CI to ensure that it remains
 working as expected.
-
