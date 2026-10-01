@@ -474,6 +474,46 @@ graphql = GraphQL(
 ```
 
 
+
+## Subscription authorization rechecks
+
+Authenticating the websocket connection in `on_connect` only proves the client was authorized at connect time. Permissions of long-lived subscriptions may change while they are active.
+
+`GraphQLTransportWSHandler` supports a `subscription_authorizer` option for rechecking the authorization of individual subscriptions:
+
+```python
+from ariadne.asgi import GraphQL
+from ariadne.asgi.handlers import GraphQLTransportWSHandler
+
+
+async def subscription_authorizer(websocket, operation):
+    return await acl.is_allowed(websocket.scope["user"], operation.name)
+
+
+graphql = GraphQL(
+    schema,
+    websocket_handler=GraphQLTransportWSHandler(
+        subscription_authorizer=subscription_authorizer,
+    ),
+)
+```
+
+The authorizer is a callable (sync or async) taking the `WebSocket` instance and the `Operation` dataclass. It's evaluated before each event is sent to the client. While an asynchronous recheck is in progress, at most one undelivered event is pulled from the subscription's source, so events don't pile up.
+
+Returning a falsy value (or raising an exception) revokes the subscription: its operation is terminated with an `error` message and its source generator is closed, but the websocket connection and other active subscriptions are not affected.
+
+The application can also proactively request a recheck, eg. when a permission change is pushed from an authorization service, using the handler's `request_authorization_recheck` method:
+
+```python
+# Recheck all subscriptions of a single connection:
+websocket_handler.request_authorization_recheck(websocket)
+
+# Recheck a single operation:
+websocket_handler.request_authorization_recheck(websocket, operation_id)
+```
+
+See the `examples/graphql_transport_ws_authorization_example.py` for a runnable example using a switchable local permission function.
+
 ## Using Server-Sent Events Protocol
 
 Instead of WebSockets, [Server-Sent Events (SSE)](https://github.com/enisdenjo/graphql-sse/blob/master/PROTOCOL.md) can be used as a transmission protocol for subscriptions. This approach uses single, long-lived HTTP connection to push data to clients.

@@ -47,6 +47,7 @@ __all__ = [
     "OnDisconnect",
     "OnOperation",
     "OnComplete",
+    "SubscriptionAuthorizer",
     "Extension",
     "SchemaBindable",
 ]
@@ -526,6 +527,26 @@ Called with two arguments:
 `Operation`: an object with closed subscription's data.
 """
 OnComplete = Callable[[WebSocket, Operation], Any]
+
+"""Type of `subscription_authorizer` option of GraphQL websocket servers.
+
+Callback function evaluated to recheck if individual GraphQL subscription
+is still authorized to receive events. It's called before each event is sent
+to the client and each time the application requests an authorization recheck
+through the websocket handler.
+
+Called with two arguments:
+
+`WebSocket`: the HTTP framework specific representation of websocket connection.
+
+`Operation`: an object with authorized subscription's data.
+
+Should return a truthy value (or awaitable resolving to one) if subscription
+is still authorized. Falsy result or raised exception revokes the
+subscription: its operation is terminated with an `error` message, without
+affecting other operations on the same websocket connection.
+"""
+SubscriptionAuthorizer = Callable[[WebSocket, Operation], Any]
 
 
 class Extension:
