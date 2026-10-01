@@ -1363,7 +1363,7 @@ class TestGenerator(TestCase):
         assert 'schemas' in schema['components']
         assert 'Ulysses' in schema['components']['schemas']
 
-    def test_duplicate_component_name(self):
+    def test_duplicate_component_name_is_deduplicated(self):
         patterns = [
             path('duplicate1/', views.ExampleAutoSchemaDuplicate1.as_view()),
             path('duplicate2/', views.ExampleAutoSchemaDuplicate2.as_view()),
@@ -1372,17 +1372,12 @@ class TestGenerator(TestCase):
         generator = SchemaGenerator(patterns=patterns)
         request = create_request('/')
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter('always')
-            schema = generator.get_schema(request=request)
-
-            assert len(w) == 1
-            assert issubclass(w[-1].category, UserWarning)
-            assert 'has been overridden with a different value.' in str(w[-1].message)
+        schema = generator.get_schema(request=request)
 
         assert 'components' in schema
         assert 'schemas' in schema['components']
         assert 'Duplicate' in schema['components']['schemas']
+        assert 'Duplicate2' in schema['components']['schemas']
 
     def test_component_should_not_be_generated_for_delete_method(self):
         class ExampleView(generics.DestroyAPIView):

@@ -348,6 +348,45 @@ Most serializers should conform to the standard OpenAPI `object` type, but you m
 wish to override `map_serializer()` in order to customize this or other
 serializer-level fields.
 
+### Polymorphic serializers
+
+Use `PolymorphicSerializer` with `SerializerBranch` when one action accepts or
+returns several serializer shapes selected by a discriminator field. Each branch
+label must be unique and unknown labels fail validation rather than falling back
+to the first branch.
+
+```python
+from rest_framework import serializers
+
+
+class TextSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=['text'])
+    text = serializers.CharField()
+
+
+class NumberSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=['number'])
+    value = serializers.IntegerField()
+
+
+class EventSerializer(serializers.PolymorphicSerializer):
+    def get_branches(self):
+        return (
+            serializers.SerializerBranch('text', TextSerializer),
+            serializers.SerializerBranch('number', NumberSerializer),
+        )
+```
+
+The generated component uses OpenAPI `oneOf` with a discriminator. Branch
+serializers become components, recursive serializer references terminate with
+`$ref`, duplicate serializer class names receive distinct component names, and
+`many=True` list responses are wrapped by the configured pagination schema.
+Override `AutoSchema.get_request_serializer()` and
+`AutoSchema.get_response_serializer()` when request and response actions use
+different branch sets.
+
+See `examples/polymorphic_serializers.py` for a runnable example.
+
 #### `map_field()`
 
 Maps individual serializer fields to their schema representation. The base implementation

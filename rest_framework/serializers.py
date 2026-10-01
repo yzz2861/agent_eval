@@ -83,6 +83,37 @@ LIST_SERIALIZER_KWARGS_REMOVE = ('allow_empty', 'min_length', 'max_length')
 ALL_FIELDS = '__all__'
 
 
+class SerializerBranch:
+    """A serializer selected by the value of a polymorphic discriminator."""
+
+    def __init__(self, label, serializer_class):
+        self.label = label
+        self.serializer_class = serializer_class
+
+
+def _get_discriminator_value(value, field_name):
+    if isinstance(value, Mapping):
+        return value.get(field_name, empty)
+    return getattr(value, field_name, empty)
+
+
+def _validate_serializer_branches(branches):
+    if not branches:
+        raise ValueError('A polymorphic serializer requires at least one branch.')
+
+    labels = set()
+    for branch in branches:
+        if not isinstance(branch, SerializerBranch):
+            label, serializer_class = branch
+            branch = SerializerBranch(label, serializer_class)
+        if branch.label in labels:
+            raise ValueError(f'Duplicate serializer branch label: {branch.label!r}')
+        labels.add(branch.label)
+        if not (isinstance(branch.serializer_class, type) and
+                issubclass(branch.serializer_class, BaseSerializer)):
+            raise TypeError('Serializer branches must reference serializer classes.')
+
+
 # BaseSerializer
 # --------------
 
@@ -829,6 +860,238 @@ class ListSerializer(BaseSerializer):
         if isinstance(ret, dict):
             return ReturnDict(ret, serializer=self)
         return ReturnList(ret, serializer=self)
+
+
+class PolymorphicListSerializer(ListSerializer):
+    def _validate_shape(self, data):
+        if html.is_html_input(data):
+            data = html.parse_html_list(data, default=[])
+
+        if not isinstance(data, list):
+            message = self.error_messages['not_a_list'].format(
+                input_type=type(data).__name__
+            )
+            raise ValidationError({
+                api_settings.NON_FIELD_ERRORS_KEY: [message]
+            }, code='not_a_list')
+
+        if not self.allow_empty and len(data) == 0:
+            message = self.error_messages['empty']
+            raise ValidationError({
+                api_settings.NON_FIELD_ERRORS_KEY: [message]
+            }, code='empty')
+
+        if self.max_length is not None and len(data) > self.max_length:
+            message = self.error_messages['max_length'].format(max_length=self.max_length)
+            raise ValidationError({
+                api_settings.NON_FIELD_ERRORS_KEY: [message]
+            }, code='max_length')
+
+        if self.min_length is not None and len(data) < self.min_length:
+            message = self.error_messages['min_length'].format(min_length=self.min_length)
+            raise ValidationError({
+                api_settings.NON_FIELD_ERRORS_KEY: [message]
+            }, code='min_length')
+
+        return data
+
+    def _get_serializer(self, value, index):
+        instance = None
+        if self.instance is not None:
+            try:
+                instance = self.instance[index]
+            except (IndexError, KeyError, TypeError):
+                instance = None
+        serializer = self.child.get_serializer_for_value(value)
+        serializer.instance = instance
+        return serializer
+
+    def _validate_item(self, item):
+        return self.child._validate_data(item)
+
+    def to_internal_value(self, data):
+        data = self._validate_shape(data)
+        result = []
+        errors = {}
+        for index, item in enumerate(data):
+            try:
+                result.append(self._validate_item(item))
+            except ValidationError as exc:
+                errors[index] = exc.detail
+
+        if errors:
+            raise ValidationError(errors)
+        return result
+
+    def to_representation(self, data):
+        iterable = data.all() if isinstance(data, models.manager.BaseManager) else data
+        return [
+            self.child.to_representation(item)
+            for item in iterable
+        ]
+
+    def create(self, validated_data):
+        result = []
+        for index, attrs in enumerate(validated_data):
+            serializer = self._get_serializer(self.child.initial_data[index], index)
+            result.append(serializer.create(attrs))
+        return result
+
+    def save(self, **kwargs):
+        assert hasattr(self, '_errors'), 'You must call `.is_valid()` before calling `.save()`.'
+        assert not self.errors, 'You cannot call `.save()` on a serializer with invalid data.'
+        assert 'commit' not in kwargs
+
+        validated_data = [{**attrs, **kwargs} for attrs in self.validated_data]
+        if self.instance is not None:
+            self.instance = self.update(self.instance, validated_data)
+        else:
+            self.instance = self.create(validated_data)
+        return self.instance
+
+
+class PolymorphicSerializer(Serializer):
+    """Validate and render serializers selected by a discriminator field."""
+
+    discriminator_field_name = 'type'
+    list_serializer_class = PolymorphicListSerializer
+
+    def __init__(
+        self, branches=None, discriminator_field_name=None,
+        instance=None, data=empty, **kwargs
+    ):
+        if discriminator_field_name is not None:
+            self.discriminator_field_name = discriminator_field_name
+        self.branches = self._coerce_branches(
+            branches if branches is not None else self.get_branches()
+        )
+        super().__init__(instance=instance, data=data, **kwargs)
+
+    @classmethod
+    def many_init(cls, *args, **kwargs):
+        branches = kwargs.pop('branches', None)
+        allow_empty = kwargs.pop('allow_empty', None)
+        max_length = kwargs.pop('max_length', None)
+        min_length = kwargs.pop('min_length', None)
+        discriminator_field_name = kwargs.pop('discriminator_field_name', None)
+        child_kwargs = dict(kwargs)
+        if len(args) > 0:
+            child_kwargs['instance'] = args[0]
+        if len(args) > 1:
+            child_kwargs['data'] = args[1]
+        child = cls(
+            branches=branches,
+            discriminator_field_name=discriminator_field_name,
+            **child_kwargs,
+        )
+        list_kwargs = {'child': child}
+        list_kwargs.update({
+            key: value for key, value in kwargs.items()
+            if key in LIST_SERIALIZER_KWARGS
+        })
+        if allow_empty is not None:
+            list_kwargs['allow_empty'] = allow_empty
+        if max_length is not None:
+            list_kwargs['max_length'] = max_length
+        if min_length is not None:
+            list_kwargs['min_length'] = min_length
+        return cls.list_serializer_class(*args, **list_kwargs)
+
+    @classmethod
+    def _coerce_branches(cls, branches):
+        _validate_serializer_branches(branches)
+        result = []
+        for branch in branches:
+            if not isinstance(branch, SerializerBranch):
+                label, serializer_class = branch
+                branch = SerializerBranch(label, serializer_class)
+            result.append(branch)
+        return tuple(result)
+
+    def get_branches(self):
+        raise NotImplementedError(
+            '`get_branches()` must be implemented or `branches` must be provided.'
+        )
+
+    def get_branch(self, label):
+        for branch in self.branches:
+            if branch.label == label:
+                return branch
+        return None
+
+    def get_discriminator_value(self, value):
+        return _get_discriminator_value(value, self.discriminator_field_name)
+
+    def get_serializer_for_value(self, value):
+        label = self.get_discriminator_value(value)
+        branch = self.get_branch(label)
+        if branch is None:
+            if label is empty:
+                message = 'This field is required.'
+                code = 'required'
+            else:
+                available = ', '.join(str(branch.label) for branch in self.branches)
+                message = (
+                    f'"{label}" is not a valid choice. '
+                    f'Valid choices are: {available}.'
+                )
+                code = 'invalid_choice'
+            raise ValidationError({
+                self.discriminator_field_name: [ErrorDetail(message, code=code)]
+            })
+        return branch.serializer_class(context=self.context, partial=self.partial)
+
+    def run_validation(self, data=empty):
+        (is_empty_value, data) = self.validate_empty_values(data)
+        if is_empty_value:
+            return data
+        if not isinstance(data, Mapping):
+            raise ValidationError({
+                api_settings.NON_FIELD_ERRORS_KEY: [
+                    ErrorDetail(
+                        self.error_messages['invalid'].format(datatype=type(data).__name__),
+                        code='invalid'
+                    )
+                ]
+            })
+        return self._validate_data(data)
+
+    def _validate_data(self, data):
+        serializer = self.get_serializer_for_value(data)
+        validated = serializer.run_validation(data)
+        if isinstance(validated, Mapping):
+            field = serializer.fields.get(self.discriminator_field_name)
+            if field is None or not field.read_only:
+                validated[self.discriminator_field_name] = (
+                    self.get_discriminator_value(data)
+                )
+        return validated
+
+    def to_internal_value(self, data):
+        return self.get_serializer_for_value(data).to_internal_value(data)
+
+    def to_representation(self, instance):
+        label = self.get_discriminator_value(instance)
+        branch = self.get_branch(label)
+        if branch is None:
+            return self.get_serializer_for_value(instance).to_representation(instance)
+        serializer_class = branch.serializer_class
+        data = serializer_class(
+            context=self.context, partial=self.partial
+        ).to_representation(instance)
+        if isinstance(data, Mapping):
+            data[self.discriminator_field_name] = branch.label
+        return data
+
+    def create(self, validated_data):
+        label = validated_data[self.discriminator_field_name]
+        serializer_class = self.get_branch(label).serializer_class
+        serializer = serializer_class(context=self.context, partial=self.partial)
+        return serializer.create(validated_data)
+
+    def update(self, instance, validated_data):
+        serializer = self.get_serializer_for_value(instance)
+        return serializer.update(instance, validated_data)
 
 
 # ModelSerializer & HyperlinkedModelSerializer
