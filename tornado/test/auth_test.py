@@ -3,12 +3,20 @@
 # and ensure that it doesn't blow up (e.g. with unicode/bytes issues in
 # python 3)
 
+import asyncio
+import base64
+import hashlib
+import secrets
+import urllib.parse
 from unittest import mock
 
 from tornado import gen
 from tornado.auth import (
     FacebookGraphMixin,
     GoogleOAuth2Mixin,
+    InMemoryOAuth2PKCEStateStore,
+    OAuth2PKCEError,
+    OAuth2PKCEState,
     OAuth2Mixin,
     OAuthMixin,
     OpenIdMixin,
@@ -18,7 +26,12 @@ from tornado.escape import json_decode
 from tornado.httpclient import HTTPClientError
 from tornado.httputil import url_concat
 from tornado.log import app_log
-from tornado.testing import ExpectLog, setup_with_context_manager
+from tornado.testing import (
+    AsyncTestCase,
+    ExpectLog,
+    gen_test,
+    setup_with_context_manager,
+)
 from tornado.test.util import AsyncHTTPTestCase, ignore_deprecation
 from tornado.web import Application, HTTPError, RequestHandler
 
@@ -272,6 +285,50 @@ class TwitterServerVerifyCredentialsHandler(RequestHandler):
         assert self.get_argument("oauth_version") == "1.0"
         assert self.get_argument("oauth_token") == "hjkl"
         self.write(dict(screen_name="foo", name="Foo"))
+
+
+class OAuth2PKCEStateStoreTest(AsyncTestCase):
+    def make_entry(self, initiator="initiator"):
+        return OAuth2PKCEState(
+            "verifier",
+            "http://example/callback",
+            "client-id",
+            initiator,
+        )
+
+    @gen_test
+    async def test_consume_is_atomic(self):
+        store = InMemoryOAuth2PKCEStateStore()
+        await store.save("state", self.make_entry(), 60)
+        results = await asyncio.gather(
+            store.consume("state", "initiator"),
+            store.consume("state", "initiator"),
+        )
+        self.assertEqual(
+            sorted(result.entry is not None for result in results),
+            [False, True],
+        )
+
+    @gen_test
+    async def test_mismatch_does_not_consume(self):
+        store = InMemoryOAuth2PKCEStateStore()
+        await store.save("state", self.make_entry(), 60)
+        mismatch = await store.consume("state", "other")
+        self.assertTrue(mismatch.initiator_mismatch)
+        self.assertIsNotNone(mismatch.entry)
+        match = await store.consume("state", "initiator")
+        self.assertIsNotNone(match.entry)
+        self.assertFalse(match.initiator_mismatch)
+
+    @gen_test
+    async def test_expired_state_is_rejected(self):
+        clock = [0.0]
+        store = InMemoryOAuth2PKCEStateStore(time_func=lambda: clock[0])
+        await store.save("state", self.make_entry(), 10)
+        clock[0] = 11
+        result = await store.consume("state", "initiator")
+        self.assertIsNone(result.entry)
+        self.assertFalse(result.initiator_mismatch)
 
 
 class OpenIDAuthTest(AsyncHTTPTestCase):
@@ -547,6 +604,73 @@ class AuthTest(AsyncHTTPTestCase):
         self.assertEqual(response.body, b"error from twitter request")
 
 
+class OAuth2PKCEClientLoginHandler(RequestHandler, OAuth2Mixin):
+    async def get(self):
+        try:
+            token = await self.oauth2_pkce_login()
+        except OAuth2PKCEError as error:
+            self.send_oauth2_pkce_error(error)
+            return
+        if token is not None:
+            self.write({"logged_in": True})
+
+
+class OAuth2PKCEAuthorizeHandler(RequestHandler):
+    def get(self):
+        challenge = self.get_argument("code_challenge")
+        assert self.get_argument("code_challenge_method") == "S256"
+        if self.get_argument("prompt", None) == "deny":
+            self.redirect(
+                url_concat(
+                    self.get_argument("redirect_uri"),
+                    {
+                        "error": "access_denied",
+                        "state": self.get_argument("state"),
+                    },
+                )
+            )
+            return
+
+        code = secrets.token_urlsafe(24)
+        self.application.settings["oauth2_pkce_codes"][code] = {
+            "redirect_uri": self.get_argument("redirect_uri"),
+            "client_id": self.get_argument("client_id"),
+            "code_challenge": challenge,
+            "state": self.get_argument("state"),
+        }
+        self.redirect(
+            url_concat(
+                self.get_argument("redirect_uri"),
+                {"code": code, "state": self.get_argument("state")},
+            )
+        )
+
+
+class OAuth2PKCETokenHandler(RequestHandler):
+    async def post(self):
+        await asyncio.sleep(0.05)
+        body = urllib.parse.parse_qs(self.request.body.decode("utf-8"))
+        code = body["code"][0]
+        codes = self.application.settings["oauth2_pkce_codes"]
+        code_data = codes.pop(code, None)
+        if code_data is None:
+            self.set_status(400)
+            self.write({"error": "invalid_grant"})
+            return
+
+        verifier = body["code_verifier"][0]
+        expected_challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode("ascii")
+        )
+        assert body["grant_type"][0] == "authorization_code"
+        assert body["redirect_uri"][0] == code_data["redirect_uri"]
+        assert body["client_id"][0] == code_data["client_id"]
+        assert expected_challenge == code_data["code_challenge"]
+        self.write({"access_token": "fake-access-token", "token_type": "bearer"})
+
+
 class GoogleLoginHandler(RequestHandler, GoogleOAuth2Mixin):
     def initialize(self, test):
         self.test = test
@@ -598,6 +722,205 @@ class GoogleOAuth2UserinfoHandler(RequestHandler):
         assert self.get_argument("access_token") == "fake-access-token"
         # return a fake user
         self.finish({"name": "Foo", "email": "foo@example.com"})
+
+
+class OAuth2PKCETest(AsyncHTTPTestCase):
+    def get_app(self):
+        return Application(
+            [
+                ("/pkce/login", OAuth2PKCEClientLoginHandler),
+                ("/pkce/authorize", OAuth2PKCEAuthorizeHandler),
+                ("/pkce/token", OAuth2PKCETokenHandler),
+            ],
+            cookie_secret="test-cookie-secret",
+            oauth2_pkce_codes={},
+            oauth2_pkce={
+                "client_id": "test-client-id",
+                "redirect_uri": self.get_url("/pkce/login"),
+                "authorize_url": self.get_url("/pkce/authorize"),
+                "token_url": self.get_url("/pkce/token"),
+                "state_store": InMemoryOAuth2PKCEStateStore(),
+                "state_ttl_seconds": 600,
+            },
+        )
+
+    def start_login(self, **query):
+        path = "/pkce/login"
+        if query:
+            path += "?" + urllib.parse.urlencode(query)
+        response = self.fetch(path, follow_redirects=False)
+        self.assertEqual(response.code, 302)
+        location = urllib.parse.urlparse(response.headers["Location"])
+        self.assertEqual(location.path, "/pkce/authorize")
+        self.assertNotIn("code_verifier", location.query)
+        for cookie in response.headers.get_list("Set-Cookie"):
+            self.assertNotIn("code_verifier", cookie)
+        return location, response.headers.get_list("Set-Cookie")
+
+    def callback_headers(self, set_cookies):
+        cookies = []
+        for item in set_cookies:
+            cookies.append(item.split(";", 1)[0])
+        return {"Cookie": "; ".join(cookies)}
+
+    def callback_url(self, location):
+        return location.query
+
+    def test_pkce_login_success(self):
+        location, set_cookies = self.start_login()
+        response = self.fetch(
+            "/pkce/login?" + self.callback_url(location),
+            headers=self.callback_headers(set_cookies),
+        )
+        response.rethrow()
+        self.assertEqual(json_decode(response.body), {"logged_in": True})
+        self.assertIn("Max-Age=0", response.headers.get("Set-Cookie", ""))
+
+    def test_pkce_provider_denial(self):
+        location, set_cookies = self.start_login(prompt="deny")
+        response = self.fetch(
+            "/pkce/login?" + self.callback_url(location),
+            headers=self.callback_headers(set_cookies),
+        )
+        self.assertEqual(response.code, 403)
+        self.assertEqual(response.body, b"Login was denied.")
+        self.assertNotIn(b"verifier", response.body)
+
+    def test_pkce_callback_is_single_use(self):
+        location, set_cookies = self.start_login()
+        headers = self.callback_headers(set_cookies)
+        first = self.fetch(
+            "/pkce/login?" + self.callback_url(location), headers=headers
+        )
+        second = self.fetch(
+            "/pkce/login?" + self.callback_url(location), headers=headers
+        )
+        self.assertEqual(first.code, 200)
+        self.assertEqual(second.code, 400)
+        self.assertEqual(
+            second.body,
+            b"This login link has expired or already been used.",
+        )
+
+    @gen_test
+    async def test_pkce_state_is_bound_to_browser(self):
+        location, set_cookies = self.start_login()
+        response = self.fetch("/pkce/login?" + self.callback_url(location))
+        self.assertEqual(response.code, 400)
+
+        query = urllib.parse.parse_qs(location.query)
+        state = query["state"][0]
+        store = self.get_app().settings["oauth2_pkce"]["state_store"]
+        expires_at, original = store._states[state]
+        store._states[state] = (
+            expires_at,
+            OAuth2PKCEState(
+                code_verifier=original.code_verifier,
+                redirect_uri=original.redirect_uri,
+                client_id=original.client_id,
+                initiator="different-browser-initiator",
+                scope=original.scope,
+                extra_params=original.extra_params,
+            ),
+        )
+        response = self.fetch(
+            "/pkce/login?" + self.callback_url(location),
+            headers=self.callback_headers(set_cookies),
+        )
+        self.assertEqual(response.code, 403)
+        self.assertNotIn("Max-Age=0", response.headers.get("Set-Cookie", ""))
+
+    def test_parallel_logins_do_not_overwrite(self):
+        first_location, first_cookies = self.start_login()
+        second_location, second_cookies = self.start_login()
+        first_query = urllib.parse.parse_qs(first_location.query)
+        second_query = urllib.parse.parse_qs(second_location.query)
+        self.assertNotEqual(first_query["state"][0], second_query["state"][0])
+        self.assertNotEqual(
+            first_cookies[0].split("=", 1)[0],
+            second_cookies[0].split("=", 1)[0],
+        )
+
+        first_response = self.fetch(
+            "/pkce/login?" + self.callback_url(first_location),
+            headers=self.callback_headers(first_cookies),
+        )
+        second_response = self.fetch(
+            "/pkce/login?" + self.callback_url(second_location),
+            headers=self.callback_headers(second_cookies),
+        )
+        self.assertEqual(first_response.code, 200)
+        self.assertEqual(second_response.code, 200)
+
+    def test_pkce_state_expires(self):
+        location, set_cookies = self.start_login()
+        store = self.get_app().settings["oauth2_pkce"]["state_store"]
+        query = urllib.parse.parse_qs(location.query)
+        expires_at, entry = store._states[query["state"][0]]
+        store._states[query["state"][0]] = (expires_at - 601, entry)
+
+        response = self.fetch(
+            "/pkce/login?" + self.callback_url(location),
+            headers=self.callback_headers(set_cookies),
+        )
+        self.assertEqual(response.code, 400)
+        self.assertEqual(
+            response.body,
+            b"This login link has expired or already been used.",
+        )
+
+    def test_pkce_unknown_state_fails(self):
+        location, set_cookies = self.start_login()
+        query = urllib.parse.parse_qs(location.query)
+        query["state"] = ["unknown-state"]
+
+        response = self.fetch(
+            "/pkce/login?" + urllib.parse.urlencode(query, doseq=True),
+            headers=self.callback_headers(set_cookies),
+        )
+        self.assertEqual(response.code, 400)
+        self.assertEqual(
+            response.body,
+            b"This login link has expired or already been used.",
+        )
+
+    def test_callback_redirect_uri_cannot_change_exchange(self):
+        location, set_cookies = self.start_login()
+        query = urllib.parse.parse_qs(location.query)
+        expected_redirect = query["redirect_uri"][0]
+        callback_query = urllib.parse.urlencode(
+            {
+                "code": "unused",
+                "state": query["state"][0],
+                "redirect_uri": self.get_url("/attacker/callback"),
+            }
+        )
+        response = self.fetch(
+            "/pkce/login?" + callback_query,
+            headers=self.callback_headers(set_cookies),
+        )
+        self.assertEqual(response.code, 400)
+        self.assertEqual(response.body, b"The login request was invalid.")
+        self.assertEqual(
+            self.get_app().settings["oauth2_pkce"]["redirect_uri"],
+            expected_redirect,
+        )
+
+    @gen_test
+    async def test_concurrent_callbacks_consume_state_once(self):
+        location, set_cookies = self.start_login()
+        url = self.get_url("/pkce/login?" + self.callback_url(location))
+        headers = self.callback_headers(set_cookies)
+        requests = [
+            self.http_client.fetch(url, headers=headers),
+            self.http_client.fetch(url, headers=headers),
+        ]
+        responses = await asyncio.gather(*requests, return_exceptions=True)
+        statuses = sorted(response.code for response in responses)
+        self.assertEqual(statuses, [400, 200])
+        for response in responses:
+            self.assertNotIn(b"fake-access-token", response.body)
+            self.assertNotIn(b"code_verifier", response.body)
 
 
 class GoogleOAuth2Test(AsyncHTTPTestCase):
