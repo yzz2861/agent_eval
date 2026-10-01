@@ -1,0 +1,102 @@
+.. _specs/rfc9396:
+
+RFC9396: OAuth 2.0 Rich Authorization Requests
+==============================================
+
+This section contains the implementation of :rfc:`RFC9396 <9396>`. Rich
+Authorization Requests let clients express fine-grained authorization
+requirements with the ``authorization_details`` parameter, a JSON array
+of typed objects, instead of relying only on the ``scope`` string.
+
+The framework validates the basic JSON structure of the parameter and
+enforces configurable size limits. Since the meaning of each ``type`` is
+application specific, validation of individual objects and the decision
+of whether requested details are covered by the details approved by the
+resource owner are delegated to callables registered per ``type``. The
+framework never guesses containment between business specific objects
+with a generic comparison.
+
+Registering types
+-----------------
+
+Register every supported ``type`` on the authorization server, with an
+optional ``validate`` callable (check one requested object) and an
+optional ``is_subsumed`` callable (decide if a requested object is
+covered by an approved one)::
+
+    from authlib.oauth2.rfc9396 import InvalidAuthorizationDetailsError
+
+    def validate_payment(detail, request):
+        if not isinstance(detail.get("amount"), int) or detail["amount"] <= 0:
+            raise InvalidAuthorizationDetailsError("Invalid 'amount'.")
+
+    def payment_subsumed(requested, approved):
+        return requested.get("amount", 0) <= approved.get("amount", 0)
+
+    authorization_server.register_authorization_details_type(
+        "payment",
+        validate=validate_payment,
+        is_subsumed=payment_subsumed,
+    )
+
+When no ``is_subsumed`` callable is registered, only an object exactly
+equal to an approved one is accepted. Unknown types, malformed objects
+and over-limit inputs are rejected with protocol errors
+(``invalid_authorization_details`` or ``invalid_request``).
+
+Authorization flow
+------------------
+
+The validated requested details are available on
+``grant.requested_authorization_details`` when building the consent
+page. During consent, the application may assign a narrowed list to
+``grant.request.authorization_details``; only the approved details are
+saved with the authorization code and issued into tokens. Persist them
+in ``save_authorization_code``::
+
+    class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
+        def save_authorization_code(self, code, request):
+            item = AuthorizationCode(
+                code=code,
+                client_id=client.client_id,
+                authorization_details=request.authorization_details,
+                ...
+            )
+
+At the token endpoint, the client may send ``authorization_details``
+again to narrow the granted details down; attempts to widen them back
+are rejected. The same applies to the refresh token grant. The token
+response contains the effective ``authorization_details``, and token
+introspection returns the details that were actually granted with the
+token, not the ones originally requested by the client.
+
+Client
+------
+
+The client accepts authorization details objects and serializes them::
+
+    authorization_details = [{"type": "payment", "amount": 30}]
+    client.create_authorization_url(url, authorization_details=authorization_details)
+    client.fetch_token(url, authorization_details=authorization_details)
+
+API Reference
+-------------
+
+.. module:: authlib.oauth2.rfc9396
+
+.. autoclass:: AuthorizationDetailsRegistry
+    :member-order: bysource
+    :members:
+
+.. autoclass:: AuthorizationDetailsType
+    :member-order: bysource
+    :members:
+
+.. autoclass:: InvalidAuthorizationDetailsError
+
+.. autoclass:: AuthorizationServerMetadata
+    :member-order: bysource
+    :members:
+
+.. autofunction:: dumps_authorization_details
+

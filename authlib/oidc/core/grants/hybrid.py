@@ -5,6 +5,7 @@ from authlib.oauth2.rfc6749 import InvalidScopeError
 from authlib.oauth2.rfc6749.grants.authorization_code import (
     validate_code_authorization_request,
 )
+from authlib.oauth2.rfc9396 import dumps_authorization_details
 
 from .implicit import OpenIDImplicitGrant
 from .util import is_openid_scope
@@ -67,6 +68,7 @@ class OpenIDHybridGrant(OpenIDImplicitGrant):
     def create_granted_params(self, grant_user):
         self.request.user = grant_user
         client = self.request.client
+        details = self.resolve_authorization_details()
         code = self.generate_authorization_code()
         self.save_authorization_code(code, self.request)
         params = [("code", code)]
@@ -79,6 +81,8 @@ class OpenIDHybridGrant(OpenIDImplicitGrant):
 
         response_types = self.request.payload.response_type.split()
         if "token" in response_types:
+            if details:
+                token["authorization_details"] = dumps_authorization_details(details)
             log.debug("Grant token %r to %r", token, client)
             self.server.save_token(token, self.request)
             if "id_token" in response_types:

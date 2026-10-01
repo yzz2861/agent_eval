@@ -1,6 +1,7 @@
 from authlib.common.errors import ContinueIteration
 from authlib.deprecate import deprecate
 
+from ..rfc9396 import AuthorizationDetailsRegistry
 from .authenticate_client import ClientAuthentication
 from .endpoint import Endpoint
 from .endpoint import EndpointRequest
@@ -20,11 +21,15 @@ class AuthorizationServer(Hookable):
     Endpoint.
 
     :param scopes_supported: A list of supported scopes by this authorization server.
+    :param authorization_details_registry: An optional
+        :class:`~authlib.oauth2.rfc9396.AuthorizationDetailsRegistry`
+        enabling RFC 9396 Rich Authorization Requests support.
     """
 
-    def __init__(self, scopes_supported=None):
+    def __init__(self, scopes_supported=None, authorization_details_registry=None):
         super().__init__()
         self.scopes_supported = scopes_supported
+        self.authorization_details_registry = authorization_details_registry
         self._token_generators = {}
         self._client_auth = None
         self._authorization_grants = []
@@ -155,6 +160,22 @@ class AuthorizationServer(Hookable):
 
     def register_extension(self, extension):
         self._extensions.append(extension(self))
+
+    def register_authorization_details_type(
+        self, type, validate=None, is_subsumed=None
+    ):
+        """Register a supported RFC 9396 ``authorization_details`` type.
+
+        :param type: the ``type`` value of the authorization details object.
+        :param validate: optional callable ``validate(detail, request)`` to
+            validate one requested authorization details object of this type.
+        :param is_subsumed: optional callable
+            ``is_subsumed(requested, approved)`` returning True when the
+            requested object is covered by an approved object of this type.
+        """
+        if self.authorization_details_registry is None:
+            self.authorization_details_registry = AuthorizationDetailsRegistry()
+        return self.authorization_details_registry.register(type, validate, is_subsumed)
 
     def get_error_uri(self, request, error):
         """Return a URI for the given error, framework may implement this method."""

@@ -1,6 +1,7 @@
 import time
 from copy import deepcopy
 from unittest import mock
+from urllib.parse import quote_plus
 
 import pytest
 from joserfc.jwk import OctKey
@@ -126,6 +127,35 @@ def test_code_challenge():
     auth_url, _ = sess.create_authorization_url(url, code_verifier=generate_token(48))
     assert "code_challenge" in auth_url
     assert "code_challenge_method=S256" in auth_url
+
+
+def test_create_authorization_url_with_authorization_details():
+    sess = OAuth2Session(client_id="foo")
+    url = "https://provider.test/authorize"
+    details = [{"type": "payment", "amount": 30}]
+    auth_url, _ = sess.create_authorization_url(url, authorization_details=details)
+    assert "authorization_details=" in auth_url
+    assert quote_plus('[{"type":"payment","amount":30}]') in auth_url
+
+
+def test_fetch_token_with_authorization_details(token):
+    def fake_send(r, **kwargs):
+        assert "authorization_details=" in r.body
+        assert quote_plus('[{"type":"payment","amount":30}]') in r.body
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        resp.json = lambda: token
+        return resp
+
+    sess = OAuth2Session(client_id="foo")
+    sess.send = fake_send
+    details = [{"type": "payment", "amount": 30}]
+    result = sess.fetch_token(
+        "https://provider.test/token",
+        grant_type="client_credentials",
+        authorization_details=details,
+    )
+    assert result["access_token"] == "a"
 
 
 def test_token_from_fragment(token):

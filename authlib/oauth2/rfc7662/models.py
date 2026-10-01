@@ -16,6 +16,9 @@ class IntrospectionToken(dict, TokenMixin):
     def get_expires_at(self):
         return self.get("exp", 0)
 
+    def get_authorization_details(self):
+        return self.get("authorization_details")
+
     def __getattr__(self, key):
         # https://tools.ietf.org/html/rfc7662#section-2.2
         available_keys = {
@@ -31,6 +34,7 @@ class IntrospectionToken(dict, TokenMixin):
             "aud",
             "iss",
             "jti",
+            "authorization_details",
         }
         try:
             return object.__getattribute__(self, key)

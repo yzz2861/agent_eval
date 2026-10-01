@@ -1,5 +1,6 @@
 import time
 
+from sqlalchemy import JSON
 from sqlalchemy import Column
 from sqlalchemy import Integer
 from sqlalchemy import String
@@ -22,6 +23,8 @@ class OAuth2AuthorizationCodeMixin(AuthorizationCodeMixin):
 
     code_challenge = Column(Text)
     code_challenge_method = Column(String(48))
+    #: RFC 9396 authorization details approved by the resource owner
+    authorization_details = Column(JSON, nullable=True)
 
     def is_expired(self):
         return self.auth_time + 300 < time.time()
@@ -44,6 +47,9 @@ class OAuth2AuthorizationCodeMixin(AuthorizationCodeMixin):
     def get_nonce(self):
         return self.nonce
 
+    def get_authorization_details(self):
+        return self.authorization_details
+
 
 class OAuth2TokenMixin(TokenMixin):
     client_id = Column(String(48))
@@ -55,6 +61,8 @@ class OAuth2TokenMixin(TokenMixin):
     access_token_revoked_at = Column(Integer, nullable=False, default=0)
     refresh_token_revoked_at = Column(Integer, nullable=False, default=0)
     expires_in = Column(Integer, nullable=False, default=0)
+    #: RFC 9396 authorization details granted with this token
+    authorization_details = Column(JSON, nullable=True)
 
     def check_client(self, client):
         return self.client_id == client.get_client_id()
@@ -74,3 +82,6 @@ class OAuth2TokenMixin(TokenMixin):
 
         expires_at = self.issued_at + self.expires_in
         return expires_at < time.time()
+
+    def get_authorization_details(self):
+        return self.authorization_details

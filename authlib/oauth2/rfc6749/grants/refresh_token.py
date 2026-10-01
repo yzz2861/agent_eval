@@ -108,6 +108,7 @@ class RefreshTokenGrant(BaseGrant, TokenEndpointMixin):
         self.request.client = client
         refresh_token = self._validate_request_token(client)
         self._validate_token_scope(refresh_token)
+        self.validate_token_request_authorization_details(refresh_token)
         self.request.refresh_token = refresh_token
 
     @hooked
@@ -141,6 +142,7 @@ class RefreshTokenGrant(BaseGrant, TokenEndpointMixin):
             scope=scope,
             include_refresh_token=self.INCLUDE_NEW_REFRESH_TOKEN,
         )
+        self.attach_authorization_details(token)
         return token
 
     def authenticate_refresh_token(self, refresh_token):

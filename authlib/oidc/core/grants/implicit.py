@@ -10,6 +10,7 @@ from authlib.oauth2.rfc6749 import InvalidScopeError
 from authlib.oauth2.rfc6749 import OAuth2Error
 from authlib.oauth2.rfc6749.errors import InvalidRequestError
 from authlib.oauth2.rfc6749.hooks import hooked
+from authlib.oauth2.rfc9396 import dumps_authorization_details
 
 from ._legacy import LegacyMixin
 from .util import create_half_hash
@@ -112,6 +113,7 @@ class OpenIDImplicitGrant(LegacyMixin, ImplicitGrant):
     def create_granted_params(self, grant_user):
         self.request.user = grant_user
         client = self.request.client
+        details = self.resolve_authorization_details()
         token = self.generate_token(
             user=grant_user,
             scope=self.request.payload.scope,
@@ -124,6 +126,8 @@ class OpenIDImplicitGrant(LegacyMixin, ImplicitGrant):
             }
             token = self.process_implicit_token(token)
         else:
+            if details:
+                token["authorization_details"] = dumps_authorization_details(details)
             log.debug("Grant token %r to %r", token, client)
             self.server.save_token(token, self.request)
             token = self.process_implicit_token(token)

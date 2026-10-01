@@ -78,6 +78,12 @@ class IntrospectionEndpoint(TokenEndpoint):
         payload = self.introspect_token(token)
         if "active" not in payload:
             payload["active"] = True
+        # RFC 9396: introspection returns the authorization details that
+        # were actually granted with the token
+        if "authorization_details" not in payload:
+            details = token.get_authorization_details()
+            if details:
+                payload["authorization_details"] = details
         return payload
 
     def check_permission(self, token, client, request):

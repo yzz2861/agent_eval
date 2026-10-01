@@ -110,6 +110,7 @@ def save_authorization_code(code, request):
         code_challenge_method=request.payload.data.get("code_challenge_method"),
         acr="urn:mace:incommon:iap:silver",
         amr="pwd otp",
+        authorization_details=request.authorization_details,
     )
     db.session.add(auth_code)
     db.session.commit()

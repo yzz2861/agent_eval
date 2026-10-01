@@ -156,6 +156,10 @@ class AuthorizationCodeGrant(BaseGrant, AuthorizationEndpointMixin, TokenEndpoin
 
         self.request.user = grant_user
 
+        # RFC 9396: only the authorization details approved by the
+        # resource owner may be saved with the authorization code
+        self.resolve_authorization_details()
+
         code = self.generate_authorization_code()
         self.save_authorization_code(code, self.request)
 
@@ -241,6 +245,10 @@ class AuthorizationCodeGrant(BaseGrant, AuthorizationEndpointMixin, TokenEndpoin
         self.request.client = client
         self.request.authorization_code = authorization_code
 
+        # RFC 9396: the client may narrow the granted authorization
+        # details down, but never widen them back
+        self.validate_token_request_authorization_details(authorization_code)
+
     @hooked
     def create_token_response(self):
         """If the access token request is valid and authorized, the
@@ -284,6 +292,7 @@ class AuthorizationCodeGrant(BaseGrant, AuthorizationEndpointMixin, TokenEndpoin
             scope=scope,
             include_refresh_token=client.check_grant_type("refresh_token"),
         )
+        self.attach_authorization_details(token)
         log.debug("Issue token %r to %r", token, client)
 
         self.save_token(token)
@@ -318,6 +327,11 @@ class AuthorizationCodeGrant(BaseGrant, AuthorizationEndpointMixin, TokenEndpoin
             the resolved scope. Per RFC 6749 Section 3.3, if the client omits the
             scope parameter, the server uses a default value from
             ``client.get_allowed_scope()``.
+
+        .. note:: When RFC 9396 Rich Authorization Requests are enabled, use
+            ``request.authorization_details`` to get the authorization details
+            approved by the resource owner, and persist them together with
+            the code.
         """
         raise NotImplementedError()
 
@@ -391,6 +405,7 @@ def validate_code_authorization_request(grant):
         if scope is None:
             raise InvalidScopeError()
         request.scope = scope
+        grant.validate_requested_authorization_details()
 
     try:
         validate_authorization_request_payload(grant, redirect_uri)

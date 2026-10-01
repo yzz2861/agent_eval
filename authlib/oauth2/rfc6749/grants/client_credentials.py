@@ -74,6 +74,9 @@ class ClientCredentialsGrant(BaseGrant, TokenEndpointMixin):
 
         self.request.client = client
         self.validate_requested_scope()
+        details = self.validate_requested_authorization_details()
+        if details is not None:
+            self.request.authorization_details = details
 
     @hooked
     def create_token_response(self):
@@ -104,6 +107,7 @@ class ClientCredentialsGrant(BaseGrant, TokenEndpointMixin):
         token = self.generate_token(
             scope=self.request.payload.scope, include_refresh_token=False
         )
+        self.attach_authorization_details(token)
         log.debug("Issue token %r to %r", token, self.client)
         self.save_token(token)
         return 200, token, self.TOKEN_RESPONSE_HEADER

@@ -1,5 +1,6 @@
 from authlib.consts import default_json_headers
 
+from ...rfc9396 import InvalidAuthorizationDetailsError
 from ..errors import InvalidRequestError
 from ..hooks import Hookable
 from ..hooks import hooked
@@ -25,6 +26,8 @@ class BaseGrant(Hookable):
         self.redirect_uri = None
         self.request = request
         self.server = server
+        #: validated authorization details requested by the client (RFC 9396)
+        self.requested_authorization_details = None
 
     @property
     def client(self):
@@ -84,6 +87,82 @@ class BaseGrant(Hookable):
         scope = self.request.payload.scope
         return self.server.validate_requested_scope(scope)
 
+    @property
+    def authorization_details_registry(self):
+        """The RFC 9396 registry configured on the authorization server,
+        or None when Rich Authorization Requests are not supported.
+        """
+        return getattr(self.server, "authorization_details_registry", None)
+
+    def validate_requested_authorization_details(self):
+        """Validate the ``authorization_details`` request parameter per
+        RFC 9396. The framework validates the basic JSON structure and
+        size limits, then delegates to the ``validate`` callable
+        registered for each ``type``. The validated details are stored
+        on ``grant.requested_authorization_details``.
+
+        :return: list of authorization details objects, or None when the
+            parameter is absent or the server does not support RFC 9396.
+        """
+        registry = self.authorization_details_registry
+        if registry is None:
+            return None
+        details = registry.validate_request(self.request)
+        self.requested_authorization_details = details
+        return details
+
+    def resolve_authorization_details(self):
+        """Resolve the authorization details approved by the resource
+        owner. Defaults to the details requested by the client, unless
+        the application assigned a (narrowed) value to
+        ``request.authorization_details`` during consent. Only these
+        approved details may be saved with the authorization code and
+        end up in tokens.
+
+        :return: list of approved authorization details objects, or None.
+        """
+        approved = self.request.authorization_details
+        if approved is None:
+            approved = self.requested_authorization_details
+        if approved is None:
+            return None
+        registry = self.authorization_details_registry
+        if registry is not None:
+            registry.validate_details_structure(approved)
+        self.request.authorization_details = approved
+        return approved
+
+    def validate_token_request_authorization_details(self, credential):
+        """Validate ``authorization_details`` sent to the token endpoint
+        against the details granted with the given credential (an
+        authorization code or a refresh token). The client can only
+        narrow the granted details down, never widen them back. The
+        effective details are stored on ``request.authorization_details``.
+        """
+        registry = self.authorization_details_registry
+        if registry is None:
+            return
+        granted = credential.get_authorization_details()
+        requested = registry.validate_request(self.request)
+        if requested is not None:
+            if not granted or not registry.is_subsumed(requested, granted):
+                raise InvalidAuthorizationDetailsError(
+                    "The requested 'authorization_details' exceed the granted ones."
+                )
+            self.request.authorization_details = requested
+        else:
+            self.request.authorization_details = granted
+
+    def attach_authorization_details(self, token):
+        """Add the effective ``authorization_details`` to the token dict,
+        so that they appear in the token response and can be persisted
+        together with the token.
+        """
+        details = self.request.authorization_details
+        if details:
+            token["authorization_details"] = details
+        return token
+
 
 class TokenEndpointMixin:
     #: Allowed HTTP methods of this token endpoint
@@ -138,7 +217,14 @@ class AuthorizationEndpointMixin:
         .. _`Section 3.1`: https://tools.ietf.org/html/rfc6749#section-3.1
         """
         datalist = request.payload.datalist
-        parameters = ["response_type", "client_id", "redirect_uri", "scope", "state"]
+        parameters = [
+            "response_type",
+            "client_id",
+            "redirect_uri",
+            "scope",
+            "state",
+            "authorization_details",
+        ]
         for param in parameters:
             if len(datalist.get(param, [])) > 1:
                 raise InvalidRequestError(

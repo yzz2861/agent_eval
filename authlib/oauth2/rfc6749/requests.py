@@ -91,6 +91,10 @@ class OAuth2Request(OAuth2Payload):
         self.refresh_token = None
         self.credential = None
         self._scope = None
+        #: resolved authorization details (RFC 9396), approved by the
+        #: resource owner at the authorization endpoint, or narrowed at
+        #: the token endpoint
+        self.authorization_details = None
 
     @property
     def args(self):

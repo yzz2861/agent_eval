@@ -1,6 +1,7 @@
 import base64
 
 from flask import Flask
+from flask import json
 from flask import request
 
 from authlib.common.encoding import to_bytes
@@ -49,6 +50,12 @@ def create_authorization_server(app, lazy=False):
 
         if request.method == "GET":
             return grant.prompt or "ok"
+
+        # simulate a consent screen where the resource owner may approve
+        # fewer authorization details than requested (RFC 9396)
+        approved = request.values.get("approved_authorization_details")
+        if approved:
+            grant.request.authorization_details = json.loads(approved)
 
         return server.create_authorization_response(grant=grant, grant_user=end_user)
 

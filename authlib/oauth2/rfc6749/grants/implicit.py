@@ -2,6 +2,7 @@ import logging
 
 from authlib.common.urls import add_params_to_uri
 
+from ...rfc9396 import dumps_authorization_details
 from ..errors import AccessDeniedError
 from ..errors import InvalidScopeError
 from ..errors import OAuth2Error
@@ -145,6 +146,7 @@ class ImplicitGrant(BaseGrant, AuthorizationEndpointMixin):
             if scope is None:
                 raise InvalidScopeError()
             self.request.scope = scope
+            self.validate_requested_authorization_details()
         except OAuth2Error as error:
             error.redirect_uri = redirect_uri
             error.redirect_fragment = True
@@ -216,6 +218,11 @@ class ImplicitGrant(BaseGrant, AuthorizationEndpointMixin):
                 scope=self.request.scope,
                 include_refresh_token=False,
             )
+            # RFC 9396: token is delivered in the redirect URI fragment,
+            # so the approved details are JSON-encoded
+            details = self.resolve_authorization_details()
+            if details:
+                token["authorization_details"] = dumps_authorization_details(details)
             log.debug("Grant token %r to %r", token, self.request.client)
 
             self.save_token(token)

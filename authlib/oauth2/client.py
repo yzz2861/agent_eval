@@ -10,6 +10,7 @@ from .rfc6749.parameters import prepare_grant_uri
 from .rfc6749.parameters import prepare_token_request
 from .rfc7009 import prepare_revoke_token_request
 from .rfc7636 import create_s256_code_challenge
+from .rfc9396 import dumps_authorization_details
 
 DEFAULT_HEADERS = {
     "Accept": "application/json",
@@ -172,6 +173,11 @@ class OAuth2Client:
         for k in self.EXTRA_AUTHORIZE_PARAMS:
             if k not in kwargs and k in self.metadata:
                 kwargs[k] = self.metadata[k]
+
+        if "authorization_details" in kwargs:
+            kwargs["authorization_details"] = dumps_authorization_details(
+                kwargs["authorization_details"]
+            )
 
         uri = prepare_grant_uri(
             url,
@@ -492,6 +498,11 @@ class OAuth2Client:
         return self._http_post(url, body, auth=auth, headers=headers, **session_kwargs)
 
     def _prepare_token_endpoint_body(self, body, grant_type, **kwargs):
+        if "authorization_details" in kwargs:
+            kwargs["authorization_details"] = dumps_authorization_details(
+                kwargs["authorization_details"]
+            )
+
         if grant_type == "authorization_code":
             if "redirect_uri" not in kwargs:
                 kwargs["redirect_uri"] = self.redirect_uri
