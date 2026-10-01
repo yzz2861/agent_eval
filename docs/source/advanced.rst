@@ -441,3 +441,64 @@ at arbitrary depth, you may find the dramatiq-workflow_ package
 useful.
 
 .. _dramatiq-workflow: https://github.com/Outset-AI/dramatiq-workflow
+
+
+.. _actor-versioning:
+
+Actor Versioning
+----------------
+
+Delayed messages may be consumed after your code has been upgraded,
+so looking up whichever implementation currently goes by a name is
+not always safe.  Dramatiq lets you register multiple explicit
+versions of the same actor; every message records the version of the
+actor that sent it and workers dispatch each message to that exact
+version:
+
+.. code-block:: python
+
+   @dramatiq.actor(actor_name="resize", version="v1")
+   def resize_v1(image_id):
+       ...
+
+
+   @dramatiq.actor(actor_name="resize", version="v2")
+   def resize_v2(image_id, *, fit="cover"):
+       ...
+
+Registering two actors with the same name *and* the same version
+raises a ``ValueError`` at declaration time, so conflicts are
+discovered when your app boots rather than at runtime.
+
+The most recently declared version is the default version.  The
+default only affects *new* messages: messages that are already
+queued -- including delayed messages, retries and pipeline
+successors -- keep the version they were sent with, so switching
+the default never changes how in-flight work is executed.  You can
+also change the default explicitly:
+
+.. code-block:: python
+
+   broker.set_default_actor_version("resize", "v2")
+
+Messages whose version can't be matched exactly are handled by two
+configurable broker policies, both of which log what they do:
+
+* ``unversioned_message_policy`` controls what happens to messages
+  that carry no version at all (for example, messages enqueued
+  before versions were introduced) when no unversioned actor with
+  the same name exists.  ``"default"`` (the default) dispatches
+  them to the default version and logs a warning; ``"error"``
+  rejects them so they end up on the dead-letter queue.
+* ``unknown_version_policy`` controls what happens to messages
+  whose version is not registered on the receiving broker.
+  ``"error"`` (the default) rejects them so they end up on the
+  dead-letter queue; ``"default"`` dispatches them to the default
+  version and logs a warning.
+
+.. code-block:: python
+
+   broker = Broker(
+       unversioned_message_policy="default",
+       unknown_version_policy="error",
+   )

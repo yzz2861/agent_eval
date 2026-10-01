@@ -9,6 +9,20 @@ All notable changes to this project will be documented in this file.
 -------------
 
 
+Added
+^^^^^
+
+* Actors may now be registered with an explicit ``version``, and
+  multiple actors may share the same name as long as their versions
+  differ.  Messages record the version of the actor that sent them
+  and workers dispatch each message to that exact version, so
+  messages enqueued before a deploy (including delayed messages,
+  retries and pipeline successors) keep running the implementation
+  they were sent with.  The broker's ``unversioned_message_policy``
+  and ``unknown_version_policy`` control how messages without a
+  version or with an unregistered version are handled.
+
+
 `2.2.1`_ -- 2026-09-01
 ----------------------
 

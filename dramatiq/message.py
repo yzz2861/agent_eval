@@ -73,6 +73,11 @@ class Message(Generic[R]):
       message_id(str): A globally-unique id assigned to the actor.
       message_timestamp(int): The UNIX timestamp in milliseconds
         representing when the message was first enqueued.
+      actor_version(str): The version of the actor that should process
+        this message.  ``None`` means the message was sent by an
+        unversioned actor (or by an older version of Dramatiq); how
+        such messages are dispatched is controlled by the broker's
+        version policies.
     """
 
     queue_name: str
@@ -82,6 +87,7 @@ class Message(Generic[R]):
     options: dict[str, Any]
     message_id: str = dataclasses.field(default_factory=generate_unique_id)
     message_timestamp: int = dataclasses.field(default_factory=lambda: int(time.time() * 1000))
+    actor_version: Optional[str] = None
 
     def __post_init__(self):
         # For backwards-compatibility, enforce that `args' is a tuple.

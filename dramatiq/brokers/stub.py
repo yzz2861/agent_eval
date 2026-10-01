@@ -40,8 +40,14 @@ class StubBroker(Broker):
         argument of :meth:`join<dramatiq.brokers.stub.StubBroker.join>`.
     """
 
-    def __init__(self, middleware: Optional[list[Middleware]] = None, *, fail_fast_default: bool = True):
-        super().__init__(middleware)
+    def __init__(
+        self,
+        middleware: Optional[list[Middleware]] = None,
+        *,
+        fail_fast_default: bool = True,
+        **kwargs,
+    ):
+        super().__init__(middleware, **kwargs)
 
         self.dead_letters_by_queue: defaultdict[str, list[MessageProxy]] = defaultdict(list)
         self.fail_fast_default: bool = fail_fast_default

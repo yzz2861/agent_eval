@@ -87,7 +87,7 @@ class TimeLimit(Middleware):
             warnings.warn(msg % current_platform, category=RuntimeWarning, stacklevel=2)
 
     def before_process_message(self, broker, message):
-        actor = broker.get_actor(message.actor_name)
+        actor = broker.resolve_actor(message.actor_name, message.actor_version)
         limit = message.options.get("time_limit") or actor.options.get("time_limit", self.time_limit)
         self.manager.add_timeout(threading.get_ident(), limit)
 

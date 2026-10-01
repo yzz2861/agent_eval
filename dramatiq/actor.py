@@ -59,6 +59,10 @@ class Actor(Generic[P, R]):
       priority(int): The actor's priority.
       options(dict): Arbitrary options that are passed to the broker
         and middleware.
+      version(str): The actor's version.  Multiple actors may share
+        the same name as long as their versions differ; messages
+        record the version of the actor that sent them so workers
+        can dispatch them to that exact implementation.
     """
 
     def __init__(
@@ -70,10 +74,8 @@ class Actor(Generic[P, R]):
         queue_name: str,
         priority: int,
         options: dict[str, Any],
+        version: Optional[str] = None,
     ) -> None:
-        if actor_name in broker.actors:
-            raise ValueError(f"An actor named {actor_name!r} is already registered.")
-
         self.logger = get_logger(fn.__module__ or "_", actor_name)
         self.fn: Callable[P, R] = async_to_sync(fn) if iscoroutinefunction(fn) else fn  # type: ignore[assignment]
         self.broker = broker
@@ -81,6 +83,7 @@ class Actor(Generic[P, R]):
         self.queue_name = queue_name
         self.priority = priority
         self.options = options
+        self.version = version
         self.broker.declare_actor(self)
 
     def message(self, *args: P.args, **kwargs: P.kwargs) -> Message[R]:
@@ -135,6 +138,7 @@ class Actor(Generic[P, R]):
             args=args,
             kwargs=kwargs or {},
             options=options,
+            actor_version=self.version,
         )
 
     def send(self, *args: P.args, **kwargs: P.kwargs) -> Message[R]:
@@ -229,6 +233,7 @@ def actor(
     queue_name: str = "default",
     priority: int = 0,
     actor_name: Optional[str] = None,
+    version: Optional[str] = None,
     broker: Optional[Broker] = None,
     actor_class: Callable[..., Actor[Any, Any]] = Actor,
     **options: Any,
@@ -241,6 +246,7 @@ def actor(
     *,
     actor_class: Callable[..., Actor[P, R]] = Actor,
     actor_name: Optional[str] = None,
+    version: Optional[str] = None,
     queue_name: str = "default",
     priority: int = 0,
     broker: Optional[Broker] = None,
@@ -281,6 +287,12 @@ def actor(
         been pulled on a worker concurrently and one has a higher
         priority than the other then it will be processed first.
         Lower numbers represent higher priorities.
+      version(str): An explicit version for this actor.  Multiple
+        actors may be registered under the same name as long as
+        their versions differ.  Messages sent by this actor are
+        stamped with its version so that workers dispatch them to
+        this exact implementation, even after a newer version
+        becomes the default.
       broker(Broker): The broker to use with this actor.
       **options: Arbitrary options that vary with the set of
         middleware that you use.  See ``get_broker().actor_options``.
@@ -314,6 +326,7 @@ def actor(
             priority=priority,
             broker=broker,
             options=options,
+            version=version,
         )
 
     if fn is None:

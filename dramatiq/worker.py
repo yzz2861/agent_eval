@@ -384,7 +384,12 @@ class ConsumerThread(Thread):
                 self.delay_queue.put(_WorkQueueItem(message.options.get("eta", 0), message))
 
             else:
-                actor = self.broker.get_actor(message.actor_name)
+                actor = self.broker.resolve_actor(message.actor_name, message.actor_version)
+                if actor.version != message.actor_version:
+                    # Record the resolved version on the message so
+                    # that all downstream processing (dispatch,
+                    # middleware, retries) consistently uses it.
+                    message._message = message._message._replace(actor_version=actor.version)
                 self.logger.debug("Pushing message %r onto work queue.", message.message_id)
                 self.work_queue.put(_WorkQueueItem(actor.priority, message))
         except ActorNotFound as e:
@@ -556,7 +561,7 @@ class WorkerThread(Thread):
 
             res = None
             if not message.failed:
-                actor = self.broker.get_actor(message.actor_name)
+                actor = self.broker.resolve_actor(message.actor_name, message.actor_version)
                 res = actor(*message.args, **message.kwargs)
                 if (
                     res is not None
