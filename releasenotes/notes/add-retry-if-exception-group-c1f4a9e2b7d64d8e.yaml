@@ -1,0 +1,17 @@
+features:
+  - |
+    Add a new ``retry_base`` class called ``retry_if_exception_group`` that
+    evaluates retry decisions over the leaves of an ``ExceptionGroup`` tree
+    instead of only looking at the outermost exception. By default every leaf
+    must be retryable (``mode="all"``); pass ``mode="any"`` to retry when at
+    least one leaf matches. Each leaf is checked together with its
+    ``__cause__`` and ``__context__`` chains (cycles terminate the traversal),
+    retryable types can be given as types, a predicate or an existing
+    ``retry_if_exception`` strategy, and ``exclude`` lists types that are
+    never retried. ``CancelledError``, ``KeyboardInterrupt``, ``SystemExit``
+    and ``GeneratorExit`` are non-retryable by default. The structured
+    ``ExceptionGroupReport`` attached to the strategy records, per leaf, which
+    exception decided the retry and why, locating leaves by their tuple path
+    of indexes into the nested group. Plain exceptions are supported as a
+    single-leaf tree, so the strategy is a drop-in replacement for the type
+    based strategies and composes with ``&``/``|``.
