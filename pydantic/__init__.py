@@ -21,6 +21,13 @@ if TYPE_CHECKING:
     )
 
     from . import dataclasses
+    from ._internal._validation_report import (
+        DefaultFactorySource,
+        DefaultSource,
+        InputPathSource,
+        ValidationReport,
+        ValueReport,
+    )
     from .aliases import AliasChoices, AliasGenerator, AliasPath
     from .annotated_handlers import GetCoreSchemaHandler, GetJsonSchemaHandler
     from .config import ConfigDict, with_config
@@ -221,6 +228,11 @@ __all__ = (
     'FailFast',
     # type_adapter
     'TypeAdapter',
+    'ValidationReport',
+    'InputPathSource',
+    'DefaultSource',
+    'DefaultFactorySource',
+    'ValueReport',
     # version
     '__version__',
     'VERSION',
@@ -389,6 +401,11 @@ _dynamic_imports: 'dict[str, tuple[str, str]]' = {
     'FailFast': (__spec__.parent, '.types'),
     # type_adapter
     'TypeAdapter': (__spec__.parent, '.type_adapter'),
+    'ValidationReport': (__spec__.parent, '._internal._validation_report'),
+    'InputPathSource': (__spec__.parent, '._internal._validation_report'),
+    'DefaultSource': (__spec__.parent, '._internal._validation_report'),
+    'DefaultFactorySource': (__spec__.parent, '._internal._validation_report'),
+    'ValueReport': (__spec__.parent, '._internal._validation_report'),
     # warnings
     'PydanticDeprecatedSince20': (__spec__.parent, '.warnings'),
     'PydanticDeprecatedSince26': (__spec__.parent, '.warnings'),

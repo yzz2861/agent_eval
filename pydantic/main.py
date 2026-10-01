@@ -46,6 +46,7 @@ from ._internal import (
     _repr,
     _typing_extra,
     _utils,
+    _validation_report,
 )
 from ._migration import getattr_migration
 from .aliases import AliasChoices, AliasPath
@@ -65,6 +66,7 @@ if TYPE_CHECKING:
     from ._internal._fields import PydanticExtraInfo
     from ._internal._namespace_utils import MappingNamespace
     from ._internal._utils import AbstractSetIntStr, MappingIntStrAny
+    from ._internal._validation_report import ValidationReport
     from .deprecated.parse import Protocol as DeprecatedParseProtocol
     from .fields import ComputedFieldInfo, FieldInfo, ModelPrivateAttr
 
@@ -744,6 +746,7 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
             )
 
     @classmethod
+    @overload
     def model_validate(
         cls,
         obj: Any,
@@ -754,6 +757,35 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
         context: Any | None = None,
         by_alias: bool | None = None,
         by_name: bool | None = None,
+    ) -> Self: ...
+
+    @classmethod
+    @overload
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+        validation_report: Literal[True],
+    ) -> tuple[Self, ValidationReport]: ...
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+        validation_report: bool = False,
     ) -> Self:
         """Validate a pydantic model instance.
 
@@ -771,6 +803,8 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
             context: Additional context to pass to the validator.
             by_alias: Whether to use the field's alias when validating against the provided input data.
             by_name: Whether to use the field's name when validating against the provided input data.
+            validation_report: If true, also return a report describing the input path, default,
+                or default factory used for each field. Original input values are not stored.
 
         Raises:
             ValidationError: If the object could not be validated.
@@ -787,15 +821,17 @@ class BaseModel(metaclass=_model_construction.ModelMetaclass):
                 code='validate-by-alias-and-name-false',
             )
 
-        return cls.__pydantic_validator__.validate_python(
-            obj,
-            strict=strict,
-            extra=extra,
-            from_attributes=from_attributes,
-            context=context,
-            by_alias=by_alias,
-            by_name=by_name,
-        )
+        validate_kwargs = {
+            'strict': strict,
+            'extra': extra,
+            'from_attributes': from_attributes,
+            'context': context,
+            'by_alias': by_alias,
+            'by_name': by_name,
+        }
+        if validation_report:
+            return _validation_report.validate_with_report(cls, obj, **validate_kwargs)  # type: ignore[return-value]
+        return cls.__pydantic_validator__.validate_python(obj, **validate_kwargs)
 
     @classmethod
     def model_validate_json(
