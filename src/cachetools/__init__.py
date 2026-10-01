@@ -18,10 +18,96 @@ import collections
 import collections.abc
 import functools
 import heapq
+import math
 import random
 import time
 
 from . import keys
+
+
+def _snapshot_items(snapshot, cache_type, timed):
+    if type(snapshot) is not dict:
+        raise ValueError("invalid cache snapshot")
+    if type(snapshot.get("version")) is not int or snapshot["version"] != 1:
+        raise ValueError("unsupported cache snapshot version")
+    if snapshot.get("type") != cache_type:
+        raise ValueError("cache snapshot type mismatch")
+    items = snapshot.get("items")
+    if type(items) is not list:
+        raise ValueError("invalid cache snapshot items")
+
+    decoded = []
+    for index, item in enumerate(items):
+        if type(item) is not dict or "key" not in item or "value" not in item:
+            raise ValueError("invalid cache snapshot item at index %d" % index)
+        entry = [item["key"], item["value"]]
+        if timed:
+            if "ttl" not in item:
+                raise ValueError("missing TTL at index %d" % index)
+            ttl = item["ttl"]
+            if isinstance(ttl, bool):
+                raise ValueError("invalid TTL at index %d" % index)
+            try:
+                valid = ttl > 0
+            except TypeError:
+                try:
+                    valid = ttl > 0 * ttl
+                except TypeError:
+                    valid = False
+            if not valid or (type(ttl) is float and math.isnan(ttl)):
+                raise ValueError("invalid TTL at index %d" % index)
+            entry.append(ttl)
+        decoded.append(tuple(entry))
+    return decoded
+
+
+def _valid_downtime(downtime):
+    if downtime is None:
+        return None
+    if isinstance(downtime, bool):
+        raise ValueError("invalid downtime")
+    try:
+        if downtime < 0:
+            raise ValueError("downtime must be non-negative")
+    except TypeError:
+        try:
+            if downtime < 0 * downtime:
+                raise ValueError("downtime must be non-negative")
+        except TypeError:
+            raise ValueError("invalid downtime") from None
+    if type(downtime) is float and math.isnan(downtime):
+        raise ValueError("invalid downtime")
+    return downtime
+
+
+def _decoded_entries(entries, decode_key, decode_value, getsizeof):
+    decoded = []
+    keys = set()
+    for index, entry in enumerate(entries):
+        key = decode_key(entry[0])
+        if key in keys:
+            raise ValueError("duplicate key in cache snapshot")
+        value = decode_value(entry[1])
+        value_size = getsizeof(value)
+        if value_size < 0:
+            raise ValueError("value size must be non-negative")
+        keys.add(key)
+        decoded.append((index, key, value, *entry[2:], value_size))
+    return decoded
+
+
+def _fit_lru(entries, maxsize):
+    retained = collections.deque()
+    total = 0
+    for entry in entries:
+        value_size = entry[-1]
+        if value_size > maxsize:
+            raise ValueError("value too large")
+        while total + value_size > maxsize:
+            total -= retained.popleft()[-1]
+        retained.append(entry)
+        total += value_size
+    return list(retained)
 
 
 class _DefaultSize:
@@ -166,6 +252,11 @@ class Cache(collections.abc.MutableMapping):
     def getsizeof(value):
         """Return the size of a cache element's value."""
         return 1
+
+    def _replace_data(self, data, size, currsize):
+        self.__data = data
+        self.__size = size
+        self.__currsize = currsize
 
 
 class FIFOCache(Cache):
@@ -324,6 +415,41 @@ class LRUCache(Cache):
             self.__order.move_to_end(key)
         except KeyError:
             self.__order[key] = None
+
+    def export(self, encode_key, encode_value):
+        """Return an encoder-provided representation of the cache."""
+        return {
+            "version": 1,
+            "type": "LRUCache",
+            "items": [
+                {
+                    "key": encode_key(key),
+                    "value": encode_value(Cache.__getitem__(self, key)),
+                }
+                for key in self.__order
+            ],
+        }
+
+    def restore(self, snapshot, decode_key, decode_value, downtime=None):
+        """Replace cache contents from an encoder-provided snapshot."""
+        entries = _snapshot_items(snapshot, "LRUCache", False)
+        decoded = _decoded_entries(entries, decode_key, decode_value, self.getsizeof)
+        custom_size = self.getsizeof is not Cache.getsizeof
+        restored_entries = _fit_lru(decoded, self.maxsize)
+
+        data = {}
+        order = collections.OrderedDict()
+        size = {} if custom_size else _DefaultSize()
+        total = 0
+        for _index, key, value, value_size in restored_entries:
+            data[key] = value
+            order[key] = None
+            if custom_size:
+                size[key] = value_size
+            total += value_size
+
+        self._replace_data(data, size, total)
+        self.__order = order
 
 
 class RRCache(Cache):
@@ -588,6 +714,62 @@ class TTLCache(_TimedCache):
         self.__links.move_to_end(key)
         return value
 
+    def export(self, encode_key, encode_value):
+        """Return an encoder-provided representation of the cache."""
+        with self.timer as time:
+            self.expire(time)
+            items = [
+                {
+                    "key": encode_key(key),
+                    "value": encode_value(Cache.__getitem__(self, key)),
+                    "ttl": link.expires - time,
+                }
+                for key, link in self.__links.items()
+            ]
+        return {"version": 1, "type": "TTLCache", "items": items}
+
+    def restore(self, snapshot, decode_key, decode_value, downtime=None):
+        """Replace cache contents from an encoder-provided snapshot."""
+        entries = _snapshot_items(snapshot, "TTLCache", True)
+        downtime = _valid_downtime(downtime)
+        decoded = _decoded_entries(entries, decode_key, decode_value, self.getsizeof)
+
+        with self.timer as now:
+            survivors = []
+            for _index, key, value, ttl, value_size in decoded:
+                if downtime is not None and ttl <= downtime:
+                    continue
+                remaining = ttl if downtime is None else ttl - downtime
+                survivors.append((key, value, now + remaining, value_size))
+            restored_entries = _fit_lru(survivors, self.maxsize)
+
+            custom_size = self.getsizeof is not Cache.getsizeof
+            data = {}
+            size = {} if custom_size else _DefaultSize()
+            links = collections.OrderedDict()
+            root = TTLCache._Link()
+            root.prev = root.next = root
+
+            total = 0
+            for key, value, expires, value_size in restored_entries:
+                data[key] = value
+                links[key] = TTLCache._Link(key, expires)
+                if custom_size:
+                    size[key] = value_size
+                total += value_size
+
+            for key, _value, _expires, _value_size in sorted(
+                restored_entries, key=lambda item: item[2]
+            ):
+                link = links[key]
+                link.next = root
+                link.prev = prev = root.prev
+                prev.next = root.prev = link
+
+            self._replace_data(data, size, total)
+            self.__root = root
+            self.__links = links
+
 
 class TLRUCache(_TimedCache):
     """Time aware Least Recently Used (TLRU) cache implementation."""
@@ -726,6 +908,55 @@ class TLRUCache(_TimedCache):
             pass
         else:
             cache_delitem(self, key)
+
+    def export(self, encode_key, encode_value):
+        """Return an encoder-provided representation of the cache."""
+        with self.timer as time:
+            self.expire(time)
+            items = [
+                {
+                    "key": encode_key(key),
+                    "value": encode_value(Cache.__getitem__(self, key)),
+                    "ttl": item.expires - time,
+                }
+                for key, item in self.__items.items()
+            ]
+        return {"version": 1, "type": "TLRUCache", "items": items}
+
+    def restore(self, snapshot, decode_key, decode_value, downtime=None):
+        """Replace cache contents from an encoder-provided snapshot."""
+        entries = _snapshot_items(snapshot, "TLRUCache", True)
+        downtime = _valid_downtime(downtime)
+        decoded = _decoded_entries(entries, decode_key, decode_value, self.getsizeof)
+
+        with self.timer as now:
+            survivors = []
+            for _index, key, value, ttl, value_size in decoded:
+                if downtime is not None and ttl <= downtime:
+                    continue
+                remaining = ttl if downtime is None else ttl - downtime
+                survivors.append((key, value, now + remaining, value_size))
+            restored_entries = _fit_lru(survivors, self.maxsize)
+
+            custom_size = self.getsizeof is not Cache.getsizeof
+            data = {}
+            size = {} if custom_size else _DefaultSize()
+            items = collections.OrderedDict()
+            order = []
+            total = 0
+            for key, value, expires, value_size in restored_entries:
+                data[key] = value
+                item = TLRUCache._Item(key, expires)
+                items[key] = item
+                order.append(item)
+                if custom_size:
+                    size[key] = value_size
+                total += value_size
+            heapq.heapify(order)
+
+            self._replace_data(data, size, total)
+            self.__items = items
+            self.__order = order
 
 
 # note that the runtime __name__ is "CacheInfo", as in stdlib:

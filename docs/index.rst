@@ -93,7 +93,7 @@ inserted into the cache.
    items used least often to make space when necessary.
 
 .. autoclass:: LRUCache(maxsize, getsizeof=None)
-   :members: popitem
+   :members: popitem, export, restore
 
    This class discards the least recently used items first to make
    space when necessary.
@@ -110,7 +110,7 @@ inserted into the cache.
    non-empty sequence.
 
 .. autoclass:: TTLCache(maxsize, ttl, timer=time.monotonic, getsizeof=None)
-   :members: popitem, timer, ttl
+   :members: popitem, timer, ttl, export, restore
 
    This class associates a time-to-live value with each item.  Items
    that expire because they have exceeded their time-to-live will be
@@ -152,7 +152,7 @@ inserted into the cache.
       :returns: An iterable of expired `(key, value)` pairs.
 
 .. autoclass:: TLRUCache(maxsize, ttu, timer=time.monotonic, getsizeof=None)
-   :members: popitem, timer, ttu
+   :members: popitem, timer, ttu, export, restore
 
    Similar to :class:`TTLCache`, this class also associates an
    expiration time with each item.  However, for :class:`TLRUCache`
@@ -203,6 +203,42 @@ inserted into the cache.
       :attr:`timer`.
 
       :returns: An iterable of expired `(key, value)` pairs.
+
+
+Exporting and restoring caches
+==============================
+
+``LRUCache``, ``TTLCache`` and ``TLRUCache`` can export their state to a
+plain Python dictionary and restore it later.  The snapshot stores LRU
+order and, for timed caches, each item's remaining lifetime instead of
+an absolute timer value.  This makes it safe to restore into another
+process even when the default :func:`time.monotonic` timer has a
+different origin.
+
+Callers provide key and value encoders and decoders, for example to
+write JSON.  Pickle is neither used nor required:
+
+.. testcode::
+
+   import json
+
+   cache = LRUCache(maxsize=128)
+   cache[1] = "one"
+   data = json.dumps(cache.export(str, str))
+
+   restored = LRUCache(maxsize=128)
+   restored.restore(json.loads(data), int, str)
+
+For timed caches, pass the elapsed shutdown time to ``restore()``.  It
+is subtracted from every item's remaining lifetime and uses the same
+units as the cache's timer: seconds for numeric timers, or a
+``datetime.timedelta`` for a ``datetime`` timer.  Items whose lifetime
+has elapsed are not restored.  If the new cache has a smaller
+``maxsize``, items are trimmed according to the cache's normal LRU
+policy.
+
+Restoration is atomic: duplicate keys, invalid snapshot metadata, or a
+key/value decoder error leave the destination cache unchanged.
 
 
 Extending cache classes

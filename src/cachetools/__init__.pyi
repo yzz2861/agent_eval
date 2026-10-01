@@ -61,7 +61,20 @@ class Cache(MutableMapping[_KT, _VT]):
 
 class FIFOCache(Cache[_KT, _VT]): ...
 class LFUCache(Cache[_KT, _VT]): ...
-class LRUCache(Cache[_KT, _VT]): ...
+
+class LRUCache(Cache[_KT, _VT]):
+    def export(
+        self,
+        encode_key: Callable[[_KT], Any],
+        encode_value: Callable[[_VT], Any],
+    ) -> dict[str, Any]: ...
+    def restore(
+        self,
+        snapshot: dict[str, Any],
+        decode_key: Callable[[Any], _KT],
+        decode_value: Callable[[Any], _VT],
+        downtime: Any = None,
+    ) -> None: ...
 
 class RRCache(Cache[_KT, _VT]):
     def __init__(
@@ -111,6 +124,18 @@ class TTLCache(_TimedCache[_KT, _VT, _TT]):
     @property
     def ttl(self) -> Any: ...
     def expire(self, time: _TT | None = None) -> list[tuple[_KT, _VT]]: ...
+    def export(
+        self,
+        encode_key: Callable[[_KT], Any],
+        encode_value: Callable[[_VT], Any],
+    ) -> dict[str, Any]: ...
+    def restore(
+        self,
+        snapshot: dict[str, Any],
+        decode_key: Callable[[Any], _KT],
+        decode_value: Callable[[Any], _VT],
+        downtime: Any = None,
+    ) -> None: ...
 
 class TLRUCache(_TimedCache[_KT, _VT, _TT]):
     @overload
@@ -132,6 +157,18 @@ class TLRUCache(_TimedCache[_KT, _VT, _TT]):
     @property
     def ttu(self) -> Callable[[_KT, _VT, _TT], _TT]: ...
     def expire(self, time: _TT | None = None) -> list[tuple[_KT, _VT]]: ...
+    def export(
+        self,
+        encode_key: Callable[[_KT], Any],
+        encode_value: Callable[[_VT], Any],
+    ) -> dict[str, Any]: ...
+    def restore(
+        self,
+        snapshot: dict[str, Any],
+        decode_key: Callable[[Any], _KT],
+        decode_value: Callable[[Any], _VT],
+        downtime: Any = None,
+    ) -> None: ...
 
 class _CacheInfo(NamedTuple):
     hits: int
