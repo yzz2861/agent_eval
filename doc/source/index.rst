@@ -251,6 +251,8 @@ See also these methods:
 
     retry_if_exception
     retry_if_exception_type
+    retry_if_exception_group_all
+    retry_if_exception_group_any
     retry_if_not_exception_type
     retry_unless_exception_type
     retry_if_result
@@ -261,6 +263,31 @@ See also these methods:
     retry_all
 
 We can also combine several conditions:
+
+When an asynchronous task group fails, Python raises an ``ExceptionGroup``
+whose nested exceptions are invisible to type-based strategies that only
+inspect the outermost exception. Two dedicated strategies look inside the
+group instead (plain, non-group exceptions are treated as a single leaf, so
+they compose with the other strategies as usual):
+
+.. testcode::
+
+    @retry(retry=retry_if_exception_group_all(IOError, exclude_types=KeyError))
+    def run_all_tasks():
+        print("Retry only if every leaf of the group is an IOError")
+
+    @retry(retry=retry_if_exception_group_any(IOError))
+    def run_more_tasks():
+        print("Retry if at least one leaf of the group is an IOError")
+
+Both walk nested groups recursively and follow ``__cause__`` / ``__context__``
+chains (cycles included) without hanging. Control-flow exceptions such as
+``CancelledError``, ``KeyboardInterrupt`` and ``SystemExit`` stop the retry
+by default, even if they would match the configured types; pass
+``allow_control_flow=True`` to judge them like any other leaf. After each
+attempt, the strategy's ``last_leaves`` and ``deciding_leaves`` attributes
+report which leaves (with their structural paths inside the group) decided
+whether to continue or stop.
 
 .. testcode::
 

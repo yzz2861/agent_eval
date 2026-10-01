@@ -1,0 +1,11 @@
+features:
+  - |
+    Add new ``retry_base`` classes ``retry_if_exception_group_all`` and
+    ``retry_if_exception_group_any`` that retry based on the leaves of an
+    ``ExceptionGroup`` (or any plain exception, treated as a single leaf).
+    Leaves are matched against configurable exception types with optional
+    exclusions; nested groups and ``__cause__`` / ``__context__`` chains are
+    traversed cycle-safely, and control-flow exceptions (``CancelledError``,
+    ``KeyboardInterrupt``, ``SystemExit``, ``GeneratorExit``) stop the retry
+    by default. The strategies report the deciding leaves, with structural
+    paths, via their ``last_leaves`` and ``deciding_leaves`` attributes.

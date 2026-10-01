@@ -42,12 +42,16 @@ from .nap import sleep, sleep_using_event
 
 # Import all built-in retry strategies for easier usage.
 from .retry import (
+    ExceptionLeaf,
+    iter_exception_leaves,
     retry_all,
     retry_always,
     retry_any,
     retry_base,
     retry_if_exception,
     retry_if_exception_cause_type,
+    retry_if_exception_group_all,
+    retry_if_exception_group_any,
     retry_if_exception_message,
     retry_if_exception_type,
     retry_if_not_exception_message,

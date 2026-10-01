@@ -13,11 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import contextlib
 import datetime
 import logging
 import pickle
 import re
+import sys
 import time
 import typing
 import unittest
@@ -1602,6 +1604,251 @@ class TestDecoratorWrapper(unittest.TestCase):
                 )
             else:
                 self.fail("RetryError should have been raised after 1 attempt")
+
+
+@unittest.skipIf(sys.version_info < (3, 11), "ExceptionGroup requires Python 3.11+")
+class TestRetryIfExceptionGroup(unittest.TestCase):
+    @staticmethod
+    def _failed_state(exc: BaseException) -> RetryCallState:
+        retry_state = RetryCallState(None, None, (), {})  # type: ignore[arg-type]
+        retry_state.outcome = tenacity.Future.construct(1, exc, True)
+        return retry_state
+
+    @staticmethod
+    def _raise_then_return(exc: BaseException, times: int) -> typing.Callable[[], str]:
+        attempts = {"count": 0}
+
+        def fn() -> str:
+            attempts["count"] += 1
+            if attempts["count"] <= times:
+                raise exc
+            return "ok"
+
+        fn.attempts = attempts  # type: ignore[attr-defined]
+        return fn
+
+    def _retrying(
+        self, retry_strategy: tenacity.retry_base, **kwargs: typing.Any
+    ) -> Retrying:
+        kwargs.setdefault("stop", tenacity.stop_after_attempt(3))
+        kwargs.setdefault("reraise", True)
+        return Retrying(retry=retry_strategy, **kwargs)
+
+    def test_plain_exception_matches(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        fn = self._raise_then_return(ValueError("boom"), 2)
+        self.assertEqual(self._retrying(strategy)(fn), "ok")
+        self.assertEqual(fn.attempts["count"], 3)
+
+    def test_plain_exception_does_not_match(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        fn = self._raise_then_return(TypeError("boom"), 5)
+        with self.assertRaises(TypeError):
+            self._retrying(strategy)(fn)
+        self.assertEqual(fn.attempts["count"], 1)
+
+    def test_all_leaves_retryable(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        group = ExceptionGroup("g", [ValueError("a"), ValueError("b")])
+        fn = self._raise_then_return(group, 2)
+        self.assertEqual(self._retrying(strategy)(fn), "ok")
+        self.assertEqual(fn.attempts["count"], 3)
+
+    def test_all_mode_stops_on_single_bad_leaf(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        bad_leaf = KeyError("bad")
+        group = ExceptionGroup("g", [ValueError("a"), bad_leaf])
+        fn = self._raise_then_return(group, 5)
+        with self.assertRaises(ExceptionGroup) as ctx:
+            self._retrying(strategy)(fn)
+        self.assertIs(ctx.exception, group)
+        self.assertEqual(fn.attempts["count"], 1)
+        # The KeyError leaf alone decided to stop, located structurally.
+        self.assertEqual(len(strategy.deciding_leaves), 1)
+        self.assertIs(strategy.deciding_leaves[0].exception, bad_leaf)
+        self.assertEqual(strategy.deciding_leaves[0].path, (1,))
+
+    def test_nested_group_leaf_paths(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        inner = ExceptionGroup("inner", [KeyError("k")])
+        group = ExceptionGroup("outer", [ValueError("a"), inner])
+        self.assertFalse(strategy(self._failed_state(group)))
+        self.assertEqual(
+            [leaf.path for leaf in strategy.last_leaves], [(0,), (1, 0)]
+        )
+        self.assertEqual(strategy.deciding_leaves[0].path, (1, 0))
+        self.assertIsInstance(strategy.deciding_leaves[0].exception, KeyError)
+
+    def test_all_mode_reports_all_leaves_when_continuing(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        group = ExceptionGroup("g", [ValueError("a"), ValueError("b")])
+        self.assertTrue(strategy(self._failed_state(group)))
+        self.assertEqual(len(strategy.deciding_leaves), 2)
+        self.assertEqual(strategy.deciding_leaves, strategy.last_leaves)
+
+    def test_any_mode_retries_on_single_good_leaf(self) -> None:
+        strategy = tenacity.retry_if_exception_group_any(ValueError)
+        good_leaf = ValueError("good")
+        group = ExceptionGroup("g", [KeyError("k"), good_leaf])
+        self.assertTrue(strategy(self._failed_state(group)))
+        self.assertEqual(len(strategy.deciding_leaves), 1)
+        self.assertIs(strategy.deciding_leaves[0].exception, good_leaf)
+        self.assertEqual(strategy.deciding_leaves[0].path, (1,))
+
+    def test_any_mode_stops_when_nothing_matches(self) -> None:
+        strategy = tenacity.retry_if_exception_group_any(ValueError)
+        group = ExceptionGroup("g", [KeyError("k"), TypeError("t")])
+        fn = self._raise_then_return(group, 5)
+        with self.assertRaises(ExceptionGroup):
+            self._retrying(strategy)(fn)
+        self.assertEqual(fn.attempts["count"], 1)
+        # Every leaf was consulted before giving up.
+        self.assertEqual(len(strategy.deciding_leaves), 2)
+
+    def test_exclude_types(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(
+            Exception, exclude_types=KeyError
+        )
+        excluded = KeyError("k")
+        group = ExceptionGroup("g", [ValueError("a"), excluded])
+        self.assertFalse(strategy(self._failed_state(group)))
+        self.assertEqual(len(strategy.deciding_leaves), 1)
+        self.assertIs(strategy.deciding_leaves[0].exception, excluded)
+
+    def test_exclude_types_all_pass_without_excluded_leaf(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(
+            Exception, exclude_types=KeyError
+        )
+        group = ExceptionGroup("g", [ValueError("a"), TypeError("t")])
+        self.assertTrue(strategy(self._failed_state(group)))
+
+    def test_control_flow_exceptions_not_retried_by_default(self) -> None:
+        for control_exc in (
+            KeyboardInterrupt(),
+            SystemExit(1),
+            asyncio.CancelledError(),
+        ):
+            # Even with a type list that would match everything, and even
+            # in "any" mode with another retryable leaf, control-flow
+            # exceptions stop the retry by default.
+            strategy = tenacity.retry_if_exception_group_any(BaseException)
+            group = BaseExceptionGroup("g", [ValueError("a"), control_exc])
+            self.assertFalse(strategy(self._failed_state(group)))
+            self.assertEqual(len(strategy.deciding_leaves), 1)
+            self.assertIs(strategy.deciding_leaves[0].exception, control_exc)
+
+    def test_control_flow_exceptions_allowed_explicitly(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(
+            BaseException, allow_control_flow=True
+        )
+        group = BaseExceptionGroup("g", [KeyboardInterrupt()])
+        self.assertTrue(strategy(self._failed_state(group)))
+
+    def test_group_found_through_cause(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(
+            (RuntimeError, ValueError)
+        )
+        group = ExceptionGroup("g", [ValueError("a")])
+        wrapper = RuntimeError("wrapped")
+        wrapper.__cause__ = group
+        self.assertTrue(strategy(self._failed_state(wrapper)))
+        self.assertEqual(
+            [leaf.path for leaf in strategy.last_leaves], [(), ("cause", 0)]
+        )
+
+    def test_context_chain_is_followed(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        context = KeyError("ctx")
+        exc = ValueError("v")
+        exc.__context__ = context
+        self.assertFalse(strategy(self._failed_state(exc)))
+        self.assertEqual(
+            [leaf.path for leaf in strategy.last_leaves], [(), ("context",)]
+        )
+
+    def test_context_can_be_excluded(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(
+            ValueError, include_context=False
+        )
+        exc = ValueError("v")
+        exc.__context__ = KeyError("ctx")
+        self.assertTrue(strategy(self._failed_state(exc)))
+
+    def test_suppressed_context_is_not_followed(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        exc = ValueError("v")
+        exc.__context__ = KeyError("ctx")
+        exc.__suppress_context__ = True
+        self.assertTrue(strategy(self._failed_state(exc)))
+        self.assertEqual([leaf.path for leaf in strategy.last_leaves], [()])
+
+    def test_cause_cycle_terminates(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        exc = ValueError("self-caused")
+        exc.__cause__ = exc
+        self.assertTrue(strategy(self._failed_state(exc)))
+        self.assertEqual(len(strategy.last_leaves), 1)
+
+    def test_two_node_cause_cycle_terminates(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        first = ValueError("a")
+        second = ValueError("b")
+        first.__cause__ = second
+        second.__cause__ = first
+        self.assertTrue(strategy(self._failed_state(first)))
+        self.assertEqual(len(strategy.last_leaves), 2)
+
+    def test_group_in_cause_cycle_terminates(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        group = ExceptionGroup("g", [ValueError("a")])
+        exc = ValueError("top")
+        exc.__cause__ = group
+        group.__cause__ = exc
+        self.assertTrue(strategy(self._failed_state(exc)))
+        self.assertEqual(
+            [leaf.path for leaf in strategy.last_leaves], [(), ("cause", 0)]
+        )
+
+    def test_combines_with_existing_strategies(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(
+            ValueError
+        ) | tenacity.retry_if_exception_type(KeyError)
+        group = ExceptionGroup("g", [ValueError("a")])
+        self.assertTrue(strategy(self._failed_state(group)))
+        self.assertTrue(strategy(self._failed_state(KeyError("k"))))
+        self.assertFalse(strategy(self._failed_state(TypeError("t"))))
+
+    def test_combines_with_and(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(
+            ValueError
+        ) & tenacity.retry_if_exception_type(ExceptionGroup)
+        group = ExceptionGroup("g", [ValueError("a")])
+        self.assertTrue(strategy(self._failed_state(group)))
+        self.assertFalse(strategy(self._failed_state(ValueError("v"))))
+
+    def test_original_exception_reraised_after_stop(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        group = ExceptionGroup("g", [ValueError("a")])
+        fn = self._raise_then_return(group, 10)
+        with self.assertRaises(ExceptionGroup) as ctx:
+            self._retrying(strategy)(fn)
+        self.assertIs(ctx.exception, group)
+        self.assertEqual(fn.attempts["count"], 3)
+
+    def test_retry_error_still_wraps_without_reraise(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        group = ExceptionGroup("g", [ValueError("a")])
+        fn = self._raise_then_return(group, 10)
+        retrying = self._retrying(strategy, reraise=False)
+        with self.assertRaises(RetryError) as ctx:
+            retrying(fn)
+        self.assertIs(ctx.exception.last_attempt.exception(), group)
+
+    def test_successful_outcome_returns_false(self) -> None:
+        strategy = tenacity.retry_if_exception_group_all(ValueError)
+        retry_state = make_retry_state(1, 0)
+        self.assertFalse(strategy(retry_state))
+        self.assertEqual(strategy.last_leaves, ())
 
 
 class TestStatisticsKeys:
