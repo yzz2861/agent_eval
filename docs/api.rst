@@ -84,6 +84,11 @@ Read the :ref:`Settings tutorial <tutorial-settings>` for details.
      in `EVICTION_POLICY` as described below.
    * `size_limit` (int, in bytes) default one gigabyte - approximate size limit
      of cache.
+   * `strict_size_limit` (bool) default False - reserve external value file
+     space before writing; reject or wait when the projected file size would
+     exceed `size_limit`.
+   * `size_limit_policy` (str) default "cull" - either "reject" or "wait"
+     when `strict_size_limit` is enabled; "cull" retains existing behavior.
    * `cull_limit` (int) default ten - maximum number of items culled during
      `set` or `add` operations.
    * `sqlite_auto_vacuum` (int) default 1, "FULL" - SQLite auto vacuum pragma.

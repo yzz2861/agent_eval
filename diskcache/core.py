@@ -5,6 +5,13 @@ import codecs
 import contextlib as cl
 import errno
 import functools as ft
+import inspect
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
+
 import io
 import json
 import os
@@ -35,6 +42,31 @@ class Constant(tuple):
         return '%s' % self[0]
 
 
+class SpaceLimitError(Exception):
+    """Raised when a value cannot fit within the strict size limit."""
+
+
+class _ReservedReader:
+    def __init__(self, reader, filename, reserve):
+        self._reader = reader
+        self._filename = filename
+        self._reserve = reserve
+        self._size = 0
+        self._eof = False
+
+    def read(self, size=-1):
+        if self._eof:
+            return b''
+        chunk = self._reader.read(size)
+        if chunk:
+            requested = self._size + len(chunk)
+            self._reserve(self._filename, requested, len(chunk))
+            self._size = requested
+        else:
+            self._eof = True
+        return chunk
+
+
 DBNAME = 'cache.db'
 ENOVAL = Constant('ENOVAL')
 UNKNOWN = Constant('UNKNOWN')
@@ -45,12 +77,20 @@ MODE_BINARY = 2
 MODE_TEXT = 3
 MODE_PICKLE = 4
 
+SPACE_POLICY_CULL = 'cull'
+SPACE_POLICY_REJECT = 'reject'
+SPACE_POLICY_WAIT = 'wait'
+SPACE_STATE_CLEANUP = 'cleanup'
+SPACE_STATE_WRITE = 'write'
+
 DEFAULT_SETTINGS = {
     'statistics': 0,  # False
     'tag_index': 0,  # False
     'eviction_policy': 'least-recently-stored',
     'size_limit': 2**30,  # 1gb
     'cull_limit': 10,
+    'strict_size_limit': 0,  # False
+    'size_limit_policy': SPACE_POLICY_CULL,
     'sqlite_auto_vacuum': 1,  # FULL
     'sqlite_cache_size': 2**13,  # 8,192 pages
     'sqlite_journal_mode': 'wal',
@@ -176,7 +216,7 @@ class Disk:
         else:
             return pickle.load(io.BytesIO(key))
 
-    def store(self, value, read, key=UNKNOWN):
+    def store(self, value, read, key=UNKNOWN, reserve=None):
         """Convert `value` to fields size, mode, filename, and value for Cache
         table.
 
@@ -204,16 +244,24 @@ class Disk:
                 return 0, MODE_RAW, None, sqlite3.Binary(value)
             else:
                 filename, full_path = self.filename(key, value)
+                if reserve is not None:
+                    reserve(filename, len(value))
                 self._write(full_path, io.BytesIO(value), 'xb')
                 return len(value), MODE_BINARY, filename, None
         elif type_value is str:
             filename, full_path = self.filename(key, value)
+            encoded = value.encode('UTF-8')
+            if reserve is not None:
+                reserve(filename, len(encoded))
             self._write(full_path, io.StringIO(value), 'x', 'UTF-8')
             size = op.getsize(full_path)
             return size, MODE_TEXT, filename, None
         elif read:
-            reader = ft.partial(value.read, 2**22)
             filename, full_path = self.filename(key, value)
+            reader_value = value
+            if reserve is not None:
+                reader_value = _ReservedReader(value, filename, reserve)
+            reader = ft.partial(reader_value.read, 2**22)
             iterator = iter(reader, b'')
             size = self._write(full_path, iterator, 'xb')
             return size, MODE_BINARY, filename, None
@@ -224,11 +272,19 @@ class Disk:
                 return 0, MODE_PICKLE, None, sqlite3.Binary(result)
             else:
                 filename, full_path = self.filename(key, value)
+                if reserve is not None:
+                    reserve(filename, len(result))
                 self._write(full_path, io.BytesIO(result), 'xb')
                 return len(result), MODE_PICKLE, filename, None
 
     def _write(self, full_path, iterator, mode, encoding=None):
         full_dir, _ = op.split(full_path)
+        iterator = iter(iterator)
+
+        try:
+            first = next(iterator)
+        except StopIteration:
+            return 0
 
         for count in range(1, 11):
             with cl.suppress(OSError):
@@ -245,7 +301,8 @@ class Disk:
                 continue
 
             with writer:
-                size = 0
+                size = len(first)
+                writer.write(first)
                 for chunk in iterator:
                     size += len(chunk)
                     writer.write(chunk)
@@ -359,11 +416,11 @@ class JSONDisk(Disk):
         data = super().get(key, raw)
         return json.loads(zlib.decompress(data).decode('utf-8'))
 
-    def store(self, value, read, key=UNKNOWN):
+    def store(self, value, read, key=UNKNOWN, reserve=None):
         if not read:
             json_bytes = json.dumps(value).encode('utf-8')
             value = zlib.compress(json_bytes, self.compress_level)
-        return super().store(value, read, key=key)
+        return super().store(value, read, key=key, reserve=reserve)
 
     def fetch(self, mode, filename, value, read):
         data = super().fetch(mode, filename, value, read)
@@ -382,6 +439,477 @@ class UnknownFileWarning(UserWarning):
 
 class EmptyDirWarning(UserWarning):
     """Warning used by Cache.check for empty directories."""
+
+
+class _SpaceReservation:
+    stale_after = 30.0
+    heartbeat_interval = 5.0
+
+    def __init__(self, cache):
+        self._cache = cache
+        self.group_id = codecs.encode(os.urandom(16), 'hex').decode('utf-8')
+        self._filenames = {}
+        self._cleanup = set()
+        self._lock = None
+        self._stop = None
+        self._thread = None
+
+    @staticmethod
+    def setup(cache):
+        cache._sql_retry(
+            'CREATE TABLE IF NOT EXISTS Reservations ('
+            ' group_id TEXT NOT NULL,'
+            ' filename TEXT NOT NULL,'
+            ' size INTEGER NOT NULL,'
+            ' state TEXT NOT NULL,'
+            ' heartbeat REAL NOT NULL,'
+            ' PRIMARY KEY (group_id, filename))'
+        )
+        cache._sql_retry(
+            'CREATE INDEX IF NOT EXISTS Reservations_heartbeat'
+            ' ON Reservations (heartbeat)'
+        )
+        _SpaceReservation.reconcile(cache)
+
+    @staticmethod
+    def reconcile(cache):
+        cutoff = time.time() - _SpaceReservation.stale_after
+        select = (
+            'SELECT DISTINCT group_id FROM Reservations'
+            ' WHERE heartbeat < ?'
+        )
+        groups = [row[0] for row in cache._sql(select, (cutoff,)).fetchall()]
+
+        for group_id in groups:
+            claim = _SpaceReservation(cache)
+            claim.group_id = group_id
+            if not claim._acquire():
+                continue
+            claim._reclaim()
+
+        cutoff = time.time() - _SpaceReservation.stale_after
+        lock_dir = op.join(cache.directory, 'locks')
+        if not op.isdir(lock_dir):
+            return
+        for name in os.listdir(lock_dir):
+            if not name.endswith('.lock'):
+                continue
+            group_id = name[:-5]
+            exists = cache._sql(
+                'SELECT 1 FROM Reservations WHERE group_id = ? LIMIT 1',
+                (group_id,),
+            ).fetchall()
+            if not exists and time.time() - op.getmtime(
+                op.join(lock_dir, name)
+            ) > cutoff:
+                with cl.suppress(OSError):
+                    os.remove(op.join(lock_dir, name))
+
+    def _lock_path(self):
+        return op.join(
+            self._cache.directory, 'locks', self.group_id + '.lock'
+        )
+
+    def _acquire(self):
+        lock_path = self._lock_path()
+        try:
+            os.makedirs(op.dirname(lock_path), exist_ok=True)
+            self._lock = open(lock_path, 'a+b')
+        except OSError:
+            self._lock = None
+            return False
+
+        if fcntl is not None:
+            try:
+                fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                self._lock.close()
+                self._lock = None
+                return False
+
+        if fcntl is None:  # pragma: no cover
+            self._stop = threading.Event()
+            self._thread = threading.Thread(target=self._heartbeat)
+            self._thread.daemon = True
+            self._thread.start()
+        return True
+
+    def _heartbeat(self):  # pragma: no cover
+        connection = sqlite3.connect(
+            op.join(self._cache.directory, DBNAME),
+            timeout=self._cache.timeout,
+            isolation_level=None,
+        )
+        try:
+            while not self._stop.wait(self.heartbeat_interval):
+                connection.execute(
+                    'UPDATE Reservations SET heartbeat = ? WHERE group_id = ?',
+                    (time.time(), self.group_id),
+                )
+        finally:
+            connection.close()
+
+    def _touch(self):
+        now = time.time()
+        self._cache._sql_retry(
+            'UPDATE Reservations SET heartbeat = ? WHERE group_id = ?',
+            (now, self.group_id),
+        )
+
+    def begin(self):
+        if not self._acquire():
+            raise Timeout(self.group_id)
+        return self
+
+    def hold_old(self, filename, size):
+        if filename is None:
+            return
+        self._update(
+            filename,
+            max(0, int(size)),
+            SPACE_STATE_WRITE,
+            force=True,
+        )
+
+    def cleanup(self, filename, size=None):
+        if filename is None:
+            return
+        if size is None:
+            size = self._filenames.get(filename, 0)
+        size = max(0, int(size))
+        self._filenames[filename] = size
+        self._cleanup.add(filename)
+
+    def reserve(self, filename, size, delta=None):
+        size = max(0, int(size))
+        self.reconcile(self._cache)
+        deadline = time.time() + self._cache.timeout
+        first_attempt = True
+
+        while True:
+            if first_attempt and self._cache.cull_limit:
+                now = time.time()
+                with self._cache._transact(retry=True) as (sql, append):
+                    self._cache._cull(now, sql, append)
+            first_attempt = False
+
+            sql = self._reserve_connection()
+            try:
+                current = self._filenames.get(filename, 0)
+                current = current if delta is None else 0
+                additional = size if delta is None else delta
+                if self._cache.size_limit_policy == SPACE_POLICY_REJECT:
+                    sql.execute(
+                        'PRAGMA busy_timeout = %d'
+                        % max(1, int(self._cache.timeout * 1000))
+                    )
+                    sql.execute('BEGIN IMMEDIATE')
+                    existing = sql.execute(
+                        'SELECT COALESCE(MAX(size), 0) FROM Reservations'
+                        ' WHERE group_id = ? AND filename = ?',
+                        (self.group_id, filename),
+                    ).fetchone()[0]
+                    sql.execute(
+                        'INSERT OR REPLACE INTO Reservations VALUES (?, ?, ?, ?, ?)',
+                        (
+                            self.group_id,
+                            filename,
+                            size,
+                            SPACE_STATE_WRITE,
+                            time.time(),
+                        ),
+                    )
+                    projected = self._projected_locked(sql) - existing
+                    if projected > self._cache.size_limit:
+                        sql.execute('ROLLBACK')
+                        raise SpaceLimitError(filename)
+                result = sql.execute(
+                    'INSERT INTO Reservations VALUES (?, ?, ?, ?, ?)'
+                    ' ON CONFLICT(group_id, filename) DO UPDATE SET'
+                    ' size = excluded.size, state = excluded.state,'
+                    ' heartbeat = excluded.heartbeat'
+                    ' WHERE ? >= (SELECT COALESCE(SUM(Cache.size), 0)'
+                    ' FROM Cache) + (SELECT COALESCE(SUM(res.size), 0)'
+                    ' FROM Reservations res WHERE res.state = ?'
+                    ' AND NOT EXISTS (SELECT 1 FROM Cache cache'
+                    ' WHERE cache.filename = res.filename))'
+                    ' + (SELECT COALESCE(SUM(res.size), 0)'
+                    ' FROM Reservations res WHERE res.state = ?)'
+                    ' - COALESCE((SELECT res.size FROM Reservations res'
+                    ' WHERE res.group_id = ? AND res.filename = ?), 0) + ?',
+                    (
+                        self.group_id,
+                        filename,
+                        size,
+                        SPACE_STATE_WRITE,
+                        time.time(),
+                        self._cache.size_limit,
+                        SPACE_STATE_WRITE,
+                        SPACE_STATE_CLEANUP,
+                        self.group_id,
+                        filename,
+                        additional,
+                    ),
+                )
+                if result.rowcount:
+                    if self._cache.size_limit_policy == SPACE_POLICY_REJECT:
+                        sql.execute('COMMIT')
+                    self._filenames[filename] = size
+                    return
+            except BaseException:
+                with cl.suppress(Exception):
+                    sql.execute('ROLLBACK')
+                raise
+            finally:
+                sql.close()
+
+            policy = self._cache.size_limit_policy
+            if policy == SPACE_POLICY_REJECT:
+                raise SpaceLimitError(filename)
+            if policy != SPACE_POLICY_WAIT:
+                raise ValueError(
+                    'unsupported size_limit_policy: %r' % policy
+                )
+            if time.time() >= deadline:
+                raise Timeout(filename) from None
+            time.sleep(min(0.05, deadline - time.time()))
+
+    def _reserve_connection(self):
+        return sqlite3.connect(
+            op.join(self._cache.directory, DBNAME),
+            timeout=self._cache.timeout,
+            isolation_level=None,
+        )
+
+    def _projected_locked(
+        self,
+        connection,
+        exclude_group=None,
+        exclude_state=None,
+    ):
+        execute = (
+            connection.execute
+            if hasattr(connection, 'execute')
+            else connection
+        )
+        cache_total = execute(
+            'SELECT COALESCE(SUM(size), 0) FROM Cache'
+        ).fetchone()[0]
+        reservation_total = execute(
+            'SELECT COALESCE(SUM(size), 0) FROM Reservations res'
+            ' WHERE res.state = ? AND NOT EXISTS (SELECT 1 FROM Cache cache'
+            ' WHERE cache.filename = res.filename)',
+            (SPACE_STATE_WRITE,),
+        ).fetchone()[0]
+        cleanup_total = execute(
+            'SELECT COALESCE(SUM(size), 0) FROM Reservations res'
+            ' WHERE res.state = ?',
+            (SPACE_STATE_CLEANUP,),
+        ).fetchone()[0]
+        excluded_total = 0
+        if exclude_group is not None:
+            excluded_total = execute(
+                'SELECT COALESCE(SUM(size), 0) FROM Reservations res'
+                ' WHERE res.group_id = ? AND res.state = ?',
+                (exclude_group, exclude_state or SPACE_STATE_WRITE),
+            ).fetchone()[0]
+        return (
+            cache_total
+            + reservation_total
+            + cleanup_total
+            - excluded_total
+        )
+
+    def _upsert(self, sql, filename, size, state):
+        execute = sql.execute if hasattr(sql, 'execute') else sql
+        execute(
+            'INSERT INTO Reservations VALUES (?, ?, ?, ?, ?)'
+            ' ON CONFLICT(group_id, filename) DO UPDATE SET'
+            ' size = excluded.size, state = excluded.state,'
+            ' heartbeat = excluded.heartbeat',
+            (self.group_id, filename, size, state, time.time()),
+        )
+
+    def _update(self, filename, size, state, force=False):
+        current = self._filenames.get(filename)
+        if current is not None and not force:
+            size = max(current, size)
+        deadline = time.time() + self._cache.timeout
+        while True:
+            try:
+                sql = self._cache._sql
+                sql('BEGIN IMMEDIATE')
+                self._upsert(sql, filename, size, state)
+                sql('COMMIT')
+                self._filenames[filename] = size
+                return
+            except BaseException:
+                with cl.suppress(Exception):
+                    self._cache._sql('ROLLBACK')
+                if not force and time.time() >= deadline:
+                    raise
+                if force:
+                    raise
+                time.sleep(0.001)
+
+    def prepare(self, sql, filenames):
+        for filename, size in filenames:
+            self.cleanup(filename, size)
+
+        for filename, size in self._filenames.items():
+            referenced = sql(
+                'SELECT 1 FROM Cache WHERE filename = ? LIMIT 1',
+                (filename,),
+            ).fetchall()
+            if filename in self._cleanup and not referenced:
+                state = SPACE_STATE_CLEANUP
+            else:
+                state = SPACE_STATE_WRITE
+            self._upsert(sql, filename, size, state)
+        if self._cache.size_limit_policy == SPACE_POLICY_REJECT and (
+            self._projected_locked(sql) > self._cache.size_limit
+        ):
+            sql('ROLLBACK')
+            self._cache._txn_id = None
+            self.abort()
+            raise SpaceLimitError(self.group_id)
+
+    def finish(self, filenames):
+        for filename, _ in filenames:
+            if filename is None:
+                continue
+            if self._safe_to_remove(filename):
+                with cl.suppress(OSError):
+                    os.remove(
+                        op.join(self._cache.directory, filename)
+                    )
+        self._cache._sql_retry(
+            'DELETE FROM Reservations WHERE group_id = ?', (self.group_id,)
+        )
+        self._release_lock(remove=True)
+
+    def abort(self):
+        for filename in self._filenames:
+            sql = self._cache._sql
+            try:
+                sql('BEGIN IMMEDIATE')
+                referenced = sql(
+                    'SELECT 1 FROM Cache WHERE filename = ?'
+                    ' UNION ALL SELECT 1 FROM Reservations WHERE filename = ?'
+                    ' AND group_id != ? LIMIT 1',
+                    (filename, filename, self.group_id),
+                ).fetchall()
+                if referenced:
+                    sql(
+                        'DELETE FROM Reservations WHERE group_id = ?'
+                        ' AND filename = ?',
+                        (self.group_id, filename),
+                    )
+                    sql('COMMIT')
+                    continue
+                os.remove(op.join(self._cache.directory, filename))
+                sql(
+                    'DELETE FROM Reservations WHERE group_id = ?'
+                    ' AND filename = ?',
+                    (self.group_id, filename),
+                )
+                sql('COMMIT')
+            except BaseException:
+                with cl.suppress(Exception):
+                    sql('ROLLBACK')
+        self._release_lock(remove=True)
+
+    def _safe_to_remove(self, filename):
+        if not op.exists(op.join(self._cache.directory, filename)):
+            return False
+        select_cache = 'SELECT 1 FROM Cache WHERE filename = ? LIMIT 1'
+        referenced_cache = self._cache._sql(select_cache, (filename,)).fetchall()
+        if referenced_cache:
+            return False
+        select_reservation = (
+            'SELECT 1 FROM Reservations WHERE filename = ?'
+            ' AND group_id != ? LIMIT 1'
+        )
+        referenced = self._cache._sql(
+            select_reservation, (filename, self.group_id)
+        ).fetchall()
+        return not referenced
+
+    def _is_referenced(self, filename):
+        select = (
+            'SELECT 1 FROM Cache WHERE filename = ?'
+            ' UNION ALL SELECT 1 FROM Reservations WHERE filename = ?'
+            ' AND group_id != ? LIMIT 1'
+        )
+        return bool(
+            self._cache._sql(
+                select, (filename, filename, self.group_id)
+            ).fetchall()
+        )
+
+    def _reclaim(self):
+        select = 'SELECT filename FROM Reservations WHERE group_id = ?'
+        filenames = [
+            row[0]
+            for row in self._cache._sql(select, (self.group_id,)).fetchall()
+        ]
+        for filename in filenames:
+            sql = self._cache._sql
+            sql('BEGIN IMMEDIATE')
+            rows = sql(
+                'SELECT 1 FROM Cache WHERE filename = ?', (filename,)
+            ).fetchall()
+            other = sql(
+                'SELECT 1 FROM Reservations WHERE filename = ?'
+                ' AND group_id != ?',
+                (filename, self.group_id),
+            ).fetchall()
+            if rows or other:
+                sql(
+                    'DELETE FROM Reservations WHERE group_id = ?'
+                    ' AND filename = ?',
+                    (self.group_id, filename),
+                )
+                sql('COMMIT')
+                continue
+            try:
+                os.remove(op.join(self._cache.directory, filename))
+            except OSError:
+                if not op.exists(
+                    op.join(self._cache.directory, filename)
+                ):
+                    sql(
+                        'DELETE FROM Reservations WHERE group_id = ?'
+                        ' AND filename = ?',
+                        (self.group_id, filename),
+                    )
+                    sql('COMMIT')
+                else:
+                    sql('ROLLBACK')
+            else:
+                sql(
+                    'DELETE FROM Reservations WHERE group_id = ?'
+                    ' AND filename = ?',
+                    (self.group_id, filename),
+                )
+                sql('COMMIT')
+        lock_path = self._lock_path()
+        self._release_lock(remove=True)
+
+    def _release_lock(self, remove=False):
+        if self._stop is not None:  # pragma: no cover
+            self._stop.set()
+            if self._thread is not None:
+                self._thread.join()
+        if self._lock is not None:
+            with cl.suppress(Exception):
+                if fcntl is not None:
+                    fcntl.flock(self._lock, fcntl.LOCK_UN)
+            self._lock.close()
+            self._lock = None
+        if remove:
+            with cl.suppress(OSError):
+                os.remove(self._lock_path())
 
 
 def args_to_key(base, args, kwargs, typed, ignore):
@@ -584,6 +1112,8 @@ class Cache:
         else:
             self.drop_tag_index()
 
+        _SpaceReservation.setup(self)
+
         # Close and re-open database connection with given timeout.
 
         self.close()
@@ -706,12 +1236,22 @@ class Cache:
             yield
 
     @cl.contextmanager
-    def _transact(self, retry=False, filename=None):
+    def _transact(
+        self,
+        retry=False,
+        filename=None,
+        reservation=None,
+    ):
         sql = self._sql
         filenames = []
         _disk_remove = self._disk.remove
         tid = threading.get_ident()
         txn_id = self._txn_id
+        pending_list = getattr(self._local, 'pending_reservations', None)
+
+        if not isinstance(pending_list, list):
+            pending_list = []
+            self._local.pending_reservations = pending_list
 
         if tid == txn_id:
             begin = False
@@ -727,6 +1267,12 @@ class Cache:
                         continue
                     if filename is not None:
                         _disk_remove(filename)
+                    for item in pending_list:
+                        if isinstance(item[0], _SpaceReservation):
+                            item[0].abort()
+                    pending_list.clear()
+                    if reservation is not None and not pending_list:
+                        reservation.abort()
                     raise Timeout from None
 
         try:
@@ -736,15 +1282,65 @@ class Cache:
                 assert self._txn_id == tid
                 self._txn_id = None
                 sql('ROLLBACK')
+                for item in pending_list:
+                    if isinstance(item[0], _SpaceReservation):
+                        item[0].abort()
+                pending_list.clear()
+            if reservation is not None:
+                reservation.abort()
             raise
         else:
+            pending_list.append((reservation, filenames))
+
             if begin:
                 assert self._txn_id == tid
                 self._txn_id = None
+                pending_list.insert(
+                    0,
+                    (None, filenames),
+                )
+                for pending_reservation, pending_filenames in pending_list:
+                    cleanup = []
+                    for item in pending_filenames:
+                        item_filename = (
+                            item[0] if isinstance(item, tuple) else item
+                        )
+                        item_size = (
+                            item[1] if isinstance(item, tuple) else None
+                        )
+                        if item_filename is not None:
+                            referenced = sql(
+                                'SELECT 1 FROM Cache WHERE filename = ?'
+                                ' LIMIT 1',
+                                (item_filename,),
+                            ).fetchall()
+                            if not referenced:
+                                item_size = (
+                                    item_size if item_size is not None else 0
+                                )
+                                cleanup.append((item_filename, item_size))
+                    if pending_reservation is not None:
+                        pending_reservation.prepare(sql, cleanup)
                 sql('COMMIT')
-            for name in filenames:
-                if name is not None:
-                    _disk_remove(name)
+                for pending_reservation, pending_filenames in pending_list:
+                    if pending_reservation is None:
+                        for item in pending_filenames:
+                            name = (
+                                item[0]
+                                if isinstance(item, tuple)
+                                else item
+                            )
+                            if name is not None:
+                                _disk_remove(name)
+                        continue
+                    cleanup = []
+                    for item in pending_filenames:
+                        if isinstance(item, tuple):
+                            cleanup.append(item)
+                        elif item is not None:
+                            cleanup.append((item, None))
+                    pending_reservation.finish(cleanup)
+                pending_list.clear()
 
     def set(self, key, value, expire=None, read=False, tag=None, retry=False):
         """Set `key` and `value` item in cache.
@@ -769,7 +1365,10 @@ class Cache:
         now = time.time()
         db_key, raw = self._disk.put(key)
         expire_time = None if expire is None else now + expire
-        size, mode, filename, db_value = self._disk.store(value, read, key=key)
+        reservation = self._begin_reservation(db_key, raw)
+        size, mode, filename, db_value = self._disk_store(
+            value, read, key, reservation
+        )
         columns = (expire_time, tag, size, mode, filename, db_value)
 
         # The order of SELECT, UPDATE, and INSERT is important below.
@@ -793,22 +1392,25 @@ class Cache:
         # INSERT OR REPLACE aka UPSERT is not used because the old filename may
         # need cleanup.
 
-        with self._transact(retry, filename) as (sql, cleanup):
+        with self._transact(
+            retry,
+            filename,
+            reservation=reservation,
+        ) as (sql, cleanup):
             rows = sql(
-                'SELECT rowid, filename FROM Cache'
+                'SELECT rowid, filename, size FROM Cache'
                 ' WHERE key = ? AND raw = ?',
                 (db_key, raw),
             ).fetchall()
 
             if rows:
-                ((rowid, old_filename),) = rows
-                cleanup(old_filename)
+                ((rowid, current_filename, current_size),) = rows
+                cleanup((current_filename, current_size))
                 self._row_update(rowid, now, columns)
             else:
                 self._row_insert(db_key, raw, now, columns)
 
             self._cull(now, sql, cleanup)
-
             return True
 
     def __setitem__(self, key, value):
@@ -821,6 +1423,49 @@ class Cache:
 
         """
         self.set(key, value, retry=True)
+
+    def _begin_reservation(self, db_key=None, raw=None):
+        if not self.strict_size_limit:
+            return None
+        reservation = _SpaceReservation(self).begin()
+        if db_key is not None:
+            rows = self._sql(
+                'SELECT filename, size FROM Cache'
+                ' WHERE key = ? AND raw = ?',
+                (db_key, raw),
+            ).fetchall()
+            if rows:
+                ((old_filename, old_size),) = rows
+                reservation.hold_old(old_filename, old_size)
+        return reservation
+
+    def _disk_store(self, value, read, key, reservation):
+        supports_reserve = 'reserve' in inspect.signature(
+            self._disk.store
+        ).parameters
+        if reservation is None:
+            if supports_reserve:
+                return self._disk.store(
+                    value, read, key=key, reserve=None
+                )
+            return self._disk.store(value, read, key=key)
+        if not supports_reserve:
+            reservation.abort()
+            raise TypeError(
+                'custom Disk.store must accept a reserve keyword argument'
+                ' when strict_size_limit is enabled'
+            )
+        try:
+            return self._disk.store(
+                value,
+                read,
+                key=key,
+                reserve=reservation.reserve if reservation is not None else None,
+            )
+        except BaseException:
+            if reservation is not None:
+                reservation.abort()
+            raise
 
     def _row_update(self, rowid, now, columns):
         sql = self._sql
@@ -888,7 +1533,7 @@ class Cache:
             ' ORDER BY expire_time LIMIT ?'
         )
 
-        select_expired = select_expired_template % 'filename'
+        select_expired = select_expired_template % 'filename, size'
         rows = sql(select_expired, (now, cull_limit)).fetchall()
 
         if rows:
@@ -897,8 +1542,8 @@ class Cache:
             )
             sql(delete_expired, (now, cull_limit))
 
-            for (filename,) in rows:
-                cleanup(filename)
+            for filename, _ in rows:
+                cleanup((filename, _))
 
             cull_limit -= len(rows)
 
@@ -912,7 +1557,9 @@ class Cache:
         if select_policy is None or self.volume() < self.size_limit:
             return
 
-        select_filename = select_policy.format(fields='filename', now=now)
+        select_filename = select_policy.format(
+            fields='filename, size', now=now
+        )
         rows = sql(select_filename, (cull_limit,)).fetchall()
 
         if rows:
@@ -921,8 +1568,8 @@ class Cache:
             )
             sql(delete, (cull_limit,))
 
-            for (filename,) in rows:
-                cleanup(filename)
+            for filename, size in rows:
+                cleanup((filename, size))
 
     def touch(self, key, expire=None, retry=False):
         """Touch `key` in cache and update `expire` time.
@@ -989,24 +1636,31 @@ class Cache:
         now = time.time()
         db_key, raw = self._disk.put(key)
         expire_time = None if expire is None else now + expire
-        size, mode, filename, db_value = self._disk.store(value, read, key=key)
+        reservation = self._begin_reservation(db_key, raw)
+        size, mode, filename, db_value = self._disk_store(
+            value, read, key, reservation
+        )
         columns = (expire_time, tag, size, mode, filename, db_value)
 
-        with self._transact(retry, filename) as (sql, cleanup):
+        with self._transact(
+            retry,
+            filename,
+            reservation=reservation,
+        ) as (sql, cleanup):
             rows = sql(
-                'SELECT rowid, filename, expire_time FROM Cache'
+                'SELECT rowid, filename, size, expire_time FROM Cache'
                 ' WHERE key = ? AND raw = ?',
                 (db_key, raw),
             ).fetchall()
 
             if rows:
-                ((rowid, old_filename, old_expire_time),) = rows
+                ((rowid, old_filename, old_size, old_expire_time),) = rows
 
                 if old_expire_time is None or old_expire_time > now:
-                    cleanup(filename)
+                    cleanup((filename, size))
                     return False
 
-                cleanup(old_filename)
+                cleanup((old_filename, old_size))
                 self._row_update(rowid, now, columns)
             else:
                 self._row_insert(db_key, raw, now, columns)
@@ -1349,7 +2003,7 @@ class Cache:
 
         with self._transact(retry) as (sql, cleanup):
             rows = sql(
-                'SELECT rowid, filename FROM Cache'
+                'SELECT rowid, filename, size FROM Cache'
                 ' WHERE key = ? AND raw = ?'
                 ' AND (expire_time IS NULL OR expire_time > ?)',
                 (db_key, raw, time.time()),
@@ -1358,9 +2012,9 @@ class Cache:
             if not rows:
                 raise KeyError(key)
 
-            ((rowid, filename),) = rows
+            ((rowid, filename, size),) = rows
             sql('DELETE FROM Cache WHERE rowid = ?', (rowid,))
-            cleanup(filename)
+            cleanup((filename, size))
 
             return True
 
@@ -1446,7 +2100,10 @@ class Cache:
         now = time.time()
         raw = True
         expire_time = None if expire is None else now + expire
-        size, mode, filename, db_value = self._disk.store(value, read)
+        reservation = self._begin_reservation()
+        size, mode, filename, db_value = self._disk_store(
+            value, read, UNKNOWN, reservation
+        )
         columns = (expire_time, tag, size, mode, filename, db_value)
         order = {'back': 'DESC', 'front': 'ASC'}
         select = (
@@ -1455,7 +2112,11 @@ class Cache:
             ' ORDER BY key %s LIMIT 1'
         ) % order[side]
 
-        with self._transact(retry, filename) as (sql, cleanup):
+        with self._transact(
+            retry,
+            filename,
+            reservation=reservation,
+        ) as (sql, cleanup):
             rows = sql(select, (min_key, max_key, raw)).fetchall()
 
             if rows:
@@ -1963,6 +2624,8 @@ class Cache:
                 # Check file system against Cache.filename.
 
                 for dirpath, _, files in os.walk(self._directory):
+                    if op.basename(dirpath) == 'locks':
+                        continue
                     paths = [op.join(dirpath, filename) for filename in files]
                     error = set(paths) - filenames
 
@@ -2129,7 +2792,9 @@ class Cache:
         if select_policy is None:
             return 0
 
-        select_filename = select_policy.format(fields='filename', now=now)
+        select_filename = select_policy.format(
+            fields='filename, size', now=now
+        )
 
         try:
             while self.volume() > self.size_limit:
@@ -2146,8 +2811,8 @@ class Cache:
                     )
                     sql(delete, (10,))
 
-                    for (filename,) in rows:
-                        cleanup(filename)
+                    for filename, size in rows:
+                        cleanup((filename, size))
         except Timeout:
             raise Timeout(count) from None
 
@@ -2404,8 +3069,23 @@ class Cache:
         if value is ENOVAL:
             select = 'SELECT value FROM Settings WHERE key = ?'
             ((value,),) = sql_retry(select, (key,)).fetchall()
+            if key == 'size_limit_policy' and value not in (
+                SPACE_POLICY_CULL,
+                SPACE_POLICY_REJECT,
+                SPACE_POLICY_WAIT,
+            ):
+                raise ValueError(
+                    'unsupported size_limit_policy: %r' % value
+                )
             setattr(self, key, value)
             return value
+
+        if key == 'size_limit_policy' and value not in (
+            SPACE_POLICY_CULL,
+            SPACE_POLICY_REJECT,
+            SPACE_POLICY_WAIT,
+        ):
+            raise ValueError('unsupported size_limit_policy: %r' % value)
 
         if update:
             statement = 'UPDATE Settings SET value = ? WHERE key = ?'

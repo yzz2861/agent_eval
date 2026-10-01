@@ -15,6 +15,7 @@ from .core import (
     EmptyDirWarning,
     JSONDisk,
     Timeout,
+    SpaceLimitError,
     UnknownFileWarning,
 )
 from .fanout import FanoutCache
@@ -45,6 +46,7 @@ __all__ = [
     'Lock',
     'RLock',
     'Timeout',
+    'SpaceLimitError',
     'UNKNOWN',
     'UnknownFileWarning',
     'barrier',

@@ -698,6 +698,9 @@ are updated using :meth:`reset <diskcache.Cache.reset>`. Attributes are set
 during initialization when passed as keyword arguments.
 
 * `size_limit`, default one gigabyte. The maximum on-disk size of the cache.
+* `strict_size_limit`, default False. When enabled, external value files
+  reserve space before writing. Use `size_limit_policy` set to ``reject`` to
+  raise :class:`SpaceLimitError` or ``wait`` to wait until space is available.
 * `cull_limit`, default ten. The maximum number of keys to cull when adding a
   new item. Set to zero to disable automatic culling. Some systems may disable
   automatic culling in exchange for a cron-like job that regularly calls

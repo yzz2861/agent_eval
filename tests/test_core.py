@@ -3,6 +3,7 @@
 import errno
 import hashlib
 import io
+import multiprocessing as mp
 import os
 import os.path as op
 import pathlib
@@ -1093,6 +1094,245 @@ def test_size_limit_with_files(cache):
     assert cache.volume() > size_limit
     cache.cull()
     assert cache.volume() <= size_limit
+
+
+class ChunkReader:
+    def __init__(self, size, chunk_size=10000):
+        self._remaining = size
+        self._chunk_size = chunk_size
+        self.request_sizes = []
+
+    def read(self, size=-1):
+        self.request_sizes.append(size)
+        count = min(size, self._chunk_size, self._remaining)
+        self._remaining -= count
+        return b'x' * count
+
+
+class CrashReader:
+    def __init__(self, started, proceed):
+        self.started = started
+        self.proceed = proceed
+
+    def read(self, size=-1):
+        self.started.set()
+        self.proceed.wait(10)
+        return b''
+
+
+def _strict_worker(path, barrier, results, index):
+    cache = dc.Cache(
+        path,
+        strict_size_limit=True,
+        size_limit_policy='reject',
+        cull_limit=0,
+    )
+    try:
+        barrier.wait()
+        cache.set(index, b'x' * 40000)
+        results.put(('ok', index))
+    except dc.SpaceLimitError:
+        results.put(('rejected', index))
+    except BaseException as exc:
+        results.put((type(exc).__name__, index))
+    finally:
+        cache.close()
+
+
+def _crash_worker(path, started, proceed, errors):
+    try:
+        cache = dc.Cache(
+            path,
+            strict_size_limit=True,
+            size_limit_policy='reject',
+            cull_limit=0,
+            timeout=10,
+        )
+        cache.set('crash', CrashReader(started, proceed), read=True)
+    except BaseException as exc:
+        errors.put(repr(exc))
+
+
+def test_strict_size_limit_rejects_stream_without_buffering():
+    cache_dir = tempfile.mkdtemp()
+    cache = dc.Cache(
+        cache_dir,
+        size_limit=40000,
+        strict_size_limit=True,
+        size_limit_policy='reject',
+        cull_limit=0,
+    )
+    reader = ChunkReader(40000)
+    cache.set('first', reader, read=True)
+    assert max(reader.request_sizes) == 2**22
+    assert cache.get('first', read=True).read() == b'x' * 40000
+
+    reader = ChunkReader(40000)
+    with pytest.raises(dc.SpaceLimitError):
+        cache.set('second', reader, read=True)
+    assert cache.get('second', default=None) is None
+    cache.close()
+    shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_strict_size_limit_counts_overwrite_coexistence():
+    cache_dir = tempfile.mkdtemp()
+    cache = dc.Cache(
+        cache_dir,
+        size_limit=2**21,
+        strict_size_limit=True,
+        size_limit_policy='reject',
+        cull_limit=0,
+    )
+    cache.set('key', b'x' * 40000)
+    cache.reset('size_limit', 79000)
+
+    with pytest.raises(dc.SpaceLimitError):
+        cache.set('key', b'y' * 40000)
+    assert cache.get('key') == b'x' * 40000
+    cache.close()
+    shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_strict_size_limit_wait_until_space_is_released():
+    cache_dir = tempfile.mkdtemp()
+    cache = dc.Cache(
+        cache_dir,
+        size_limit=2**21,
+        strict_size_limit=True,
+        size_limit_policy='wait',
+        cull_limit=0,
+        timeout=5,
+        )
+    cache.set('old', b'o' * 40000)
+    cache.reset('size_limit', 39000)
+    assert cache.size_limit_policy == 'wait'
+    ready = threading.Event()
+    proceed = threading.Event()
+
+    class WaitReader:
+        def __init__(self):
+            self.first = True
+
+        def read(self, size=-1):
+            if self.first:
+                self.first = False
+                ready.set()
+                return b'n' * 40000
+            proceed.wait(10)
+            return b''
+
+    result = []
+
+    def worker():
+        try:
+            cache.set('new', WaitReader(), read=True)
+        except BaseException as exc:
+            result.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(10)
+    time.sleep(0.1)
+    assert thread.is_alive()
+    assert cache.delete('old')
+    proceed.set()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert not result
+    assert cache.get('new') == b'n' * 40000
+    cache.close()
+    shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_strict_size_limit_multiprocess_last_quota():
+    ctx = mp.get_context('fork')
+    cache_dir = tempfile.mkdtemp()
+    cache = dc.Cache(cache_dir)
+    size_limit = 40000
+    cache.reset('size_limit', size_limit)
+    cache.reset('strict_size_limit', 1)
+    cache.reset('size_limit_policy', 'reject')
+    cache.reset('cull_limit', 0)
+    cache.close()
+
+    barrier = ctx.Barrier(2)
+    results = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_strict_worker,
+            args=(cache_dir, barrier, results, index),
+        )
+        for index in range(2)
+    ]
+    for process in processes:
+        process.start()
+    outcomes = [results.get(timeout=10) for _ in processes]
+    for process in processes:
+        process.join(10)
+        assert process.exitcode == 0
+
+    assert sorted(status for status, _ in outcomes) == ['ok', 'rejected']
+    with dc.Cache(cache_dir) as cache:
+        assert cache.reset('size') <= size_limit
+        assert len(cache) == 1
+    shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_strict_size_limit_recovers_crashed_reservation():
+    ctx = mp.get_context('fork')
+    cache_dir = tempfile.mkdtemp()
+    cache = dc.Cache(
+        cache_dir,
+        size_limit=2**20,
+        strict_size_limit=True,
+        size_limit_policy='reject',
+        cull_limit=0,
+    )
+    cache.close()
+    started = ctx.Event()
+    proceed = ctx.Event()
+    errors = ctx.Queue()
+    process = ctx.Process(
+        target=_crash_worker,
+        args=(cache_dir, started, proceed, errors),
+    )
+    process.start()
+    assert started.wait(10)
+    process.terminate()
+    process.join(10)
+    assert errors.empty()
+
+    with dc.Cache(
+        cache_dir,
+        size_limit=2**20,
+        strict_size_limit=True,
+        size_limit_policy='reject',
+        cull_limit=0,
+    ) as recovered:
+        dc.core._SpaceReservation.stale_after = -1
+        try:
+            dc.core._SpaceReservation.reconcile(recovered)
+            rows = recovered._sql(
+                'SELECT COUNT(*) FROM Reservations'
+            ).fetchall()
+            assert rows == [(0,)]
+            recovered.set('after', b'z' * 40000)
+
+            filename = recovered._sql(
+                'SELECT filename FROM Cache WHERE key = ?', ('after',)
+            ).fetchone()[0]
+            group_id = 'stale-live-file'
+            recovered._sql(
+                'INSERT INTO Reservations VALUES (?, ?, ?, ?, ?)',
+                (group_id, filename, 40000, 'write', 0),
+            )
+            dc.core._SpaceReservation.reconcile(recovered)
+            assert op.exists(op.join(cache_dir, filename))
+            assert recovered.get('after') == b'z' * 40000
+        finally:
+            dc.core._SpaceReservation.stale_after = 30.0
+    shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 def test_size_limit_with_database(cache):
