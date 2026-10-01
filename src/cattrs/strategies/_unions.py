@@ -1,13 +1,24 @@
 from collections import defaultdict
-from typing import Any, Callable, Union
+from collections.abc import Mapping
+from typing import Any, Callable, Union, get_origin
 
 from attrs import NOTHING, NothingType
 
 from .. import BaseConverter
-from .._compat import get_newtype_base, is_literal, is_subclass, is_union_type
+from .._compat import (
+    NoneType,
+    get_newtype_base,
+    has,
+    is_literal,
+    is_subclass,
+    is_union_type,
+)
+from ..disambiguators import create_literal_dis_func
+from ..errors import UnionAmbiguityError, UnionValidationError, UnionValidationNote
 from ..typealiases import get_type_alias_base, is_type_alias
 
 __all__ = [
+    "configure_strict_union",
     "configure_tagged_union",
     "configure_union_passthrough",
     "default_tag_generator",
@@ -292,3 +303,99 @@ def configure_union_passthrough(
     converter.register_structure_hook_factory(
         contains_native_union, make_structure_native_union
     )
+
+
+def configure_strict_union(
+    union: Any, converter: BaseConverter, *, use_literals: bool = True
+) -> None:
+    """
+    Configure the converter to structure `union` strictly, by evaluating all
+    union members instead of stopping at the first one which structures
+    successfully.
+
+    When the members carry an explicit discriminator (`Literal` fields) and
+    `use_literals` is set, the discriminator is used directly. Otherwise every
+    member's structure hook is tried at most once:
+
+    * if exactly one member structures successfully, its (already structured)
+      result is returned
+    * if more than one member structures successfully,
+      :class:`UnionAmbiguityError <cattrs.errors.UnionAmbiguityError>` is raised
+    * if no member structures successfully,
+      :class:`UnionValidationError <cattrs.errors.UnionValidationError>` is
+      raised, containing the errors of all members, each annotated with the
+      member type it belongs to
+
+    Nested unions, generic classes and `None` are supported as members.
+
+    :param union: The union (or a type alias of one) to configure.
+    :param converter: The converter to apply the strategy to.
+    :param use_literals: Whether to prefer `Literal` field disambiguation
+        when the union members support it.
+
+    .. versionadded:: 26.3.0
+    """
+    if is_type_alias(union):
+        union = union.__value__
+    if not is_union_type(union):
+        raise ValueError(f"{union!r} is not a union type.")
+
+    args = union.__args__
+    has_none = NoneType in args
+    candidates = tuple(a for a in args if a is not NoneType)
+
+    dis_fn = None
+    if (
+        use_literals
+        and len(candidates) > 1
+        and all(has(get_origin(c) or c) for c in candidates)
+    ):
+        dis_fn = create_literal_dis_func(converter, *candidates)
+
+    # Hooks are resolved lazily and cached, so members registered (or
+    # configured) after this strategy is applied still work; each member hook
+    # is still executed at most once per structuring call.
+    hook_cache: dict[Any, Callable] = {}
+
+    def get_hook(t: Any) -> Callable:
+        if t not in hook_cache:
+            hook_cache[t] = converter.get_structure_hook(t)
+        return hook_cache[t]
+
+    def structure_strict_union(obj: Any, _) -> union:
+        if obj is None:
+            if has_none:
+                return None
+        elif dis_fn is not None and isinstance(obj, Mapping):
+            # An explicit discriminator field takes priority.
+            try:
+                target = dis_fn(obj)
+            except (KeyError, ValueError):
+                pass
+            else:
+                return get_hook(target)(obj, target)
+
+        matches: list[tuple[Any, Any]] = []
+        errors: list[Exception] = []
+        for candidate in candidates:
+            try:
+                res = get_hook(candidate)(obj, candidate)
+            except Exception as exc:
+                exc.__notes__ = [
+                    *getattr(exc, "__notes__", []),
+                    UnionValidationNote(
+                        f"Structuring {union!r} @ branch {candidate!r}", candidate
+                    ),
+                ]
+                errors.append(exc)
+            else:
+                matches.append((candidate, res))
+
+        if len(matches) == 1:
+            # The already-structured result is reused directly.
+            return matches[0][1]
+        if matches:
+            raise UnionAmbiguityError(union, [c for c, _ in matches])
+        raise UnionValidationError(f"While structuring {union!r}", errors, union)
+
+    converter.register_structure_hook(union, structure_strict_union)

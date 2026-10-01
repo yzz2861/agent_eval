@@ -25,7 +25,7 @@ from .gen import AttributeOverride
 if TYPE_CHECKING:
     from .converters import BaseConverter
 
-__all__ = ["create_default_dis_func", "is_supported_union"]
+__all__ = ["create_default_dis_func", "create_literal_dis_func", "is_supported_union"]
 
 
 def is_supported_union(typ: Any) -> bool:
@@ -33,6 +33,68 @@ def is_supported_union(typ: Any) -> bool:
     return is_union_type(typ) and all(
         e is NoneType or has(get_origin(e) or e) for e in typ.__args__
     )
+
+
+def create_literal_dis_func(
+    converter: BaseConverter, *classes: type[AttrsInstance]
+) -> Callable[[Mapping[Any, Any]], type[Any] | None] | None:
+    """Given attrs classes or dataclasses, generate a disambiguation function
+    based on their `Literal` fields.
+
+    Return `None` if the classes cannot be disambiguated using literal
+    fields alone.
+
+    .. versionadded:: 26.3.0
+    """
+    if len(classes) < 2:
+        raise ValueError("At least two classes required.")
+
+    # requirements for a discriminator field:
+    # (... TODO: a single fallback is OK)
+    #  - it must always be enumerated
+    cls_candidates = [
+        {at.name for at in adapted_fields(get_origin(cl) or cl) if is_literal(at.type)}
+        for cl in classes
+    ]
+
+    # literal field names common to all members
+    discriminators: set[str] = cls_candidates[0]
+    for possible_discriminators in cls_candidates:
+        discriminators &= possible_discriminators
+
+    best_result = None
+    best_discriminator = None
+    for discriminator in discriminators:
+        # maps Literal values (strings, ints...) to classes
+        mapping = defaultdict(list)
+
+        for cl in classes:
+            for key in get_args(fields_dict(get_origin(cl) or cl)[discriminator].type):
+                mapping[key].append(cl)
+
+        if best_result is None or max(len(v) for v in mapping.values()) <= max(
+            len(v) for v in best_result.values()
+        ):
+            best_result = mapping
+            best_discriminator = discriminator
+
+    if (
+        best_result
+        and best_discriminator
+        and max(len(v) for v in best_result.values()) != len(classes)
+    ):
+        final_mapping = {
+            k: v[0] if len(v) == 1 else Union[tuple(v)] for k, v in best_result.items()
+        }
+
+        def dis_func(data: Mapping[Any, Any]) -> type | None:
+            if not isinstance(data, Mapping):
+                raise ValueError("Only input mappings are supported.")
+            return final_mapping[data[best_discriminator]]
+
+        return dis_func
+
+    return None
 
 
 def create_default_dis_func(
@@ -66,56 +128,8 @@ def create_default_dis_func(
 
     # first, attempt for unique values
     if use_literals:
-        # requirements for a discriminator field:
-        # (... TODO: a single fallback is OK)
-        #  - it must always be enumerated
-        cls_candidates = [
-            {
-                at.name
-                for at in adapted_fields(get_origin(cl) or cl)
-                if is_literal(at.type)
-            }
-            for cl in classes
-        ]
-
-        # literal field names common to all members
-        discriminators: set[str] = cls_candidates[0]
-        for possible_discriminators in cls_candidates:
-            discriminators &= possible_discriminators
-
-        best_result = None
-        best_discriminator = None
-        for discriminator in discriminators:
-            # maps Literal values (strings, ints...) to classes
-            mapping = defaultdict(list)
-
-            for cl in classes:
-                for key in get_args(
-                    fields_dict(get_origin(cl) or cl)[discriminator].type
-                ):
-                    mapping[key].append(cl)
-
-            if best_result is None or max(len(v) for v in mapping.values()) <= max(
-                len(v) for v in best_result.values()
-            ):
-                best_result = mapping
-                best_discriminator = discriminator
-
-        if (
-            best_result
-            and best_discriminator
-            and max(len(v) for v in best_result.values()) != len(classes)
-        ):
-            final_mapping = {
-                k: v[0] if len(v) == 1 else Union[tuple(v)]
-                for k, v in best_result.items()
-            }
-
-            def dis_func(data: Mapping[Any, Any]) -> type | None:
-                if not isinstance(data, Mapping):
-                    raise ValueError("Only input mappings are supported.")
-                return final_mapping[data[best_discriminator]]
-
+        dis_func = create_literal_dis_func(converter, *classes)
+        if dis_func is not None:
             return dis_func
 
     # next, attempt for unique keys

@@ -6,6 +6,8 @@ from .errors import (
     ClassValidationError,
     ForbiddenExtraKeysError,
     IterableValidationError,
+    UnionAmbiguityError,
+    UnionValidationError,
 )
 
 __all__ = ["format_exception", "transform_error"]
@@ -42,6 +44,8 @@ def format_exception(exc: BaseException, type: Union[type, None]) -> str:
             res = f"invalid value for type, expected {tn}"
     elif isinstance(exc, ForbiddenExtraKeysError):
         res = f"extra fields found ({', '.join(sorted(exc.extra_fields))})"
+    elif isinstance(exc, UnionAmbiguityError):
+        res = f"ambiguous value, matches {len(exc.matches)} types"
     elif isinstance(exc, AttributeError) and exc.args[0].endswith(
         "object has no attribute 'items'"
     ):
@@ -72,6 +76,7 @@ def transform_error(
     * by appending `.{field_name}` for fields in classes
     * by appending `[{int}]` for indices in iterables, like lists
     * by appending `[{str}]` for keys in mappings, like dictionaries
+    * by appending `[{type_name}]` for branches of strictly validated unions
 
     :param exc: The exception to transform into error messages.
     :param path: The root path to use.
@@ -79,13 +84,37 @@ def transform_error(
         string descriptions of errors.
 
     .. versionadded:: 23.1.0
+    .. versionchanged:: 26.3.0
+        `UnionValidationError <cattrs.errors.UnionValidationError>` is now
+        also supported.
     """
     errors = []
-    if isinstance(exc, IterableValidationError):
+    if isinstance(exc, UnionValidationError):
+        with_notes, without = exc.group_exceptions()
+        for exc, note in with_notes:
+            tn = (
+                note.type.__name__
+                if hasattr(note.type, "__name__")
+                else repr(note.type)
+            )
+            p = f"{path}[{tn}]"
+            if isinstance(
+                exc,
+                (ClassValidationError, IterableValidationError, UnionValidationError),
+            ):
+                errors.extend(transform_error(exc, p, format_exception))
+            else:
+                errors.append(f"{format_exception(exc, note.type)} @ {p}")
+        for exc in without:
+            errors.append(f"{format_exception(exc, None)} @ {path}")
+    elif isinstance(exc, IterableValidationError):
         with_notes, without = exc.group_exceptions()
         for exc, note in with_notes:
             p = f"{path}[{note.index!r}]"
-            if isinstance(exc, (ClassValidationError, IterableValidationError)):
+            if isinstance(
+                exc,
+                (ClassValidationError, IterableValidationError, UnionValidationError),
+            ):
                 errors.extend(transform_error(exc, p, format_exception))
             else:
                 errors.append(f"{format_exception(exc, note.type)} @ {p}")
@@ -95,7 +124,10 @@ def transform_error(
         with_notes, without = exc.group_exceptions()
         for exc, note in with_notes:
             p = f"{path}.{note.name}"
-            if isinstance(exc, (ClassValidationError, IterableValidationError)):
+            if isinstance(
+                exc,
+                (ClassValidationError, IterableValidationError, UnionValidationError),
+            ):
                 errors.extend(transform_error(exc, p, format_exception))
             else:
                 errors.append(f"{format_exception(exc, note.type)} @ {p}")

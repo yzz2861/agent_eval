@@ -330,6 +330,52 @@ Nested(m=MyClass(a=43))
 
 ```
 
+## Strict Unions Strategy
+
+_Found at {py:func}`cattrs.strategies.configure_strict_union`._
+
+The _strict union_ strategy structures a union by evaluating all of its members, instead of picking a branch heuristically.
+This is useful when the members have similar shapes and no explicit discriminator field, where more eager strategies may silently interpret the data as the wrong member.
+
+When the strategy is applied, each member's structure hook is tried at most once per structuring call:
+
+- if exactly one member structures successfully, its (already structured) result is returned
+- if more than one member structures successfully, {py:class}`UnionAmbiguityError <cattrs.errors.UnionAmbiguityError>` is raised
+- if no member structures successfully, {py:class}`UnionValidationError <cattrs.errors.UnionValidationError>` is raised, containing the errors of all members; each error is annotated with the member type it belongs to, so {py:func}`transform_error <cattrs.transform_error>` can attribute it to the right branch and field path
+
+If the union members share a `Literal` discriminator field, it is used directly and no evaluation takes place (this can be turned off with `use_literals=False`).
+Nested unions, generic classes and `None` are supported as members.
+
+```{doctest} strict_unions
+
+>>> from cattrs.strategies import configure_strict_union
+
+>>> @define
+... class Cat:
+...     name: str
+...     lives: int
+
+>>> @define
+... class Dog:
+...     name: str
+...     breed: str
+
+>>> converter = Converter()
+>>> configure_strict_union(Cat | Dog, converter)
+
+>>> converter.structure({"name": "Tom", "lives": 9}, Cat | Dog)
+Cat(name='Tom', lives=9)
+
+>>> converter.structure({"name": "Rex", "lives": 1, "breed": "collie"}, Cat | Dog)
+Traceback (most recent call last):
+...
+cattrs.errors.UnionAmbiguityError: Ambiguous union: __main__.Cat | __main__.Dog matched 2 members (Cat, Dog)
+```
+
+```{versionadded} 26.3.0
+
+```
+
 ## Union Passthrough
 
 _Found at {py:func}`cattrs.strategies.configure_union_passthrough`._

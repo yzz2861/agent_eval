@@ -11,6 +11,12 @@ The third number is for emergencies when we need to start branches for older rel
 
 Our backwards-compatibility policy can be found [here](https://github.com/python-attrs/cattrs/blob/main/.github/SECURITY.md).
 
+## 26.3.0 (UNRELEASED)
+
+- Add the {func}`strict union strategy <cattrs.strategies.configure_strict_union>`: when union members have no explicit discriminator field, all members are evaluated and exactly one must structure successfully; multiple matches raise {class}`UnionAmbiguityError <cattrs.errors.UnionAmbiguityError>` and zero matches raise {class}`UnionValidationError <cattrs.errors.UnionValidationError>`, which keeps each member's errors for {func}`transform_error <cattrs.transform_error>`.
+  `Literal` discriminator fields are still used preferentially, and nested unions, generics and `None` are supported as members.
+- Add {func}`create_literal_dis_func <cattrs.disambiguators.create_literal_dis_func>` for generating disambiguation functions based on `Literal` fields only.
+
 ## 26.2.1 (2026-09-26)
 
 - Fix heterogeneous tuples and `NamedTuple`s with a member type containing a quote in its `repr`, like `tuple[Literal["a"], int]`, crashing structuring code generation with `SyntaxError`; the index note is now embedded with `repr`.
