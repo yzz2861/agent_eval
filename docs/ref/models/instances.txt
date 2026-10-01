@@ -438,6 +438,57 @@ exclude from validation. It will raise a
 :exc:`~django.core.exceptions.ValidationError` if any constraints fail
 validation.
 
+.. method:: Model.bulk_validate(instances, *, exclude=None, using=None, chunk_size=100)
+
+.. versionadded:: 6.2
+
+Validates the uniqueness constraints of a group of instances in a single pass,
+without writing anything to the database. This is useful before a bulk import,
+where calling :meth:`~Model.validate_unique` on every instance would issue one
+query per instance per constraint.
+
+``instances`` is an iterable of instances of the model (subclasses are
+accepted). ``exclude`` is an optional set of field names to ignore, like in
+:meth:`~Model.validate_unique`. ``using`` forces the database alias used for
+the checks; by default each instance is validated against the alias returned
+by the database router (``instance._state.db`` when set). ``chunk_size``
+controls how many instances are checked per database query; the number of
+queries grows with the number of constraint groups and chunks, not with the
+number of instances.
+
+The method covers :attr:`~django.db.models.Field.unique` fields,
+:attr:`~django.db.models.Options.unique_together`, and field-based
+:class:`~django.db.models.UniqueConstraint` objects. Both rows already stored
+in the database and duplicates between the given instances are reported. When
+editing existing instances, each instance excludes its own row but still sees
+the other instances of the batch as conflicts. NULL values follow the
+``UniqueConstraint.nulls_distinct`` semantics of the backend.
+
+It returns a :class:`~django.db.models.BulkValidationResult` whose ``errors``
+attribute is a list, aligned with ``instances``, of
+:exc:`~django.core.exceptions.ValidationError` objects or ``None``:
+
+.. code-block:: pycon
+
+    >>> result = Article.bulk_validate([article1, article2])
+    >>> if not result.valid:
+    ...     for article, error in zip([article1, article2], result.errors):
+    ...         if error is not None:
+    ...             print(article, error.message_dict)
+
+The result object has these attributes:
+
+* ``errors`` -- a list of :exc:`~django.core.exceptions.ValidationError`
+  objects or ``None``, aligned with the order of ``instances``.
+* ``valid`` -- ``True`` when every instance passed validation.
+* ``fallback`` -- a list of ``(model_class, constraint)`` pairs for the
+  constraints validated with the per-instance logic.
+
+``UniqueConstraint`` objects based on expressions or conditions cannot be
+checked in bulk. They are validated with the existing per-instance logic
+instead, and the ``(model_class, constraint)`` pairs are collected in
+``result.fallback`` so callers can tell the fast path was not used for them.
+
 Saving objects
 ==============
 

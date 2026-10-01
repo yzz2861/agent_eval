@@ -233,3 +233,35 @@ class UniqueConstraintConditionProduct(models.Model):
                 condition=models.Q(color__isnull=True),
             ),
         ]
+
+
+class BulkValidateModel(models.Model):
+    name = models.CharField(max_length=50)
+    city = models.CharField(max_length=50, null=True)
+    email = models.EmailField(null=True)
+
+    class Meta:
+        unique_together = ("name", "city")
+        constraints = [
+            models.UniqueConstraint(fields=["email"], name="bulk_email_uq"),
+            models.UniqueConstraint(
+                fields=["name", "city"],
+                name="bulk_name_city_nulls_equal_uq",
+                nulls_distinct=False,
+            ),
+        ]
+
+
+class BulkValidateFallbackModel(models.Model):
+    name = models.CharField(max_length=50)
+    color = models.CharField(max_length=50, null=True)
+
+    class Meta:
+        required_db_features = {"supports_partial_indexes"}
+        constraints = [
+            models.UniqueConstraint(
+                fields=["name"],
+                name="bulk_fallback_condition_uq",
+                condition=models.Q(color="red"),
+            ),
+        ]

@@ -2,6 +2,7 @@ import copy
 import inspect
 import warnings
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import partialmethod
 from itertools import chain
 
@@ -37,6 +38,7 @@ from django.db.models import (
     Value,
 )
 from django.db.models.constants import LOOKUP_SEP
+from django.db.models.constraints import UniqueConstraint
 from django.db.models.deletion import CASCADE, DO_NOTHING, Collector, DatabaseOnDelete
 from django.db.models.expressions import DatabaseDefault
 from django.db.models.fetch_modes import FETCH_ONE
@@ -63,6 +65,11 @@ from django.utils.encoding import force_str
 from django.utils.hashable import make_hashable
 from django.utils.text import capfirst, get_text_list
 from django.utils.translation import gettext_lazy as _
+
+
+# Default number of instances handled per database query during
+# Model.bulk_validate().
+BULK_VALIDATE_BATCH_SIZE = 100
 
 
 class Deferred:
@@ -1481,6 +1488,222 @@ class Model(AltersData, metaclass=ModelBase):
         if errors:
             raise ValidationError(errors)
 
+    @classmethod
+    def bulk_validate(
+        cls,
+        instances,
+        *,
+        exclude=None,
+        using=None,
+        chunk_size=None,
+    ):
+        """
+        Validate the uniqueness constraints of a group of unsaved instances in
+        a single pass.
+
+        Return a list of ValidationError objects (or None when no errors were
+        found), aligned with the order of ``instances``. Both conflicts with
+        rows already stored in the database and conflicts between the given
+        instances are reported.
+
+        Plain ``Field.unique``, ``Meta.unique_together`` and field-based
+        ``UniqueConstraint`` checks are performed using one query per chunk of
+        instances. Constraints that cannot be checked in bulk (those based on
+        expressions, conditions or generated fields) are validated using the
+        per-instance logic instead and are recorded in
+        ``result.fallback``.
+
+        No data is written to the database.
+        """
+        instances = list(instances)
+        if exclude is None:
+            exclude = set()
+        else:
+            exclude = set(exclude)
+        if chunk_size is None:
+            chunk_size = BULK_VALIDATE_BATCH_SIZE
+        if (
+            not isinstance(chunk_size, int)
+            or isinstance(chunk_size, bool)
+            or chunk_size < 1
+        ):
+            raise ValueError("chunk_size must be a positive integer.")
+
+        result = BulkValidationResult()
+        result.errors = [None] * len(instances)
+
+        if not instances:
+            return result
+
+        for instance in instances:
+            if not isinstance(instance, cls):
+                raise TypeError(
+                    "%s.bulk_validate() received an instance of %s; all "
+                    "instances must be instances of %s."
+                    % (
+                        cls.__name__,
+                        type(instance).__name__,
+                        cls.__name__,
+                    )
+                )
+
+        # Group the instances by the database alias they are validated
+        # against so that queries are issued on the right connection.
+        aliases = {}
+        for index, instance in enumerate(instances):
+            alias = using or instance._state.db or router.db_for_write(
+                cls, instance=instance
+            )
+            aliases.setdefault(alias, []).append(index)
+
+        bulk_checks, fallback_constraints = cls._get_bulk_unique_checks(
+            exclude=exclude
+        )
+
+        for alias, indices in aliases.items():
+            alias_instances = [instances[index] for index in indices]
+            errors = [{} for _ in indices]
+
+            for bulk_check in bulk_checks:
+                bulk_check.perform(
+                    alias_instances,
+                    errors,
+                    using=alias,
+                    chunk_size=chunk_size,
+                )
+
+            for model_class, constraint in fallback_constraints:
+                cls._bulk_fallback_validate(
+                    model_class,
+                    constraint,
+                    alias_instances,
+                    errors,
+                    using=alias,
+                    exclude=exclude,
+                )
+
+            for offset, index in enumerate(indices):
+                if errors[offset]:
+                    result.errors[index] = ValidationError(errors[offset])
+
+        result.fallback = fallback_constraints
+        return result
+
+    @classmethod
+    def _get_bulk_unique_checks(cls, exclude=None):
+        """Return the bulk-friendly unique checks and the fallback ones."""
+        if exclude is None:
+            exclude = set()
+        bulk_checks = []
+        fallback_constraints = []
+
+        def add_bulk_check(model_class, field_names, kind, constraint=None):
+            field_names = tuple(field_names)
+            nulls_equal = (
+                constraint is not None and constraint.nulls_distinct is False
+            )
+            for check in bulk_checks:
+                if (
+                    check.model_class is model_class
+                    and check.field_names == field_names
+                    and check._nulls_equal() == nulls_equal
+                ):
+                    # Prefer the richer UniqueConstraint error reporting when
+                    # two checks share the same fields and NULL semantics.
+                    if kind == "constraint" and check.kind != "constraint":
+                        check.kind = kind
+                        check.constraint = constraint
+                    return
+            bulk_checks.append(
+                _BulkUniqueCheck(
+                    model_class=model_class,
+                    field_names=field_names,
+                    kind=kind,
+                    constraint=constraint,
+                )
+            )
+
+        models_to_check = [cls]
+        for parent_class in cls._meta.all_parents:
+            models_to_check.append(parent_class)
+
+        for model_class in models_to_check:
+            meta = model_class._meta
+
+            for field in meta.local_fields:
+                if field.name in exclude:
+                    continue
+                if isinstance(field, CompositePrimaryKey):
+                    names = tuple(part.name for part in field.fields)
+                    if exclude.isdisjoint(names):
+                        add_bulk_check(model_class, names, "unique")
+                    continue
+                if field.unique:
+                    add_bulk_check(model_class, (field.name,), "unique")
+
+            for field_names in meta.unique_together:
+                if not any(name in exclude for name in field_names):
+                    add_bulk_check(model_class, field_names, "unique_together")
+
+            for constraint in meta.constraints:
+                if not isinstance(constraint, UniqueConstraint):
+                    continue
+                if any(name in exclude for name in constraint.fields):
+                    continue
+                if cls._constraint_needs_fallback(model_class, constraint):
+                    fallback_constraints.append((model_class, constraint))
+                else:
+                    add_bulk_check(
+                        model_class,
+                        constraint.fields,
+                        "constraint",
+                        constraint=constraint,
+                    )
+
+        return bulk_checks, fallback_constraints
+
+    @staticmethod
+    def _constraint_needs_fallback(model_class, constraint):
+        """
+        Return True when a UniqueConstraint cannot be checked with the bulk
+        query and must use the per-instance validation instead.
+        """
+        if constraint.contains_expressions or constraint.condition is not None:
+            return True
+        for field_name in constraint.fields:
+            field = model_class._meta.get_field(field_name)
+            if field.generated:
+                return True
+        return False
+
+    @staticmethod
+    def _bulk_fallback_validate(
+        model_class,
+        constraint,
+        instances,
+        errors,
+        *,
+        using,
+        exclude,
+    ):
+        """
+        Run the existing per-instance UniqueConstraint validation for the
+        constraints that cannot be checked in bulk. The caller reports them in
+        ``BulkValidationResult.fallback``.
+        """
+        for position, instance in enumerate(instances):
+            try:
+                constraint.validate(
+                    model_class, instance, exclude=exclude, using=using
+                )
+            except ValidationError as error:
+                if (
+                    getattr(error, "code", None) == "unique"
+                    and len(constraint.fields) == 1
+                ):
+                    error = ValidationError({constraint.fields[0]: [error]})
+                errors[position] = error.update_error_dict(errors[position])
+
     def _get_unique_checks(self, exclude=None, include_meta_constraints=False):
         """
         Return a list of checks to perform. Since validate_unique() could be
@@ -2576,6 +2799,209 @@ def make_foreign_order_accessors(model, related_model):
 ########
 # MISC #
 ########
+
+
+class BulkValidationResult:
+    """
+    Container for the outcome of :meth:`Model.bulk_validate`.
+
+    ``errors`` holds, for each instance (in the same order as given), a
+    :class:`~django.core.exceptions.ValidationError` or ``None``. ``fallback``
+    lists the ``(model_class, constraint)`` pairs that could not be checked in
+    bulk and were validated using the per-instance logic.
+    """
+
+    def __init__(self, errors=None, fallback=None):
+        self.errors = list(errors or [])
+        self.fallback = list(fallback or [])
+
+    def __iter__(self):
+        return iter(self.errors)
+
+    def __len__(self):
+        return len(self.errors)
+
+    def __getitem__(self, index):
+        return self.errors[index]
+
+    def __bool__(self):
+        return self.valid
+
+    def __eq__(self, other):
+        if isinstance(other, BulkValidationResult):
+            return self.errors == other.errors and self.fallback == other.fallback
+        if isinstance(other, list):
+            return self.errors == other
+        return NotImplemented
+
+    @property
+    def valid(self):
+        return not any(error is not None for error in self.errors)
+
+
+@dataclass
+class _BulkUniqueCheck:
+    """A uniqueness check that can be performed for many instances at once."""
+
+    model_class: type
+    field_names: tuple
+    kind: str
+    constraint: UniqueConstraint = None
+
+    def _nulls_equal(self):
+        """Return whether NULL values are considered equal by this check."""
+        if self.constraint is not None:
+            return self.constraint.nulls_distinct is False
+        # Field.unique and unique_together follow the standard SQL behavior
+        # where NULL values are distinct.
+        return False
+
+    def prepare(self, instance, interprets_empty_as_null):
+        """
+        Return the lookup values for ``instance`` or ``None`` when the check
+        must be skipped for it (NULL values, database defaults, primary keys
+        being edited).
+        """
+        nulls_equal = self._nulls_equal()
+        values = []
+        for field_name in self.field_names:
+            field = instance._meta.get_field(field_name)
+            lookup_value = getattr(instance, field.attname)
+            if lookup_value is None:
+                if not nulls_equal:
+                    return None
+            elif (lookup_value == "" and interprets_empty_as_null) or (
+                isinstance(lookup_value, DatabaseDefault)
+                and not isinstance(lookup_value.expression, Value)
+            ):
+                return None
+            if (
+                field in self.model_class._meta.pk_fields
+                and not instance._state.adding
+            ):
+                # No need to check a unique primary key while editing it.
+                return None
+            values.append(lookup_value)
+        return tuple(values)
+
+    def values_filter(self, values):
+        """Build the Q() matching rows equal to ``values``."""
+        conditions = Q()
+        for field_name, value in zip(self.field_names, values):
+            if value is None:
+                conditions &= Q((f"{field_name}__isnull", True))
+            else:
+                conditions &= Q((field_name, value))
+        return conditions
+
+    def error_for(self, instance):
+        """Build the error dict reported for a conflicting instance."""
+        if self.kind == "constraint":
+            constraint = self.constraint
+            if (
+                constraint.fields
+                and constraint.violation_error_message
+                == constraint.default_violation_error_message
+            ):
+                # Match UniqueConstraint.validate() which falls back to
+                # unique_error_message() for field-based constraints.
+                message = instance.unique_error_message(
+                    self.model_class, constraint.fields
+                )
+                error = ValidationError(message, code=message.code)
+            else:
+                error = ValidationError(
+                    constraint.get_violation_error_message(),
+                    code=constraint.violation_error_code,
+                )
+            if (
+                getattr(error, "code", None) == "unique"
+                and len(constraint.fields) == 1
+            ):
+                return {constraint.fields[0]: [error]}
+            return {NON_FIELD_ERRORS: [error]}
+        error = instance.unique_error_message(self.model_class, self.field_names)
+        if len(self.field_names) == 1:
+            return {self.field_names[0]: [error]}
+        return {NON_FIELD_ERRORS: [error]}
+
+    def perform(self, instances, errors, *, using, chunk_size):
+        """Attach this check's errors to the per-instance error dicts."""
+        connection = connections[using]
+        interprets_empty_as_null = (
+            connection.features.interprets_empty_strings_as_nulls
+        )
+
+        prepared = []
+        for position, instance in enumerate(instances):
+            values = self.prepare(instance, interprets_empty_as_null)
+            if values is not None:
+                prepared.append((position, instance, values))
+        if not prepared:
+            return
+
+        # Conflicts among the given instances. With standard NULL semantics
+        # two NULL values are distinct and never collide.
+        seen = {}
+        batch_conflicts = set()
+        flagged = set()
+        nulls_equal = self._nulls_equal()
+        for position, instance, values in prepared:
+            if not nulls_equal and any(value is None for value in values):
+                continue
+            if values not in seen:
+                seen[values] = position
+            else:
+                batch_conflicts.add(position)
+                batch_conflicts.add(seen[values])
+
+        # Conflicts with stored rows: one query per chunk.
+        for chunk_start in range(0, len(prepared), chunk_size):
+            chunk = prepared[chunk_start : chunk_start + chunk_size]
+            combined_filter = Q()
+            for position, instance, values in chunk:
+                combined_filter |= self.values_filter(values)
+
+            queryset = self.model_class._default_manager.using(using).filter(
+                combined_filter
+            )
+            pk_attnames = [
+                pk_field.attname
+                for pk_field in self.model_class._meta.pk_fields
+            ]
+            fetched_rows = queryset.values_list(*pk_attnames, *self.field_names)
+
+            # Map each matched key to the primary keys of the stored rows
+            # carrying it. When editing, an instance must exclude itself but
+            # still see the other instances of the batch as conflicts.
+            matched_pks_by_key = defaultdict(set)
+            for row in fetched_rows:
+                if len(pk_attnames) == 1:
+                    row_pk = row[0]
+                else:
+                    row_pk = tuple(row[: len(pk_attnames)])
+                matched_pks_by_key[tuple(row[len(pk_attnames) :])].add(row_pk)
+
+            for position, instance, values in chunk:
+                matched_pks = matched_pks_by_key.get(values, set())
+                if (
+                    not instance._state.adding
+                    and instance._is_pk_set(self.model_class._meta)
+                ):
+                    own_pk = instance._get_pk_val(self.model_class._meta)
+                    has_other_row = bool(matched_pks - {own_pk})
+                else:
+                    has_other_row = bool(matched_pks)
+                if has_other_row and position not in flagged:
+                    flagged.add(position)
+                    self._append_error(errors, position, instance)
+                if position in batch_conflicts and position not in flagged:
+                    flagged.add(position)
+                    self._append_error(errors, position, instance)
+
+    def _append_error(self, errors, position, instance):
+        error = ValidationError(self.error_for(instance))
+        errors[position] = error.update_error_dict(errors[position])
 
 
 def model_unpickle(model_id):

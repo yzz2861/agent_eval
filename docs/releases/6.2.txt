@@ -207,7 +207,13 @@ Migrations
 Models
 ~~~~~~
 
-* ...
+* The new :meth:`.Model.bulk_validate` method checks the uniqueness
+  constraints (``Field.unique``, ``Meta.unique_together`` and field-based
+  :class:`~django.db.models.UniqueConstraint`) of a group of unsaved instances
+  in bulk, reporting both conflicts with stored rows and duplicates within the
+  group. It returns a :class:`~django.db.models.BulkValidationResult` and never
+  writes to the database; expression-based or conditional constraints fall back
+  to per-instance validation and are listed in ``result.fallback``.
 
 Requests and Responses
 ~~~~~~~~~~~~~~~~~~~~~~

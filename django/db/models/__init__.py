@@ -61,7 +61,12 @@ from django.db.models.query import (
 from django.db.models.query_utils import FilteredRelation, Q
 
 # Imports that would create circular imports if sorted
-from django.db.models.base import DEFERRED, Model  # isort:skip
+from django.db.models.base import (  # isort:skip
+    BULK_VALIDATE_BATCH_SIZE,
+    BulkValidationResult,
+    DEFERRED,
+    Model,
+)
 from django.db.models.fields.related import (  # isort:skip
     ForeignKey,
     ForeignObject,
@@ -78,6 +83,8 @@ __all__ += [
     "ObjectDoesNotExist",
     "signals",
     "CASCADE",
+    "BULK_VALIDATE_BATCH_SIZE",
+    "BulkValidationResult",
     "DB_CASCADE",
     "DB_SET_DEFAULT",
     "DB_SET_NULL",
