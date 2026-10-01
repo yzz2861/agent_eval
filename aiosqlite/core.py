@@ -5,6 +5,8 @@
 Core implementation of aiosqlite proxies
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import sqlite3
@@ -12,14 +14,15 @@ from collections.abc import AsyncIterator, Generator, Iterable
 from functools import partial
 from pathlib import Path
 from queue import Empty, Queue, SimpleQueue
-from threading import Thread
+from threading import Event, Thread
 from typing import Any, Callable, Literal, Optional, Union
 from warnings import warn
 
+from .blob import Blob
 from .context import contextmanager
 from .cursor import Cursor
 
-__all__ = ["connect", "Connection", "Cursor"]
+__all__ = ["connect", "Connection", "Cursor", "Blob"]
 
 AuthorizerCallback = Callable[[int, str, str, str, str], int]
 
@@ -87,6 +90,8 @@ class Connection:
         self._connector = connector
         self._tx: _TxQueue = SimpleQueue()
         self._iter_chunk_size = iter_chunk_size
+        self._blobs: set[Blob] = set()
+        self._trace_callback: Optional[Callable[[str], None]] = None
         self._thread = Thread(target=_connection_worker_thread, args=(self._tx,))
 
         if loop is not None:
@@ -119,6 +124,11 @@ class Connection:
 
         def close_and_stop():
             if self._connection is not None:
+                for blob in tuple(self._blobs):
+                    try:
+                        self._close_blob(blob)
+                    except Exception:
+                        LOG.info("exception occurred while closing blob")
                 self._connection.close()
                 self._connection = None
             return _STOP_RUNNING_SENTINEL
@@ -194,7 +204,51 @@ class Connection:
 
     async def rollback(self) -> None:
         """Roll back the current transaction."""
-        await self._execute(self._conn.rollback)
+        await self._execute(self._rollback)
+
+    def _close_blob(self, blob: Blob) -> None:
+        raw_blob = blob._blob
+        if raw_blob is None:
+            self._blobs.discard(blob)
+            return
+
+        raw_blob.close()
+        blob._blob = None
+        blob._closed = True
+        self._blobs.discard(blob)
+        if self._connection is not None and not self._blobs:
+            self._conn.set_trace_callback(self._trace_callback)
+
+    def _handle_trace(self, statement: str) -> None:
+        normalized = statement.strip().upper()
+        if normalized.startswith("ROLLBACK"):
+            for blob in tuple(self._blobs):
+                self._close_blob(blob)
+
+    def _trace_with_blob_hook(self, statement: str) -> None:
+        self._handle_trace(statement)
+        if self._trace_callback is not None:
+            self._trace_callback(statement)
+
+    def _rollback(self) -> None:
+        self._conn.rollback()
+        self._close_all_blobs(restore_trace_callback=True)
+
+    def _close_all_blobs(self, restore_trace_callback: bool) -> Optional[Exception]:
+        error: Optional[Exception] = None
+        for blob in tuple(self._blobs):
+            try:
+                self._close_blob(blob)
+            except Exception as exception:
+                if error is None:
+                    error = exception
+
+        if restore_trace_callback and self._connection is not None and not self._blobs:
+            self._conn.set_trace_callback(self._trace_callback)
+        return error
+
+    async def _close_blob_async(self, blob: Blob) -> None:
+        await self._execute(self._close_blob, blob)
 
     async def close(self) -> None:
         """Complete queued queries/cursors and close the connection."""
@@ -203,7 +257,9 @@ class Connection:
             return
 
         try:
-            await self._execute(self._conn.close)
+            for blob in self._blobs:
+                blob._closed = True
+            await self._execute(self._close_connection)
         except Exception:
             LOG.info("exception occurred while closing connection")
             raise
@@ -258,6 +314,69 @@ class Connection:
     async def interrupt(self) -> None:
         """Interrupt pending queries."""
         return self._conn.interrupt()
+
+    def _close_connection(self) -> None:
+        error = self._close_all_blobs(restore_trace_callback=False)
+        self._conn.close()
+        if error is not None:
+            raise error
+
+    def _open_blob(
+        self,
+        table: str,
+        column: str,
+        row: int,
+        *,
+        name: str,
+        readonly: bool,
+    ) -> Any:
+        return self._conn.blobopen(table, column, row, name=name, readonly=readonly)
+
+    @contextmanager
+    async def blobopen(
+        self,
+        table: str,
+        column: str,
+        row: int,
+        *,
+        name: str = "main",
+        readonly: bool = False,
+    ) -> Blob:
+        """Open an incremental BLOB handle."""
+        blob = Blob(self, None, 0, self._iter_chunk_size)
+        completed = Event()
+        self._blobs.add(blob)
+
+        def open_blob():
+            install_trace_hook = not self._blobs - {blob}
+            try:
+                raw_blob = self._open_blob(
+                    table, column, row, name=name, readonly=readonly
+                )
+                length = len(raw_blob)
+                if install_trace_hook:
+                    self._conn.set_trace_callback(self._trace_with_blob_hook)
+                blob._blob = raw_blob
+                blob._length = length
+            except BaseException:
+                blob._closed = True
+                self._blobs.discard(blob)
+                raise
+            finally:
+                completed.set()
+
+        try:
+            await self._execute(open_blob)
+        except asyncio.CancelledError:
+            await asyncio.to_thread(completed.wait)
+            if blob._blob is not None:
+                blob._closed = True
+                self._tx.put_nowait((None, partial(self._close_blob, blob)))
+            raise
+        if blob._closed or blob._blob is None:
+            await self._execute(self._close_blob, blob)
+            raise ValueError("Blob closed")
+        return blob
 
     async def create_function(
         self, name: str, num_params: int, func: Callable, deterministic: bool = False
@@ -325,7 +444,14 @@ class Connection:
         await self._execute(self._conn.set_progress_handler, handler, n)
 
     async def set_trace_callback(self, handler: Callable) -> None:
-        await self._execute(self._conn.set_trace_callback, handler)
+        def set_callback() -> None:
+            self._trace_callback = handler
+            if self._blobs:
+                self._conn.set_trace_callback(self._trace_with_blob_hook)
+            else:
+                self._conn.set_trace_callback(handler)
+
+        await self._execute(set_callback)
 
     async def set_authorizer(
         self, authorizer_callback: Optional[AuthorizerCallback]
