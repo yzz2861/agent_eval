@@ -1596,6 +1596,23 @@ class H2Connection:
         """
         Receive a headers frame on the connection.
         """
+        # Let's decode the headers. We handle headers as bytes internally up
+        # until we hang them off the event, at which point we may optionally
+        # convert them to unicode.
+        headers = _decode_headers(self.decoder, frame.data)
+
+        if _header_list_exceeds_application_limit(
+            headers, self.config.max_inbound_header_list_size,
+        ):
+            events = self.state_machine.process_input(
+                ConnectionInputs.RECV_HEADERS,
+            )
+            stream = self._get_or_create_stream(
+                frame.stream_id, AllowedStreamIDs(not self.config.client_side),
+            )
+            frames, stream_events = stream.reject_received_headers()
+            return frames, events + stream_events
+
         # If necessary, check we can open the stream. Also validate that the
         # stream ID is valid.
         if frame.stream_id not in self.streams:
@@ -1604,11 +1621,6 @@ class H2Connection:
             if (value + 1) > max_open_streams:
                 msg = f"Max inbound streams is {max_open_streams}, {value} open"
                 raise TooManyStreamsError(msg)
-
-        # Let's decode the headers. We handle headers as bytes internally up
-        # until we hang them off the event, at which point we may optionally
-        # convert them to unicode.
-        headers = _decode_headers(self.decoder, frame.data)
 
         events = self.state_machine.process_input(
             ConnectionInputs.RECV_HEADERS,
@@ -2115,3 +2127,18 @@ def _decode_headers(decoder: Decoder, encoded_header_block: bytes) -> Iterable[H
         # compatibility, catch all of them.
         msg = f"Error decoding header block: {e}"
         raise ProtocolError(msg) from e
+
+
+def _header_list_exceeds_application_limit(headers: Iterable[Header], limit: int | None) -> bool:
+    """
+    Check the uncompressed HTTP/2 header-list size used by SETTINGS_MAX_HEADER_LIST_SIZE.
+    """
+    if limit is None:
+        return False
+
+    size = 0
+    for name, value in headers:
+        size += 32 + len(name) + len(value)
+        if size > limit:
+            return True
+    return False

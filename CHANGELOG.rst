@@ -1,6 +1,13 @@
 Release History
 ===============
 
+Unreleased
+----------
+
+**API Changes (Backward Compatible)**
+
+- Add ``H2Configuration.max_inbound_header_list_size`` for an optional application-level header-list limit that resets only the offending stream while preserving the connection-wide HPACK decoder hard limit.
+
 4.4.1 (2026-08-03)
 ------------------
 

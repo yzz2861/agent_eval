@@ -1106,6 +1106,19 @@ class H2Stream:
         )
         return [], events
 
+    def reject_received_headers(self) -> tuple[list[Frame], list[Event]]:
+        """
+        Reset the stream after a complete but application-rejected header block.
+        """
+        self.state_machine.process_input(StreamInputs.RECV_HEADERS)
+        frames = self.reset_stream(ErrorCodes.ENHANCE_YOUR_CALM)
+        event = StreamReset(
+            stream_id=self.stream_id,
+            error_code=ErrorCodes.ENHANCE_YOUR_CALM,
+            remote_reset=False,
+        )
+        return frames, [event]
+
     def receive_data(self, data: bytes, end_stream: bool, flow_control_len: int) -> tuple[list[Frame], list[Event]]:
         """
         Receive some data.

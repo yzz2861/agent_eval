@@ -142,6 +142,13 @@ class H2Configuration:
 
     :type normalize_inbound_headers: ``bool``
 
+    :param max_inbound_header_list_size: Controls an optional application-level
+        limit on the uncompressed size of a received HEADERS block. Blocks that
+        exceed this limit but remain within the compression decoder's hard
+        limit reset only their stream. Defaults to ``None``, which disables
+        this additional limit.
+    :type max_inbound_header_list_size: ``int`` or ``None``
+
     :param logger: A logger that conforms to the requirements for this module,
         those being no I/O and no context switches, which is needed in order
         to run in asynchronous operation.
@@ -176,6 +183,7 @@ class H2Configuration:
                  split_outbound_cookies: bool = False,
                  validate_inbound_headers: bool = True,
                  normalize_inbound_headers: bool = True,
+                 max_inbound_header_list_size: int | None = None,
                  logger: DummyLogger | OutputLogger | None = None) -> None:
         self.client_side = client_side
         self.header_encoding = header_encoding
@@ -184,6 +192,7 @@ class H2Configuration:
         self.split_outbound_cookies = split_outbound_cookies
         self.validate_inbound_headers = validate_inbound_headers
         self.normalize_inbound_headers = normalize_inbound_headers
+        self.max_inbound_header_list_size = max_inbound_header_list_size
         self.logger = logger or DummyLogger(__name__)
 
     @property
@@ -210,3 +219,19 @@ class H2Configuration:
             msg = "header_encoding cannot be True"
             raise ValueError(msg)
         self._header_encoding = value
+
+    @property
+    def max_inbound_header_list_size(self) -> int | None:
+        """
+        The optional application-level limit on received uncompressed header
+        list size. When ``None``, only the compression decoder's hard limit is
+        enforced.
+        """
+        return self._max_inbound_header_list_size
+
+    @max_inbound_header_list_size.setter
+    def max_inbound_header_list_size(self, value: int | None) -> None:
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            msg = "max_inbound_header_list_size must be a non-negative integer or None"
+            raise ValueError(msg)
+        self._max_inbound_header_list_size = value

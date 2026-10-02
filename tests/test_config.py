@@ -22,6 +22,7 @@ class TestH2Config:
         config = h2.config.H2Configuration()
         assert config.client_side
         assert config.header_encoding is None
+        assert config.max_inbound_header_list_size is None
         assert isinstance(config.logger, h2.config.DummyLogger)
 
     boolean_config_options = [
@@ -119,6 +120,32 @@ class TestH2Config:
         config = h2.config.H2Configuration()
         config.header_encoding = header_encoding
         assert config.header_encoding == header_encoding
+
+    @pytest.mark.parametrize("value", [0, 1, 2**16])
+    def test_max_inbound_header_list_size_is_reflected_init(self, value) -> None:
+        config = h2.config.H2Configuration(max_inbound_header_list_size=value)
+        assert config.max_inbound_header_list_size == value
+
+    @pytest.mark.parametrize("value", [0, 1, 2**16])
+    def test_max_inbound_header_list_size_is_reflected_attr(self, value) -> None:
+        config = h2.config.H2Configuration()
+        config.max_inbound_header_list_size = value
+        assert config.max_inbound_header_list_size == value
+
+    @pytest.mark.parametrize("value", [-1, 1.5, "256", True])
+    def test_max_inbound_header_list_size_rejects_invalid_values_init(
+        self, value,
+    ) -> None:
+        with pytest.raises(ValueError):
+            h2.config.H2Configuration(max_inbound_header_list_size=value)
+
+    @pytest.mark.parametrize("value", [-1, 1.5, "256", True])
+    def test_max_inbound_header_list_size_rejects_invalid_values_attr(
+        self, value,
+    ) -> None:
+        config = h2.config.H2Configuration()
+        with pytest.raises(ValueError):
+            config.max_inbound_header_list_size = value
 
     def test_logger_instance_is_reflected(self) -> None:
         """

@@ -7,6 +7,7 @@ import itertools
 
 import hyperframe.frame
 import pytest
+from hpack.struct import NeverIndexedHeaderTuple
 from hypothesis import given
 from hypothesis.strategies import binary, lists, tuples
 
@@ -948,3 +949,170 @@ class TestOversizedHeaders:
             last_stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
+
+
+class TestApplicationHeaderListLimit:
+    """
+    Header blocks over the application-level limit only reset their stream.
+    """
+
+    request_headers = [
+        (b":method", b"GET"),
+        (b":authority", b"example.com"),
+        (b":scheme", b"https"),
+        (b":path", b"/"),
+    ]
+    oversized_request_headers = [
+        *request_headers,
+        (b"x-test", b"v"),
+        NeverIndexedHeaderTuple(b"x-fill", b"v"),
+        NeverIndexedHeaderTuple(b"x-fill", b"v"),
+    ]
+    indexed_request_headers = [
+        *request_headers,
+        (b"x-test", b"v"),
+    ]
+
+    def _server_connection(self) -> h2.connection.H2Connection:
+        config = h2.config.H2Configuration(
+            client_side=False,
+            max_inbound_header_list_size=256,
+        )
+        return h2.connection.H2Connection(config=config)
+
+    def _assert_reset(self, connection, frame_factory, stream_id=1) -> None:
+        rst_frame = frame_factory.build_rst_stream_frame(
+            stream_id=stream_id,
+            error_code=h2.errors.ErrorCodes.ENHANCE_YOUR_CALM,
+        )
+        assert connection.data_to_send() == rst_frame.serialize()
+
+    def test_soft_limit_resets_initial_headers_and_preserves_hpack_state(
+        self, frame_factory,
+    ) -> None:
+        c = self._server_connection()
+        c.receive_data(frame_factory.preamble())
+        c.clear_outbound_data_buffer()
+
+        oversized_frame = frame_factory.build_headers_frame(
+            self.oversized_request_headers,
+            stream_id=1,
+            flags=["END_STREAM"],
+        )
+        events = c.receive_data(oversized_frame.serialize())
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.StreamReset)
+        assert events[0].stream_id == 1
+        assert events[0].error_code == h2.errors.ErrorCodes.ENHANCE_YOUR_CALM
+        assert not events[0].remote_reset
+        self._assert_reset(c, frame_factory)
+
+        indexed_frame = frame_factory.build_headers_frame(
+            self.indexed_request_headers,
+            stream_id=3,
+            flags=["END_STREAM"],
+        )
+        assert b"\xbe" in indexed_frame.data
+        events = c.receive_data(indexed_frame.serialize())
+
+        assert len(events) == 2
+        assert isinstance(events[0], h2.events.RequestReceived)
+        assert events[0].stream_id == 3
+        assert events[0].headers == self.indexed_request_headers
+        assert isinstance(events[1], h2.events.StreamEnded)
+        assert c.data_to_send() == b""
+
+    def test_soft_limit_resets_continuation_header_block(
+        self, frame_factory,
+    ) -> None:
+        c = self._server_connection()
+        c.receive_data(frame_factory.preamble())
+        c.clear_outbound_data_buffer()
+
+        first_frame = frame_factory.build_headers_frame(
+            self.oversized_request_headers,
+            stream_id=1,
+        )
+        header_data = first_frame.data
+        chunks = [
+            header_data[offset:offset + 10]
+            for offset in range(0, len(header_data), 10)
+        ]
+        first_frame.data = chunks.pop(0)
+        continuation_frames = [
+            frame_factory.build_continuation_frame(chunk, stream_id=1)
+            for chunk in chunks
+        ]
+        first_frame.flags = {"END_STREAM"}
+        continuation_frames[-1].flags.add("END_HEADERS")
+        frames = [first_frame, *continuation_frames]
+
+        events = c.receive_data(b"".join(frame.serialize() for frame in frames))
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.StreamReset)
+        self._assert_reset(c, frame_factory)
+
+        indexed_frame = frame_factory.build_headers_frame(
+            self.indexed_request_headers,
+            stream_id=3,
+            flags=["END_STREAM"],
+        )
+        events = c.receive_data(indexed_frame.serialize())
+
+        assert isinstance(events[0], h2.events.RequestReceived)
+        assert events[0].headers == self.indexed_request_headers
+
+    def test_soft_limit_resets_trailers_and_preserves_hpack_state(
+        self, frame_factory,
+    ) -> None:
+        config = h2.config.H2Configuration(max_inbound_header_list_size=256)
+        c = h2.connection.H2Connection(config=config)
+        c.initiate_connection()
+        c.send_headers(stream_id=1, headers=self.request_headers)
+        c.send_headers(stream_id=3, headers=self.request_headers)
+        c.clear_outbound_data_buffer()
+
+        response_headers = [(b":status", b"200")]
+        response_frame = frame_factory.build_headers_frame(
+            response_headers, stream_id=1,
+        )
+        events = c.receive_data(response_frame.serialize())
+        assert isinstance(events[0], h2.events.ResponseReceived)
+        c.clear_outbound_data_buffer()
+
+        trailers = [
+            (b"x-test", b"v"),
+            *[
+                NeverIndexedHeaderTuple(
+                    f"x-fill-{index}".encode(), b"v",
+                )
+                for index in range(6)
+            ],
+        ]
+        trailers_frame = frame_factory.build_headers_frame(
+            trailers,
+            stream_id=1,
+            flags=["END_STREAM"],
+        )
+        events = c.receive_data(trailers_frame.serialize())
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.StreamReset)
+        assert not isinstance(events[0], h2.events.TrailersReceived)
+        self._assert_reset(c, frame_factory)
+
+        indexed_response = [
+            (b":status", b"200"),
+            (b"x-test", b"v"),
+        ]
+        indexed_frame = hyperframe.frame.HeadersFrame(stream_id=3)
+        indexed_frame.data = b"\x88\xbe"
+        indexed_frame.flags.add("END_HEADERS")
+        events = c.receive_data(indexed_frame.serialize())
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.ResponseReceived)
+        assert events[0].headers == indexed_response
+        assert c.data_to_send() == b""
