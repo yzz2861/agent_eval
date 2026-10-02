@@ -52,15 +52,65 @@ module Tilt
     # @private
     attr_reader :lazy_map, :template_map
 
-    def initialize
+    # Controls whether a lazy candidate failure allows Tilt to try the
+    # next candidate. Built-in values are :load_error, :raise, :any, and
+    # any callable object.
+    attr_reader :fallback_policy
+
+    # Creates a new mapping. When +source+ is another mapping, an independent
+    # snapshot of its current configuration is used as the initial state.
+    def initialize(source=nil, options=nil)
       @template_map = Hash.new
       @lazy_map = Hash.new { |h, k| h[k] = [] }
+      @resolved_map = Hash.new
+      @lock = Monitor.new
+
+      if source.is_a?(Hash)
+        options = source
+        source = nil
+      end
+      options ||= {}
+
+      @strict_candidate_order = options.fetch(:strict_candidate_order, !source.nil?)
+      policy = options.key?(:fallback_policy) ? options[:fallback_policy] : options[:fallback]
+      self.fallback_policy = policy.nil? && !options.key?(:fallback) ? :load_error : policy
+      copy_from(source) if source
+
+      yield self if block_given?
     end
 
     # @private
     def initialize_copy(other)
-      @template_map = other.template_map.dup
-      @lazy_map = other.lazy_map.dup
+      copy_from(other)
+      @fallback_policy = other.fallback_policy
+      @strict_candidate_order = true
+      @lock = Monitor.new
+    end
+
+    # @return [Tilt::Mapping] an independent snapshot of the mapping
+    alias snapshot dup
+
+    # @return [Boolean] whether lazy candidates are attempted in this
+    # mapping's order before globally loaded lower-priority candidates
+    def strict_candidate_order?
+      @strict_candidate_order
+    end
+
+    def fallback_policy=(policy)
+      valid = case policy
+              when Symbol
+                [:load_error, :default, :raise, :never, :any, :always].include?(policy)
+              when true, false, nil
+                true
+              else
+                policy.respond_to?(:call)
+              end
+
+      unless valid
+        raise ArgumentError, "invalid lazy load fallback policy: #{policy.inspect}"
+      end
+
+      @fallback_policy = policy
     end
 
     # Registers a lazy template implementation by file extension. You
@@ -83,12 +133,20 @@ module Tilt
       # Internal API
       if class_name.is_a?(Symbol)
         Tilt.autoload class_name, file
-        class_name = "Tilt::#{class_name}"
       end
 
-      extensions.each do |ext|
-        @lazy_map[ext].unshift([class_name, file])
+      class_name = lazy_class_name(class_name)
+      extensions = extensions.map { |ext| ext.to_s }
+
+      synchronize do
+        extensions.each do |ext|
+          choices = @lazy_map[ext]
+          choices.delete_if { |name, _| name == class_name }
+          choices.unshift([class_name, file])
+          clear_resolved(ext)
+        end
       end
+      nil
     end
 
     # Registers a template implementation by file extension. There can only be
@@ -108,8 +166,13 @@ module Tilt
         extensions, template_class = [template_class], extensions[0]
       end
 
-      extensions.each do |ext|
-        @template_map[ext.to_s] = template_class
+      extensions = extensions.map { |ext| ext.to_s }
+
+      synchronize do
+        extensions.each do |ext|
+          @resolved_map.delete(ext)
+          @template_map[ext] = template_class
+        end
       end
     end
 
@@ -144,7 +207,9 @@ module Tilt
       klass = Class.new(Pipeline)
       klass.send(:const_set, :TEMPLATES, templates)
 
-      register(klass, ext, *Array(options[:extra_exts]))
+      synchronize do
+        register(klass, ext, *Array(options[:extra_exts]))
+      end
       klass
     end
 
@@ -160,12 +225,101 @@ module Tilt
     #   mapping.unregister('mt')
     #   mapping['index.mt'] # => nil
     def unregister(*extensions)
-      extensions.each do |ext|
-        ext = ext.to_s
-        @template_map.delete(ext)
-        @lazy_map.delete(ext)
+      extensions = extensions.map { |ext| ext.to_s }
+
+      synchronize do
+        extensions.each do |ext|
+          @template_map.delete(ext)
+          @lazy_map.delete(ext)
+          @resolved_map.delete(ext)
+        end
       end
 
+      nil
+    end
+
+    # Moves an existing lazy candidate to the front of the candidate list for
+    # each given extension.
+    #
+    # @param class_name [String, Symbol] Lazy candidate class name.
+    # @param extensions [Array<String>] Extensions to update.
+    def prefer_lazy(class_name, *extensions)
+      class_name = lazy_class_name(class_name)
+      extensions = extensions.map { |ext| ext.to_s }
+
+      synchronize do
+        assert_lazy_candidate!(class_name, extensions)
+
+        extensions.each do |ext|
+          choices = @lazy_map[ext]
+          index = choices.index { |name, _| name == class_name }
+          choices.unshift(choices.delete_at(index))
+          clear_resolved(ext)
+        end
+      end
+      nil
+    end
+    alias prioritize_lazy prefer_lazy
+
+    # Removes a lazy candidate for each given extension. With no candidate,
+    # removes all lazy candidates but keeps eager registrations.
+    #
+    # @param class_name [String, Symbol, nil] Lazy candidate class name.
+    # @param extensions [Array<String>] Extensions to update.
+    def unregister_lazy(class_name=nil, *extensions)
+      if class_name && extensions.empty?
+        extensions = [class_name]
+        class_name = nil
+      end
+
+      extensions = extensions.map { |ext| ext.to_s }
+      raise ArgumentError, "at least one extension is required" if extensions.empty?
+
+      synchronize do
+        if class_name
+          class_name = lazy_class_name(class_name)
+          assert_lazy_candidate!(class_name, extensions)
+
+          extensions.each do |ext|
+            @lazy_map[ext].delete_if { |name, _| name == class_name }
+            clear_resolved(ext) if resolved_for?(ext, class_name)
+            @lazy_map.delete(ext) if @lazy_map[ext].empty?
+          end
+        else
+          extensions.each do |ext|
+            @lazy_map.delete(ext)
+            clear_resolved(ext)
+          end
+        end
+      end
+      nil
+    end
+    alias disable_lazy unregister_lazy
+
+    # Orders the given lazy candidates at the front of an extension. Remaining
+    # candidates keep their current relative order.
+    #
+    # @param ext [String] Extension to update.
+    # @param class_names [Array<String, Symbol>] Candidate class names.
+    def order_lazy(ext, *class_names)
+      ext = ext.to_s
+      class_names = class_names.map { |name| lazy_class_name(name) }
+      raise ArgumentError, "at least one candidate is required" if class_names.empty?
+      raise ArgumentError, "candidates must be unique" if class_names.uniq.length != class_names.length
+
+      synchronize do
+        choices = @lazy_map[ext]
+        available = choices.each_with_object({}) { |candidate, hash| hash[candidate[0]] ||= candidate }
+        missing = class_names.reject { |name| available.key?(name) }
+        unless missing.empty?
+          raise ArgumentError, "lazy candidate not registered for #{ext}: #{missing.join(', ')}"
+        end
+
+        ordered = class_names.map { |name| available[name] }
+        remaining = choices.reject { |name, _| class_names.include?(name) }
+        @lazy_map[ext] = ordered + remaining
+        clear_resolved(ext)
+      end
       nil
     end
 
@@ -178,7 +332,9 @@ module Tilt
     #   mapping.registered?('erb')  # => true
     #   mapping.registered?('nope') # => false
     def registered?(ext)
-      @template_map.has_key?(ext.downcase) or lazy?(ext)
+      synchronize do
+        @template_map.has_key?(ext.downcase) or lazy?(ext)
+      end
     end
 
     # Instantiates a new template class based on the file.
@@ -239,11 +395,13 @@ module Tilt
     # @param [template class] template_class
     def extensions_for(template_class)
       res = []
-      template_map.each do |ext, klass|
-        res << ext if template_class == klass
-      end
-      lazy_map.each do |ext, choices|
-        res << ext if choices.any? { |klass, file| template_class.to_s == klass }
+      synchronize do
+        template_map.each do |ext, klass|
+          res << ext if template_class == klass
+        end
+        lazy_map.each do |ext, choices|
+          res << ext if choices.any? { |klass, file| template_class.to_s == klass }
+        end
       end
       res.uniq
     end
@@ -270,48 +428,58 @@ module Tilt
     end
 
     def lookup(ext)
-      @template_map[ext] || lazy_load(ext)
+      synchronize do
+        @template_map[ext] || lazy_load(ext)
+      end
     end
 
-    LOCK = Monitor.new
-
     def lazy_load(pattern)
-      return unless @lazy_map.has_key?(pattern)
+      synchronize do
+        return unless @lazy_map.has_key?(pattern)
 
-      LOCK.enter
-      entered = true
+        choices = @lazy_map[pattern].map(&:dup)
+        failures = []
 
-      choices = @lazy_map[pattern]
-
-      # Check if a template class is already present
-      choices.each do |class_name, file|
-        template_class = constant_defined?(class_name)
-        if template_class
-          register(template_class, pattern)
-          return template_class
+        unless strict_candidate_order?
+          # Check if a template class is already present
+          choices.each do |class_name, file|
+            template_class = constant_defined?(class_name)
+            if template_class
+              register_resolved(template_class, pattern)
+              return template_class
+            end
+          end
         end
-      end
 
-      first_failure = nil
+        # Load in order
+        choices.each do |class_name, file|
+          begin
+            if strict_candidate_order?
+              template_class = constant_defined?(class_name)
+              if template_class
+                register_resolved(template_class, pattern)
+                return template_class
+              end
+            end
 
-      # Load in order
-      choices.each do |class_name, file|
-        begin
-          require file
-          # It's safe to eval() here because constant_defined? will
-          # raise NameError on invalid constant names
-          template_class = eval(class_name)
-        rescue LoadError => ex
-          first_failure ||= ex
-        else
-          register(template_class, pattern)
-          return template_class
+            require file
+            # It's safe to eval() here because constant_defined? will
+            # raise NameError on invalid constant names
+            template_class = eval(class_name)
+          rescue LoadError, StandardError => error
+            if lazy_load_fallback?(error, class_name, file, pattern)
+              failures << error
+            else
+              raise
+            end
+          else
+            register_resolved(template_class, pattern)
+            return template_class
+          end
         end
-      end
 
-      raise first_failure if first_failure
-    ensure
-      LOCK.exit if entered
+        raise failures.first unless failures.empty?
+      end
     end
 
     # The proper behavior (in MRI) for autoload? is to
@@ -332,5 +500,82 @@ module Tilt
         scope.const_get(n)
       end
     end
+
+    def lazy_class_name(class_name)
+      class_name.is_a?(Symbol) ? "Tilt::#{class_name}" : class_name.to_s
+    end
+
+    def register_resolved(template_class, ext)
+      @resolved_map[ext] = true
+      @template_map[ext] = template_class
+    end
+
+    def clear_resolved(ext)
+      return unless @resolved_map.delete(ext)
+      @template_map.delete(ext)
+    end
+
+    def resolved_for?(ext, class_name)
+      @resolved_map.key?(ext) && @template_map[ext].to_s == class_name
+    end
+
+    def assert_lazy_candidate!(class_name, extensions)
+      missing = extensions.reject do |ext|
+        @lazy_map[ext].any? { |name, _| name == class_name }
+      end
+
+      unless missing.empty?
+        raise ArgumentError, "lazy candidate #{class_name} not registered for #{missing.join(', ')}"
+      end
+    end
+
+    def lazy_load_fallback?(error, class_name, file, pattern)
+      case fallback_policy
+      when :load_error, :default, nil
+        error.is_a?(LoadError)
+      when :raise, :never, false
+        false
+      when :any, :always, true
+        true
+      else
+        if fallback_policy.respond_to?(:call)
+          !!call_fallback_policy(error, class_name, file, pattern)
+        else
+          raise ArgumentError, "invalid lazy load fallback policy: #{fallback_policy.inspect}"
+        end
+      end
+    end
+
+    def call_fallback_policy(error, class_name, file, pattern)
+      args = [error, class_name, file, pattern]
+      arity = fallback_policy.respond_to?(:arity) ? fallback_policy.arity : 4
+      fallback_policy.call(*(arity >= 0 ? args[0, arity] : args))
+    end
+
+    def copy_from(other)
+      raise ArgumentError, "expected a Tilt::Mapping" unless other.is_a?(Mapping)
+
+      other.synchronize do
+        @template_map = other.template_map.dup
+        @resolved_map = Hash.new
+        other.template_map.each_key do |ext|
+          @template_map.delete(ext) if other.resolved?(ext)
+        end
+        @lazy_map = Hash.new(other.lazy_map.default_proc)
+        other.lazy_map.each do |ext, choices|
+          @lazy_map[ext] = choices.map(&:dup)
+        end
+      end
+    end
+
+    def synchronize(&block)
+      @lock.synchronize(&block)
+    end
+    protected :synchronize
+
+    def resolved?(ext)
+      @resolved_map.key?(ext)
+    end
+    protected :resolved?
   end
 end

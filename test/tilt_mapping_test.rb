@@ -1,4 +1,5 @@
 require_relative 'test_helper'
+require 'timeout'
 
 describe 'tilt/mapping' do
   _Stub = Class.new
@@ -31,6 +32,20 @@ describe 'tilt/mapping' do
     assert_nil @mapping['foo.baz']
   end
 
+  it "creates templates through the mapping" do
+    template_class = Class.new do
+      attr_reader :file
+      def initialize(file, *)
+        @file = file
+      end
+    end
+    @mapping.register(template_class, 'fake')
+    template = @mapping.new('hello.fake')
+
+    assert_kind_of template_class, template
+    assert_equal 'hello.fake', template.file
+  end
+
   it "can be dup'd" do
     @mapping.register(_Stub, 'foo')
     other = @mapping.dup
@@ -43,6 +58,132 @@ describe 'tilt/mapping' do
     # other doesn't leak to @mapping
     other.register(_Stub, 'baz')
     refute @mapping.registered?('baz')
+  end
+
+  it "snapshots lazy candidate lists independently of the source mapping" do
+    @mapping.register_lazy('SnapshotFakeA', 'snapshot_fake_a', 'fake')
+    @mapping.register_lazy('SnapshotFakeB', 'snapshot_fake_b', 'fake')
+    snapshot = @mapping.snapshot
+
+    snapshot.prefer_lazy('SnapshotFakeA', 'fake')
+
+    assert_equal ['SnapshotFakeB', 'SnapshotFakeA'],
+      @mapping.lazy_map['fake'].map(&:first)
+    assert_equal ['SnapshotFakeA', 'SnapshotFakeB'],
+      snapshot.lazy_map['fake'].map(&:first)
+  end
+
+  it "creates an independent snapshot from another mapping" do
+    source = Tilt::Mapping.new(@mapping)
+    source.register(_Stub, 'source')
+    snapshot = Tilt::Mapping.new(source, :fallback_policy => :raise)
+
+    snapshot.register(_Stub2, 'snapshot')
+
+    assert source.registered?('source')
+    refute @mapping.registered?('source')
+    refute source.registered?('snapshot')
+    assert snapshot.registered?('snapshot')
+    assert_equal :raise, snapshot.fallback_policy
+  end
+
+  it "does not snapshot a runtime-resolved lazy engine" do
+    @mapping.register_lazy('ResolvedFakeB', 'resolved_fake_b', 'fake')
+    @mapping.register_lazy('ResolvedFakeA', 'resolved_fake_a', 'fake')
+
+    require_fake = proc do |file|
+      raise LoadError, file unless file == 'resolved_fake_b'
+      Object.const_set(:ResolvedFakeB, Class.new) if file == 'resolved_fake_b'
+      true
+    end
+    @mapping.stub(:require, require_fake) { @mapping['hello.fake'] }
+    snapshot = @mapping.snapshot
+    refute snapshot.template_map.key?('fake')
+
+    require_fake = proc do |file|
+      raise LoadError, file unless file == 'resolved_fake_a'
+      Object.const_set(:ResolvedFakeA, Class.new)
+      true
+    end
+    template_class = nil
+    snapshot.stub(:require, require_fake) do
+      template_class = snapshot['hello.fake']
+    end
+
+    assert_equal Object.const_get(:ResolvedFakeA), template_class
+  ensure
+    Object.send :remove_const, :ResolvedFakeA if defined?(::ResolvedFakeA)
+    Object.send :remove_const, :ResolvedFakeB if defined?(::ResolvedFakeB)
+  end
+
+  it "snapshots the global mapping without changing its configuration" do
+    snapshot = Tilt.default_mapping.snapshot
+    assert Tilt.default_mapping.registered?('md')
+    assert snapshot.registered?('md')
+
+    snapshot.unregister('md')
+    refute snapshot.registered?('md')
+    assert Tilt.default_mapping.registered?('md')
+  end
+
+  it "rejects an unknown lazy load fallback policy" do
+    assert_raises(ArgumentError) do
+      @mapping.fallback_policy = :sometimes
+    end
+  end
+
+  it "accepts :fallback as the fallback policy option" do
+    mapping = Tilt::Mapping.new(:fallback => :raise)
+    assert_equal :raise, mapping.fallback_policy
+  end
+
+  it "reorders lazy candidates without duplicating them" do
+    @mapping.register_lazy('OrderFakeA', 'order_fake_a', 'fake')
+    @mapping.register_lazy('OrderFakeB', 'order_fake_b', 'fake')
+
+    @mapping.prefer_lazy('OrderFakeA', 'fake')
+
+    assert_equal [['OrderFakeA', 'order_fake_a'],
+                  ['OrderFakeB', 'order_fake_b']], @mapping.lazy_map['fake']
+  end
+
+  it "orders multiple lazy candidates" do
+    @mapping.register_lazy('OrderFakeC', 'order_fake_c', 'fake')
+    @mapping.register_lazy('OrderFakeB', 'order_fake_b', 'fake')
+    @mapping.register_lazy('OrderFakeA', 'order_fake_a', 'fake')
+
+    @mapping.order_lazy('fake', 'OrderFakeA', 'OrderFakeC')
+
+    assert_equal ['OrderFakeA', 'OrderFakeC', 'OrderFakeB'],
+      @mapping.lazy_map['fake'].map(&:first)
+  end
+
+  it "disables one lazy candidate while retaining other candidates" do
+    @mapping.register_lazy('DisableFakeA', 'disable_fake_a', 'fake')
+    @mapping.register_lazy('DisableFakeB', 'disable_fake_b', 'fake')
+
+    @mapping.unregister_lazy('DisableFakeA', 'fake')
+
+    assert_equal [['DisableFakeB', 'disable_fake_b']],
+      @mapping.lazy_map['fake']
+  end
+
+  it "disables all lazy candidates for an extension" do
+    @mapping.register_lazy('DisableFakeA', 'disable_fake_a', 'fake')
+    @mapping.register(_Stub, 'fake')
+
+    @mapping.unregister_lazy(nil, 'fake')
+
+    assert_equal _Stub, @mapping['fake']
+    assert_empty @mapping.lazy_map['fake']
+  end
+
+  it "disables lazy candidates with the extension-only form" do
+    @mapping.register_lazy('DisableFakeA', 'disable_fake_a', 'fake')
+
+    @mapping.unregister_lazy('fake')
+
+    refute @mapping.registered?('fake')
   end
 
   it "#extensions_for" do
@@ -212,6 +353,173 @@ describe 'tilt/mapping' do
 
       assert_equal MyTemplate1, @mapping['hello.mt']
     end
+  end
+
+  describe "lazy fallback policy" do
+    before do
+      @mapping = Tilt::Mapping.new
+      @mapping.register_lazy('FallbackFakeB', 'fallback_fake_b', 'fake')
+      @mapping.register_lazy('FallbackFakeA', 'fallback_fake_a', 'fake')
+      @snapshot = @mapping.snapshot
+    end
+
+    after do
+      Object.send :remove_const, :FallbackFakeA if defined?(::FallbackFakeA)
+      Object.send :remove_const, :FallbackFakeB if defined?(::FallbackFakeB)
+    end
+
+    it "falls back from LoadError by default" do
+      require_fake = proc do |file|
+        if file == 'fallback_fake_b'
+          Object.const_set(:FallbackFakeB, Class.new)
+          true
+        else
+          raise LoadError, file
+        end
+      end
+
+      @snapshot.stub :require, require_fake do
+        template_class = @snapshot['hello.fake']
+        assert_equal Object.const_get(:FallbackFakeB), template_class
+      end
+    end
+
+    it "does not treat other errors as fallback candidates by default" do
+      require_fake = proc do |file|
+        raise RuntimeError, file if file == 'fallback_fake_a'
+        Object.const_set(:FallbackFakeB, Class.new)
+      end
+
+      @snapshot.stub :require, require_fake do
+        err = assert_raises(RuntimeError) { @snapshot['hello.fake'] }
+        assert_equal 'fallback_fake_a', err.message
+      end
+
+      refute @snapshot.template_map.key?('fake')
+    end
+
+    it "can fall back from any standard error" do
+      @snapshot.fallback_policy = :any
+      require_fake = proc do |file|
+        if file == 'fallback_fake_b'
+          Object.const_set(:FallbackFakeB, Class.new)
+        else
+          raise RuntimeError, file
+        end
+        true
+      end
+
+      @snapshot.stub :require, require_fake do
+        template_class = @snapshot['hello.fake']
+        assert_equal Object.const_get(:FallbackFakeB), template_class
+      end
+    end
+
+    it "can disable fallback" do
+      @snapshot.fallback_policy = :raise
+      require_fake = proc do |file|
+        raise LoadError, file if file == 'fallback_fake_a'
+        Object.const_set(:FallbackFakeB, Class.new)
+      end
+
+      @snapshot.stub :require, require_fake do
+        err = assert_raises(LoadError) { @snapshot['hello.fake'] }
+        assert_equal 'fallback_fake_a', err.message
+      end
+    end
+
+    it "passes the failure and candidate to a callable policy" do
+      policy_candidates = nil
+      @snapshot.fallback_policy = proc do |error, class_name, file, ext|
+        policy_candidates = [error.class, class_name, file, ext]
+        true
+      end
+      require_fake = proc do |file|
+        if file == 'fallback_fake_b'
+          Object.const_set(:FallbackFakeB, Class.new)
+        else
+          raise LoadError, file
+        end
+        true
+      end
+
+      @snapshot.stub :require, require_fake do
+        template_class = @snapshot['hello.fake']
+        assert_equal Object.const_get(:FallbackFakeB), template_class
+      end
+      assert_equal [LoadError, 'FallbackFakeA', 'fallback_fake_a', 'fake'],
+        policy_candidates
+    end
+
+    it "raises the preferred candidate error and leaves no resolved mapping" do
+      require_fake = proc { |file| raise LoadError, file }
+
+      @snapshot.stub :require, require_fake do
+        err = assert_raises(LoadError) { @snapshot['hello.fake'] }
+        assert_equal 'fallback_fake_a', err.message
+      end
+
+      refute @snapshot.template_map.key?('fake')
+      assert_equal [['FallbackFakeA', 'fallback_fake_a'],
+                    ['FallbackFakeB', 'fallback_fake_b']],
+        @snapshot.lazy_map['fake']
+    end
+  end
+
+  it "keeps concurrent first loads on each snapshot's own preference" do
+    concurrent_mapping = Class.new(Tilt::Mapping) do
+      attr_accessor :require_callback
+
+      def require(file)
+        @require_callback.call(file)
+      end
+    end
+
+    base = Tilt::Mapping.new
+    base.register_lazy('ConcurrentFakeB', 'concurrent_fake_b', 'fake')
+    base.register_lazy('ConcurrentFakeA', 'concurrent_fake_a', 'fake')
+    app_a = concurrent_mapping.new(base)
+    app_b = concurrent_mapping.new(base)
+    app_b.prefer_lazy('ConcurrentFakeB', 'fake')
+
+    started = Queue.new
+    release = Queue.new
+    calls = {:a => [], :b => []}
+    lock = Mutex.new
+
+    loader = proc do |app, file|
+      lock.synchronize { calls[app] << file }
+      started << app
+      release.pop
+
+      case file
+      when 'concurrent_fake_a'
+        Object.const_set(:ConcurrentFakeA, Class.new)
+      when 'concurrent_fake_b'
+        Object.const_set(:ConcurrentFakeB, Class.new)
+      end
+      true
+    end
+
+    app_a.require_callback = proc { |file| loader.call(:a, file) }
+    app_b.require_callback = proc { |file| loader.call(:b, file) }
+
+    result = nil
+    Timeout.timeout(2) do
+      thread_a = Thread.new { app_a['hello.fake'] }
+      thread_b = Thread.new { app_b['hello.fake'] }
+      2.times { started.pop }
+      2.times { release << :continue }
+      result = [thread_a.value, thread_b.value]
+    end
+
+    assert_equal [Object.const_get(:ConcurrentFakeA),
+                  Object.const_get(:ConcurrentFakeB)], result
+    assert_equal ['concurrent_fake_a'], calls[:a]
+    assert_equal ['concurrent_fake_b'], calls[:b]
+  ensure
+    Object.send :remove_const, :ConcurrentFakeA if defined?(::ConcurrentFakeA)
+    Object.send :remove_const, :ConcurrentFakeB if defined?(::ConcurrentFakeB)
   end
 
   it "raises NameError on invalid class name" do
