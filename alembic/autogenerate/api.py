@@ -545,6 +545,9 @@ class RevisionContext:
             # e.g. multiple databases
         }
         self.generated_revisions = [self._default_revision()]
+        # one MigrationContext entry per run_environment() pass; in a
+        # multi-engine / multidb setup there is one entry for each engine.
+        self._migration_contexts: list[MigrationContext] = []
 
     def _to_script(self, migration_script: MigrationScript) -> Script | None:
         template_args: dict[str, Any] = self.template_args.copy()
@@ -603,6 +606,8 @@ class RevisionContext:
         upgrade_token = migration_context.opts["upgrade_token"]
         downgrade_token = migration_context.opts["downgrade_token"]
 
+        self._migration_contexts.append(migration_context)
+
         migration_script = self.generated_revisions[-1]
         if not getattr(migration_script, "_needs_render", False):
             migration_script.upgrade_ops_list[-1].upgrade_token = upgrade_token
@@ -639,6 +644,51 @@ class RevisionContext:
 
         for migration_script in self.generated_revisions:
             migration_script._needs_render = True
+
+    def audit_revisions(self) -> Any:
+        """Run the data-loss audit phase over generated migration scripts.
+
+        Returns the combined :class:`.AuditReport`.  The caller decides
+        whether findings block revision generation; the audit itself never
+        raises on findings (checker exceptions are collected into the
+        report).
+        """
+
+        from ..operations.audit import AuditReport
+        from ..operations.audit import OperationAuditor
+
+        report = AuditReport()
+
+        for migration_script in self.generated_revisions:
+            dialect_names: dict[str, str | None] = {}
+            type_check: Any = None
+            auditor: Any = None
+
+            contexts = self._migration_contexts
+            for pass_idx, upgrade_ops in enumerate(
+                migration_script.upgrade_ops_list
+            ):
+                if pass_idx < len(contexts):
+                    migration_context = contexts[pass_idx]
+                    dialect_names[upgrade_ops.upgrade_token] = (
+                        migration_context.dialect.name
+                    )
+                    opts = migration_context.opts
+                    auditor = opts.get("revision_auditor", auditor)
+                    type_check = opts.get(
+                        "revision_audit_type_check", type_check
+                    )
+
+            auditor = auditor or OperationAuditor()
+            sub_report = auditor.audit(
+                migration_script,
+                dialect_names=dialect_names,
+                type_check=type_check,
+            )
+            report.findings.extend(sub_report.findings)
+            report.checker_errors.extend(sub_report.checker_errors)
+
+        return report
 
     def _default_revision(self) -> MigrationScript:
         command_args: dict[str, Any] = self.command_args

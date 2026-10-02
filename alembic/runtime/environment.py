@@ -440,6 +440,8 @@ class EnvironmentContext(util.ModuleClsProxy):
         user_module_prefix: str | None = None,
         on_version_apply: OnVersionApplyFn | None = None,
         autogenerate_plugins: Sequence[str] | None = None,
+        revision_auditor: Any | None = None,
+        revision_audit_type_check: Any | None = None,
         **kw: Any,
     ) -> None:
         """Configure a :class:`.MigrationContext` within this
@@ -554,6 +556,18 @@ class EnvironmentContext(util.ModuleClsProxy):
             * ``heads``: a collection of version strings representing the
               current heads,
             * ``run_args``: the ``**kwargs`` passed to :meth:`.run_migrations`.
+
+        :param revision_auditor: optional
+         :class:`~alembic.operations.audit.OperationAuditor` instance (or
+         object with an ``audit()`` method of the same signature) used by the
+         ``alembic revision --revision-audit`` phase.
+
+        :param revision_audit_type_check: optional callback used by the
+         revision audit phase to classify column type changes.  Receives
+         ``(context, alter_column_op, existing_type, modify_type)`` and
+         returns ``None`` to defer to the dialect type policy, a
+         :class:`~alembic.operations.audit.TypeNarrowing`, or a
+         :class:`~alembic.operations.audit.TypeChangeAssessment`.
 
         Parameters specific to the autogenerate feature, when
         ``alembic revision`` is run with the ``--autogenerate`` feature:
@@ -923,6 +937,9 @@ class EnvironmentContext(util.ModuleClsProxy):
         opts["literal_binds"] = literal_binds
         opts["process_revision_directives"] = process_revision_directives
         opts["on_version_apply"] = util.to_tuple(on_version_apply, default=())
+
+        opts["revision_auditor"] = revision_auditor
+        opts["revision_audit_type_check"] = revision_audit_type_check
 
         if autogenerate_plugins is not None:
             opts["autogenerate_plugins"] = autogenerate_plugins

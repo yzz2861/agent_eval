@@ -709,6 +709,47 @@ class CommandLine:
                 "offline mode.",
             ),
         ),
+        "revision_audit": (
+            "--revision-audit",
+            dict(
+                nargs="?",
+                const=True,
+                default=None,
+                type=lambda val: str(val).lower()
+                in ("1", "true", "yes", "on"),
+                help="Enable data-loss audit of the generated migration "
+                "operation tree",
+            ),
+        ),
+        "revision_audit_report_only": (
+            "--revision-audit-report-only",
+            dict(
+                nargs="?",
+                const=True,
+                default=None,
+                type=lambda val: str(val).lower()
+                in ("1", "true", "yes", "on"),
+                help="Audit and report only; never block revision "
+                "generation",
+            ),
+        ),
+        "revision_audit_block_on": (
+            "--revision-audit-block-on",
+            dict(
+                type=str,
+                default=None,
+                help="Comma-separated audit severities that block "
+                "revision generation (risk, unknown, warning, info)",
+            ),
+        ),
+        "revision_audit_format": (
+            "--revision-audit-format",
+            dict(
+                type=str,
+                default=None,
+                help="Audit report format: text (default) or json",
+            ),
+        ),
         "tag": (
             "--tag",
             dict(
