@@ -23,32 +23,41 @@ module Rack
       end
 
       def matched_by?(request)
+        data = throttle_data_for(request)
+        return false unless data
+
+        annotate_request_with_throttle_data(request, data)
+
+        (data[:count] > data[:limit]).tap do |matched|
+          if matched
+            annotate_request_with_matched_data(request, data)
+            instrument_match(request, data)
+          end
+        end
+      end
+
+      private
+
+      def throttle_data_for(request)
         discriminator = discriminator_for(request)
-        return false unless discriminator
+        return unless discriminator
 
-        current_period  = period_for(request)
-        current_limit   = limit_for(request)
-        count           = cache.count("#{name}:#{discriminator}", current_period)
+        current_period = period_for(request)
+        current_limit = limit_for(request)
+        count = cache.count(count_key(discriminator), current_period)
 
-        data = {
+        {
           discriminator: discriminator,
           count: count,
           period: current_period,
           limit: current_limit,
           epoch_time: cache.last_epoch_time
         }
-
-        annotate_request_with_throttle_data(request, data)
-
-        (count > current_limit).tap do |throttled|
-          if throttled
-            annotate_request_with_matched_data(request, data)
-            Rack::Attack.instrument(request)
-          end
-        end
       end
 
-      private
+      def count_key(discriminator)
+        "#{name}:#{discriminator}"
+      end
 
       def discriminator_for(request)
         discriminator = block.call(request)
@@ -75,6 +84,10 @@ module Rack
         request.env['rack.attack.match_discriminator'] = data[:discriminator]
         request.env['rack.attack.match_type']          = type
         request.env['rack.attack.match_data']          = data
+      end
+
+      def instrument_match(request, _data)
+        Rack::Attack.instrument(request)
       end
     end
   end

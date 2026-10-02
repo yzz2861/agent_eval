@@ -31,6 +31,7 @@ module Rack
     autoload :Track,                'rack/attack/track'
     autoload :Fail2Ban,             'rack/attack/fail2ban'
     autoload :Allow2Ban,            'rack/attack/allow2ban'
+    autoload :ShadowThrottle,       'rack/attack/shadow_throttle'
 
     class << self
       attr_accessor :enabled, :notifier, :throttle_discriminator_normalizer
@@ -44,6 +45,24 @@ module Rack
           # Deprecated: Keeping just for backwards compatibility
           notifier.instrument("rack.attack", request: request)
         end
+      end
+
+      def instrument_shadow_throttle(throttle, request, data)
+        return unless notifier
+
+        notifier.instrument(
+          "shadow_throttle.rack_attack",
+          request_summary: {
+            ip: request.ip,
+            path: request.path,
+            request_method: request.request_method
+          },
+          matched: throttle.name,
+          match_type: :shadow_throttle,
+          match_discriminator: data[:discriminator],
+          match_data: data,
+          hypothetical: true
+        )
       end
 
       def cache
@@ -67,6 +86,7 @@ module Rack
         :blocklist_ip,
         :safelist_ip,
         :throttle,
+        :shadow_throttle,
         :track,
         :throttled_responder,
         :throttled_responder=,
@@ -82,6 +102,7 @@ module Rack
         :safelists,
         :blocklists,
         :throttles,
+        :shadow_throttles,
         :tracks
       )
     end
@@ -108,16 +129,19 @@ module Rack
       env['PATH_INFO'] = PathNormalizer.normalize_path(env['PATH_INFO'])
       request = Rack::Attack::Request.new(env)
 
-      if configuration.safelisted?(request)
+      formal_result = formal_result_for(request)
+      configuration.shadow_throttles?(request)
+
+      if formal_result == :safelisted
         @app.call(env)
-      elsif configuration.blocklisted?(request)
+      elsif formal_result == :blocklisted
         # Deprecated: Keeping blocklisted_response for backwards compatibility
         if configuration.blocklisted_response
           configuration.blocklisted_response.call(env)
         else
           configuration.blocklisted_responder.call(request)
         end
-      elsif configuration.throttled?(request)
+      elsif formal_result == :throttled
         # Deprecated: Keeping throttled_response for backwards compatibility
         if configuration.throttled_response
           configuration.throttled_response.call(env)
@@ -125,8 +149,22 @@ module Rack
           configuration.throttled_responder.call(request)
         end
       else
-        configuration.tracked?(request)
         @app.call(env)
+      end
+    end
+
+    private
+
+    def formal_result_for(request)
+      if configuration.safelisted?(request)
+        :safelisted
+      elsif configuration.blocklisted?(request)
+        :blocklisted
+      elsif configuration.throttled?(request)
+        :throttled
+      else
+        configuration.tracked?(request)
+        :allowed
       end
     end
   end

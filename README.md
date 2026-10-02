@@ -276,6 +276,19 @@ Rack::Attack.throttle('request per ip', limit: limit_proc, period: period_proc) 
 end
 ```
 
+#### `shadow_throttle(name, options, &block)`
+
+A shadow throttle uses the same options and discriminator block as `throttle`, but it never blocks a
+request or changes the response. It maintains counters under separate cache keys and publishes a
+`shadow_throttle.rack_attack` notification when the hypothetical limit is reached. Shadow rules still
+run when a formal safelist, blocklist, or throttle matches, so their counters can be compared against
+the active rules during an observation period.
+
+The shadow event payload intentionally contains a limited `request_summary` (`ip`, `path`, and
+`request_method`), the matched rule, discriminator, match data, and `hypothetical: true`; it does not
+include the full request object. Errors raised by a shadow rule are isolated and do not change the
+formal decision or stop other shadow rules.
+
 ### Tracks
 
 ```ruby
