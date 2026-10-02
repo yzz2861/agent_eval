@@ -1,6 +1,7 @@
 # frozen-string-literal: true
 
 require 'openssl'
+require 'thread'
 require 'securerandom'
 require 'uri'
 require 'rack/utils'
@@ -77,6 +78,16 @@ class Roda
     #                                should be removed as soon as you are OK with CSRF forms generated
     #                                before the upgrade not longer being usable. The default rack_csrf
     #                                key is <tt>'csrf.token'</tt>.
+    # :one_time_token_field :: Form input parameter name for one-time CSRF tokens.  By default,
+    #                           the :field value is used, so one-time tokens can be submitted
+    #                           through the same form field as ordinary CSRF tokens.
+    # :one_time_token_store :: The token store to use for one-time CSRF tokens.  Stores must
+    #                           implement the small put/consume protocol described by
+    #                           RouteCsrf::TokenStore.  No default store is configured.
+    # :one_time_token_ttl :: Number of seconds a newly issued one-time token is valid
+    #                         (default: 600).
+    # :one_time_token_clock :: Object responding to #now, used to issue and expire one-time
+    #                          tokens (default: Time).
     #
     # The plugin also supports a block, in which case the block will be used
     # as the value of the :csrf_failure option.
@@ -94,6 +105,8 @@ class Roda
     #                         override any of the plugin options for this specific call.
     #                         The :token option can be used to specify the provided CSRF token
     #                         (instead of looking for the token in the submitted parameters).
+    #                         The :one_time option requires a single-use token.
+    # check_one_time_csrf!(opts={}) :: Equivalent to calling check_csrf! with :one_time => true.
     # csrf_formaction_tag(path, method='POST') :: An HTML hidden input tag string containing the CSRF token, suitable
     #                                             for placing in an HTML form that has inputs that use formaction
     #                                             attributes to change the endpoint to which the form is submitted.
@@ -113,11 +126,15 @@ class Roda
     #                                        not specific to the request, but such a token will only
     #                                        work if you set the :require_request_specific_tokens option
     #                                        to false, which is a bad idea from a security standpoint.
+    # one_time_csrf_token(path=nil, method='POST', opts={}) :: The value of a single-use CSRF token
+    #                                                          bound to the session, HTTP method, and
+    #                                                          normalized target path.
     # use_request_specific_csrf_tokens? :: Whether the plugin is configured to only support
     #                                      request-specific tokens, true by default.
     # valid_csrf?(opts={}) :: Returns whether the submitted CSRF token is valid (also true if
     #                         the request does not require a CSRF token).  Takes same option hash
     #                         as check_csrf!.
+    # valid_one_time_csrf?(opts={}) :: Returns whether the submitted single-use CSRF token is valid.
     #
     # This plugin also adds the following instance methods for compatibility with the
     # older csrf plugin, but it is not recommended to use these methods in new code:
@@ -183,6 +200,10 @@ class Roda
         :require_request_specific_tokens => true,
         :csrf_failure => :raise,
         :check_header => false,
+        :one_time_token_field => nil,
+        :one_time_token_store => nil,
+        :one_time_token_ttl => 600,
+        :one_time_token_clock => Time,
         # RODA4: Remove and set :exempt_request_methods by default
         :check_request_methods => %w'POST DELETE PATCH PUT'.freeze.each(&:freeze)
       }.freeze
@@ -190,6 +211,74 @@ class Roda
       # Exception class raised when :csrf_failure option is :raise and
       # a valid CSRF token was not provided.
       class InvalidToken < RodaError; end
+
+      # Small protocol required for one-time token storage.  consume must atomically
+      # find an unexpired token with matching metadata and remove it.
+      module TokenStore
+        # Store the token metadata with the given expiration time (integer seconds).
+        def put(token_id, session_id, method, path, expires_at)
+          raise NotImplementedError, "#{self.class}#put must be implemented"
+        end
+
+        # Atomically consume the token.  Return a truthy value only when the token
+        # exists, is unexpired, and matches the session, method, and path.
+        def consume(token_id, session_id, method, path, current_time)
+          raise NotImplementedError, "#{self.class}#consume must be implemented"
+        end
+      end
+
+      # Thread-safe in-memory implementation of the one-time token store protocol.
+      class InMemoryTokenStore
+        include TokenStore
+
+        MAX_RECORDS = 10_000
+
+        def initialize
+          @tokens = {}
+          @mutex = Mutex.new
+        end
+
+        def put(token_id, session_id, method, path, expires_at)
+          @mutex.synchronize do
+            if @tokens.length >= MAX_RECORDS
+              oldest_token = @tokens.min_by{|_, record| record[:expires_at]}
+              @tokens.delete(oldest_token[0])
+            end
+
+            @tokens[token_id] = {
+              :session_id => session_id,
+              :method => method,
+              :path => path,
+              :expires_at => expires_at
+            }
+          end
+        end
+
+        def consume(token_id, session_id, method, path, current_time)
+          @mutex.synchronize do
+            prune_expired(current_time)
+
+            record = @tokens[token_id]
+            return false unless record
+            return false unless record[:session_id] == session_id
+            return false unless record[:method] == method
+            return false unless record[:path] == path
+            return false if record[:expires_at] < current_time
+
+            @tokens.delete(token_id)
+            true
+          end
+        end
+
+        private
+
+        def prune_expired(current_time)
+          @tokens.delete_if{|_, record| record[:expires_at] < current_time}
+        end
+      end
+
+      MemoryTokenStore = InMemoryTokenStore
+      MemoryStore = InMemoryTokenStore
 
       def self.load_dependencies(app, opts=OPTS, &_)
         app.plugin :_base64
@@ -251,6 +340,12 @@ class Roda
           end
         end
 
+        # Check that the submitted single-use CSRF token is valid.
+        def check_one_time_csrf!(opts=OPTS, &block)
+          opts = opts.merge(:one_time => true)
+          check_csrf!(opts, &block)
+        end
+
         # The name of the hidden input tag containing the CSRF token.  Also used as the name
         # for the meta tag.
         def csrf_field
@@ -267,6 +362,12 @@ class Roda
         # It is not recommended to use this, as it doesn't support request-specific tokens.
         def csrf_metatag
           "<meta name=\"#{csrf_field}\" content=\"#{csrf_token}\" \/>"
+        end
+
+        # An HTML hidden input tag containing a single-use CSRF token.
+        def one_time_csrf_tag(path=nil, method='POST', opts=OPTS)
+          field = opts[:field] || csrf_options[:one_time_token_field] || csrf_field
+          "<input type=\"hidden\" name=\"#{field}\" value=\"#{one_time_csrf_token(path, method, opts)}\" \/>"
         end
 
         # Given a form action, return the appropriate path to use for the CSRF token.
@@ -305,9 +406,38 @@ class Roda
         # argument.  By default, it a path is provided, the POST request method will
         # be assumed.  To generate a token for a non-POST request method, pass the
         # method as the second argument.
-        def csrf_token(path=nil, method=('POST' if path))
+        def csrf_token(path=nil, method=('POST' if path), opts=OPTS)
+          return one_time_csrf_token(path, method, opts) if opts[:one_time]
+
           token = SecureRandom.random_bytes(31)
           token << csrf_hmac(token, method, path)
+          [token].pack("m0")
+        end
+
+        # The value of a single-use CSRF token bound to the session, method,
+        # and normalized target path.
+        def one_time_csrf_token(path=nil, method='POST', opts=OPTS)
+          options = opts.empty? ? csrf_options : csrf_options.merge(opts)
+          unless store = options[:one_time_token_store]
+            raise RodaError, "cannot issue one-time CSRF token without a token store"
+          end
+
+          method = method.to_s.upcase
+          path = csrf_one_time_path(path)
+          token_id = SecureRandom.random_bytes(31)
+          session_id = csrf_secret
+          token = token_id.dup
+          token << csrf_one_time_hmac(token_id, session_id, method, path)
+          begin
+            expires_at = options[:one_time_token_clock].now.to_i + options[:one_time_token_ttl]
+          rescue StandardError
+            raise RodaError, "one-time CSRF token clock is unavailable"
+          end
+          begin
+            store.put(token_id, session_id, method, path, expires_at)
+          rescue StandardError
+            raise RodaError, "one-time CSRF token store is unavailable"
+          end
           [token].pack("m0")
         end
 
@@ -319,6 +449,13 @@ class Roda
         # Whether the submitted CSRF token is valid for the request.  True if the
         # request does not require a CSRF token.
         def valid_csrf?(opts=OPTS)
+          csrf_invalid_message(opts).nil?
+        end
+
+        # Whether the submitted single-use CSRF token is valid.  True if the
+        # request does not require a CSRF token.
+        def valid_one_time_csrf?(opts=OPTS)
+          opts = opts.merge(:one_time => true)
           csrf_invalid_message(opts).nil?
         end
 
@@ -344,6 +481,7 @@ class Roda
           end
 
           path = @_request.path
+          path = csrf_one_time_path(path) if opts[:one_time]
 
           unless encoded_token = opts[:token]
             encoded_token = case opts[:check_header]
@@ -353,7 +491,12 @@ class Roda
               return (csrf_invalid_message(opts.merge(:check_header=>false)) && csrf_invalid_message(opts.merge(:check_header=>:only)))
             else
               params = @_request.params
-              ((formactions = params[opts[:formaction_field]]).is_a?(Hash) && (formactions[path])) || params[opts[:field]]
+              if opts[:one_time]
+                field = opts[:one_time_token_field] || opts[:field]
+                params[field]
+              else
+                ((formactions = params[opts[:formaction_field]]).is_a?(Hash) && (formactions[path])) || params[opts[:field]]
+              end
             end
           end
 
@@ -361,7 +504,7 @@ class Roda
             return "encoded token is not a string"
           end
 
-          if (rack_csrf_key = opts[:upgrade_from_rack_csrf_key]) && (rack_csrf_value = session[rack_csrf_key]) && csrf_compare(rack_csrf_value, encoded_token)
+          if !opts[:one_time] && (rack_csrf_key = opts[:upgrade_from_rack_csrf_key]) && (rack_csrf_value = session[rack_csrf_key]) && csrf_compare(rack_csrf_value, encoded_token)
             # RODA4: Remove :upgrade_from_rack_csrf_key support
             return
           end
@@ -382,15 +525,39 @@ class Roda
 
           random_data = submitted_hmac.slice!(0...31)
 
-          if csrf_compare(csrf_hmac(random_data, method, path), submitted_hmac)
-            return
-          end
+          if opts[:one_time]
+            session_id = csrf_secret
+            unless csrf_compare(csrf_one_time_hmac(random_data, session_id, method, path), submitted_hmac)
+              return "decoded one-time token is not valid for session, request method, and path"
+            end
 
-          if opts[:require_request_specific_tokens]
-            "decoded token is not valid for request method and path"
+            unless store = opts[:one_time_token_store]
+              return "one-time CSRF token store is not configured"
+            end
+
+            begin
+              current_time = opts[:one_time_token_clock].now.to_i
+            rescue StandardError
+              return "one-time CSRF token clock is unavailable"
+            end
+            begin
+              return if store.consume(random_data, session_id, method, path, current_time)
+            rescue StandardError
+              return "one-time CSRF token store is unavailable"
+            end
+
+            "one-time CSRF token is expired, already used, or not valid for the request"
           else
-            unless csrf_compare(csrf_hmac(random_data, '', ''), submitted_hmac)
-              "decoded token is not valid for either request method and path or for blank method and path"
+            if csrf_compare(csrf_hmac(random_data, method, path), submitted_hmac)
+              return
+            end
+
+            if opts[:require_request_specific_tokens]
+              "decoded token is not valid for request method and path"
+            else
+              unless csrf_compare(csrf_hmac(random_data, '', ''), submitted_hmac)
+                "decoded token is not valid for either request method and path or for blank method and path"
+              end
             end
           end
         end
@@ -408,6 +575,63 @@ class Roda
         # Return the HMAC-SHA-256 for the secret and the given arguments.
         def csrf_hmac(random_data, method, path)
           OpenSSL::HMAC.digest(OpenSSL::Digest::SHA256.new, csrf_secret, "#{method.to_s.upcase}#{path}#{random_data}")
+        end
+
+        # HMAC for one-time tokens.  The purpose string keeps one-time and ordinary
+        # tokens from being accepted by each other's validators.
+        def csrf_one_time_hmac(random_data, session_id, method, path)
+          OpenSSL::HMAC.digest(OpenSSL::Digest::SHA256.new, session_id, "one-time CSRF token\0#{method}#{path}#{random_data}")
+        end
+
+        # Normalize a form action or request target to the path used by one-time tokens.
+        def csrf_one_time_path(path)
+          csrf_normalize_path(csrf_path(path))
+        end
+
+        # Remove query/fragment data and RFC 3986 dot segments from a path.
+        def csrf_normalize_path(path)
+          path = begin
+            URI.parse(path).path
+          rescue URI::InvalidURIError
+            return path
+          end
+
+          input = path.dup
+          output = String.new
+
+          while !input.empty?
+            if input.start_with?('/../')
+              input.replace(input[4..-1])
+              csrf_remove_normalized_path_segment(output)
+            elsif input == '/..'
+              csrf_remove_normalized_path_segment(output)
+              input.replace('/')
+            elsif input.start_with?('/./')
+              input.replace(input[2..-1])
+            elsif input == '/.'
+              input.replace('/')
+            elsif input.start_with?('../')
+              input.replace(input[3..-1])
+            elsif input == '..'
+              input.replace('')
+            elsif input.start_with?('./')
+              input.replace(input[2..-1])
+            elsif input == '.'
+              input.replace('')
+            else
+              index = input.index('/', 1) || input.bytesize
+              output << input.slice!(0, index)
+            end
+          end
+
+          output
+        end
+
+        def csrf_remove_normalized_path_segment(output)
+          return if output == '/'
+
+          output.sub!(%r{/[^/]*\z}, '')
+          output << '/' if output.empty?
         end
 
         # If a secret has not already been specified, generate a random 32-byte

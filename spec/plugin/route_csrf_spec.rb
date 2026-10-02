@@ -1,4 +1,10 @@
 require_relative "../spec_helper"
+require_relative "../../lib/roda/plugins/route_csrf"
+
+begin
+  require 'rack/csrf'
+rescue LoadError
+end
 
 begin
   require 'cgi/escape'
@@ -350,6 +356,269 @@ describe "route_csrf plugin" do
     body('/a/b', "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(body('/b', 'HTTPS'=>'on', 'HTTP_HOST'=>'foo.com', 'CP'=>'a/b'))}")).must_equal '/a/b2'
     body('/b/a/b', "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(body('/b/', 'HTTPS'=>'on', 'HTTP_HOST'=>'foo.com', 'CP'=>'a/b'))}")).must_equal '/b/a/b2'
     body('/b/a/b', "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(body('/b/a', 'HTTPS'=>'on', 'HTTP_HOST'=>'foo.com', 'CP'=>'a/b'))}")).must_equal '/b/a/b2'
+  end
+
+  describe "one-time CSRF tokens" do
+    include CookieJar
+
+    class FakeClock
+      attr_accessor :current
+
+      def initialize(current)
+        @current = current
+      end
+
+      def now
+        self
+      end
+
+      def to_i
+        current
+      end
+    end
+
+    class BrokenClock
+      def now
+        raise "clock is unavailable"
+      end
+    end
+
+    class ConsumeBarrierStore
+      attr_reader :ready, :release
+      attr_accessor :primed
+
+      def initialize(store)
+        @store = store
+        @ready = Queue.new
+        @release = Queue.new
+      end
+
+      def put(*args)
+        @store.put(*args)
+      end
+
+      def consume(*args)
+        if primed
+          ready.push(true)
+          release.pop
+        end
+        @store.consume(*args)
+      end
+    end
+
+    class UnavailableTokenStore
+      def put(*)
+        raise "token store is unavailable"
+      end
+
+      def consume(*)
+        raise "token store is unavailable"
+      end
+    end
+
+    def one_time_csrf_app(store, clock, options={})
+      one_time_csrf_options = options
+      app(:bare) do
+        send(*DEFAULT_SESSION_ARGS)
+        plugin :route_csrf, :csrf_failure=>:empty_403,
+          :one_time_token_store=>store,
+          :one_time_token_clock=>clock,
+          :one_time_token_ttl=>options[:ttl] || 5,
+          :upgrade_from_rack_csrf_key=>options[:upgrade_from_rack_csrf_key]
+
+        route do |r|
+          r.get "token" do
+            one_time_csrf_token(env["TARGET"] || "/account")
+          end
+
+          r.get "ordinary-token" do
+            csrf_token("/normal")
+          end
+
+          r.get "legacy-token" do
+            session["csrf.token"] = "legacy-token-value"
+          end
+
+          r.get "session" do
+            session[one_time_csrf_options[:key] || "_roda_csrf_secret"] || "no-session"
+          end
+
+          r.get "new-session" do
+            session.clear
+            send(:csrf_secret)
+            session[one_time_csrf_options[:key] || "_roda_csrf_secret"]
+          end
+
+          r.is "normal" do
+            check_csrf!
+            "normal"
+          end
+
+          ["account", "other"].each do |path|
+            r.is path do
+              request_options = env["TOKEN"] ? {:token=>env["TOKEN"]} : {}
+              check_one_time_csrf!(request_options)
+              request.request_method
+            end
+          end
+
+          r.is "broken-store" do
+            check_one_time_csrf!(:one_time_token_store=>UnavailableTokenStore.new, :token=>env["TOKEN"])
+            "available"
+          end
+
+          r.get "broken-token" do
+            one_time_csrf_token("/account", "POST", :one_time_token_store=>UnavailableTokenStore.new)
+          end
+
+          r.get "broken-clock-token" do
+            one_time_csrf_token("/account", "POST", :one_time_token_clock=>BrokenClock.new)
+          end
+        end
+      end
+    end
+
+    def post(path, options={})
+      env = {
+        "PATH_INFO"=>path,
+        "REQUEST_METHOD"=>options.delete(:method) || "POST",
+        "rack.input"=>rack_input(options.delete(:input) || "")
+      }.merge!(options)
+      env["HTTP_COOKIE"] ||= @cookie
+      status(env)
+    end
+
+    it "allows only one concurrent request to consume a token" do
+      clock = FakeClock.new(100)
+      store = Roda::RodaPlugins::RouteCsrf::InMemoryTokenStore.new
+      barrier = ConsumeBarrierStore.new(store)
+      barrier.primed = true
+      one_time_csrf_app(barrier, clock)
+
+      token = body("/token")
+      cookie = @cookie
+      responses = []
+      response_mutex = Mutex.new
+
+      threads = 2.times.map do
+        env = req_env(
+          "PATH_INFO"=>"/account",
+          "REQUEST_METHOD"=>"POST",
+          "HTTP_COOKIE"=>cookie,
+          "TOKEN"=>token,
+          "rack.input"=>rack_input
+        )
+
+        Thread.new do
+          response_status, _headers, response_body = @app.call(env)
+          response_body.each{|_|}
+          response_body.close if response_body.respond_to?(:close)
+          response_mutex.synchronize{responses << response_status}
+        end
+      end
+
+      2.times{barrier.ready.pop}
+      2.times{barrier.release.push(true)}
+      threads.each(&:join)
+      barrier.primed = false
+
+      responses.sort.must_equal [200, 403]
+      post("/account", "HTTP_COOKIE"=>cookie, "TOKEN"=>token).must_equal 403
+    end
+
+    it "expires one-time tokens at the configured short TTL" do
+      clock = FakeClock.new(100)
+      one_time_csrf_app(Roda::RodaPlugins::RouteCsrf::InMemoryTokenStore.new, clock)
+
+      token = body("/token")
+      clock.current = 105
+      post("/account", "TOKEN"=>token).must_equal 200
+
+      clock.current = 111
+      post("/account", "TOKEN"=>token).must_equal 403
+    end
+
+    it "keeps ordinary form tokens usable while separating them from one-time tokens" do
+      clock = FakeClock.new(100)
+      one_time_csrf_app(Roda::RodaPlugins::RouteCsrf::InMemoryTokenStore.new, clock)
+
+      ordinary_token = body("/ordinary-token")
+      ordinary_input = "_csrf=#{Rack::Utils.escape(ordinary_token)}"
+      post("/normal", :input=>ordinary_input).must_equal 200
+      post("/normal", :input=>ordinary_input).must_equal 200
+      post("/account", :input=>ordinary_input).must_equal 403
+      post("/normal", :input=>ordinary_input).must_equal 200
+
+      one_time_token = body("/token")
+      post("/normal", :input=>"_csrf=#{Rack::Utils.escape(one_time_token)}").must_equal 403
+      post("/account", "TOKEN"=>one_time_token).must_equal 200
+      post("/account", "TOKEN"=>one_time_token).must_equal 403
+    end
+
+    it "does not consume a token for method, path, malformed-token, or storage failures" do
+      clock = FakeClock.new(100)
+      one_time_csrf_app(Roda::RodaPlugins::RouteCsrf::InMemoryTokenStore.new, clock)
+
+      wrong_path_token = body("/token", "TARGET"=>"/other")
+      post("/account", "TOKEN"=>wrong_path_token).must_equal 403
+      post("/other", "TOKEN"=>wrong_path_token).must_equal 200
+
+      wrong_method_token = body("/token")
+      post("/account", :method=>"DELETE", "TOKEN"=>wrong_method_token).must_equal 403
+      post("/account", "TOKEN"=>wrong_method_token).must_equal 200
+
+      token = body("/token")
+      post("/account", "TOKEN"=>"#{token}x").must_equal 403
+      post("/account", "TOKEN"=>token).must_equal 200
+
+      token = body("/token")
+      post("/broken-store", "TOKEN"=>token).must_equal 403
+      post("/account", "TOKEN"=>token).must_equal 200
+
+      proc{body("/broken-token")}.must_raise Roda::RodaError
+      proc{body("/broken-clock-token")}.must_raise Roda::RodaError
+    end
+
+    it "binds one-time tokens to the issuing session" do
+      clock = FakeClock.new(100)
+      one_time_csrf_app(Roda::RodaPlugins::RouteCsrf::InMemoryTokenStore.new, clock)
+
+      token = body("/token")
+      first_session_cookie = @cookie
+
+      @cookie = nil
+      new_secret = body("/new-session")
+      second_session_cookie = @cookie
+      second_session_cookie.wont_equal first_session_cookie
+
+      post("/account", "TOKEN"=>token).must_equal 403
+      body("/session").must_equal new_secret
+      @cookie = first_session_cookie
+      post("/account", "TOKEN"=>token).must_equal 200
+    end
+
+    it "binds one-time tokens to the normalized target path" do
+      clock = FakeClock.new(100)
+      one_time_csrf_app(Roda::RodaPlugins::RouteCsrf::InMemoryTokenStore.new, clock)
+
+      token = body("/token", "TARGET"=>"/account?x=1#section")
+      post("/account", "TOKEN"=>token).must_equal 200
+
+      token = body("/token", "TARGET"=>"/a/../account?x=1")
+      post("/account", "TOKEN"=>token).must_equal 200
+
+      token = body("/token", "TARGET"=>"http://example.com/account?x=1")
+      post("/account", "TOKEN"=>token).must_equal 200
+    end
+
+    if defined?(Rack::Csrf)
+      it "does not accept legacy rack_csrf tokens as one-time tokens" do
+        clock = FakeClock.new(100)
+        one_time_csrf_app(Roda::RodaPlugins::RouteCsrf::InMemoryTokenStore.new, clock, :upgrade_from_rack_csrf_key=>"csrf.token")
+        token = body("/legacy-token")
+        post("/account", :input=>"_csrf=#{Rack::Utils.escape(token)}").must_equal 403
+      end
+    end
   end
 
 begin
