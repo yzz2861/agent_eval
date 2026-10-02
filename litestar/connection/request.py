@@ -27,6 +27,7 @@ from litestar.exceptions import (
     ValidationException,
 )
 from litestar.exceptions.http_exceptions import RequestEntityTooLarge
+from litestar.middleware.request_decompression import REQUEST_DECOMPRESSION_SCOPE_KEY
 from litestar.serialization import decode_json, decode_msgpack
 from litestar.types import Empty, HTTPReceiveMessage
 
@@ -176,6 +177,32 @@ class Request(Generic[UserT, AuthT, StateT], ASGIConnection["HTTPRouteHandler", 
         except ValueError:
             raise ClientException(f"Invalid content-length: {content_length_header!r}") from None
         return content_length
+
+    @property
+    def content_encoding(self) -> str | None:
+        """Return the request's original ``Content-Encoding`` header value."""
+        info = self.scope.get("state", {}).get(REQUEST_DECOMPRESSION_SCOPE_KEY)
+        if info is not None:
+            return info.content_encoding
+        return self.headers.get("content-encoding")
+
+    @property
+    def compressed_content_length(self) -> int | None:
+        """Return the compressed request body's announced ``Content-Length``."""
+        info = self.scope.get("state", {}).get(REQUEST_DECOMPRESSION_SCOPE_KEY)
+        return None if info is None else info.compressed_content_length
+
+    @property
+    def compressed_bytes_received(self) -> int | None:
+        """Return the number of compressed bytes received so far."""
+        info = self.scope.get("state", {}).get(REQUEST_DECOMPRESSION_SCOPE_KEY)
+        return None if info is None else info.compressed_bytes_received
+
+    @property
+    def decompressed_content_length(self) -> int | None:
+        """Return the number of decompressed bytes received so far."""
+        info = self.scope.get("state", {}).get(REQUEST_DECOMPRESSION_SCOPE_KEY)
+        return None if info is None else info.decompressed_content_length
 
     async def stream(self) -> AsyncGenerator[bytes, None]:
         """Return an async generator that streams chunks of bytes.

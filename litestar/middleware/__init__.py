@@ -8,6 +8,12 @@ from litestar.middleware.base import (
     DefineMiddleware,
     MiddlewareProtocol,
 )
+from litestar.middleware.request_decompression import (
+    GzipDecompressionError,
+    RequestDecompressionInfo,
+    RequestDecompressionMiddleware,
+    UnsupportedContentEncodingException,
+)
 
 __all__ = (
     "ASGIMiddleware",
@@ -15,5 +21,9 @@ __all__ = (
     "AbstractMiddleware",
     "AuthenticationResult",
     "DefineMiddleware",
+    "GzipDecompressionError",
     "MiddlewareProtocol",
+    "RequestDecompressionInfo",
+    "RequestDecompressionMiddleware",
+    "UnsupportedContentEncodingException",
 )

@@ -162,6 +162,42 @@ list of domains to :class:`~litestar.app.Litestar`:
     domain name, not in the middle or end. Doing so will result in a validation exception being raised.
 
 
+Request Decompression
+---------------------
+
+Request bodies can optionally be decompressed with
+:class:`~litestar.middleware.request_decompression.RequestDecompressionMiddleware`.
+It currently supports ``gzip`` and ``identity`` content codings. The middleware wraps
+the ASGI ``receive`` callable and decompresses incrementally, so request handlers can
+continue to use :meth:`~litestar.connection.Request.body`,
+:meth:`~litestar.connection.Request.form` and
+:meth:`~litestar.connection.Request.stream` normally.
+
+.. code-block:: python
+
+   from litestar import Litestar
+   from litestar.middleware import RequestDecompressionMiddleware
+
+   app = Litestar(
+       route_handlers=[...],
+       middleware=[RequestDecompressionMiddleware],
+   )
+
+For gzip requests the middleware removes both ``Content-Encoding`` and
+``Content-Length`` before the request reaches downstream code. The original values and
+the byte counts are available on :class:`~litestar.connection.Request`:
+
+* ``content_encoding``: original content coding, for example ``gzip``
+* ``compressed_content_length``: original, wire-format ``Content-Length``
+* ``compressed_bytes_received``: compressed bytes received so far
+* ``decompressed_content_length``: decompressed bytes received so far
+
+The configured ``request_max_body_size`` is enforced against decompressed bytes,
+including raw ASGI consumers wrapped by this middleware. Truncated streams, bad gzip
+checksums and trailing data after a gzip stream result in a ``400`` response. Requests
+using any other ``Content-Encoding`` receive a ``415`` response.
+
+
 Compression
 -----------
 
