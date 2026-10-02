@@ -1,0 +1,8 @@
+Add a connection-level ``strict`` option. ``h11.Connection(role, strict=True)``
+only accepts canonical CRLF line endings on request/status lines, header
+fields, chunk headers and trailers, and the chunk data separator, and rejects
+obsolete line folding (RFC 7230 section 3.2.4). The checks are applied
+incrementally as data arrives, so they work regardless of how bytes are split
+across ``receive_data`` calls (including a CRLF split across two calls) and
+report a violation as soon as the offending byte is seen. The default remains
+the previous lenient behavior.

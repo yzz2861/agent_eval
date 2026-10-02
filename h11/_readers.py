@@ -62,11 +62,27 @@ def _obsolete_line_fold(lines: Iterable[bytes]) -> Iterable[bytes]:
 
 
 def _decode_header_lines(
-    lines: Iterable[bytes],
+    lines: Iterable[bytes], strict: bool = False
 ) -> Iterable[Tuple[bytes, bytes]]:
-    for line in _obsolete_line_fold(lines):
-        matches = validate(header_field_re, line, "illegal header line: {!r}", line)
-        yield (matches["field_name"], matches["field_value"])
+    if strict:
+        # In strict mode continuation lines are rejected at the buffer level
+        # (as soon as they arrive); guard here too so the parser never joins
+        # folded lines, regardless of how it was invoked.
+        for line in lines:
+            if obs_fold_re.match(line):
+                raise LocalProtocolError(
+                    "illegal header line: obsolete line folding is not allowed"
+                )
+            matches = validate(
+                header_field_re, line, "illegal header line: {!r}", line
+            )
+            yield (matches["field_name"], matches["field_value"])
+    else:
+        for line in _obsolete_line_fold(lines):
+            matches = validate(
+                header_field_re, line, "illegal header line: {!r}", line
+            )
+            yield (matches["field_name"], matches["field_value"])
 
 
 request_line_re = re.compile(request_line.encode("ascii"))
@@ -84,7 +100,9 @@ def maybe_read_from_IDLE_client(buf: ReceiveBuffer) -> Optional[Request]:
         request_line_re, lines[0], "illegal request line: {!r}", lines[0]
     )
     return Request(
-        headers=list(_decode_header_lines(lines[1:])), _parsed=True, **matches
+        headers=list(_decode_header_lines(lines[1:], strict=buf.strict)),
+        _parsed=True,
+        **matches,
     )
 
 
@@ -111,7 +129,7 @@ def maybe_read_from_SEND_RESPONSE_server(
         InformationalResponse if status_code < 200 else Response
     )
     return class_(
-        headers=list(_decode_header_lines(lines[1:])),
+        headers=list(_decode_header_lines(lines[1:], strict=buf.strict)),
         _parsed=True,
         status_code=status_code,
         reason=reason,
@@ -158,7 +176,9 @@ class ChunkedReader:
             lines = buf.maybe_extract_lines()
             if lines is None:
                 return None
-            return EndOfMessage(headers=list(_decode_header_lines(lines)))
+            return EndOfMessage(
+                headers=list(_decode_header_lines(lines, strict=buf.strict))
+            )
         if self._bytes_to_discard:
             data = buf.maybe_extract_at_most(len(self._bytes_to_discard))
             if data is None:

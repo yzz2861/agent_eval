@@ -2,6 +2,8 @@ import re
 import sys
 from typing import List, Optional, Union
 
+from ._util import LocalProtocolError
+
 __all__ = ["ReceiveBuffer"]
 
 
@@ -45,10 +47,24 @@ blank_line_regex = re.compile(b"\n\r?\n", re.MULTILINE)
 
 
 class ReceiveBuffer:
-    def __init__(self) -> None:
+    def __init__(self, strict: bool = False) -> None:
+        # When strict is True, line-oriented framing data (request/status
+        # lines, header fields, chunk headers/trailers) is only accepted when
+        # terminated by the canonical CRLF sequence, and obsolete line
+        # folding (RFC 7230 section 3.2.4) is rejected.
+        #
+        # In this mode we also validate each new fragment of framing data as
+        # it arrives, rather than waiting for a complete line or header
+        # block. This means an error is raised immediately when the offending
+        # byte becomes visible -- even if a CRLF happens to be split across
+        # two receive_data() calls -- without buffering an arbitrarily large
+        # message first.
+        self.strict = strict
         self._data = bytearray()
         self._next_line_search = 0
         self._multiple_lines_search = 0
+        # Offset up to which the framing data has been strict-checked.
+        self._strict_checked = 0
 
     def __iadd__(self, byteslike: Union[bytes, bytearray]) -> "ReceiveBuffer":
         self._data += byteslike
@@ -71,8 +87,56 @@ class ReceiveBuffer:
 
         self._next_line_search = 0
         self._multiple_lines_search = 0
+        # All remaining data is unchecked; an empty trailing CRLF of one
+        # framing block is the start of the next one.
+        self._strict_checked = 0
 
         return out
+
+    def _maybe_raise_for_strict_line_endings(
+        self, end: Optional[int] = None
+    ) -> None:
+        """Incrementally reject bare LF and obs-fold in framing data.
+
+        Only bytes that have arrived since the previous successful check are
+        examined, with one byte of lookbehind so a CRLF split across
+        receive_data() calls is not mistaken for a bare LF.
+
+        ``end`` optionally limits the check to the first ``end`` bytes
+        (e.g. a completed line); otherwise the whole buffered prefix is
+        checked, which is only valid while we are reading framing data.
+        """
+        if not self.strict:
+            return
+        if end is None:
+            end = len(self._data)
+        if end <= self._strict_checked:
+            return
+        # One byte of lookbehind: a CR already accepted on its own may be
+        # completed by the LF in the new fragment.
+        start = self._strict_checked - 1 if self._strict_checked else 0
+        data = self._data
+        index = start
+        while index < end:
+            if data[index] == 0x0A and (
+                index == 0 or data[index - 1] != 0x0D
+            ):
+                raise LocalProtocolError(
+                    "illegal line ending: expected CRLF, got bare LF"
+                )
+            # obs-fold: CRLF immediately followed by SP/HTAB starts a
+            # continuation line.
+            if (
+                data[index] in (0x20, 0x09)
+                and index >= 2
+                and data[index - 2] == 0x0D
+                and data[index - 1] == 0x0A
+            ):
+                raise LocalProtocolError(
+                    "illegal header line: obsolete line folding is not allowed"
+                )
+            index += 1
+        self._strict_checked = end
 
     def maybe_extract_at_most(self, count: int) -> Optional[bytearray]:
         """
@@ -94,17 +158,27 @@ class ReceiveBuffer:
 
         if partial_idx == -1:
             self._next_line_search = len(self._data)
+            # No completed line yet -- validate everything that has arrived
+            # so far, so a bare LF is reported immediately.
+            self._maybe_raise_for_strict_line_endings()
             return None
 
         # + 2 is to compensate len(b"\r\n")
         idx = partial_idx + 2
 
+        self._maybe_raise_for_strict_line_endings(idx)
         return self._extract(idx)
 
     def maybe_extract_lines(self) -> Optional[List[bytearray]]:
         """
         Extract everything up to the first blank line, and return a list of lines.
         """
+        if self.strict:
+            # A header block must begin with a proper line; a bare LF here
+            # is an illegal (empty) request/status line, not a valid blank
+            # line terminator.
+            self._maybe_raise_for_strict_line_endings(1)
+
         # Handle the case where we have an immediate empty line.
         if self._data[:1] == b"\n":
             self._extract(1)
@@ -118,10 +192,16 @@ class ReceiveBuffer:
         match = blank_line_regex.search(self._data, self._multiple_lines_search)
         if match is None:
             self._multiple_lines_search = max(0, len(self._data) - 2)
+            # No complete header block yet -- validate the buffered prefix
+            # so that bare LFs and obs-fold are detected immediately
+            # instead of after the whole (possibly large) message arrives.
+            self._maybe_raise_for_strict_line_endings()
             return None
 
         # Truncate the buffer and return it.
         idx = match.span(0)[-1]
+
+        self._maybe_raise_for_strict_line_endings(idx)
         out = self._extract(idx)
         lines = out.split(b"\n")
 

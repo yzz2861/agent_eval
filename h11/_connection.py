@@ -162,14 +162,31 @@ class Connection:
             exceeded, then :meth:`next_event` will raise
             :exc:`RemoteProtocolError`.
 
+        strict (bool):
+            When False (the default), received line endings are accepted
+            leniently: both CRLF and bare LF terminate lines, and obsolete
+            header line folding (RFC 7230 section 3.2.4) is unfolded.
+
+            When True, parsing is restricted to the canonical HTTP/1.1 wire
+            grammar: request lines, status lines, header fields, chunk
+            headers/trailers and chunk separators must all use CRLF, and
+            obsolete line folding is rejected. The check is applied
+            incrementally as data arrives, so it works regardless of how
+            :meth:`receive_data` calls split the bytes, and an error is
+            raised as soon as the offending byte is seen rather than after
+            the whole message has been buffered.
+
     """
 
     def __init__(
         self,
         our_role: Type[Sentinel],
         max_incomplete_event_size: int = DEFAULT_MAX_INCOMPLETE_EVENT_SIZE,
+        *,
+        strict: bool = False,
     ) -> None:
         self._max_incomplete_event_size = max_incomplete_event_size
+        self.strict = strict
         # State and role tracking
         if our_role not in (CLIENT, SERVER):
             raise ValueError(f"expected CLIENT or SERVER, not {our_role!r}")
@@ -187,7 +204,7 @@ class Connection:
         self._reader = self._get_io_object(self.their_role, None, READERS)
 
         # Holds any unprocessed received data
-        self._receive_buffer = ReceiveBuffer()
+        self._receive_buffer = ReceiveBuffer(strict=strict)
         # If this is true, then it indicates that the incoming connection was
         # closed *after* the end of whatever's in self._receive_buffer:
         self._receive_buffer_closed = False

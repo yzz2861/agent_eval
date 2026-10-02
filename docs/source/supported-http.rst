@@ -74,3 +74,14 @@ sure whether anyone actually needs it. Unfortunately a few major
 implementations that I spot-checked (node.js, go) do still seem to
 support reading such headers (but not generating them), so it might or
 might not be obsolete in practice -- it's hard to know.
+
+For callers who want to reject this kind of legacy traffic outright,
+:class:`Connection` accepts a ``strict=True`` option. In strict mode
+h11 only accepts the canonical CRLF line ending on request/status
+lines, header fields, chunk headers/trailers, and the chunk data
+separator, and rejects obsolete line folding. The checks are applied
+incrementally as data is received, so they work regardless of how the
+bytes are split across calls to :meth:`Connection.receive_data`, and a
+violation is reported as soon as the offending byte arrives rather than
+after the whole message has been buffered. The default remains the
+lenient behavior described above, so existing callers are unaffected.
