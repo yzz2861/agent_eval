@@ -52,6 +52,7 @@ __all__ = [
     "Date",
     "DateTime",
     "Decimal",
+    "DependentDefault",
     "Dict",
     "Email",
     "Enum",
@@ -116,6 +117,71 @@ def _resolve_field_instance(cls_or_instance: Field | type[Field]) -> Field:
     if not isinstance(cls_or_instance, Field):
         raise _FieldInstanceResolutionError
     return cls_or_instance
+
+
+class DependentDefault:
+    """A factory for computing a field's ``load_default`` from other fields
+    of the same `Schema <marshmallow.Schema>`.
+
+    The factory may only read the fields it explicitly declares as
+    dependencies, and it is called with the *deserialized* (validated) values
+    of those fields. Dependencies are always deserialized before the fields
+    that depend on them, regardless of the order in which the fields are
+    declared on the schema.
+
+    Example: ::
+
+        import datetime as dt
+
+        from marshmallow import Schema, fields
+
+
+        class EventSchema(Schema):
+            start = fields.DateTime()
+            end = fields.DateTime(
+                load_default=fields.DependentDefault(
+                    lambda deps: deps["start"] + dt.timedelta(hours=1),
+                    depends_on=("start",),
+                )
+            )
+
+    The generated value is passed through the field's normal deserialization
+    and validation. If the user provides a value for the field, the factory is
+    not called. If any dependency fails validation (or is otherwise
+    unavailable), the factory is not called and an error is reported on the
+    field, in addition to the dependency's own error.
+
+    Dependencies are checked when the `Schema <marshmallow.Schema>` is
+    instantiated: depending on an unknown field or declaring a circular
+    dependency raises a `ValueError`.
+
+    :param func: Callable that receives a mapping of dependency field names to
+        their deserialized values and returns the default value for the field.
+        It is called at most once per deserialized object.
+    :param depends_on: Names of the fields this default depends on. Names refer
+        to the field names declared on the schema, not ``data_key`` or
+        ``attribute``.
+
+    .. versionadded:: 4.4.0
+    """
+
+    def __init__(
+        self,
+        func: typing.Callable[[typing.Mapping[str, typing.Any]], typing.Any],
+        *,
+        depends_on: typing.Iterable[str],
+    ) -> None:
+        if not callable(func):
+            raise TypeError("DependentDefault 'func' must be callable.")
+        self.func = func
+        self.depends_on = tuple(depends_on)
+
+    def __repr__(self) -> str:
+        return f"<DependentDefault(func={self.func!r}, depends_on={self.depends_on!r})>"
+
+    def generate(self, dependencies: typing.Mapping[str, typing.Any]) -> typing.Any:
+        """Compute the default value from the validated dependency values."""
+        return self.func(dependencies)
 
 
 class Field(typing.Generic[_InternalT]):

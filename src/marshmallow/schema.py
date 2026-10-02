@@ -302,6 +302,10 @@ class Schema(metaclass=SchemaMeta):
     _default_error_messages: dict[str, str] = {
         "type": "Invalid input type.",
         "unknown": "Unknown field.",
+        "dependent_default": (
+            "Unable to generate default value because the following "
+            "dependencies are missing or invalid: {dependencies}."
+        ),
     }
 
     OPTIONS_CLASS: type = SchemaOpts
@@ -644,7 +648,12 @@ class Schema(metaclass=SchemaMeta):
             error_store.store_error([self.error_messages["type"]], index=index)
         else:
             partial_is_collection = is_collection(partial)
-            for attr_name, field_obj in self.load_fields.items():
+            # Successfully deserialized values, keyed by field name. Used to
+            # resolve DependentDefault factories, which may only read
+            # declared dependencies that validated successfully.
+            validated: dict[str, typing.Any] = {}
+            for attr_name in self._load_order:
+                field_obj = self.load_fields[attr_name]
                 field_name = (
                     field_obj.data_key if field_obj.data_key is not None else attr_name
                 )
@@ -655,6 +664,29 @@ class Schema(metaclass=SchemaMeta):
                         partial_is_collection and attr_name in partial
                     ):
                         continue
+                    if isinstance(field_obj.load_default, ma_fields.DependentDefault):
+                        default = field_obj.load_default
+                        unavailable = [
+                            dep for dep in default.depends_on if dep not in validated
+                        ]
+                        if unavailable:
+                            error_store.store_error(
+                                [
+                                    self.error_messages["dependent_default"].format(
+                                        dependencies=", ".join(unavailable)
+                                    )
+                                ],
+                                field_name,
+                                index,
+                            )
+                            continue
+                        try:
+                            raw_value = default.generate(
+                                {dep: validated[dep] for dep in default.depends_on}
+                            )
+                        except ValidationError as error:
+                            error_store.store_error(error.messages, field_name, index)
+                            continue
                 d_kwargs = {}
                 # Allow partial loading of nested schemas.
                 if partial_is_collection:
@@ -667,15 +699,25 @@ class Schema(metaclass=SchemaMeta):
                 elif partial is not None:
                     d_kwargs["partial"] = partial
 
+                errored: list[bool] = []
+
                 def getter(
-                    val, field_obj=field_obj, field_name=field_name, d_kwargs=d_kwargs
+                    val,
+                    field_obj=field_obj,
+                    field_name=field_name,
+                    d_kwargs=d_kwargs,
+                    errored=errored,
                 ):
-                    return field_obj.deserialize(
-                        val,
-                        field_name,
-                        data,
-                        **d_kwargs,
-                    )
+                    try:
+                        return field_obj.deserialize(
+                            val,
+                            field_name,
+                            data,
+                            **d_kwargs,
+                        )
+                    except ValidationError:
+                        errored.append(True)
+                        raise
 
                 value = self._call_and_store(
                     getter_func=getter,
@@ -684,6 +726,8 @@ class Schema(metaclass=SchemaMeta):
                     error_store=error_store,
                     index=index,
                 )
+                if not errored and value is not missing:
+                    validated[attr_name] = value
                 if value is not missing:
                     key = field_obj.attribute or attr_name
                     set_value(ret_d, key, value)
@@ -1051,6 +1095,55 @@ class Schema(metaclass=SchemaMeta):
         self.fields = fields_dict
         self.dump_fields = dump_fields
         self.load_fields = load_fields
+        self._load_order = self._resolve_dependent_default_order()
+
+    def _resolve_dependent_default_order(self) -> list[str]:
+        """Validate the dependent default factories declared on load fields
+        and return the load field names in an order such that dependencies are
+        deserialized before the fields that depend on them.
+
+        Raise a `ValueError` if a dependency does not exist or if the
+        dependency graph contains a cycle.
+        This method is private API.
+        """
+        dependencies: dict[str, tuple[str, ...]] = {}
+        for field_name, field_obj in self.load_fields.items():
+            default = field_obj.load_default
+            if isinstance(default, ma_fields.DependentDefault):
+                dependencies[field_name] = default.depends_on
+        if not dependencies:
+            return list(self.load_fields)
+        for field_name, deps in dependencies.items():
+            for dep in deps:
+                if dep not in self.load_fields:
+                    raise ValueError(
+                        f'The dependent default for field "{field_name}" of {self} '
+                        f'depends on "{dep}", which is not a loadable field '
+                        "of the schema."
+                    )
+        order: list[str] = []
+        permanent: set[str] = set()
+        temporary: set[str] = set()
+
+        def visit(field_name: str, path: list[str]) -> None:
+            if field_name in permanent:
+                return
+            if field_name in temporary:
+                cycle = " -> ".join([*path, field_name])
+                raise ValueError(
+                    "Circular dependency detected in dependent defaults "
+                    f"of {self}: {cycle}."
+                )
+            temporary.add(field_name)
+            for dep in dependencies.get(field_name, ()):
+                visit(dep, [*path, field_name])
+            temporary.discard(field_name)
+            permanent.add(field_name)
+            order.append(field_name)
+
+        for field_name in self.load_fields:
+            visit(field_name, [])
+        return order
 
     def on_bind_field(self, field_name: str, field_obj: Field) -> None:
         """Hook to modify a field when it is bound to the `Schema <marshmallow.Schema>`.

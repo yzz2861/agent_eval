@@ -6,6 +6,11 @@ Changelog
 
 Features:
 
+- Add `DependentDefault <marshmallow.fields.DependentDefault>`, a
+  ``load_default`` factory that computes a field's default from other
+  declared fields. Dependencies are deserialized before their dependents
+  regardless of declaration order, and unknown or circular dependencies
+  raise `ValueError` when the schema is instantiated.
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
 Bug fixes:
