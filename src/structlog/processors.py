@@ -30,6 +30,7 @@ from typing import (
     cast,
 )
 
+from ._budget_renderer import BudgetedJSONRenderer
 from ._frames import (
     _find_first_app_frame_and_name,
     _format_exception,
@@ -49,6 +50,7 @@ from .typing import (
 
 __all__ = [
     "NAME_TO_LEVEL",  # some people rely on it being here
+    "BudgetedJSONRenderer",
     "CallsiteParameter",
     "CallsiteParameterAdder",
     "EventRenamer",

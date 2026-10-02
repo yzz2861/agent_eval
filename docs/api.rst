@@ -216,6 +216,17 @@ API Reference
       ...                                       {"a": 42, "b": [1, 2, 3]})
       'b=[1, 2, 3] a=42'
 
+.. autoclass:: BudgetedJSONRenderer
+
+   .. doctest::
+
+      >>> from structlog.processors import BudgetedJSONRenderer
+      >>> BudgetedJSONRenderer(52)(None, "", {
+      ...     "event": "user logged in",
+      ...     "debug": "x" * 100,
+      ... })
+      '{"_truncated":"truncated","event":"user logged in"}'
+
 .. autoclass:: LogfmtRenderer
 
    .. doctest::

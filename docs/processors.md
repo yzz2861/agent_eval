@@ -163,6 +163,19 @@ This should give you enough power to use *structlog* with any logging system whi
 The probably most useful formatter for string based loggers is {class}`structlog.processors.JSONRenderer`.
 Advanced log aggregation and analysis tools like [Logstash](https://www.elastic.co/logstash) offer features like telling them "this is JSON, deal with it" instead of fiddling with regular expressions.
 
+Some log platforms reject records that exceed a fixed size (often measured in UTF-8 bytes).
+Rendering the whole event and cutting the string afterwards is not an option, because it leaves you with invalid JSON.
+{class}`structlog.processors.BudgetedJSONRenderer` solves this by building the document directly inside the budget: fields are kept in priority order, long strings are shortened with an ellipsis, nested containers are reduced, and low-priority fields are omitted.
+Whenever content is dropped, the renderer adds a `_truncated` field explaining it.
+The original event dict is never modified, and the result is always valid JSON whose UTF-8 length does not exceed the configured limit:
+
+```pycon
+>>> structlog.processors.BudgetedJSONRenderer(48)(
+...     None, "", {"event": "user logged in", "debug": "x" * 100}
+... )
+'{"_truncated":"truncated","event":"user log…"}'
+```
+
 For a list of shipped processors, check out the {ref}`API documentation <procs>`.
 
 

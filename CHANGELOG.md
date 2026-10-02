@@ -16,6 +16,11 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
 
+### Added
+
+- `structlog.processors.BudgetedJSONRenderer` renders events as compact JSON that never exceeds a configured number of UTF-8 bytes. It keeps fields in priority order, shortens long strings, reduces nested containers, omits low-priority fields and records truncation in a `_truncated` field. The output is always valid JSON, even if an error occurs while encoding, and the original event dict is left untouched.
+
+
 ## [26.1.0](https://github.com/hynek/structlog/compare/25.5.0...26.1.0) - 2026-06-06
 
 ### Removed
