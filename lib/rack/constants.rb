@@ -21,6 +21,7 @@ module Rack
   CONTENT_TYPE      = 'content-type'
   ETAG              = 'etag'
   EXPIRES           = 'expires'
+  PREFERENCE_APPLIED = 'preference-applied'
   SET_COOKIE        = 'set-cookie'
   TRANSFER_ENCODING = 'transfer-encoding'
 
@@ -54,6 +55,7 @@ module Rack
   RACK_RECURSIVE_INCLUDE              = 'rack.recursive.include'
   RACK_MULTIPART_BUFFER_SIZE          = 'rack.multipart.buffer_size'
   RACK_MULTIPART_TEMPFILE_FACTORY     = 'rack.multipart.tempfile_factory'
+  RACK_PREFERENCES                    = 'rack.preferences'
   RACK_RESPONSE_FINISHED              = 'rack.response_finished'
   RACK_PROTOCOL                       = 'rack.protocol'
   RACK_REQUEST_CONFIG                 = 'rack.request.config'

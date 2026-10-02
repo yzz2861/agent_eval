@@ -4,6 +4,7 @@ require_relative 'constants'
 require_relative 'utils'
 require_relative 'media_type'
 require_relative 'multipart'
+require_relative 'preferences'
 
 module Rack
   # Rack::Request provides a convenient interface to a Rack
@@ -406,6 +407,18 @@ module Rack
       # https://wicg.github.io/nav-speculation/prefetch.html#sec-purpose-header
       def prefetch?
         get_header("HTTP_SEC_PURPOSE") == "prefetch"
+      end
+
+      # The parsed +Prefer+ request header (RFC 7240) as a
+      # Rack::Preferences instance. The instance is shared through the
+      # +rack.preferences+ environment key, so preferences the
+      # application applies via Rack::Preferences#apply are visible to
+      # Rack::PreferenceApplied when it generates the
+      # +Preference-Applied+ response header.
+      def preferences
+        fetch_header(RACK_PREFERENCES) do
+          set_header(RACK_PREFERENCES, Preferences.parse(get_header('HTTP_PREFER')))
+        end
       end
 
       # The `HTTP_HOST` header.

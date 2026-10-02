@@ -157,6 +157,10 @@ middleware:
 * `Rack::Lock` for serializing requests using a mutex.
 * `Rack::MethodOverride` for modifying the request method based on a submitted
   parameter.
+* `Rack::PreferenceApplied` for handling the `Prefer` request header (RFC 7240)
+  and generating the `Preference-Applied` response header from the preferences
+  the application applied, discarding the response body when `return=minimal`
+  is applied.
 * `Rack::Recursive` for including data from other paths in the application, and
   for performing internal redirects.
 * `Rack::Reloader` for reloading files if they have been modified.
