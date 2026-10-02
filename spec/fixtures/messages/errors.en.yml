@@ -1,0 +1,22 @@
+en:
+  dry_validation:
+    rules:
+      email: "E-mail"
+    errors:
+      format: "has invalid format"
+      rules:
+        not_weekend: "this only works on weekends"
+        email:
+          invalid: "oh noez bad email"
+          taken: "looks like %{email} is taken"
+        city:
+          invalid: "is not a valid city name"
+        address:
+          street:
+            invalid: "doesn't look good"
+        contact:
+          wrong: "not right"
+        age:
+          toddler: "should be included in %{list}"
+        small_integers:
+          too_big: "is too big!"

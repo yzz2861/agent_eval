@@ -1,0 +1,36 @@
+#!/usr/bin/env ruby
+
+# frozen_string_literal: true
+
+require "bundler/setup"
+
+require "dry/validation"
+require "dry/types"
+
+module Types
+  include Dry::Types()
+end
+
+class Context
+  def schema(&)
+    Dry::Schema.define(&)
+  end
+
+  def params(&)
+    Dry::Schema.Params(&)
+  end
+
+  def json(&)
+    Dry::Schema.JSON(&)
+  end
+
+  def contract(&)
+    Dry::Validation::Contract.build(&)
+  end
+
+  def console
+    binding.irb
+  end
+end
+
+Context.new.console
