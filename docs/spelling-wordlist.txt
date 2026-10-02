@@ -7,6 +7,8 @@ ValidationError
 # 0th, sigh...
 th
 amongst
+async
+asynchronous
 callables
 # non-codeblocked cls from autoapi
 cls
@@ -31,6 +33,9 @@ metaschema
 online
 outputter
 pre
+prefetch
+prefetched
+prefetching
 programmatically
 pseudocode
 recurses

@@ -10,6 +10,7 @@ Submodules
    /api/jsonschema/validators/index
    /api/jsonschema/exceptions/index
    /api/jsonschema/protocols/index
+   /api/jsonschema/prefetch/index
 
 :mod:`jsonschema`
 -----------------

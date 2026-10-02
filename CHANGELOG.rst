@@ -1,6 +1,7 @@
 v4.27.0
 =======
 
+* Add a new `jsonschema.prefetch` module with an async preparation phase for remote references: given an async loader, it retrieves every transitively referenced schema (deduplicating concurrent requests, bounding concurrency, resource count and total bytes, supporting timeouts and cancellation, and restricting allowed URI schemes and hosts) and returns a fully offline `referencing.jsonschema.SchemaRegistry` ready for use with any validator.
 * Improve ``best_match`` for ``anyOf`` / ``oneOf`` errors: the most relevant error is now found within each subschema separately before the deepest of those is picked (#1257, #1300).
   In particular an applicator with a single subschema now produces the same best match as the bare subschema would.
   ``relevance`` no longer considers an error's position amongst its siblings.

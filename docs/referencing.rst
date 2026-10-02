@@ -298,6 +298,42 @@ Retrieving resources from a SQLite database or some other network-accessible res
 
     You wouldn't want a user causing your machine to go off and retrieve giant files off the network by passing it a ``$ref`` to some huge blob, or exploiting similar vulnerabilities in your setup.
 
+.. _prefetch:
+
+Prefetching Remote Schemas Ahead of Validation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Retrieving resources lazily during validation requires a *synchronous* retrieval function, which is often inconvenient -- HTTP clients in asynchronous applications are generally asynchronous themselves.
+The `jsonschema.prefetch` module instead offers an explicit asynchronous *preparation phase*: you give it a schema and an async loader callable, and it follows references and retrieves every remote document *before* validation begins, returning a registry which is then fully usable offline.
+
+.. code-block:: python
+
+    import httpx
+
+    from jsonschema import Draft202012Validator
+    from jsonschema.prefetch import prefetch
+
+    async def loader(uri: str) -> bytes:
+        return (await httpx.AsyncClient().get(uri)).content
+
+    registry = await prefetch(
+        {"$ref": "https://json.schemastore.org/pyproject.json"},
+        loader=loader,
+    )
+    validator = Draft202012Validator(
+        {"$ref": "https://json.schemastore.org/pyproject.json"},
+        registry=registry,
+    )
+
+Relative references are resolved against each resource's own ``$id``, and each distinct URI is retrieved at most once, even if references to it are discovered concurrently or form a cycle.
+The number of concurrent loader calls, the total number of retrieved resources and their total size in bytes are all limited (see the ``max_concurrency``, ``max_resources`` and ``max_bytes`` arguments), and a ``timeout`` may be provided, after which the whole preparation is aborted.
+Cancelling the surrounding task aborts the preparation as well, cancelling any in-flight loader calls.
+
+Only URIs whose scheme (and optionally host) you have explicitly allowed are retrieved, via the ``allowed_schemes`` and ``allowed_hosts`` arguments; anything else fails the preparation.
+
+If *any* document cannot be retrieved, parsed, or exceeds a limit, `jsonschema.prefetch.PrefetchError` (or a subclass) is raised and *no* registry is produced -- a partially populated registry is never silently returned.
+The registry which *is* returned never attempts further retrieval: if validation later needs a resource which was not prefetched, an error is raised rather than calling back out to the loader.
+
 
 Migrating From ``RefResolver``
 ------------------------------
