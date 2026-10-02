@@ -17,6 +17,7 @@ require 'rack/utils'
 require_relative 'abstract/id'
 require_relative 'encryptor'
 require_relative 'constants'
+require_relative 'revocation'
 
 module Rack
 
@@ -87,8 +88,56 @@ module Rack
     #     }.new
     #   })
     #
+    # == Per-subject revocation
+    #
+    # A :revocation_store option (see Rack::Session::Revocation::Store) enables
+    # per-subject session revocation, so that e.g. a password change can sign
+    # out every existing session of a single user without rotating the global
+    # secrets (which would sign out all users at once):
+    #
+    #   store = Rack::Session::Revocation::Memory.new
+    #   Rack::Session::Cookie.new(application, {
+    #     secrets: 'a randomly generated, raw binary string 64 bytes in size',
+    #     revocation_store: store,
+    #     subject_key: 'user_id', # default
+    #   })
+    #
+    #   # Later, e.g. after a password change:
+    #   store.revoke!(user_id)
+    #
+    # When enabled, each issued session records the generation of its subject
+    # (the value of the session's :subject_key entry) inside the encrypted
+    # cookie payload. On every request the recorded generation is compared
+    # against the store; sessions issued before the subject's current
+    # generation are discarded and the request continues with a fresh,
+    # anonymous session. The exact semantics are:
+    #
+    # * Anonymous sessions (no subject in the session data) are never stamped
+    #   and never checked; they pass through untouched.
+    # * Ordinary renewal of a session keeps the generation recorded at
+    #   issuance. It is never re-stamped, so a revoked session cannot regain
+    #   validity simply by being used.
+    # * A new login, or any request that changes the session's subject, is
+    #   stamped with the subject's *current* generation.
+    # * Sessions issued before the feature was enabled (or before a subject
+    #   was ever stamped) are treated as generation 0.
+    # * If the revocation store fails while checking a session, the session is
+    #   rejected (fail closed): a revocation that cannot be verified is never
+    #   silently skipped. If the store fails while stamping a new login, the
+    #   session is not saved. Both failures are logged to rack.errors.
+    #
 
     class Cookie < Abstract::PersistedSecure
+      # Session payload key holding the subject generation recorded at
+      # issuance. This is session metadata and is removed from the session
+      # data exposed to the application.
+      GENERATION_KEY = "session_generation"
+
+      # Request environment key holding the validated [subject, generation]
+      # pair of the loaded session, used to keep the generation stable across
+      # ordinary renewals.
+      RACK_SESSION_REVOCATION = "rack.session.revocation"
+
       # Encode session cookies as Base64
       class Base64
         def encode(str)
@@ -195,6 +244,9 @@ module Rack
         # encryption could present a major security issue.
         @coder = options[:coder] ||= Base64::Marshal.new
 
+        @revocation_store = options[:revocation_store]
+        @subject_key = (options[:subject_key] || "user_id").to_s
+
         super(app, options.merge!(cookie_only: true))
       end
 
@@ -203,7 +255,81 @@ module Rack
       def find_session(req, sid)
         data = unpacked_cookie_data(req)
         data = persistent_session_id!(data)
+        data = validate_session_generation(req, data)
         [data["session_id"], data]
+      end
+
+      # Compare the generation recorded in the session against the revocation
+      # store. Returns the session data to use: either the original data, or a
+      # fresh anonymous session if the loaded one was revoked (or could not be
+      # verified). The validated [subject, generation] pair is kept in the
+      # request environment so that write_session can keep the generation
+      # stable across ordinary renewals.
+      def validate_session_generation(req, data)
+        return data unless @revocation_store
+
+        # The generation is session metadata, not application data.
+        generation = data.delete(GENERATION_KEY) || 0
+        subject = data[@subject_key]
+
+        # Anonymous sessions are not tied to a subject and cannot be revoked
+        # by generation.
+        unless subject
+          req.set_header(RACK_SESSION_REVOCATION, false)
+          return data
+        end
+
+        current = fetch_current_generation(req, subject)
+
+        if current && current <= generation
+          req.set_header(RACK_SESSION_REVOCATION, [subject, generation])
+          data
+        else
+          # The session was revoked, or the store is unavailable and we fail
+          # closed: discard it and start fresh.
+          req.set_header(RACK_SESSION_REVOCATION, false)
+          persistent_session_id!({})
+        end
+      end
+
+      # Record the subject's generation in the session payload about to be
+      # written. Returns false if the generation could not be determined due
+      # to a storage failure, in which case the session must not be saved.
+      def stamp_session_generation(req, session)
+        subject = session[@subject_key]
+
+        # Anonymous sessions are never stamped.
+        return true unless subject
+
+        revocation = req.get_header(RACK_SESSION_REVOCATION)
+
+        if revocation && revocation.first == subject
+          # The subject is unchanged since the session was loaded: keep the
+          # generation recorded at issuance. Renewal must never upgrade the
+          # generation, otherwise a revoked session could launder itself back
+          # to validity simply by being used.
+          session[GENERATION_KEY] = revocation.last
+          return true
+        end
+
+        # A new login or a subject switch: stamp the subject's current
+        # generation.
+        if generation = fetch_current_generation(req, subject)
+          session[GENERATION_KEY] = generation
+          true
+        else
+          false
+        end
+      end
+
+      # Read the subject's current generation from the revocation store.
+      # Storage failures are logged and reported as nil, so callers fail
+      # closed.
+      def fetch_current_generation(req, subject)
+        @revocation_store.current_generation(subject)
+      rescue StandardError => error
+        req.get_header(RACK_ERRORS).puts("Session revocation store error: #{error.message}")
+        nil
       end
 
       def extract_session_id(request)
@@ -266,6 +392,12 @@ module Rack
 
       def write_session(req, session_id, session, options)
         session = session.merge("session_id" => session_id)
+
+        if @revocation_store && !stamp_session_generation(req, session)
+          req.get_header(RACK_ERRORS).puts("Warning! #{self.class.name} could not verify the session generation. Content dropped.")
+          return false
+        end
+
         session_data = encode_session_data(session)
 
         if session_data.size > (4096 - @key.size)
