@@ -24,6 +24,8 @@ module Rack
 
     class IncompatibleStoreError < Error; end
 
+    class StoreError < Error; end
+
     autoload :Check,                'rack/attack/check'
     autoload :Throttle,             'rack/attack/throttle'
     autoload :Safelist,             'rack/attack/safelist'
@@ -44,6 +46,17 @@ module Rack
           # Deprecated: Keeping just for backwards compatibility
           notifier.instrument("rack.attack", request: request)
         end
+      end
+
+      def instrument_store_error(rule_name:, discriminator_fingerprint:, error:)
+        return unless notifier
+
+        notifier.instrument(
+          "store_error.rack_attack",
+          name: rule_name,
+          discriminator_fingerprint: discriminator_fingerprint,
+          error: error
+        )
       end
 
       def cache
@@ -76,6 +89,8 @@ module Rack
         :blocklisted_response=,
         :throttled_response,
         :throttled_response=,
+        :store_unavailable_responder,
+        :store_unavailable_responder=,
         :throttled_response_retry_after_header,
         :throttled_response_retry_after_header=,
         :clear_configuration,
@@ -117,16 +132,21 @@ module Rack
         else
           configuration.blocklisted_responder.call(request)
         end
-      elsif configuration.throttled?(request)
-        # Deprecated: Keeping throttled_response for backwards compatibility
-        if configuration.throttled_response
-          configuration.throttled_response.call(env)
-        else
-          configuration.throttled_responder.call(request)
-        end
       else
-        configuration.tracked?(request)
-        @app.call(env)
+        case configuration.throttle_outcome(request)
+        when :store_unavailable
+          configuration.store_unavailable_responder.call(request)
+        when :throttled
+          # Deprecated: Keeping throttled_response for backwards compatibility
+          if configuration.throttled_response
+            configuration.throttled_response.call(env)
+          else
+            configuration.throttled_responder.call(request)
+          end
+        else
+          configuration.tracked?(request)
+          @app.call(env)
+        end
       end
     end
   end

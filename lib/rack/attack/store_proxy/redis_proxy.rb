@@ -61,8 +61,8 @@ module Rack
 
         def rescuing
           yield
-        rescue Redis::BaseConnectionError
-          nil
+        rescue Redis::BaseConnectionError => error
+          raise Rack::Attack::StoreError, "Redis cache store operation failed: #{error.class}"
         end
       end
     end

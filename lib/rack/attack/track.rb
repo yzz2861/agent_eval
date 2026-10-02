@@ -17,7 +17,21 @@ module Rack
       end
 
       def matched_by?(request)
-        filter.matched_by?(request)
+        if filter.is_a?(Throttle)
+          matched_by_throttle?(request)
+        else
+          filter.matched_by?(request)
+        end
+      end
+
+      private
+
+      def matched_by_throttle?(request)
+        outcome = filter.evaluate(request)
+        return false unless outcome == :throttled
+
+        filter.annotate_match!(request, :track)
+        true
       end
     end
   end

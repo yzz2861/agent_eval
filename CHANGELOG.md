@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Per-throttle `failure_policy` option (`:allow`/`:deny`) declaring whether requests are let through or rejected when the cache store is temporarily unavailable.
+- Distinct `:store_unavailable` outcome rendered by a configurable `Rack::Attack.store_unavailable_responder` (default `503`), separate from the `429` quota-exhaustion response.
+- `store_error.rack_attack` notification carrying a truncated discriminator fingerprint instead of the full discriminator.
+- `Rack::Attack::StoreError`, raised (instead of silently swallowed) when a cache store operation fails; Fail2Ban/Allow2Ban remain fail-open.
+
+### Changed
+
+- When several throttle rules match one request, outcomes merge with a stable precedence: fail-closed outage wins over quota exhaustion, which wins over a fail-open outage. Real counter values are used again immediately after the store recovers.
+
 ## [6.8.0] - 2025-10-14
 
 ### Changed

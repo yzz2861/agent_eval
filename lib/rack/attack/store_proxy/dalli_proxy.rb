@@ -69,8 +69,8 @@ module Rack
 
         def rescuing
           yield
-        rescue Dalli::DalliError
-          nil
+        rescue Dalli::DalliError => error
+          raise Rack::Attack::StoreError, "Memcached cache store operation failed: #{error.class}"
         end
       end
     end

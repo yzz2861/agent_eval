@@ -9,7 +9,7 @@ module Rack
           findtime  = options[:findtime]  or raise ArgumentError, "Must pass findtime option"
           maxretry  = options[:maxretry]  or raise ArgumentError, "Must pass maxretry option"
 
-          if banned?(discriminator)
+          if banned?(discriminator) == true
             # Return true for blocklist
             true
           elsif yield
@@ -25,7 +25,10 @@ module Rack
         end
 
         def banned?(discriminator)
-          cache.read("#{key_prefix}:ban:#{discriminator}") ? true : false
+          value = cache.read("#{key_prefix}:ban:#{discriminator}")
+          value ? true : false
+        rescue Rack::Attack::StoreError
+          nil
         end
 
         protected
@@ -35,6 +38,16 @@ module Rack
         end
 
         def fail!(discriminator, bantime, findtime, maxretry)
+          with_store_error_rescue { fail_with_count(discriminator, bantime, findtime, maxretry) }
+        end
+
+        private
+
+        def ban!(discriminator, bantime)
+          with_store_error_rescue { cache.write("#{key_prefix}:ban:#{discriminator}", 1, bantime) }
+        end
+
+        def fail_with_count(discriminator, bantime, findtime, maxretry)
           count = cache.count("#{key_prefix}:count:#{discriminator}", findtime)
           if count >= maxretry
             ban!(discriminator, bantime)
@@ -43,10 +56,10 @@ module Rack
           true
         end
 
-        private
-
-        def ban!(discriminator, bantime)
-          cache.write("#{key_prefix}:ban:#{discriminator}", 1, bantime)
+        def with_store_error_rescue
+          yield
+        rescue Rack::Attack::StoreError
+          nil
         end
 
         def cache

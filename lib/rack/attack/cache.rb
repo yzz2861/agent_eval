@@ -39,27 +39,29 @@ module Rack
       def read(unprefixed_key)
         raise Rack::Attack::MissingStoreError if store.nil?
 
-        store.read("#{prefix}:#{unprefixed_key}")
+        with_store_error_handling { store.read("#{prefix}:#{unprefixed_key}") }
       end
 
       def write(unprefixed_key, value, expires_in)
         raise Rack::Attack::MissingStoreError if store.nil?
 
-        store.write("#{prefix}:#{unprefixed_key}", value, expires_in: expires_in)
+        with_store_error_handling do
+          store.write("#{prefix}:#{unprefixed_key}", value, expires_in: expires_in)
+        end
       end
 
       def reset_count(unprefixed_key, period)
         key, _ = key_and_expiry(unprefixed_key, period)
-        store.delete(key)
+        with_store_error_handling { store.delete(key) }
       end
 
       def delete(unprefixed_key)
-        store.delete("#{prefix}:#{unprefixed_key}")
+        with_store_error_handling { store.delete("#{prefix}:#{unprefixed_key}") }
       end
 
       def reset!
         if store.respond_to?(:delete_matched)
-          store.delete_matched(/#{prefix}*/)
+          with_store_error_handling { store.delete_matched(/#{prefix}*/) }
         else
           raise(
             Rack::Attack::IncompatibleStoreError,
@@ -80,13 +82,21 @@ module Rack
       def do_count(key, expires_in)
         raise Rack::Attack::MissingStoreError if store.nil?
 
-        result = store.increment(key, 1, expires_in: expires_in)
+        result = with_store_error_handling { store.increment(key, 1, expires_in: expires_in) }
 
         # NB: Some stores return nil when incrementing uninitialized values
         if result.nil?
-          store.write(key, 1, expires_in: expires_in)
+          with_store_error_handling { store.write(key, 1, expires_in: expires_in) }
         end
         result || 1
+      end
+
+      def with_store_error_handling
+        yield
+      rescue Rack::Attack::StoreError
+        raise
+      rescue StandardError => error
+        raise Rack::Attack::StoreError, "Cache store operation failed: #{error.class}"
       end
 
       def check_store_methods_presence(*method_names)

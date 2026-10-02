@@ -276,6 +276,27 @@ Rack::Attack.throttle('request per ip', limit: limit_proc, period: period_proc) 
 end
 ```
 
+#### Storage failure policy
+
+The cache backend can become temporarily unavailable. Each throttle rule declares what should happen then via the `failure_policy` option:
+
+- `failure_policy: :allow` (default) — fail **open**: the request is allowed. Suitable for public, read-only endpoints.
+- `failure_policy: :deny` — fail **closed**: the request is rejected with the [store-unavailable response](#storage-unavailable-response). Suitable for sensitive operations such as logins or payments.
+
+```ruby
+# Public search must keep working even if the cache is down
+Rack::Attack.throttle('search/ip', limit: 300, period: 60, failure_policy: :allow) do |req|
+  req.ip if req.path == '/search'
+end
+
+# Login attempts must be rejected when the counter backend is unreachable
+Rack::Attack.throttle('logins/email', limit: 5, period: 60, failure_policy: :deny) do |req|
+  req.params['email'] if req.path == '/login' && req.post?
+end
+```
+
+When several throttle rules match a single request and disagree, the merge order is stable and security-first: a `:deny` backend outage always wins over an exhausted quota (`429`), which wins over an `:allow` outage. Only cache store calls are intercepted; errors raised by your rule block or by `limit`/`period` procs propagate normally. As soon as the backend recovers, the real counter is used again — the outage is never cached.
+
 ### Tracks
 
 ```ruby
@@ -338,6 +359,23 @@ Rack::Attack.throttled_responder = lambda do |request|
 end
 ```
 
+### Storage unavailable response
+
+A rule with `failure_policy: :deny` whose cache backend call fails produces a distinct `:store_unavailable` result (rather than a `429` quota exhaustion). It is rendered by a dedicated responder, defaulting to `503 Service Unavailable`:
+
+```ruby
+Rack::Attack.store_unavailable_responder = lambda do |request|
+  # request.env['rack.attack.match_type'] == :store_unavailable
+  # request.env['rack.attack.matched']                        # rule name
+  # request.env['rack.attack.match_data'][:failure_policy]   # :deny
+  # request.env['rack.attack.match_data'][:discriminator_fingerprint]
+  # request.env['rack.attack.match_data'][:error]
+  [503, { 'content-type' => 'text/plain' }, ["Temporarily unavailable\n"]]
+end
+```
+
+Note that the full discriminator is deliberately omitted from this response.
+
 ### RateLimit headers for well-behaved clients
 
 While Rack::Attack's primary focus is minimizing harm from abusive clients, it
@@ -396,6 +434,17 @@ ActiveSupport::Notifications.subscribe(/rack_attack/) do |name, start, finish, i
   # request object available in payload[:request]
 
   # Your code here
+end
+```
+
+Cache backend failures are published as `store_error.rack_attack` events. The payload contains the rule `:name`, the underlying `:error`, and a truncated SHA-256 `:discriminator_fingerprint` — the full discriminator is never included.
+
+```ruby
+ActiveSupport::Notifications.subscribe('store_error.rack_attack') do |_name, _start, _finish, _id, payload|
+  Rails.logger.warn(
+    "rack-attack store failure rule=#{payload[:name]} " \
+    "client=#{payload[:discriminator_fingerprint]} error=#{payload[:error].class}"
+  )
 end
 ```
 

@@ -29,5 +29,18 @@ describe Rack::Attack::Configuration do
     it 'exposes the anonymous_safelists attribute' do
       _(subject.anonymous_safelists).must_equal([])
     end
+
+    it 'exposes a default store-unavailable responder' do
+      response = subject.store_unavailable_responder.call(nil)
+
+      _(response[0]).must_equal 503
+    end
+
+    it 'allows customizing the store-unavailable responder' do
+      responder = ->(_req) { [503, {}, ['down']] }
+      subject.store_unavailable_responder = responder
+
+      _(subject.store_unavailable_responder).must_equal responder
+    end
   end
 end

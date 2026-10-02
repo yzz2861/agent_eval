@@ -5,19 +5,19 @@ require_relative '../spec_helper'
 
 OfflineExamples = Minitest::SharedExamples.new do
   it 'should write' do
-    @cache.write('cache-test-key', 'foobar', 1)
+    _(-> { @cache.write('cache-test-key', 'foobar', 1) }).must_raise Rack::Attack::StoreError
   end
 
   it 'should read' do
-    @cache.read('cache-test-key')
+    _(-> { @cache.read('cache-test-key') }).must_raise Rack::Attack::StoreError
   end
 
   it 'should count' do
-    @cache.count('cache-test-key', 1)
+    _(-> { @cache.count('cache-test-key', 1) }).must_raise Rack::Attack::StoreError
   end
 
   it 'should delete' do
-    @cache.delete('cache-test-key')
+    _(-> { @cache.delete('cache-test-key') }).must_raise Rack::Attack::StoreError
   end
 end
 
