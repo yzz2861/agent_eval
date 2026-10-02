@@ -36,6 +36,24 @@ module Rack
         do_count(key, expires_in)
       end
 
+      def atomic_update(unprefixed_key, expires_in:)
+        raise Rack::Attack::MissingStoreError if store.nil?
+
+        unless store.respond_to?(:atomic_update)
+          raise(
+            Rack::Attack::IncompatibleStoreError,
+            "Configured store #{store.class.name} doesn't respond to #atomic_update. " \
+            "Weighted throttles require a store implementing the Rack::Attack::AtomicStore " \
+            "contract (see Rack::Attack::MemoryStore); emulating it with read/write would " \
+            "not be atomic."
+          )
+        end
+
+        store.atomic_update("#{prefix}:#{unprefixed_key}", expires_in: expires_in) do |current|
+          yield current
+        end
+      end
+
       def read(unprefixed_key)
         raise Rack::Attack::MissingStoreError if store.nil?
 

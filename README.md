@@ -276,6 +276,41 @@ Rack::Attack.throttle('request per ip', limit: limit_proc, period: period_proc) 
 end
 ```
 
+#### `weighted_throttle(name, options, &block)`
+
+Fixed-window counting is a poor fit when the cost of a request varies (e.g. an
+export endpoint that is much more expensive than a status check), or when you
+want a smooth sustained rate instead of a hard window reset.
+`weighted_throttle` implements a smoothed token bucket: capacity refills
+continuously at a sustained `rate` per `per` seconds, short spikes up to
+`burst` cost units are admitted, and each request is charged the `cost`
+computed from the request.
+
+```ruby
+# Allow a sustained 10 cost units per minute per IP, bursts up to 20,
+# charging exports 5 units and everything else 1.
+Rack::Attack.weighted_throttle("api", rate: 10, per: 60, burst: 20,
+  cost: ->(req) { req.path == "/export" ? 5 : 1 }) do |req|
+  req.ip
+end
+```
+
+When a request is throttled, the match data includes a `retry_after` value:
+the number of seconds to wait until an equivalent request would be accepted.
+Enable `Rack::Attack.configuration.throttled_response_retry_after_header` to
+send it as a `Retry-After` header.
+
+Because bucket state must be updated atomically, `weighted_throttle` requires
+a cache store implementing the `Rack::Attack::AtomicStore` contract
+(`#atomic_update`). Stores that only support read/write/increment raise
+`Rack::Attack::IncompatibleStoreError` rather than emulating atomicity
+unsafely. `Rack::Attack::MemoryStore` is provided as a reference
+implementation suitable for single-process deployments:
+
+```ruby
+Rack::Attack.cache.store = Rack::Attack::MemoryStore.new
+```
+
 ### Tracks
 
 ```ruby

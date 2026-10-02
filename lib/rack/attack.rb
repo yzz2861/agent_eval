@@ -4,6 +4,8 @@ require 'rack'
 require 'forwardable'
 require 'rack/attack/cache'
 require 'rack/attack/configuration'
+require 'rack/attack/atomic_store'
+require 'rack/attack/memory_store'
 require 'rack/attack/path_normalizer'
 require 'rack/attack/request'
 require 'rack/attack/store_proxy/dalli_proxy'
@@ -26,6 +28,7 @@ module Rack
 
     autoload :Check,                'rack/attack/check'
     autoload :Throttle,             'rack/attack/throttle'
+    autoload :WeightedThrottle,     'rack/attack/weighted_throttle'
     autoload :Safelist,             'rack/attack/safelist'
     autoload :Blocklist,            'rack/attack/blocklist'
     autoload :Track,                'rack/attack/track'
@@ -67,6 +70,7 @@ module Rack
         :blocklist_ip,
         :safelist_ip,
         :throttle,
+        :weighted_throttle,
         :track,
         :throttled_responder,
         :throttled_responder=,
