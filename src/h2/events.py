@@ -593,6 +593,91 @@ class ConnectionTerminated(Event):
         )
 
 
+class ConnectionDraining(Event):
+    """
+    The ConnectionDraining event is fired when the remote peer sends a
+    graceful GOAWAY frame (a GOAWAY frame carrying the error code
+    ``NO_ERROR``). Unlike :class:`ConnectionTerminated
+    <h2.events.ConnectionTerminated>`, this does not tear the connection
+    down: streams with an ID less than or equal to ``last_stream_id`` remain
+    fully usable and may continue to send and receive DATA frames, exchange
+    WINDOW_UPDATE frames and terminate normally. Only once all such streams
+    have completed should the connection be closed.
+
+    Streams initiated by this peer whose ID is greater than
+    ``last_stream_id`` were never accepted by the remote peer. A
+    :class:`StreamNotAccepted <h2.events.StreamNotAccepted>` event is fired
+    for each of them so that the caller can decide whether to retry them on a
+    new connection.
+
+    A peer is allowed to send further graceful GOAWAY frames while draining,
+    but their ``last_stream_id`` may only ever decrease (tighten). This event
+    is fired for every graceful GOAWAY frame that is received.
+
+    .. versionadded:: 4.5.0
+    """
+
+    def __init__(self) -> None:
+        #: The error code cited in the GOAWAY frame. For a graceful GOAWAY
+        #: this is always :data:`ErrorCodes.NO_ERROR
+        #: <h2.errors.ErrorCodes.NO_ERROR>`; it is exposed for parity with
+        #: :class:`ConnectionTerminated <h2.events.ConnectionTerminated>`.
+        self.error_code: ErrorCodes | int | None = None
+
+        #: The stream ID of the highest-numbered stream that the remote peer
+        #: accepted. Requests on outbound streams with a higher ID may be
+        #: safely retried on a new connection.
+        self.last_stream_id: int | None = None
+
+        #: Additional debug data that can be appended to the GOAWAY frame.
+        self.additional_data: bytes | None = None
+
+    def __repr__(self) -> str:
+        return (
+            "<ConnectionDraining error_code:{!s}, last_stream_id:{}, "
+            "additional_data:{}>".format(
+                self.error_code,
+                self.last_stream_id,
+                _bytes_representation(
+                    self.additional_data[:20]
+                    if self.additional_data else None),
+            )
+        )
+
+
+class StreamNotAccepted(Event):
+    """
+    The StreamNotAccepted event is fired during a graceful connection drain
+    for a stream that was initiated by this peer but that the remote peer
+    never accepted (its ID is greater than the ``last_stream_id`` carried by
+    a received graceful GOAWAY frame).
+
+    Any request carried by such a stream can safely be retried on a new
+    connection. h2 does not reset or remove these streams itself: it is up
+    to the caller to either retry them or to reset them explicitly using
+    :meth:`reset_stream <h2.connection.H2Connection.reset_stream>`. Any data
+    already queued for the stream is retained until the caller acts.
+
+    .. versionadded:: 4.5.0
+    """
+
+    stream_id: int
+    """The ID of the stream that the remote peer did not accept."""
+
+    last_stream_id: int
+    """The last stream ID accepted by the remote peer."""
+
+    def __init__(self, stream_id: int, last_stream_id: int) -> None:
+        self.stream_id = stream_id
+        self.last_stream_id = last_stream_id
+
+    def __repr__(self) -> str:
+        return (
+            f"<StreamNotAccepted stream_id:{self.stream_id}, "
+            f"last_stream_id:{self.last_stream_id}>"
+        )
+
+
 class AlternativeServiceAvailable(Event):
     """
     The AlternativeServiceAvailable event is fired when the remote peer

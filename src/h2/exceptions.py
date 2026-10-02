@@ -88,6 +88,30 @@ class NoAvailableStreamIDError(ProtocolError):
 
 
 
+class ConnectionDrainingError(H2Error):
+    """
+    An attempt was made to initiate a new stream on a connection that is
+    draining after a graceful GOAWAY frame was received from the remote
+    peer.
+
+    Streams that were already accepted by the remote peer before the
+    GOAWAY remain usable; only the creation of new streams is rejected. The
+    request should be retried on a new connection.
+
+    .. versionadded:: 4.5.0
+    """
+
+    def __init__(self, last_stream_id: int) -> None:
+        #: The last stream ID accepted by the remote peer.
+        self.last_stream_id = last_stream_id
+
+    def __str__(self) -> str:
+        return (
+            "Connection is draining; the remote peer did not accept any "
+            f"stream with an ID greater than {self.last_stream_id}"
+        )
+
+
 class NoSuchStreamError(ProtocolError):
     """
     A stream-specific action referenced a stream that does not exist.

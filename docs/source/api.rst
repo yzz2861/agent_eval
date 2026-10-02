@@ -77,6 +77,12 @@ Events
 .. autoclass:: h2.events.ConnectionTerminated
    :members:
 
+.. autoclass:: h2.events.ConnectionDraining
+   :members:
+
+.. autoclass:: h2.events.StreamNotAccepted
+   :members:
+
 .. autoclass:: h2.events.AlternativeServiceAvailable
    :members:
 
@@ -88,6 +94,10 @@ Exceptions
 ----------
 
 .. autoclass:: h2.exceptions.H2Error
+   :members:
+
+.. autoclass:: h2.exceptions.ConnectionDrainingError
+   :show-inheritance:
    :members:
 
 .. autoclass:: h2.exceptions.NoSuchStreamError

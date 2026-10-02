@@ -1790,8 +1790,9 @@ class TestBasicServer:
 
     def test_receiving_multiple_goaway_frames(self, frame_factory) -> None:
         """
-        Multiple GOAWAY frames can be received at once, and are allowed. Each
-        one fires a ConnectionTerminated event.
+        Multiple graceful (NO_ERROR) GOAWAY frames can be received at once.
+        Each one fires a ConnectionDraining event and leaves the connection
+        open.
         """
         c = h2.connection.H2Connection(config=self.server_config)
         c.receive_data(frame_factory.preamble())
@@ -1802,14 +1803,16 @@ class TestBasicServer:
 
         assert len(events) == 3
         assert all(
-            isinstance(event, h2.events.ConnectionTerminated)
+            isinstance(event, h2.events.ConnectionDraining)
             for event in events
         )
+        assert c.state_machine.state == h2.connection.ConnectionState.IDLE
+        assert c.remote_drains is True
 
-    def test_receiving_goaway_frame_with_additional_data(self, frame_factory) -> None:
+    def test_receiving_terminating_goaway_frame_with_additional_data(self, frame_factory) -> None:
         """
-        GOAWAY frame can contain additional data,
-        it should be available via ConnectionTerminated event.
+        A terminating (non NO_ERROR) GOAWAY frame can contain additional data,
+        which should be available via the ConnectionTerminated event.
         """
         c = h2.connection.H2Connection(config=self.server_config)
         c.initiate_connection()
@@ -1817,6 +1820,7 @@ class TestBasicServer:
 
         additional_data = b"debug data"
         f = frame_factory.build_goaway_frame(last_stream_id=0,
+                                             error_code=h2.errors.ErrorCodes.INTERNAL_ERROR,
                                              additional_data=additional_data)
         events = c.receive_data(f.serialize())
 

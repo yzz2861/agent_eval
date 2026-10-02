@@ -1,6 +1,30 @@
 Release History
 ===============
 
+4.5.0 (unreleased)
+------------------
+
+**API Changes (Backward Compatible)**
+
+- Add :meth:`H2Connection.graceful_close <h2.connection.H2Connection.graceful_close>` for
+  graceful connection draining (RFC 9113 section 6.8). It sends a GOAWAY frame with
+  ``NO_ERROR`` without closing the connection: accepted streams keep exchanging DATA and
+  WINDOW_UPDATE frames and end normally, new inbound streams are refused with
+  RST_STREAM/REFUSED_STREAM, and queued outbound data is never discarded.
+  The immediate ``close_connection`` method is unchanged.
+- Receiving a GOAWAY frame with error code ``NO_ERROR`` now fires a new
+  :class:`ConnectionDraining <h2.events.ConnectionDraining>` event instead of
+  :class:`ConnectionTerminated <h2.events.ConnectionTerminated>`, and no longer clears the
+  outbound data buffer or closes the connection. GOAWAY frames with any other error code
+  keep the previous immediate-termination behaviour.
+- Add the :class:`StreamNotAccepted <h2.events.StreamNotAccepted>` event, fired for outbound
+  streams that the draining peer did not accept, so callers can retry them on a new
+  connection. Successive GOAWAY frames may only tighten ``last_stream_id``.
+- Add the :class:`ConnectionDrainingError <h2.exceptions.ConnectionDrainingError>` exception,
+  raised when attempting to initiate a new outbound stream while the remote peer is draining.
+- Add the ``local_drains``, ``remote_drains`` and ``draining`` properties to
+  :class:`H2Connection <h2.connection.H2Connection>`.
+
 4.4.1 (2026-08-03)
 ------------------
 
