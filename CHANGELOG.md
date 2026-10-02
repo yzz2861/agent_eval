@@ -1,3 +1,13 @@
+## master
+
+* Add stage diagnostics to template pipelines: failures raise
+  Tilt::Pipeline::StageError identifying the stage, the position in the
+  stage input, and the position in the template source, preserving the
+  original exception as the cause.  Pipeline stages can optionally
+  return Tilt::Pipeline::StageOutput to provide a line mapping;
+  positions in stages without a mapping are reported as intermediate
+  text.
+
 ## 2.1.0 (2023-02-17)
 
 * Use UnboundMethod#bind_call on Ruby 2.7+ for better performance (#380, jeremyevans)
