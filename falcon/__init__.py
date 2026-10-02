@@ -41,6 +41,12 @@ __all__ = (
     'HTTPSeeOther',
     'HTTPTemporaryRedirect',
     'Forwarded',
+    'IdempotencyInProgress',
+    'IdempotencyKeyMiddleware',
+    'IdempotencyKeyReused',
+    'IdempotencyRecord',
+    'IdempotencyResultUnknown',
+    'IdempotencyStatus',
     'Request',
     'RequestOptions',
     'Response',
@@ -90,6 +96,7 @@ __all__ = (
     'misc',
     'parse_header',
     'reader',
+    'SQLiteIdempotencyStore',
     'runs_sync',
     'secure_filename',
     'structures',
@@ -413,6 +420,13 @@ from falcon.hooks import after
 from falcon.hooks import before
 from falcon.http_error import HTTPError
 from falcon.http_status import HTTPStatus
+from falcon.idempotency import IdempotencyInProgress
+from falcon.idempotency import IdempotencyKeyMiddleware
+from falcon.idempotency import IdempotencyKeyReused
+from falcon.idempotency import IdempotencyRecord
+from falcon.idempotency import IdempotencyResultUnknown
+from falcon.idempotency import IdempotencyStatus
+from falcon.idempotency import SQLiteIdempotencyStore
 from falcon.middleware import CORSMiddleware
 from falcon.redirects import HTTPFound
 from falcon.redirects import HTTPMovedPermanently

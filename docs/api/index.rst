@@ -15,6 +15,7 @@ Framework Reference
    redirects
    middleware
    cors
+   idempotency
    hooks
    routing
    inspect
