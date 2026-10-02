@@ -1,0 +1,121 @@
+plugins:
+  - rubocop-performance
+  - rubocop-rake
+
+inherit_from: .rubocop_todo.yml
+
+# When excluding files, use merge mode so we preserve default Rubocop config.
+inherit_mode:
+  merge:
+    - Exclude
+
+# Set this to the minimum supported ruby in the gemspec. Otherwise
+# we get errors if our ruby version doesn't match.
+AllCops:
+  SuggestExtensions: false
+  TargetRubyVersion: 3.0
+  NewCops: enable
+  Exclude:
+    - 'test/data/*'
+
+# Allow this in this file because adding the extra lines is pointless.
+Layout/EmptyLineBetweenDefs:
+  Exclude:
+    - 'lib/zip/errors.rb'
+
+Layout/HashAlignment:
+  EnforcedHashRocketStyle: table
+  EnforcedColonStyle: table
+
+# Set a workable line length, given the current state of the code,
+# and turn off for the tests.
+Layout/LineLength:
+  Max: 100
+  Exclude:
+    - 'test/**/*.rb'
+
+Lint/EmptyClass:
+  Enabled: false
+
+# In some cases we just need to catch an exception, rather than
+# actually handle it. Allow the tests to make use of this shortcut.
+Lint/SuppressedException:
+  AllowComments: true
+  Exclude:
+    - 'test/**/*.rb'
+
+# Allow this "useless" test, as we are testing <=> here.
+Lint/BinaryOperatorWithIdenticalOperands:
+  Exclude:
+    - 'test/entry_test.rb'
+
+# Turn off ABC metrics for the tests and set a workable max given
+# the current state of the code.
+Metrics/AbcSize:
+  Max: 37
+  Exclude:
+    - 'test/**/*.rb'
+
+# Turn block length metrics off for the tests and gemspec.
+Metrics/BlockLength:
+  Exclude:
+    - 'rubyzip.gemspec'
+    - 'test/**/*.rb'
+
+# Turn class length metrics off for the tests.
+Metrics/ClassLength:
+  Exclude:
+    - 'test/**/*.rb'
+
+# Turn method length metrics off for the tests.
+Metrics/MethodLength:
+  Exclude:
+    - 'test/**/*.rb'
+
+# These tests are just better with snake_case numbers.
+Naming/VariableNumber:
+  Exclude:
+    - 'test/file_permissions_test.rb'
+
+# Need to allow accessors in Entry to be separated for doc purposes.
+Style/AccessorGrouping:
+  Exclude:
+    - 'lib/zip/entry.rb'
+
+# Set a consistent way of checking types.
+Style/ClassCheck:
+  EnforcedStyle: kind_of?
+
+Style/HashEachMethods:
+  Enabled: true
+
+Style/HashTransformValues:
+  Enabled: true
+
+# Allow non-default behaviour for Zip.
+Style/ModuleFunction:
+  Exclude:
+    - 'lib/zip.rb'
+
+# Allow this multi-line block chain as it actually reads better
+# than the alternatives.
+Style/MultilineBlockChain:
+  Exclude:
+    - 'lib/zip/crypto/traditional_encryption.rb'
+
+# Allow inner slashes when using // for regex literals. Allow the
+# Guardfile to use a syntax that is more consistent with its own style.
+Style/RegexpLiteral:
+  AllowInnerSlashes: true
+  Exclude:
+    - 'Guardfile'
+
+Style/SymbolArray:
+  EnforcedStyle: brackets
+
+# Turn this cop off for these files as it fires for objects without
+# an empty? method.
+Style/ZeroLengthPredicate:
+  Exclude:
+    - 'lib/zip/file.rb'
+    - 'lib/zip/input_stream.rb'

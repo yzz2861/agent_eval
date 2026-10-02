@@ -1,0 +1,85 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        ruby: ['3.0', '3.1', '3.2', '3.3', '3.4', '4.0', head, jruby, jruby-head, truffleruby, truffleruby-head]
+        include:
+          - { os: macos-15, ruby: '3.0' }
+          - { os: macos-latest, ruby: '3.3' }
+          - { os: windows-2022, ruby: '3.0' }
+          - { os: windows-2025, ruby: '3.3' }
+          - { os: windows-2025, ruby: '4.0' }
+          # Windows head builds.
+          - { os: windows-latest, ruby: ucrt  }
+          - { os: windows-latest, ruby: mswin }
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ endsWith(matrix.ruby, 'head') || startsWith(matrix.os, 'windows') }}
+    env:
+      BUNDLE_WITHOUT: benchmark
+    steps:
+    - name: Checkout rubyzip code
+      uses: actions/checkout@v5
+
+    - name: Install and set up ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ matrix.ruby }}
+        rubygems: latest
+        bundler-cache: true
+
+    - name: Run the tests
+      env:
+        RUBYOPT: -v
+        JRUBY_OPTS: --debug
+        FULL_ZIP64_TEST: 1
+      run: bundle exec rake
+
+    - name: Coveralls
+      if: matrix.os == 'ubuntu' && !endsWith(matrix.ruby, 'head')
+      uses: coverallsapp/github-action@v2
+      with:
+        github-token: ${{ secrets.github_token }}
+        flag-name: ${{ matrix.ruby }}
+        parallel: true
+
+  test-yjit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        ruby: ['3.3', '3.4', '4.0', head]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    env:
+      BUNDLE_WITHOUT: benchmark
+    steps:
+    - name: Checkout rubyzip code
+      uses: actions/checkout@v5
+
+    - name: Install and set up ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ matrix.ruby }}
+        bundler-cache: true
+
+    - name: Run the tests
+      env:
+        RUBYOPT: --enable-yjit -v
+        FULL_ZIP64_TEST: 1
+      run: bundle exec rake
+
+  finish:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Coveralls Finished
+      uses: coverallsapp/github-action@v2
+      with:
+        github-token: ${{ secrets.github_token }}
+        parallel-finished: true
