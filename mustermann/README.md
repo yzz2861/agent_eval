@@ -42,7 +42,7 @@ pattern.params('/a/b.c') # => { "prefix" => "a", splat => ["b", "c"] }
 These features are included in the library, but not loaded by default
 
 * **[Pattern Set](#-pattern-set):** A collection of patterns with associated values, designed for building routing tables that dispatch efficiently as the number of routes grows.
-* **Mustermann::Router:** A very basic rack router built on top of `Mustermann::Set` for demonstration purposes or small-footprint routing in Rack middleware. Simple and fast.
+* **Mustermann::Router:** A very basic rack router built on top of `Mustermann::Set` for demonstration purposes or small-footprint routing in Rack middleware. Simple and fast. It also offers an opt-in `method_negotiation:` mode with accurate `405`/`Allow` responses, `HEAD` support (explicit routes win, otherwise `GET` is used with the body stripped and closed) and automatic `OPTIONS`.
 
 <a name="-pattern-types"></a>
 ## Pattern Types

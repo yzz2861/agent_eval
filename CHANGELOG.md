@@ -6,6 +6,10 @@ Mustermann follows [Semantic Versioning 2.0](http://semver.org/). Anything docum
 
 ### Mustermann 4.0.1
 
+#### New features
+
+* `Mustermann::Router` now supports an optional `method_negotiation:` mode. When enabled, requests to a path that exists but does not support the request method get a `405` response with an accurate `Allow` header, while unknown paths still hit the fallback (usually `404`). `HEAD` requests prefer an explicit `HEAD` route and fall back to `GET` otherwise, invoking the target exactly once, closing its response body and dropping the body. `OPTIONS` requests are answered automatically from the same candidate rules without invoking any target application. The mode is opt-in and the legacy behavior remains the default.
+
 #### Performance improvements
 
 * Reduce memory usage by deduplicating internal data structures. This is especially effective when using large `Mustermann::Set` objects. [#159](https://github.com/sinatra/mustermann/issues/159) [#160](https://github.com/sinatra/mustermann/pull/160) [@byroot](https://github.com/byroot)
