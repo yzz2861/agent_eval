@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require 'mustermann/error'
+require 'mustermann/explanation'
 require 'mustermann/match'
 require 'mustermann/equality_map'
 require 'uri'
@@ -191,6 +192,30 @@ module Mustermann
     # @param [String] string the string to match against
     # @return [Hash{String: String, Array<String>}, nil] Sinatra style params if pattern matches.
     def params(string = nil) = match(string)&.params
+
+    # Explains why the pattern does not match the given string.
+    #
+    # The explanation points at the furthest position in the string up to
+    # which matching was able to proceed, along with the segments that would
+    # have been accepted there and where in the pattern they originate from.
+    #
+    # This is computed on demand; normal matching does not track any of this
+    # information.
+    #
+    # @example
+    #   pattern = Mustermann.new('/users/:id', capture: :digit)
+    #   pattern.explain('/users/new').message
+    #   # => 'expected a digit segment (:id) at position 7 in "/users/new"'
+    #
+    # @param [String] string The string to match against
+    # @return [Mustermann::Explanation, nil] nil if the pattern matches the
+    #   string, otherwise an explanation of the mismatch
+    # @see Mustermann::Explanation
+    def explain(string)
+      return if self === string
+      Explanation.new(pattern: self, string: string, position: 0,
+                      expectations: [Explanation::Expectation.pattern(to_s)])
+    end
 
     # @note This method is only implemented by certain subclasses.
     #

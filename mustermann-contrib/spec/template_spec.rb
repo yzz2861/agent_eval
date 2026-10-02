@@ -839,4 +839,20 @@ describe Mustermann::Template do
       example { pattern.peek_params("/foo bar")       .should be_nil }
     end
   end
+
+  context "explaining" do
+    it 'returns nil when the pattern matches' do
+      expect(Mustermann::Template.new('/{+list}/x').explain('/a/b/x')).to be_nil
+    end
+
+    it 'explains mismatches past template expressions' do
+      explanation = Mustermann::Template.new('/{+list}/x').explain('/a/b')
+      expect(explanation.message).to be == 'expected "/" at position 4 in "/a/b"'
+    end
+
+    it 'describes failing template variables' do
+      explanation = Mustermann::Template.new('/{list}').explain('/a/b/c')
+      expect(explanation.message).to be == 'expected end of input at position 2 in "/a/b/c"'
+    end
+  end
 end

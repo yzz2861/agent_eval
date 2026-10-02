@@ -2,6 +2,7 @@
 require 'mustermann/ast/parser'
 require 'mustermann/ast/boundaries'
 require 'mustermann/ast/compiler'
+require 'mustermann/ast/explainer'
 require 'mustermann/ast/transformer'
 require 'mustermann/ast/validation'
 require 'mustermann/ast/template_generator'
@@ -125,6 +126,18 @@ module Mustermann
       def expand(behavior = nil, values = EMPTY_HASH)
         @expander ||= Mustermann::Expander.new(self)
         @expander.expand(behavior, values)
+      end
+
+      # Explains why the pattern does not match the given string by walking
+      # the AST and tracking the furthest position matching was able to reach.
+      #
+      # @example (see Mustermann::Pattern#explain)
+      # @param (see Mustermann::Pattern#explain)
+      # @return (see Mustermann::Pattern#explain)
+      # @see Mustermann::Pattern#explain
+      def explain(string)
+        return if match(string)
+        Explainer.explain(self, string)
       end
 
       # All AST-based pattern implementations support generating templates.

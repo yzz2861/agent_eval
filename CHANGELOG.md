@@ -6,6 +6,10 @@ Mustermann follows [Semantic Versioning 2.0](http://semver.org/). Anything docum
 
 ### Mustermann 4.0.1
 
+#### New features
+
+* Added `Mustermann::Pattern#explain`, which returns a `Mustermann::Explanation` for strings that do not match a pattern. The explanation points at the furthest position matching was able to reach, along with the segments that would have been accepted there and where in the pattern they originate from. Diagnostics are computed on demand and do not affect matching performance.
+
 #### Performance improvements
 
 * Reduce memory usage by deduplicating internal data structures. This is especially effective when using large `Mustermann::Set` objects. [#159](https://github.com/sinatra/mustermann/issues/159) [#160](https://github.com/sinatra/mustermann/pull/160) [@byroot](https://github.com/byroot)

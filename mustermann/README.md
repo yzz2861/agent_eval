@@ -192,6 +192,36 @@ params, size = patter.peek_params(path_info)  # params == { "prefix" => "foo" }
 rest         = path_info[size..-1]            # => "/bar"
 ```
 
+<a name="-failure-diagnostics"></a>
+## Failure Diagnostics
+
+When a pattern does not match, `explain` tells you why. It returns a
+`Mustermann::Explanation` pointing at the furthest position in the string that
+matching was able to reach, along with the segments that would have been
+accepted there. Each expectation also knows where in the pattern it originates
+from. If the pattern matches, `explain` returns `nil`.
+
+``` ruby
+require 'mustermann'
+
+pattern = Mustermann.new('/users/:id', capture: :digit)
+pattern.explain('/users/new').message
+# => 'expected a digit segment (:id) at position 7 in "/users/new"'
+
+explanation = Mustermann.new('/foo(/bar)?/baz').explain('/foo/baq')
+explanation.position                # => 7
+explanation.matched_prefix          # => "/foo/ba"
+explanation.remainder               # => "q"
+explanation.expectations.map(&:description) # => ['"r"', '"z"']
+explanation.expectations.first.kind # => :literal
+explanation.expectations.first.pattern_range # => 8...9
+```
+
+The explanation is computed on demand by walking the pattern AST, so normal
+matching does not pay for any additional tracking. Patterns that are not
+AST-based (like `Mustermann::Regular` or `Mustermann::Identity`) fall back to a
+generic explanation.
+
 <a name="-expanding"></a>
 ## Expanding
 
