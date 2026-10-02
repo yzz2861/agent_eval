@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file. For info on
 - Add support for streaming bodies when using `Rack::Events`. ([#2375](github.com/rack/rack/pull/2375), [@unflxw](https://github.com/unflxw))
 - Add `deflaters` option to `Rack::Deflater` to enable custom compression algorithms like zstd. ([#2168](https://github.com/rack/rack/issues/2168), [@alexanderadam](https://github.com/alexanderadam))
 - Add `Rack::Request#prefetch?` for identifying requests with `Sec-Purpose: prefetch` header set. ([#2405](https://github.com/rack/rack/pull/2405), [@glaszig](https://github.com/glaszig))
+- Add `Rack::Prefer` and `Rack::Request#preferences` for parsing RFC 7240 `Prefer`, explicitly applying preferences, and generating `Preference-Applied`.
 - Add `rack.request.config` environment key to configure Rack::Request behavior.
 - Add `Rack::Request#headers` for simpler access to request headers by header name. ([#1881](https://github.com/rack/rack/pull/1881), [@jeremyevans](https://github.com/jeremyevans))
 - Allow disabling the `Rack::QueryParser` bytesize and params limits by passing `nil` for the `bytesize_limit`/`params_limit` keyword arguments, or a negative value for `RACK_QUERY_PARSER_BYTESIZE_LIMIT`/`RACK_QUERY_PARSER_PARAMS_LIMIT`. ([#2492](https://github.com/rack/rack/pull/2492), [@alpaca-tc](https://github.com/alpaca-tc))

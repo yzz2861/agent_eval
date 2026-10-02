@@ -87,6 +87,19 @@ module Rack
       @headers ||= Headers.new(@env)
     end
 
+    def preferences
+      get_header(RACK_REQUEST_PREFERENCES) ||
+        set_header(RACK_REQUEST_PREFERENCES, Prefer::Collection.new(headers[Prefer::PREFER]))
+    end
+
+    # Returns all requested preferences when called without arguments. With
+    # arguments, explicitly records the preference actually adopted by the
+    # application for the response.
+    def prefer(name = nil, *args, **params)
+      return preferences if name.nil?
+      preferences.apply(name, *args, **params)
+    end
+
     class Headers
       def initialize(env)
         @env = env
@@ -888,5 +901,12 @@ module Rack
 
     include Env
     include Helpers
+  end
+
+  require_relative 'prefer' unless defined?(::Rack::Prefer)
+
+  class Request
+    Preferences = ::Rack::Prefer::Collection
+    Preference = ::Rack::Prefer::Preference
   end
 end
