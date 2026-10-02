@@ -9,6 +9,155 @@ module Tilt
   # @private
   LOCK = Mutex.new
 
+  # Error raised when the locals given to Template#render do not satisfy
+  # the locals contract declared for the template, or when evaluating the
+  # default value for an optional local fails.  The error message includes
+  # the template's file and line.
+  class LocalsContractError < ArgumentError
+  end
+
+  # A locals contract describes the locals a template expects: which
+  # locals are required, which locals are optional (with default values),
+  # and whether locals not declared in the contract are allowed.
+  #
+  # Contracts are declared as hashes:
+  #
+  #   {
+  #     required: [:name],              # locals that must be provided
+  #     optional: {title: 'untitled'},  # locals with default values
+  #     allow_extra: false,             # whether undeclared locals are allowed
+  #   }
+  #
+  # When a template has a contract, Template#render checks the given
+  # locals against the contract before the template body is evaluated:
+  #
+  # * A missing required local raises LocalsContractError.
+  # * An undeclared local raises LocalsContractError, unless the contract
+  #   allows extra locals.
+  # * Omitted optional locals are set to their default values.  Defaults
+  #   that respond to #call are called on every render; other defaults are
+  #   duplicated (with #dup) on every render, so mutable default values
+  #   are never shared between renders.  If evaluating a default raises,
+  #   a LocalsContractError is raised and the template body is not
+  #   evaluated.
+  #
+  # After validation, locals are canonicalized to the names declared in
+  # the contract (plus any extra locals, if allowed), so templates with a
+  # contract compile a single method per scope class, regardless of the
+  # order or subset of locals each render provides.
+  class LocalsContract
+    # Array of required local names, as symbols.
+    attr_reader :required
+
+    # Hash of optional local names (symbols) to their default values.
+    attr_reader :optional
+
+    def initialize(contract)
+      unless contract.respond_to?(:to_hash)
+        raise ArgumentError, "locals contract must be a hash: #{contract.inspect}"
+      end
+      contract = contract.to_hash
+
+      @required = Array(contract[:required]).map { |name| normalize_name(name) }.freeze
+      if @required != @required.uniq
+        raise ArgumentError, "duplicate required locals in contract: #{@required.inspect}"
+      end
+
+      optional = contract[:optional] || {}
+      unless optional.respond_to?(:to_hash)
+        raise ArgumentError, "optional locals in contract must be a hash of names to defaults: #{optional.inspect}"
+      end
+      @optional = {}
+      optional.to_hash.each_pair do |name, default|
+        @optional[normalize_name(name)] = default
+      end
+      @optional.freeze
+
+      overlap = @required & @optional.keys
+      unless overlap.empty?
+        raise ArgumentError, "locals cannot be both required and optional: #{overlap.inspect}"
+      end
+
+      @allow_extra = contract[:allow_extra] ? true : false
+      @names = (@required + @optional.keys).freeze
+    end
+
+    # Whether locals not declared in the contract are allowed.
+    def allow_extra?
+      @allow_extra
+    end
+
+    # Check the given locals against the contract for the given template,
+    # and return the canonical locals hash to evaluate the template with.
+    # Raises LocalsContractError if the locals do not satisfy the contract
+    # or a default value cannot be evaluated.
+    def resolve(locals, template)
+      location = "#{template.eval_file}:#{template.line}"
+      provided = {}
+      extra = {}
+
+      locals.each_pair do |key, value|
+        name = begin
+          key.to_sym
+        rescue NoMethodError
+          nil
+        end
+
+        if name && @names.include?(name)
+          provided[name] = value
+        else
+          extra[key] = value
+        end
+      end
+
+      @required.each do |name|
+        unless provided.key?(name)
+          raise LocalsContractError, "#{location}: missing required local: #{name.inspect}"
+        end
+      end
+
+      unless allow_extra? || extra.empty?
+        names = extra.keys.map { |key| key.inspect }.join(', ')
+        raise LocalsContractError, "#{location}: unexpected locals: #{names}"
+      end
+
+      resolved = {}
+      @required.each do |name|
+        resolved[name] = provided[name]
+      end
+      @optional.each do |name, default|
+        resolved[name] = if provided.key?(name)
+          provided[name]
+        else
+          evaluate_default(name, default, location)
+        end
+      end
+      extra.each_pair do |key, value|
+        resolved[key] = value
+      end
+      resolved
+    end
+
+    private
+
+    def normalize_name(name)
+      unless name.respond_to?(:to_sym)
+        raise ArgumentError, "local names in contracts must be strings or symbols: #{name.inspect}"
+      end
+      name.to_sym
+    end
+
+    def evaluate_default(name, default, location)
+      if default.respond_to?(:call)
+        default.call
+      else
+        default.dup
+      end
+    rescue => e
+      raise LocalsContractError, "#{location}: default for local #{name.inspect} failed: #{e.message} (#{e.class})"
+    end
+  end
+
   # Base class for template implementations. Subclasses must implement
   # the #prepare method and one of the #evaluate or #precompiled_template
   # methods.
@@ -33,11 +182,34 @@ module Tilt
     # on the compiled template code.
     attr_reader :compiled_path
 
+    # The LocalsContract declared for this template, or nil if the
+    # template does not declare a locals contract.
+    attr_reader :locals_contract
+
     class << self
       # An empty Hash that the template engine can populate with various
       # metadata.
       def metadata
         @metadata ||= {}
+      end
+
+      # The locals contract declared for this template class, or nil if no
+      # contract is declared.  Contracts set on a class are inherited by
+      # subclasses, and can be overridden per template instance with the
+      # :locals_contract option.  See LocalsContract for the contract
+      # format.
+      def locals_contract
+        if defined?(@locals_contract)
+          @locals_contract
+        elsif superclass.respond_to?(:locals_contract)
+          superclass.locals_contract
+        end
+      end
+
+      # Declare the locals contract used by default for instances of this
+      # template class.  See LocalsContract for the contract format.
+      def locals_contract=(contract)
+        @locals_contract = contract
       end
 
       # @deprecated Use `.metadata[:mime_type]` instead.
@@ -81,6 +253,12 @@ module Tilt
       # currently only used if template compiles to ruby
       @default_encoding = @options.delete :default_encoding
 
+      # Resolve the locals contract declared for this template, if any.
+      # The :locals_contract option overrides any class-level contract;
+      # pass false or nil to disable an inherited contract.
+      contract = @options.delete(:locals_contract) { self.class.locals_contract }
+      @locals_contract = LocalsContract.new(contract) if contract
+
       # load template data and prepare (uses binread to avoid encoding issues)
       @reader = block || lambda { |t| read_template_file }
       @data = @reader.call(self)
@@ -102,13 +280,20 @@ module Tilt
     # Render the template in the given scope with the locals specified. If a
     # block is given, it is typically available within the template via
     # +yield+.
+    #
+    # If the template declares a locals contract, the locals are checked
+    # against the contract (and defaults for omitted optional locals are
+    # applied) before the template is evaluated.  See LocalsContract.
     def render(scope=nil, locals={}, &block)
       scope ||= Object.new
+      locals = apply_locals_contract(locals || {})
       current_template = Thread.current[:tilt_current_template]
-      Thread.current[:tilt_current_template] = self
-      evaluate(scope, locals || {}, &block)
-    ensure
-      Thread.current[:tilt_current_template] = current_template
+      begin
+        Thread.current[:tilt_current_template] = self
+        evaluate(scope, locals, &block)
+      ensure
+        Thread.current[:tilt_current_template] = current_template
+      end
     end
 
     # The basename of the template file.
@@ -244,6 +429,16 @@ module Tilt
     # !@endgroup
 
     private
+
+    # Apply the declared locals contract (if any) to the given locals,
+    # returning the locals to evaluate the template with.
+    def apply_locals_contract(locals)
+      if (contract = @locals_contract)
+        contract.resolve(locals, self)
+      else
+        locals
+      end
+    end
 
     def read_template_file
       data = File.open(file, 'rb') { |io| io.read }

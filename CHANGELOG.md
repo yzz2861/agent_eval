@@ -1,3 +1,7 @@
+## Unreleased
+
+* Add support for locals contracts on templates: templates can declare required locals, optional locals with default values, and whether extra locals are allowed, via the :locals_contract option or Template.locals_contract. Locals are validated before rendering with errors that include the template location, optional defaults are evaluated per render (so mutable defaults are never shared, and a failing default prevents the template body from running), and templates with a contract compile a single method per scope class regardless of the order or subset of locals given.
+
 ## 2.1.0 (2023-02-17)
 
 * Use UnboundMethod#bind_call on Ruby 2.7+ for better performance (#380, jeremyevans)
