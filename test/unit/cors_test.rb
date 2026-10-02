@@ -432,6 +432,141 @@ describe Rack::Cors do
     end
   end
 
+  describe 'with strict origin checking' do
+    def strict_app(origins, holder)
+      Rack::Builder.new do
+        result_holder = holder
+        use CaptureResult, holder: result_holder
+        use Rack::Cors, strict_origin_check: true do
+          allow do
+            origins(*origins)
+            resource '/', headers: :any, methods: :any
+          end
+        end
+        run ->(_env) { [200, { 'content-type' => 'text/html' }, ['success']] }
+      end
+    end
+
+    before do
+      @holder = OpenStruct.new
+    end
+
+    def strict_get(origin)
+      @app.call({ 'REQUEST_METHOD' => 'GET', 'PATH_INFO' => '/', 'HTTP_ORIGIN' => origin })
+    end
+
+    def strict_preflight(origin)
+      @app.call(
+        'REQUEST_METHOD' => 'OPTIONS',
+        'PATH_INFO' => '/',
+        'HTTP_ORIGIN' => origin,
+        'HTTP_ACCESS_CONTROL_REQUEST_METHOD' => 'GET'
+      )
+    end
+
+    it 'normalizes host case and the default port on actual requests' do
+      @app = strict_app(['example.com'], @holder)
+      status, headers, = strict_get('HTTP://EXAMPLE.COM:80')
+
+      _(status).must_equal 200
+      _(headers['access-control-allow-origin']).must_equal 'http://example.com'
+    end
+
+    it 'normalizes IPv6 addresses on preflight requests' do
+      @app = strict_app(['[2001:db8::1]'], @holder)
+      _, headers, = strict_preflight('http://[2001:DB8:0:0:0:0:0:1]:80')
+
+      _(headers['access-control-allow-origin']).must_equal 'http://[2001:db8::1]'
+    end
+
+    it 'rejects a comma joined origin with an invalid origin result on actual requests' do
+      @app = strict_app(['*'], @holder)
+      _, headers, = strict_get('https://example.com,https://evil.example')
+
+      _(headers['Access-Control-Allow-Origin']).must_be_nil
+      _(@holder.cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_INVALID_ORIGIN
+    end
+
+    it 'rejects userinfo and path fragments on preflight requests' do
+      @app = strict_app(['example.com'], @holder)
+      [
+        'https://user@example.com',
+        'https://example.com/path',
+        'https://example.com?',
+        'https://example.com#',
+        'https://example.com::80',
+        'https://example.com:080',
+        'https://[2001:db8::1',
+        "https://example.com\x00"
+      ].each do |origin|
+        _, headers, = strict_preflight(origin)
+
+        _(headers['Access-Control-Allow-Origin']).must_be_nil
+        _(@holder.cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_INVALID_ORIGIN
+      end
+    end
+
+    it 'uses a different result code for a valid origin that does not match a rule' do
+      @app = strict_app(['example.com'], @holder)
+      _, headers, = strict_preflight('https://evil.example')
+
+      _(headers['Access-Control-Allow-Origin']).must_be_nil
+      _(@holder.cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_NO_ORIGIN
+    end
+
+    it 'does not treat null as a wildcard origin' do
+      @app = strict_app(['*'], @holder)
+      _, headers, = strict_get('null')
+
+      _(headers['Access-Control-Allow-Origin']).must_be_nil
+      _(@holder.cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_NO_ORIGIN
+    end
+
+    it 'supports explicitly configured null origins' do
+      @app = strict_app([:null], @holder)
+      _, headers, = strict_get('null')
+
+      _(headers['access-control-allow-origin']).must_equal 'null'
+    end
+
+    it 'does not write invalid origin input to debug logs' do
+      origin = "https://example.com/evil\nInjected: yes"
+      logger = mock
+      logger.expects(:debug).at_least_once
+      logger.expects(:debug).with(regexp_matches(Regexp.new(Regexp.escape(origin)))).never
+
+      app = proc { [200, {}, ['']] }
+      cors = Rack::Cors.new(app, strict_origin_check: true, debug: true, logger: logger) do
+        allow do
+          origins '*'
+          resource '*'
+        end
+      end
+      cors.call('REQUEST_METHOD' => 'GET', 'PATH_INFO' => '/', 'HTTP_ORIGIN' => origin)
+    end
+  end
+
+  describe 'without strict origin checking' do
+    it 'keeps permissive wildcard behavior for null and malformed origins' do
+      holder = OpenStruct.new
+      app = Rack::Builder.new do
+        use CaptureResult, holder: holder
+        use Rack::Cors do
+          allow do
+            origins '*'
+            resource '*'
+          end
+        end
+        run ->(_env) { [200, {}, ['success']] }
+      end
+
+      ['null', 'https://example.com/path'].each do |origin|
+        _, headers, = app.call('REQUEST_METHOD' => 'GET', 'PATH_INFO' => '/', 'HTTP_ORIGIN' => origin)
+        _(headers['access-control-allow-origin']).must_equal '*'
+      end
+    end
+  end
+
   describe 'Rack::Lint' do
     def app
       @app ||= Rack::Builder.new do

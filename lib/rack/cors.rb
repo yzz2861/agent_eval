@@ -3,6 +3,7 @@
 require 'logger'
 require_relative 'cors/resources'
 require_relative 'cors/resource'
+require_relative 'cors/origin'
 require_relative 'cors/result'
 require_relative 'cors/version'
 
@@ -22,13 +23,19 @@ module Rack
       # retaining the old key for backwards compatibility
       ENV_KEY = 'rack.cors'
 
+    RACK_CORS_ORIGIN = 'rack.cors.origin'
+
     OPTIONS     = 'OPTIONS'
 
     DEFAULT_VARY_HEADERS = ['Origin'].freeze
 
+    STRICT_ORIGIN_OPTION_KEYS = %i[strict_origin_check strict_origins strict_origin].freeze
+    INVALID_ORIGIN_LOG_VALUE = '[invalid origin]'.freeze
+
     def initialize(app, opts = {}, &block)
       @app = app
       @debug_mode = !!opts[:debug]
+      @strict_origin_check = STRICT_ORIGIN_OPTION_KEYS.any? { |key| opts[key] }
       @logger = @logger_proc = nil
 
       logger = opts[:logger]
@@ -53,8 +60,12 @@ module Rack
       @debug_mode
     end
 
+    def strict_origin_check?
+      @strict_origin_check
+    end
+
     def allow(&block)
-      all_resources << (resources = Resources.new)
+      all_resources << (resources = Resources.new(strict_origin_check?))
 
       if block.arity == 1
         block.call(resources)
@@ -66,29 +77,37 @@ module Rack
     def call(env)
       env[HTTP_ORIGIN] ||= env[HTTP_X_ORIGIN] if env[HTTP_X_ORIGIN]
 
+      origin_valid = evaluate_origin(env)
+
       path = evaluate_path(env)
 
       add_headers = nil
       if env[HTTP_ORIGIN]
         debug(env) do
           ['Incoming Headers:',
-           "  Origin: #{env[HTTP_ORIGIN]}",
-           "  Path-Info: #{path}",
-           "  Access-Control-Request-Method: #{env[HTTP_ACCESS_CONTROL_REQUEST_METHOD]}",
-           "  Access-Control-Request-Headers: #{env[HTTP_ACCESS_CONTROL_REQUEST_HEADERS]}"].join("\n")
+           "  Origin: #{debug_value(origin_for_debug(env))}",
+           "  Path-Info: #{debug_value(path)}",
+           "  Access-Control-Request-Method: #{debug_value(env[HTTP_ACCESS_CONTROL_REQUEST_METHOD])}",
+           "  Access-Control-Request-Headers: #{debug_value(env[HTTP_ACCESS_CONTROL_REQUEST_HEADERS])}"].join("\n")
         end
 
         if env[REQUEST_METHOD] == OPTIONS && env[HTTP_ACCESS_CONTROL_REQUEST_METHOD]
           return [400, {}, []] unless Rack::Utils.valid_path?(path)
 
+          unless origin_valid
+            result = Result.preflight(env)
+            result.miss(Result::MISS_INVALID_ORIGIN)
+            return [200, {}, []]
+          end
+
           headers = process_preflight(env, path)
           debug(env) do
             "Preflight Headers:\n" +
-              headers.collect { |kv| "  #{kv.join(': ')}" }.join("\n")
+              headers.collect { |key, value| "  #{debug_value(key)}: #{debug_value(value)}" }.join("\n")
           end
           return [200, headers, []]
         else
-          add_headers = process_cors(env, path)
+          add_headers = origin_valid ? process_cors(env, path) : invalid_origin(env)
         end
       else
         Result.miss(env, Result::MISS_NO_ORIGIN)
@@ -135,6 +154,14 @@ module Rack
       (@logger || select_logger(env)).debug(message, &block) if debug?
     end
 
+    def debug_value(value)
+      value.inspect
+    end
+
+    def origin_for_debug(env)
+      strict_origin_check? ? env[RACK_CORS_ORIGIN] || INVALID_ORIGIN_LOG_VALUE : env[HTTP_ORIGIN]
+    end
+
     def select_logger(env)
       @logger = if @logger_proc
                   logger_proc = @logger_proc
@@ -166,6 +193,22 @@ module Rack
 
     def all_resources
       @all_resources ||= []
+    end
+
+    def evaluate_origin(env)
+      return true unless strict_origin_check?
+      return true unless env[HTTP_ORIGIN]
+
+      serialized = Origin.serialize(env[HTTP_ORIGIN])
+      return false unless serialized
+
+      env[RACK_CORS_ORIGIN] = serialized
+      true
+    end
+
+    def invalid_origin(env)
+      Result.miss(env, Result::MISS_INVALID_ORIGIN)
+      nil
     end
 
     def process_preflight(env, path)
@@ -202,7 +245,7 @@ module Rack
     end
 
     def match_resource(path, env)
-      origin = env[HTTP_ORIGIN]
+      origin = env[RACK_CORS_ORIGIN] || env[HTTP_ORIGIN]
 
       origin_matched = false
       all_resources.each do |r|

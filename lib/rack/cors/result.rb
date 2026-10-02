@@ -7,6 +7,7 @@ module Rack
 
       MISS_NO_ORIGIN = 'no-origin'
       MISS_NO_PATH   = 'no-path'
+      MISS_INVALID_ORIGIN = 'invalid-origin'
 
       MISS_NO_METHOD   = 'no-method'
       MISS_DENY_METHOD = 'deny-method'

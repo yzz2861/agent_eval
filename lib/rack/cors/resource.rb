@@ -9,8 +9,10 @@ module Rack
 
       attr_accessor :path, :methods, :headers, :expose, :max_age, :credentials, :pattern, :if_proc, :vary_headers
 
-      def initialize(public_resource, path, opts = {})
+      def initialize(public_resource, path, opts = {}, strict_origin_check: false)
         raise CorsMisconfigurationError if public_resource && opts[:credentials] == true
+
+        @strict_origin_check = strict_origin_check
 
         self.path         = path
         self.credentials  = public_resource ? false : (opts[:credentials] == true)
@@ -60,7 +62,7 @@ module Rack
 
       def to_headers(env)
         h = {
-          'access-control-allow-origin' => origin_for_response_header(env[Rack::Cors::HTTP_ORIGIN]),
+          'access-control-allow-origin' => origin_for_response_header(env[Rack::Cors::RACK_CORS_ORIGIN] || env[Rack::Cors::HTTP_ORIGIN]),
           'access-control-allow-methods' => methods.collect { |m| m.to_s.upcase }.join(', '),
           'access-control-expose-headers' => expose.nil? ? '' : expose.join(', '),
           'access-control-max-age' => max_age.to_s
@@ -76,6 +78,7 @@ module Rack
       end
 
       def origin_for_response_header(origin)
+        return origin if @strict_origin_check && origin == Origin::NULL
         return '*' if public_resource?
 
         origin

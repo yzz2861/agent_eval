@@ -81,9 +81,26 @@ end
 #### Middleware Options
 * **debug** (boolean):  Enables debug logging and `X-Rack-CORS` HTTP headers for debugging.
 * **logger** (Object or Proc): Specify the logger to log to.  If a proc is provided, it will be called when a logger is needed.  This is helpful in cases where the logger is initialized after `Rack::Cors` is initially configured, like `Rails.logger`.
+* **strict_origin_check** (boolean): Verify that an incoming `Origin` is one serialized origin before evaluating allow rules. This is off by default to preserve existing permissive behavior. When enabled, hosts are matched case-insensitively, IPv6 literals are normalized, and default scheme ports (`http: 80`, `https: 443`, `ws: 80`, `wss: 443`, and `ftp: 21`) are omitted from the canonical origin echoed in `Access-Control-Allow-Origin`. Commas, userinfo, paths/queries/fragments, control characters, invalid ports, and malformed hosts are rejected with the `invalid-origin` diagnostic rather than treated as `no-origin`.
 
 #### Origin
-Origins can be specified as a string, a regular expression, or as '\*' to allow all origins.
+Origins can be specified as a string, a regular expression, `:null`, or as '\*' to allow all origins.
+
+When `strict_origin_check` is enabled, use `origins :null` (or `origins 'null'`) in a separate rule if sandboxed documents that send `Origin: null` should be allowed. A wildcard origin never matches `null` in strict mode, and `null` is not interpreted as a host name.
+
+```ruby
+use Rack::Cors, strict_origin_check: true do
+  allow do
+    origins 'example.com', '[2001:db8::1]'
+    resource '*', headers: :any, methods: [:get, :post]
+  end
+
+  allow do
+    origins :null
+    resource '/sandboxed-embed'
+  end
+end
+```
 
 **\*SECURITY NOTE:** Be careful when using regular expressions to not accidentally be too inclusive.  For example, the expression `/https:\/\/example\.com/` will match the domain *example.com.randomdomainname.co.uk*.  It is recommended that any regular expression be enclosed with start & end string anchors, like `\Ahttps:\/\/example\.com\z`.
 
