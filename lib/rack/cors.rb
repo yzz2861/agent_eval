@@ -69,6 +69,7 @@ module Rack
       path = evaluate_path(env)
 
       add_headers = nil
+      matched_resource = nil
       if env[HTTP_ORIGIN]
         debug(env) do
           ['Incoming Headers:',
@@ -88,7 +89,7 @@ module Rack
           end
           return [200, headers, []]
         else
-          add_headers = process_cors(env, path)
+          add_headers, matched_resource = process_cors(env, path)
         end
       else
         Result.miss(env, Result::MISS_NO_ORIGIN)
@@ -103,6 +104,7 @@ module Rack
 
       if add_headers
         headers = add_headers.merge(headers)
+        headers = matched_resource.apply_dynamic_expose(headers) if matched_resource
         debug(env) do
           add_headers.each_pair do |key, value|
             headers["x-rack-cors-original-#{key}"] = value if headers.key?(key)
@@ -184,8 +186,7 @@ module Rack
       resource, error = match_resource(path, env)
       if resource
         Result.hit(env)
-        cors = resource.to_headers(env)
-        cors
+        [resource.to_headers(env), resource]
 
       else
         Result.miss(env, error)

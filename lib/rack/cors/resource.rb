@@ -7,6 +7,10 @@ module Rack
       # {https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Headers}
       CORS_SIMPLE_HEADERS = %w[accept accept-language content-language content-type].freeze
 
+      # Response headers that must never be exposed to the client, even
+      # when an expose pattern or wildcard would match them.
+      SENSITIVE_EXPOSE_HEADERS = %w[set-cookie www-authenticate proxy-authenticate].freeze
+
       attr_accessor :path, :methods, :headers, :expose, :max_age, :credentials, :pattern, :if_proc, :vary_headers
 
       def initialize(public_resource, path, opts = {})
@@ -62,14 +66,108 @@ module Rack
         h = {
           'access-control-allow-origin' => origin_for_response_header(env[Rack::Cors::HTTP_ORIGIN]),
           'access-control-allow-methods' => methods.collect { |m| m.to_s.upcase }.join(', '),
-          'access-control-expose-headers' => expose.nil? ? '' : expose.join(', '),
+          'access-control-expose-headers' => static_expose_headers.join(', '),
           'access-control-max-age' => max_age.to_s
         }
         h['access-control-allow-credentials'] = 'true' if credentials
         header_proc.call(h)
       end
 
+      # Statically configured expose header names. Patterns and the
+      # wildcard are resolved against the actual response instead, and
+      # sensitive headers are always excluded.
+      def static_expose_headers
+        return [] if expose.nil?
+
+        expose.reject { |entry| entry.is_a?(Regexp) || entry.to_s == '*' }
+              .map(&:to_s)
+              .reject { |name| sensitive_expose_header?(name) }
+      end
+
+      def expose_patterns
+        return [] if expose.nil?
+
+        expose.select { |entry| entry.is_a?(Regexp) }
+      end
+
+      def expose_wildcard?
+        !expose.nil? && expose.any? { |entry| entry.to_s == '*' }
+      end
+
+      # True when the expose configuration can only be resolved by
+      # inspecting the headers of the actual response.
+      def dynamic_expose?
+        expose_patterns.any? || expose_wildcard?
+      end
+
+      # Returns a new headers hash in which Access-Control-Expose-Headers
+      # has been merged with the response headers matching the configured
+      # expose patterns and/or wildcard. The given hash is never mutated
+      # (it may be frozen).
+      #
+      # Merge rules:
+      # - names already present (set by the app, or from the static
+      #   configuration) are kept first, in their original order;
+      # - statically configured names come next;
+      # - pattern matches are appended in response header order;
+      # - a wildcard expands to the concrete response header names when
+      #   credentials are enabled (a literal wildcard is invalid there),
+      #   and is emitted as a single wildcard otherwise;
+      # - sensitive headers are never added;
+      # - header names are compared case-insensitively and appear once.
+      def apply_dynamic_expose(headers)
+        return headers unless dynamic_expose?
+
+        expose_keys = headers.keys.select do |key|
+          key.to_s.casecmp('access-control-expose-headers').zero?
+        end
+
+        names = []
+        add_name = lambda do |name|
+          name = name.to_s.strip
+          next if name.empty?
+          next if names.any? { |existing| existing.casecmp(name).zero? }
+
+          names << name
+        end
+
+        expose_keys.each do |key|
+          headers[key].to_s.split(',').each { |name| add_name.call(name) }
+        end
+        static_expose_headers.each { |name| add_name.call(name) }
+
+        response_names = headers.keys.map(&:to_s).reject do |name|
+          name.casecmp('access-control-expose-headers').zero? ||
+            sensitive_expose_header?(name)
+        end
+
+        expose_patterns.each do |pattern|
+          response_names.each do |name|
+            add_name.call(name) if pattern.match?(name) || pattern.match?(name.downcase)
+          end
+        end
+
+        if expose_wildcard?
+          if credentials
+            response_names.each do |name|
+              add_name.call(name) unless name.downcase.start_with?('access-control-')
+            end
+          else
+            add_name.call('*')
+          end
+        end
+
+        merged = headers.dup
+        expose_keys.each { |key| merged.delete(key) }
+        merged['access-control-expose-headers'] = names.join(', ')
+        merged
+      end
+
       protected
+
+      def sensitive_expose_header?(name)
+        SENSITIVE_EXPOSE_HEADERS.include?(name.to_s.downcase)
+      end
 
       def public_resource?
         @public_resource

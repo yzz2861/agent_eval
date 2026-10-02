@@ -1,6 +1,12 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+### Added
+- The `expose` resource option now accepts regular expressions and the `'*'` wildcard, resolved against the headers of the actual response
+- Expose header merging rules: app-set `Access-Control-Expose-Headers` values are preserved and merged, header names are de-duplicated case-insensitively, and sensitive headers (`Set-Cookie`, `WWW-Authenticate`, `Proxy-Authenticate`) are never exposed
+- With `credentials: true`, an `expose` wildcard expands to the concrete response header names instead of the invalid literal `*`
+
 ## 3.0.0 - 2025-05-16
 ### Changed
 - Update Rack dependency to >= 3.0.14

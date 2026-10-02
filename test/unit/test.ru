@@ -18,8 +18,17 @@ use Rack::Cors do
     resource '/options', methods: :options
     resource '/single_header', headers: 'x-domain-token'
     resource '/two_headers', headers: %w[x-domain-token x-requested-with]
-    resource '/expose_single_header', expose: 'expose-test'
-    resource '/expose_multiple_headers', expose: %w[expose-test-1 expose-test-2]
+   resource '/expose_single_header', expose: 'expose-test'
+   resource '/expose_multiple_headers', expose: %w[expose-test-1 expose-test-2]
+    resource '/expose_pattern', expose: [%r{\Ax-report-}i]
+    resource '/expose_mixed', expose: ['x-static-token', %r{\Ax-report-}i]
+    resource '/expose_sensitive', expose: [%r{\A(?:s|x)-}i]
+    resource '/expose_wildcard', expose: '*'
+    resource '/expose_wildcard_credentials', expose: '*', credentials: true
+    resource '/expose_pattern_credentials', expose: [%r{\Ax-}i], credentials: true
+    resource '/expose_pattern_error', expose: [%r{\Ax-report-}i]
+    resource '/expose_app_set', expose: ['x-static-token', %r{\Ax-report-}i]
+    resource '/expose_frozen', expose: [%r{\Ax-report-}i]
     resource '/conditional', methods: :get, if: proc { |env| !!env['HTTP_X_OK'] }
     resource '/vary_test', methods: :get, vary: %w[Origin Host]
     resource '/patch_test', methods: :patch

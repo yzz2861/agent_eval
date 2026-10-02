@@ -96,7 +96,12 @@ A Resource path can be specified as exact string match (`/path/to/file.txt`) or 
 
 * **methods** (string or array or `:any`): The HTTP methods allowed for the resource.
 * **headers** (string or array or `:any`): The HTTP headers that will be allowed in the CORS resource request.  Use `:any` to allow for any headers in the actual request.
-* **expose** (string or array): The HTTP headers in the resource response can be exposed to the client.
+* **expose** (string, regexp or array): The HTTP headers in the resource response that can be exposed to the client. Entries can be mixed:
+  * a **string** (or symbol) is always emitted as-is;
+  * a **regexp** is matched against the headers actually present in the final response, and every match is exposed (matched case-insensitively);
+  * `'*'` exposes all response headers. Without credentials a literal `*` is emitted; with `credentials: true` (where a literal `*` is invalid) it expands to the concrete response header names.
+
+  Dynamic entries (regexps and wildcards) are resolved after the app has run, so they only ever name headers that exist in the final response; preflight responses therefore only list statically configured names. `Set-Cookie`, `WWW-Authenticate` and `Proxy-Authenticate` are never exposed. Names are de-duplicated case-insensitively, and any `Access-Control-Expose-Headers` value already set by the app is merged in (app-set names first).
 * **credentials** (boolean, default: `false`): Sets the `Access-Control-Allow-Credentials` response header. **Note:** If a wildcard (`*`) origin is specified, this option cannot be set to `true`.  Read this [security article](http://web-in-security.blogspot.de/2017/07/cors-misconfigurations-on-large-scale.html) for more information.
 * **max_age** (number): Sets the `Access-Control-Max-Age` response header.
 * **if** (Proc): If the result of the proc is true, will process the request as a valid CORS request.

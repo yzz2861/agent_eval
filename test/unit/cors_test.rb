@@ -70,11 +70,28 @@ describe Rack::Cors do
       use CaptureResult, holder: test
       eval File.read(File.dirname(__FILE__) + "/#{name}.ru")
       use FakeProxy if options[:proxy]
-      map('/') do
-        run(lambda do |_env|
-          [200, { 'content-type' => 'text/html' }, ['success']]
-        end)
-      end
+       map('/') do
+          run(lambda do |env|
+          headers = { 'content-type' => 'text/html' }
+          status = 200
+          case env['PATH_INFO']
+          when '/expose_pattern', '/expose_mixed', '/expose_sensitive',
+               '/expose_wildcard', '/expose_wildcard_credentials',
+               '/expose_pattern_credentials', '/expose_frozen'
+            headers['x-report-total'] = '3'
+            headers['x-report-region'] = 'cn'
+            headers['set-cookie'] = 'session=secret'
+            headers.freeze if env['PATH_INFO'] == '/expose_frozen'
+          when '/expose_pattern_error'
+            status = 500
+            headers['x-report-total'] = '3'
+          when '/expose_app_set'
+            headers['x-report-total'] = '3'
+            headers['access-control-expose-headers'] = 'X-Report-Total, x-app-token'
+          end
+          [status, headers, ['success']]
+         end)
+       end
     end
   end
 
@@ -133,9 +150,67 @@ describe Rack::Cors do
     _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'expose-test'
   end
 
-  it 'should support expose multiple header configuration' do
-    successful_cors_request '/expose_multiple_headers'
-    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'expose-test-1, expose-test-2'
+ it 'should support expose multiple header configuration' do
+   successful_cors_request '/expose_multiple_headers'
+   _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'expose-test-1, expose-test-2'
+ end
+
+  it 'should expose response headers matching an expose pattern' do
+    successful_cors_request '/expose_pattern'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'x-report-total, x-report-region'
+  end
+
+  it 'should never expose sensitive headers even when the pattern matches them' do
+    successful_cors_request '/expose_sensitive'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'x-report-total, x-report-region'
+  end
+
+  it 'should merge static expose names with pattern matches' do
+    successful_cors_request '/expose_mixed'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'x-static-token, x-report-total, x-report-region'
+  end
+
+  it 'should emit a literal wildcard expose header without credentials' do
+    successful_cors_request '/expose_wildcard'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal '*'
+  end
+
+  it 'should expand the wildcard to concrete response headers with credentials' do
+    successful_cors_request '/expose_wildcard_credentials'
+    _(last_response.headers['Access-Control-Allow-Credentials']).must_equal 'true'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'content-type, x-report-total, x-report-region'
+  end
+
+  it 'should apply expose patterns with credentials' do
+    successful_cors_request '/expose_pattern_credentials'
+    _(last_response.headers['Access-Control-Allow-Credentials']).must_equal 'true'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'x-report-total, x-report-region'
+  end
+
+  it 'should apply expose patterns on error responses' do
+    cors_request '/expose_pattern_error'
+    _(last_response.status).must_equal 500
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'x-report-total'
+  end
+
+  it 'should merge with app-set expose headers and dedupe case-insensitively' do
+    successful_cors_request '/expose_app_set'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'X-Report-Total, x-app-token, x-static-token'
+  end
+
+  it 'should not mutate frozen response headers' do
+    successful_cors_request '/expose_frozen'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'x-report-total, x-report-region'
+  end
+
+  it 'should not expose pattern matched headers on preflight requests' do
+    preflight_request 'http://localhost:3000', '/expose_pattern'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal ''
+  end
+
+  it 'should only expose static names on preflight requests' do
+    preflight_request 'http://localhost:3000', '/expose_mixed'
+    _(last_response.headers['Access-Control-Expose-Headers']).must_equal 'x-static-token'
   end
 
   # Explanation: http://www.fastly.com/blog/best-practices-for-using-the-vary-header/
