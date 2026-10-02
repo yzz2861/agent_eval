@@ -20,6 +20,7 @@ from sanic.log import error_logger, logger
 from sanic.worker.constants import RestartOrder
 from sanic.worker.process import ProcessState, Worker, WorkerProcess
 from sanic.worker.restarter import Restarter
+from sanic.worker.upgrade import ReadinessCheck, RollingUpgrader
 
 
 SIGKILL: int
@@ -83,6 +84,7 @@ class WorkerManager:
         self._serve = serve
         self._server_settings = server_settings
         self._server_count = count()
+        self.upgrader = RollingUpgrader(self)
 
         if number == 0:
             raise RuntimeError("Cannot serve with no workers")
@@ -198,6 +200,7 @@ class WorkerManager:
         """Run the worker manager."""
         self.start()
         self.monitor()
+        self.upgrader.drain()
         self.join()
         self.terminate()
         self.cleanup()
@@ -282,6 +285,58 @@ class WorkerManager:
                 self.shutdown_server()
         self.num_server = num_worker
 
+    def upgrade(
+        self,
+        process_names: list[str] | None = None,
+        max_concurrent: int = 1,
+        readiness_check: ReadinessCheck | None = None,
+        ack_timeout: float | None = None,
+    ) -> str:
+        """Perform a rolling upgrade of the server processes.
+
+        New-generation processes are started one at a time (limited by
+        "max_concurrent") and only replace the corresponding old
+        process once they have acknowledged startup and passed the
+        optional readiness check. If a new process crashes, does not
+        acknowledge in time, or fails the readiness check, the
+        operation stops advancing: the healthy old generation keeps
+        serving and this round's leftover children are cleaned up.
+
+        Repeated calls while an upgrade is running do not stack a
+        second rollout; the id of the in-flight operation is returned.
+
+        Args:
+            process_names (Optional[List[str]], optional): Limit the
+                upgrade to these process names. Defaults to all server
+                processes.
+            max_concurrent (int, optional): Maximum number of
+                simultaneous replacements. Defaults to "1".
+            readiness_check (Optional[Callable], optional): Callable
+                receiving the new WorkerProcess and the worker state
+                mapping, returning whether the new process may take
+                over. Defaults to "None".
+            ack_timeout (Optional[float], optional): Seconds to wait
+                for a new process to become ready. Defaults to 30.
+
+        Returns:
+            str: The stable id of the upgrade operation.
+        """
+        return self.upgrader.begin(
+            process_names=process_names,
+            max_concurrent=max_concurrent,
+            readiness_check=readiness_check,
+            ack_timeout=ack_timeout,
+        )
+
+    def upgrade_status(self) -> dict[str, Any]:
+        """Get the status of the current or last upgrade operation.
+
+        Returns:
+            Dict[str, Any]: The operation id, phase, live generation,
+                completed items, per-item states, and failure reason.
+        """
+        return self.upgrader.status
+
     def monitor(self):
         """Monitor the worker processes.
 
@@ -303,6 +358,7 @@ class WorkerManager:
                 elif cycle is MonitorCycle.CONTINUE:
                     continue
                 self._sync_states()
+                self.upgrader.tick()
                 self._cleanup_non_tracked_workers()
             except InterruptedError:
                 if not OS_IS_WINDOWS:
@@ -497,6 +553,17 @@ class WorkerManager:
         split_message = message.split(":", 2)
         if message.startswith("__SCALE__"):
             self.scale(int(split_message[-1]))
+            return MonitorCycle.CONTINUE
+        if message.startswith("__UPGRADE__"):
+            max_concurrent = (
+                int(split_message[1])
+                if len(split_message) > 1 and split_message[1]
+                else 1
+            )
+            try:
+                self.upgrade(max_concurrent=max_concurrent)
+            except (RuntimeError, ValueError) as exc:
+                error_logger.error("Could not start upgrade: %s", exc)
             return MonitorCycle.CONTINUE
 
         processes = split_message[0]

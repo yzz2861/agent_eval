@@ -139,6 +139,16 @@ class WorkerMultiplexer:
         message = f"__SCALE__:{num_workers}"
         self._monitor_publisher.send(message)
 
+    def upgrade(self, max_concurrent: int = 1):
+        """Perform a rolling upgrade of the workers.
+
+        Args:
+            max_concurrent (int, optional): The maximum number of
+                workers replaced simultaneously. Defaults to "1".
+        """
+        message = f"__UPGRADE__:{max_concurrent}"
+        self._monitor_publisher.send(message)
+
     def terminate(self, early: bool = False):
         """Terminate the worker.
 

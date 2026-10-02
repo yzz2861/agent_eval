@@ -85,6 +85,11 @@ class WorkerProcess:
         self.set_state(ProcessState.JOINED)
         self._current_process.join()
 
+    def reap(self):
+        """Reap a terminated child process without changing state."""
+        if self._current_process.pid is not None:
+            self._current_process.join()
+
     def exit(self):
         limit = 100
         while self.is_alive() and limit > 0:

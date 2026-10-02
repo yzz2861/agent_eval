@@ -106,6 +106,32 @@ def test_run_inspector_scale(publisher, http_client):
     publisher.send.assert_called_once_with("__SCALE__:4")
 
 
+def test_run_inspector_upgrade(publisher, inspector):
+    message = inspector.upgrade(max_concurrent=2)
+    assert message == "Upgrading workers with max_concurrent=2"
+    publisher.send.assert_called_once_with("__UPGRADE__:2")
+
+
+def test_run_inspector_upgrade_default(publisher, inspector):
+    inspector.upgrade()
+    publisher.send.assert_called_once_with("__UPGRADE__:1")
+
+
+def test_run_inspector_upgrade_status(publisher):
+    worker_state = {"Sanic-Upgrade": {"operation_id": "upgrade-1"}}
+    inspector = Inspector(
+        publisher,
+        {},
+        worker_state,
+        "localhost",
+        9999,
+        "",
+        Default(),
+        Default(),
+    )
+    assert inspector.upgrade_status() == {"operation_id": "upgrade-1"}
+
+
 def test_run_inspector_arbitrary(http_client):
     _, response = http_client.post("/foo", json={"bar": 99})
     assert response.status == 200

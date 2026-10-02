@@ -107,6 +107,11 @@ def test_scale(monitor_publisher: Mock, m: WorkerMultiplexer):
     monitor_publisher.send.assert_called_once_with("__SCALE__:99")
 
 
+def test_upgrade(monitor_publisher: Mock, m: WorkerMultiplexer):
+    m.upgrade(max_concurrent=2)
+    monitor_publisher.send.assert_called_once_with("__UPGRADE__:2")
+
+
 def test_manage(monitor_publisher: Mock, m: WorkerMultiplexer):
     m.manage("NEW", noop, auto_start=False, kwargs={"foo": 99})
     monitor_publisher.send.assert_called_once_with(

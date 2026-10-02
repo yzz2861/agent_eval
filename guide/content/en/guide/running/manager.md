@@ -113,6 +113,46 @@ If you are intending to use the restart functionality in production then you may
 
 *Added in v22.12*
 
+### Rolling upgrades
+
+While a zero downtime restart replaces processes in place, a rolling upgrade replaces the whole batch of server workers as an observable and rollback-safe operation. New-generation processes are started one at a time (limited by `max_concurrent`) and only take over from the corresponding old process once they have [acked](#worker-ack) and passed an optional readiness check. Because the old process is retired only after its replacement is ready, the serving capacity never drops below the configured worker count.
+
+.. column::
+
+    From the main process (for example inside `main_process_ready`), call `upgrade` on the manager
+
+.. column::
+
+    ```python
+    @app.main_process_ready
+    async def ready(app, _):
+        operation_id = app.manager.upgrade(max_concurrent=1)
+    ```
+
+.. column::
+
+    Or, trigger it from the [inspector](#inspector) or the multiplexer
+
+.. column::
+
+    ```python
+    app.m.upgrade(max_concurrent=1)
+    ```
+
+If a new process crashes, does not ack in time, or fails the readiness check, the operation stops advancing: pending replacements are cancelled, the still-healthy old generation keeps serving, and any new-generation children that did not take over are terminated and reaped.
+
+Every operation has a stable id, and repeated upgrade requests while one is running will not stack a second rollout. The current generation, completed items, per-item states, and the failure reason can be queried at any time:
+
+.. column::
+
+    ```python
+    status = app.manager.upgrade_status()
+    ```
+
+.. column::
+
+    The status is also published to the [worker state](#worker-state) under `Sanic-Upgrade`, and exposed by the inspector via `GET /` and `POST /upgrade_status`.
+
 ## Using shared context between worker processes
 
 Python provides a few methods for [exchanging objects](https://docs.python.org/3/library/multiprocessing.html#exchanging-objects-between-processes), [synchronizing](https://docs.python.org/3/library/multiprocessing.html#synchronization-between-processes), and [sharing state](https://docs.python.org/3/library/multiprocessing.html#sharing-state-between-processes) between processes. This usually involves objects from the `multiprocessing` and `ctypes` modules.

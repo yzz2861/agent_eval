@@ -155,6 +155,33 @@ class Inspector:
         self._publisher.send(message)
         return log_msg
 
+    def upgrade(self, max_concurrent: str | int = 1) -> str:
+        """Perform a rolling upgrade of the workers
+
+        Args:
+            max_concurrent (Union[str, int], optional): The maximum
+                number of workers replaced simultaneously. Defaults to
+                "1".
+
+        Returns:
+            str: A log message.
+        """
+        limit = int(max_concurrent) if max_concurrent else 1
+        log_msg = f"Upgrading workers with max_concurrent={limit}"
+        logger.info(log_msg)
+        message = f"__UPGRADE__:{limit}"
+        self._publisher.send(message)
+        return log_msg
+
+    def upgrade_status(self) -> dict[str, Any]:
+        """Get the status of the current or last upgrade operation
+
+        Returns:
+            Dict[str, Any]: The operation id, phase, generation,
+                completed items, and failure reason.
+        """
+        return dict(self.worker_state.get("Sanic-Upgrade", {}))
+
     def shutdown(self) -> None:
         """Shutdown the workers"""
         message = "__TERMINATE__"
