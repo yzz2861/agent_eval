@@ -65,6 +65,7 @@ class BatchOperationsImpl:
         reflect_kwargs,
         naming_convention,
         partial_reordering,
+        preserve_triggers=False,
     ):
         self.operations = operations
         self.table_name = table_name
@@ -87,6 +88,7 @@ class BatchOperationsImpl:
         )
         self.naming_convention = naming_convention
         self.partial_reordering = partial_reordering
+        self.preserve_triggers = preserve_triggers
         self.batch = []
 
     @property
@@ -165,6 +167,7 @@ class BatchOperationsImpl:
                     self.table_kwargs,
                     reflected,
                     partial_reordering=self.partial_reordering,
+                    preserve_triggers=self.preserve_triggers,
                 )
                 for opname, arg, kw in self.batch:
                     fn = getattr(batch_impl, opname)
@@ -228,6 +231,7 @@ class ApplyBatchImpl:
         table_kwargs: dict[str, Any],
         reflected: bool,
         partial_reordering: tuple = (),
+        preserve_triggers: bool = False,
     ) -> None:
         self.impl = impl
         self.table = table  # this is a Table object
@@ -235,6 +239,8 @@ class ApplyBatchImpl:
         self.table_kwargs = table_kwargs
         self.temp_table_name = self._calc_temp_name(table.name)
         self.new_table: Table | None = None
+        self.new_table_name: str | None = None
+        self.preserve_triggers = preserve_triggers
 
         self.partial_reordering = partial_reordering  # tuple of tuples
         self.add_col_ordering: tuple[
@@ -470,9 +476,22 @@ class ApplyBatchImpl:
     def _create(self, op_impl: DefaultImpl) -> None:
         self._transfer_elements_to_new_table()
 
+        trigger_ddls: list[tuple[str, str]] | None = None
+        if self.preserve_triggers:
+            # reflect and validate trigger definitions before any DDL
+            # is emitted; raises CommandError up front if a trigger
+            # cannot be carried over to the new table
+            trigger_ddls = op_impl.preserve_triggers_for_batch(self)
+
         op_impl.prep_table_for_batch(self, self.table)
         assert self.new_table is not None
         op_impl.create_table(self.new_table)
+
+        final_table_name = (
+            self.new_table_name
+            if self.new_table_name is not None
+            else self.table.name
+        )
 
         try:
             op_impl._exec(
@@ -499,14 +518,52 @@ class ApplyBatchImpl:
             raise
         else:
             op_impl.rename_table(
-                self.temp_table_name, self.table.name, schema=self.table.schema
+                self.temp_table_name,
+                final_table_name,
+                schema=self.table.schema,
             )
-            self.new_table.name = self.table.name
+            self.new_table.name = final_table_name
             try:
                 for idx in self._gather_indexes_from_both_tables():
                     op_impl.create_index(idx)
             finally:
                 self.new_table.name = self.temp_table_name
+            if trigger_ddls:
+                self._restore_triggers(op_impl, trigger_ddls)
+
+    def _restore_triggers(
+        self, op_impl: DefaultImpl, trigger_ddls: list[tuple[str, str]]
+    ) -> None:
+        conn = op_impl.connection
+        assert conn is not None
+        preparer = op_impl.dialect.identifier_preparer
+        created = []
+        try:
+            for trigger_name, trigger_sql in trigger_ddls:
+                # exec_driver_sql so that trigger bodies containing
+                # colons (e.g. within string literals) are not
+                # interpreted as bound parameters
+                conn.exec_driver_sql(trigger_sql)
+                created.append(trigger_name)
+        except Exception:
+            # don't leave a partial set of triggers behind; the
+            # migration fails either way, but the database should not
+            # keep only some of the triggers that were in place
+            for trigger_name in reversed(created):
+                if self.table.schema:
+                    qualified = "%s.%s" % (
+                        preparer.quote_schema(self.table.schema),
+                        preparer.quote(trigger_name),
+                    )
+                else:
+                    qualified = preparer.quote(trigger_name)
+                try:
+                    conn.exec_driver_sql(
+                        "DROP TRIGGER IF EXISTS %s" % qualified
+                    )
+                except Exception:
+                    pass
+            raise
 
     def alter_column(
         self,
@@ -754,5 +811,9 @@ class ApplyBatchImpl:
         except KeyError:
             raise ValueError("No such index: '%s'" % idx.name)
 
-    def rename_table(self, *arg, **kw):
-        raise NotImplementedError("TODO")
+    def rename_table(
+        self, table_name: str, new_table_name: str, **kw: Any
+    ) -> None:
+        # the recreated table is renamed to the new name instead of
+        # the original one at the end of the batch
+        self.new_table_name = new_table_name

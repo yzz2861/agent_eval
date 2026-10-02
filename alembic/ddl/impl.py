@@ -202,6 +202,25 @@ class DefaultImpl(metaclass=ImplMeta):
 
         """
 
+    def preserve_triggers_for_batch(
+        self, batch_impl: ApplyBatchImpl
+    ) -> list[tuple[str, str]]:
+        """Return a list of (name, sql) trigger DDL statements to be
+        replayed after a batch table recreate, so that triggers defined
+        on the table are preserved.
+
+        Trigger definitions are reflected and validated before any DDL
+        is emitted, so that a trigger which cannot be carried over
+        produces an error up front.
+
+        Currently only implemented by the SQLite dialect.
+
+        """
+        raise NotImplementedError(
+            "preserve_triggers is currently only implemented for the "
+            "SQLite dialect"
+        )
+
     @property
     def bind(self) -> Connection | None:
         return self.connection

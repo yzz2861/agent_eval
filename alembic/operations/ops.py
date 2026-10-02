@@ -1441,6 +1441,7 @@ class AlterTableOp(MigrateOperation):
 
 
 @Operations.register_operation("rename_table")
+@BatchOperations.register_operation("rename_table", "batch_rename_table")
 class RenameTableOp(AlterTableOp):
     """Represent a rename table operation."""
 
@@ -1474,6 +1475,28 @@ class RenameTableOp(AlterTableOp):
 
         """
         op = cls(old_table_name, new_table_name, schema=schema)
+        return operations.invoke(op)
+
+    @classmethod
+    def batch_rename_table(
+        cls, operations: BatchOperations, new_table_name: str
+    ) -> None:
+        """Issue a "rename table" instruction using the
+        current batch migration context.
+
+        The batch form of this call omits the table_name and
+        schema arguments from the call.
+
+        .. seealso::
+
+            :meth:`.Operations.rename_table`
+
+        """
+        op = cls(
+            operations.impl.table_name,
+            new_table_name,
+            schema=operations.impl.schema,
+        )
         return operations.invoke(op)
 
 

@@ -13,6 +13,7 @@ from sqlalchemy import JSON
 from sqlalchemy import schema
 from sqlalchemy import sql
 
+from ._sqlite_trigger import rewrite_trigger_sql
 from .base import alter_table
 from .base import ColumnName
 from .base import format_column_name
@@ -20,6 +21,7 @@ from .base import format_table_name
 from .base import RenameTable
 from .impl import DefaultImpl
 from .. import util
+from ..util import exc
 from ..util.sqla_compat import compiles
 
 if TYPE_CHECKING:
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.schema import Table
     from sqlalchemy.sql.type_api import TypeEngine
 
+    from ..operations.batch import ApplyBatchImpl
     from ..operations.batch import BatchOperationsImpl
 
 
@@ -70,6 +73,75 @@ class SQLiteImpl(DefaultImpl):
                 return True
         else:
             return False
+
+    def preserve_triggers_for_batch(
+        self, batch_impl: ApplyBatchImpl
+    ) -> list[tuple[str, str]]:
+        if self.as_sql:
+            raise exc.CommandError(
+                "preserve_triggers requires a live database connection "
+                "with which to reflect the triggers on the table; it "
+                "cannot be used in --sql (offline) mode."
+            )
+
+        table = batch_impl.table
+        table_name = str(table.name)
+        final_table_name = (
+            str(batch_impl.new_table_name)
+            if batch_impl.new_table_name is not None
+            else table_name
+        )
+
+        column_renames = {
+            old_name: transfer["name"]
+            for old_name, transfer in batch_impl.column_transfers.items()
+            if "name" in transfer
+        }
+        old_column_names = {c.name for c in table.c}
+        new_column_names = {c.name for c in batch_impl.columns.values()}
+        dropped_columns = (
+            old_column_names - new_column_names - set(column_renames)
+        )
+
+        if table.schema:
+            master = "%s.sqlite_master" % (
+                self.dialect.identifier_preparer.quote_schema(table.schema)
+            )
+        else:
+            master = "sqlite_master"
+
+        assert self.connection is not None
+        rows = self.connection.exec_driver_sql(
+            "SELECT name, sql FROM %s "
+            "WHERE type = 'trigger' AND tbl_name = ? ORDER BY name" % master,
+            (table_name,),
+        ).fetchall()
+
+        trigger_ddls = []
+        for trigger_name, trigger_sql in rows:
+            if not trigger_sql:
+                raise exc.CommandError(
+                    f"Trigger '{trigger_name}' on table "
+                    f"'{table_name}' has no recorded definition and "
+                    "cannot be preserved across a batch table "
+                    "recreate.  Drop it before the batch operation "
+                    "and recreate it afterwards, or don't use "
+                    "preserve_triggers."
+                )
+            new_sql = rewrite_trigger_sql(
+                trigger_sql,
+                trigger_name=trigger_name,
+                table_name=table_name,
+                new_table_name=(
+                    final_table_name
+                    if final_table_name != table_name
+                    else None
+                ),
+                column_renames=column_renames,
+                dropped_columns=dropped_columns,
+            )
+            trigger_ddls.append((trigger_name, new_sql))
+        return trigger_ddls
 
     def add_constraint(self, const: Constraint, **kw: Any):
         # attempt to distinguish between an

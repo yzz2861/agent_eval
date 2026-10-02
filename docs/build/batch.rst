@@ -285,6 +285,66 @@ by a batch migration.  Therefore it may be necessary to manipulate the
 ``PRAGMA FOREIGN KEYS`` setting if a migration seeks to rename a table vs.
 batch migrate it.
 
+.. _batch_preserve_triggers:
+
+Preserving Triggers
+-------------------
+
+When a table is recreated using the "move and copy" procedure, any
+triggers that were defined on the original table are dropped along
+with it, and are **not** recreated on the new table.  For tables that
+rely on triggers, such as auditing triggers that record changes into
+a separate table, this silently breaks the auditing behavior.
+
+The :paramref:`~.Operations.batch_alter_table.preserve_triggers`
+parameter changes this: before the original table is dropped, the
+definitions of its triggers are read from the database; once the new
+table is in place, the triggers are recreated::
+
+    with op.batch_alter_table("some_table", preserve_triggers=True) as batch_op:
+        batch_op.drop_column("bar")
+
+The data copy itself does not fire the preserved triggers, as they are
+only recreated after the new table is fully populated and renamed into
+place; ordinary writes after the migration fire each trigger exactly
+once, as before.
+
+If the batch operation renames columns (using
+:paramref:`~.BatchOperations.alter_column.new_column_name`) or
+renames the table itself (using
+:meth:`.BatchOperations.rename_table`), the trigger definitions are
+adjusted accordingly, including ``OLD`` / ``NEW`` column
+references, ``UPDATE OF`` column lists, and column references in
+``WHEN`` clauses.  The adjustment is performed on the parsed
+statement, so string literals, comments, and identifiers that merely
+resemble a renamed column are left untouched.  Unqualified column
+references inside trigger body statements other than ``OLD`` /
+``NEW`` references cannot be attributed to the table reliably and
+are not rewritten.
+
+If a trigger references a column that is dropped by the batch
+operation, or its definition cannot be reliably interpreted, an error
+is raised before any DDL is emitted, so that the trigger can be
+migrated by hand instead::
+
+    def upgrade():
+        # migrate a trigger manually: drop it up front, then recreate
+        # it against the new structure afterwards
+        op.execute("DROP TRIGGER IF EXISTS some_trigger")
+        with op.batch_alter_table("some_table", preserve_triggers=True) as batch_op:
+            batch_op.drop_column("bar")
+        op.execute(
+            "CREATE TRIGGER some_trigger AFTER INSERT ON some_table "
+            "BEGIN ...; END"
+        )
+
+.. note::
+
+    ``preserve_triggers`` is currently only supported on SQLite,
+    and requires a live database connection; it cannot be used in
+    ``--sql`` (offline) mode.  Only ordinary schema-level triggers
+    are preserved; temporary triggers are not.
+
 .. _batch_offline_mode:
 
 Working in Offline Mode

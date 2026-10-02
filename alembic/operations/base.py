@@ -249,6 +249,7 @@ class AbstractOperations(util.ModuleClsProxy):
         reflect_args: tuple[Any, ...] = (),
         reflect_kwargs: Mapping[str, Any] = util.immutabledict(),
         naming_convention: dict[str, str] | None = None,
+        preserve_triggers: bool = False,
     ) -> Iterator[BatchOperations]:
         """Invoke a series of per-table migrations in batch.
 
@@ -379,6 +380,22 @@ class AbstractOperations(util.ModuleClsProxy):
          set is undefined.   Therefore it is best to specify the complete
          ordering of all columns for best results.
 
+        :param preserve_triggers: when True, triggers defined on the
+         table are preserved when the table is recreated using the
+         "move and copy" procedure, rather than being silently dropped
+         along with the original table.  Trigger definitions are read
+         from the database before the original table is dropped, are
+         adjusted for any column or table renames applied by the batch
+         operation, and are replayed once the new table is in place.
+         If a trigger references a column that is dropped, or its
+         definition cannot be reliably interpreted, an error is raised
+         before any DDL is emitted.  Requires a live database
+         connection; currently only supported on SQLite.  Defaults to
+         False, which retains the previous behavior of dropping
+         triggers along with the original table.
+
+         .. versionadded:: 1.21
+
         .. note:: batch mode requires SQLAlchemy 0.8 or above.
 
         .. seealso::
@@ -398,6 +415,7 @@ class AbstractOperations(util.ModuleClsProxy):
             reflect_kwargs,
             naming_convention,
             partial_reordering,
+            preserve_triggers=preserve_triggers,
         )
         batch_op = BatchOperations(self.migration_context, impl=impl)
         yield batch_op
@@ -1980,6 +1998,20 @@ class BatchOperations(AbstractOperations):
             .. seealso::
 
                 :meth:`.Operations.execute`
+
+            """  # noqa: E501
+            ...
+
+        def rename_table(self, new_table_name: str) -> None:
+            """Issue a "rename table" instruction using the
+            current batch migration context.
+
+            The batch form of this call omits the table_name and
+            schema arguments from the call.
+
+            .. seealso::
+
+                :meth:`.Operations.rename_table`
 
             """  # noqa: E501
             ...
