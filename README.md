@@ -160,6 +160,9 @@ middleware:
 * `Rack::Recursive` for including data from other paths in the application, and
   for performing internal redirects.
 * `Rack::Reloader` for reloading files if they have been modified.
+* `Rack::RequestTarget` for preserving and validating the raw request target
+  passed through a reverse proxy, with separate policies for encoded slashes,
+  backslashes, dot segments, and repeated percent encoding.
 * `Rack::Runtime` for including a response header with the time taken to process
   the request.
 * `Rack::Sendfile` for working with web servers that can use optimized file
