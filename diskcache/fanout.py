@@ -9,7 +9,7 @@ import sqlite3
 import tempfile
 import time
 
-from .core import DEFAULT_SETTINGS, ENOVAL, Cache, Disk, Timeout
+from .core import DEFAULT_SETTINGS, ENOVAL, Cache, Disk, Snapshot, Timeout
 from .persistent import Deque, Index
 
 
@@ -98,6 +98,17 @@ class FanoutCache:
                 shard_transaction = shard.transact(retry=True)
                 stack.enter_context(shard_transaction)
             yield
+
+    def snapshot(self):
+        """Return a read-only point-in-time snapshot of all shards."""
+        with cl.ExitStack() as stack:
+            for shard in self._shards:
+                stack.enter_context(shard.transact(retry=True))
+            snapshots = [
+                Snapshot(shard, external=True) for shard in self._shards
+            ]
+            stack.close()
+        return FanoutSnapshot(snapshots)
 
     def set(self, key, value, expire=None, read=False, tag=None, retry=False):
         """Set `key` and `value` item in cache.
@@ -685,3 +696,69 @@ class FanoutCache:
 
 
 FanoutCache.memoize = Cache.memoize  # type: ignore
+
+
+class FanoutSnapshot:
+    """Read-only point-in-time view of a FanoutCache."""
+
+    def __init__(self, snapshots):
+        self._snapshots = snapshots
+
+    def get(self, key, default=None, expire_time=False, tag=False):
+        """Retrieve key from the snapshot."""
+        count = len(self._snapshots)
+        index = self._snapshots[0]._cache.disk.hash(key) % count
+        snapshot = self._snapshots[index]
+        return snapshot.get(
+            key,
+            default=default,
+            expire_time=expire_time,
+            tag=tag,
+        )
+
+    def __getitem__(self, key):
+        value = self.get(key, default=ENOVAL)
+        if value is ENOVAL:
+            raise KeyError(key)
+        return value
+
+    def __contains__(self, key):
+        count = len(self._snapshots)
+        index = self._snapshots[0]._cache.disk.hash(key) % count
+        return key in self._snapshots[index]
+
+    def __len__(self):
+        return sum(len(snapshot) for snapshot in self._snapshots)
+
+    def iterkeys(self):
+        """Iterate keys from every shard snapshot."""
+        for snapshot in self._snapshots:
+            for key in snapshot:
+                yield key
+
+    def __iter__(self):
+        return self.iterkeys()
+
+    def iteritems(self, expire_time=False, tag=False):
+        """Iterate key and value pairs from every shard snapshot."""
+        for snapshot in self._snapshots:
+            for item in snapshot.iteritems(
+                expire_time=expire_time, tag=tag
+            ):
+                yield item
+
+    def itervalues(self):
+        """Iterate values from every shard snapshot."""
+        for _, value in self.iteritems():
+            yield value
+
+    def close(self):
+        """Close all shard snapshots and release retained files."""
+        for snapshot in self._snapshots:
+            snapshot.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        self.close()

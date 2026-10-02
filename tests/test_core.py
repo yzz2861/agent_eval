@@ -3,6 +3,7 @@
 import errno
 import hashlib
 import io
+import multiprocessing as mp
 import os
 import os.path as op
 import pathlib
@@ -28,6 +29,23 @@ def cache():
     with dc.Cache() as cache:
         yield cache
     shutil.rmtree(cache.directory, ignore_errors=True)
+
+
+def _snapshot_overwrite_worker(directory, snapshot_opened, finished):
+    cache = dc.Cache(directory, disk_min_file_size=1)
+    snapshot_opened.wait()
+    cache.set('large', b'new' * 100, tag='new')
+    cache.evict('new')
+    finished.set()
+
+
+def _snapshot_hold_worker(directory, ready):
+    cache = dc.Cache(directory, disk_min_file_size=1)
+    snapshot = cache.snapshot()
+    ready.set()
+    time.sleep(30)
+    snapshot.close()
+    cache.close()
 
 
 def test_init(cache):
@@ -1032,6 +1050,298 @@ def test_peekitem_ioerror(cache):
 
 def test_iterkeys(cache):
     assert list(cache.iterkeys()) == []
+
+
+def test_snapshot_consistent_metadata_and_files(cache):
+    cache.reset('disk_min_file_size', 1)
+    old_value = b'old' * 100
+    new_value = b'new' * 100
+    cache.set('large', old_value, expire=60, tag='old')
+    cache.set('small', 0, expire=60, tag='small')
+
+    with cache.snapshot() as snapshot:
+        cache.set('large', new_value, expire=60, tag='new')
+        cache.evict('new')
+        cache.set('added', b'added', tag='added')
+
+        assert snapshot['large'] == old_value
+        assert snapshot['small'] == 0
+        assert 'added' not in snapshot
+        value, expire_time, tag = snapshot.get(
+            'large', expire_time=True, tag=True
+        )
+        assert value == old_value
+        assert expire_time > snapshot.now
+        assert tag == 'old'
+        assert len(snapshot) == 2
+        assert list(snapshot) == ['large', 'small']
+        assert list(reversed(snapshot)) == ['small', 'large']
+        assert list(snapshot.itervalues()) == [old_value, 0]
+        assert list(snapshot.iteritems(tag=True)) == [
+            (('large', old_value), 'old'),
+            (('small', 0), 'small'),
+        ]
+        items = snapshot.iteritems(expire_time=True, tag=True)
+        assert next(items)[1:] == (expire_time, 'old')
+        assert list(snapshot.iteritems(expire_time=True))[0][1] == expire_time
+        with snapshot.get('large', read=True) as reader:
+            assert reader.read() == old_value
+
+        assert snapshot.get('large', tag=True) == (old_value, 'old')
+
+        assert snapshot.get('missing') is None
+        assert snapshot.get('missing', b'default') == b'default'
+        assert snapshot.get('missing', expire_time=True) == (None, None)
+        with pytest.raises(KeyError):
+            snapshot['missing']
+
+    assert not op.exists(snapshot.directory)
+    assert len(cache) == 2
+
+    with pytest.raises(RuntimeError):
+        snapshot.get('large')
+
+    snapshot.close()
+
+
+def test_snapshot_expiry_state(cache):
+    cache.reset('disk_min_file_size', 1)
+    cache.set('expired', b'value' * 100, expire=0.01)
+
+    with cache.snapshot() as snapshot:
+        time.sleep(0.02)
+        assert snapshot['expired'] == b'value' * 100
+        assert 'expired' in snapshot
+
+    assert 'expired' not in cache
+
+
+def test_snapshot_copy_fallback(cache):
+    cache.reset('disk_min_file_size', 1)
+    value = b'value' * 100
+    cache.set('large', value)
+
+    with mock.patch('diskcache.core.os.link', side_effect=OSError):
+        snapshot = cache.snapshot()
+
+    try:
+        assert snapshot['large'] == value
+    finally:
+        snapshot.close()
+
+
+def test_snapshot_lock_retry(cache):
+    lock_con = mock.Mock()
+    side_effect = [sqlite3.OperationalError(), lock_con]
+
+    with mock.patch.object(
+        cache,
+        '_snapshot_lock',
+        mock.Mock(side_effect=side_effect),
+    ):
+        snapshot = cache.snapshot()
+
+    snapshot.close()
+    assert lock_con.close.called
+
+
+def test_snapshot_creation_error_cleanup(cache):
+    cache.reset('disk_min_file_size', 1)
+    cache.set('large', b'value' * 100)
+
+    with mock.patch('diskcache.core.shutil.copy2', side_effect=OSError):
+        with mock.patch('diskcache.core.os.link', side_effect=OSError):
+            with pytest.raises(OSError):
+                cache.snapshot()
+
+    assert os.listdir(op.join(cache.directory, 'snapshots')) == []
+    assert cache._sql('SELECT COUNT(*) FROM Snapshots').fetchone()[0] == 0
+
+
+def test_snapshot_missing_value_file(cache):
+    cache.reset('disk_min_file_size', 1)
+    cache.set('large', b'value' * 100)
+    snapshot = cache.snapshot()
+    shutil.rmtree(snapshot.directory)
+
+    assert snapshot.get('large', b'default') == b'default'
+
+    snapshot.close()
+
+
+def test_snapshot_early_stop_and_exception_cleanup(cache):
+    cache.reset('disk_min_file_size', 1)
+    cache.set('a', b'a' * 100)
+    cache.set('b', b'b' * 100)
+
+    snapshot = cache.snapshot()
+    iterator = snapshot.iteritems()
+    assert next(iterator)[0] == 'a'
+    iterator.close()
+    snapshot.close()
+    assert not op.exists(snapshot.directory)
+
+    snapshot = cache.snapshot()
+
+    with pytest.raises(RuntimeError):
+        for _, value in snapshot.iteritems():
+            raise RuntimeError(value)
+
+    snapshot.close()
+    assert not op.exists(snapshot.directory)
+
+
+def test_snapshot_cross_process_overwrite_and_eviction():
+    directory = tempfile.mkdtemp()
+
+    try:
+        cache = dc.Cache(directory, disk_min_file_size=1)
+        cache.set('large', b'old' * 100, tag='old')
+
+        ctx = mp.get_context()
+        snapshot_opened = ctx.Event()
+        finished = ctx.Event()
+        process = ctx.Process(
+            target=_snapshot_overwrite_worker,
+            args=(directory, snapshot_opened, finished),
+        )
+        process.start()
+
+        with cache.snapshot() as snapshot:
+            snapshot_opened.set()
+            assert finished.wait(5)
+            assert snapshot['large'] == b'old' * 100
+
+        process.join(5)
+        assert process.exitcode == 0
+        assert 'large' not in cache
+        cache.close()
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_snapshot_crash_recovery():
+    directory = tempfile.mkdtemp()
+
+    try:
+        cache = dc.Cache(directory, disk_min_file_size=1)
+        cache.set('large', b'old' * 100)
+
+        ctx = mp.get_context()
+        ready = ctx.Event()
+        process = ctx.Process(
+            target=_snapshot_hold_worker, args=(directory, ready)
+        )
+        process.start()
+        assert ready.wait(5)
+        process.terminate()
+        process.join(5)
+
+        snapshots_dir = op.join(directory, 'snapshots')
+        assert len(os.listdir(snapshots_dir)) == 2
+
+        recovered = dc.Cache(directory, disk_min_file_size=1)
+        assert os.listdir(snapshots_dir) == []
+        assert recovered._sql('SELECT COUNT(*) FROM Snapshots').fetchone()[0] == 0
+        recovered.close()
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_snapshot_missing_directory_recovery():
+    directory = tempfile.mkdtemp()
+
+    try:
+        cache = dc.Cache(directory)
+        snapshot = cache.snapshot()
+        snapshot_id = snapshot._id
+        lock_path = snapshot._lock_path
+        snapshot.close()
+
+        cache._sql(
+            'INSERT INTO Snapshots (id, pid, created) VALUES (?, ?, ?)',
+            (snapshot_id, os.getpid(), time.time()),
+        )
+        assert op.exists(lock_path) is False
+
+        recovered = dc.Cache(directory)
+        assert recovered._sql(
+            'SELECT COUNT(*) FROM Snapshots WHERE id = ?', (snapshot_id,)
+        ).fetchone()[0] == 0
+        recovered.close()
+        cache.close()
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_snapshot_missing_lock_recovery():
+    directory = tempfile.mkdtemp()
+
+    try:
+        cache = dc.Cache(directory, disk_min_file_size=1)
+        cache.set('large', b'value' * 100)
+        snapshot = cache.snapshot()
+        snapshot_id = snapshot._id
+        snapshot_dir = snapshot.directory
+        snapshot.close()
+
+        os.makedirs(snapshot_dir)
+        cache._sql(
+            'INSERT INTO Snapshots (id, pid, created) VALUES (?, ?, ?)',
+            (snapshot_id, os.getpid(), time.time()),
+        )
+
+        recovered = dc.Cache(directory, disk_min_file_size=1)
+        assert not op.exists(snapshot_dir)
+        assert recovered._sql(
+            'SELECT COUNT(*) FROM Snapshots WHERE id = ?', (snapshot_id,)
+        ).fetchone()[0] == 0
+        recovered.close()
+        cache.close()
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_snapshot_missing_lock_orphan_recovery():
+    directory = tempfile.mkdtemp()
+
+    try:
+        cache = dc.Cache(directory)
+        snapshot = cache.snapshot()
+        snapshot_id = snapshot._id
+        snapshot_dir = snapshot.directory
+        snapshot.close()
+
+        os.makedirs(snapshot_dir)
+        with open(op.join(snapshot_dir, 'left'), 'wb') as writer:
+            writer.write(b'left')
+
+        recovered = dc.Cache(directory)
+        assert not op.exists(snapshot_dir)
+        assert recovered._sql(
+            'SELECT COUNT(*) FROM Snapshots WHERE id = ?', (snapshot_id,)
+        ).fetchone()[0] == 0
+        recovered.close()
+        cache.close()
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_snapshot_recovery_preserves_active_snapshot():
+    with dc.Cache() as cache:
+        cache.reset('disk_min_file_size', 1)
+        cache.set('large', b'value' * 100)
+
+        with cache.snapshot() as snapshot:
+            other = dc.Cache(cache.directory, disk_min_file_size=1)
+            try:
+                assert snapshot._lock_path in dc.core._ACTIVE_SNAPSHOT_LOCKS
+                assert op.exists(snapshot.directory)
+                assert snapshot['large'] == b'value' * 100
+            finally:
+                other.close()
+
+    shutil.rmtree(cache.directory, ignore_errors=True)
 
 
 def test_pickle(cache):

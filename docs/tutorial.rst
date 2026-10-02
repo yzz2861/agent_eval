@@ -314,6 +314,13 @@ keys will be serialized which is likely to have a meaningless sorted order.
 If only the first or last item in insertion order is desired then
 :meth:`peekitem <.Cache.peekitem>` is more efficient than using iteration.
 
+Audit or backup scans that must observe a consistent cache can use the
+Cache.snapshot method. The returned read-only snapshot starts a SQLite read
+transaction and retains copies of externally stored value files until it is
+closed. Other processes and threads may continue updating and evicting the
+cache while the snapshot iterates its fixed keys, values, tags, and expiry
+state. Always close snapshots, preferably with a context manager.
+
 Three additional methods use the sorted ordering of keys to maintain a
 queue-like data structure within the cache. The :meth:`push <.Cache.push>`,
 :meth:`pull <.Cache.pull>`, and :meth:`peek <.Cache.peek>` methods

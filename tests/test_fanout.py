@@ -511,6 +511,31 @@ def test_reversed(cache):
     assert list(cache) == list(reversed(reverse))
 
 
+def test_snapshot(cache):
+    cache.reset('disk_min_file_size', 1)
+    old_value = b'old' * 100
+    cache.set('a', old_value, tag='old')
+    cache.set('b', 1)
+
+    with cache.snapshot() as snapshot:
+        cache.set('a', b'new' * 100, tag='new')
+        cache.evict('new')
+        cache.set('c', 2)
+
+        assert cache.set('d', 3)
+
+        assert snapshot['a'] == old_value
+        assert snapshot['b'] == 1
+        assert 'c' not in snapshot
+        assert 'd' not in snapshot
+        assert len(snapshot) == 2
+        assert set(snapshot.iterkeys()) == {'a', 'b'}
+        assert set(snapshot.itervalues()) == {old_value, 1}
+        assert sorted(snapshot.iteritems(tag=True)) == sorted(
+            [(('a', old_value), 'old'), (('b', 1), None)]
+        )
+
+
 def test_pickle(cache):
     for num, val in enumerate('abcde'):
         cache[val] = num
