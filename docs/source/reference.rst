@@ -306,3 +306,9 @@ These are the environment variables that dramatiq reads
    * - ``dramatiq_worker_timeout``
      - 1000
      - The number of milliseconds workers should wake up after if the queue is idle.
+   * - ``dramatiq_priority_age_enabled``
+      - 0 (disabled)
+      - Enable wait-time compensation ("aging") in the worker-local ready queue, so long-waiting low-priority messages are gradually promoted and cannot be starved indefinitely by new high-priority messages. Truthy values include ``1``, ``true`` and ``yes``.
+   * - ``dramatiq_priority_age_interval_ms``
+      - 1000
+      - The number of milliseconds a message must wait in the ready queue for its effective priority to be boosted by one level. Only used when wait-time compensation is enabled.

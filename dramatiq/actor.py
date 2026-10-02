@@ -41,6 +41,35 @@ from .message import Message
 #: The regular expression that represents valid queue names.
 _queue_name_re = re.compile(r"[a-zA-Z_][a-zA-Z0-9._-]*")
 
+#: The lowest actor priority value allowed.  Lower numbers represent
+#: higher priorities, so this is the *highest* possible priority.
+MIN_PRIORITY = 0
+
+#: The highest actor priority value allowed.  Higher numbers represent
+#: lower priorities, so this is the *lowest* possible priority.
+MAX_PRIORITY = 100
+
+
+def _validate_priority(priority: int) -> None:
+    """Ensure the given priority is an integer within the allowed range.
+
+    Parameters:
+      priority(int): The priority to validate.
+
+    Raises:
+      ValueError: If the priority is not an integer or if it falls
+        outside of ``MIN_PRIORITY``..``MAX_PRIORITY``.
+    """
+    # bool is a subclass of int, but True/False are not valid priorities.
+    if isinstance(priority, bool) or not isinstance(priority, int):
+        raise ValueError("Actor priority must be an integer, got %r." % (priority,))
+
+    if not MIN_PRIORITY <= priority <= MAX_PRIORITY:
+        raise ValueError(
+            "Actor priority must be between %d and %d (inclusive), got %d."
+            % (MIN_PRIORITY, MAX_PRIORITY, priority)
+        )
+
 # Type variables for the Actor function's parameters and return type.
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -73,6 +102,8 @@ class Actor(Generic[P, R]):
     ) -> None:
         if actor_name in broker.actors:
             raise ValueError(f"An actor named {actor_name!r} is already registered.")
+
+        _validate_priority(priority)
 
         self.logger = get_logger(fn.__module__ or "_", actor_name)
         self.fn: Callable[P, R] = async_to_sync(fn) if iscoroutinefunction(fn) else fn  # type: ignore[assignment]
@@ -280,7 +311,9 @@ def actor(
       priority(int): The actor's global priority.  If two tasks have
         been pulled on a worker concurrently and one has a higher
         priority than the other then it will be processed first.
-        Lower numbers represent higher priorities.
+        Lower numbers represent higher priorities.  Must be an integer
+        between ``MIN_PRIORITY`` (0) and ``MAX_PRIORITY`` (100),
+        inclusive.
       broker(Broker): The broker to use with this actor.
       **options: Arbitrary options that vary with the set of
         middleware that you use.  See ``get_broker().actor_options``.

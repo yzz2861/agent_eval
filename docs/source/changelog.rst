@@ -9,6 +9,26 @@ All notable changes to this project will be documented in this file.
 -------------
 
 
+Added
+^^^^^
+
+* Optional wait-time compensation ("priority aging") for the worker's
+  local ready queue.  When enabled (via the ``priority_age_enabled``
+  :class:`~dramatiq.Worker` parameter, or the
+  ``dramatiq_priority_age_enabled`` environment variable), messages that
+  have been ready the longest are gradually promoted toward the highest
+  priority, so a continuous stream of new high-priority messages can no
+  longer starve an already-enqueued low-priority message indefinitely.
+  The boost rate is configurable with ``priority_age_interval_ms`` (env:
+  ``dramatiq_priority_age_interval_ms``).  It is disabled by default,
+  preserving the original static-priority/FIFO behaviour.  Delay-queue
+  ETAs do not count toward waiting time; the clock starts only once a
+  message becomes ready.
+* Actor priorities are now restricted to a fixed integer range,
+  ``dramatiq.MIN_PRIORITY`` (0) through ``dramatiq.MAX_PRIORITY`` (100).
+  Declaring an actor with a priority outside of that range (or with a
+  non-integer priority) now raises ``ValueError``.
+
 `2.2.1`_ -- 2026-09-01
 ----------------------
 

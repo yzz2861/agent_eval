@@ -370,8 +370,9 @@ That way if messages for both ``generate_report`` and ``sync_order_to_warehouse`
 have been consumed from the queue at the same time but there's only capacity to run
 one of them, ``generate_report`` will always run *first*.
 
-Although all positive integers represent valid priorities, if you're
-going to use this feature, I'd recommend setting up constants for the
+Priorities must be integers in the range ``0``..``100`` (inclusive); these
+bounds are also available as ``dramatiq.MIN_PRIORITY`` and
+``dramatiq.MAX_PRIORITY``.  I'd recommend setting up constants for the
 various priorities you plan to use::
 
   PRIORITY_LOW = 100
@@ -391,6 +392,73 @@ To make this work best, all the actors for a queue should have the same actor ``
 .. seealso::
    The |RabbitmqBroker| supports prioritizing messages while they are waiting in the queue
    with the ``broker_priority`` option.
+
+
+Wait-Time Compensation (Aging)
+------------------------------
+
+With static priorities, a steady stream of new high-priority messages can
+keep an already-enqueued low-priority message waiting indefinitely -- a
+form of *priority starvation*.  Dramatiq offers an *optional* wait-time
+compensation strategy (also called "aging") for the worker's local ready
+queue: the longer a ready message waits, the higher its *effective*
+priority becomes, while the original static-priority mode stays the
+default.
+
+Aging is disabled by default, preserving the original behaviour.  Enable
+it when constructing a :class:`~dramatiq.Worker`::
+
+  worker = dramatiq.Worker(
+      broker,
+      priority_age_enabled=True,
+      priority_age_interval_ms=1000,  # one level of boost per second
+  )
+
+With aging enabled, a message with static priority ``p`` that has been
+ready for ``wait`` milliseconds is scheduled with the effective priority
+``max(0, p - wait // priority_age_interval_ms)``.  Its effective priority
+is therefore boosted by one level for every ``priority_age_interval_ms``
+milliseconds it spends waiting, but it is never boosted above priority
+``0``.  Whenever two messages have the same effective priority, the one
+that became ready first runs first (FIFO).
+
+For example, with ``priority_age_interval_ms=1000`` and priorities
+``0`` (high) and ``2`` (low), a worker that keeps taking work::
+
+  t = 0s   low(p=2) and high(p=0) are ready  -> high runs (p 0 < 2)
+  t = 1s   a new high arrives; low is now p=1  -> high runs (p 0 < 1)
+  t = 2s   a new high arrives; low is now p=0  -> LOW runs (ties at p 0,
+                                                        and it is older)
+
+Because the low message reaches the top priority after
+``priority * priority_age_interval_ms`` milliseconds, a continuous stream
+of fresh high-priority work can push it back only a *bounded* number of
+times; an already-enqueued message can never be starved forever, as long
+as the worker keeps processing messages.
+
+Timing rules
+^^^^^^^^^^^^
+
+* Only time spent in the worker's in-memory **ready** queue counts.  A
+  delayed/scheduled message sitting in a delay queue waiting for its
+  ``eta`` does **not** age: its ETA is never part of the compensation
+  calculation and it cannot run early.  The clock starts only once the
+  message has actually become ready and entered the ready queue.
+* **Pausing** a worker does not pause aging.  Messages already in the
+  ready queue keep accumulating waiting time while the worker is paused,
+  so they are not penalized (nor specially reset) by the pause.
+* When a message is **retried** (with a backoff delay) it goes back
+  through the broker and a delay queue.  It only re-enters a ready queue
+  once its backoff ETA passes, at which point its waiting time starts
+  over from zero.
+* When unacked messages are **requeued** to the broker (for example on
+  shutdown or a connection error) and later consumed again, they are
+  treated as freshly-ready messages, so their waiting time also starts
+  over.
+
+You can also enable aging without changing code using the
+``dramatiq_priority_age_enabled`` and
+``dramatiq_priority_age_interval_ms`` environment variables.
 
 
 Message Brokers

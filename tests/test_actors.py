@@ -458,6 +458,43 @@ def test_actors_can_prioritize_work(stub_broker):
         assert calls == ["hi"] * 10 + ["lo"] * 10
 
 
+@pytest.mark.parametrize("priority", [dramatiq.MIN_PRIORITY, dramatiq.MAX_PRIORITY])
+def test_actors_accept_priority_boundaries(stub_broker, priority):
+    # Given a priority at either end of the allowed range
+    # When I declare an actor
+    @dramatiq.actor(priority=priority)
+    def bounded():
+        pass
+
+    # Then the actor is created with that priority
+    assert bounded.priority == priority
+
+
+@pytest.mark.parametrize("priority", [-1, dramatiq.MAX_PRIORITY + 1, 1000])
+def test_actors_reject_out_of_range_priorities(stub_broker, priority):
+    # Given a priority outside of the allowed range
+    # When I try to declare an actor
+    # Then a ValueError should be raised
+    with pytest.raises(ValueError):
+
+        @dramatiq.actor(priority=priority)
+        def out_of_range():
+            pass
+
+
+def test_actors_reject_non_integer_priorities(stub_broker):
+    # Given a non-integer priority (booleans are integers in Python, but
+    # True/False are not meaningful priorities)
+    # When I try to declare an actor
+    # Then a ValueError should be raised
+    for invalid_priority in (True, False, 1.5, "0"):
+        with pytest.raises(ValueError):
+
+            @dramatiq.actor(priority=invalid_priority)
+            def non_integer():
+                pass
+
+
 def test_can_call_str_on_actors(stub_broker):
     # Given that I have an actor
     @dramatiq.actor

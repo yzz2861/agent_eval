@@ -18,14 +18,17 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import os
 import time
 from collections import defaultdict
+from collections import deque
 from functools import lru_cache
-from queue import Empty, PriorityQueue
+from queue import Empty, PriorityQueue, Queue
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Iterable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 
+from .actor import MAX_PRIORITY
 from .broker import Broker, Consumer, MessageProxy
 from .common import current_millis, iter_queue, join_all, q_name
 from .errors import ActorNotFound, BrokerConnectionError, RateLimitExceeded, Retry
@@ -58,6 +61,27 @@ DELAY_QUEUE_PREFETCH = int(os.getenv("dramatiq_delay_queue_prefetch", 0))
 WORKER_TIMEOUT = int(os.getenv("dramatiq_worker_timeout", 1000))
 
 
+def _getenv_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip() not in {"", "0", "false", "False", "no", "off"}
+
+
+#: Wait-time compensation ("priority aging") gradually promotes messages that
+#: have been waiting in the worker's local *ready* queue so that a continuous
+#: stream of new high-priority messages can never starve an already-enqueued
+#: low-priority message indefinitely.  This is disabled by default; when
+#: disabled, worker-local scheduling behaves exactly like a static-priority
+#: queue (with FIFO ordering among messages of equal priority).
+PRIORITY_AGE_ENABLED = _getenv_bool("dramatiq_priority_age_enabled", False)
+
+#: The number of milliseconds a message must wait in the local ready queue for
+#: its effective priority to be boosted by one level.  Only used when
+#: wait-time compensation is enabled.
+PRIORITY_AGE_INTERVAL_MS = int(os.getenv("dramatiq_priority_age_interval_ms", 1000))
+
+
 class Worker:
     """Workers consume messages off of all declared queues and
     distribute those messages to individual worker threads for
@@ -74,6 +98,17 @@ class Worker:
       worker_timeout(int): The number of milliseconds workers should
         wake up after if the queue is idle.
       worker_threads(int): The number of worker threads to spawn.
+      priority_age_enabled(bool): Enable wait-time compensation
+        ("priority aging") in the worker-local ready queue.  When
+        enabled, messages that have been waiting the longest are
+        gradually promoted so a continuous stream of new high-priority
+        messages can't starve them indefinitely.  Defaults to False,
+        which preserves the original static-priority/FIFO behaviour.
+      priority_age_interval_ms(int): The number of milliseconds a
+        message must wait in the ready queue for its effective priority
+        to be boosted by one level.  Must be a positive integer.
+      clock(Callable[[], int]): A monotonic nanosecond clock used to
+        measure waiting time.  Injectable primarily for testing.
     """
 
     def __init__(
@@ -83,6 +118,9 @@ class Worker:
         queues: Optional[set[str]] = None,
         worker_timeout: int = WORKER_TIMEOUT,
         worker_threads: int = 8,
+        priority_age_enabled: bool = PRIORITY_AGE_ENABLED,
+        priority_age_interval_ms: int = PRIORITY_AGE_INTERVAL_MS,
+        clock: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         self.logger = get_logger(__name__, type(self))
         self.broker = broker
@@ -98,7 +136,17 @@ class Worker:
         self.delay_prefetch = DELAY_QUEUE_PREFETCH or min(worker_threads * 1000, 65535)
 
         self.workers: list[WorkerThread] = []
-        self.work_queue: PriorityQueue[_WorkQueueItem] = PriorityQueue()
+        if priority_age_interval_ms < 1:
+            raise ValueError("priority_age_interval_ms must be a positive integer.")
+
+        self.clock = clock
+        self.priority_age_enabled = priority_age_enabled
+        self.priority_age_interval_ns = priority_age_interval_ms * 1_000_000
+        self.work_queue: Queue[_WorkQueueItem] = ReadyQueue(
+            age_enabled=priority_age_enabled,
+            age_interval_ns=self.priority_age_interval_ns,
+            clock=clock,
+        )
         self.worker_timeout = worker_timeout
         self.worker_threads = worker_threads
 
@@ -269,6 +317,160 @@ class _WorkQueueItem:
     _queued_time: int = dataclasses.field(default_factory=time.monotonic_ns)
 
 
+@dataclasses.dataclass(slots=True)
+class _ReadyEntry:
+    """Internal bookkeeping for an item held by a :class:`ReadyQueue`.
+
+    Attributes:
+      item(_WorkQueueItem): The wrapped work item.
+      ready_at(int): The value of the monotonic clock (in nanoseconds)
+        at which the message became *ready*, i.e. entered this ready
+        queue.  Waiting time for the purposes of compensation is measured
+        from this instant; it is *not* measured from the message's delay
+        ETA.
+      sequence(int): A strictly increasing per-queue number assigned in
+        enqueue order.  It's used to preserve FIFO ordering whenever two
+        messages have the same effective priority.
+    """
+
+    item: _WorkQueueItem
+    ready_at: int
+    sequence: int
+
+
+class ReadyQueue(Queue):
+    """A bounded-priority ready queue with optional wait-time compensation.
+
+    Messages are stored in one FIFO bucket per static priority value
+    (``0`` being the highest priority).  Each bucket is a ``deque``, so
+    enqueue and dequeue never move the other elements: selecting a
+    message touches at most ``max_priority + 1`` bucket heads, which is a
+    small fixed constant and independent of the queue's size -- the queue
+    is therefore *never* fully reordered.
+
+    When wait-time compensation ("aging") is enabled, a message that has
+    been ready for ``wait_ns`` nanoseconds is treated as having the
+    effective priority::
+
+        max(0, static_priority - wait_ns // age_interval_ns)
+
+    The longer a message waits in the ready queue, the more it is promoted
+    toward priority ``0``.  A message's effective priority can never drop
+    below ``0``, so aging can't make a low-priority message leap ahead of a
+    freshly-arrived, genuinely higher-priority message.  When compensation
+    is disabled, effective priority equals static priority.
+
+    Ties on effective priority are broken by ``sequence`` (enqueue order),
+    so messages with the same effective priority always leave in FIFO
+    order.
+
+    Only the head of each bucket is a candidate at any instant, which is
+    sufficient because the head of a bucket is both its most-promoted and
+    its oldest message.
+
+    Parameters:
+      max_priority(int): The highest valid static priority value; buckets
+        ``0``..``max_priority`` are created.  Defaults to the dramatiq
+        ``MAX_PRIORITY`` constant.
+      age_enabled(bool): Whether wait-time compensation is active.
+      age_interval_ns(int): The number of nanoseconds a message must wait
+        for its effective priority to be boosted by one level.
+      clock(Callable[[], int]): The monotonic nanosecond clock used to
+        determine the current time.  Injectable primarily for testing.
+    """
+
+    def __init__(
+        self,
+        maxsize: int = 0,
+        *,
+        max_priority: int = MAX_PRIORITY,
+        age_enabled: bool = PRIORITY_AGE_ENABLED,
+        age_interval_ns: int = PRIORITY_AGE_INTERVAL_MS * 1_000_000,
+        clock: Callable[[], int] = time.monotonic_ns,
+    ) -> None:
+        self._bucket_count = max_priority + 1
+        self.age_enabled = age_enabled
+        self.age_interval_ns = age_interval_ns
+        self.clock = clock
+        # initialised here because Queue.__init__ calls self._init().
+        self._buckets: list[deque[_ReadyEntry]] = []
+        self._size = 0
+        self._sequence = itertools.count()
+        super().__init__(maxsize=maxsize)
+
+    def _init(self, maxsize: int = 0) -> None:
+        self._buckets = [deque() for _ in range(self._bucket_count)]
+        self._size = 0
+
+    def _qsize(self) -> int:
+        return self._size
+
+    def _put(self, item: _WorkQueueItem) -> None:
+        priority = item.priority
+        # Defensive clamp: actor priorities are validated, but this keeps
+        # out-of-range values from corrupting the bucket index.
+        if priority < 0:
+            priority = 0
+        elif priority >= self._bucket_count:
+            priority = self._bucket_count - 1
+
+        entry = _ReadyEntry(item=item, ready_at=self.clock(), sequence=next(self._sequence))
+        self._buckets[priority].append(entry)
+        self._size += 1
+
+    def _effective_priority(self, entry: _ReadyEntry, now: int) -> int:
+        if not self.age_enabled:
+            return entry.item.priority
+
+        levels = (now - entry.ready_at) // self.age_interval_ns
+        effective = entry.item.priority - levels
+        return max(0, effective)
+
+    def _get(self) -> _WorkQueueItem:
+        now = self.clock()
+        chosen_entry: Optional[_ReadyEntry] = None
+        chosen_priority: Optional[int] = None
+
+        # Only bucket heads are candidates.  Choosing the candidate with the
+        # smallest (effective priority, sequence) gives global correct
+        # ordering without ever reordering the stored buckets.
+        for bucket in self._buckets:
+            if not bucket:
+                continue
+
+            candidate = bucket[0]
+            candidate_priority = self._effective_priority(candidate, now)
+            is_first = chosen_entry is None
+            is_more_urgent = chosen_priority is not None and candidate_priority < chosen_priority
+            ties_but_older = (
+                chosen_priority is not None
+                and candidate_priority == chosen_priority
+                and chosen_entry is not None
+                and candidate.sequence < chosen_entry.sequence
+            )
+            if is_first or is_more_urgent or ties_but_older:
+                chosen_entry = candidate
+                chosen_priority = candidate_priority
+
+        # _get is only invoked by Queue when _qsize() > 0, so a candidate
+        # must exist; the guard keeps type checkers honest.
+        assert chosen_entry is not None and chosen_priority is not None
+        bucket = self._buckets[chosen_entry.item.priority]
+        bucket.popleft()
+        self._size -= 1
+        return chosen_entry.item
+
+    def drain(self) -> list[_WorkQueueItem]:
+        """Remove and return every buffered item.
+
+        Used by tests and during shutdown; does not call ``task_done``.
+        """
+        with self.mutex:
+            items = [entry.item for bucket in self._buckets for entry in bucket]
+            self._init()
+            return items
+
+
 class ConsumerThread(Thread):
     def __init__(
         self,
@@ -276,7 +478,7 @@ class ConsumerThread(Thread):
         broker: Broker,
         queue_name: str,
         prefetch: int,
-        work_queue: PriorityQueue[_WorkQueueItem],
+        work_queue: Queue[_WorkQueueItem],
         worker_timeout: int,
     ) -> None:
         super().__init__(daemon=True)
@@ -496,7 +698,7 @@ class WorkerThread(Thread):
     Parameters:
       broker(Broker)
       consumers(dict[str, ConsumerThread])
-      work_queue(PriorityQueue[_WorkQueueItem])
+      work_queue(Queue[_WorkQueueItem])
       worker_timeout(int)
     """
 
@@ -505,7 +707,7 @@ class WorkerThread(Thread):
         *,
         broker: Broker,
         consumers: dict[str, ConsumerThread],
-        work_queue: PriorityQueue[_WorkQueueItem],
+        work_queue: Queue[_WorkQueueItem],
         worker_timeout: int,
     ) -> None:
         super().__init__(daemon=True)

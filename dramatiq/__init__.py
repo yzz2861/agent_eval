@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import warnings
 
-from .actor import Actor, actor
+from .actor import MAX_PRIORITY, MIN_PRIORITY, Actor, actor
 from .broker import Broker, Consumer, MessageProxy, get_broker, set_broker
 from .composition import group, pipeline
 from .encoder import Encoder, JSONEncoder, PickleEncoder
@@ -47,6 +47,8 @@ __all__ = [
     "Actor",
     "GenericActor",
     "actor",
+    "MIN_PRIORITY",
+    "MAX_PRIORITY",
     # Brokers
     "Broker",
     "Consumer",
