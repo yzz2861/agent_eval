@@ -4107,6 +4107,43 @@ class Jinja2Template(BaseTemplate):
             return (f.read().decode(self.encoding), fname, lambda: False)
 
 
+class _SlotContent(str):
+    """ Rendered slot content. Inserted into templates without re-escaping. """
+
+
+class _SlotBlock:
+    """ Context manager that redirects template output into a named slot.
+
+    Used in templates as ``% with slot('name'):`` (replace) or
+    ``% with slot_append('name'):`` (append). Slot state lives in the
+    per-render ``_slots`` dict shared by the whole include/rebase chain.
+    """
+
+    def __init__(self, env, name, append=False):
+        self.env, self.name, self.append = env, name, append
+
+    def __enter__(self):
+        self.prev_stdout = self.env['_stdout']
+        self.prev_printlist = self.env['_printlist']
+        buffer = []
+        self.env['_stdout'] = buffer
+        self.env['_printlist'] = buffer.extend
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        buffer = self.env['_stdout']
+        self.env['_stdout'] = self.prev_stdout
+        self.env['_printlist'] = self.prev_printlist
+        if exc_type is None:
+            content = ''.join(buffer)
+            slots = self.env['_slots']
+            if self.append and self.name in slots:
+                slots[self.name] += content
+            else:
+                slots[self.name] = content
+        return False
+
+
 class SimpleTemplate(BaseTemplate):
     def prepare(self,
                 escape_func=html_escape,
@@ -4149,9 +4186,24 @@ class SimpleTemplate(BaseTemplate):
             self.cache[_name] = self.__class__(name=_name, lookup=self.lookup, syntax=self.syntax)
         return self.cache[_name].execute(env['_stdout'], env)
 
+    def _slot(self, _env, _name, _append=False):
+        return _SlotBlock(_env, _name, _append)
+
+    def _slot_append(self, _env, _name):
+        return _SlotBlock(_env, _name, append=True)
+
+    def _slot_get(self, _env, _name, _default=''):
+        return _SlotContent(_env['_slots'].get(_name, _default))
+
+    def _escape_slot(self, x):
+        if isinstance(x, _SlotContent):
+            return x
+        return self._escape(x)
+
     def execute(self, _stdout, kwargs):
         env = self.defaults.copy()
         env.update(kwargs)
+        env.setdefault('_slots', {})
         env.update({
             '_stdout': _stdout,
             '_printlist': _stdout.extend,
@@ -4159,7 +4211,11 @@ class SimpleTemplate(BaseTemplate):
             'rebase': functools.partial(self._rebase, env),
             '_rebase': None,
             '_str': self._str,
-            '_escape': self._escape,
+            '_escape': self._escape_slot,
+            'slot': functools.partial(self._slot, env),
+            'slot_append': functools.partial(self._slot_append, env),
+            'slot_get': functools.partial(self._slot_get, env),
+            'slot_defined': env['_slots'].__contains__,
             'get': env.get,
             'setdefault': env.setdefault,
             'defined': env.__contains__

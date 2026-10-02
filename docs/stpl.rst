@@ -168,6 +168,145 @@ Each template is preloaded with a bunch of functions that help with the most com
     </html>
 
 
+Named Slots
+-----------
+
+The ``rebase`` mechanism above passes exactly one block of rendered text (the
+``base`` variable) to the layout. If a layout needs more than that, for
+example a ``<head>`` section, a sidebar and a block of scripts, templates can
+capture output into *named slots* and the layout can read them back later.
+Slot state is shared by the whole chain of templates involved in a single
+render: the template itself, everything it includes, and any layouts reached
+via ``rebase``. Each call to ``render()`` starts with a fresh set of slots,
+so repeated renders never accumulate leftover content.
+
+.. function:: slot(name)
+
+  Used as a ``with`` block, captures everything rendered inside the block
+  into the named slot, *replacing* any previous content of that slot::
+
+    % with slot('sidebar'):
+      <p>Latest news ...</p>
+    % end
+
+.. function:: slot_append(name)
+
+  Same as ``slot()``, but *appends* to the current content of the slot
+  instead of replacing it. Operations on the same slot apply in execution
+  order, so a layout can add default content before or after the content
+  captured by the wrapped template::
+
+    % with slot_append('scripts'):
+      <script src="extra.js"></script>
+    % end
+
+.. function:: slot_get(name, default='')
+
+  Return the rendered content of a slot. The content was already rendered
+  (and escaped) when it was captured, so it is inserted into the template
+  *without being escaped again*. Reading a slot that was never filled
+  returns the default (an empty string) instead of raising an error::
+
+    <head>{{slot_get('head')}}</head>
+
+.. function:: slot_defined(name)
+
+  Return True if the slot has any content, False otherwise.
+
+Expressions inside a slot block follow the normal escaping rules (``{{...}}``
+escapes, ``{{!...}}`` does not). Only the insertion via ``slot_get()`` skips
+escaping, because the content is already fully rendered at that point.
+
+Sub-templates rendered via ``include()`` contribute to the same slots as
+their caller, which allows partials to register scripts or styles for the
+final layout. This only applies to slots: ordinary variables defined inside
+an included template still do not leak back into the caller. Recursive
+includes work as expected, too. Every recursion level appends to or replaces
+the shared slots in execution order, and (as with any recursion) unbounded
+recursion ends in a ``RecursionError``.
+
+Here is a complete example with a two-level layout (``base.tpl`` and
+``mid.tpl``) and two page templates. The root layout defines the slots it
+knows about:
+
+.. code-block:: html
+
+  <html>
+  <head>{{slot_get('head')}}</head>
+  <aside>{{slot_get('sidebar')}}</aside>
+  <main>{{!base}}</main>
+  {{slot_get('scripts')}}</html>
+
+The middle layout ``mid.tpl`` rebases into it and appends its own sidebar
+entry after whatever the page contributed::
+
+  % rebase('base.tpl')
+  % with slot_append('sidebar'):
+  <span>mid</span>
+  % end
+  {{!base}}
+
+The first page fills all three slots. ``{{title}}`` is escaped when captured
+into the slots, and the layout inserts the rendered slot content verbatim::
+
+  % rebase('mid.tpl')
+  % with slot('head'):
+  <title>{{title}}</title>
+  % end
+  % with slot('sidebar'):
+  <span>p1</span>
+  % end
+  % with slot('scripts'):
+  <script>{{title}}</script>
+  % end
+  <h1>{{title}}</h1>
+
+Rendered with ``title='<P1>'`` this produces:
+
+.. code-block:: html
+
+  <html>
+  <head><title>&lt;P1&gt;</title>
+  </head>
+  <aside><span>p1</span>
+  <span>mid</span>
+  </aside>
+  <main><h1>&lt;P1&gt;</h1>
+  </main>
+  <script>&lt;P1&gt;</script>
+  </html>
+
+The second page leaves ``head`` undefined (the layout renders an empty
+``<head>``) and relies on an included partial to contribute its script. The
+``inc_var`` variable defined by the partial does not leak back::
+
+  % rebase('mid.tpl')
+  % with slot('sidebar'):
+  <span>p2</span>
+  % end
+  % include('inc.tpl')
+  <h1>P2</h1> inc_var leaked: {{defined('inc_var')}}
+
+with ``inc.tpl`` being::
+
+  % with slot_append('scripts'):
+  <script src="inc.js"></script>
+  % end
+  % inc_var = 'secret'
+
+.. code-block:: html
+
+  <html>
+  <head></head>
+  <aside><span>p2</span>
+  <span>mid</span>
+  </aside>
+  <main><h1>P2</h1> inc_var leaked: False
+  </main>
+  <script src="inc.js"></script>
+  </html>
+
+
 Accessing undefined variables in a template raises :exc:`NameError` and
 stops rendering immediately. This is standard python behavior and nothing new,
 but vanilla python lacks an easy way to check the availability of a variable.

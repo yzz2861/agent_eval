@@ -238,6 +238,75 @@ class TestSimpleTemplate(unittest.TestCase):
         self.assertRenders(tpl, 'x')
 
 
+class TestStplSlots(unittest.TestCase):
+    def assertRenders(self, tpl, to, *args, **vars):
+        if isinstance(tpl, str):
+            tpl = SimpleTemplate(tpl, lookup=[os.path.join(os.path.dirname(__file__), 'views')])
+        self.assertEqual(touni(to), tpl.render(*args, **vars))
+
+    def test_slot_capture(self):
+        ''' Slots: Capture block output and read it back '''
+        t = "% with slot('s'):\n<b>{{v}}</b>\n% end\n[{{slot_get('s')}}]"
+        self.assertRenders(t, '[<b>&lt;a&gt;</b>\n]', v='<a>')
+
+    def test_slot_replace_and_append_order(self):
+        ''' Slots: Same-name operations apply in execution order '''
+        t = "% with slot('s'):\nA\n% end\n" \
+            "% with slot('s'):\nB\n% end\n" \
+            "% with slot_append('s'):\nC\n% end\n" \
+            "[{{slot_get('s')}}]"
+        self.assertRenders(t, '[B\nC\n]')
+
+    def test_slot_escaping(self):
+        ''' Slots: Expressions are escaped on capture, not again on insert '''
+        t = "% with slot('s'):\n{{v}}\n% end\n{{slot_get('s')}}"
+        self.assertRenders(t, '&lt;b&gt;\n', v='<b>')
+        t = "% with slot('s'):\n{{v}}\n% end\n{{!slot_get('s')}}"
+        self.assertRenders(t, '&lt;b&gt;\n', v='<b>')
+
+    def test_slot_undefined(self):
+        ''' Slots: Reading an undefined slot yields an empty string '''
+        self.assertRenders("[{{slot_get('nope')}}][{{slot_defined('nope')}}]", '[][False]')
+        t = "% with slot('s'):\nX\n% end\n{{slot_defined('s')}}"
+        self.assertRenders(t, 'True')
+
+    def test_slot_render_isolation(self):
+        ''' Slots: Each render() call has independent slot state '''
+        t = SimpleTemplate("% with slot_append('s'):\nA\n% end\n{{slot_get('s')}}")
+        self.assertEqual(touni('A\n'), t.render())
+        self.assertEqual(touni('A\n'), t.render())
+
+    def test_slot_include_contributes_but_vars_stay_local(self):
+        ''' Slots: Includes contribute slots, but local variables do not leak '''
+        t = "% include('stpl_slot_inc')\nleaked: {{defined('inc_var')}}\n[{{slot_get('scripts')}}]"
+        self.assertRenders(t, 'leaked: False\n[<script src="inc.js"></script>\n]')
+
+    def test_slot_recursive_include(self):
+        ''' Slots: Recursive includes share slot state in execution order '''
+        t = "% include('stpl_slot_rec', n=3)\n[{{slot_get('s')}}]"
+        self.assertRenders(t, '[3\n2\n1\n]')
+
+    def test_slot_two_level_rebase_page1(self):
+        ''' Slots: Two-level layout, child fills head/sidebar/scripts '''
+        with chdir(__file__):
+            t = SimpleTemplate(name='stpl_slot_page1', lookup=['./views/'])
+            result = '<html>\n<head><title>&lt;P1&gt;</title>\n</head>\n' \
+                     '<aside><span>p1</span>\n<span>mid</span>\n</aside>\n' \
+                     '<main><h1>&lt;P1&gt;</h1>\n\n</main>\n' \
+                     '<script>&lt;P1&gt;</script>\n</html>\n'
+            self.assertRenders(t, result, title='<P1>')
+
+    def test_slot_two_level_rebase_page2(self):
+        ''' Slots: Undefined slots are empty, includes contribute to layouts '''
+        with chdir(__file__):
+            t = SimpleTemplate(name='stpl_slot_page2', lookup=['./views/'])
+            result = '<html>\n<head></head>\n' \
+                     '<aside><span>p2</span>\n<span>mid</span>\n</aside>\n' \
+                     '<main><h1>P2</h1> inc_var leaked: False\n\n</main>\n' \
+                     '<script src="inc.js"></script>\n</html>\n'
+            self.assertRenders(t, result)
+
+
 class TestSTPLDir(unittest.TestCase):
     def fix_ident(self, string):
         lines = string.splitlines(True)
