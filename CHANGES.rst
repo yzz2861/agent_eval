@@ -3,6 +3,13 @@ Version 1.10.0
 
 Unreleased
 
+-   Add an optional ``priority`` argument to ``connect``, ``connect_via``,
+    and ``connected_to``.
+    Higher-priority receivers run first; equal priorities retain first
+    connection order. Each send uses a snapshot of its applicable
+    subscriptions, and a receiver matching both ``ANY`` and a specific sender
+    runs once using the highest matching priority.
+
 
 Version 1.9.0
 -------------

@@ -55,7 +55,12 @@ def _test_signal_signals(sender: t.Any) -> None:
         expected = (
             "receiver_connected",
             sig,
-            {"receiver": receiver, "sender": sender, "weak": weak},
+            {
+                "receiver": receiver,
+                "sender": sender,
+                "weak": weak,
+                "priority": 0,
+            },
         )
 
         assert sentinel[-1] == expected
@@ -412,6 +417,268 @@ def test_no_double_send() -> None:
     assert sentinel == [None, 123]
     sig.send()
     assert sentinel == [None, 123, None]
+
+
+def test_receiver_priority_and_connection_order() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def normalize(sender: t.Any) -> None:
+        calls.append("normalize")
+
+    def notify(sender: t.Any) -> None:
+        calls.append("notify")
+
+    def audit(sender: t.Any) -> None:
+        calls.append("audit")
+
+    sig.connect(normalize)
+    sig.connect(notify)
+    sig.connect(audit, priority=10)
+
+    sig.send()
+
+    assert calls == ["audit", "normalize", "notify"]
+
+
+def test_receiver_priority_supports_decorated_and_bound_methods() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    class Receiver:
+        def notify(self, sender: t.Any) -> None:
+            calls.append("notify")
+
+    receiver = Receiver()
+
+    @sig.connect_via(blinker.ANY, priority=5)
+    def normalize(sender: t.Any) -> None:
+        calls.append("normalize")
+
+    sig.connect(receiver.notify, priority=10)
+
+    sig.send()
+
+    assert calls == ["notify", "normalize"]
+
+
+def test_overlapping_any_and_sender_receiver_uses_highest_priority() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+    sender = object()
+
+    def normalize(sender_arg: t.Any) -> None:
+        calls.append("normalize")
+
+    def audit(sender_arg: t.Any) -> None:
+        calls.append("audit")
+
+    def notify(sender_arg: t.Any) -> None:
+        calls.append("notify")
+
+    sig.connect(normalize, sender=sender)
+    sig.connect(audit, sender=sender)
+    sig.connect(normalize, priority=5)
+    sig.connect(audit, priority=10)
+    sig.connect(notify, priority=10)
+
+    sig.send(sender)
+
+    assert calls == ["audit", "notify", "normalize"]
+
+
+def test_reconnect_gets_new_connection_order() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def first(sender: t.Any) -> None:
+        calls.append("first")
+
+    def second(sender: t.Any) -> None:
+        calls.append("second")
+
+    sig.connect(first)
+    sig.connect(second)
+    sig.send()
+    assert calls == ["first", "second"]
+
+    sig.disconnect(first)
+    sig.connect(first, priority=1)
+    calls.clear()
+    sig.send()
+    assert calls == ["first", "second"]
+
+    sig.disconnect(first)
+    sig.connect(first)
+    calls.clear()
+    sig.send()
+    assert calls == ["second", "first"]
+
+
+def test_partial_reconnect_gets_new_connection_order() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+    sender = object()
+
+    def first(sender: t.Any) -> None:
+        calls.append("first")
+
+    def second(sender: t.Any) -> None:
+        calls.append("second")
+
+    sig.connect(first, sender=sender)
+    sig.connect(second, sender=sender)
+
+    sig.disconnect(first, sender=sender)
+    sig.connect(first, sender=sender)
+    sig.send(sender)
+
+    assert calls == ["second", "first"]
+
+
+def test_send_uses_subscription_snapshot() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def normalize(sender: t.Any) -> None:
+        calls.append("normalize")
+        sig.connect(notify, priority=10)
+
+    def audit(sender: t.Any) -> None:
+        calls.append("audit")
+        sig.disconnect(notify)
+        sig.connect(notify, priority=10)
+
+    def notify(sender: t.Any) -> None:
+        calls.append("notify")
+
+    sig.connect(normalize, priority=10)
+    sig.connect(audit, priority=5)
+    sig.connect(notify, priority=0)
+
+    sig.send()
+    assert calls == ["normalize", "audit", "notify"]
+
+    calls.clear()
+    sig.send()
+    assert calls == ["normalize", "notify", "audit"]
+
+
+def test_send_snapshot_ignores_remove_and_priority_changes() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def normalize(sender: t.Any) -> None:
+        calls.append("normalize")
+        sig.disconnect(notify)
+        sig.connect(audit, priority=20)
+
+    def audit(sender: t.Any) -> None:
+        calls.append("audit")
+
+    def notify(sender: t.Any) -> None:
+        calls.append("notify")
+
+    sig.connect(normalize, priority=10)
+    sig.connect(audit, priority=5)
+    sig.connect(notify, priority=0)
+
+    sig.send()
+    assert calls == ["normalize", "audit", "notify"]
+
+    calls.clear()
+    sig.send()
+    assert calls == ["audit", "normalize"]
+
+
+def test_reentrant_send_reads_current_subscriptions() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+    is_reentrant_send = False
+
+    def normalize(sender: t.Any) -> None:
+        calls.append("normalize")
+        nonlocal is_reentrant_send
+
+        if is_reentrant_send:
+            return
+
+        sig.disconnect(notify)
+        sig.connect(notify, priority=10)
+        is_reentrant_send = True
+        sig.send(sender)
+        is_reentrant_send = False
+
+    def audit(sender: t.Any) -> None:
+        calls.append("audit")
+
+    def notify(sender: t.Any) -> None:
+        calls.append("notify")
+
+    sig.connect(normalize, priority=10)
+    sig.connect(audit, priority=5)
+    sig.connect(notify, priority=0)
+
+    sig.send("sender")
+
+    assert calls == [
+        "normalize",
+        "normalize",
+        "notify",
+        "audit",
+        "audit",
+        "notify",
+    ]
+
+
+async def test_send_async_uses_subscription_snapshot() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    async def normalize(sender: t.Any) -> None:
+        calls.append("normalize")
+        sig.connect(notify, priority=10)
+
+    async def audit(sender: t.Any) -> None:
+        calls.append("audit")
+
+    async def notify(sender: t.Any) -> None:
+        calls.append("notify")
+
+    sig.connect(normalize, priority=10)
+    sig.connect(audit, priority=5)
+
+    await sig.send_async()
+    assert calls == ["normalize", "audit"]
+
+    await sig.send_async()
+    assert calls == [
+        "normalize",
+        "audit",
+        "normalize",
+        "notify",
+        "audit",
+    ]
+
+
+def test_send_exception_still_propagates() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def failing(sender: t.Any) -> None:
+        calls.append("failing")
+        raise ValueError("boom")
+
+    def later(sender: t.Any) -> None:
+        calls.append("later")
+
+    sig.connect(failing, priority=10)
+    sig.connect(later)
+
+    with pytest.raises(ValueError, match="boom"):
+        sig.send()
+
+    assert calls == ["failing"]
 
 
 def test_has_receivers() -> None:
