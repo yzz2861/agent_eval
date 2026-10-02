@@ -4210,6 +4210,206 @@ class TestCompoundSelectModels(ModelTestCase):
 class User2(TestModel):
     username = TextField()
 
+
+class TestTaggedModelUnion(ModelTestCase):
+    requires = [CNote, CFile]
+
+    def setUp(self):
+        super(TestTaggedModelUnion, self).setUp()
+        self.ts = lambda i: datetime.datetime(2018, 1, i)
+        with self.database.atomic():
+            for i, content in enumerate(('note-a', 'note-b', 'note-c'), 1):
+                CNote.create(id=i, content=content, timestamp=self.ts(i))
+            for i, (filename, data) in enumerate((
+                    ('a.txt', 'data-a'), ('b.txt', 'data-b')), 4):
+                CFile.create(filename=filename, data=data,
+                             timestamp=self.ts(i))
+
+    def _tagged(self, mapping, tag_column='kind'):
+        lhs = CNote.select(CNote.id, CNote.content, CNote.timestamp,
+                           Value('note').alias('kind'))
+        rhs = CFile.select(Value(0), CFile.filename, CFile.timestamp,
+                           Value('file').alias('kind'))
+        query = (lhs.union_all(rhs)
+                 .order_by(SQL('timestamp'))
+                 .tagged_models(tag_column, mapping))
+        return query
+
+    def test_tagged_models_basic(self):
+        query = self._tagged({
+            'note': CNote,
+            'file': (CFile, {'filename': 'content',
+                             'timestamp': 'timestamp'})})
+
+        objects = list(query)
+        self.assertEqual([type(o) for o in objects],
+                         [CNote, CNote, CNote, CFile, CFile])
+        self.assertEqual([o.id for o in objects[:3]], [1, 2, 3])
+        self.assertEqual([o.content for o in objects[:3]],
+                         ['note-a', 'note-b', 'note-c'])
+        self.assertEqual([o.filename for o in objects[3:]],
+                         ['a.txt', 'b.txt'])
+        # Field converters come from each row's own model.
+        self.assertEqual([o.timestamp for o in objects],
+                         [self.ts(i) for i in range(1, 6)])
+        # Objects are clean (not dirty) after construction.
+        for obj in objects:
+            self.assertEqual(obj._dirty, set())
+
+    def test_tagged_models_order_limit(self):
+        mapping = {'note': CNote,
+                   'file': (CFile, {'filename': 'content'})}
+        lhs = CNote.select(CNote.id, CNote.content, CNote.timestamp,
+                           Value('note').alias('kind'))
+        rhs = CFile.select(Value(0), CFile.filename, CFile.timestamp,
+                           Value('file').alias('kind'))
+        query = (lhs.union_all(rhs)
+                 .order_by(SQL('timestamp').desc())
+                 .limit(2)
+                 .tagged_models('kind', mapping))
+        objects = list(query)
+        self.assertEqual([type(o) for o in objects], [CFile, CFile])
+        self.assertEqual([o.filename for o in objects], ['b.txt', 'a.txt'])
+
+    def test_tagged_models_column_order(self):
+        # The branches select columns in different orders, and the tag sits
+        # at a different position in each branch. Index-based mappings align
+        # the fields as declared.
+        lhs = CNote.select(CNote.id, CNote.content, CNote.timestamp,
+                           Value('note').alias('kind'))
+        rhs = CFile.select(Value('file'), CFile.timestamp, CFile.filename,
+                           CFile.data)
+        query = (lhs.union_all(rhs)
+                 .order_by(SQL('timestamp'))
+                 .tagged_models('kind', {
+                     'note': (CNote, {'id': 0, 'content': 1, 'timestamp': 2}),
+                     'file': (CFile, {'filename': 2, 'timestamp': 1}, 0)}))
+
+        objects = list(query)
+        self.assertEqual([type(o) for o in objects],
+                         [CNote, CNote, CNote, CFile, CFile])
+        self.assertEqual([o.content for o in objects[:3]],
+                         ['note-a', 'note-b', 'note-c'])
+        self.assertEqual([o.filename for o in objects[3:]],
+                         ['a.txt', 'b.txt'])
+        self.assertEqual(objects[3].timestamp, self.ts(4))
+
+    def test_tagged_models_null_vs_missing(self):
+        lhs = CNote.select(CNote.id, CNote.content, Value(None),
+                           CNote.timestamp, Value('note').alias('kind'))
+        rhs = CFile.select(Value(0), CFile.filename,
+                           fn.NULLIF(CFile.data, 'data-b'),
+                           CFile.timestamp, Value('file').alias('kind'))
+        query = (lhs.union_all(rhs)
+                 .order_by(SQL('timestamp'))
+                 .tagged_models('kind', {
+                     'note': CNote,
+                     'file': (CFile, {'filename': 'content', 'data': 2})}))
+
+        files = [o for o in query if isinstance(o, CFile)]
+        # A mapped column containing SQL NULL is set to None...
+        self.assertEqual(files[0].__data__['data'], 'data-a')
+        self.assertTrue('data' in files[1].__data__)
+        self.assertIsNone(files[1].__data__['data'])
+
+        # ...while an unmapped field is simply left unset.
+        query = self._tagged({
+            'note': CNote,
+            'file': (CFile, {'filename': 'content'})})
+        files = [o for o in query if isinstance(o, CFile)]
+        for obj in files:
+            self.assertFalse('data' in obj.__data__)
+            self.assertFalse('timestamp' in obj.__data__)
+
+    def test_tagged_models_lazy_iteration(self):
+        query = self._tagged({
+            'note': CNote,
+            'file': (CFile, {'filename': 'content'})})
+        cursor_wrapper = query.execute()
+        iterator = iter(cursor_wrapper)
+        first = next(iterator)
+        self.assertTrue(isinstance(first, CNote))
+        self.assertEqual(first.content, 'note-a')
+        # Exhausting the wrapper yields every row as the right model.
+        self.assertEqual(len(cursor_wrapper), 5)
+        self.assertEqual([type(o) for o in cursor_wrapper],
+                         [CNote, CNote, CNote, CFile, CFile])
+        # Slicing/indexing works off the same cache.
+        self.assertTrue(isinstance(cursor_wrapper[-1], CFile))
+
+    def test_tagged_models_errors(self):
+        query = self._tagged({'note': CNote,
+                              'file': (CFile, {'filename': 'content'})})
+
+        def assert_value_error(fn):
+            self.assertRaises(ValueError, fn)
+
+        # Unknown type tag in a result row.
+        def unknown_tag():
+            lhs = CNote.select(CNote.id, CNote.content, CNote.timestamp,
+                               Value('nope').alias('kind'))
+            rhs = CFile.select(Value(0), CFile.filename, CFile.timestamp,
+                               Value('file').alias('kind'))
+            list(lhs.union_all(rhs).tagged_models('kind', {
+                'note': CNote, 'file': (CFile, {'filename': 'content'})}))
+        assert_value_error(unknown_tag)
+
+        # Duplicate tag mapping.
+        assert_value_error(lambda: query.tagged_models(
+            'kind', [('note', CNote), ('note', CFile)]))
+
+        # Primary key missing from an explicit field mapping.
+        assert_value_error(lambda: query.tagged_models(
+            'kind', {'note': (CNote, {'content': 'content'})}))
+
+        # Primary key value is NULL in a result row.
+        def null_pk():
+            lhs = CNote.select(CNote.id, CNote.content, CNote.timestamp,
+                               Value('note').alias('kind'))
+            rhs = CFile.select(Value(None), CFile.filename, CFile.timestamp,
+                               Value('file').alias('kind'))
+            list(lhs.union_all(rhs).tagged_models('kind', {
+                'note': CNote, 'file': (CFile, {'filename': 0})}))
+        assert_value_error(null_pk)
+
+        # Unknown field name in a mapping.
+        assert_value_error(lambda: query.tagged_models(
+            'kind', {'note': (CNote, {'id': 'id', 'nope': 'content'})}))
+
+        # Same result column mapped to two fields.
+        assert_value_error(lambda: query.tagged_models(
+            'kind', {'note': (CNote, {'id': 'id', 'content': 'id'})}))
+
+        # Tag column not present in the result.
+        assert_value_error(lambda: list(self._tagged(
+            {'note': CNote, 'file': (CFile, {'filename': 'content'})},
+            tag_column='nope')))
+
+        # Empty mapping.
+        assert_value_error(lambda: query.tagged_models('kind', {}))
+
+    def test_tagged_models_other_row_types_unchanged(self):
+        lhs = CNote.select(CNote.id, CNote.content, CNote.timestamp,
+                           Value('note').alias('kind'))
+        rhs = CFile.select(Value(0), CFile.filename, CFile.timestamp,
+                           Value('file').alias('kind'))
+        union = lhs.union_all(rhs).order_by(SQL('timestamp'))
+
+        # A plain union still builds instances of the lhs model.
+        self.assertEqual([type(o) for o in union.limit(2)], [CNote, CNote])
+
+        # Switching row types on a tagged query falls back to the
+        # corresponding generic wrappers.
+        tagged = union.tagged_models('kind', {
+            'note': CNote, 'file': (CFile, {'filename': 'content'})})
+        rows = tagged.dicts().limit(2)
+        self.assertEqual(rows[0]['content'], 'note-a')
+        self.assertEqual(tagged.tuples()[0][1], 'note-a')
+
+        # count()/exists() are unaffected by the tagged row type.
+        self.assertEqual(tagged.count(), 5)
+        self.assertTrue(tagged.exists())
+
 class Category2(TestModel):
     name = TextField()
     parent = ForeignKeyField('self', backref='children', null=True)

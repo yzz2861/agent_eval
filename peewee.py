@@ -407,7 +407,8 @@ ROW = attrdict(
     DICT=2,
     NAMED_TUPLE=3,
     CONSTRUCTOR=4,
-    MODEL=5)
+    MODEL=5,
+    TAGGED_MODEL=6)
 
 # Query type to use with prefetch
 PREFETCH_TYPE = attrdict(
@@ -8485,7 +8486,26 @@ class BaseModelSelect(_ModelQueryHelper):
 class ModelCompoundSelectQuery(BaseModelSelect, CompoundSelectQuery):
     def __init__(self, model, *args, **kwargs):
         self.model = model
+        self._tag_spec = None
         super(ModelCompoundSelectQuery, self).__init__(*args, **kwargs)
+
+    @Node.copy
+    def tagged_models(self, tag_column, mapping):
+        # Return each row of the compound query as an instance of the model
+        # indicated by the row's type tag. "tag_column" names (or indexes)
+        # the result column holding the tag, and "mapping" declares, for
+        # each tag value, the model to build and how result columns map to
+        # its fields. See _normalize_tagged_mapping() for accepted forms.
+        self._row_type = ROW.TAGGED_MODEL
+        self._tag_spec = (tag_column, _normalize_tagged_mapping(mapping))
+
+    def _get_cursor_wrapper(self, cursor):
+        row_type = self._row_type or self.default_row_type
+        if row_type == ROW.TAGGED_MODEL:
+            tag_column, tag_map = self._tag_spec
+            return TaggedModelCursorWrapper(cursor, tag_column, tag_map)
+        return super(ModelCompoundSelectQuery, self)._get_cursor_wrapper(
+            cursor)
 
     def _get_model_cursor_wrapper(self, cursor):
         return self.lhs._get_model_cursor_wrapper(cursor)
@@ -9138,6 +9158,215 @@ class ModelObjectCursorWrapper(ModelDictCursorWrapper):
             return obj
         else:
             return self.constructor(**result)
+
+
+def _normalize_tagged_mapping(mapping):
+    # Validate and normalize the mapping declared for tagged_models(). The
+    # accepted forms are a dict {tag: spec} or a sequence of (tag, spec)
+    # pairs, where spec is one of:
+    #
+    # * Model -- fields are auto-mapped to same-named result columns.
+    # * (Model, fields) -- fields maps field names to result columns.
+    # * (Model, fields, tag_column) -- as above, but the tag for this branch
+    #   is read from the given column instead of the query-wide one.
+    #
+    # "fields" may be a dict {field_name: column} or a sequence of
+    # (field_name, column) pairs; a column is a result column name or index.
+    # Returns {tag: (model, field_map or None, tag_column or None)}.
+    if isinstance(mapping, dict):
+        items = list(mapping.items())
+    elif isinstance(mapping, (list, tuple)):
+        items = list(mapping)
+    else:
+        raise ValueError('tagged model mapping must be a dict or a sequence '
+                         'of (tag, spec) pairs')
+
+    if not items:
+        raise ValueError('tagged model mapping must not be empty')
+
+    normalized = {}
+    for item in items:
+        try:
+            tag, spec = item
+        except (TypeError, ValueError):
+            raise ValueError('tagged model mapping entries must be (tag, '
+                             'spec) pairs, got: %r' % (item,))
+        if tag in normalized:
+            raise ValueError('duplicate mapping for type tag "%s"' % (tag,))
+
+        tag_column = None
+        fields = None
+        if is_model(spec):
+            model = spec
+        else:
+            try:
+                spec = tuple(spec)
+            except TypeError:
+                raise ValueError('tagged model spec must be a model or a '
+                                 '(model, fields[, tag_column]) tuple, got: '
+                                 '%r' % (spec,))
+            if len(spec) == 2:
+                model, fields = spec
+            elif len(spec) == 3:
+                model, fields, tag_column = spec
+            else:
+                raise ValueError('tagged model spec must be a (model, '
+                                 'fields[, tag_column]) tuple, got: %r'
+                                 % (spec,))
+            if not is_model(model):
+                raise ValueError('tagged model spec must name a model '
+                                 'class, got: %r' % (model,))
+
+        if tag_column is not None:
+            _validate_tag_column(tag_column)
+
+        if fields is not None:
+            fields = _normalize_tag_fields(model, tag, fields)
+
+        normalized[tag] = (model, fields, tag_column)
+
+    return normalized
+
+
+def _validate_tag_column(tag_column):
+    if isinstance(tag_column, bool) or not isinstance(tag_column, (str, int)):
+        raise ValueError('tag column must be a column name or index, got: '
+                         '%r' % (tag_column,))
+
+
+def _normalize_tag_fields(model, tag, fields):
+    if isinstance(fields, dict):
+        pairs = list(fields.items())
+    elif isinstance(fields, (list, tuple)):
+        pairs = list(fields)
+    else:
+        raise ValueError('field mapping for tag "%s" must be a dict or a '
+                         'sequence of (field, column) pairs' % (tag,))
+
+    if not pairs:
+        raise ValueError('field mapping for tag "%s" must not be empty'
+                         % (tag,))
+
+    normalized = {}
+    columns = set()
+    for pair in pairs:
+        try:
+            name, column = pair
+        except (TypeError, ValueError):
+            raise ValueError('field mapping entries for tag "%s" must be '
+                             '(field, column) pairs, got: %r' % (tag, pair))
+        if name in normalized:
+            raise ValueError('duplicate mapping for field "%s" (tag "%s")'
+                             % (name, tag))
+        if name not in model._meta.fields:
+            raise ValueError('model %s has no field named "%s" (tag "%s")'
+                             % (model.__name__, name, tag))
+        if isinstance(column, bool) or not isinstance(column, (str, int)):
+            raise ValueError('column for field "%s" (tag "%s") must be a '
+                             'column name or index, got: %r'
+                             % (name, tag, column))
+        if column in columns:
+            raise ValueError('column "%s" is mapped more than once (tag '
+                             '"%s")' % (column, tag))
+        normalized[name] = column
+        columns.add(column)
+
+    pk = model._meta.primary_key
+    if pk is not False and pk.name not in normalized:
+        raise ValueError('field mapping for tag "%s" must include the '
+                         'primary-key field "%s" of model %s'
+                         % (tag, pk.name, model.__name__))
+    return normalized
+
+
+class TaggedModelCursorWrapper(CursorWrapper):
+    # Builds model instances for the rows of a compound (UNION) query,
+    # choosing the model from each row's type tag. Fields not present in a
+    # tag's mapping are left unset (model defaults apply), which is kept
+    # distinct from a mapped column containing SQL NULL (set to None).
+    def __init__(self, cursor, tag_column, tag_map):
+        super(TaggedModelCursorWrapper, self).__init__(cursor)
+        _validate_tag_column(tag_column)
+        self.tag_column = tag_column
+        self.tag_map = tag_map
+
+    def _resolve_column(self, ref, columns, tag):
+        if isinstance(ref, int):
+            if ref < 0 or ref >= len(columns):
+                raise ValueError('column index %s (tag "%s") is out of range '
+                                 'for a result with %s column(s)'
+                                 % (ref, tag, len(columns)))
+            return ref
+        try:
+            return columns.index(ref)
+        except ValueError:
+            raise ValueError('column "%s" (tag "%s") is not present in the '
+                             'query result' % (ref, tag))
+
+    def initialize(self):
+        columns = self.dedupe_columns(
+            [col_spec[0] for col_spec in self.cursor.description],
+            valid_identifiers=False)
+        self.ncols = len(columns)
+
+        # Group the tags by the column they are read from, so that branches
+        # whose tag sits at a different position are still recognized.
+        self.tag_readers = {}
+        self.specs = {}
+        for tag, (model, field_map, tag_column) in self.tag_map.items():
+            ref = self.tag_column if tag_column is None else tag_column
+            tag_idx = self._resolve_column(ref, columns, tag)
+
+            if field_map is None:
+                # Auto-map fields to same-named result columns. Fields with
+                # no matching column are simply left unset.
+                field_map = {}
+                for field in model._meta.sorted_fields:
+                    if field.name in columns:
+                        field_map[field.name] = field.name
+                    elif field.column_name in columns:
+                        field_map[field.name] = field.column_name
+                pk = model._meta.primary_key
+                if pk is not False and pk.name not in field_map:
+                    raise ValueError('primary-key column for field "%s" of '
+                                     'model %s (tag "%s") is not present in '
+                                     'the query result'
+                                     % (pk.name, model.__name__, tag))
+
+            indexes = {}
+            converters = {}
+            for name, column in field_map.items():
+                indexes[name] = self._resolve_column(column, columns, tag)
+                field = model._meta.fields[name]
+                converters[name] = (field.python_value
+                                    if field._coerce else None)
+
+            pk = model._meta.primary_key
+            pk_name = pk.name if pk is not False else None
+            self.specs[tag] = (model, indexes, converters, pk_name)
+            self.tag_readers.setdefault(tag_idx, {})[tag] = self.specs[tag]
+
+    def process_row(self, row):
+        for tag_idx, tags in self.tag_readers.items():
+            tag = row[tag_idx]
+            if tag in tags:
+                return self._build(tag, tags[tag], row)
+        raise ValueError('unknown type tag "%s" in result row' % (tag,))
+
+    def _build(self, tag, spec, row):
+        model, indexes, converters, pk_name = spec
+        data = {}
+        for name, idx in indexes.items():
+            value = row[idx]
+            converter = converters[name]
+            data[name] = converter(value) if converter is not None else value
+        if pk_name is not None and data.get(pk_name) is None:
+            raise ValueError('missing primary-key value for model %s (tag '
+                             '"%s"), refusing to build a partial object'
+                             % (model.__name__, tag))
+        obj = model(__no_default__=1, **data)
+        obj._dirty.clear()
+        return obj
 
 
 class ModelCursorWrapper(BaseModelCursorWrapper):

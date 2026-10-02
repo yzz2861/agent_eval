@@ -6043,9 +6043,56 @@ Queries
       Create an EXCEPT query with ``dest``. The method name has a trailing
       "_" character since ``except`` is a Python reserved word.
 
-   .. method:: __sub__(dest)
+  .. method:: __sub__(dest)
 
       Create an EXCEPT query with ``dest``.
+
+   .. method:: tagged_models(tag_column, mapping)
+
+      Return each row of a compound (UNION / UNION ALL) query as an
+      instance of the model indicated by the row's *type tag*, rather than
+      coercing every row to the left-most model. This is a result mode: it
+      does not change the generated SQL, so ordering, ``LIMIT``, aliasing
+      and lazy iteration behave as they do for any compound query.
+
+      :param tag_column: name (or zero-based index) of the result column
+          that holds the type tag.
+      :param mapping: a dict (or sequence of pairs) mapping each tag value
+          to a model spec, which may be:
+
+          * ``Model`` -- fields are auto-mapped to same-named result
+            columns. Fields with no matching column are left unset.
+          * ``(Model, fields)`` -- ``fields`` maps field names to result
+            columns (names or indexes), so branches whose columns are in a
+            different order can be aligned by declaration.
+          * ``(Model, fields, tag_column)`` -- as above, but the tag for
+            this branch is read from the given column.
+
+      Field values are converted using the field definitions of the model
+      that owns them. A mapped column containing SQL ``NULL`` is set to
+      ``None``, while a field that is not mapped at all is simply left
+      unset (model defaults apply). An unknown tag, a duplicate mapping, or
+      a missing/NULL primary key raises a :py:exc:`ValueError` instead of
+      building a partial object.
+
+      Example:
+
+      .. code-block:: python
+
+         notes = Note.select(Note.id, Note.content,
+                             Value('note').alias('kind'))
+         files = File.select(File.id, File.filename,
+                             Value('file').alias('kind'))
+
+         query = (notes
+                  .union_all(files)
+                  .order_by(SQL('id'))
+                  .tagged_models('kind', {
+                      'note': Note,
+                      'file': (File, {'id': 'id', 'filename': 'content'})}))
+
+         for obj in query:
+             # obj is a Note or a File, depending on the row's tag.
 
 
 .. class:: SelectBase()
