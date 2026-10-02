@@ -5,6 +5,11 @@ module Rack
     class Throttle
       MANDATORY_OPTIONS = [:limit, :period].freeze
 
+      # Default settlement rule for reserve-and-settle throttles: a
+      # delivered response is refunded (not counted) when its status is
+      # below 400. Anything else keeps the reserved unit.
+      DEFAULT_REFUND_IF = lambda { |status, _request| status.to_i < 400 }
+
       attr_reader :name, :limit, :period, :block, :type
 
       def initialize(name, options, &block)
@@ -16,10 +21,20 @@ module Rack
         @limit = options[:limit]
         @period = options[:period].respond_to?(:call) ? options[:period] : options[:period].to_i
         @type   = options.fetch(:type, :throttle)
+        @reserve = options.fetch(:reserve, false)
+        @refund_if = options[:refund_if]
       end
 
       def cache
         Rack::Attack.cache
+      end
+
+      def reserve?
+        @reserve
+      end
+
+      def refund?(status, request)
+        (@refund_if || DEFAULT_REFUND_IF).call(status, request)
       end
 
       def matched_by?(request)
@@ -28,7 +43,7 @@ module Rack
 
         current_period  = period_for(request)
         current_limit   = limit_for(request)
-        count           = cache.count("#{name}:#{discriminator}", current_period)
+        count           = count_for(request, "#{name}:#{discriminator}", current_period)
 
         data = {
           discriminator: discriminator,
@@ -49,6 +64,16 @@ module Rack
       end
 
       private
+
+      def count_for(request, key, current_period)
+        if reserve?
+          reservation = cache.reserve(key, current_period)
+          (request.env['rack.attack.reservations'] ||= {})[name] = reservation
+          reservation.count
+        else
+          cache.count(key, current_period)
+        end
+      end
 
       def discriminator_for(request)
         discriminator = block.call(request)

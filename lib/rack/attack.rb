@@ -26,6 +26,8 @@ module Rack
 
     autoload :Check,                'rack/attack/check'
     autoload :Throttle,             'rack/attack/throttle'
+    autoload :Reservation,          'rack/attack/reservation'
+    autoload :SettlingBody,         'rack/attack/settling_body'
     autoload :Safelist,             'rack/attack/safelist'
     autoload :Blocklist,            'rack/attack/blocklist'
     autoload :Track,                'rack/attack/track'
@@ -118,6 +120,10 @@ module Rack
           configuration.blocklisted_responder.call(request)
         end
       elsif configuration.throttled?(request)
+        # A rejected request never reached the app, so any quota it
+        # reserved is returned immediately.
+        release_reservations(request)
+
         # Deprecated: Keeping throttled_response for backwards compatibility
         if configuration.throttled_response
           configuration.throttled_response.call(env)
@@ -126,7 +132,59 @@ module Rack
         end
       else
         configuration.tracked?(request)
-        @app.call(env)
+        call_app_with_settlement(env, request)
+      end
+    end
+
+    private
+
+    def release_reservations(request)
+      reservations = request.env['rack.attack.reservations']
+      return if reservations.nil?
+
+      reservations.each_value { |reservation| reservation.settle(:refund) }
+    end
+
+    def call_app_with_settlement(env, request)
+      reservations = request.env['rack.attack.reservations']
+      return @app.call(env) if reservations.nil? || reservations.empty?
+
+      begin
+        status, headers, body = @app.call(env)
+      rescue Exception
+        # The app blew up before responding: the attempt is kept.
+        settle_reservations(request, reservations, :error)
+        raise
+      end
+
+      settling_body = SettlingBody.new(body) do |delivery|
+        settle_reservations(request, reservations, delivery, status)
+      end
+
+      [status, headers, settling_body]
+    end
+
+    # Billing points:
+    # * :delivered - response fully delivered; each throttle's refund rule
+    #   (default: status < 400) decides keep vs. refund.
+    # * :error     - the app raised, or the body raised while streaming;
+    #   the reservation is kept.
+    # * :closed    - the body was closed before full delivery (e.g. the
+    #   client went away early); the reservation is kept.
+    def settle_reservations(request, reservations, delivery, status = nil)
+      reservations.each do |name, reservation|
+        outcome = delivery == :delivered && refundable?(request, name, status) ? :refund : :keep
+        reservation.settle(outcome)
+      end
+    end
+
+    def refundable?(request, throttle_name, status)
+      throttle = configuration.throttles[throttle_name]
+
+      if throttle
+        throttle.refund?(status, request)
+      else
+        Throttle::DEFAULT_REFUND_IF.call(status, request)
       end
     end
   end

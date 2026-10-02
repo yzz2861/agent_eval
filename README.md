@@ -31,6 +31,7 @@ See the [Backing & Hacking blog post](https://www.kickstarter.com/backing-and-ha
     - [Allow2Ban](#allow2ban)
   - [Throttling](#throttling)
     - [`throttle(name, options, &block)`](#throttlename-options-block)
+    - [Reserve-and-settle throttles](#reserve-and-settle-throttles)
   - [Tracks](#tracks)
   - [Cache store configuration](#cache-store-configuration)
 - [Customizing responses](#customizing-responses)
@@ -275,6 +276,53 @@ Rack::Attack.throttle('request per ip', limit: limit_proc, period: period_proc) 
   request.ip
 end
 ```
+
+#### Reserve-and-settle throttles
+
+By default a throttle counts a request as soon as it arrives. That is fine for
+coarse rate limiting, but sometimes you only want to count certain outcomes --
+e.g. only *failed* login attempts. Counting after the response is produced
+would let a burst of concurrent in-flight requests slip past the limit, so a
+throttle with `reserve: true` instead *reserves* one unit of quota up front and
+*settles* it once the request's outcome is known: the unit is either kept
+(counted) or refunded (returned to the window it came from).
+
+```ruby
+# Only failed logins count against the limit; successful ones are refunded.
+Rack::Attack.throttle('logins per email', limit: 5, period: 60, reserve: true) do |req|
+  req.params['email'].to_s.downcase.gsub(/\s+/, "") if req.path == '/login' && req.post?
+end
+
+# Custom refund rule: refund only clean 200 responses.
+Rack::Attack.throttle('logins per ip', limit: 5, period: 60, reserve: true,
+                      refund_if: ->(status, _req) { status == 200 }) do |req|
+  req.ip if req.path == '/login' && req.post?
+end
+```
+
+The default `refund_if` rule refunds when the response status is below 400.
+
+Each reservation carries an independent token. Settlement is idempotent:
+settling the same reservation more than once takes effect only once, and a
+reservation that is settled after its window has rolled over can never refund
+into (or otherwise touch) a newer window.
+
+The billing points are defined as follows:
+
+- **Throttled (429)**: a request rejected by the limit never reached the app,
+  so its reservation is refunded immediately.
+- **Response fully delivered**: each throttle's `refund_if` rule decides
+  (default: refund when `status < 400`).
+- **App raises**: the reservation is kept and the exception is re-raised.
+- **Body raises while streaming**: the reservation is kept and the error is
+  re-raised.
+- **Client closes early** (the body is closed before being fully delivered):
+  the reservation is kept.
+
+Reserve-and-settle requires a cache store that supports `#decrement` with
+atomic `#delete` semantics. It is currently implemented and verified for the
+in-memory store (`ActiveSupport::Cache::MemoryStore`); other stores may need a
+dedicated store proxy before their settlements are race-free.
 
 ### Tracks
 
