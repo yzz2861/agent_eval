@@ -3,6 +3,10 @@
 Version 3.2.0
 -------------
 
+-   Add :mod:`werkzeug.http_signatures`, an RFC 9421 signature base
+    builder covering plain header fields and the @method, @target-uri,
+    @authority, @path, @query, @query-param, and @status derived
+    components.
 -   Drop support for Python 3.9 and 3.10. :pr:`3098`
 -   Remove previous deprecated code: :pr:`3099`
 
