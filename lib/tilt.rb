@@ -13,6 +13,25 @@ module Tilt
     attr_reader :default_mapping
   end
 
+  # An application-local registry. It starts as an independent snapshot of
+  # the global registry, so applications can register, disable, or reorder
+  # engines without changing each other or the top-level Tilt API.
+  class Registry < Mapping
+    def initialize(options=nil, &block)
+      options = options ? options.dup : {}
+      options[:_registry_snapshot] = true
+      block ? super(Tilt.default_mapping, options, &block) : super(Tilt.default_mapping, options)
+    end
+  end
+
+  # Creates an application-local registry from an independent snapshot of
+  # the current global configuration.
+  def self.registry(options=nil)
+    registry = Registry.new(options)
+    yield registry if block_given?
+    registry
+  end
+
   # @private
   def self.lazy_map
     default_mapping.lazy_map
@@ -31,6 +50,11 @@ module Tilt
   # @see Tilt::Mapping#register_pipeline
   def self.register_pipeline(ext, options={})
     default_mapping.register_pipeline(ext, options)
+  end
+
+  # @see Tilt::Mapping#unregister
+  def self.unregister(*extensions)
+    default_mapping.unregister(*extensions)
   end
 
   # @deprecated Use {register} instead.
