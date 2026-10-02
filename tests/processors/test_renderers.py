@@ -13,6 +13,7 @@ import pytest
 import time_machine
 
 from structlog.processors import (
+    BudgetedJSONRenderer,
     ExceptionRenderer,
     JSONRenderer,
     KeyValueRenderer,
@@ -369,6 +370,93 @@ class TestJSONRenderer:
             "y": "test",
             "z": [1, 2],
         } == json.loads(jr(None, None, event_dict))
+
+
+class TestBudgetedJSONRenderer:
+    def test_prioritizes_fields_and_marks_truncation(self):
+        renderer = BudgetedJSONRenderer(64, key_order=["important"])
+        event = {"low": "x" * 40, "important": "kept"}
+
+        rendered = renderer(None, None, event)
+
+        assert len(rendered.encode("utf-8")) <= 64
+        result = json.loads(rendered)
+        assert result["important"] == "kept"
+        assert result["low"].endswith("...")
+        assert result["_truncated"] is True
+        assert event == {"low": "x" * 40, "important": "kept"}
+
+    def test_utf8_bytes_escapes_and_nested_containers(self):
+        renderer = BudgetedJSONRenderer(48)
+        event = {"nested": {"text": '你好"\n世界', "drop": "x"}}
+
+        rendered = renderer(None, None, event)
+
+        assert len(rendered.encode("utf-8")) <= 48
+        result = json.loads(rendered)
+        assert result["nested"]["text"].startswith("你")
+        assert "drop" not in result["nested"]
+        assert "_truncated" in result
+
+    def test_shortens_long_string_without_full_serialization(self):
+        large = "中" * 1_000_000
+        renderer = BudgetedJSONRenderer(80)
+
+        rendered = renderer(None, None, {"event": large})
+
+        encoded = rendered.encode("utf-8")
+        assert len(encoded) <= 80
+        result = json.loads(encoded)
+        assert result["event"].endswith("...")
+        assert result["event"].count("中") < 30
+        assert len(large) == 1_000_000
+
+    def test_nested_arrays_omit_later_items(self):
+        renderer = BudgetedJSONRenderer(35)
+
+        rendered = renderer(
+            None, None, {"items": [1, 2, 12345678901234567890]}
+        )
+
+        assert len(rendered.encode()) <= 35
+        result = json.loads(rendered)
+        assert result["items"] == [1, 2]
+        assert result["_truncated"] is True
+
+    def test_minimum_failure_record_is_valid_and_configured(self):
+        with pytest.raises(ValueError, match="at least 19 bytes"):
+            BudgetedJSONRenderer(18)
+
+        renderer = BudgetedJSONRenderer(19)
+
+        rendered = renderer(None, None, {"event": "x" * 1000})
+
+        assert rendered == '{"_truncated":true}'
+        assert json.loads(rendered) == {"_truncated": True}
+        assert len(rendered.encode()) == 19
+
+    def test_encoding_errors_always_stay_within_budget(self):
+        class Exploding:
+            def __structlog__(self):
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        renderer = BudgetedJSONRenderer(30)
+
+        rendered = renderer(None, None, {"bad": Exploding()})
+
+        assert len(rendered.encode("utf-8")) <= 30
+        assert json.loads(rendered) == {"_truncated": True}
+
+    def test_sorts_remaining_keys(self):
+        renderer = BudgetedJSONRenderer(
+            500, key_order=["event"], sort_keys=True
+        )
+        event = {"z": 1, "event": "hello", "a": 2}
+
+        rendered = renderer(None, None, event)
+
+        assert list(json.loads(rendered)) == ["event", "a", "z"]
 
 
 class TestTimeStamper:

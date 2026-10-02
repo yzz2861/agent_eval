@@ -205,6 +205,8 @@ API Reference
          ...     log.exception("Cannot compute!")
          {"event": "Cannot compute!", "exception": [{"exc_type": "ZeroDivisionError", "exc_value": "division by zero", "exc_notes": [], "syntax_error": null, "is_cause": false, "frames": [{"filename": "<doctest default[3]>", "lineno": 2, "name": "<module>", "locals": {..., "var": "'spam'"}}], "is_group": false, "exceptions": []}]}
 
+.. autoclass:: BudgetedJSONRenderer
+
 .. autoclass:: KeyValueRenderer
 
    .. doctest::

@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from types import FrameType, TracebackType
 from typing import (
     Any,
@@ -49,6 +49,7 @@ from .typing import (
 
 __all__ = [
     "NAME_TO_LEVEL",  # some people rely on it being here
+    "BudgetedJSONRenderer",
     "CallsiteParameter",
     "CallsiteParameterAdder",
     "EventRenamer",
@@ -369,6 +370,445 @@ def _json_fallback_handler(obj: Any) -> Any:
         return obj.__structlog__()
     except AttributeError:
         return repr(obj)
+
+
+_BUDGET_FAILURE: Final[bytes] = b'{"_truncated":true}'
+_BUDGET_TRUNCATION_MESSAGE: Final[str] = "truncated to fit byte budget"
+
+
+class BudgetedJSONRenderer:
+    """
+    Render an event dictionary as JSON that fits into a UTF-8 byte budget.
+
+    Top-level fields are rendered in priority order. Fields omitted from
+    *key_order* are rendered afterwards, in either insertion or sorted order.
+    When the budget is exhausted, strings are shortened and remaining fields
+    and nested values are omitted. A truncation marker is added to the event.
+
+    Rendering is incremental and never builds a full serialization that is
+    larger than the configured budget. The original event dictionary is not
+    modified.
+
+    Args:
+        max_bytes: Maximum size of the rendered JSON in UTF-8 bytes.
+        key_order: Top-level field names in descending priority order.
+        sort_keys: Whether to sort fields not listed in *key_order*.
+        default: Callable used to make unsupported values JSON serializable.
+        ensure_ascii: Escape non-ASCII characters when ``True``.
+
+    Raises:
+        ValueError: If *max_bytes* is smaller than the mandatory failure
+            record.
+
+    .. versionadded:: 26.2.0
+    """
+
+    def __init__(
+        self,
+        max_bytes: int,
+        key_order: Sequence[str] | None = None,
+        *,
+        sort_keys: bool = False,
+        default: Callable[[Any], Any] | None = None,
+        ensure_ascii: bool = False,
+    ) -> None:
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool):
+            msg = "max_bytes must be an integer"
+            raise TypeError(msg)
+        if max_bytes < len(_BUDGET_FAILURE):
+            msg = f"max_bytes must be at least {len(_BUDGET_FAILURE)} bytes"
+            raise ValueError(msg)
+
+        self._max_bytes = max_bytes
+        self._sort_keys = sort_keys
+        self._ensure_ascii = ensure_ascii
+        self._default = default or _json_fallback_handler
+        self._key_order = tuple(key_order or ())
+
+        message = (
+            b'"' + self._encode_string_piece(_BUDGET_TRUNCATION_MESSAGE) + b'"'
+        )
+        self._marker_append = b',"_truncated":' + message
+        self._marker_standalone = b'{"_truncated":' + message[1:] + b"}"
+
+    def __call__(
+        self, logger: WrappedLogger, name: str, event_dict: EventDict
+    ) -> str:
+        try:
+            rendered = self._render_event(event_dict)
+        except Exception:  # noqa: BLE001
+            rendered = _BUDGET_FAILURE
+
+        return rendered.decode("utf-8")
+
+    def _render_event(self, event_dict: EventDict) -> bytes:  # noqa: PLR0911
+        if not isinstance(event_dict, Mapping):
+            return _BUDGET_FAILURE
+
+        body, truncated, fatal = self._render_mapping(
+            event_dict,
+            self._max_bytes,
+            set(),
+            root=True,
+        )
+        if fatal:
+            return _BUDGET_FAILURE
+
+        if not truncated:
+            return b"{" + body + b"}"
+
+        marker = self._marker_append[1:]
+        rendered = b"{" + body + marker + b"}"
+        if len(rendered) <= self._max_bytes:
+            return rendered
+
+        marker = b',"_truncated":true'
+        body, truncated, fatal = self._render_mapping(
+            event_dict,
+            self._max_bytes - len(marker),
+            set(),
+            root=True,
+        )
+        if not fatal and truncated:
+            suffix = marker if body else marker[1:]
+            rendered = b"{" + body + suffix + b"}"
+            if len(rendered) <= self._max_bytes:
+                return rendered
+
+        body, truncated, fatal = self._render_mapping(
+            event_dict,
+            self._max_bytes - len(self._marker_append),
+            set(),
+            root=True,
+        )
+        if not fatal and truncated:
+            suffix = self._marker_append if body else self._marker_append[1:]
+            rendered = b"{" + body + suffix + b"}"
+            if len(rendered) <= self._max_bytes:
+                return rendered
+
+        return _BUDGET_FAILURE
+
+    def _render_mapping(
+        self,
+        mapping: Mapping[Any, Any],
+        budget: int,
+        seen: set[int],
+        *,
+        root: bool = False,
+    ) -> tuple[bytes | None, bool, bool]:
+        if budget < 2:
+            return None, True, root
+
+        content_budget = budget - 2
+
+        mapping_id = id(mapping)
+        if mapping_id in seen:
+            msg = "Circular reference detected"
+            raise ValueError(msg)
+
+        seen.add(mapping_id)
+        try:
+            parts: list[bytes] = []
+            total = 0
+            truncated = False
+
+            for index, (key, value) in enumerate(
+                self._mapping_items(mapping, root)
+            ):
+                try:
+                    separator_length = 0 if index == 0 else 1
+                    key_token = self._render_key(
+                        key,
+                        content_budget - total - separator_length - 2,
+                        root,
+                    )
+                    if key_token is None:
+                        truncated = True
+                        break
+
+                    value_budget = (
+                        content_budget
+                        - total
+                        - separator_length
+                        - len(key_token)
+                        - 1
+                    )
+                    rendered_value, value_truncated = self._render_value(
+                        value,
+                        value_budget,
+                        seen,
+                    )
+                except Exception:  # noqa: BLE001
+                    if root and not parts:
+                        return None, True, True
+                    truncated = True
+                    break
+
+                if rendered_value is None:
+                    truncated = True
+                    if root and not parts:
+                        return None, True, True
+                    break
+
+                separator = b"" if index == 0 else b","
+                item = separator + key_token + b":" + rendered_value
+                parts.append(item)
+                total += len(item)
+                if value_truncated:
+                    truncated = True
+                    break
+
+            return b"".join(parts), truncated, False
+        finally:
+            seen.remove(mapping_id)
+
+    def _mapping_items(
+        self, mapping: Mapping[Any, Any], root: bool
+    ) -> list[tuple[Any, Any]]:
+        if not root:
+            items = list(mapping.items())
+            if self._sort_keys:
+                items.sort(key=lambda item: str(item[0]))
+            return items
+
+        items = []
+        used = set()
+        for key in self._key_order:
+            if key in mapping:
+                items.append((key, mapping[key]))
+                used.add(key)
+
+        extras = [
+            (key, value) for key, value in mapping.items() if key not in used
+        ]
+        if self._sort_keys:
+            extras.sort(key=lambda item: str(item[0]))
+
+        items.extend(extras)
+        return items
+
+    def _render_array(
+        self, values: Collection[Any], budget: int, seen: set[int]
+    ) -> tuple[bytes | None, bool]:
+        if budget < 2:
+            return None, True
+
+        array_id = id(values)
+        if array_id in seen:
+            msg = "Circular reference detected"
+            raise ValueError(msg)
+
+        seen.add(array_id)
+        try:
+            parts: list[bytes] = []
+            total = 0
+            truncated = False
+
+            for index, value in enumerate(values):
+                separator_length = 0 if index == 0 else 1
+                try:
+                    rendered, value_truncated = self._render_value(
+                        value,
+                        budget - total - separator_length - 1,
+                        seen,
+                    )
+                except Exception:  # noqa: BLE001
+                    rendered, value_truncated = None, True
+
+                if rendered is None:
+                    truncated = True
+                    break
+
+                separator = b"" if index == 0 else b","
+                parts.append(separator + rendered)
+                total += len(parts[-1])
+                if value_truncated:
+                    truncated = True
+                    break
+
+            return b"".join(parts), truncated
+        finally:
+            seen.remove(array_id)
+
+    def _render_value(  # noqa: PLR0911
+        self,
+        value: Any,
+        budget: int,
+        seen: set[int],
+    ) -> tuple[bytes | None, bool]:
+        if value is None:
+            return self._render_scalar(b"null", budget), False
+        if value is True:
+            return self._render_scalar(b"true", budget), False
+        if value is False:
+            return self._render_scalar(b"false", budget), False
+        if isinstance(value, str):
+            return self._render_string(value, budget)
+        if isinstance(value, int):
+            return self._render_integer(value, budget), False
+        if isinstance(value, float):
+            return self._render_float(value, budget), False
+        if isinstance(value, Mapping):
+            budget -= 2
+            body, truncated, _ = self._render_mapping(value, budget, seen)
+            if body is None:
+                return None, True
+            return b"{" + body + b"}", truncated
+        if isinstance(value, (list, tuple)):
+            budget -= 2
+            body, truncated = self._render_array(value, budget, seen)
+            if body is None:
+                return None, True
+            return b"[" + body + b"]", truncated
+
+        return self._render_unknown(value, budget, seen)
+
+    def _render_unknown(
+        self,
+        value: Any,
+        budget: int,
+        seen: set[int],
+    ) -> tuple[bytes | None, bool]:
+        value_id = id(value)
+        if value_id in seen:
+            msg = "Circular reference detected"
+            raise ValueError(msg)
+
+        seen.add(value_id)
+        try:
+            converted = self._default(value)
+            if isinstance(converted, str):
+                return self._render_string(converted, budget)
+            if isinstance(converted, (Mapping, list, tuple)):
+                return self._render_value(converted, budget, seen)
+            if converted is None or isinstance(converted, (bool, int, float)):
+                return self._render_value(converted, budget, seen)
+
+            return self._render_string(repr(converted), budget)
+        finally:
+            seen.remove(value_id)
+
+    def _render_key(self, key: Any, budget: int, root: bool) -> bytes | None:
+        encoded = self._encode_key_token(key)
+        if root:
+            return encoded if len(encoded) <= budget else None
+        rendered, truncated = self._render_string(
+            key if isinstance(key, str) else str(key), budget
+        )
+        if truncated:
+            return None
+        return rendered
+
+    def _encode_key_token(self, key: Any) -> bytes:
+        if not isinstance(key, str):
+            key = str(key)
+        position = 0
+        encoded = b""
+        while position < len(key):
+            piece = self._next_string_piece(key, position)
+            encoded += self._encode_string_piece(piece)
+            position += len(piece)
+        return b'"' + encoded + b'"'
+
+    def _render_scalar(self, token: bytes, budget: int) -> bytes | None:
+        return token if len(token) <= budget else None
+
+    def _render_integer(self, value: int, budget: int) -> bytes | None:
+        digits = max(1, value.bit_length() * 2 // 7 + 2)
+        if digits + (1 if value < 0 else 0) > budget:
+            return None
+
+        token = str(value).encode("ascii")
+        return token if len(token) <= budget else None
+
+    def _render_float(self, value: float, budget: int) -> bytes | None:
+        token = json.dumps(
+            value, ensure_ascii=self._ensure_ascii, allow_nan=False
+        ).encode("ascii")
+        return token if len(token) <= budget else None
+
+    def _render_string(
+        self, value: str, budget: int
+    ) -> tuple[bytes | None, bool]:
+        if budget < 2:
+            return None, True
+        if budget < 5:
+            return b'""', True
+
+        pieces: list[tuple[str, bytes]] = []
+        position = 0
+        encoded_size = 0
+        while position < len(value):
+            piece = self._next_string_piece(value, position)
+            encoded_piece = self._encode_string_piece(piece)
+            if encoded_size + len(encoded_piece) + 1 > budget:
+                break
+            pieces.append((piece, encoded_piece))
+            encoded_size += len(encoded_piece)
+            position += len(piece)
+        else:
+            rendered = b'"' + b"".join(chunk for _, chunk in pieces)
+            return rendered + b'"', False
+
+        over_piece = piece
+        while pieces:
+            previous_piece, previous_encoded = pieces.pop()
+            position -= len(previous_piece)
+            encoded_size -= len(previous_encoded)
+            candidate_piece = previous_piece + over_piece
+            prefix = self._longest_piece_prefix(
+                candidate_piece, budget - encoded_size - 5
+            )
+            if prefix is not None:
+                rendered = b'"' + b"".join(chunk for _, chunk in pieces)
+                return rendered + prefix + b'..."', True
+            over_piece = candidate_piece
+
+        prefix = self._longest_piece_prefix(over_piece, budget - 5)
+        if prefix is None:
+            return b'""', True
+        return b'"' + prefix + b'..."', True
+
+    def _longest_piece_prefix(self, piece: str, limit: int) -> bytes | None:
+        low = 0
+        high = len(piece) + 1
+        while low < high:
+            middle = (low + high) // 2
+            candidate = self._encode_string_piece(piece[:middle])
+            if len(candidate) <= limit:
+                low = middle + 1
+            else:
+                high = middle
+
+        count = low - 1
+        if count < 0:
+            return None
+        prefix = self._encode_string_piece(piece[:count])
+        return prefix if len(prefix) <= limit else None
+
+    def _next_string_piece(self, value: str, start: int) -> str:
+        chunk_size = 4096 if self._ensure_ascii else 2048
+        piece = value[start : start + chunk_size]
+        end = start + len(piece)
+        if (
+            not self._ensure_ascii
+            and piece
+            and "\ud800" <= piece[-1] <= "\udbff"
+            and end < len(value)
+        ):
+            piece += value[end]
+        return piece
+
+    def _encode_string_piece(self, piece: str) -> bytes:
+        try:
+            return json.dumps(
+                piece,
+                ensure_ascii=self._ensure_ascii,
+                separators=(",", ":"),
+            )[1:-1].encode("utf-8")
+        except UnicodeEncodeError:
+            return "\ufffd".encode()
 
 
 class ExceptionRenderer:

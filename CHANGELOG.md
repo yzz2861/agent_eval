@@ -15,6 +15,10 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.processors.BudgetedJSONRenderer` renders events as UTF-8 JSON that always fits into a configured byte budget, preserving fields by priority and adding an explicit truncation marker.
+
 
 ## [26.1.0](https://github.com/hynek/structlog/compare/25.5.0...26.1.0) - 2026-06-06
 
