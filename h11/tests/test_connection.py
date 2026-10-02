@@ -238,6 +238,71 @@ def test_chunk_boundaries() -> None:
     assert conn.next_event() == EndOfMessage()
 
 
+def test_chunk_extensions_round_trip() -> None:
+    client = Connection(CLIENT)
+    server = Connection(SERVER)
+    request = Request(
+        method="POST",
+        target="/",
+        headers=[
+            ("Host", "example.com"),
+            ("Transfer-Encoding", "chunked"),
+        ],
+    )
+    wire = client.send(request)
+    assert (
+        client.send(
+            Data(
+                data=b"ab",
+                chunk_start=True,
+                chunk_end=False,
+                extensions=[("flag", None), ("name", b'a;b="c"')],
+            )
+        )
+        == b""
+    )
+    wire += client.send(Data(data=b"c", chunk_start=False, chunk_end=True))
+    wire += client.send(
+        EndOfMessage(
+            headers=[("Trailer", "x")],
+            extensions=[("done", None)],
+        )
+    )
+    server.receive_data(wire)
+    assert server.next_event() == Request(
+        method="POST",
+        target="/",
+        headers=[("Host", "example.com"), ("Transfer-Encoding", "chunked")],
+    )
+    assert server.next_event() == Data(
+        data=b"abc",
+        chunk_start=True,
+        chunk_end=True,
+        extensions=[(b"flag", None), (b"name", b'a;b="c"')],
+    )
+    assert server.next_event() == EndOfMessage(
+        headers=[("Trailer", "x")],
+        extensions=[(b"done", None)],
+    )
+
+
+def test_chunk_extension_header_limit() -> None:
+    conn = Connection(SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n"
+        b"5;name=" + b"x" * 8192 + b"\r\n"
+    )
+    assert conn.next_event() == Request(
+        method="POST",
+        target="/",
+        headers=[("Host", "example.com"), ("Transfer-Encoding", "chunked")],
+    )
+    with pytest.raises(RemoteProtocolError):
+        conn.next_event()
+
+
 def test_client_talking_to_http10_server() -> None:
     c = Connection(CLIENT)
     c.send(Request(method="GET", target="/", headers=[("Host", "example.com")]))

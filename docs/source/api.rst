@@ -1096,3 +1096,14 @@ Again, it is *strongly encouraged* that you avoid relying on this information
 if at all possible. This functionality should be considered an escape hatch for
 when there is no alternative but to rely on the information, rather than a
 general source of data that is worth relying on.
+
+Chunk extensions are attached to the same protocol chunk header as these
+markers. They are represented as an ordered list of ``(name, value)`` byte
+pairs, with a value of ``None`` for valueless extensions. When a received
+protocol chunk is delivered as more than one :class:`Data` event, its
+extensions are exposed only on the first event; later fragments have an
+empty extension list. When sending, put the extensions on the first
+:class:`Data` fragment and use :data:`Data.chunk_start` and
+:data:`Data.chunk_end` to mark fragments that belong to the same protocol
+chunk. Extensions on the final zero-length chunk are attached to
+:class:`EndOfMessage`.

@@ -43,12 +43,18 @@ def normalize_data_events(in_events: List[Event]) -> List[Event]:
     out_events: List[Event] = []
     for event in in_events:
         if type(event) is Data:
-            event = Data(data=bytes(event.data), chunk_start=False, chunk_end=False)
+            event = Data(
+                data=bytes(event.data),
+                chunk_start=False,
+                chunk_end=False,
+                extensions=event.extensions,
+            )
         if out_events and type(out_events[-1]) is type(event) is Data:
             out_events[-1] = Data(
                 data=out_events[-1].data + event.data,
-                chunk_start=out_events[-1].chunk_start,
-                chunk_end=out_events[-1].chunk_end,
+                chunk_start=False,
+                chunk_end=False,
+                extensions=out_events[-1].extensions or event.extensions,
             )
         else:
             out_events.append(event)

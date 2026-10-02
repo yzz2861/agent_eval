@@ -8,9 +8,14 @@
 import re
 from abc import ABC
 from dataclasses import dataclass
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 from ._abnf import method, request_target
+from ._chunk_extensions import (
+    ChunkExtensionInputs,
+    ChunkExtensions,
+    normalize_chunk_extensions,
+)
 from ._headers import Headers, normalize_and_validate
 from ._util import bytesify, LocalProtocolError, validate
 
@@ -273,35 +278,48 @@ class Data(Event):
     .. attribute:: chunk_start
 
        A marker that indicates whether this data object is from the start of a
-       chunked transfer encoding chunk. This field is ignored when when a Data
-       event is provided to :meth:`Connection.send`: it is only valid on
-       events emitted from :meth:`Connection.next_event`. You probably
-       shouldn't use this attribute at all; see
+       chunked transfer encoding chunk. When sending, it marks the start of a
+       protocol chunk that may be continued in later :class:`Data` events. You
+       probably shouldn't use this attribute at all; see
        :ref:`chunk-delimiters-are-bad` for details.
 
     .. attribute:: chunk_end
 
        A marker that indicates whether this data object is the last for a
-       given chunked transfer encoding chunk. This field is ignored when when
-       a Data event is provided to :meth:`Connection.send`: it is only valid
-       on events emitted from :meth:`Connection.next_event`. You probably
-       shouldn't use this attribute at all; see
-       :ref:`chunk-delimiters-are-bad` for details.
+       given chunked transfer encoding chunk. When sending, it marks the
+       final :class:`Data` event belonging to a protocol chunk started with
+       :attr:`chunk_start`. You probably shouldn't use this attribute at
+       all; see :ref:`chunk-delimiters-are-bad` for details.
+
+    .. attribute:: extensions
+
+       The ordered chunk extensions from this chunk's header. An extension
+       is represented as a ``(name, value)`` pair, where ``None`` means the
+       extension had no value. Extensions are only present on the first
+       :class:`Data` event emitted from a chunk; fragments from the same
+       chunk use an empty list. When sending, extensions on a non-final
+       :class:`Data` fragment are attached to the buffered protocol chunk.
 
     """
 
-    __slots__ = ("data", "chunk_start", "chunk_end")
+    __slots__ = ("data", "chunk_start", "chunk_end", "extensions")
 
     data: bytes
     chunk_start: bool
     chunk_end: bool
+    extensions: ChunkExtensions
 
     def __init__(
-        self, data: bytes, chunk_start: bool = False, chunk_end: bool = False
+        self,
+        data: bytes,
+        chunk_start: bool = False,
+        chunk_end: bool = False,
+        extensions: Optional[ChunkExtensionInputs] = None,
     ) -> None:
         object.__setattr__(self, "data", data)
         object.__setattr__(self, "chunk_start", chunk_start)
         object.__setattr__(self, "chunk_end", chunk_end)
+        object.__setattr__(self, "extensions", normalize_chunk_extensions(extensions))
 
     # This is an unhashable type.
     __hash__ = None  # type: ignore
@@ -328,11 +346,17 @@ class EndOfMessage(Event):
 
        Must be empty unless ``Transfer-Encoding: chunked`` is in use.
 
+    .. attribute:: extensions
+
+       The ordered chunk extensions attached to the final zero-length
+       chunk, represented in the same form as :attr:`Data.extensions`.
+
     """
 
-    __slots__ = ("headers",)
+    __slots__ = ("headers", "extensions")
 
     headers: Headers
+    extensions: ChunkExtensions
 
     def __init__(
         self,
@@ -340,6 +364,7 @@ class EndOfMessage(Event):
         headers: Union[
             Headers, List[Tuple[bytes, bytes]], List[Tuple[str, str]], None
         ] = None,
+        extensions: Optional[ChunkExtensionInputs] = None,
         _parsed: bool = False,
     ) -> None:
         super().__init__()
@@ -349,6 +374,7 @@ class EndOfMessage(Event):
             headers = normalize_and_validate(headers, _parsed=_parsed)
 
         object.__setattr__(self, "headers", headers)
+        object.__setattr__(self, "extensions", normalize_chunk_extensions(extensions))
 
     # This is an unhashable type.
     __hash__ = None  # type: ignore

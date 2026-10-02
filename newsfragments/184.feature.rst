@@ -1,0 +1,3 @@
+Support reading and writing HTTP/1.1 chunk extensions, including ordered,
+valueless, quoted, and final zero-length-chunk extensions. Senders can now
+also split one protocol chunk across multiple :class:`h11.Data` events.

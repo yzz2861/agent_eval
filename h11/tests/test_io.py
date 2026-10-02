@@ -348,6 +348,16 @@ def _run_reader(*args: Any) -> List[Event]:
     return normalize_data_events(events)
 
 
+def _run_reader_byte_by_byte(thunk: Any, data: bytes) -> List[Event]:
+    reader = thunk()
+    buf = ReceiveBuffer()
+    events: List[Event] = []
+    for byte in data:
+        buf += bytes([byte])
+        events.extend(_run_reader_iter(reader, buf, False))
+    return events
+
+
 def t_body_reader(thunk: Any, data: bytes, expected: Any, do_eof: bool = False) -> None:
     # Simple: consume whole thing
     print("Test 1")
@@ -367,7 +377,7 @@ def t_body_reader(thunk: Any, data: bytes, expected: Any, do_eof: bool = False) 
     events = []
     try:
         for i in range(len(data)):
-            events += _run_reader(reader, buf, False)
+            events += list(_run_reader_iter(reader, buf, False))
             buf += data[i : i + 1]
         events += _run_reader(reader, buf, do_eof)
         assert normalize_data_events(events) == expected
@@ -443,15 +453,72 @@ def test_ChunkedReader() -> None:
     # refuses garbage in the chunk count
     t_body_reader(ChunkedReader, b"10\x00\r\nxxx", [LocalProtocolError])
 
-    # handles (and discards) "chunk extensions" omg wtf
+    extensions = [
+        (b"flag", None),
+        (b"name", b"token"),
+        (b"quote", b'a;b="x"'),
+        (b"empty", b""),
+        (b"order", b"1"),
+    ]
     t_body_reader(
         ChunkedReader,
-        b"5; hello=there\r\n"
+        b'5;flag;name=token;quote="a;b=\\"x\\"";empty="";order=1\r\n'
         + b"xxxxx"
         + b"\r\n"
-        + b'0; random="junk"; some=more; canbe=lonnnnngg\r\n\r\n',
-        [Data(data=b"xxxxx"), EndOfMessage()],
+        + b'0;final;empty=""\r\n'
+        + b"Some: header\r\n\r\n",
+        [
+            Data(data=b"xxxxx", extensions=extensions),
+            EndOfMessage(
+                headers=[("Some", "header")],
+                extensions=[(b"final", None), (b"empty", b"")],
+            ),
+        ],
     )
+
+    t_body_reader(
+        ChunkedReader,
+        b"0;gone\r\n\r\n",
+        [EndOfMessage(extensions=[(b"gone", None)])],
+    )
+
+    wire = (
+        b'5;flag;quote="a;b=\\"x\\""\r\n'
+        + b"hel"
+        + b"l"
+        + b"o\r\n"
+        + b"0;final\r\n"
+        + b"Some: header\r\n\r\n"
+    )
+    events = _run_reader_byte_by_byte(ChunkedReader, wire)
+    assert events == [
+        Data(
+            data=b"h",
+            chunk_start=True,
+            chunk_end=False,
+            extensions=[(b"flag", None), (b"quote", b'a;b="x"')],
+        ),
+        Data(data=b"e", chunk_start=False, chunk_end=False, extensions=[]),
+        Data(data=b"l", chunk_start=False, chunk_end=False, extensions=[]),
+        Data(data=b"l", chunk_start=False, chunk_end=False, extensions=[]),
+        Data(data=b"o", chunk_start=False, chunk_end=True, extensions=[]),
+        EndOfMessage(
+            headers=[("Some", "header")],
+            extensions=[(b"final", None)],
+        ),
+    ]
+
+    for malformed in [
+        b"5; \r\nxxxxx",
+        b"5;flag ;x\r\nxxxxx",
+        b"5; bad=,\r\nxxxxx",
+        b'5; bad="unterminated\r\nxxxxx',
+        b"5; bad=\x00\r\nxxxxx",
+    ]:
+        t_body_reader(ChunkedReader, malformed, [LocalProtocolError])
+
+    oversized = b"5;name=" + b"x" * 8192 + b"\r\nxxxxx"
+    t_body_reader(ChunkedReader, oversized, [LocalProtocolError])
 
     t_body_reader(
         ChunkedReader,
@@ -507,12 +574,91 @@ def test_ChunkedWriter() -> None:
 
     assert dowrite(w, Data(data=b"")) == b""
 
+    extensions = [
+        (b"flag", None),
+        (b"name", b"token"),
+        (b"quote", b'a;b="x"'),
+        (b"empty", b""),
+    ]
+    assert (
+        dowrite(w, Data(data=b"hello", extensions=extensions))
+        == b'5;flag;name=token;quote="a;b=\\"x\\"";empty=""\r\nhello\r\n'
+    )
+
+    w = ChunkedWriter()
+    assert dowrite(w, Data(data=b"ab", chunk_start=True, chunk_end=False)) == b""
+    assert (
+        dowrite(w, Data(data=b"cde", chunk_start=False, chunk_end=True))
+        == b"5\r\nabcde\r\n"
+    )
+
+    w = ChunkedWriter()
+    assert (
+        dowrite(
+            w,
+            Data(
+                data=b"ab",
+                chunk_start=True,
+                chunk_end=False,
+                extensions=[(b"name", b"value")],
+            ),
+        )
+        == b""
+    )
+    assert (
+        dowrite(w, Data(data=b"c", chunk_start=False, chunk_end=True))
+        == b"3;name=value\r\nabc\r\n"
+    )
+
+    w = ChunkedWriter()
+    assert (
+        dowrite(
+            w,
+            Data(
+                data=b"",
+                chunk_start=True,
+                chunk_end=False,
+                extensions=[(b"name", b"value")],
+            ),
+        )
+        == b""
+    )
+    assert dowrite(w, Data(data=b"abc", chunk_start=False, chunk_end=True)) == (
+        b"3;name=value\r\nabc\r\n"
+    )
+
+    w = ChunkedWriter()
+    dowrite(w, Data(data=b"ab", chunk_start=True, chunk_end=False))
+    with pytest.raises(LocalProtocolError):
+        dowrite(w, Data(data=b"c", chunk_start=True, chunk_end=False))
+    with pytest.raises(LocalProtocolError):
+        dowrite(w, Data(data=b"c", extensions=[(b"name", b"value")]))
+    with pytest.raises(LocalProtocolError):
+        dowrite(w, EndOfMessage())
+
+    w = ChunkedWriter()
+    with pytest.raises(LocalProtocolError):
+        dowrite(w, Data(data=b"abc", chunk_start=False, chunk_end=True))
+    with pytest.raises(LocalProtocolError):
+        dowrite(w, Data(data=b"", chunk_start=True, chunk_end=True))
+
     assert dowrite(w, EndOfMessage()) == b"0\r\n\r\n"
+
+    assert (
+        dowrite(w, EndOfMessage(extensions=[(b"final", None), (b"empty", b"")]))
+        == b'0;final;empty=""\r\n\r\n'
+    )
 
     assert (
         dowrite(w, EndOfMessage(headers=[("Etag", "asdf"), ("a", "b")]))
         == b"0\r\nEtag: asdf\r\na: b\r\n\r\n"
     )
+
+    for writer in [ContentLengthWriter(5), Http10Writer()]:
+        with pytest.raises(LocalProtocolError):
+            dowrite(writer, Data(data=b"abc", extensions=[(b"name", b"value")]))
+        with pytest.raises(LocalProtocolError):
+            dowrite(writer, EndOfMessage(extensions=[(b"name", b"value")]))
 
 
 def test_Http10Writer() -> None:

@@ -17,9 +17,21 @@
 # - or, for body readers, a dict of per-framing reader factories
 
 import re
-from typing import Any, Callable, Dict, Iterable, NoReturn, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    NoReturn,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 from ._abnf import chunk_header, header_field, request_line, status_line
+from ._chunk_extensions import MAX_CHUNK_HEADER_SIZE, parse_chunk_extensions
 from ._events import Data, EndOfMessage, InformationalResponse, Request, Response
 from ._receivebuffer import ReceiveBuffer
 from ._state import (
@@ -148,6 +160,9 @@ chunk_header_re = re.compile(chunk_header.encode("ascii"))
 class ChunkedReader:
     def __init__(self) -> None:
         self._bytes_in_chunk = 0
+        self._chunk_extensions: List[Tuple[bytes, Optional[bytes]]] = []
+        self._last_chunk_extensions: List[Tuple[bytes, Optional[bytes]]] = []
+        self._at_chunk_start = False
         # After reading a chunk, we have to throw away the trailing \r\n.
         # This tracks the bytes that we need to match and throw away.
         self._bytes_to_discard = b""
@@ -158,7 +173,11 @@ class ChunkedReader:
             lines = buf.maybe_extract_lines()
             if lines is None:
                 return None
-            return EndOfMessage(headers=list(_decode_header_lines(lines)))
+            return EndOfMessage(
+                headers=list(_decode_header_lines(lines)),
+                extensions=self._last_chunk_extensions,
+                _parsed=True,
+            )
         if self._bytes_to_discard:
             data = buf.maybe_extract_at_most(len(self._bytes_to_discard))
             if data is None:
@@ -177,20 +196,23 @@ class ChunkedReader:
             chunk_header = buf.maybe_extract_next_line()
             if chunk_header is None:
                 return None
+            if len(chunk_header) > MAX_CHUNK_HEADER_SIZE:
+                raise LocalProtocolError("chunk header too long")
             matches = validate(
                 chunk_header_re,
                 chunk_header,
                 "illegal chunk header: {!r}",
                 chunk_header,
             )
-            # XX FIXME: we discard chunk extensions. Does anyone care?
+            extension_text = matches["chunk_ext"] or b""
             self._bytes_in_chunk = int(matches["chunk_size"], base=16)
+            self._chunk_extensions = parse_chunk_extensions(extension_text)
             if self._bytes_in_chunk == 0:
+                self._last_chunk_extensions = self._chunk_extensions
+                self._chunk_extensions = []
                 self._reading_trailer = True
                 return self(buf)
-            chunk_start = True
-        else:
-            chunk_start = False
+            self._at_chunk_start = True
         assert self._bytes_in_chunk > 0
         data = buf.maybe_extract_at_most(self._bytes_in_chunk)
         if data is None:
@@ -201,7 +223,17 @@ class ChunkedReader:
             chunk_end = True
         else:
             chunk_end = False
-        return Data(data=data, chunk_start=chunk_start, chunk_end=chunk_end)
+        chunk_start = self._at_chunk_start
+        self._at_chunk_start = False
+        extensions = self._chunk_extensions
+        if chunk_start:
+            self._chunk_extensions = []
+        return Data(
+            data=data,
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
+            extensions=extensions,
+        )
 
     def read_eof(self) -> NoReturn:
         raise RemoteProtocolError(

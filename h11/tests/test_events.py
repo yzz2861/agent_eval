@@ -115,9 +115,19 @@ def test_events() -> None:
 
     d = Data(data=b"asdf")
     assert d.data == b"asdf"
+    assert d.extensions == []
+    d = Data(data=b"asdf", extensions=[("flag", None), ("name", "value")])
+    assert d.extensions == [(b"flag", None), (b"name", b"value")]
+    with pytest.raises(LocalProtocolError):
+        Data(data=b"asdf", extensions=[["flag", None]])
+    with pytest.raises(LocalProtocolError):
+        Data(data=b"asdf", extensions=[("flag",)])
 
     eom = EndOfMessage()
     assert eom.headers == []
+    assert eom.extensions == []
+    eom = EndOfMessage(extensions=[("flag", None)])
+    assert eom.extensions == [(b"flag", None)]
 
     cc = ConnectionClosed()
     assert repr(cc) == "ConnectionClosed()"
