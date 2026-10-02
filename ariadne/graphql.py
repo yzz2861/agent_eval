@@ -15,9 +15,11 @@ from graphql import (
     GraphQLSchema,
     MiddlewareManager,
     OperationDefinitionNode,
+    OperationType,
     TypeInfo,
     execute,
     execute_sync,
+    get_operation_ast,
     parse,
 )
 from graphql import (
@@ -188,22 +190,33 @@ async def graphql(
                 result_update = root_value
                 root_value = root_value.root_value
 
-            exec_result = execute(
-                schema,
-                document,
-                root_value=root_value,
-                context_value=context_value,
-                variable_values=variables,
-                operation_name=operation_name,
-                execution_context_class=execution_context_class,
-                middleware=extension_manager.as_middleware_manager(
-                    middleware, middleware_manager_class
-                ),
-                **kwargs,
-            )
+            operation_type = get_operation_type(document, operation_name)
 
-            if isawaitable(exec_result):
-                exec_result = await exec_result
+            await extension_manager.aoperation_started(operation_type)
+            try:
+                exec_result = execute(
+                    schema,
+                    document,
+                    root_value=root_value,
+                    context_value=context_value,
+                    variable_values=variables,
+                    operation_name=operation_name,
+                    execution_context_class=execution_context_class,
+                    middleware=extension_manager.as_middleware_manager(
+                        middleware, middleware_manager_class
+                    ),
+                    **kwargs,
+                )
+
+                if isawaitable(exec_result):
+                    exec_result = await exec_result
+            except BaseException:
+                await extension_manager.aoperation_finished(operation_type, None)
+                raise
+
+            await extension_manager.aoperation_finished(
+                operation_type, exec_result.errors or []
+            )
         except GraphQLError as error:
             error_result = handle_graphql_errors(
                 [error],
@@ -380,25 +393,38 @@ def graphql_sync(
                 result_update = root_value
                 root_value = root_value.root_value
 
-            exec_result = execute_sync(
-                schema,
-                document,
-                root_value=root_value,
-                context_value=context_value,
-                variable_values=variables,
-                operation_name=operation_name,
-                execution_context_class=execution_context_class,
-                middleware=extension_manager.as_middleware_manager(
-                    middleware, middleware_manager_class
-                ),
-                **kwargs,
-            )
+            operation_type = get_operation_type(document, operation_name)
 
-            if isawaitable(exec_result):
-                ensure_future(cast(Awaitable[ExecutionResult], exec_result)).cancel()
-                raise RuntimeError(
-                    "GraphQL execution failed to complete synchronously."
+            extension_manager.operation_started(operation_type)
+            try:
+                exec_result = execute_sync(
+                    schema,
+                    document,
+                    root_value=root_value,
+                    context_value=context_value,
+                    variable_values=variables,
+                    operation_name=operation_name,
+                    execution_context_class=execution_context_class,
+                    middleware=extension_manager.as_middleware_manager(
+                        middleware, middleware_manager_class
+                    ),
+                    **kwargs,
                 )
+
+                if isawaitable(exec_result):
+                    ensure_future(
+                        cast(Awaitable[ExecutionResult], exec_result)
+                    ).cancel()
+                    raise RuntimeError(
+                        "GraphQL execution failed to complete synchronously."
+                    )
+            except BaseException:
+                extension_manager.operation_finished(operation_type, None)
+                raise
+
+            extension_manager.operation_finished(
+                operation_type, exec_result.errors or []
+            )
         except GraphQLError as error:
             error_result = handle_graphql_errors(
                 [error],
@@ -664,6 +690,13 @@ def validate_variables(variables) -> None:
 def validate_operation_name(operation_name) -> None:
     if operation_name is not None and not isinstance(operation_name, str):
         raise GraphQLError(f'"{operation_name}" is not a valid operation name.')
+
+
+def get_operation_type(
+    document_ast: DocumentNode, operation_name: str | None
+) -> OperationType | None:
+    operation = get_operation_ast(document_ast, operation_name)
+    return operation.operation if operation else None
 
 
 def validate_operation_is_query(document_ast: DocumentNode, operation_name: str | None):

@@ -4,7 +4,7 @@ from .enums_default_values import (
     validate_schema_default_enum_values,
 )
 from .executable_schema import make_executable_schema
-from .extensions import ExtensionManager
+from .extensions import ExtensionManager, TransactionExtension
 from .file_uploads import combine_multipart_data, upload_scalar
 from .format_error import (
     format_error,
@@ -30,7 +30,7 @@ from .subscription_handlers import (
     SubscriptionHandler,
 )
 from .subscriptions import SubscriptionType
-from .types import Extension, SchemaBindable
+from .types import Extension, SchemaBindable, Transaction, TransactionFactory
 from .unions import UnionType
 from .utils import (
     convert_camel_case_to_snake,
@@ -56,6 +56,9 @@ __all__ = [
     "SubscriptionEventType",
     "SubscriptionHandler",
     "SubscriptionType",
+    "Transaction",
+    "TransactionExtension",
+    "TransactionFactory",
     "UnionType",
     "combine_multipart_data",
     "convert_camel_case_to_snake",

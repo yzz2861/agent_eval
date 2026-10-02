@@ -6,4 +6,5 @@ For released versions, see the [Releases](https://github.com/mirumee/ariadne/rel
 
 ## Unreleased
 
+- Added `TransactionExtension` that wraps mutation operations in application-provided transactions, committing them only when execution completes without errors and rolling them back on errors, interruptions or cancellations. Added `operation_started` and `operation_finished` hooks to `Extension` base class and `Transaction` and `TransactionFactory` types.
 

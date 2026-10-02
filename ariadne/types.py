@@ -1,5 +1,6 @@
 from collections.abc import (
     AsyncGenerator,
+    Awaitable,
     Callable,
     Collection,
     Generator,
@@ -19,6 +20,7 @@ from graphql import (
     GraphQLError,
     GraphQLResolveInfo,
     GraphQLSchema,
+    OperationType,
 )
 from graphql.utilities.type_info import TypeInfo
 from graphql.validation.rules import ASTValidationRule
@@ -49,6 +51,8 @@ __all__ = [
     "OnComplete",
     "Extension",
     "SchemaBindable",
+    "Transaction",
+    "TransactionFactory",
 ]
 
 
@@ -605,6 +609,72 @@ class Extension:
     def format(self, context: ContextValue) -> dict | None:
         """Extension hook executed to retrieve extra data to include in result's
         `extensions` data."""
+
+    def operation_started(
+        self, context: ContextValue, operation_type: OperationType | None
+    ) -> Any:
+        """Extension hook executed after query's validation, before its execution.
+
+        # Arguments
+
+        `context`: a `ContextValue` of type specific to the server.
+
+        `operation_type`: an `OperationType` of the executed operation
+        (`query`, `mutation` or `subscription`), or `None` if it
+        couldn't be resolved from the document.
+
+        In asynchronous query executor this hook may return an awaitable.
+        """
+
+    def operation_finished(
+        self,
+        context: ContextValue,
+        operation_type: OperationType | None,
+        errors: list[GraphQLError] | None,
+    ) -> Any:
+        """Extension hook executed after operation's execution.
+
+        # Arguments
+
+        `context`: a `ContextValue` of type specific to the server.
+
+        `operation_type`: an `OperationType` of the executed operation
+        (`query`, `mutation` or `subscription`), or `None` if it
+        couldn't be resolved from the document.
+
+        `errors`: a `list` of GraphQL errors from the execution result
+        (empty when execution succeeded), or `None` if the execution itself
+        raised an exception (including cancellation).
+
+        In asynchronous query executor this hook may return an awaitable.
+        """
+
+
+@runtime_checkable
+class Transaction(Protocol):
+    """Protocol for transaction objects used by `TransactionExtension`.
+
+    Transaction objects are created by the transaction factory and are
+    ORM-agnostic: they only need to expose `commit` and `rollback`
+    methods. Both methods may return awaitables in asynchronous query executor.
+    """
+
+    def commit(self) -> Any:
+        """Commits the transaction."""
+
+    def rollback(self) -> Any:
+        """Rolls the transaction back."""
+
+
+"""Type of transaction factory used by `TransactionExtension`.
+
+It's a callable that takes the GraphQL `ContextValue` and returns
+a `Transaction` object (or an awaitable resolving to one in
+asynchronous query executor).
+"""
+TransactionFactory = Callable[
+    [ContextValue | None], "Transaction | Awaitable[Transaction]"
+]
 
 
 @runtime_checkable
