@@ -40,7 +40,7 @@ module Sequel
     
     # Methods that return modified datasets
     QUERY_METHODS = ((<<-METHS).split.map(&:to_sym) + JOIN_METHODS).freeze
-      add_graph_aliases distinct except exclude exclude_having
+      add_graph_aliases distinct divide except exclude exclude_having
       filter for_update from from_self graph grep group group_and_count group_append group_by having intersect invert
       limit lock_style naked offset or order order_append order_by order_more order_prepend qualify
       reverse reverse_order select select_all select_append select_group select_more select_prepend server
@@ -134,6 +134,105 @@ module Sequel
       else
         raise(InvalidOperation, "DISTINCT ON not supported") unless supports_distinct_on?
         clone(:distinct => args.freeze)
+      end
+    end
+
+    # Performs a relational division, returning the rows of the current
+    # dataset (the dividend) that are related through the child dataset to
+    # every row of the required relation.  This answers questions such as
+    # "which suppliers hold all of the required qualifications" without
+    # loading any data into Ruby, and the returned dataset can be further
+    # filtered, ordered, and paginated like any other dataset.
+    #
+    #   DB[:suppliers].divide(DB[:supplier_qualifications],
+    #     by: {id: :supplier_id},
+    #     on: :qualification_id,
+    #     matching: [1, 2, 3])
+    #   # SELECT * FROM suppliers
+    #   # WHERE ((EXISTS (SELECT * FROM supplier_qualifications
+    #   #   WHERE ((supplier_qualifications.supplier_id = suppliers.id)
+    #   #     AND (supplier_qualifications.qualification_id = 1))))
+    #   #   AND (EXISTS (... qualification_id = 2)))
+    #   #   AND (EXISTS (... qualification_id = 3))))
+    #
+    # The required relation can also be a dataset, in which case a row is
+    # returned when no required row lacks a matching child row:
+    #
+    #   DB[:suppliers].divide(DB[:supplier_qualifications],
+    #     by: {id: :supplier_id},
+    #     on: :qualification_id,
+    #     matching: DB[:required_qualifications].select(:qualification_id))
+    #   # SELECT * FROM suppliers
+    #   # WHERE NOT (EXISTS (
+    #   #   SELECT * FROM (SELECT qualification_id FROM required_qualifications) AS sequel_division_required
+    #   #   WHERE NOT (EXISTS (SELECT * FROM supplier_qualifications
+    #   #     WHERE ((supplier_qualifications.supplier_id = suppliers.id)
+    #   #       AND (supplier_qualifications.qualification_id = sequel_division_required.qualification_id))))))
+    #
+    # If the required relation is empty, all rows of the current dataset
+    # are returned (every required row is vacuously satisfied).
+    #
+    # Duplicate rows in the child dataset do not affect the results, since
+    # matching is based on EXISTS rather than counting.
+    #
+    # Options:
+    # :by :: The join key(s) between the current dataset and the child
+    #        dataset.  A Symbol or Array of Symbols uses the same column
+    #        name(s) on both sides; a Hash maps columns of the current
+    #        dataset to columns of the child dataset.  An Array or Hash
+    #        with multiple entries uses a composite join key.
+    # :on :: The child dataset column(s) matched against the required
+    #        relation.  A Symbol or Array of Symbols uses the same column
+    #        name(s) in the required relation; a Hash maps child dataset
+    #        columns to required relation columns.
+    # :matching :: The required relation.  Either an array of required
+    #        values (arrays of values for composite :on keys), or a
+    #        dataset returning the required rows.
+    # :null :: How NULL values are compared.  The default, :ignore, uses
+    #        regular SQL equality, so NULL never matches.  :match treats
+    #        NULL as equal to NULL (IS NOT DISTINCT FROM semantics).
+    def divide(child, opts=OPTS)
+      by = opts[:by] or raise Error, "divide requires the :by option giving the join key(s) between the datasets"
+      on = opts[:on] or raise Error, "divide requires the :on option giving the child column(s) to match"
+      raise Error, "divide requires the :matching option giving the required relation" unless opts.key?(:matching)
+      matching = opts[:matching]
+      null_strategy = opts[:null] || :ignore
+      unless null_strategy == :ignore || null_strategy == :match
+        raise Error, "invalid :null option for divide: #{null_strategy.inspect} (expected :ignore or :match)"
+      end
+
+      child_ds = child.is_a?(Dataset) ? child : @db[child]
+      parent_alias = first_source_alias
+      child_alias = child_ds.first_source_alias
+      if child_alias == parent_alias
+        child_alias = :sequel_division_child
+        child_ds = child_ds.from_self(alias: child_alias)
+      end
+
+      join_cond = divide_key_pairs(by).map do |parent_col, child_col|
+        divide_comparison(SQL::QualifiedIdentifier.new(parent_alias, parent_col), SQL::QualifiedIdentifier.new(child_alias, child_col), null_strategy)
+      end
+      on_pairs = divide_key_pairs(on)
+
+      if matching.is_a?(Dataset)
+        required_alias = :sequel_division_required
+        match_cond = on_pairs.map do |child_col, required_col|
+          divide_comparison(SQL::QualifiedIdentifier.new(child_alias, child_col), SQL::QualifiedIdentifier.new(required_alias, required_col), null_strategy)
+        end
+        exists = child_ds.where(Sequel.&(*(join_cond + match_cond))).exists
+        where(Sequel.~(matching.from_self(alias: required_alias).where(Sequel.~(exists)).exists))
+      else
+        ds = self
+        join_expr = Sequel.&(*join_cond)
+        matching.each do |value|
+          values = on_pairs.length == 1 ? [value] : Array(value)
+          unless values.length == on_pairs.length
+            raise Error, "divide :matching entry #{value.inspect} does not have #{on_pairs.length} value(s) matching the :on option"
+          end
+          cond = on_pairs.map.with_index{|(child_col, _), i| [SQL::QualifiedIdentifier.new(child_alias, child_col), values[i]]}
+          ds = ds.where(child_ds.where(join_expr).where(SQL::BooleanExpression.from_value_pairs(cond)).exists)
+        end
+        ds
       end
     end
 
@@ -1353,6 +1452,31 @@ module Sequel
     end
 
     private
+
+    # Normalize the :by/:on options for divide into an array of
+    # [left column, right column] pairs.
+    def divide_key_pairs(keys)
+      case keys
+      when Hash
+        keys.map{|k, v| [k, v]}
+      when Array
+        keys.map{|k| [k, k]}
+      else
+        [[keys, keys]]
+      end
+    end
+
+    # The comparison expression used by divide for a pair of columns.
+    # With the :match NULL strategy, NULL is treated as equal to NULL.
+    def divide_comparison(lhs, rhs, null_strategy)
+      if null_strategy == :match
+        SQL::BooleanExpression.new(:OR,
+          SQL::BooleanExpression.from_value_pairs([[lhs, rhs]]),
+          SQL::BooleanExpression.from_value_pairs([[lhs, nil], [rhs, nil]]))
+      else
+        SQL::BooleanExpression.from_value_pairs([[lhs, rhs]])
+      end
+    end
 
     # simplecov:disable
     unless TRUE_FREEZE

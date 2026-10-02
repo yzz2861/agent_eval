@@ -2393,6 +2393,100 @@ describe "Dataset#distinct" do
   end
 end
 
+describe "Dataset#divide" do
+  before do
+    @db = Sequel.mock
+    @ds = @db[:suppliers]
+    @child = @db[:supplier_quals]
+  end
+
+  it "should return rows related to all required values" do
+    @ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>[1, 2]).sql.must_equal(
+      'SELECT * FROM suppliers WHERE ((EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.supplier_id) AND (supplier_quals.qual_id = 1)))) AND (EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.supplier_id) AND (supplier_quals.qual_id = 2)))))')
+  end
+
+  it "should support a dataset as the required relation" do
+    @ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>@db[:required_quals].select(:qual_id)).sql.must_equal(
+      'SELECT * FROM suppliers WHERE NOT (EXISTS (SELECT * FROM (SELECT qual_id FROM required_quals) AS sequel_division_required WHERE NOT (EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.supplier_id) AND (supplier_quals.qual_id = sequel_division_required.qual_id))))))')
+  end
+
+  it "should return the receiver unmodified for an empty required array" do
+    ds = @ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>[])
+    ds.must_be_same_as @ds
+    ds.sql.must_equal 'SELECT * FROM suppliers'
+  end
+
+  it "should return all rows when the required dataset is empty" do
+    @db.fetch = [{:id=>1}, {:id=>2}]
+    @ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>@db[:required_quals].select(:qual_id).where(false)).all
+    @db.sqls.must_equal ["SELECT * FROM suppliers WHERE NOT (EXISTS (SELECT * FROM (SELECT qual_id FROM required_quals WHERE 'f') AS sequel_division_required WHERE NOT (EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.supplier_id) AND (supplier_quals.qual_id = sequel_division_required.qual_id))))))"]
+  end
+
+  it "should support composite join keys and composite :on columns" do
+    @ds.divide(@child, :by=>[:id, :region_id], :on=>[:qual_id, :level], :matching=>[[1, 2], [3, 4]]).sql.must_equal(
+      'SELECT * FROM suppliers WHERE ((EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.id) AND (suppliers.region_id = supplier_quals.region_id) AND (supplier_quals.qual_id = 1) AND (supplier_quals.level = 2)))) AND (EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.id) AND (suppliers.region_id = supplier_quals.region_id) AND (supplier_quals.qual_id = 3) AND (supplier_quals.level = 4)))))')
+  end
+
+  it "should support a hash :on mapping child columns to required columns" do
+    @ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>{:qual_id=>:req_id}, :matching=>@db[:required_quals].select(:req_id)).sql.must_equal(
+      'SELECT * FROM suppliers WHERE NOT (EXISTS (SELECT * FROM (SELECT req_id FROM required_quals) AS sequel_division_required WHERE NOT (EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.supplier_id) AND (supplier_quals.qual_id = sequel_division_required.req_id))))))')
+  end
+
+  it "should support a table symbol for the child relation" do
+    @ds.divide(:supplier_quals, :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>[1]).sql.must_equal(
+      'SELECT * FROM suppliers WHERE (EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.supplier_id) AND (supplier_quals.qual_id = 1))))')
+  end
+
+  it "should alias the child relation when it uses the same table as the receiver" do
+    @ds.divide(@db[:suppliers], :by=>{:id=>:parent_id}, :on=>:qual_id, :matching=>[1]).sql.must_equal(
+      'SELECT * FROM suppliers WHERE (EXISTS (SELECT * FROM (SELECT * FROM suppliers) AS sequel_division_child WHERE ((suppliers.id = sequel_division_child.parent_id) AND (sequel_division_child.qual_id = 1))))')
+  end
+
+  it "should match NULL values with the :match null strategy" do
+    @ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>@db[:required_quals].select(:qual_id), :null=>:match).sql.must_equal(
+      'SELECT * FROM suppliers WHERE NOT (EXISTS (SELECT * FROM (SELECT qual_id FROM required_quals) AS sequel_division_required WHERE NOT (EXISTS (SELECT * FROM supplier_quals WHERE (((suppliers.id = supplier_quals.supplier_id) OR ((suppliers.id IS NULL) AND (supplier_quals.supplier_id IS NULL))) AND ((supplier_quals.qual_id = sequel_division_required.qual_id) OR ((supplier_quals.qual_id IS NULL) AND (sequel_division_required.qual_id IS NULL))))))))')
+  end
+
+  it "should treat nil required values as NULL" do
+    @ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>[nil]).sql.must_equal(
+      'SELECT * FROM suppliers WHERE (EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.supplier_id) AND (supplier_quals.qual_id IS NULL))))')
+  end
+
+  it "should return a dataset that can be filtered and paginated further" do
+    @ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>[1]).where(:active=>true).order(:name).limit(10, 5).sql.must_equal(
+      'SELECT * FROM suppliers WHERE ((EXISTS (SELECT * FROM supplier_quals WHERE ((suppliers.id = supplier_quals.supplier_id) AND (supplier_quals.qual_id = 1)))) AND (active IS TRUE)) ORDER BY name LIMIT 10 OFFSET 5')
+  end
+
+  it "should raise an error for missing or invalid options" do
+    proc{@ds.divide(@child, :on=>:qual_id, :matching=>[1])}.must_raise(Sequel::Error)
+    proc{@ds.divide(@child, :by=>{:id=>:supplier_id}, :matching=>[1])}.must_raise(Sequel::Error)
+    proc{@ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>:qual_id)}.must_raise(Sequel::Error)
+    proc{@ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>[1], :null=>:bogus)}.must_raise(Sequel::Error)
+    proc{@ds.divide(@child, :by=>{:id=>:supplier_id}, :on=>[:a, :b], :matching=>[[1]])}.must_raise(Sequel::Error)
+  end
+
+  it "should keep bind variable order with a dataset required relation on PostgreSQL" do
+    db = Sequel.mock(:host=>'postgres')
+    ds = db[:suppliers].where(Sequel[:region]=>:$region).
+      divide(db[:supplier_quals].where(Sequel[:active]=>:$active),
+        :by=>{:id=>:supplier_id}, :on=>:qual_id,
+        :matching=>db[:required_quals].select(:qual_id).where(Sequel[:kind]=>:$kind))
+    ps = ds.prepare(:select, :divide_region)
+    ps.prepared_sql.must_equal 'SELECT * FROM "suppliers" WHERE (("region" = $region) AND NOT (EXISTS (SELECT * FROM (SELECT "qual_id" FROM "required_quals" WHERE ("kind" = $kind)) AS "sequel_division_required" WHERE NOT (EXISTS (SELECT * FROM "supplier_quals" WHERE (("active" = $active) AND ("suppliers"."id" = "supplier_quals"."supplier_id") AND ("supplier_quals"."qual_id" = "sequel_division_required"."qual_id")))))))'
+    ps.call(:region=>'EU', :active=>true, :kind=>2)
+    db.sqls.must_equal [%q{SELECT * FROM "suppliers" WHERE (("region" = 'EU') AND NOT (EXISTS (SELECT * FROM (SELECT "qual_id" FROM "required_quals" WHERE ("kind" = 2)) AS "sequel_division_required" WHERE NOT (EXISTS (SELECT * FROM "supplier_quals" WHERE (("active" = true) AND ("suppliers"."id" = "supplier_quals"."supplier_id") AND ("supplier_quals"."qual_id" = "sequel_division_required"."qual_id")))))))}]
+  end
+
+  it "should keep bind variable order with an array required relation on PostgreSQL" do
+    db = Sequel.mock(:host=>'postgres')
+    ds = db[:suppliers].divide(db[:supplier_quals], :by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>[:$q1, :$q2]).where(Sequel[:region]=>:$region)
+    ps = ds.prepare(:select, :divide_array)
+    ps.prepared_sql.must_equal 'SELECT * FROM "suppliers" WHERE ((EXISTS (SELECT * FROM "supplier_quals" WHERE (("suppliers"."id" = "supplier_quals"."supplier_id") AND ("supplier_quals"."qual_id" = $q1)))) AND (EXISTS (SELECT * FROM "supplier_quals" WHERE (("suppliers"."id" = "supplier_quals"."supplier_id") AND ("supplier_quals"."qual_id" = $q2)))) AND ("region" = $region))'
+    ps.call(:q1=>1, :q2=>2, :region=>'EU')
+    db.sqls.must_equal [%q{SELECT * FROM "suppliers" WHERE ((EXISTS (SELECT * FROM "supplier_quals" WHERE (("suppliers"."id" = "supplier_quals"."supplier_id") AND ("supplier_quals"."qual_id" = 1)))) AND (EXISTS (SELECT * FROM "supplier_quals" WHERE (("suppliers"."id" = "supplier_quals"."supplier_id") AND ("supplier_quals"."qual_id" = 2)))) AND ("region" = 'EU'))}]
+  end
+end
+
 describe "Dataset#count" do
   before do
     @db = Sequel.mock(:fetch=>{:count=>1})

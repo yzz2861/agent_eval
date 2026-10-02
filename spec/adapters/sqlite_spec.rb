@@ -233,6 +233,67 @@ describe "An SQLite database" do
   end
 end
 
+describe "Dataset#divide on SQLite" do
+  before do
+    @db = DB
+    @db.create_table!(:suppliers){primary_key :id; String :name}
+    @db.create_table!(:supplier_quals){Integer :supplier_id; Integer :qual_id}
+    @db[:suppliers].import([:id, :name], [[1, 's1'], [2, 's2'], [3, 's3'], [4, 's4']])
+    @db[:supplier_quals].import([:supplier_id, :qual_id], [
+      [1, 1], [1, 2], [1, 2], # duplicate row must not affect results
+      [2, 1],
+      [3, 1], [3, 2], [3, 3],
+    ])
+    @divide = proc{|matching, opts={}| @db[:suppliers].divide(@db[:supplier_quals], {:by=>{:id=>:supplier_id}, :on=>:qual_id, :matching=>matching}.merge!(opts))}
+  end
+  after do
+    @db.drop_table?(:suppliers, :supplier_quals)
+  end
+
+  it "should return suppliers having all required qualifications" do
+    @divide.call([1, 2]).order(:id).map(:id).must_equal [1, 3]
+    @divide.call([1, 2, 3]).map(:id).must_equal [3]
+    @divide.call([2]).order(:id).map(:id).must_equal [1, 3]
+    @divide.call([4]).must_be_empty
+  end
+
+  it "should return all suppliers for an empty required array" do
+    @divide.call([]).order(:id).map(:id).must_equal [1, 2, 3, 4]
+  end
+
+  it "should support a dataset as the required relation" do
+    required = @db[:supplier_quals].where(:supplier_id=>3).select(:qual_id).exclude(:qual_id=>3)
+    @divide.call(required).order(:id).map(:id).must_equal [1, 3]
+  end
+
+  it "should return all suppliers when the required dataset is empty" do
+    required = @db[:supplier_quals].select(:qual_id).where(false)
+    @divide.call(required).order(:id).map(:id).must_equal [1, 2, 3, 4]
+  end
+
+  it "should support further filtering and pagination" do
+    @divide.call([1]).where(Sequel[:id] > 1).order(:id).limit(1).map(:id).must_equal [2]
+    @divide.call([1]).order(:id).limit(2, 1).map(:id).must_equal [2, 3]
+  end
+
+  it "should support composite join keys" do
+    @db.create_table!(:supplier_quals2){Integer :supplier_id; Integer :region_id; Integer :qual_id}
+    @db[:supplier_quals2].import([:supplier_id, :region_id, :qual_id], [[1, 1, 5], [1, 2, 6], [2, 1, 5]])
+    ds = @db[:suppliers].divide(@db[:supplier_quals2], :by=>{:id=>:supplier_id}, :on=>[:region_id, :qual_id], :matching=>[[1, 5], [2, 6]])
+    ds.map(:id).must_equal [1]
+    @db.drop_table?(:supplier_quals2)
+  end
+
+  it "should control NULL comparison via the :null option" do
+    @db[:supplier_quals].insert(:supplier_id=>1, :qual_id=>nil)
+    @db[:supplier_quals].insert(:supplier_id=>2, :qual_id=>nil)
+    @divide.call([nil]).order(:id).map(:id).must_equal [1, 2]
+    required = @db[:supplier_quals].select(:qual_id).where(:qual_id=>nil)
+    @divide.call(required).must_be_empty
+    @divide.call(required, :null=>:match).order(:id).map(:id).must_equal [1, 2]
+  end
+end
+
 describe "SQLite temporary views" do
   before do
     @db = DB
