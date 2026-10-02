@@ -22,6 +22,11 @@ module Rack
       # retaining the old key for backwards compatibility
       ENV_KEY = 'rack.cors'
 
+    # Env key holding the winning origin rule's structured match result for
+    # the current request, so preflight and actual requests share the same
+    # per-origin decision.
+    ORIGIN_MATCH_KEY = 'rack.cors.origin_match'
+
     OPTIONS     = 'OPTIONS'
 
     DEFAULT_VARY_HEADERS = ['Origin'].freeze
@@ -114,13 +119,7 @@ module Rack
       # response to be different depending on the Origin header value.
       # Better explained here: http://www.fastly.com/blog/best-practices-for-using-the-vary-header/
       if vary_resource
-        vary = headers['vary']
-        cors_vary_headers = if vary_resource.vary_headers&.any?
-                              vary_resource.vary_headers
-                            else
-                              DEFAULT_VARY_HEADERS
-                            end
-        headers['vary'] = ((vary ? [vary].flatten.map { |v| v.split(/,\s*/) }.flatten : []) + cors_vary_headers).uniq.join(', ')
+        add_vary_headers(headers, vary_resource)
       end
 
       result = env[ENV_KEY]
@@ -177,7 +176,9 @@ module Rack
         return {}
       end
 
-      resource.process_preflight(env, result)
+      headers = resource.process_preflight(env, result)
+      add_vary_headers(headers, resource)
+      headers
     end
 
     def process_cors(env, path)
@@ -206,14 +207,28 @@ module Rack
 
       origin_matched = false
       all_resources.each do |r|
-        next unless r.allow_origin?(origin, env)
+        origin_match = r.match_origin(origin, env)
+        next unless origin_match
 
         origin_matched = true
         found = r.match_resource(path, env)
-        return [found, nil] if found
+        if found
+          env[ORIGIN_MATCH_KEY] = origin_match
+          return [found, nil]
+        end
       end
 
       [nil, origin_matched ? Result::MISS_NO_PATH : Result::MISS_NO_ORIGIN]
+    end
+
+    def add_vary_headers(headers, resource)
+      cors_vary_headers = if resource.vary_headers&.any?
+                            resource.vary_headers
+                          else
+                            DEFAULT_VARY_HEADERS
+                          end
+      vary = headers['vary']
+      headers['vary'] = ((vary ? [vary].flatten.map { |v| v.split(/,\s*/) }.flatten : []) + cors_vary_headers).uniq.join(', ')
     end
   end
 end

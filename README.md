@@ -92,6 +92,45 @@ Additionally, origins can be specified dynamically via a block of the following 
   origins { |source, env| true || false }
 ```
 
+#### Per-origin credentials and max-age
+
+An origin rule can also carry a structured match result that decides
+`Access-Control-Allow-Credentials` and `Access-Control-Max-Age` for that
+origin alone. Declare it with a hash mapping the matcher to its options:
+
+```ruby
+allow do
+  # The same read-only API is open to every origin, but only the two
+  # trusted admin sites may send credentials. The wildcard is listed
+  # first on purpose: specific rules always win over it.
+  origins '*',
+          { 'https://admin-one.example.com' => { credentials: true, max_age: 1200 } },
+          { 'https://admin-two.example.com' => { credentials: true, max_age: 1200 } }
+
+  resource '/api/data', methods: [:get], headers: :any
+end
+```
+
+A block may also return a hash instead of a boolean to produce a structured
+match result:
+
+```ruby
+  origins { |source, env| source.end_with?('.trusted.example.com') && { credentials: true } }
+```
+
+When several rules match the same origin, a single winner is picked
+deterministically: exact strings beat regular expressions, which beat blocks,
+which beat the `*` wildcard; declaration order only breaks ties within the
+same tier. The winning rule alone decides the `Access-Control-Allow-Origin`,
+`Access-Control-Allow-Credentials` and `Access-Control-Max-Age` response
+headers, and preflight and actual requests always use the same decision.
+Requests answered from a specific rule reflect the request origin and
+include `Vary: Origin`; requests answered by the wildcard keep the `*`
+allow-origin header. A wildcard rule can never be combined with
+`credentials: true` — such a configuration raises
+`Rack::Cors::Resource::CorsMisconfigurationError`, and a `*` allow-origin
+header is never emitted together with credentials.
+
 A Resource path can be specified as exact string match (`/path/to/file.txt`) or with a '\*' wildcard (`/all/files/in/*`).  A resource can take the following options:
 
 * **methods** (string or array or `:any`): The HTTP methods allowed for the resource.

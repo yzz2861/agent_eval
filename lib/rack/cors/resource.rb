@@ -59,13 +59,15 @@ module Rack
       end
 
       def to_headers(env)
+        match = env[Rack::Cors::ORIGIN_MATCH_KEY]
+        allow_origin = origin_for_response_header(env[Rack::Cors::HTTP_ORIGIN], match)
         h = {
-          'access-control-allow-origin' => origin_for_response_header(env[Rack::Cors::HTTP_ORIGIN]),
+          'access-control-allow-origin' => allow_origin,
           'access-control-allow-methods' => methods.collect { |m| m.to_s.upcase }.join(', '),
           'access-control-expose-headers' => expose.nil? ? '' : expose.join(', '),
-          'access-control-max-age' => max_age.to_s
+          'access-control-max-age' => max_age_for(match).to_s
         }
-        h['access-control-allow-credentials'] = 'true' if credentials
+        h['access-control-allow-credentials'] = 'true' if credentials_for(allow_origin, match)
         header_proc.call(h)
       end
 
@@ -75,10 +77,28 @@ module Rack
         @public_resource
       end
 
-      def origin_for_response_header(origin)
+      # The winning origin rule decides which origin header to emit: a
+      # wildcard match stays public ('*'), a specific rule reflects the
+      # request origin so that per-origin decisions (credentials, max-age)
+      # are only ever sent to the origin they were declared for.
+      def origin_for_response_header(origin, match = nil)
+        return match.wildcard? ? '*' : origin if match
         return '*' if public_resource?
 
         origin
+      end
+
+      # Per-origin credentials from the winning rule take precedence over the
+      # resource-level default. Credentials are never emitted together with a
+      # '*' allow-origin header, since browsers reject that combination and it
+      # would be insecure.
+      def credentials_for(allow_origin, match)
+        allowed = match && !match.credentials.nil? ? match.credentials : credentials
+        allowed && allow_origin != '*'
+      end
+
+      def max_age_for(match)
+        (match && match.max_age) || max_age
       end
 
       def to_preflight_headers(env)

@@ -1,6 +1,25 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+### Added
+- Origin rules can return structured match results: declare per-origin
+  `credentials` and `max_age` with hash syntax
+  (`origins 'https://admin.example.com' => { credentials: true, max_age: 600 }`)
+  or by returning a hash from an origins block. Plain strings, regexps and
+  boolean blocks keep working as before.
+- Deterministic priority when several origin rules match: exact string >
+  regexp > block > wildcard, declaration order breaks ties. A wildcard rule
+  can no longer shadow a more specific rule's credentials decision.
+- Preflight and actual requests share the same origin decision; preflight
+  responses now include a `Vary` header.
+
+### Security
+- A `*` allow-origin header is never emitted together with
+  `Access-Control-Allow-Credentials: true`; configuring
+  `credentials: true` on a wildcard origin rule raises
+  `Rack::Cors::Resource::CorsMisconfigurationError`.
+
 ## 3.0.0 - 2025-05-16
 ### Changed
 - Update Rack dependency to >= 3.0.14

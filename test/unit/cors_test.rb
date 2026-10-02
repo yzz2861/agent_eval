@@ -213,6 +213,56 @@ describe Rack::Cors do
     _(last_response.headers['Access-Control-Allow-Credentials']).must_be_nil
   end
 
+  describe 'with per-origin credentials and max-age' do
+    let(:app) { load_app('per_origin') }
+
+    it 'reflects the origin and allows credentials for the first trusted site' do
+      successful_cors_request '/api/data', origin: 'https://admin-one.example.com'
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal 'https://admin-one.example.com'
+      _(last_response.headers['Access-Control-Allow-Credentials']).must_equal 'true'
+      _(last_response.headers['Vary']).must_equal 'Origin'
+    end
+
+    it 'reflects the origin and allows credentials for the second trusted site' do
+      successful_cors_request '/api/data', origin: 'https://admin-two.example.com'
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal 'https://admin-two.example.com'
+      _(last_response.headers['Access-Control-Allow-Credentials']).must_equal 'true'
+      _(last_response.headers['Vary']).must_equal 'Origin'
+    end
+
+    it 'allows any other origin on the same path without credentials' do
+      successful_cors_request '/api/data', origin: 'https://random-site.example.org'
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal '*'
+      _(last_response.headers['Access-Control-Allow-Credentials']).must_be_nil
+      _(last_response.headers['Vary']).must_equal 'Origin'
+    end
+
+    it 'uses the same decision for preflight requests from trusted sites' do
+      preflight_request('https://admin-one.example.com', '/api/data')
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal 'https://admin-one.example.com'
+      _(last_response.headers['Access-Control-Allow-Credentials']).must_equal 'true'
+      _(last_response.headers['Access-Control-Max-Age']).must_equal '1200'
+      _(last_response.headers['Vary']).must_equal 'Origin'
+    end
+
+    it 'uses the same decision for preflight requests from arbitrary sites' do
+      preflight_request('https://random-site.example.org', '/api/data')
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal '*'
+      _(last_response.headers['Access-Control-Allow-Credentials']).must_be_nil
+      _(last_response.headers['Access-Control-Max-Age']).must_equal '7200'
+      _(last_response.headers['Vary']).must_equal 'Origin'
+    end
+
+    it 'never emits a wildcard allow-origin together with credentials' do
+      preflight_request('https://random-site.example.org', '/api/data')
+      allow_origin = last_response.headers['Access-Control-Allow-Origin']
+      credentials = last_response.headers['Access-Control-Allow-Credentials']
+      _(allow_origin == '*' && credentials == 'true').must_equal false
+    end
+  end
+
   describe 'logging' do
     it 'should not log debug messages if debug option is false' do
       app = mock
