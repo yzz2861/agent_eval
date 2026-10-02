@@ -1,3 +1,10 @@
+## Unreleased
+
+* Add Tilt::Template.compile_cache_capacity to limit the number of cached
+  compiled methods per template instance (LRU eviction), with
+  Tilt::Template#compile_cache_stats and Tilt::Template#clear_compile_cache
+  for introspection and cleanup
+
 ## 2.1.0 (2023-02-17)
 
 * Use UnboundMethod#bind_call on Ruby 2.7+ for better performance (#380, jeremyevans)

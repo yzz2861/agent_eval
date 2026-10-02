@@ -40,6 +40,24 @@ module Tilt
         @metadata ||= {}
       end
 
+      # The default maximum number of compiled methods cached per template
+      # instance.  When nil (the default), the cache is unbounded and Tilt
+      # behaves as it always has.  When set to a positive Integer, each
+      # template instance keeps at most that many compiled methods, evicting
+      # the least recently used entries.  A value of 0 disables caching of
+      # compiled methods.  Subclasses inherit the setting of their
+      # superclass unless they set their own.
+      def compile_cache_capacity
+        if instance_variable_defined?(:@compile_cache_capacity)
+          @compile_cache_capacity
+        elsif superclass.respond_to?(:compile_cache_capacity)
+          superclass.compile_cache_capacity
+        end
+      end
+
+      # Set the default compiled method cache capacity for this class.
+      attr_writer :compile_cache_capacity
+
       # @deprecated Use `.metadata[:mime_type]` instead.
       def default_mime_type
         metadata[:mime_type]
@@ -76,6 +94,10 @@ module Tilt
 
       # used to hold compiled template methods
       @compiled_method = {}
+
+      # compiled method cache statistics
+      @compile_cache_hits = 0
+      @compile_cache_evictions = 0
 
       # used on 1.9 to set the encoding if it is not set elsewhere (like a magic comment)
       # currently only used if template compiles to ruby
@@ -134,6 +156,46 @@ module Tilt
       else
         self.class.metadata
       end
+    end
+
+    # The maximum number of compiled methods cached by this template
+    # instance.  Defaults to the class-level .compile_cache_capacity.
+    # nil means the cache is unbounded (the historical behavior).
+    def compile_cache_capacity
+      if instance_variable_defined?(:@compile_cache_capacity)
+        @compile_cache_capacity
+      else
+        self.class.compile_cache_capacity
+      end
+    end
+
+    # Set a per-instance compiled method cache capacity, overriding the
+    # class-level setting.  nil means unbounded, 0 disables caching.
+    attr_writer :compile_cache_capacity
+
+    # Statistics for this template's compiled method cache.  Returns a
+    # Hash with the following keys:
+    #
+    #   :size      - number of compiled methods currently cached
+    #   :hits      - cumulative number of cache hits
+    #   :evictions - cumulative number of compiled methods evicted because
+    #                the cache reached its capacity
+    def compile_cache_stats
+      LOCK.synchronize do
+        {
+          :size => @compiled_method.size,
+          :hits => @compile_cache_hits,
+          :evictions => @compile_cache_evictions
+        }
+      end
+    end
+
+    # Remove all cached compiled methods for this template instance.  The
+    # template remains usable; methods are recompiled on demand the next
+    # time the template is rendered.  Renders that already started are
+    # unaffected, since they hold a reference to the compiled method.
+    def clear_compile_cache
+      LOCK.synchronize { @compiled_method.clear }
     end
 
     # Set the prefix to use for compiled paths.
@@ -256,9 +318,39 @@ module Tilt
 
     # The compiled method for the locals keys provided.
     def compiled_method(locals_keys, scope_class=nil)
+      key = [scope_class, locals_keys]
       LOCK.synchronize do
-        @compiled_method[[scope_class, locals_keys]] ||= compile_template_method(locals_keys, scope_class)
+        if method = @compiled_method[key]
+          @compile_cache_hits += 1
+          if compile_cache_capacity
+            # Move the entry to the end so eviction is least recently used.
+            @compiled_method.delete(key)
+            @compiled_method[key] = method
+          end
+          method
+        else
+          # Compile outside of any cache mutation, so a failed compilation
+          # neither stores an entry nor evicts existing ones.
+          method = compile_template_method(locals_keys, scope_class)
+          store_compiled_method(key, method)
+          method
+        end
       end
+    end
+
+    # Store a compiled method, evicting the least recently used entries
+    # first when the cache is at capacity.  When no capacity is
+    # configured, the cache grows unbounded (the historical behavior).
+    def store_compiled_method(key, method)
+      capacity = compile_cache_capacity
+      if capacity
+        return if capacity <= 0
+        while @compiled_method.size >= capacity
+          @compiled_method.shift
+          @compile_cache_evictions += 1
+        end
+      end
+      @compiled_method[key] = method
     end
 
     def local_extraction(local_keys)
