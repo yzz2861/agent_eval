@@ -1,3 +1,5 @@
+require_relative 'locals'
+
 module Tilt
   # @private
   module CompiledTemplates
@@ -33,6 +35,10 @@ module Tilt
     # on the compiled template code.
     attr_reader :compiled_path
 
+    # The Tilt::LocalsContract declared for this template, or nil when the
+    # template does not declare a locals contract.
+    attr_reader :locals_contract
+
     class << self
       # An empty Hash that the template engine can populate with various
       # metadata.
@@ -48,6 +54,82 @@ module Tilt
       # @deprecated Use `.metadata[:mime_type] = val` instead.
       def default_mime_type=(value)
         metadata[:mime_type] = value
+      end
+
+      # Declare the locals contract for every template of this class. Only
+      # effective when the template is rendered through #render.
+      #
+      #   class MyTemplate < Tilt::Template
+      #     locals :title, :body => Tilt::Default.new { "" }, :allow_extra => false
+      #   end
+      #
+      # A Symbol (or String) name declares a required local. A Hash entry maps
+      # an optional local name to its default value; wrap a mutable default or
+      # one that can fail in a Tilt::Default block (or a Proc). Pass
+      # <tt>:allow_extra => true</tt> to permit locals that are not declared.
+      #
+      # Declarations are inherited by subclasses, which can extend them.
+      def locals(*declaration)
+        @locals_declaration = declaration
+      end
+
+      # The raw locals declaration made with .locals, or nil.
+      attr_reader :locals_declaration
+
+      def inherited(subclass)
+        super
+        subclass.instance_variable_set(:@locals_declaration, @locals_declaration)
+      end
+
+      # Build a LocalsContract from a declaration. Accepts a LocalsContract,
+      # an Array/varargs of required names with an optional settings Hash, or
+      # a name => default Hash. Returns nil for nil/false (no contract).
+      def build_locals_contract(declaration)
+        return nil if declaration.nil? || declaration == false
+        return declaration if LocalsContract === declaration
+
+        required = []
+        defaults = {}
+        allow_extra = false
+
+        parts = declaration.is_a?(Array) ? declaration.flatten : [declaration]
+        parts.each do |part|
+          case part
+          when nil
+            next
+          when LocalsContract
+            return part
+          when Symbol, String
+            required << part
+          when Hash
+            symbolic_keys = part.keys.map { |key| key.to_sym rescue key }
+            setting_keys = symbolic_keys & [:required, :defaults]
+            extras = symbolic_keys - [:required, :defaults, :allow_extra]
+            if !setting_keys.empty? && extras.empty?
+              required.concat(Array(part[:required]))
+              defaults.merge!(part[:defaults] || {})
+              allow_extra = part[:allow_extra] if part.key?(:allow_extra)
+            else
+              part.each do |key, value|
+                if key == :allow_extra
+                  allow_extra = value
+                elsif value.nil?
+                  required << key
+                else
+                  defaults[key] = value
+                end
+              end
+            end
+          else
+            raise ArgumentError, "can't interpret locals contract entry: #{part.inspect}"
+          end
+        end
+
+        defaults = defaults.each_with_object({}) do |(key, value), hash|
+          hash[key] = value.is_a?(Proc) ? Default.new(&value) : value
+        end
+
+        LocalsContract.new(required, defaults, allow_extra)
       end
     end
 
@@ -81,6 +163,16 @@ module Tilt
       # currently only used if template compiles to ruby
       @default_encoding = @options.delete :default_encoding
 
+      # A :locals option declares the locals contract for this template and
+      # overrides any contract declared on the class. It is not passed through
+      # to the underlying template engine.
+      locals_declaration = @options.delete(:locals)
+      if locals_declaration
+        @locals_contract = self.class.build_locals_contract(locals_declaration)
+      elsif self.class.locals_declaration
+        @locals_contract = self.class.build_locals_contract(self.class.locals_declaration)
+      end
+
       # load template data and prepare (uses binread to avoid encoding issues)
       @reader = block || lambda { |t| read_template_file }
       @data = @reader.call(self)
@@ -106,7 +198,17 @@ module Tilt
       scope ||= Object.new
       current_template = Thread.current[:tilt_current_template]
       Thread.current[:tilt_current_template] = self
+      locals = prepare_locals(locals)
       evaluate(scope, locals || {}, &block)
+    rescue LocalsError => error
+      # Tag the error so a rendering template further up the stack does not
+      # prepend its own location on top of this one.
+      raise error if error.instance_variable_get(:@tilt_locals_located)
+      error.instance_variable_set(:@tilt_locals_located, true)
+      original_message = error.message
+      location = "#{eval_file}:#{line}"
+      error.define_singleton_method(:message) { "#{location}: #{original_message}" }
+      raise error
     ensure
       Thread.current[:tilt_current_template] = current_template
     end
@@ -176,8 +278,12 @@ module Tilt
     # This method is only used by source generating templates. Subclasses that
     # override render() may not support all features.
     def evaluate(scope, locals, &block)
-      locals_keys = locals.keys
-      locals_keys.sort!{|x, y| x.to_s <=> y.to_s}
+      # When a contract is declared the compiled method always binds the same
+      # declared locals, so it is compiled once regardless of which optionals
+      # were supplied or the order they were passed in. Without a contract the
+      # keys reflect exactly what the caller provided (legacy behavior).
+      locals_keys = locals_contract ? locals_contract.keys : locals.keys
+      locals_keys = locals_keys.sort_by { |key| key.to_s }
 
       case scope
       when Object
@@ -244,6 +350,15 @@ module Tilt
     # !@endgroup
 
     private
+
+    # Validate the locals against the declared contract and fill in defaults.
+    # When no contract is declared the locals are passed through unchanged
+    # (other than treating nil as an empty Hash), preserving legacy behavior.
+    def prepare_locals(locals)
+      locals = {} if locals.nil?
+      return locals unless locals_contract
+      locals_contract.materialize(locals)
+    end
 
     def read_template_file
       data = File.open(file, 'rb') { |io| io.read }

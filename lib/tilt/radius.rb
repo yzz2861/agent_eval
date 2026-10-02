@@ -31,7 +31,7 @@ module Tilt
         block.call
       end
       locals.each do |tag, value|
-        context.define_tag(tag) do
+        context.define_tag(tag.to_s) do
           value
         end
       end
