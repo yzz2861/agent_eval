@@ -286,6 +286,37 @@ To set these attributes you should override the `CursorPagination` class, and th
 
 ---
 
+### MultiColumnCursorPagination
+
+The multi-column cursor pagination is a "keyset" pagination style that locates rows by their complete sort position across all ordering fields, rather than by a single position plus an offset like `CursorPagination`.
+
+The cursor stores the full tuple of ordering values for the boundary row, so large groups of rows sharing the same value (for example, many records created at the same timestamp) do not degrade into an ever-growing offset. Rows inserted between page fetches never shift the results, and both forward and reverse paging remain stable.
+
+Each cursor is bound to the current ordering and to the remaining query parameters (typically filters) via a fingerprint. A cursor created for one query cannot be reused against a different ordering or a different set of filters; doing so raises a 404 Not Found error.
+
+NULL values are handled explicitly: a NULL is treated as the smallest possible value, so NULLs sort first on ascending fields and last on descending fields.
+
+#### Setup
+
+To enable the `MultiColumnCursorPagination` style globally, use the following configuration, modifying the `PAGE_SIZE` as desired:
+
+    REST_FRAMEWORK = {
+        'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.MultiColumnCursorPagination',
+        'PAGE_SIZE': 100
+    }
+
+On `GenericAPIView` subclasses you may also set the `pagination_class` attribute to select `MultiColumnCursorPagination` on a per-view basis.
+
+#### Configuration
+
+The `MultiColumnCursorPagination` class supports the same attributes as `CursorPagination`, with the following differences:
+
+* `ordering` = This should be a string, or list of strings, indicating the fields against which the cursor based pagination will be applied. Mixed directions are supported, for example: `ordering = ('-created_at', 'category', 'id')`. If the ordering does not include a unique field, the primary key is appended automatically so that the sort position is total.
+* `append_pk_to_ordering` = A boolean indicating whether the primary key should be appended to orderings that do not include a unique field. If set to `False`, such orderings raise `ImproperlyConfigured` instead. Defaults to `True`.
+* The `offset_cutoff` attribute is not used, as this pagination style does not use offsets.
+
+---
+
 ## Custom pagination styles
 
 To create a custom pagination serializer class, you should inherit the subclass `pagination.BasePagination`, override the `paginate_queryset(self, queryset, request, view=None)`, and `get_paginated_response(self, data)` methods:
