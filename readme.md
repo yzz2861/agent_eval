@@ -32,6 +32,34 @@ class MyApp
 end
 ```
 
+### Subject revocation
+
+Optional per-subject session generations can revoke all sessions for one user
+without rotating the cookie encryption key and affecting every user:
+
+``` ruby
+revocation_store = Rack::Session::Revocation::MemoryStore.new
+
+use Rack::Session::Cookie,
+  secret: '**unique secret key**',
+  revocation_store: revocation_store,
+  revocation_subject: 'user_id'
+
+# After a password change, in the same process using the store:
+revocation_store.bump_generation!(current_user.id)
+```
+
+The session record stores its subject's generation when an authenticated
+session is issued. A request whose subject has a newer generation is rejected
+and starts as an anonymous session. Anonymous sessions do not query the store.
+
+New logins and subject changes rotate the session ID and stamp the current
+generation. Ordinary renewal keeps the existing generation, so an old session
+cannot gain access by renewing its ID. Storage failures while validating or
+issuing an authenticated session fail closed. Use a custom store with atomic
+`generation(subject)` and `bump_generation!(subject)` methods for multi-process
+deployments; `MemoryStore` is intended for tests and single-process use.
+
 ### Compatibility
 
 `rack-session` code used to be part of Rack, but it was extracted in Rack v3 to this gem. The v1 release of this gem is compatible with Rack v2, and the v2 release of this gem is compatible with Rack v3+. That means you can add `gem "rack-session"` to your application and it will be compatible with all versions of Rack.

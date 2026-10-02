@@ -43,10 +43,18 @@ module Rack
 
       def find_session(req, sid)
         @mutex.synchronize do
-          unless sid and session = get_session_with_fallback(sid)
+          if sid and session = get_session_with_fallback(sid)
+            if revocation_enabled? && !valid_session_generation?(session)
+              @pool.delete(sid.public_id)
+              @pool.delete(sid.private_id)
+              sid = generate_sid(use_mutex: false)
+              session = {}
+            end
+          else
             sid, session = generate_sid(use_mutex: false), {}
-            @pool.store sid.private_id, session
           end
+
+          @pool.store sid.private_id, session
           [sid, session]
         end
       end

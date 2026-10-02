@@ -13,6 +13,7 @@ require 'rack/request'
 require 'rack/response'
 
 require_relative '../constants'
+require_relative '../revocation'
 
 module Rack
 
@@ -252,7 +253,7 @@ module Rack
           secure_random: ::SecureRandom
         }.freeze
 
-        attr_reader :key, :default_options, :sid_secure, :same_site
+        attr_reader :key, :default_options, :sid_secure, :same_site, :revocation_store
 
         def initialize(app, options = {})
           @app = app
@@ -261,6 +262,16 @@ module Rack
           @assume_ssl = @default_options.delete(:assume_ssl)
           @cookie_only = @default_options.delete(:cookie_only)
           @same_site = @default_options.delete(:same_site)
+          @revocation_store = @default_options.delete(:revocation_store)
+          @revocation_subject = @default_options.delete(:revocation_subject) || 'user_id'
+
+          if @revocation_store && !@revocation_store.respond_to?(:generation)
+            raise ArgumentError, ':revocation_store must respond to #generation'
+          end
+          if @revocation_store && !@revocation_store.respond_to?(:bump_generation!)
+            raise ArgumentError, ':revocation_store must respond to #bump_generation!'
+          end
+
           initialize_sid
         end
 
@@ -320,7 +331,18 @@ module Rack
         def load_session(req)
           sid = current_session_id(req)
           sid, session = find_session(req, sid)
-          [sid, session || {}]
+          session ||= {}
+
+          if revocation_enabled?
+            req.set_header(RACK_SESSION_REVOCATION_SUBJECT, revocation_subject(session))
+
+            unless valid_session_generation?(session)
+              sid = generate_sid
+              session = {}
+            end
+          end
+
+          [sid, session]
         end
 
         # Extract session id from request object.
@@ -381,6 +403,7 @@ module Rack
         def commit_session(req, res)
           session = req.get_header RACK_SESSION
           options = session.options
+          renewed = options[:renew]
 
           if options[:drop] || options[:renew]
             session_id = delete_session(req, session.id || generate_sid, options)
@@ -392,6 +415,17 @@ module Rack
           session.send(:load!) unless loaded_session?(session)
           session_id ||= session.id
           session_data = session.to_hash.delete_if { |k, v| v.nil? }
+          subject_changed = revocation_enabled? &&
+            revocation_subject(session_data) != req.get_header(RACK_SESSION_REVOCATION_SUBJECT)
+
+          if subject_changed && !renewed
+            session_id = rotate_session_id(req, session_id, options)
+            return unless session_id
+            session.id = session_id
+            session_data["session_id"] = session_id
+          end
+
+          session_data = issue_session_generation(req, session_data)
 
           if not data = write_session(req, session_id, session_data, options)
             req.get_header(RACK_ERRORS).puts("Warning! #{self.class.name} failed to save session. Content dropped.")
@@ -415,6 +449,62 @@ module Rack
 
         def cookie_value(data)
           data
+        end
+
+        def revocation_enabled?
+          !@revocation_store.nil?
+        end
+
+        def valid_session_generation?(session)
+          subject = revocation_subject(session)
+          return true if subject.nil?
+
+          session_generation(session) == current_session_generation(subject)
+        end
+
+        def issue_session_generation(req, session)
+          return session unless revocation_enabled?
+
+          subject = revocation_subject(session)
+
+          if subject.nil?
+            session.delete(SESSION_GENERATION)
+          elsif session[SESSION_GENERATION].nil? ||
+              subject != req.get_header(RACK_SESSION_REVOCATION_SUBJECT)
+            session[SESSION_GENERATION] = current_session_generation(subject)
+          end
+
+          session
+        end
+
+        def current_session_generation(subject)
+          generation = @revocation_store.generation(subject)
+
+          unless generation.is_a?(Integer)
+            raise Revocation::StorageError, 'session generation store must return an Integer'
+          end
+
+          generation
+        end
+
+        def revocation_subject(session)
+          if @revocation_subject.respond_to?(:call)
+            @revocation_subject.call(session)
+          else
+            session[@revocation_subject.to_s]
+          end
+        end
+
+        def session_generation(session)
+          value = session[SESSION_GENERATION]
+          return 0 if value.nil?
+
+          return value if value.is_a?(Integer)
+          -1
+        end
+
+        def rotate_session_id(req, session_id, options)
+          delete_session(req, session_id, options.merge(drop: false, renew: true))
         end
 
         # Sets the cookie back to the client with session id. We skip the cookie

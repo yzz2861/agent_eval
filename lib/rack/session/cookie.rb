@@ -181,6 +181,10 @@ module Rack
           @legacy_hmac = false
         end
 
+        if options[:revocation_store] && !secure?(options)
+          raise ArgumentError, ':revocation_store requires encrypted or integrity-protected cookies'
+        end
+
         warn <<-MSG unless secure?(options)
         SECURITY WARNING: No secret option provided to Rack::Session::Cookie.
         This poses a security threat. It is strongly recommended that you
