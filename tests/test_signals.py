@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import collections.abc as c
 import gc
 import sys
+import threading
 import typing as t
 
 import pytest
@@ -281,6 +283,379 @@ async def test_async_receiver() -> None:
 
     with pytest.raises(RuntimeError):
         sig.send()
+
+
+def test_connect_once() -> None:
+    calls = []
+
+    def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    sig = blinker.Signal()
+    sig.connect_once(received, weak=False)
+
+    sig.send(1)
+    sig.send(2)
+
+    assert calls == [1]
+    assert not sig.receivers
+    assert not sig._once_connections
+
+
+def test_connect_once_preserves_custom_receiver_order() -> None:
+    class OrderedSet:
+        _values: list[t.Any]
+
+        def __init__(self, values: c.Iterable[t.Any] = ()) -> None:
+            self._values = list(dict.fromkeys(values))
+
+        def __iter__(self) -> c.Iterator[t.Any]:
+            return iter(self._values)
+
+        def add(self, value: t.Any) -> None:
+            if value not in self._values:
+                self._values.append(value)
+
+        def discard(self, value: t.Any) -> None:
+            if value in self._values:
+                self._values.remove(value)
+
+        def __ior__(self, other: c.Iterable[t.Any]) -> OrderedSet:
+            for value in other:
+                self.add(value)
+
+            return self
+
+    calls = []
+
+    class OrderedSignal(blinker.Signal):
+        set_class = OrderedSet  # type: ignore[assignment]
+
+    sig = OrderedSignal()
+    sig.connect_once(lambda sender: calls.append("first"), weak=False)
+    sig.connect_once(lambda sender: calls.append("second"), weak=False)
+
+    sig.send()
+
+    assert calls == ["first", "second"]
+
+
+def test_connect_once_filtered_sender() -> None:
+    calls = []
+
+    def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    sig = blinker.Signal()
+    sig.connect_once(received, sender=123, weak=False)
+
+    sig.send()
+    sig.send(456)
+    assert calls == []
+
+    sig.send(123)
+    sig.send(123)
+    assert calls == [123]
+
+
+def test_connect_once_is_claimed_before_reentrant_send() -> None:
+    calls = []
+    sig = blinker.Signal()
+
+    def received(sender: t.Any) -> None:
+        calls.append(sender)
+        sig.send(sender)
+
+    sig.connect_once(received, weak=False)
+    sig.send(123)
+
+    assert calls == [123]
+    assert not sig.receivers
+    assert not sig._once_connections
+
+
+def test_connect_once_is_consumed_when_receiver_raises() -> None:
+    def received(sender: t.Any) -> None:
+        raise RuntimeError(sender)
+
+    sig = blinker.Signal()
+    sig.connect_once(received, weak=False)
+
+    with pytest.raises(RuntimeError):
+        sig.send(123)
+
+    sig.send(456)
+
+    assert not sig.receivers
+    assert not sig._once_connections
+    sig._cleanup_bookkeeping()
+    values_are_empty_sets_(sig._by_receiver)
+    values_are_empty_sets_(sig._by_sender)
+
+
+def test_connect_once_concurrent_send() -> None:
+    sig = blinker.Signal()
+    barrier = threading.Barrier(2)
+    calls: list[t.Any] = []
+    calls_lock = threading.Lock()
+
+    def received(sender: t.Any) -> None:
+        with calls_lock:
+            calls.append(sender)
+
+    sig.connect_once(received, weak=False)
+
+    def send() -> None:
+        barrier.wait(5)
+        sig.send(123)
+
+    def second_send() -> None:
+        barrier.wait(5)
+        sig.send(123)
+
+    first_thread = threading.Thread(target=send)
+    second_thread = threading.Thread(target=second_send)
+    threads = [first_thread, second_thread]
+
+    for thread in threads:
+        thread.start()
+
+    for thread in threads:
+        thread.join(5)
+        assert not thread.is_alive()
+
+    assert calls == [123]
+    assert not sig.receivers
+    assert not sig._once_connections
+
+
+def test_once_and_normal_connections_are_independent() -> None:
+    calls = []
+
+    def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    sig = blinker.Signal()
+    receiver_id = blinker.base.make_id(received)
+    sender_id = blinker.base.make_id(123)
+
+    sig.connect(received, sender=123, weak=False)
+    sig.connect_once(received, sender=123, weak=False)
+    sig.send(123)
+    sig.send(123)
+
+    assert calls == [123, 123]
+    assert (sender_id, receiver_id) not in sig._once_connections
+    assert (sender_id, receiver_id) in sig._connections
+
+
+def test_once_any_and_normal_sender_are_independent() -> None:
+    calls = []
+
+    def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    sig = blinker.Signal()
+    receiver_id = blinker.base.make_id(received)
+    sender_id = blinker.base.make_id(123)
+
+    sig.connect_once(received, sender=blinker.ANY, weak=False)
+    sig.connect(received, sender=123, weak=False)
+
+    sig.send(123)
+    sig.send(456)
+    sig.send(123)
+
+    assert calls == [123, 123]
+    assert (blinker.base.ANY_ID, receiver_id) not in sig._once_connections
+    assert (sender_id, receiver_id) in sig._connections
+
+
+def test_once_any_and_sender_are_independent() -> None:
+    calls = []
+
+    def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    sig = blinker.Signal()
+    receiver_id = blinker.base.make_id(received)
+    sender_id = blinker.base.make_id(123)
+
+    sig.connect_once(received, sender=blinker.ANY, weak=False)
+    sig.connect_once(received, sender=123, weak=False)
+
+    sig.send(123)
+    sig.send(456)
+    sig.send(123)
+
+    assert calls == [123]
+    assert (blinker.base.ANY_ID, receiver_id) not in sig._once_connections
+    assert (sender_id, receiver_id) not in sig._once_connections
+
+
+def test_once_sender_and_normal_any_are_independent() -> None:
+    calls = []
+
+    def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    sig = blinker.Signal()
+    receiver_id = blinker.base.make_id(received)
+    sender_id = blinker.base.make_id(123)
+
+    sig.connect_once(received, sender=123, weak=False)
+    sig.connect(received, sender=blinker.ANY, weak=False)
+
+    sig.send(123)
+    sig.send(456)
+
+    assert calls == [123, 456]
+    assert (sender_id, receiver_id) not in sig._once_connections
+    assert (blinker.base.ANY_ID, receiver_id) in sig._connections
+
+
+def test_once_sender_disconnect_does_not_remove_any() -> None:
+    calls = []
+
+    def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    sig = blinker.Signal()
+    sig.connect_once(received, sender=123, weak=False)
+    sig.connect_once(received, sender=blinker.ANY, weak=False)
+
+    sig.disconnect(received, sender=123)
+    assert sig._by_sender[blinker.base.ANY_ID]
+    sig.send(456)
+
+    assert calls == [456]
+    assert not sig._by_sender[blinker.base.make_id(123)]
+    assert not sig._by_sender[blinker.base.ANY_ID]
+
+
+async def test_async_connect_once() -> None:
+    calls = []
+
+    async def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    sig = blinker.Signal()
+    sig.connect_once(received)
+
+    await sig.send_async()
+    await sig.send_async()
+
+    assert calls == [None]
+    assert not sig.receivers
+    assert not sig._once_connections
+
+
+async def test_async_connect_once_is_consumed_when_receiver_raises() -> None:
+    async def received(sender: t.Any) -> None:
+        raise RuntimeError(sender)
+
+    sig = blinker.Signal()
+    sig.connect_once(received)
+
+    with pytest.raises(RuntimeError):
+        await sig.send_async()
+
+    await sig.send_async()
+
+    assert not sig.receivers
+    assert not sig._once_connections
+
+
+def test_sync_send_connect_once_async_receiver() -> None:
+    calls = []
+
+    async def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    sig = blinker.Signal()
+    sig.connect_once(received)
+
+    def wrapper(func: c.Callable[..., t.Any]) -> c.Callable[..., None]:
+        def inner(*args: t.Any, **kwargs: t.Any) -> None:
+            asyncio.run(func(*args, **kwargs))
+
+        return inner
+
+    result = sig.send(123, _async_wrapper=wrapper)
+    assert len(result) == 1
+    assert calls == [123]
+    assert not sig.receivers
+    assert not sig._once_connections
+
+
+async def test_async_connect_once_releases_lock_while_waiting() -> None:
+    sig = blinker.Signal()
+    receiver_entered = asyncio.Event()
+    release_receiver = asyncio.Event()
+    calls = []
+
+    async def received(sender: t.Any) -> None:
+        calls.append(sender)
+        receiver_entered.set()
+        await release_receiver.wait()
+
+    sig.connect_once(received)
+    sending = asyncio.create_task(sig.send_async())
+    await receiver_entered.wait()
+    await sig.send_async()
+    release_receiver.set()
+    await sending
+
+    assert calls == [None]
+    assert not sig.receivers
+    assert not sig._once_connections
+
+
+def test_connect_once_weak_receiver_cleanup() -> None:
+    calls = []
+
+    class Receiver:
+        def received(self, sender: t.Any) -> None:
+            calls.append(sender)
+
+    receiver = Receiver()
+    sig = blinker.Signal()
+    sig.connect_once(receiver.received)
+
+    del receiver
+    collect_acyclic_refs()
+
+    assert not calls
+    assert not sig.receivers
+    assert not sig._once_connections
+    sig._cleanup_bookkeeping()
+    values_are_empty_sets_(sig._by_receiver)
+    values_are_empty_sets_(sig._by_sender)
+    sig.send(123)
+    assert not calls
+
+
+def test_connect_once_weak_sender_cleanup() -> None:
+    calls = []
+
+    def received(sender: t.Any) -> None:
+        calls.append(sender)
+
+    class Sender:
+        pass
+
+    sender = Sender()
+    sig = blinker.Signal()
+    sig.connect_once(received, sender=sender, weak=False)
+
+    del sender
+    collect_acyclic_refs()
+
+    assert not sig._once_connections
+    values_are_empty_sets_(sig._by_receiver)
+    assert not any(bucket for bucket in sig._by_sender.values())
+    sig.send(123)
+    assert not calls
 
 
 def test_instancemethod_receiver() -> None:

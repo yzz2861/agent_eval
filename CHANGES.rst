@@ -3,6 +3,11 @@ Version 1.10.0
 
 Unreleased
 
+-   Add one-time receiver subscriptions with ``Signal.connect_once`` and
+    ``Signal.connect(..., once=True)``. The matching subscription is claimed
+    before invoking the receiver, so reentrant sends, concurrent sends, and
+    exceptions do not schedule another call.
+
 
 Version 1.9.0
 -------------

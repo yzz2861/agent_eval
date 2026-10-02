@@ -132,6 +132,28 @@ This function has been subscribed to ``ready`` but only when sent by
   Processing.
 
 
+One-time Subscriptions
+----------------------
+
+Use :meth:`~Signal.connect_once`, or ``connect(..., once=True)``, to receive
+the next matching signal only once. The subscription is claimed before the
+receiver is invoked, so sending again from inside the receiver or raising an
+exception does not invoke it a second time.
+
+.. code-block:: python
+
+  >>> started = Signal()
+  >>> started.connect_once(lambda sender: print("once"), weak=False)
+  >>> _ = started.send()
+  once
+  >>> _ = started.send()
+
+Subscriptions for :data:`~blinker.ANY` and a specific sender are independent.
+For example, disconnecting the specific-sender subscription does not remove an
+ANY subscription for the same receiver. One-time subscriptions use the same
+weak reference behavior as regular subscriptions.
+
+
 Sending and Receiving Data Through Signals
 ------------------------------------------
 
