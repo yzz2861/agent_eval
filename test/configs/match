@@ -1,0 +1,12 @@
+Host test.host
+  ForwardAgent yes
+
+Match all
+  Compression yes
+
+Match unsupported
+  Port 2345
+
+Host *
+  Port 22
+  Compression no

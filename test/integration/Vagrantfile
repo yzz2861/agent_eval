@@ -1,0 +1,14 @@
+VAGRANTFILE_API_VERSION = "2"
+
+Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
+  config.vm.box = "ubuntu/jammy64"
+  config.vm.provision "ansible" do |ansible|
+    ansible.playbook = "./playbook.yml"
+    ansible.become = true
+    ansible.become_user = 'root'
+    ansible.verbose = 'vvvv'
+    ansible.compatibility_mode = "2.0"
+  end
+
+  config.vm.synced_folder "../..", "/net-ssh"
+end
