@@ -188,7 +188,7 @@ The hook factories are also good building blocks for more complex customizations
 Another reason is overriding behavior on a per-attribute basis.
 
 Currently, the overrides only support generating dictionary un/structuring hooks (as opposed to tuples),
-and support `omit_if_default`, `forbid_extra_keys`, `rename` and `omit`.
+and support `omit_if_default`, `forbid_extra_keys`, `rename`, `path` and `omit`.
 
 ### `omit_if_default`
 ```{currentmodule} cattrs.gen
@@ -305,6 +305,53 @@ This is useful if an attribute name is a reserved keyword in Python.
 >>> c.structure({'class': 1}, ExampleClass)
 ExampleClass(klass=1)
 ```
+
+### `path`
+
+```{versionadded} 26.3.0
+```
+
+While `rename` moves a field to a different top-level key, the `path` override maps a
+flat attribute to a location nested arbitrarily deep in the unstructured data.
+This is useful when an external format wraps groups of fields in objects or arrays
+that don't deserve their own attrs classes.
+
+A path is a sequence of segments; strings are mapping keys and integers are sequence
+indices, so keys containing dots are never split up.
+A plain string is treated as a single key.
+`path` cannot be combined with `rename`.
+
+```{doctest}
+
+>>> from cattrs.gen import make_dict_structure_fn, make_dict_unstructure_fn, override
+
+>>> @define
+... class User:
+...     name: str
+...     city: str
+
+>>> c = cattrs.Converter()
+>>> overrides = {"city": override(path=("profile", "address", "city"))}
+>>> c.register_structure_hook(User, make_dict_structure_fn(User, c, **overrides))
+>>> c.register_unstructure_hook(User, make_dict_unstructure_fn(User, c, **overrides))
+>>> c.structure({"name": "Ana", "profile": {"address": {"city": "Berlin"}}}, User)
+User(name='Ana', city='Berlin')
+>>> c.unstructure(User("Ana", "Berlin"))
+{'name': 'Ana', 'profile': {'address': {'city': 'Berlin'}}}
+```
+
+When structuring, a missing key (or missing intermediate object) falls back to the
+attribute default if there is one, and is an error otherwise.
+An explicit `null` is not the same as a missing key: it is structured like any other
+value, so it only works for `None`-able types.
+A `null` where an intermediate object or array is expected is an error.
+
+When unstructuring, intermediate dictionaries and lists are created as needed,
+and fields sharing a path prefix share the intermediate containers.
+Combining `path` with `omit_if_default` leaves no empty containers behind.
+
+Two fields may not map to the same path, and one field's path may not be a prefix
+of another's; such conflicts raise a `ValueError` when the hook is generated.
 
 ### `omit`
 

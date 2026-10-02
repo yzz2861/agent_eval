@@ -11,6 +11,11 @@ The third number is for emergencies when we need to start branches for older rel
 
 Our backwards-compatibility policy can be found [here](https://github.com/python-attrs/cattrs/blob/main/.github/SECURITY.md).
 
+## Unreleased
+
+- Add a `path` parameter to {func}`cattrs.gen.override`, mapping a flat attribute to a nested location when generating dict structuring and unstructuring hooks.
+  Paths are sequences of segments (strings for mapping keys, integers for sequence indices), missing keys fall back to defaults while explicit `null`s are structured normally, and conflicting paths are rejected when the hook is generated.
+
 ## 26.2.1 (2026-09-26)
 
 - Fix heterogeneous tuples and `NamedTuple`s with a member type containing a quote in its `repr`, like `tuple[Literal["a"], int]`, crashing structuring code generation with `SyntaxError`; the index note is now embedded with `repr`.

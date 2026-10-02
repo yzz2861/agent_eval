@@ -13,6 +13,7 @@ class AttributeOverride:
     omit: bool | None = None  # Omit the field completely.
     struct_hook: Callable[[Any, Any], Any] | None = None  # Structure hook to use.
     unstruct_hook: Callable[[Any], Any] | None = None  # Structure hook to use.
+    path: tuple[str | int, ...] | None = None  # Nested location of the field.
 
 
 neutral = AttributeOverride()
