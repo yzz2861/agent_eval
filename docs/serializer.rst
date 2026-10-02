@@ -28,6 +28,30 @@ the data.
 By default, data is serialized to JSON with the built-in :mod:`json`
 module. This internal serializer can be changed by subclassing.
 
+Canonical JSON (RFC 8785)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The same JSON object can be serialized differently across programming
+languages (member ordering, number formatting, or escaping), which
+produces different signatures. Sorting keys is not enough: object
+members must be sorted by UTF-16 code unit, numbers must use the IEEE
+754/ECMAScript representation (including negative zero as ``0``), and
+strings must be escaped per :rfc:`8785`.
+
+Use :class:`CanonicalJSONSerializer` to get interoperable canonical
+output::
+
+    from itsdangerous import CanonicalJSONSerializer, Serializer
+
+    s = Serializer("secret-key", serializer=CanonicalJSONSerializer)
+    s.dumps({"b": 1, "a": -0.0})
+    b'{"a":0,"b":1}.<signature>'
+
+Non-finite numbers, integers that cannot be represented exactly as an
+IEEE 754 double (they are not silently rounded), lone UTF-16 surrogate
+characters, and duplicate object keys on ``loads`` are rejected with a
+``ValueError``. The default serializer is unchanged; this is opt-in.
+
 To record and validate the age of the signature, see :doc:`/timed`.
 To serialize to a format that is safe to use in URLs, see
 :doc:`/url_safe`.
@@ -107,6 +131,9 @@ unsign using either SHA-512 or SHA-1:
 
 API
 ---
+
+.. autoclass:: CanonicalJSONSerializer
+    :members:
 
 .. autoclass:: Serializer
     :members:

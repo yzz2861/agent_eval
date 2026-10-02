@@ -5,6 +5,12 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add opt-in ``CanonicalJSONSerializer`` implementing RFC 8785 (JSON
+    Canonicalization Scheme) for cross-language stable signatures. It
+    sorts object members by UTF-16 code unit, emits ECMAScript/IEEE 754
+    number representations (including negative zero as ``0``), and
+    rejects non-finite numbers, integers outside the double domain, lone
+    surrogate characters, and duplicate object keys.
 
 
 Version 2.2.0
