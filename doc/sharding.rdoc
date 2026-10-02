@@ -226,6 +226,40 @@ to use, which can be useful if you are mixing sharding and primary/replica serve
     end
   end
 
+=== primary_after_write Extension
+
+With a primary/replica setup, SELECTs default to the +:read_only+ server while
+writes use the +:default+ (primary) server.  Inside a single business operation
+that performs both, reads after a write need to go to the primary to avoid
+replication lag.  The primary_after_write extension adds
+Database#with_primary_on_write for this scoped read-after-write consistency:
+
+  DB.extension :primary_after_write
+  DB.with_primary_on_write do
+    account = DB[:accounts].where(id: id).first # Uses the :read_only server
+    DB[:accounts].where(id: id).update(balance: new_balance)
+    DB[:accounts].where(id: id).first # Uses the :default server
+  end
+  DB[:accounts].where(id: id).first # Uses the :read_only server again
+
+Reads are redirected only after a write has completed successfully.  A write
+that raises does not pin reads, so reads issued while rescuing the exception
+still use the replica.  A write that is later rolled back has still been sent
+to the primary, so reads stay pinned after a whole-transaction rollback or a
+savepoint rollback in a nested transaction, just as they do after a committed
+write; transaction and savepoint state is not inspected.
+
+Calls can be nested.  Each scope inherits the state of its enclosing scope,
+and a successful write in an inner scope also pins all enclosing scopes.
+Explicit routing still wins: a concrete server, or an explicit
++:default+/+:read_only+ given via Dataset#server, is always used as given.
+
+Scope state is isolated per thread, and per fiber when the
+fiber_concurrency extension is enabled before the pool is created.  The
+extension works with the sharded single, threaded, and timed queue connection
+pools, and composes with server_block so a write in a shard block pins reads
+to that shard's primary.
+
 === arbitrary_servers Extension
 
 By default, Sequel's sharding support is designed to work with predefined shards.  It ships
@@ -283,4 +317,3 @@ for that shard as the value.  Example:
 
   DB=Sequel.connect('jdbc:postgresql://primary_server/database', 
     servers: {read_only: {uri: 'jdbc:postgresql://replica_server/database'}})
-
