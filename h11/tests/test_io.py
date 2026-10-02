@@ -2,6 +2,7 @@ from typing import Any, Callable, Generator, List
 
 import pytest
 
+from .._chunkextensions import parse_chunk_extensions, serialize_chunk_extensions
 from .._events import (
     Data,
     EndOfMessage,
@@ -443,15 +444,33 @@ def test_ChunkedReader() -> None:
     # refuses garbage in the chunk count
     t_body_reader(ChunkedReader, b"10\x00\r\nxxx", [LocalProtocolError])
 
-    # handles (and discards) "chunk extensions" omg wtf
+    # parses chunk extensions
     t_body_reader(
         ChunkedReader,
-        b"5; hello=there\r\n"
+        b'5;hello=there;flag;quoted="a\\"b"\r\n'
         + b"xxxxx"
         + b"\r\n"
-        + b'0; random="junk"; some=more; canbe=lonnnnngg\r\n\r\n',
-        [Data(data=b"xxxxx"), EndOfMessage()],
+        + b'0;random="junk";some=more;canbe=lonnnnngg\r\n\r\n',
+        [
+            Data(
+                data=b"xxxxx",
+                chunk_extensions=[
+                    (b"hello", b"there"),
+                    (b"flag", None),
+                    (b"quoted", b'a"b'),
+                ],
+            ),
+            EndOfMessage(
+                chunk_extensions=[
+                    (b"random", b"junk"),
+                    (b"some", b"more"),
+                    (b"canbe", b"lonnnnngg"),
+                ]
+            ),
+        ],
     )
+
+    t_body_reader(ChunkedReader, b"5; hello=there\r\n", [LocalProtocolError])
 
     t_body_reader(
         ChunkedReader,
@@ -513,6 +532,62 @@ def test_ChunkedWriter() -> None:
         dowrite(w, EndOfMessage(headers=[("Etag", "asdf"), ("a", "b")]))
         == b"0\r\nEtag: asdf\r\na: b\r\n\r\n"
     )
+
+    w = ChunkedWriter()
+    got: List[bytes] = []
+    w(
+        Data(
+            data=b"ab",
+            chunk_start=True,
+            chunk_extensions=[(b"name", b"a b")],
+        ),
+        got.append,
+    )
+    assert got == []
+    w(Data(data=b"c", chunk_end=True), got.append)
+    assert b"".join(got) == b'3;name="a b"\r\nabc\r\n'
+
+    assert dowrite(
+        w,
+        Data(
+            data=b"x",
+            chunk_extensions=[(b"a", None), (b"b", b'"\\')],
+        ),
+    ) == b'1;a;b="\\\"\\\\"\r\nx\r\n'
+    assert dowrite(w, EndOfMessage(chunk_extensions=[(b"last", None)])) == (
+        b"0;last\r\n\r\n"
+    )
+
+    with pytest.raises(LocalProtocolError):
+        dowrite(ChunkedWriter(), Data(data=b"x", chunk_end=True))
+
+    w = ChunkedWriter()
+    dowrite(w, Data(data=b"x", chunk_start=True, chunk_end=False))
+    with pytest.raises(LocalProtocolError):
+        dowrite(w, Data(data=b"y", chunk_start=True, chunk_end=True))
+
+    w = ChunkedWriter()
+    dowrite(w, Data(data=b"", chunk_start=True, chunk_end=False))
+    dowrite(w, Data(data=b""))
+    assert dowrite(w, Data(data=b"z", chunk_end=True)) == b"1\r\nz\r\n"
+
+
+def test_chunk_extension_codec() -> None:
+    extensions = [
+        (b"ordered", b"one"),
+        (b"ordered", b"two"),
+        (b"no-value", None),
+        (b"quoted", b'a"b\\c d'),
+        (b"empty", b""),
+    ]
+    wire = (
+        b";ordered=one;ordered=two;no-value;"
+        + b'quoted="a\\"b\\\\c d";empty=""'
+    )
+    assert serialize_chunk_extensions(extensions) == wire
+    assert parse_chunk_extensions(wire) == tuple(extensions)
+    data = Data(data=b"x", chunk_extensions=[[b"name", b"value"]])
+    assert data.chunk_extensions == ((b"name", b"value"),)
 
 
 def test_Http10Writer() -> None:

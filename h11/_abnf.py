@@ -116,17 +116,41 @@ HEXDIG = r"[0-9A-Fa-f]"
 #
 # but we impose an upper-limit to avoid ridiculosity. len(str(2**64)) == 20
 chunk_size = r"({HEXDIG}){{1,20}}".format(**globals())
-# Actually
-#
-#     chunk-ext      = *( ";" chunk-ext-name [ "=" chunk-ext-val ] )
-#
-# but we aren't parsing the things so we don't really care.
-chunk_ext = r";.*"
+# RFC 7230 section 4.1.1:
+#   chunk-ext      = *( ";" chunk-ext-name [ "=" chunk-ext-val ] )
+#   chunk-ext-name = token
+#   chunk-ext-val  = token / quoted-string
+#   quoted-string  = DQUOTE *( qdtext / quoted-pair ) DQUOTE
+#   qdtext         = HTAB / SP / %x21 / %x23-5B / %x5D-7E / obs-text
+#   quoted-pair    = "\" ( HTAB / SP / VCHAR / obs-text )
+chunk_ext_name = token
+chunk_ext_quoted_text = r"[ \t\x21\x23-\x5b\x5d-\x7e\x80-\xff]"
+chunk_ext_quoted_pair = r"\\[ \t\x21-\x7e\x80-\xff]"
+chunk_ext_quoted_string = (
+    r'"(?:'
+    + chunk_ext_quoted_text
+    + r"|"
+    + chunk_ext_quoted_pair
+    + r')*"'
+)
+chunk_ext_value = (
+    r"(?:"
+    + token
+    + r"|"
+    + chunk_ext_quoted_string
+    + r")"
+)
+chunk_ext_item = (
+    r";"
+    + chunk_ext_name
+    + r"(?:=" + chunk_ext_value + r")?"
+)
+chunk_ext = r"(?P<chunk_ext>(?:" + chunk_ext_item + r")*)"
 chunk_header = (
     r"(?P<chunk_size>{chunk_size})"
-    r"(?P<chunk_ext>{chunk_ext})?"
-    r"{OWS}\r\n".format(
+    r"{chunk_ext}?"
+    r"{OWS}".format(
         **globals()
-    )  # Even though the specification does not allow for extra whitespaces,
+    )  # Even though the specification does not allow for extra whitespace,
     # we are lenient with trailing whitespaces because some servers on the wild use it.
 )

@@ -54,13 +54,13 @@ ascii status messages -- instead of ``200 OK`` we just say
 us skip carrying around a pointless table of status message strings,
 but I suppose it might be worth fixing at some point.
 
-When parsing chunked encoding, we parse but discard "chunk
-extensions". This is an extremely obscure feature that allows
-arbitrary metadata to be interleaved into a chunked transfer
-stream. This metadata has no standard uses, and proxies are allowed to
-strip it out. I don't think anyone will notice this lack, but it could
-be added if someone really wants it; I just ran out of energy for
-implementing weirdo features no-one uses.
+When parsing chunked encoding, h11 exposes "chunk extensions" as ordered
+``(name, value)`` pairs on :class:`h11.Data` and :class:`h11.EndOfMessage`.
+Missing extension values use ``None``. Values from quoted strings have their
+quoted-pair escapes decoded. For a chunk split into multiple Data events by
+network delivery, the extensions appear only on the first event. Chunk header
+lines are limited to 4096 bytes; malformed extensions are treated as protocol
+errors.
 
 Currently we *do* implement support for "obsolete line folding" when
 reading HTTP headers. This is an optional part of the spec --

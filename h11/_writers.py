@@ -9,6 +9,7 @@
 
 from typing import Any, Callable, Dict, List, Tuple, Type, Union
 
+from ._chunkextensions import ChunkExtensions, serialize_chunk_extensions
 from ._events import Data, EndOfMessage, Event, InformationalResponse, Request, Response
 from ._headers import Headers
 from ._state import CLIENT, IDLE, SEND_BODY, SEND_RESPONSE, SERVER
@@ -62,16 +63,34 @@ def write_any_response(
 class BodyWriter:
     def __call__(self, event: Event, write: Writer) -> None:
         if type(event) is Data:
-            self.send_data(event.data, write)
+            self.send_data(
+                event.data,
+                write,
+                event.chunk_start,
+                event.chunk_end,
+                event.chunk_extensions,
+            )
         elif type(event) is EndOfMessage:
-            self.send_eom(event.headers, write)
+            self.send_eom(event.headers, write, event.chunk_extensions)
         else:  # pragma: no cover
             assert False
 
-    def send_data(self, data: bytes, write: Writer) -> None:
+    def send_data(
+        self,
+        data: bytes,
+        write: Writer,
+        chunk_start: bool = False,
+        chunk_end: bool = False,
+        chunk_extensions: ChunkExtensions = (),
+    ) -> None:
         pass
 
-    def send_eom(self, headers: Headers, write: Writer) -> None:
+    def send_eom(
+        self,
+        headers: Headers,
+        write: Writer,
+        chunk_extensions: ChunkExtensions = (),
+    ) -> None:
         pass
 
 
@@ -85,13 +104,29 @@ class ContentLengthWriter(BodyWriter):
     def __init__(self, length: int) -> None:
         self._length = length
 
-    def send_data(self, data: bytes, write: Writer) -> None:
+    def send_data(
+        self,
+        data: bytes,
+        write: Writer,
+        chunk_start: bool = False,
+        chunk_end: bool = False,
+        chunk_extensions: ChunkExtensions = (),
+    ) -> None:
+        if chunk_extensions:
+            raise LocalProtocolError("chunk extensions require chunked encoding")
         self._length -= len(data)
         if self._length < 0:
             raise LocalProtocolError("Too much data for declared Content-Length")
         write(data)
 
-    def send_eom(self, headers: Headers, write: Writer) -> None:
+    def send_eom(
+        self,
+        headers: Headers,
+        write: Writer,
+        chunk_extensions: ChunkExtensions = (),
+    ) -> None:
+        if chunk_extensions:
+            raise LocalProtocolError("chunk extensions require chunked encoding")
         if self._length != 0:
             raise LocalProtocolError("Too little data for declared Content-Length")
         if headers:
@@ -99,25 +134,93 @@ class ContentLengthWriter(BodyWriter):
 
 
 class ChunkedWriter(BodyWriter):
-    def send_data(self, data: bytes, write: Writer) -> None:
-        # if we encoded 0-length data in the naive way, it would look like an
-        # end-of-message.
-        if not data:
+    def __init__(self) -> None:
+        self._in_chunk = False
+        self._pending_data: List[bytes] = []
+        self._pending_extensions: ChunkExtensions = ()
+
+    def send_data(
+        self,
+        data: bytes,
+        write: Writer,
+        chunk_start: bool = False,
+        chunk_end: bool = False,
+        chunk_extensions: ChunkExtensions = (),
+    ) -> None:
+        if not data and not (chunk_start or chunk_end or chunk_extensions):
             return
-        write(b"%x\r\n" % len(data))
-        write(data)
+        if not data and chunk_start and chunk_end:
+            raise LocalProtocolError(
+                "zero-length chunks are only valid at end-of-message"
+            )
+
+        if self._in_chunk:
+            if chunk_start or chunk_extensions:
+                raise LocalProtocolError("cannot start a chunk inside a chunk")
+            self._pending_data.append(data)
+            if not chunk_end:
+                return
+            data_parts = self._pending_data
+            extensions = self._pending_extensions
+            self._in_chunk = False
+            self._pending_data = []
+            self._pending_extensions = ()
+        else:
+            if chunk_end and not chunk_start:
+                raise LocalProtocolError("cannot end a chunk that has not started")
+            data_parts = [data]
+            extensions = chunk_extensions
+            if chunk_start and not chunk_end:
+                self._in_chunk = True
+                self._pending_data = data_parts
+                self._pending_extensions = extensions
+                return
+
+        self._write_chunk(data_parts, extensions, write)
+
+    @staticmethod
+    def _write_chunk(
+        data_parts: List[bytes], extensions: ChunkExtensions, write: Writer
+    ) -> None:
+        chunk_length = sum(len(data) for data in data_parts)
+        write(b"%x%s\r\n" % (chunk_length, serialize_chunk_extensions(extensions)))
+        for data in data_parts:
+            write(data)
         write(b"\r\n")
 
-    def send_eom(self, headers: Headers, write: Writer) -> None:
-        write(b"0\r\n")
+    def send_eom(
+        self,
+        headers: Headers,
+        write: Writer,
+        chunk_extensions: ChunkExtensions = (),
+    ) -> None:
+        if self._in_chunk:
+            raise LocalProtocolError("cannot end message inside a chunk")
+        write(b"0%s\r\n" % serialize_chunk_extensions(chunk_extensions))
         write_headers(headers, write)
 
 
 class Http10Writer(BodyWriter):
-    def send_data(self, data: bytes, write: Writer) -> None:
+    def send_data(
+        self,
+        data: bytes,
+        write: Writer,
+        chunk_start: bool = False,
+        chunk_end: bool = False,
+        chunk_extensions: ChunkExtensions = (),
+    ) -> None:
+        if chunk_extensions:
+            raise LocalProtocolError("chunk extensions require chunked encoding")
         write(data)
 
-    def send_eom(self, headers: Headers, write: Writer) -> None:
+    def send_eom(
+        self,
+        headers: Headers,
+        write: Writer,
+        chunk_extensions: ChunkExtensions = (),
+    ) -> None:
+        if chunk_extensions:
+            raise LocalProtocolError("chunk extensions require chunked encoding")
         if headers:
             raise LocalProtocolError("can't send trailers to HTTP/1.0 client")
         # no need to close the socket ourselves, that will be taken care of by

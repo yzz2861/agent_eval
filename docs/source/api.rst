@@ -1096,3 +1096,13 @@ Again, it is *strongly encouraged* that you avoid relying on this information
 if at all possible. This functionality should be considered an escape hatch for
 when there is no alternative but to rely on the information, rather than a
 general source of data that is worth relying on.
+
+When sending chunked data, these flags also control the chunk boundaries h11
+writes. A non-empty :class:`Data` event with neither flag is sent as one
+complete chunk for backwards compatibility. Use ``chunk_start=True`` and
+``chunk_end=True`` to explicitly send a complete chunk, or
+``chunk_start=True`` followed by later Data events ending with
+``chunk_end=True`` to split one protocol chunk across several events. Chunk
+extensions can be attached to the first such event through
+:attr:`Data.chunk_extensions`, and final-chunk extensions through
+:attr:`EndOfMessage.chunk_extensions`.

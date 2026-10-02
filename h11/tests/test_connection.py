@@ -2,7 +2,13 @@ from typing import Any, cast, Dict, List, Optional, Tuple, Type
 
 import pytest
 
-from .._connection import _body_framing, _keep_alive, Connection, NEED_DATA, PAUSED
+from .._connection import (
+    _body_framing,
+    _keep_alive,
+    Connection,
+    NEED_DATA,
+    PAUSED,
+)
 from .._events import (
     ConnectionClosed,
     Data,
@@ -236,6 +242,164 @@ def test_chunk_boundaries() -> None:
 
     conn.receive_data(b"0\r\n\r\n")
     assert conn.next_event() == EndOfMessage()
+
+
+def test_chunk_extensions_roundtrip_and_fragmentation() -> None:
+    client = Connection(CLIENT)
+    server = Connection(SERVER)
+    server.receive_data(
+        client.send(
+            Request(
+                method="POST",
+                target="/",
+                headers=[
+                    ("Host", "example.com"),
+                    ("Transfer-Encoding", "chunked"),
+                ],
+            )
+        )
+    )
+    assert client.send(
+        Data(
+            data=b"ab",
+            chunk_start=True,
+            chunk_extensions=[(b"name", b"value with space")],
+        )
+    ) == b""
+    server.receive_data(client.send(Data(data=b"c", chunk_end=True)))
+    server.receive_data(
+        client.send(
+            EndOfMessage(
+                chunk_extensions=[(b"last", None)],
+                headers=[("Trailer", "x")],
+            )
+        )
+    )
+    assert server.next_event() == Request(
+        method="POST",
+        target="/",
+        headers=[("Host", "example.com"), ("Transfer-Encoding", "chunked")],
+    )
+    assert server.next_event() == Data(
+        data=b"abc",
+        chunk_start=True,
+        chunk_end=True,
+        chunk_extensions=((b"name", b"value with space"),),
+    )
+    assert server.next_event() == EndOfMessage(
+        headers=[("Trailer", "x")],
+        chunk_extensions=((b"last", None),),
+    )
+
+
+def test_chunk_extension_exposed_only_on_first_payload_event() -> None:
+    conn = Connection(SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n"
+    )
+    assert type(conn.next_event()) is Request
+
+    wire = b'5;name=value\r\nhello\r\n0\r\n\r\n'
+    events = []
+    for index in range(len(wire)):
+        conn.receive_data(wire[index : index + 1])
+        event = conn.next_event()
+        if event is not NEED_DATA:
+            events.append(event)
+
+    assert events == [
+        Data(
+            data=b"h",
+            chunk_start=True,
+            chunk_extensions=((b"name", b"value"),),
+        ),
+        Data(data=b"e"),
+        Data(data=b"l"),
+        Data(data=b"l"),
+        Data(data=b"o", chunk_end=True),
+        EndOfMessage(),
+    ]
+
+
+def test_empty_body_chunk_extension_and_trailers() -> None:
+    conn = Connection(CLIENT)
+    conn.send(
+        Request(
+            method="POST",
+            target="/",
+            headers=[("Host", "example.com"), ("Transfer-Encoding", "chunked")],
+        )
+    )
+    assert conn.send(
+        EndOfMessage(
+            chunk_extensions=[(b"a", None), (b"b", b'"quoted"')],
+            headers=[("x", "y")],
+        )
+    ) == b'0;a;b="\\\"quoted\\\""\r\nx: y\r\n\r\n'
+
+
+def test_empty_body_extensions_and_trailers_bytewise() -> None:
+    conn = Connection(SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n"
+    )
+    conn.next_event()
+    wire = b'0;last=one\r\ntrailer: value\r\n\r\n'
+    events = []
+    for index in range(len(wire)):
+        conn.receive_data(wire[index : index + 1])
+        event = conn.next_event()
+        if event is not NEED_DATA:
+            events.append(event)
+    assert events == [
+        EndOfMessage(
+            headers=[(b"trailer", b"value")],
+            chunk_extensions=((b"last", b"one"),),
+        )
+    ]
+
+
+def test_sender_chunk_boundaries_are_controllable() -> None:
+    conn = Connection(CLIENT)
+    conn.send(
+        Request(
+            method="POST",
+            target="/",
+            headers=[("Host", "example.com"), ("Transfer-Encoding", "chunked")],
+        )
+    )
+    assert conn.send(Data(data=b"ab", chunk_start=True, chunk_end=False)) == b""
+    assert conn.send(Data(data=b"c", chunk_end=True)) == b"3\r\nabc\r\n"
+    assert conn.send(Data(data=b"def")) == b"3\r\ndef\r\n"
+    assert conn.send(EndOfMessage()) == b"0\r\n\r\n"
+
+
+def test_chunk_extension_errors_and_limit() -> None:
+    conn = Connection(SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n"
+    )
+    conn.next_event()
+    conn.receive_data(b'1;bad name=x\r\nx\r\n0\r\n\r\n')
+    with pytest.raises(RemoteProtocolError):
+        conn.next_event()
+
+    conn = Connection(SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n"
+    )
+    conn.next_event()
+    conn.receive_data(b"1;x=" + b"y" * 5000)
+    with pytest.raises(RemoteProtocolError):
+        conn.next_event()
 
 
 def test_client_talking_to_http10_server() -> None:

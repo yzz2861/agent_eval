@@ -8,9 +8,10 @@
 import re
 from abc import ABC
 from dataclasses import dataclass
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 from ._abnf import method, request_target
+from ._chunkextensions import ChunkExtensions, normalize_chunk_extensions
 from ._headers import Headers, normalize_and_validate
 from ._util import bytesify, LocalProtocolError, validate
 
@@ -273,35 +274,60 @@ class Data(Event):
     .. attribute:: chunk_start
 
        A marker that indicates whether this data object is from the start of a
-       chunked transfer encoding chunk. This field is ignored when when a Data
-       event is provided to :meth:`Connection.send`: it is only valid on
-       events emitted from :meth:`Connection.next_event`. You probably
-       shouldn't use this attribute at all; see
-       :ref:`chunk-delimiters-are-bad` for details.
+       chunked transfer encoding chunk.
+
+       On events received from :meth:`Connection.next_event`, this is only set
+       on the first :class:`Data` event for a chunk. On events given to
+       :meth:`Connection.send`, set this together with :attr:`chunk_end` to
+       control chunk boundaries: ``True``/``True`` sends one complete chunk,
+       while ``True``/``False`` starts a chunk continued by later Data events.
+       Leaving both flags at their defaults sends one chunk per non-empty Data
+       event, as in older h11 versions.
 
     .. attribute:: chunk_end
 
        A marker that indicates whether this data object is the last for a
-       given chunked transfer encoding chunk. This field is ignored when when
-       a Data event is provided to :meth:`Connection.send`: it is only valid
-       on events emitted from :meth:`Connection.next_event`. You probably
-       shouldn't use this attribute at all; see
-       :ref:`chunk-delimiters-are-bad` for details.
+       given chunked transfer encoding chunk. On received events it is only set
+       on the final Data event for that chunk. On sent events, set it to
+       ``True`` on the final Data event for a chunk that was started by an
+       earlier event.
+
+    .. attribute:: chunk_extensions
+
+       The ordered chunk extensions from the chunk header, represented as a
+       sequence of ``(name, value)`` byte-string pairs. A missing value is
+       represented as ``None``. For received chunks, this is populated only on
+       the first Data event belonging to that chunk; later transport fragments
+       have an empty sequence. It is ignored for non-chunked framing.
+
+       When sending, pass extensions either on a complete Data chunk or on the
+       first Data event of a split chunk.
 
     """
 
-    __slots__ = ("data", "chunk_start", "chunk_end")
+    __slots__ = ("data", "chunk_start", "chunk_end", "chunk_extensions")
 
     data: bytes
     chunk_start: bool
     chunk_end: bool
+    chunk_extensions: Tuple[Tuple[bytes, Optional[bytes]], ...]
 
     def __init__(
-        self, data: bytes, chunk_start: bool = False, chunk_end: bool = False
+        self,
+        data: bytes,
+        chunk_start: bool = False,
+        chunk_end: bool = False,
+        *,
+        chunk_extensions: Optional[ChunkExtensions] = None,
     ) -> None:
         object.__setattr__(self, "data", data)
         object.__setattr__(self, "chunk_start", chunk_start)
         object.__setattr__(self, "chunk_end", chunk_end)
+        object.__setattr__(
+            self,
+            "chunk_extensions",
+            normalize_chunk_extensions(chunk_extensions),
+        )
 
     # This is an unhashable type.
     __hash__ = None  # type: ignore
@@ -328,11 +354,18 @@ class EndOfMessage(Event):
 
        Must be empty unless ``Transfer-Encoding: chunked`` is in use.
 
+    .. attribute:: chunk_extensions
+
+       Extensions attached to the final zero-length chunk, using the same
+       ordered ``(name, value)`` representation as :attr:`Data.chunk_extensions`.
+       These are written immediately before any trailing headers.
+
     """
 
-    __slots__ = ("headers",)
+    __slots__ = ("headers", "chunk_extensions")
 
     headers: Headers
+    chunk_extensions: Tuple[Tuple[bytes, Optional[bytes]], ...]
 
     def __init__(
         self,
@@ -340,6 +373,7 @@ class EndOfMessage(Event):
         headers: Union[
             Headers, List[Tuple[bytes, bytes]], List[Tuple[str, str]], None
         ] = None,
+        chunk_extensions: Optional[ChunkExtensions] = None,
         _parsed: bool = False,
     ) -> None:
         super().__init__()
@@ -349,6 +383,11 @@ class EndOfMessage(Event):
             headers = normalize_and_validate(headers, _parsed=_parsed)
 
         object.__setattr__(self, "headers", headers)
+        object.__setattr__(
+            self,
+            "chunk_extensions",
+            normalize_chunk_extensions(chunk_extensions),
+        )
 
     # This is an unhashable type.
     __hash__ = None  # type: ignore
