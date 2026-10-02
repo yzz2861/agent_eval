@@ -16,6 +16,7 @@ __all__ = [
     "EXCLUDE",
     "INCLUDE",
     "RAISE",
+    "DefaultFactory",
     "Schema",
     "SchemaOpts",
     "ValidationError",
@@ -28,3 +29,5 @@ __all__ = [
     "validates",
     "validates_schema",
 ]
+
+DefaultFactory = fields.DefaultFactory

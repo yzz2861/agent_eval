@@ -13,10 +13,12 @@ from marshmallow import (
     EXCLUDE,
     INCLUDE,
     RAISE,
+    DefaultFactory,
     Schema,
     fields,
     missing,
     validate,
+    validates,
 )
 from marshmallow.exceptions import ValidationError
 from tests.base import (
@@ -1831,6 +1833,206 @@ class TestSchemaDeserialization:
         result = AliasingUserSerializer().load(data)
         assert result["name"] == "Mick"
         assert result["years"] is None
+
+    def test_dependent_default_uses_validated_fields_regardless_of_order(self):
+        class EventSchema(Schema):
+            end = fields.DateTime()
+            start = fields.DateTime()
+
+            @staticmethod
+            def default_end(start):
+                return start + dt.timedelta(hours=1)
+
+            end.load_default = DefaultFactory(default_end, depends_on=("start",))
+
+        result = EventSchema().load({"start": "2024-01-01T00:00:00"})
+        assert result == {
+            "start": dt.datetime(2024, 1, 1),
+            "end": dt.datetime(2024, 1, 1, 1),
+        }
+
+    def test_explicit_dependent_value_does_not_call_factory(self):
+        calls = []
+
+        def default_end(start):
+            calls.append(start)
+            return start + dt.timedelta(hours=1)
+
+        class EventSchema(Schema):
+            start = fields.DateTime()
+            end = fields.DateTime(
+                load_default=DefaultFactory(default_end, depends_on=("start",))
+            )
+
+        end = dt.datetime(2024, 1, 1, 2)
+        result = EventSchema().load(
+            {"start": "2024-01-01T00:00:00", "end": "2024-01-01T02:00:00"}
+        )
+        assert result["end"] == end
+        assert calls == []
+
+    def test_dependent_default_runs_after_field_validator(self):
+        calls = []
+
+        class EventSchema(Schema):
+            start = fields.DateTime()
+            end = fields.DateTime(
+                load_default=DefaultFactory(
+                    lambda start: calls.append(start) or start + dt.timedelta(hours=1),
+                    depends_on=("start",),
+                )
+            )
+
+            @validates("start")
+            def validate_start(self, value, **kwargs):
+                if value.minute:
+                    raise ValidationError("Must be on the hour.")
+
+        with pytest.raises(ValidationError) as excinfo:
+            EventSchema().load({"start": "2024-01-01T00:01:00"})
+        assert excinfo.value.messages["start"] == ["Must be on the hour."]
+        assert any(
+            "could not be generated" in message
+            for message in excinfo.value.messages["end"]
+        )
+        assert calls == []
+
+    def test_failed_default_does_not_skip_later_field_validators(self):
+        class EventSchema(Schema):
+            start = fields.DateTime(required=True)
+            end = fields.DateTime(
+                load_default=DefaultFactory(
+                    lambda start: start + dt.timedelta(hours=1),
+                    depends_on=("start",),
+                )
+            )
+            label = fields.String()
+
+            @validates("label")
+            def validate_label(self, value, **kwargs):
+                if value != "ok":
+                    raise ValidationError("Invalid label.")
+
+        with pytest.raises(ValidationError) as excinfo:
+            EventSchema().load({"label": "bad"})
+        assert "start" in excinfo.value.messages
+        assert "end" in excinfo.value.messages
+        assert excinfo.value.messages["label"] == ["Invalid label."]
+
+    def test_generated_dependent_default_is_validated(self):
+        def must_be_future(value):
+            if value <= dt.datetime.now():
+                raise ValidationError("Must be in the future.")
+
+        class EventSchema(Schema):
+            start = fields.DateTime()
+            end = fields.DateTime(
+                validate=must_be_future,
+                load_default=DefaultFactory(
+                    lambda start: start - dt.timedelta(hours=1),
+                    depends_on=("start",),
+                ),
+            )
+
+        with pytest.raises(ValidationError) as excinfo:
+            EventSchema().load({"start": dt.datetime.now().isoformat()})
+        assert "end" in excinfo.value.messages
+
+    def test_dependent_default_supports_mapping_argument(self):
+        class EventSchema(Schema):
+            start = fields.DateTime()
+            end = fields.DateTime(
+                load_default=DefaultFactory(
+                    lambda values: values["start"] + dt.timedelta(hours=1),
+                    depends_on=("start",),
+                )
+            )
+
+        result = EventSchema().load({"start": "2024-01-01T00:00:00"})
+        assert result["end"] == dt.datetime(2024, 1, 1, 1)
+
+    def test_dependent_default_factory_is_called_once_per_many_item(self):
+        calls = []
+
+        def default_end(start):
+            calls.append(start)
+            return start + dt.timedelta(hours=1)
+
+        class EventSchema(Schema):
+            start = fields.DateTime()
+            end = fields.DateTime(
+                load_default=DefaultFactory(default_end, depends_on=("start",))
+            )
+
+        data = [
+            {"start": "2024-01-01T00:00:00"},
+            {"start": "2024-01-01T02:00:00"},
+        ]
+        result = EventSchema().load(data, many=True)
+        assert result[0]["end"] == dt.datetime(2024, 1, 1, 1)
+        assert result[1]["end"] == dt.datetime(2024, 1, 1, 3)
+        assert len(calls) == 2
+
+    def test_nested_many_calculates_and_isolates_mutable_defaults(self):
+        class ItemSchema(Schema):
+            source = fields.String()
+            tags = fields.List(
+                fields.String(),
+                load_default=DefaultFactory(
+                    lambda source: [source], depends_on=("source",)
+                ),
+            )
+
+        class ContainerSchema(Schema):
+            items = fields.Nested(ItemSchema, many=True)
+
+        result = ContainerSchema().load({"items": [{"source": "a"}, {"source": "b"}]})
+        assert result == {
+            "items": [{"source": "a", "tags": ["a"]}, {"source": "b", "tags": ["b"]}]
+        }
+        assert result["items"][0]["tags"] is not result["items"][1]["tags"]
+
+    def test_unknown_dependent_default_raises_when_schema_is_initialized(self):
+        class EventSchema(Schema):
+            start = fields.DateTime()
+            end = fields.DateTime(
+                load_default=DefaultFactory(
+                    lambda start: start + dt.timedelta(hours=1),
+                    depends_on=("begin",),
+                )
+            )
+
+        with pytest.raises(ValueError, match="undeclared field"):
+            EventSchema()
+
+    def test_circular_dependent_defaults_raise_when_schema_is_initialized(self):
+        class EventSchema(Schema):
+            start = fields.DateTime(
+                load_default=DefaultFactory(
+                    lambda end: end - dt.timedelta(hours=1), depends_on=("end",)
+                )
+            )
+            end = fields.DateTime(
+                load_default=DefaultFactory(
+                    lambda start: start + dt.timedelta(hours=1),
+                    depends_on=("start",),
+                )
+            )
+
+        with pytest.raises(ValueError, match="Circular dependency"):
+            EventSchema()
+
+    def test_dependent_default_decorator(self):
+        class EventSchema(Schema):
+            start = fields.DateTime()
+            end = fields.DateTime(load_default=DefaultFactory(depends_on=("start",)))
+
+            @end.load_default
+            def default_end(start):  # noqa: N805
+                return start + dt.timedelta(hours=1)
+
+        result = EventSchema().load({"start": "2024-01-01T00:00:00"})
+        assert result["end"] == dt.datetime(2024, 1, 1, 1)
 
     def test_deserialization_raises_with_errors(self):
         bad_data = {"email": "invalid-email", "colors": "burger", "age": -1}

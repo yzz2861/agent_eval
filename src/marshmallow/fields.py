@@ -7,6 +7,7 @@ import copy
 import datetime as dt
 import decimal
 import email.utils
+import inspect
 import ipaddress
 import math
 import numbers
@@ -14,6 +15,7 @@ import typing
 import uuid
 from collections.abc import Mapping as _Mapping
 from enum import Enum as EnumType
+from types import MappingProxyType
 
 try:
     from typing import Unpack
@@ -52,6 +54,7 @@ __all__ = [
     "Date",
     "DateTime",
     "Decimal",
+    "DefaultFactory",
     "Dict",
     "Email",
     "Enum",
@@ -86,6 +89,90 @@ _ProcessorT = typing.TypeVar(
     "_ProcessorT",
     bound=types.PostLoadCallable | types.PreLoadCallable | types.Validator,
 )
+
+
+class DefaultFactory:
+    """Generate a load default from other successfully validated fields.
+
+    The factory receives dependency values as keyword arguments when its
+    signature names those fields. It may instead accept one read-only mapping.
+    """
+
+    def __init__(
+        self,
+        factory: typing.Callable[..., typing.Any] | None = None,
+        *,
+        depends_on: typing.Sequence[str] = (),
+        dependencies: typing.Sequence[str] | None = None,
+    ) -> None:
+        declared_dependencies = depends_on if dependencies is None else dependencies
+        if factory is None:
+            self.factory = None
+            self.depends_on = tuple(declared_dependencies)
+            self._signature = None
+            return
+        if not callable(factory):
+            msg = "Default factory must be callable."
+            raise TypeError(msg)
+        if isinstance(declared_dependencies, str) or not isinstance(
+            declared_dependencies,
+            (typing.Sequence, typing.AbstractSet),
+        ):
+            msg = "Default factory dependencies must be a collection of strings."
+            raise TypeError(msg)
+        self.factory = factory
+        self.depends_on = tuple(declared_dependencies)
+        try:
+            self._signature = inspect.signature(factory)
+        except (TypeError, ValueError):
+            self._signature = None
+
+    def __call__(  # noqa: PLR0911
+        self, values: typing.Mapping[str, typing.Any] | None = None
+    ) -> typing.Any:
+        if self.factory is None:
+            factory = typing.cast("typing.Callable[..., typing.Any]", values)
+            self.factory = factory
+            try:
+                self._signature = inspect.signature(factory)
+            except (TypeError, ValueError):
+                self._signature = None
+            return self
+
+        if values is None:
+            return self.factory()
+        if not self.depends_on:
+            return self.factory()
+        if self._signature is None:
+            return self.factory(MappingProxyType(dict(values)))
+
+        parameters = self._signature.parameters
+        has_var_keyword = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        has_positional_only = any(
+            parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+            for parameter in parameters.values()
+        )
+        if has_positional_only:
+            return self.factory(MappingProxyType(dict(values)))
+        if has_var_keyword or all(name in parameters for name in values):
+            return self.factory(**dict(values))
+
+        positional_parameters = [
+            parameter
+            for parameter in parameters.values()
+            if parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        ]
+        if len(positional_parameters) == 1:
+            return self.factory(MappingProxyType(dict(values)))
+
+        msg = (
+            "Default factory must accept its declared dependencies as keyword "
+            "arguments or a single mapping argument."
+        )
+        raise TypeError(msg)
 
 
 class _BaseFieldKwargs(typing.TypedDict, total=False):
@@ -394,6 +481,24 @@ class Field(typing.Generic[_InternalT]):
         self._validate(output)
 
         # Apply post_load functions
+        for func in self.post_load:
+            output = func(output)
+        return output
+
+    def deserialize_generated_default(
+        self,
+        value: typing.Any,
+        attr: str | None = None,
+        data: typing.Mapping[str, typing.Any] | None = None,
+        **kwargs,
+    ) -> _InternalT | None:
+        """Deserialize and validate a value supplied by a load default factory."""
+        self._validate_missing(value)
+        if self.allow_none and value is None:
+            return None
+
+        output = self._deserialize(value, attr, data, **kwargs)
+        self._validate(output)
         for func in self.post_load:
             output = func(output)
         return output

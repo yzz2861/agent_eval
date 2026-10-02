@@ -43,6 +43,15 @@ if typing.TYPE_CHECKING:
     from marshmallow.fields import Field
 
 
+class _LoadState:
+    def __init__(self, dict_cls: type[dict]) -> None:
+        self.validated = dict_cls()
+        self.partial = dict_cls()
+        self.failed: set[str] = set()
+        self.skipped: set[str] = set()
+        self.pending: set[str] = set()
+
+
 def _get_fields(attrs) -> list[tuple[str, Field]]:
     """Get fields from a class
 
@@ -643,66 +652,215 @@ class Schema(metaclass=SchemaMeta):
         if not isinstance(data, Mapping):
             error_store.store_error([self.error_messages["type"]], index=index)
         else:
-            partial_is_collection = is_collection(partial)
-            for attr_name, field_obj in self.load_fields.items():
-                field_name = (
-                    field_obj.data_key if field_obj.data_key is not None else attr_name
-                )
-                raw_value = data.get(field_name, missing)
-                if raw_value is missing:
-                    # Ignore missing field if we're allowed to.
-                    if partial is True or (
-                        partial_is_collection and attr_name in partial
-                    ):
-                        continue
-                d_kwargs = {}
-                # Allow partial loading of nested schemas.
-                if partial_is_collection:
-                    prefix = attr_name + "."
-                    len_prefix = len(prefix)
-                    sub_partial = [
-                        f[len_prefix:] for f in partial if f.startswith(prefix)
-                    ]
-                    d_kwargs["partial"] = sub_partial
-                elif partial is not None:
-                    d_kwargs["partial"] = partial
+            self._deserialize_mapping(
+                data,
+                ret_d=ret_d,
+                error_store=error_store,
+                partial=partial,
+                unknown=unknown,
+                index=index,
+            )
 
-                def getter(
-                    val, field_obj=field_obj, field_name=field_name, d_kwargs=d_kwargs
-                ):
-                    return field_obj.deserialize(
-                        val,
-                        field_name,
-                        data,
-                        **d_kwargs,
-                    )
-
-                value = self._call_and_store(
-                    getter_func=getter,
-                    data=raw_value,
-                    field_name=field_name,
-                    error_store=error_store,
-                    index=index,
-                )
-                if value is not missing:
-                    key = field_obj.attribute or attr_name
-                    set_value(ret_d, key, value)
-            if unknown != EXCLUDE:
-                fields = {
-                    field_obj.data_key if field_obj.data_key is not None else field_name
-                    for field_name, field_obj in self.load_fields.items()
-                }
-                for key in set(data) - fields:
-                    value = data[key]
-                    if unknown == INCLUDE:
-                        ret_d[key] = value
-                    elif unknown == RAISE:
-                        error_store.store_error(
-                            [self.error_messages["unknown"]],
-                            key,
-                            index,
-                        )
         return ret_d
+
+    def _deserialize_mapping(
+        self,
+        data: Mapping[str, typing.Any],
+        *,
+        ret_d: dict[str, typing.Any],
+        error_store: ErrorStore,
+        partial,
+        unknown: types.UnknownOption,
+        index,
+    ) -> None:
+        partial_is_collection = is_collection(partial)
+        state = _LoadState(self.dict_class)
+
+        self._deserialize_explicit_fields(
+            data,
+            state=state,
+            error_store=error_store,
+            partial=partial,
+            partial_is_collection=partial_is_collection,
+            index=index,
+        )
+        self._resolve_defaults_and_validators(
+            data,
+            state=state,
+            error_store=error_store,
+            partial=partial,
+            partial_is_collection=partial_is_collection,
+            index=index,
+        )
+        self._store_deserialized_values(ret_d, state)
+        self._store_unknown_fields(
+            data, ret_d=ret_d, error_store=error_store, unknown=unknown, index=index
+        )
+
+    def _deserialize_explicit_fields(
+        self, data, *, state, error_store, partial, partial_is_collection, index
+    ):
+        for attr_name, field_obj in self.load_fields.items():
+            field_name = (
+                field_obj.data_key if field_obj.data_key is not None else attr_name
+            )
+            raw_value = data.get(field_name, missing)
+            if raw_value is missing:
+                if partial is True or (partial_is_collection and attr_name in partial):
+                    state.skipped.add(attr_name)
+                    continue
+                if isinstance(field_obj.load_default, ma_fields.DefaultFactory):
+                    state.pending.add(attr_name)
+                    continue
+            d_kwargs = self._get_field_deserialize_kwargs(
+                attr_name,
+                partial=partial,
+                partial_is_collection=partial_is_collection,
+            )
+            try:
+                value = field_obj.deserialize(raw_value, field_name, data, **d_kwargs)
+            except ValidationError as error:
+                error_store.store_error(error.messages, field_name, index=index)
+                state.failed.add(attr_name)
+                value = error.valid_data or missing
+                if value is not missing:
+                    state.partial[attr_name] = value
+            else:
+                if value is not missing:
+                    state.validated[attr_name] = value
+
+    def _resolve_defaults_and_validators(
+        self, data, *, state, error_store, partial, partial_is_collection, index
+    ):
+        for attr_name in self._default_field_order:
+            if attr_name in state.pending:
+                if not self._resolve_field_default(
+                    attr_name,
+                    data,
+                    state=state,
+                    error_store=error_store,
+                    partial=partial,
+                    partial_is_collection=partial_is_collection,
+                    index=index,
+                ):
+                    continue
+            self._validate_loaded_field(
+                attr_name, state=state, error_store=error_store, index=index
+            )
+
+    def _resolve_field_default(
+        self,
+        attr_name,
+        data,
+        *,
+        state,
+        error_store,
+        partial,
+        partial_is_collection,
+        index,
+    ):
+        field_obj = self.load_fields[attr_name]
+        field_name = field_obj.data_key if field_obj.data_key is not None else attr_name
+        factory = typing.cast("ma_fields.DefaultFactory", field_obj.load_default)
+        failed_dependencies = [
+            dependency
+            for dependency in factory.depends_on
+            if dependency in state.failed
+        ]
+        skipped_dependencies = [
+            dependency
+            for dependency in factory.depends_on
+            if dependency in state.skipped
+        ]
+        missing_dependencies = [
+            dependency
+            for dependency in factory.depends_on
+            if dependency not in state.failed
+            and dependency not in state.skipped
+            and dependency not in state.validated
+        ]
+        if failed_dependencies:
+            self._store_unavailable_default(
+                error_store=error_store,
+                field_name=field_name,
+                dependencies=failed_dependencies,
+                index=index,
+                reason="failed validation",
+            )
+            state.failed.add(attr_name)
+            return False
+        if skipped_dependencies:
+            state.skipped.add(attr_name)
+            return False
+        if missing_dependencies:
+            self._store_unavailable_default(
+                error_store=error_store,
+                field_name=field_name,
+                dependencies=missing_dependencies,
+                index=index,
+                reason="was not provided",
+            )
+            state.failed.add(attr_name)
+            return False
+
+        dependency_values = {
+            dependency: state.validated[dependency] for dependency in factory.depends_on
+        }
+        d_kwargs = self._get_field_deserialize_kwargs(
+            attr_name,
+            partial=partial,
+            partial_is_collection=partial_is_collection,
+        )
+        try:
+            generated_value = factory(dependency_values)
+            value = field_obj.deserialize_generated_default(
+                generated_value, field_name, data, **d_kwargs
+            )
+        except ValidationError as error:
+            error_store.store_error(error.messages, field_name, index=index)
+            state.failed.add(attr_name)
+            if error.valid_data:
+                state.partial[attr_name] = error.valid_data
+            return False
+        state.validated[attr_name] = value
+        return True
+
+    def _validate_loaded_field(self, attr_name, *, state, error_store, index):
+        values = state.validated if attr_name in state.validated else state.partial
+        if attr_name not in values:
+            return
+        value = self._run_field_validators(
+            attr_name=attr_name,
+            value=values[attr_name],
+            error_store=error_store,
+            index=index,
+        )
+        if value is missing:
+            state.failed.add(attr_name)
+            values.pop(attr_name, None)
+        else:
+            values[attr_name] = value
+
+    def _store_deserialized_values(self, ret_d, state):
+        for attr_name, field_obj in self.load_fields.items():
+            value = state.validated.get(
+                attr_name, state.partial.get(attr_name, missing)
+            )
+            if value is not missing:
+                set_value(ret_d, field_obj.attribute or attr_name, value)
+
+    def _store_unknown_fields(self, data, *, ret_d, error_store, unknown, index):
+        if unknown == EXCLUDE:
+            return
+        field_data_keys = {
+            field_obj.data_key if field_obj.data_key is not None else field_name
+            for field_name, field_obj in self.load_fields.items()
+        }
+        for key in set(data) - field_data_keys:
+            if unknown == INCLUDE:
+                ret_d[key] = data[key]
+            elif unknown == RAISE:
+                error_store.store_error([self.error_messages["unknown"]], key, index)
 
     def load(
         self,
@@ -839,6 +997,132 @@ class Schema(metaclass=SchemaMeta):
 
     ##### Private Helpers #####
 
+    def _init_default_factories(self) -> None:
+        """Validate default factory dependencies and determine field load order."""
+        dependencies = {
+            field_name: tuple(
+                typing.cast(
+                    "ma_fields.DefaultFactory", field_obj.load_default
+                ).depends_on
+            )
+            for field_name, field_obj in self.load_fields.items()
+            if isinstance(field_obj.load_default, ma_fields.DefaultFactory)
+        }
+
+        for field_name, field_dependencies in dependencies.items():
+            unknown_dependencies = sorted(
+                set(field_dependencies) - self.load_fields.keys()
+            )
+            if unknown_dependencies:
+                dependency_text = ", ".join(unknown_dependencies)
+                raise ValueError(
+                    f'Default for field "{field_name}" depends on undeclared '
+                    f"field(s): {dependency_text}."
+                )
+
+        field_order = list(self.load_fields)
+        remaining = set(field_order)
+        ordered = []
+        while remaining:
+            ready_fields = [
+                field_name
+                for field_name in field_order
+                if field_name in remaining
+                and all(
+                    dependency not in remaining
+                    for dependency in dependencies.get(field_name, ())
+                )
+            ]
+            if not ready_fields:
+                cyclic_fields = sorted(remaining)
+                field_text = ", ".join(cyclic_fields)
+                raise ValueError(
+                    "Circular dependency detected between default value factories: "
+                    f"{field_text}."
+                )
+            ordered.extend(ready_fields)
+            remaining.difference_update(ready_fields)
+        self._default_field_order = ordered
+
+    @staticmethod
+    def _get_field_deserialize_kwargs(
+        attr_name: str,
+        *,
+        partial: bool | types.StrSequenceOrSet | None,
+        partial_is_collection: bool,
+    ) -> dict[str, typing.Any]:
+        d_kwargs: dict[str, typing.Any] = {}
+        if partial_is_collection:
+            prefix = attr_name + "."
+            d_kwargs["partial"] = [
+                field_name[len(prefix) :]
+                for field_name in partial
+                if field_name.startswith(prefix)
+            ]
+        elif partial is not None:
+            d_kwargs["partial"] = partial
+        return d_kwargs
+
+    def _store_unavailable_default(
+        self,
+        *,
+        error_store: ErrorStore,
+        field_name: str,
+        dependencies: typing.Sequence[str],
+        index: int | None,
+        reason: str,
+    ) -> None:
+        dependency_names = []
+        for dependency in dependencies:
+            dependency_field = self.load_fields[dependency]
+            dependency_names.append(
+                dependency_field.data_key
+                if dependency_field.data_key is not None
+                else dependency
+            )
+        dependency_text = ", ".join(f'"{name}"' for name in dependency_names)
+        plural = "s" if len(dependencies) != 1 else ""
+        message = (
+            f'Default value for field "{field_name}" could not be generated '
+            f"because dependent field{plural} {dependency_text} {reason}."
+        )
+        error_store.store_error([message], field_name, index=index)
+
+    def _run_field_validators(
+        self,
+        *,
+        attr_name: str,
+        value: typing.Any,
+        error_store: ErrorStore,
+        index: int | None,
+    ) -> typing.Any:
+        try:
+            field_obj = self.fields[attr_name]
+        except KeyError as error:
+            raise ValueError(f'"{attr_name}" field does not exist.') from error
+
+        field_name = field_obj.data_key if field_obj.data_key is not None else attr_name
+        for validator_name, _, validator_kwargs in self._hooks[VALIDATES]:
+            if attr_name not in validator_kwargs["field_names"]:
+                continue
+            validator = getattr(self, validator_name)
+            try:
+                validated_value = validator(value, data_key=field_name)
+            except ValidationError as error:
+                error_store.store_error(error.messages, field_name, index=index)
+                return missing
+            if validated_value is not None:
+                value = validated_value
+        return value
+
+    def _validate_field_validator_names(self) -> None:
+        for _, _, validator_kwargs in self._hooks[VALIDATES]:
+            for field_name in validator_kwargs["field_names"]:
+                if field_name not in self.fields and field_name in self.declared_fields:
+                    continue
+                if field_name not in self.fields:
+                    raise ValueError(f'"{field_name}" field does not exist.')
+
     def _do_load(
         self,
         data: (Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]]),
@@ -870,6 +1154,7 @@ class Schema(metaclass=SchemaMeta):
         unknown = self.unknown if unknown is None else unknown
         if partial is None:
             partial = self.partial
+        self._validate_field_validator_names()
         # Run preprocessors
         if self._hooks[PRE_LOAD]:
             try:
@@ -894,10 +1179,6 @@ class Schema(metaclass=SchemaMeta):
                 many=many,
                 partial=partial,
                 unknown=unknown,
-            )
-            # Run field-level validation
-            self._invoke_field_validators(
-                error_store=error_store, data=result, many=many
             )
             # Run schema-level validation
             if self._hooks[VALIDATES_SCHEMA]:
@@ -1051,6 +1332,7 @@ class Schema(metaclass=SchemaMeta):
         self.fields = fields_dict
         self.dump_fields = dump_fields
         self.load_fields = load_fields
+        self._init_default_factories()
 
     def on_bind_field(self, field_name: str, field_obj: Field) -> None:
         """Hook to modify a field when it is bound to the `Schema <marshmallow.Schema>`.
@@ -1120,56 +1402,6 @@ class Schema(metaclass=SchemaMeta):
             partial=partial,
             unknown=unknown,
         )
-
-    def _invoke_field_validators(self, *, error_store: ErrorStore, data, many: bool):
-        for attr_name, _, validator_kwargs in self._hooks[VALIDATES]:
-            validator = getattr(self, attr_name)
-
-            field_names = validator_kwargs["field_names"]
-
-            for field_name in field_names:
-                try:
-                    field_obj = self.fields[field_name]
-                except KeyError as error:
-                    if field_name in self.declared_fields:
-                        continue
-                    raise ValueError(f'"{field_name}" field does not exist.') from error
-
-                data_key = (
-                    field_obj.data_key if field_obj.data_key is not None else field_name
-                )
-                do_validate = functools.partial(validator, data_key=data_key)
-
-                if many:
-                    for idx, item in enumerate(data):
-                        try:
-                            value = item[field_obj.attribute or field_name]
-                        except KeyError:
-                            pass
-                        else:
-                            validated_value = self._call_and_store(
-                                getter_func=do_validate,
-                                data=value,
-                                field_name=data_key,
-                                error_store=error_store,
-                                index=(idx if self.opts.index_errors else None),
-                            )
-                            if validated_value is missing:
-                                item.pop(field_name, None)
-                else:
-                    try:
-                        value = data[field_obj.attribute or field_name]
-                    except KeyError:
-                        pass
-                    else:
-                        validated_value = self._call_and_store(
-                            getter_func=do_validate,
-                            data=value,
-                            field_name=data_key,
-                            error_store=error_store,
-                        )
-                        if validated_value is missing:
-                            data.pop(field_name, None)
 
     def _invoke_schema_validators(
         self,

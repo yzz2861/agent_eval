@@ -413,6 +413,26 @@ Likewise, `dump_default` specifies the default serialization value.
     UserSchema().dump({})
     # {'birthdate': '2017-09-29T00:00:00+00:00'}
 
+Use :class:`DefaultFactory <marshmallow.fields.DefaultFactory>` when a default depends
+on another field. Declared dependencies are loaded and validated before the factory is
+called, and the value it returns is also validated by its field.
+
+.. code-block:: python
+
+    class EventSchema(Schema):
+        start = fields.DateTime()
+        end = fields.DateTime(
+            load_default=fields.DefaultFactory(
+                lambda start: start + dt.timedelta(hours=1),
+                depends_on=("start",),
+            )
+        )
+
+
+    EventSchema().load({"start": "2024-01-01T09:00:00"})
+    # {'start': datetime.datetime(2024, 1, 1, 9, 0),
+    #  'end': datetime.datetime(2024, 1, 1, 10, 0)}
+
 .. _unknown:
 
 Handling unknown fields
