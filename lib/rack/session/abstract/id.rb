@@ -45,11 +45,30 @@ module Rack
     end
 
     module Abstract
+      # Recursively duplicate session data (hashes and arrays) so that a
+      # session draft and the stored session never share mutable state.
+      # Used by the manual commit mode to enforce the isolation boundary
+      # between the request-local session and the persisted session.
+
+      def self.deep_dup_session(value)
+        case value
+        when Hash
+          value.each_with_object({}) do |(key, entry), copy|
+            copy[key] = deep_dup_session(entry)
+          end
+        when Array
+          value.map {|entry| deep_dup_session(entry)}
+        else
+          value
+        end
+      end
+
       # SessionHash is responsible to lazily load the session from store.
 
       class SessionHash
         include Enumerable
         attr_writer :id
+        attr_reader :committed_result
 
         Unspecified = Object.new
 
@@ -69,6 +88,8 @@ module Rack
           @store = store
           @req = req
           @loaded = false
+          @committed = false
+          @destroyed = false
         end
 
         def id
@@ -124,7 +145,40 @@ module Rack
 
         def destroy
           clear
-          @id = @store.send(:delete_session, @req, id, options)
+          if manual_commit?
+            # In manual commit mode, deletion is staged and only applied
+            # to the store if the session is explicitly committed.
+            @destroyed = true
+          else
+            @id = @store.send(:delete_session, @req, id, options)
+          end
+        end
+
+        # Explicitly persist the current session to the store. In :manual
+        # commit mode this is the only way session changes are saved: the
+        # request works on a private copy of the session, and a deep copy
+        # of the current data is written synchronously to the store, so
+        # storage failures are reported to the application before the
+        # response is committed. Returns true if the session was persisted
+        # and false otherwise. After a successful commit the session
+        # remains editable, but further changes are not persisted unless
+        # #commit! is called again.
+
+        def commit!
+          @store.send(:commit_draft_session, @req, self)
+        end
+
+        # Whether the session was explicitly committed during this request.
+
+        def committed?
+          @committed
+        end
+
+        # Whether the session was destroyed and the deletion is still
+        # waiting to be applied to the store.
+
+        def destroyed?
+          @destroyed
         end
 
         def to_hash
@@ -194,7 +248,26 @@ module Rack
         def load!
           @id, session = @store.send(:load_session, @req)
           @data = stringify_keys(session)
+          # In manual commit mode the draft must not share nested hashes
+          # or arrays with the stored session, otherwise mutating them
+          # would bypass the commit boundary.
+          @data = Abstract.deep_dup_session(@data) if manual_commit?
           @loaded = true
+        end
+
+        # Called by the store after the session was successfully committed.
+        # Records the result of write_session so that the response can set
+        # the appropriate cookie without re-reading the (possibly further
+        # modified) session data.
+
+        def committed!(result)
+          @committed = true
+          @committed_result = result
+          @destroyed = false
+        end
+
+        def manual_commit?
+          @req && options[:commit_mode] == :manual
         end
 
         def stringify_keys(other)
@@ -223,6 +296,18 @@ module Rack
       # * :renew (implementation dependent) will prompt the generation of a new
       #   session id, and migration of data to be referenced at the new id. If
       #   :defer is set, it will be overridden and the cookie will be set.
+      # * :commit_mode controls when session changes are persisted. The
+      #   default :auto mode writes the session back to the store when the
+      #   response is generated, as before. The :manual mode gives the
+      #   request a private, editable copy of the session: changes
+      #   (including changes to nested hashes and arrays) are never
+      #   persisted unless the application calls
+      #   <tt>env['rack.session'].commit!</tt>. If the request finishes or
+      #   raises without committing, the stored session and the client
+      #   cookie are left untouched. Committing writes a deep copy of the
+      #   current data synchronously, so storage failures are reported
+      #   before the response is committed, and later modifications only
+      #   take effect if committed again.
       # * :sidbits sets the number of bits in length that a generated session
       #   id will be.
       #
@@ -247,6 +332,7 @@ module Rack
           partitioned: false,
           defer: false,
           renew: false,
+          commit_mode: :auto,
           sidbits: 128,
           cookie_only: true,
           secure_random: ::SecureRandom
@@ -382,6 +468,14 @@ module Rack
           session = req.get_header RACK_SESSION
           options = session.options
 
+          if options[:commit_mode] == :manual
+            # In manual commit mode, session data is only ever written by
+            # SessionHash#commit! during the request. Here we only set the
+            # session cookie if the session was actually committed.
+            commit_committed_session(req, res, session, options)
+            return
+          end
+
           if options[:drop] || options[:renew]
             session_id = delete_session(req, session.id || generate_sid, options)
             return unless session_id
@@ -412,6 +506,70 @@ module Rack
           end
         end
         public :commit_session
+
+        # Explicitly persist the session to the store in the middle of the
+        # request. Called by SessionHash#commit!. A deep copy of the
+        # current session data is written synchronously, so storage
+        # failures are reported to the application before the response is
+        # committed. Returns true if the session was persisted and false
+        # otherwise.
+
+        def commit_draft_session(req, session)
+          options = session.options
+          return false if options[:skip]
+          return false unless security_matches?(req, options)
+
+          session.send(:load!) unless loaded_session?(session)
+
+          if session.destroyed? || options[:drop] || options[:renew]
+            session_id = delete_session(req, session.id || generate_sid, options)
+            # With :drop, the session is deleted and nothing else is
+            # persisted; no cookie will be set on the response either.
+            return true unless session_id
+            session.id = session_id
+          end
+
+          session_data = Abstract.deep_dup_session(session.to_hash).delete_if {|key, value| value.nil?}
+
+          if data = write_session(req, session.id, session_data, options)
+            session.send(:committed!, data)
+            true
+          else
+            req.get_header(RACK_ERRORS).puts("Warning! #{self.class.name} failed to save session. Content dropped.")
+            false
+          end
+        end
+
+        # Manual commit mode counterpart of #commit_session: the session
+        # data was already written synchronously by #commit_draft_session,
+        # so only the cookie derived from the committed result is set on
+        # the response. Sessions that were never committed leave both the
+        # store and the client cookie untouched.
+
+        def commit_committed_session(req, res, session, options)
+          return unless session.respond_to?(:committed?) && session.committed?
+
+          data = session.committed_result
+          return unless data
+
+          if options[:defer] and not options[:renew]
+            req.get_header(RACK_ERRORS).puts("Deferring cookie for #{session.id}") if $VERBOSE
+            return
+          end
+
+          cookie = Hash.new
+          cookie[:value] = cookie_value(data)
+          cookie[:expires] = Time.now + options[:expire_after] if options[:expire_after]
+          cookie[:expires] = Time.now + options[:max_age] if options[:max_age]
+
+          if @same_site.respond_to? :call
+            cookie[:same_site] = @same_site.call(req, res)
+          else
+            cookie[:same_site] = @same_site
+          end
+
+          set_cookie(req, res, cookie.merge!(options))
+        end
 
         def cookie_value(data)
           data
