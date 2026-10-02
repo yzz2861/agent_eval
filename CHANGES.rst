@@ -3,6 +3,11 @@ Version 1.10.0
 
 Unreleased
 
+-   Add one-shot receiver subscriptions with ``connect(once=True)`` and
+    ``connect_once``. The subscription is claimed atomically before its
+    receiver is called, so reentrant or concurrent sends do not invoke it
+    again and receiver exceptions do not retry it.
+
 
 Version 1.9.0
 -------------

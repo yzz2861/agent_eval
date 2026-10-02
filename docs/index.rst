@@ -17,6 +17,7 @@ The core of Blinker is quite small but provides powerful features:
  - anonymous signals
  - custom name registries
  - permanently or temporarily connected receivers
+ - one-shot receivers
  - automatically disconnected receivers via weak referencing
  - sending arbitrary data payloads
  - collecting return values from signal receivers
@@ -59,6 +60,22 @@ object that caused the signal to be emitted.
   >>> ready = signal('ready')
   >>> ready.connect(subscriber)
   <function subscriber at 0x...>
+
+
+One-shot Receivers
+------------------
+
+Use :meth:`Signal.connect_once` or ``connect(once=True)`` to call a receiver
+only for the next matching send. The subscription is removed before the
+receiver is called, so reentrant or concurrent sends do not invoke it again,
+and an exception from the receiver still consumes the subscription.
+
+.. code-block:: python
+
+  def initialize_once(sender):
+      print("Initializing")
+
+  ready.connect_once(initialize_once)
 
 
 Emitting Signals
