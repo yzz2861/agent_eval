@@ -22,6 +22,28 @@ module Mustermann
       unescape(string) == @string
     end
 
+    # Identity patterns compare the input against the pattern string literally
+    # (with URI decoding). Reports the first differing character, or trailing
+    # input when the pattern ended.
+    #
+    # @param (see Mustermann::Pattern#explain)
+    # @return (see Mustermann::Pattern#explain)
+    # @see Mustermann::Pattern#explain
+    def explain(string)
+      return nil if self === string
+      decoded = unescape(string)
+      position = 0
+      position += 1 while position < decoded.length && position < @string.length &&
+        decoded[position] == @string[position]
+      expected_literal = position < @string.length ? @string[position] : nil
+      expectation = Expectation.new(
+        position: position,
+        kind: expected_literal ? :literal : :end,
+        pattern_position: position, literal: expected_literal
+      )
+      Failure.new(pattern: self, string:, position:, expectations: [expectation])
+    end
+
     # @param (see Mustermann::Pattern#peek_size)
     # @return (see Mustermann::Pattern#peek_size)
     # @see (see Mustermann::Pattern#peek_size)

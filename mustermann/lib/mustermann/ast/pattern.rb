@@ -6,6 +6,7 @@ require 'mustermann/ast/transformer'
 require 'mustermann/ast/validation'
 require 'mustermann/ast/template_generator'
 require 'mustermann/ast/param_scanner'
+require 'mustermann/ast/explainer'
 require 'mustermann/regexp_based'
 require 'mustermann/expander'
 require 'mustermann/equality_map'
@@ -86,6 +87,23 @@ module Mustermann
         compiler.compile(to_ast, **options)
       rescue CompileError => error
         raise error.class, "#{error.message}: #{@string.inspect}", error.backtrace
+      end
+
+      # On-demand failure diagnosis. Runs the normal regular-expression match
+      # first; the explanatory AST walk only happens after an actual failure.
+      #
+      # @example
+      #   pattern = Mustermann.new("/users/:id", capture: :integer)
+      #   failure = pattern.explain("/users/abc")
+      #   failure.position             # => 7
+      #   failure.expectations.first.kind # => :capture
+      #
+      # @param (see Mustermann::Pattern#explain)
+      # @return (see Mustermann::Pattern#explain)
+      # @see Mustermann::Pattern#explain
+      def explain(string)
+        return nil if self === string
+        Explainer.explain(self, string)
       end
 
       # Returns a regexp that matches strings excluded by the +except+ option,

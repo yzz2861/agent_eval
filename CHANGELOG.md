@@ -4,6 +4,10 @@ Mustermann follows [Semantic Versioning 2.0](http://semver.org/). Anything docum
 
 ## Unreleased changes
 
+#### New features
+
+* Added `Mustermann::Pattern#explain` for on-demand failure explanations. When a string does not match, it returns a `Mustermann::Failure` carrying the furthest reachable input position, the segment kinds expected there (literal, capture, splat, end of string, etc.) and the corresponding positions in the pattern string. Expectations from different alternative branches at the same furthest position are merged. Normal matching is unchanged and performs no diagnosis work.
+
 ### Mustermann 4.0.1
 
 #### Performance improvements

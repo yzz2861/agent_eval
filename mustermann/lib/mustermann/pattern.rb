@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require 'mustermann/error'
+require 'mustermann/failure'
 require 'mustermann/match'
 require 'mustermann/equality_map'
 require 'uri'
@@ -88,6 +89,29 @@ module Mustermann
     # @see Mustermann::Match
     def match(string)
       Match.new(self, string) if self === string
+    end
+
+    # Explains why a string does not match the pattern, without affecting the
+    # matching fast path: {#===} and friends never perform any diagnosis work.
+    #
+    # @example
+    #   pattern = Mustermann.new("/users/:id", capture: :integer)
+    #   if failure = pattern.explain("/users/abc")
+    #     puts failure.message  # => "expected capture \"id\" at position 7 matching :integer"
+    #   end
+    #
+    # @param [String] string the string that failed to match
+    # @return [Mustermann::Failure, nil] a failure explanation, or nil if the
+    #   string matches or this pattern type does not support explanations
+    # @see Mustermann::Failure
+    def explain(string)
+      return nil if self === string
+      explain_failure(string)
+    end
+
+    # @!visibility private
+    def explain_failure(_string)
+      nil
     end
 
     # @return [Array<String>] list of named captures in the pattern
