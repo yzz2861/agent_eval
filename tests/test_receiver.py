@@ -136,10 +136,80 @@ class TestChunkedReceiver(unittest.TestCase):
         buf = DummyBuffer()
         inst = self._makeOne(buf)
         inst.all_chunks_received = True
-        result = inst.received(b"abc\r\n\r\n")
-        self.assertEqual(inst.trailer, b"abc\r\n\r\n")
-        self.assertEqual(result, 7)
+        data = b"X-Foo: bar\r\n\r\n"
+        result = inst.received(data)
+        self.assertEqual(inst.trailers, [("X-Foo", "bar")])
+        self.assertEqual(result, len(data))
         self.assertTrue(inst.completed)
+        self.assertIsNone(inst.error)
+
+    def test_received_trailer_invalid_field(self):
+        from waitress.utilities import BadRequest
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+        result = inst.received(b"abc\r\n\r\n")
+        self.assertEqual(result, 7)
+        self.assertFalse(inst.completed)
+        self.assertIsInstance(inst.error, BadRequest)
+
+    def test_received_trailer_preserves_order_and_duplicates(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+        data = b"X-Batch: one\r\nX-Batch: two\r\nX-Signature: abc\r\n\r\n"
+        result = inst.received(data)
+        self.assertEqual(
+            inst.trailers,
+            [("X-Batch", "one"), ("X-Batch", "two"), ("X-Signature", "abc")],
+        )
+        self.assertEqual(result, len(data))
+        self.assertTrue(inst.completed)
+        self.assertIsNone(inst.error)
+
+    def test_received_trailer_split_across_reads(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+        data = b"X-Foo: bar\r\nX-Baz: qux\r\n\r\n"
+        for byte in data:
+            result = inst.received(bytes([byte]))
+            self.assertEqual(result, 1)
+        self.assertEqual(
+            inst.trailers, [("X-Foo", "bar"), ("X-Baz", "qux")]
+        )
+        self.assertTrue(inst.completed)
+        self.assertIsNone(inst.error)
+
+    def test_received_trailer_empty_terminates(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        result = inst.received(b"0\r\n\r\n")
+        self.assertEqual(result, 5)
+        self.assertTrue(inst.completed)
+        self.assertEqual(inst.trailers, [])
+        self.assertIsNone(inst.error)
+
+    def test_received_trailer_followed_by_next_request(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        data = b"0\r\nX-Foo: bar\r\n\r\nGET / HTTP/1.1\r\n\r\n"
+        result = inst.received(data)
+        self.assertEqual(result, len(b"0\r\nX-Foo: bar\r\n\r\n"))
+        self.assertTrue(inst.completed)
+        self.assertEqual(inst.trailers, [("X-Foo", "bar")])
+        self.assertIsNone(inst.error)
+
+    def test_received_trailer_empty_followed_by_next_request(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        data = b"0\r\n\r\nGET / HTTP/1.1\r\n\r\n"
+        result = inst.received(data)
+        self.assertEqual(result, len(b"0\r\n\r\n"))
+        self.assertTrue(inst.completed)
+        self.assertEqual(inst.trailers, [])
+        self.assertIsNone(inst.error)
 
     def test_getfile(self):
         buf = DummyBuffer()
@@ -222,6 +292,102 @@ class TestChunkedReceiver(unittest.TestCase):
         self.assertTrue(inst.completed)
         self.assertEqual(b"".join(buf.data), b"Wikipedia in\r\n\r\nchunks.")
         self.assertIsNone(inst.error)
+
+
+class TestChunkedReceiverTrailers(unittest.TestCase):
+    def _makeOne(self, buf):
+        from waitress.receiver import ChunkedReceiver
+
+        return ChunkedReceiver(buf)
+
+    def test_forbidden_trailer_fields(self):
+        from waitress.receiver import FORBIDDEN_TRAILER_FIELDS
+        from waitress.utilities import BadRequest
+
+        self.assertIn("CONTENT_LENGTH", FORBIDDEN_TRAILER_FIELDS)
+        self.assertIn("TRANSFER_ENCODING", FORBIDDEN_TRAILER_FIELDS)
+        self.assertIn("HOST", FORBIDDEN_TRAILER_FIELDS)
+        self.assertIn("AUTHORIZATION", FORBIDDEN_TRAILER_FIELDS)
+
+        for field in (
+            "Content-Length",
+            "Transfer-Encoding",
+            "Host",
+            "Authorization",
+            "Proxy-Authorization",
+            "Connection",
+            "TE",
+            "Trailer",
+        ):
+            buf = DummyBuffer()
+            inst = self._makeOne(buf)
+            inst.all_chunks_received = True
+            inst.received(field.encode("latin-1") + b": x\r\n\r\n")
+            self.assertIsInstance(inst.error, BadRequest, field)
+            self.assertFalse(inst.completed, field)
+            self.assertEqual(inst.trailers, [], field)
+
+    def test_trailer_line_too_long(self):
+        from waitress.utilities import RequestHeaderFieldsTooLarge
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.max_trailer_line = 16
+        inst.all_chunks_received = True
+        result = inst.received(b"X-Foo: " + b"a" * 32 + b"\r\n\r\n")
+        self.assertIsInstance(inst.error, RequestHeaderFieldsTooLarge)
+        self.assertFalse(inst.completed)
+        self.assertEqual(inst.trailers, [])
+
+    def test_trailer_partial_line_too_long(self):
+        from waitress.utilities import RequestHeaderFieldsTooLarge
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.max_trailer_line = 16
+        inst.all_chunks_received = True
+        # No CRLF yet, but the buffered partial line is already over the
+        # limit.
+        result = inst.received(b"X-Foo: " + b"a" * 32)
+        self.assertIsInstance(inst.error, RequestHeaderFieldsTooLarge)
+        self.assertFalse(inst.completed)
+
+    def test_trailer_too_many_fields(self):
+        from waitress.utilities import RequestHeaderFieldsTooLarge
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.max_trailer_fields = 2
+        inst.all_chunks_received = True
+        inst.received(b"X-A: 1\r\nX-B: 2\r\nX-C: 3\r\n\r\n")
+        self.assertIsInstance(inst.error, RequestHeaderFieldsTooLarge)
+        self.assertFalse(inst.completed)
+        self.assertEqual(inst.trailers, [("X-A", "1"), ("X-B", "2")])
+
+    def test_trailer_too_many_bytes(self):
+        from waitress.utilities import RequestHeaderFieldsTooLarge
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.max_trailer_bytes = 16
+        inst.all_chunks_received = True
+        inst.received(b"X-A: 1\r\nX-B: 2\r\nX-C: 3\r\n\r\n")
+        self.assertIsInstance(inst.error, RequestHeaderFieldsTooLarge)
+        self.assertFalse(inst.completed)
+
+    def test_trailer_limits_not_hit(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.max_trailer_bytes = 64
+        inst.max_trailer_fields = 2
+        inst.max_trailer_line = 16
+        inst.all_chunks_received = True
+        data = b"X-A: 1\r\nX-B: 2\r\n\r\n"
+        result = inst.received(data)
+        self.assertEqual(result, len(data))
+        self.assertTrue(inst.completed)
+        self.assertIsNone(inst.error)
+        self.assertEqual(inst.trailers, [("X-A", "1"), ("X-B", "2")])
 
 
 class TestChunkedReceiverParametrized:

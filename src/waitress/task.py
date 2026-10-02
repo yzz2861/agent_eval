@@ -565,6 +565,17 @@ class WSGITask(Task):
             if mykey not in environ:
                 environ[mykey] = value
 
+        # If the request body arrived with chunked transfer coding, expose
+        # any trailer fields that followed it as a separate, read-only
+        # environ entry. They are deliberately not merged into the HTTP_*
+        # headers above so that they can not be confused with the fields
+        # that arrived in the header section of the request.
+        body_rcv = getattr(request, "body_rcv", None)
+        trailers = getattr(body_rcv, "trailers", None)
+
+        if trailers is not None:
+            environ["waitress.trailers"] = tuple(trailers)
+
         # Insert a callable into the environment that allows the application to
         # check if the client disconnected. Only works with
         # channel_request_lookahead larger than 0.

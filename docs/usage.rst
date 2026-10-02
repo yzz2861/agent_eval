@@ -68,6 +68,27 @@ The :term:`PasteDeploy` syntax for UNIX domain sockets is analogous:
 You can find more settings to tweak (arguments to ``waitress.serve`` or
 equivalent settings in PasteDeploy) in :ref:`arguments`.
 
+.. _request-trailers:
+
+Request trailers
+----------------
+
+When a request body arrives with ``Transfer-Encoding: chunked``, Waitress
+parses any trailer fields that follow the final chunk and exposes them to the
+WSGI application as ``environ["waitress.trailers"]``, a read-only tuple of
+``(name, value)`` pairs in the order they were received. Same-named fields
+are preserved as separate entries, and the fields are never merged into the
+``HTTP_*`` environ entries that hold the headers of the request. The key
+is only present for chunked requests.
+
+Trailer fields that could alter the framing of the message, the routing of
+the request, or the way authentication is interpreted (such as
+``Content-Length``, ``Transfer-Encoding``, ``Host``, or
+``Authorization``) are rejected with a 400 (Bad Request), as are malformed
+field lines. Trailer sections that exceed the built-in limits on total size,
+line length, or field count are rejected with a 431 (Request Header Fields
+Too Large).
+
 Additionally, there is a command line runner called ``waitress-serve``, which
 can be used in development and in situations where the likes of
 :term:`PasteDeploy` is not necessary:

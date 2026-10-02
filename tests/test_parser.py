@@ -400,6 +400,66 @@ class TestHTTPRequestParser(unittest.TestCase):
         self.assertIsNone(self.parser.error)
         self.assertEqual(self.parser.headers["CONTENT_LENGTH"], "29")
 
+    def test_received_chunked_completed_parses_trailers(self):
+        data = (
+            b"GET /foobar HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"4\r\n"
+            b"Wiki\r\n"
+            b"0\r\n"
+            b"X-Batch: one\r\n"
+            b"X-Batch: two\r\n"
+            b"\r\n"
+        )
+        result = self.parser.received(data)
+        result += self.parser.received(data[result:])
+        self.assertEqual(result, len(data))
+        self.assertTrue(self.parser.completed)
+        self.assertIsNone(self.parser.error)
+        self.assertEqual(
+            self.parser.body_rcv.trailers,
+            [("X-Batch", "one"), ("X-Batch", "two")],
+        )
+        # Trailer fields must not be merged into the request headers.
+        self.assertNotIn("X_BATCH", self.parser.headers)
+        self.assertEqual(self.parser.headers["CONTENT_LENGTH"], "4")
+
+    def test_received_chunked_forbidden_trailer_is_error(self):
+        data = (
+            b"GET /foobar HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"4\r\n"
+            b"Wiki\r\n"
+            b"0\r\n"
+            b"Content-Length: 4\r\n"
+            b"\r\n"
+        )
+        result = self.parser.received(data)
+        self.parser.received(data[result:])
+        self.assertTrue(self.parser.completed)
+        self.assertIsInstance(self.parser.error, BadRequest)
+
+    def test_received_chunked_invalid_trailer_is_error(self):
+        data = (
+            b"GET /foobar HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"4\r\n"
+            b"Wiki\r\n"
+            b"0\r\n"
+            b"not a header field\r\n"
+            b"\r\n"
+        )
+        result = self.parser.received(data)
+        self.parser.received(data[result:])
+        self.assertTrue(self.parser.completed)
+        self.assertIsInstance(self.parser.error, BadRequest)
+
     def test_parse_header_gardenpath(self):
         data = b"GET /foobar HTTP/8.4\r\nfoo: bar\r\n"
         self.parser.parse_header(data)

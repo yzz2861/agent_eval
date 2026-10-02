@@ -99,6 +99,14 @@ Backward Incompatibilities
 Features
 ~~~~~~~~
 
+- Trailer fields of a chunked request body are now parsed and made available
+  to the WSGI application as ``environ["waitress.trailers"]``, a read-only
+  tuple of (name, value) pairs in the order they were received, instead of
+  being silently discarded. Trailer fields that would change the framing,
+  routing, or authentication of the request are rejected with a 400 (Bad
+  Request), and the trailer section is bounded in total size, line length,
+  and field count.
+
 - Added support for Python 3.13.
   See https://github.com/Pylons/waitress/pull/445.
 

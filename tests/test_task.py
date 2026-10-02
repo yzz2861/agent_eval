@@ -738,6 +738,28 @@ class TestWSGITask(unittest.TestCase):
         environ = inst.get_environment()
         self.assertEqual(environ["QUERY_STRING"], "abc")
 
+    def test_get_environment_with_trailers(self):
+        inst = self._makeOne()
+        request = DummyParser()
+        request.body_rcv = DummyChunkedReceiver()
+        inst.request = request
+        environ = inst.get_environment()
+        trailers = environ["waitress.trailers"]
+        self.assertIsInstance(trailers, tuple)
+        self.assertEqual(
+            trailers,
+            (("X-Batch", "one"), ("X-Batch", "two"), ("X-Batch", "three")),
+        )
+        # Trailer fields must not be merged into the HTTP_* headers.
+        self.assertNotIn("HTTP_X_BATCH", environ)
+
+    def test_get_environment_without_trailers(self):
+        inst = self._makeOne()
+        request = DummyParser()
+        inst.request = request
+        environ = inst.get_environment()
+        self.assertNotIn("waitress.trailers", environ)
+
     def test_get_environ_with_url_prefix_miss(self):
         inst = self._makeOne()
         inst.channel.server.adj.url_prefix = "/foo"
@@ -978,6 +1000,10 @@ class DummyChannel:
         else:
             self.otherdata.append(data)
         return len(data)
+
+
+class DummyChunkedReceiver:
+    trailers = [("X-Batch", "one"), ("X-Batch", "two"), ("X-Batch", "three")]
 
 
 class DummyParser:
