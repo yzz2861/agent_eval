@@ -1213,6 +1213,7 @@ is controlled by *force_close* constructor's parameter).
 
 .. class:: TCPConnector(*, ssl=True, verify_ssl=True, fingerprint=None, \
                  use_dns_cache=True, ttl_dns_cache=10, \
+                 soft_ttl_dns_cache=None, stale_dns_on_error=True, \
                  family=0, ssl_context=None, local_addr=None, \
                  resolver=None, keepalive_timeout=sentinel, \
                  force_close=False, limit=100, limit_per_host=0, \
@@ -1275,6 +1276,28 @@ is controlled by *force_close* constructor's parameter).
       In some environments the IP addresses related to a specific HOST can
       change after a specific time. Use this option to keep the DNS cache
       updated refreshing each entry after N seconds.
+
+   :param float soft_ttl_dns_cache: revalidate cached DNS entries in the
+      background after some seconds, ``None`` means no background
+      revalidation. By default ``None`` (optional).
+
+      When a cached DNS entry is older than *soft_ttl_dns_cache* but has
+      not yet reached *ttl_dns_cache*, the stale entry is still used for
+      new connections while a single background refresh updates the cache,
+      so requests do not stall on slow DNS resolvers. Once the entry
+      reaches *ttl_dns_cache* it is no longer served and requests wait
+      for a fresh resolution. Must be smaller than *ttl_dns_cache*.
+
+      .. versionadded:: 4.0
+
+   :param bool stale_dns_on_error: keep serving a stale cached DNS entry
+      (one past *soft_ttl_dns_cache*) when its background refresh fails,
+      ``True`` by default. The entry is never served past
+      *ttl_dns_cache*, regardless of refresh failures. If ``False``,
+      a failed refresh drops the stale entry and the next request
+      resolves synchronously.
+
+      .. versionadded:: 4.0
 
    :param int limit: total number simultaneous connections. If *limit* is
                      ``0`` the connector has no limit (default: 100).

@@ -2765,6 +2765,294 @@ async def test_tcp_connector_clear_dns_cache_bad_args() -> None:
     await conn.close()
 
 
+def _dns_addrs(*ips: str) -> list[ResolveResult]:
+    return [
+        {
+            "hostname": "example.com",
+            "host": ip,
+            "port": 80,
+            "family": socket.AF_INET,
+            "proto": 0,
+            "flags": socket.AI_NUMERICHOST,
+        }
+        for ip in ips
+    ]
+
+
+class _ControllableResolver(AbstractResolver):
+    """Fake resolver whose timing, results and failures are test-controlled."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+        self.gate: asyncio.Event | None = None
+        self.outcomes: deque[list[ResolveResult] | BaseException] = deque()
+
+    async def resolve(
+        self, host: str, port: int, family: int = 0
+    ) -> list[ResolveResult]:
+        self.calls.append((host, port))
+        if self.gate is not None:
+            await self.gate.wait()
+        outcome = self.outcomes.popleft()
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    async def close(self) -> None:
+        """Nothing to close."""
+
+
+@pytest.fixture
+def dns_now(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    now = [1000.0]
+    monkeypatch.setattr("aiohttp.connector.monotonic", lambda: now[0])
+    return now
+
+
+async def _wait_for_refresh(conn: aiohttp.TCPConnector, key: tuple[str, int]) -> None:
+    while key in conn._throttle_dns_futures:
+        await asyncio.sleep(0)
+
+
+async def test_dns_cache_soft_ttl_must_be_smaller_than_ttl() -> None:
+    with pytest.raises(ValueError, match="soft_ttl_dns_cache"):
+        aiohttp.TCPConnector(ttl_dns_cache=10, soft_ttl_dns_cache=10)
+    with pytest.raises(ValueError, match="soft_ttl_dns_cache"):
+        aiohttp.TCPConnector(ttl_dns_cache=10, soft_ttl_dns_cache=20)
+    # No error when ttl_dns_cache is None (entries never hard-expire).
+    conn = aiohttp.TCPConnector(ttl_dns_cache=None, soft_ttl_dns_cache=10)
+    await conn.close()
+
+
+async def test_dns_cache_soft_ttl_serves_stale_and_refreshes_once(
+    dns_now: list[float],
+) -> None:
+    resolver = _ControllableResolver()
+    resolver.outcomes.append(_dns_addrs("10.0.0.1"))
+    conn = aiohttp.TCPConnector(
+        resolver=resolver, ttl_dns_cache=60, soft_ttl_dns_cache=10
+    )
+    async with conn:
+        first = await conn._resolve_host("example.com", 80)
+        assert [addr["host"] for addr in first] == ["10.0.0.1"]
+        assert len(resolver.calls) == 1
+
+        # Enter the soft expiry window: the stale addresses are served
+        # while a slow refresh runs in the background.
+        dns_now[0] += 11
+        resolver.gate = asyncio.Event()
+        resolver.outcomes.append(_dns_addrs("10.0.0.2"))
+        stale1 = await conn._resolve_host("example.com", 80)
+        stale2 = await conn._resolve_host("example.com", 80)
+        assert [addr["host"] for addr in stale1] == ["10.0.0.1"]
+        assert [addr["host"] for addr in stale2] == ["10.0.0.1"]
+        # Both requests share a single background refresh.
+        assert len(resolver.calls) == 2
+
+        # Once the refresh finishes, the new addresses are used.
+        resolver.gate.set()
+        await _wait_for_refresh(conn, ("example.com", 80))
+        refreshed = await conn._resolve_host("example.com", 80)
+        assert [addr["host"] for addr in refreshed] == ["10.0.0.2"]
+        assert len(resolver.calls) == 2
+
+
+async def test_dns_cache_hard_ttl_waits_for_fresh_result(
+    dns_now: list[float],
+) -> None:
+    resolver = _ControllableResolver()
+    resolver.outcomes.append(_dns_addrs("10.0.0.1"))
+    conn = aiohttp.TCPConnector(
+        resolver=resolver, ttl_dns_cache=20, soft_ttl_dns_cache=10
+    )
+    async with conn:
+        await conn._resolve_host("example.com", 80)
+
+        # Past the hard TTL the stale entry must not be served: the
+        # request waits for the new resolution to finish.
+        dns_now[0] += 21
+        resolver.gate = asyncio.Event()
+        resolver.outcomes.append(_dns_addrs("10.0.0.2"))
+        request = asyncio.create_task(conn._resolve_host("example.com", 80))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not request.done()
+        resolver.gate.set()
+        assert [addr["host"] for addr in await request] == ["10.0.0.2"]
+
+
+async def test_dns_cache_refresh_failure_serves_stale_until_hard_ttl(
+    dns_now: list[float],
+) -> None:
+    resolver = _ControllableResolver()
+    resolver.outcomes.append(_dns_addrs("10.0.0.1"))
+    conn = aiohttp.TCPConnector(
+        resolver=resolver, ttl_dns_cache=20, soft_ttl_dns_cache=10
+    )
+    async with conn:
+        await conn._resolve_host("example.com", 80)
+
+        # The background refresh fails; the stale entry is still served.
+        dns_now[0] += 11
+        resolver.outcomes.append(OSError("DNS is down"))
+        stale = await conn._resolve_host("example.com", 80)
+        assert [addr["host"] for addr in stale] == ["10.0.0.1"]
+        await _wait_for_refresh(conn, ("example.com", 80))
+
+        # Another failed refresh does not extend the hard deadline either.
+        dns_now[0] += 1
+        resolver.outcomes.append(OSError("DNS is still down"))
+        stale = await conn._resolve_host("example.com", 80)
+        assert [addr["host"] for addr in stale] == ["10.0.0.1"]
+        await _wait_for_refresh(conn, ("example.com", 80))
+
+        # The hard TTL is measured from the original resolution, so past
+        # it the request must wait for a fresh result.
+        dns_now[0] += 9
+        resolver.gate = asyncio.Event()
+        resolver.outcomes.append(_dns_addrs("10.0.0.2"))
+        request = asyncio.create_task(conn._resolve_host("example.com", 80))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not request.done()
+        resolver.gate.set()
+        assert [addr["host"] for addr in await request] == ["10.0.0.2"]
+
+
+async def test_dns_cache_refresh_failure_drops_stale_entry_when_disabled(
+    dns_now: list[float],
+) -> None:
+    resolver = _ControllableResolver()
+    resolver.outcomes.append(_dns_addrs("10.0.0.1"))
+    conn = aiohttp.TCPConnector(
+        resolver=resolver,
+        ttl_dns_cache=60,
+        soft_ttl_dns_cache=10,
+        stale_dns_on_error=False,
+    )
+    async with conn:
+        await conn._resolve_host("example.com", 80)
+
+        dns_now[0] += 11
+        resolver.outcomes.append(OSError("DNS is down"))
+        stale = await conn._resolve_host("example.com", 80)
+        assert [addr["host"] for addr in stale] == ["10.0.0.1"]
+        await _wait_for_refresh(conn, ("example.com", 80))
+        assert ("example.com", 80) not in conn._cached_hosts
+
+        # The stale entry is gone: the next request resolves in the
+        # foreground and the failure is propagated to it.
+        resolver.outcomes.append(OSError("DNS is still down"))
+        with pytest.raises(OSError, match="DNS is still down"):
+            await conn._resolve_host("example.com", 80)
+
+        # A later successful resolution is used and cached again.
+        resolver.outcomes.append(_dns_addrs("10.0.0.2"))
+        fresh = await conn._resolve_host("example.com", 80)
+        assert [addr["host"] for addr in fresh] == ["10.0.0.2"]
+
+
+async def test_clear_dns_cache_invalidates_inflight_resolution() -> None:
+    resolver = _ControllableResolver()
+    resolver.gate = asyncio.Event()
+    resolver.outcomes.append(_dns_addrs("10.0.0.1"))
+    conn = aiohttp.TCPConnector(resolver=resolver, ttl_dns_cache=60)
+    async with conn:
+        request = asyncio.create_task(conn._resolve_host("example.com", 80))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert len(resolver.calls) == 1
+
+        # The resolution started before the clear must not repopulate
+        # the cleared entry.
+        conn.clear_dns_cache("example.com", 80)
+        resolver.gate.set()
+        assert [addr["host"] for addr in await request] == ["10.0.0.1"]
+        assert ("example.com", 80) not in conn._cached_hosts
+
+        resolver.outcomes.append(_dns_addrs("10.0.0.2"))
+        fresh = await conn._resolve_host("example.com", 80)
+        assert [addr["host"] for addr in fresh] == ["10.0.0.2"]
+        assert len(resolver.calls) == 2
+
+
+async def test_clear_dns_cache_all_invalidates_inflight_resolution() -> None:
+    resolver = _ControllableResolver()
+    resolver.gate = asyncio.Event()
+    resolver.outcomes.append(_dns_addrs("10.0.0.1"))
+    conn = aiohttp.TCPConnector(resolver=resolver, ttl_dns_cache=60)
+    async with conn:
+        request = asyncio.create_task(conn._resolve_host("example.com", 80))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert len(resolver.calls) == 1
+
+        conn.clear_dns_cache()
+        resolver.gate.set()
+        assert [addr["host"] for addr in await request] == ["10.0.0.1"]
+        assert ("example.com", 80) not in conn._cached_hosts
+
+        resolver.outcomes.append(_dns_addrs("10.0.0.2"))
+        fresh = await conn._resolve_host("example.com", 80)
+        assert [addr["host"] for addr in fresh] == ["10.0.0.2"]
+        assert len(resolver.calls) == 2
+
+
+async def test_dns_refresh_not_cancelled_by_request_cancellation() -> None:
+    resolver = _ControllableResolver()
+    resolver.gate = asyncio.Event()
+    resolver.outcomes.append(_dns_addrs("10.0.0.1"))
+    conn = aiohttp.TCPConnector(resolver=resolver, ttl_dns_cache=60)
+    async with conn:
+        cancelled_request = asyncio.create_task(conn._resolve_host("example.com", 80))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        waiting_request = asyncio.create_task(conn._resolve_host("example.com", 80))
+        await asyncio.sleep(0)
+
+        cancelled_request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled_request
+
+        # The shared lookup is still running for the other request.
+        assert not waiting_request.done()
+        resolver.gate.set()
+        assert [addr["host"] for addr in await waiting_request] == ["10.0.0.1"]
+        assert len(resolver.calls) == 1
+
+
+async def test_dns_refresh_and_waiters_cancelled_on_close(
+    dns_now: list[float],
+) -> None:
+    resolver = _ControllableResolver()
+    resolver.outcomes.append(_dns_addrs("10.0.0.1"))
+    conn = aiohttp.TCPConnector(
+        resolver=resolver, ttl_dns_cache=20, soft_ttl_dns_cache=10
+    )
+    await conn._resolve_host("example.com", 80)
+
+    # A background refresh is in flight in the soft expiry window...
+    dns_now[0] += 11
+    resolver.gate = asyncio.Event()
+    stale = await conn._resolve_host("example.com", 80)
+    assert [addr["host"] for addr in stale] == ["10.0.0.1"]
+    assert ("example.com", 80) in conn._throttle_dns_futures
+
+    # ...and another request past the hard TTL waits for it.
+    dns_now[0] += 10
+    waiting = asyncio.create_task(conn._resolve_host("example.com", 80))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    await conn.close()
+    await asyncio.sleep(0)
+    assert waiting.done()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert not conn._resolve_host_tasks
+
+
 async def test___get_ssl_context1() -> None:
     conn = aiohttp.TCPConnector()
     req = mock.Mock()
@@ -4315,6 +4603,30 @@ class TestDNSCacheTable:
         dns_cache_table.add(self.host1, [self.result1])
         monkeypatch.setattr("aiohttp.connector.monotonic", lambda: 1.00001)
         assert dns_cache_table.expired(self.host1)
+
+    def test_soft_expired(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        dns_cache_table = _DNSCacheTable(ttl=10, soft_ttl=1)
+        monkeypatch.setattr("aiohttp.connector.monotonic", lambda: 1)
+        dns_cache_table.add(self.host1, [self.result1])
+        assert not dns_cache_table.soft_expired(self.host1)
+        monkeypatch.setattr("aiohttp.connector.monotonic", lambda: 3)
+        assert dns_cache_table.soft_expired(self.host1)
+        assert not dns_cache_table.expired(self.host1)
+
+    def test_soft_expired_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        dns_cache_table = _DNSCacheTable(ttl=10)
+        monkeypatch.setattr("aiohttp.connector.monotonic", lambda: 1)
+        dns_cache_table.add(self.host1, [self.result1])
+        monkeypatch.setattr("aiohttp.connector.monotonic", lambda: 10000000)
+        assert not dns_cache_table.soft_expired(self.host1)
+
+    def test_soft_expired_ttl_None(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        dns_cache_table = _DNSCacheTable(ttl=None, soft_ttl=1)
+        monkeypatch.setattr("aiohttp.connector.monotonic", lambda: 1)
+        dns_cache_table.add(self.host1, [self.result1])
+        monkeypatch.setattr("aiohttp.connector.monotonic", lambda: 3)
+        assert dns_cache_table.soft_expired(self.host1)
+        assert not dns_cache_table.expired(self.host1)
 
     def test_next_addrs(self, dns_cache_table: _DNSCacheTable) -> None:
         result3: ResolveResult = {

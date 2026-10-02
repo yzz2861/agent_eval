@@ -873,12 +873,18 @@ class BaseConnector:
 
 
 class _DNSCacheTable:
-    def __init__(self, ttl: float | None = None, max_size: int = 1000) -> None:
+    def __init__(
+        self,
+        ttl: float | None = None,
+        max_size: int = 1000,
+        soft_ttl: float | None = None,
+    ) -> None:
         self._addrs_rr: OrderedDict[
             tuple[str, int], tuple[Iterator[ResolveResult], int]
         ] = OrderedDict()
         self._timestamps: dict[tuple[str, int], float] = {}
         self._ttl = ttl
+        self._soft_ttl = soft_ttl
         self._max_size = max_size
 
     def __contains__(self, host: object) -> bool:
@@ -890,7 +896,7 @@ class _DNSCacheTable:
 
         self._addrs_rr[key] = (cycle(addrs), len(addrs))
 
-        if self._ttl is not None:
+        if self._ttl is not None or self._soft_ttl is not None:
             self._timestamps[key] = monotonic()
 
         if len(self._addrs_rr) > self._max_size:
@@ -918,6 +924,23 @@ class _DNSCacheTable:
             return False
 
         return self._timestamps[key] + self._ttl < monotonic()
+
+    def soft_expired(self, key: tuple[str, int]) -> bool:
+        """Return True if the entry is past its soft TTL.
+
+        A soft-expired entry may still be served while it is refreshed
+        in the background, until it reaches its hard TTL.
+        """
+        if self._soft_ttl is None:
+            return False
+
+        return self._timestamps[key] + self._soft_ttl < monotonic()
+
+
+def _drop_task_exception(task: "asyncio.Future[list[ResolveResult]]") -> None:
+    """Consume the task result so it is never reported as unretrieved."""
+    with suppress(Exception, asyncio.CancelledError):
+        task.result()
 
 
 def _make_ssl_context(verified: bool) -> SSLContext:
@@ -963,6 +986,12 @@ class TCPConnector(BaseConnector):
         resolver
     use_dns_cache - Use memory cache for DNS lookups.
     ttl_dns_cache - Max seconds having cached a DNS entry, None forever.
+    soft_ttl_dns_cache - Max seconds a cached DNS entry is served without
+        revalidation. Past this window the stale entry keeps being served
+        (up to ttl_dns_cache) while a single background refresh runs.
+        None (default) disables the soft expiry window.
+    stale_dns_on_error - Keep serving a soft-expired cached DNS entry when
+        its background refresh fails, until ttl_dns_cache is reached.
     family - socket address family
     local_addr - local tuple of (host, port) to bind socket to
 
@@ -998,6 +1027,8 @@ class TCPConnector(BaseConnector):
         use_dns_cache: bool = True,
         ttl_dns_cache: int | None = 10,
         dns_cache_max_size: int = 1000,
+        soft_ttl_dns_cache: float | None = None,
+        stale_dns_on_error: bool = True,
         family: socket.AddressFamily = socket.AddressFamily.AF_UNSPEC,
         ssl: bool | Fingerprint | SSLContext = True,
         local_addr: tuple[str, int] | None = None,
@@ -1038,9 +1069,22 @@ class TCPConnector(BaseConnector):
             self._resolver_owner = False
 
         self._use_dns_cache = use_dns_cache
+        if (
+            soft_ttl_dns_cache is not None
+            and ttl_dns_cache is not None
+            and soft_ttl_dns_cache >= ttl_dns_cache
+        ):
+            raise ValueError("soft_ttl_dns_cache must be smaller than ttl_dns_cache")
         self._cached_hosts = _DNSCacheTable(
-            ttl=ttl_dns_cache, max_size=dns_cache_max_size
+            ttl=ttl_dns_cache,
+            max_size=dns_cache_max_size,
+            soft_ttl=soft_ttl_dns_cache,
         )
+        self._stale_dns_on_error = stale_dns_on_error
+        # Epochs change when clear_dns_cache() drops an entry, so a
+        # resolution that was already in flight cannot repopulate it.
+        self._dns_cache_epoch = 0
+        self._dns_cache_key_epochs: dict[tuple[str, int], int] = {}
         self._throttle_dns_futures: dict[tuple[str, int], set[asyncio.Future[None]]] = (
             {}
         )
@@ -1114,11 +1158,19 @@ class TCPConnector(BaseConnector):
     def clear_dns_cache(self, host: str | None = None, port: int | None = None) -> None:
         """Remove specified host/port or clear all dns local cache."""
         if host is not None and port is not None:
-            self._cached_hosts.remove((host, port))
+            key = (host, port)
+            self._cached_hosts.remove(key)
+            self._dns_cache_key_epochs[key] = self._dns_cache_key_epochs.get(key, 0) + 1
         elif host is not None or port is not None:
             raise ValueError("either both host and port or none of them are allowed")
         else:
             self._cached_hosts.clear()
+            self._dns_cache_epoch += 1
+            self._dns_cache_key_epochs.clear()
+
+    def _dns_cache_token(self, key: tuple[str, int]) -> tuple[int, int]:
+        """Return a token that changes when the cache entry for key is cleared."""
+        return (self._dns_cache_epoch, self._dns_cache_key_epochs.get(key, 0))
 
     async def _resolve_host(
         self, host: str, port: int, traces: Sequence["Trace"] | None = None
@@ -1158,44 +1210,80 @@ class TCPConnector(BaseConnector):
             return res
 
         key = (host, port)
-        if key in self._cached_hosts and not self._cached_hosts.expired(key):
-            # get result early, before any await (#4014)
-            result = self._cached_hosts.next_addrs(key)
+        while True:
+            if key in self._cached_hosts and not self._cached_hosts.expired(key):
+                # get result early, before any await (#4014)
+                result = self._cached_hosts.next_addrs(key)
+                if (
+                    self._cached_hosts.soft_expired(key)
+                    and key not in self._throttle_dns_futures
+                ):
+                    # The entry is past its soft TTL: keep serving the stale
+                    # addresses and refresh them in the background, starting
+                    # at most one refresh per key.
+                    self._start_background_refresh(key, host, port, traces)
 
-            if traces:
-                for trace in traces:
-                    await trace.send_dns_cache_hit(host)
-            return result
+                if traces:
+                    for trace in traces:
+                        await trace.send_dns_cache_hit(host)
+                return result
 
-        futures: set[asyncio.Future[None]]
-        #
-        # If multiple connectors are resolving the same host, we wait
-        # for the first one to resolve and then use the result for all of them.
-        # We use a throttle to ensure that we only resolve the host once
-        # and then use the result for all the waiters.
-        #
-        if key in self._throttle_dns_futures:
-            # get futures early, before any await (#4014)
-            futures = self._throttle_dns_futures[key]
-            future: asyncio.Future[None] = self._loop.create_future()
-            futures.add(future)
-            if traces:
-                for trace in traces:
-                    await trace.send_dns_cache_hit(host)
+            #
+            # If multiple connectors are resolving the same host, we wait
+            # for the first one to resolve and then use the result for all of them.
+            # We use a throttle to ensure that we only resolve the host once
+            # and then use the result for all the waiters.
+            #
+            if key in self._throttle_dns_futures:
+                # get futures early, before any await (#4014)
+                futures = self._throttle_dns_futures[key]
+                future: asyncio.Future[None] = self._loop.create_future()
+                futures.add(future)
+                if traces:
+                    for trace in traces:
+                        await trace.send_dns_cache_hit(host)
+                try:
+                    await future
+                finally:
+                    futures.discard(future)
+                if key in self._cached_hosts:
+                    return self._cached_hosts.next_addrs(key)
+                # The entry was dropped by clear_dns_cache() or a failed
+                # background refresh while waiting; resolve it ourselves.
+                continue
+
+            resolved_host_task = self._start_resolve_host_task(key, host, port, traces)
             try:
-                await future
-            finally:
-                futures.discard(future)
-            return self._cached_hosts.next_addrs(key)
+                return await asyncio.shield(resolved_host_task)
+            except asyncio.CancelledError:
+                resolved_host_task.add_done_callback(_drop_task_exception)
+                raise
 
+    def _start_resolve_host_task(
+        self,
+        key: tuple[str, int],
+        host: str,
+        port: int,
+        traces: Sequence["Trace"] | None,
+    ) -> asyncio.Task[list[ResolveResult]]:
+        """Start a throttled DNS resolution task for key.
+
+        While the returned task is running, other requests for the same key
+        wait for its result through _throttle_dns_futures instead of
+        starting a concurrent lookup.
+        """
         # update dict early, before any await (#4014)
-        self._throttle_dns_futures[key] = futures = set()
+        futures: set[asyncio.Future[None]] = set()
+        self._throttle_dns_futures[key] = futures
+        cache_token = self._dns_cache_token(key)
         # In this case we need to create a task to ensure that we can shield
         # the task from cancellation as cancelling this lookup should not cancel
         # the underlying lookup or else the cancel event will get broadcast to
         # all the waiters across all connections.
         #
-        coro = self._resolve_host_with_throttle(key, host, port, futures, traces)
+        coro = self._resolve_host_with_throttle(
+            key, host, port, futures, traces, cache_token
+        )
         if sys.version_info >= (3, 14):
             # Try to send immediately to avoid having to schedule the task.
             loop = asyncio.get_running_loop()
@@ -1213,17 +1301,20 @@ class TCPConnector(BaseConnector):
         if not resolved_host_task.done():
             self._resolve_host_tasks.add(resolved_host_task)
             resolved_host_task.add_done_callback(self._resolve_host_tasks.discard)
+        return resolved_host_task
 
-        try:
-            return await asyncio.shield(resolved_host_task)
-        except asyncio.CancelledError:
-
-            def drop_exception(fut: "asyncio.Future[list[ResolveResult]]") -> None:
-                with suppress(Exception, asyncio.CancelledError):
-                    fut.result()
-
-            resolved_host_task.add_done_callback(drop_exception)
-            raise
+    def _start_background_refresh(
+        self,
+        key: tuple[str, int],
+        host: str,
+        port: int,
+        traces: Sequence["Trace"] | None,
+    ) -> None:
+        """Refresh a soft-expired DNS cache entry in the background."""
+        refresh_task = self._start_resolve_host_task(key, host, port, traces)
+        # Nothing awaits the refresh task: retrieve its result so a failure
+        # is not reported as an unretrieved task exception.
+        refresh_task.add_done_callback(_drop_task_exception)
 
     async def _resolve_host_with_throttle(
         self,
@@ -1232,6 +1323,7 @@ class TCPConnector(BaseConnector):
         port: int,
         futures: set[asyncio.Future[None]],
         traces: Sequence["Trace"] | None,
+        cache_token: tuple[int, int],
     ) -> list[ResolveResult]:
         """Resolve host and set result for all waiters.
 
@@ -1251,7 +1343,8 @@ class TCPConnector(BaseConnector):
                 for trace in traces:
                     await trace.send_dns_resolvehost_end(host)
 
-            self._cached_hosts.add(key, addrs)
+            if self._dns_cache_token(key) == cache_token:
+                self._cached_hosts.add(key, addrs)
             for fut in futures:
                 set_result(fut, None)
         except BaseException as e:
@@ -1260,11 +1353,23 @@ class TCPConnector(BaseConnector):
             # we should never be propagating cancellation here.
             for fut in futures:
                 set_exception(fut, e)
+            if (
+                not self._stale_dns_on_error
+                and self._dns_cache_token(key) == cache_token
+            ):
+                # The refresh failed and stale addresses may not be served
+                # on errors: drop the entry so the next request resolves
+                # synchronously instead of reusing outdated addresses.
+                self._cached_hosts.remove(key)
             raise
         finally:
             self._throttle_dns_futures.pop(key)
 
-        return self._cached_hosts.next_addrs(key)
+        if key in self._cached_hosts:
+            return self._cached_hosts.next_addrs(key)
+        # The cache was cleared while resolving, so the entry was not
+        # stored; the addresses are still valid for this request.
+        return addrs
 
     async def _create_connection(
         self, req: ClientRequest, traces: list["Trace"], timeout: "ClientTimeout"

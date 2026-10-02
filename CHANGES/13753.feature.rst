@@ -1,0 +1,8 @@
+Added ``soft_ttl_dns_cache`` and ``stale_dns_on_error`` parameters to
+:class:`aiohttp.TCPConnector` -- by :user:`aio-libs`.
+
+When ``soft_ttl_dns_cache`` is set, a DNS cache entry past its soft TTL is
+still served (up to the hard ``ttl_dns_cache`` deadline) while a single
+background refresh updates it, so requests no longer stall on slow upstream
+resolvers. ``stale_dns_on_error`` controls whether the stale entry may keep
+being served when the background refresh fails.

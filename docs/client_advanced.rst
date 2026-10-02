@@ -528,6 +528,21 @@ end up making a DNS resolution, as the following example shows::
 
     conn = aiohttp.TCPConnector(use_dns_cache=False)
 
+When the upstream resolver is slow, requests can stall while waiting for
+an expired entry to be resolved again. Setting *soft_ttl_dns_cache*
+enables a soft expiry window: an entry older than *soft_ttl_dns_cache*
+is still served (until *ttl_dns_cache* is reached) while a single
+background refresh updates it::
+
+    conn = aiohttp.TCPConnector(ttl_dns_cache=300, soft_ttl_dns_cache=60)
+
+If the background refresh fails, the stale entry keeps being served until
+*ttl_dns_cache* is reached, unless the connector is created with
+``stale_dns_on_error=False``.
+
+.. versionadded:: 4.0
+   The *soft_ttl_dns_cache* and *stale_dns_on_error* parameters.
+
 
 Resolving using custom nameservers
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
