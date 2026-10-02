@@ -32,6 +32,7 @@ from .errors import ActorNotFound, BrokerConnectionError, RateLimitExceeded, Ret
 from .logging import get_logger
 from .middleware import Middleware, SkipMessage
 from .results.middleware import Results
+from .subprocess_pool import Subprocess, SubprocessPool
 
 #: The number of milliseconds to wait before restarting consumers
 #: after a connection error.
@@ -57,6 +58,14 @@ DELAY_QUEUE_PREFETCH = int(os.getenv("dramatiq_delay_queue_prefetch", 0))
 #: The number of milliseconds workers should wake up after if the queue is idle.
 WORKER_TIMEOUT = int(os.getenv("dramatiq_worker_timeout", 1000))
 
+#: The maximum number of subprocesses that may run concurrently for
+#: actors declared with subprocess=True.
+SUBPROCESS_MAX_PROCESSES = int(os.getenv("dramatiq_subprocess_max_processes", 4))
+#: The default hard time limit in seconds for messages executed in a
+#: subprocess.  Actors may override this with the subprocess_timeout
+#: option.
+SUBPROCESS_TIMEOUT = float(os.getenv("dramatiq_subprocess_timeout", 300))
+
 
 class Worker:
     """Workers consume messages off of all declared queues and
@@ -74,6 +83,13 @@ class Worker:
       worker_timeout(int): The number of milliseconds workers should
         wake up after if the queue is idle.
       worker_threads(int): The number of worker threads to spawn.
+      subprocess_max_processes(Optional[int]): The maximum number of
+        child processes that may run concurrently for actors declared
+        with subprocess=True.  Defaults to the Subprocess
+        middleware's max_processes.
+      subprocess_timeout(Optional[float]): The default hard time
+        limit in seconds for messages executed in a subprocess.
+        Defaults to the Subprocess middleware's timeout.
     """
 
     def __init__(
@@ -83,9 +99,19 @@ class Worker:
         queues: Optional[set[str]] = None,
         worker_timeout: int = WORKER_TIMEOUT,
         worker_threads: int = 8,
+        subprocess_max_processes: Optional[int] = None,
+        subprocess_timeout: Optional[float] = None,
     ) -> None:
         self.logger = get_logger(__name__, type(self))
         self.broker = broker
+
+        subprocess_middleware = next((m for m in broker.middleware if isinstance(m, Subprocess)), None)
+        if subprocess_max_processes is None:
+            subprocess_max_processes = (
+                subprocess_middleware.max_processes if subprocess_middleware else SUBPROCESS_MAX_PROCESSES
+            )
+        if subprocess_timeout is None:
+            subprocess_timeout = subprocess_middleware.timeout if subprocess_middleware else SUBPROCESS_TIMEOUT
 
         self.consumers: dict[str, "ConsumerThread"] = {}
         self.consumer_whitelist = queues and set(queues)
@@ -101,6 +127,11 @@ class Worker:
         self.work_queue: PriorityQueue[_WorkQueueItem] = PriorityQueue()
         self.worker_timeout = worker_timeout
         self.worker_threads = worker_threads
+        self.subprocess_pool = SubprocessPool(
+            broker,
+            max_processes=subprocess_max_processes,
+            default_timeout=subprocess_timeout,
+        )
 
     def start(self) -> None:
         """Initialize the worker boot sequence and start up all the
@@ -160,6 +191,9 @@ class Worker:
 
         join_all(self.workers, timeout)
         self.logger.debug("Workers stopped.")
+        self.logger.debug("Stopping subprocess pool...")
+        self.subprocess_pool.close()
+        self.logger.debug("Subprocess pool stopped.")
         self.logger.debug("Stopping consumers...")
         for thread in self.consumers.values():
             thread.stop()
@@ -233,6 +267,7 @@ class Worker:
             consumers=self.consumers,
             work_queue=self.work_queue,
             worker_timeout=self.worker_timeout,
+            subprocess_pool=self.subprocess_pool,
         )
         worker.start()
         self.workers.append(worker)
@@ -498,6 +533,7 @@ class WorkerThread(Thread):
       consumers(dict[str, ConsumerThread])
       work_queue(PriorityQueue[_WorkQueueItem])
       worker_timeout(int)
+      subprocess_pool(Optional[SubprocessPool])
     """
 
     def __init__(
@@ -507,6 +543,7 @@ class WorkerThread(Thread):
         consumers: dict[str, ConsumerThread],
         work_queue: PriorityQueue[_WorkQueueItem],
         worker_timeout: int,
+        subprocess_pool: Optional[SubprocessPool] = None,
     ) -> None:
         super().__init__(daemon=True)
 
@@ -518,6 +555,7 @@ class WorkerThread(Thread):
         self.consumers = consumers
         self.work_queue = work_queue
         self.timeout = worker_timeout / 1000
+        self.subprocess_pool = subprocess_pool
 
     def run(self) -> None:
         self.logger.debug("Running worker thread...")
@@ -557,7 +595,16 @@ class WorkerThread(Thread):
             res = None
             if not message.failed:
                 actor = self.broker.get_actor(message.actor_name)
-                res = actor(*message.args, **message.kwargs)
+                if actor.options.get("subprocess") and self.subprocess_pool is not None:
+                    res = self.subprocess_pool.run(
+                        actor_name=actor.actor_name,
+                        message_id=message.message_id,
+                        args=message.args,
+                        kwargs=message.kwargs,
+                        timeout=actor.options.get("subprocess_timeout"),
+                    )
+                else:
+                    res = actor(*message.args, **message.kwargs)
                 if (
                     res is not None
                     and message.options.get("pipe_target") is None

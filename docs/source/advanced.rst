@@ -229,6 +229,47 @@ the message, raise an exception to indicate failure.
            raise
 
 
+Running Actors in Subprocesses
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Actors that call into native libraries that may hang or crash the
+interpreter cannot be supervised with thread-level interrupts alone.
+Such actors can be isolated in dedicated child processes by enabling
+the |Subprocess| middleware and opting individual actors in with the
+``subprocess`` actor option::
+
+   from dramatiq.middleware import Subprocess
+
+   broker.add_middleware(Subprocess(max_processes=2, timeout=60))
+
+   @dramatiq.actor(subprocess=True, subprocess_timeout=10)
+   def risky_native_call():
+       ...
+
+Actors without the option keep running in the normal worker threads.
+The parent process keeps owning message acknowledgement and retries;
+the child process only runs the actor callable.  Arguments and
+results cross the process boundary as newline-delimited JSON (never
+pickle), so they must be JSON-encodable.
+
+Each message runs in a fresh child process and every exchange is
+tagged with the message id, so a late result can never be attributed
+to a different message.  If the hard time limit
+(``subprocess_timeout``, defaulting to the middleware's ``timeout``)
+is exceeded, the child is killed and the message fails with
+|SubprocessTimeout|.  If the child dies without answering, the
+message fails with |SubprocessCrashed|.  If the actor itself raises,
+the message fails with |RemoteActorError|, which carries the remote
+exception's type, message and traceback.  The child is always
+confirmed dead before its concurrency slot is released, and stopping
+the worker reaps any remaining children.
+
+Because every child is a brand new interpreter (spawned the same way
+on all platforms, including macOS), subprocess actors must live in
+importable modules so the child can re-import them, exactly like when
+running under the ``dramatiq`` CLI.
+
+
 Accessing Messages from Within Actors
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

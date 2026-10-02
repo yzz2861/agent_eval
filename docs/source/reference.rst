@@ -112,6 +112,7 @@ The following middleware classes are available, but not enabled by default.
    :member-order: bysource
 .. autoclass:: dramatiq.middleware.GroupCallbacks
 .. autoclass:: dramatiq.middleware.prometheus.Prometheus
+.. autoclass:: dramatiq.middleware.Subprocess
 
 .. py:class:: dramatiq.results.Results
    :no-index:
@@ -253,6 +254,21 @@ Errors
    :members:
    :show-inheritance:
 .. autoexception:: Retry
+   :members:
+   :show-inheritance:
+.. autoexception:: dramatiq.subprocess_pool.SubprocessError
+   :members:
+   :show-inheritance:
+.. autoexception:: dramatiq.subprocess_pool.SubprocessTimeout
+   :members:
+   :show-inheritance:
+.. autoexception:: dramatiq.subprocess_pool.SubprocessCrashed
+   :members:
+   :show-inheritance:
+.. autoexception:: dramatiq.subprocess_pool.SubprocessProtocolError
+   :members:
+   :show-inheritance:
+.. autoexception:: dramatiq.subprocess_pool.RemoteActorError
    :members:
    :show-inheritance:
 .. autoexception:: dramatiq.results.ResultError

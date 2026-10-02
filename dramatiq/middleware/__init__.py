@@ -28,6 +28,7 @@ from .retries import Retries
 from .shutdown import Shutdown, ShutdownNotifications
 from .threading import Interrupt, raise_thread_exception
 from .time_limit import TimeLimit, TimeLimitExceeded
+from ..subprocess_pool import Subprocess
 
 __all__ = [
     # Basics
@@ -47,6 +48,7 @@ __all__ = [
     "Retries",
     "Shutdown",
     "ShutdownNotifications",
+    "Subprocess",
     "TimeLimit",
     "TimeLimitExceeded",
 ]
