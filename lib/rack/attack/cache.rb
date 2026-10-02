@@ -3,6 +3,15 @@
 module Rack
   class Attack
     class Cache
+      class CountResult
+        attr_reader :count, :epoch_time
+
+        def initialize(count, epoch_time)
+          @count = count
+          @epoch_time = epoch_time
+        end
+      end
+
       attr_accessor :prefix
       attr_reader :last_epoch_time
 
@@ -32,8 +41,14 @@ module Rack
       end
 
       def count(unprefixed_key, period)
-        key, expires_in = key_and_expiry(unprefixed_key, period)
-        do_count(key, expires_in)
+        count_with_window(unprefixed_key, period).count
+      end
+
+      def count_with_window(unprefixed_key, period)
+        epoch_time, key, expires_in = key_and_expiry(unprefixed_key, period)
+        @last_epoch_time = epoch_time
+
+        CountResult.new(do_count(key, expires_in), epoch_time)
       end
 
       def read(unprefixed_key)
@@ -49,7 +64,7 @@ module Rack
       end
 
       def reset_count(unprefixed_key, period)
-        key, _ = key_and_expiry(unprefixed_key, period)
+        _, key, _ = key_and_expiry(unprefixed_key, period)
         store.delete(key)
       end
 
@@ -70,11 +85,11 @@ module Rack
 
       private
 
-      def key_and_expiry(unprefixed_key, period)
-        @last_epoch_time = Time.now.to_i
+      def key_and_expiry(unprefixed_key, period, epoch_time = Time.now.to_i)
         # Add 1 to expires_in to avoid timing error: https://github.com/rack/rack-attack/pull/85
-        expires_in = (period - (@last_epoch_time % period) + 1).to_i
-        ["#{prefix}:#{(@last_epoch_time / period).to_i}:#{unprefixed_key}", expires_in]
+        expires_in = (period - (epoch_time % period) + 1).to_i
+        key = "#{prefix}:#{(epoch_time / period).to_i}:#{unprefixed_key}"
+        [epoch_time, key, expires_in]
       end
 
       def do_count(key, expires_in)

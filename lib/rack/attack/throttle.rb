@@ -28,19 +28,19 @@ module Rack
 
         current_period  = period_for(request)
         current_limit   = limit_for(request)
-        count           = cache.count("#{name}:#{discriminator}", current_period)
+        result          = cache.count_with_window("#{name}:#{discriminator}", current_period)
 
         data = {
           discriminator: discriminator,
-          count: count,
+          count: result.count,
           period: current_period,
           limit: current_limit,
-          epoch_time: cache.last_epoch_time
+          epoch_time: result.epoch_time
         }
 
         annotate_request_with_throttle_data(request, data)
 
-        (count > current_limit).tap do |throttled|
+        (result.count > current_limit).tap do |throttled|
           if throttled
             annotate_request_with_matched_data(request, data)
             Rack::Attack.instrument(request)

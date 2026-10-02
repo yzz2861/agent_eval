@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'spec_helper'
+require_relative 'support/blocking_memory_store'
 require_relative 'support/freeze_time_helper'
 
 describe 'Rack::Attack.throttle' do
@@ -159,6 +160,101 @@ describe 'Rack::Attack.throttle with block returning nil' do
       get '/', {}, 'REMOTE_ADDR' => '1.2.3.4'
       assert_nil last_request.env['rack.attack.throttle_data']
     end
+  end
+end
+
+describe 'Rack::Attack.throttle with concurrent windows' do
+  it 'associates each request with the window that produced its count' do
+    store = BlockingMemoryStore.new
+    store.key_pattern = ':0:first'
+    Rack::Attack.cache.store = store
+
+    dynamic_period = lambda do |request|
+      request.path == '/first' ? 60 : 120
+    end
+    Rack::Attack.throttle('first', limit: 0, period: dynamic_period) do |request|
+      if request.path == '/first'
+        'first'
+      elsif request.path == '/second'
+        'second'
+      end
+    end
+    Rack::Attack.throttle('second', limit: 0, period: dynamic_period) do |request|
+      if request.path == '/first'
+        'first'
+      elsif request.path == '/second'
+        'second'
+      end
+    end
+
+    first_request = Rack::Attack::Request.new(Rack::MockRequest.env_for('/first'))
+    second_request = Rack::Attack::Request.new(Rack::MockRequest.env_for('/second'))
+    first_throttle = Rack::Attack.throttles.fetch('first')
+    second_throttle = Rack::Attack.throttles.fetch('second')
+    first_count = nil
+    second_count = nil
+    second_rule_count = nil
+
+    begin
+      Timecop.freeze(Time.at(59))
+      first_thread = Thread.new do
+        first_throttle.matched_by?(first_request)
+        second_throttle.matched_by?(first_request)
+      end
+      store.window_started.pop
+
+      Timecop.freeze(Time.at(120))
+      second_thread = Thread.new { second_throttle.matched_by?(second_request) }
+      second_thread.join
+      store.window_continue << true
+      first_thread.join
+
+      first_count = store.read('rack::attack:0:first:first')
+      second_count = store.read('rack::attack:1:second:second')
+      second_rule_count = store.read('rack::attack:2:second:first')
+    ensure
+      Timecop.return
+    end
+
+    first_data = first_request.env['rack.attack.throttle_data'].fetch('first')
+    second_data = second_request.env['rack.attack.throttle_data'].fetch('second')
+
+    _(first_data[:count]).must_equal 1
+    _(first_data[:period]).must_equal 60
+    _(first_data[:epoch_time]).must_equal 59
+
+    _(second_data[:count]).must_equal 1
+    _(second_data[:period]).must_equal 120
+    _(second_data[:epoch_time]).must_equal 120
+    _(second_request.env['rack.attack.match_data'][:epoch_time]).must_equal 120
+
+    second_rule_data = first_request.env['rack.attack.throttle_data'].fetch('second')
+    _(second_rule_data[:count]).must_equal 1
+    _(second_rule_data[:period]).must_equal 60
+    _(second_rule_data[:epoch_time]).must_equal 120
+    _(first_request.env['rack.attack.match_data'][:epoch_time]).must_equal 120
+
+    _(first_count).must_equal 1
+    _(second_count).must_equal 1
+    _(second_rule_count).must_equal 1
+  end
+end
+
+describe 'Rack::Attack.throttle with unmatched rules' do
+  it 'does not annotate data for rules that do not match' do
+    Rack::Attack.cache.store = ActiveSupport::Cache::MemoryStore.new
+    Rack::Attack.throttle('matching', limit: 1, period: 60) do |request|
+      request.ip if request.path == '/match'
+    end
+    Rack::Attack.throttle('ignored', limit: 1, period: 120) do |request|
+      request.ip if request.path == '/other'
+    end
+
+    get '/match', {}, 'REMOTE_ADDR' => '1.2.3.4'
+
+    throttle_data = last_request.env['rack.attack.throttle_data']
+    _(throttle_data.keys).must_equal(['matching'])
+    _(throttle_data.fetch('matching')[:epoch_time]).must_equal(Time.now.to_i)
   end
 end
 
