@@ -6,14 +6,14 @@ from mimetypes import guess_type
 from os import path
 from pathlib import PurePath
 from time import time
-from typing import Any, AnyStr, Callable
+from typing import Any, AnyStr, Callable, cast
 from urllib.parse import quote_plus
 
 from sanic.compat import Header, open_async, stat_async
 from sanic.constants import DEFAULT_HTTP_CONTENT_TYPE
 from sanic.helpers import Default, _default
 from sanic.log import logger
-from sanic.models.protocol_types import HTMLProtocol, Range
+from sanic.models.protocol_types import HTMLProtocol, MultipartRange, Range
 
 from .types import HTTPResponse, JSONResponse, ResponseStream
 
@@ -365,25 +365,66 @@ async def file_stream(
         )
     filename = filename or path.split(location)[-1]
     mime_type = mime_type or guess_type(filename)[0] or "text/plain"
+    response_content_type = mime_type
+    multipart_range: MultipartRange | None = None
     if _range:
         start = _range.start
         end = _range.end
         total = _range.total
 
-        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        is_multipart = getattr(_range, "multipart", False)
+        if is_multipart:
+            multipart_range = cast(MultipartRange, _range)
+            headers.setdefault("Content-Type", multipart_range.content_type)
+            headers.setdefault(
+                "Content-Length",
+                str(multipart_range.size + multipart_range.overhead),
+            )
+            response_content_type = multipart_range.content_type
+        else:
+            headers["Content-Range"] = f"bytes {start}-{end}/{total}"
         status = 206
 
     async def _streaming_fn(response):
         async with await open_async(location, mode="rb") as f:
             if _range:
-                await f.seek(_range.start)
-                to_send = _range.size
-                while to_send > 0:
-                    content = await f.read(min((_range.size, chunk_size)))
-                    if len(content) < 1:
-                        break
-                    to_send -= len(content)
-                    await response.write(content)
+                if getattr(_range, "multipart", False):
+                    current_range = cast(MultipartRange, _range)
+                    ranges = current_range.ranges
+                    boundary = current_range.boundary.encode("ascii")
+                    for index, requested_range in enumerate(ranges):
+                        await response.write(
+                            (b"\r\n--" if index else b"--") + boundary
+                        )
+                        await response.write(
+                            b"\r\nContent-Type: "
+                            + current_range.media_type.encode("utf-8")
+                            + b"\r\nContent-Range: bytes "
+                            + (
+                                f"{requested_range.start}-"
+                                f"{requested_range.end}/"
+                                f"{current_range.total}"
+                                "\r\n\r\n"
+                            ).encode("ascii")
+                        )
+                        await f.seek(requested_range.start)
+                        to_send = requested_range.size
+                        while to_send > 0:
+                            content = await f.read(min(to_send, chunk_size))
+                            if not content:
+                                break
+                            to_send -= len(content)
+                            await response.write(content)
+                    await response.write(b"\r\n--" + boundary + b"--\r\n")
+                else:
+                    await f.seek(_range.start)
+                    to_send = _range.size
+                    while to_send > 0:
+                        content = await f.read(min(to_send, chunk_size))
+                        if not content:
+                            break
+                        to_send -= len(content)
+                        await response.write(content)
             else:
                 while True:
                     content = await f.read(chunk_size)
@@ -395,7 +436,7 @@ async def file_stream(
         streaming_fn=_streaming_fn,
         status=status,
         headers=headers,
-        content_type=mime_type,
+        content_type=response_content_type,
     )
 
 

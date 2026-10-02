@@ -16,10 +16,20 @@ class HTMLProtocol(Protocol):
 
 
 class Range(Protocol):
-    start: int | None
-    end: int | None
-    size: int | None
-    total: int | None
+    start: int
+    end: int
+    size: int
+    total: int
+    __slots__ = ()
+
+
+class MultipartRange(Range, Protocol):
+    boundary: str
+    content_type: str
+    media_type: str
+    multipart: bool
+    overhead: int
+    ranges: tuple[tuple[int, int], ...]
     __slots__ = ()
 
 

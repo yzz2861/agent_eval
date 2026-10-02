@@ -292,6 +292,7 @@ class StaticHandleMixin(metaclass=SanicMeta):
 
         try:
             headers = {}
+            content_type = ""
             # Check if the client has been sent this file before
             # and it has not been modified since
             stats = None
@@ -304,23 +305,16 @@ class StaticHandleMixin(metaclass=SanicMeta):
                 headers["Last-Modified"] = formatdate(
                     modified_since, usegmt=True
                 )
-            _range = None
             if use_content_range:
-                _range = None
                 if not stats:
                     stats = await stat_async(file_path)
                 headers["Accept-Ranges"] = "bytes"
                 headers["Content-Length"] = str(stats.st_size)
-                if request.method != "HEAD":
-                    try:
-                        _range = ContentRangeHandler(request, stats)
-                    except HeaderNotFound:
-                        pass
-                    else:
-                        del headers["Content-Length"]
-                        headers.update(_range.headers)
+                headers["ETag"] = f'"{stats.st_size:x}-{stats.st_mtime_ns:x}"'
 
-            if "content-type" not in headers:
+            if "content-type" in headers:
+                content_type = headers["Content-Type"]
+            else:
                 content_type = content_type or guess_content_type(file_path)
 
                 if "charset=" not in content_type and (
@@ -331,10 +325,40 @@ class StaticHandleMixin(metaclass=SanicMeta):
 
                 headers["Content-Type"] = content_type
 
+            _range = None
+            if use_content_range:
+                if stats is None:
+                    stats = await stat_async(file_path)
+                try:
+                    _range = ContentRangeHandler(
+                        request, stats, content_type=content_type
+                    )
+                except HeaderNotFound:
+                    pass
+                else:
+                    headers["Content-Length"] = _range.headers[
+                        "Content-Length"
+                    ]
+                    if _range.multipart:
+                        headers["Content-Type"] = _range.content_type
+                    else:
+                        headers["Content-Range"] = _range.headers[
+                            "Content-Range"
+                        ]
+
             if request.method == "HEAD":
-                return HTTPResponse(headers=headers)
+                return HTTPResponse(
+                    status=206 if _range else 200, headers=headers
+                )
             else:
-                if stream_large_files:
+                if _range:
+                    return await file_stream(
+                        file_path,
+                        headers=headers,
+                        mime_type=content_type,
+                        _range=_range,
+                    )
+                elif stream_large_files:
                     if isinstance(stream_large_files, bool):
                         threshold = 1024 * 1024
                     else:
@@ -344,7 +368,10 @@ class StaticHandleMixin(metaclass=SanicMeta):
                         stats = await stat_async(file_path)
                     if stats.st_size >= threshold:
                         return await file_stream(
-                            file_path, headers=headers, _range=_range
+                            file_path,
+                            headers=headers,
+                            mime_type=content_type,
+                            _range=_range,
                         )
                 return await file(file_path, headers=headers, _range=_range)
         except (IsADirectoryError, PermissionError):
