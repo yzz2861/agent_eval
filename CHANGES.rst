@@ -5,6 +5,9 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add `RFC8785JSON`, an optional JSON Canonicalization Scheme
+    (RFC 8785) serializer that produces deterministic output for
+    signing across languages and platforms.
 
 
 Version 2.2.0
