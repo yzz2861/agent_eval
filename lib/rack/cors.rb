@@ -3,6 +3,7 @@
 require 'logger'
 require_relative 'cors/resources'
 require_relative 'cors/resource'
+require_relative 'cors/combined_resource'
 require_relative 'cors/result'
 require_relative 'cors/version'
 
@@ -26,10 +27,20 @@ module Rack
 
     DEFAULT_VARY_HEADERS = ['Origin'].freeze
 
+    # :first_match keeps the historical behavior: the first resource whose
+    # path matches wins. :intersection combines every matching resource by
+    # intersecting their methods, headers and origin permissions.
+    COMBINE_MODES = %i[first_match intersection].freeze
+
     def initialize(app, opts = {}, &block)
       @app = app
       @debug_mode = !!opts[:debug]
       @logger = @logger_proc = nil
+      @combine = opts.fetch(:combine, :first_match)
+
+      unless COMBINE_MODES.include?(@combine)
+        raise ArgumentError, "unknown :combine option #{@combine.inspect}; expected one of #{COMBINE_MODES.map(&:inspect).join(', ')}"
+      end
 
       logger = opts[:logger]
       if logger
@@ -47,6 +58,8 @@ module Rack
       else
         instance_eval(&block)
       end
+
+      validate_configuration!
     end
 
     def debug?
@@ -183,9 +196,13 @@ module Rack
     def process_cors(env, path)
       resource, error = match_resource(path, env)
       if resource
-        Result.hit(env)
-        cors = resource.to_headers(env)
-        cors
+        if resource.respond_to?(:deny_methods?) && resource.deny_methods?
+          Result.miss(env, Result::MISS_DENY_METHOD)
+          nil
+        else
+          Result.hit(env)
+          resource.to_headers(env)
+        end
 
       else
         Result.miss(env, error)
@@ -194,6 +211,11 @@ module Rack
     end
 
     def resource_for_path(path_info)
+      if @combine == :intersection
+        matched = all_resources.flat_map { |r| r.resources_matching_path(path_info) }
+        return matched.empty? ? nil : CombinedResource.new(matched)
+      end
+
       all_resources.each do |r|
         found = r.resource_for_path(path_info)
         return found if found
@@ -202,6 +224,8 @@ module Rack
     end
 
     def match_resource(path, env)
+      return match_resource_intersection(path, env) if @combine == :intersection
+
       origin = env[HTTP_ORIGIN]
 
       origin_matched = false
@@ -214,6 +238,128 @@ module Rack
       end
 
       [nil, origin_matched ? Result::MISS_NO_PATH : Result::MISS_NO_ORIGIN]
+    end
+
+    def match_resource_intersection(path, env)
+      matched = all_resources.flat_map { |r| r.resources_for_path(path, env) }
+
+      if matched.empty?
+        origin_matched = all_resources.any? { |r| r.allow_origin?(env[HTTP_ORIGIN], env) }
+        return [nil, origin_matched ? Result::MISS_NO_PATH : Result::MISS_NO_ORIGIN]
+      end
+
+      unless matched.all? { |resource| resource.owner.allow_origin?(env[HTTP_ORIGIN], env) }
+        return [nil, Result::MISS_NO_ORIGIN]
+      end
+
+      [CombinedResource.new(matched), nil]
+    end
+
+    # Raises for contradictory static configuration that can be detected
+    # without an actual request. Decisions involving Proc origins, Regexp
+    # paths or :if guards are resolved at request time.
+    def validate_configuration!
+      return unless @combine == :intersection
+
+      owned_resources = all_resources.flat_map do |block|
+        block.resources.map { |resource| [resource, block] }
+      end
+
+      all_resources.each do |block|
+        next if block.resources.empty?
+        next if block.public_resources?
+        next unless block.concrete_origin_candidates == []
+
+        raise Resource::CorsMisconfigurationError,
+              'combine: :intersection requires at least one origin per allow block that declares resources'
+      end
+
+      owned_resources.each_with_index do |(resource, block), index|
+        if resource.methods.empty?
+          raise Resource::CorsMisconfigurationError,
+                "combine: :intersection cannot grant any methods for resource #{resource.path.inspect}: methods list is empty"
+        end
+
+        owned_resources[(index + 1)..].each do |(other, other_block)|
+          next if resource.if_proc || other.if_proc
+
+          next unless paths_overlap?(resource.path_glob, other.path_glob)
+
+          if (resource.methods & other.methods).empty?
+            raise Resource::CorsMisconfigurationError,
+                  "combine: :intersection denies everything: resources #{resource.path.inspect} and #{other.path.inspect} overlap but share no allowed methods"
+          end
+
+          next if block.equal?(other_block)
+          next if origins_can_overlap?(block, other_block)
+
+          raise Resource::CorsMisconfigurationError,
+                "combine: :intersection denies everything: allow blocks governing #{resource.path.inspect} and #{other.path.inspect} have disjoint origins"
+        end
+      end
+    end
+
+    # true: provably overlap, false: provably disjoint, nil: cannot decide
+    # without a request (e.g. Regexp paths, embedded wildcards).
+    def paths_overlap?(path_a, path_b)
+      return nil unless path_a.respond_to?(:to_str) && path_b.respond_to?(:to_str)
+
+      variants_a = glob_variants(path_a.to_str)
+      variants_b = glob_variants(path_b.to_str)
+
+      results = variants_a.product(variants_b).map { |a, b| globs_overlap?(a, b) }
+      return true if results.include?(true)
+      return false if results.all?(false)
+
+      nil
+    end
+
+    # A trailing '/*' also matches the directory itself, so each glob
+    # represents either one or two concrete segment lists.
+    def glob_variants(path)
+      segments = path.split('/').reject(&:empty?)
+      variants = [segments]
+      if segments.length == 1 && segments.first == '*'
+        variants << []
+      elsif segments.length > 1 && segments.last == '*'
+        variants << segments[0..-2]
+      end
+      variants
+    end
+
+    def globs_overlap?(segments_a, segments_b)
+      return false unless segments_a.length == segments_b.length
+
+      segments_a.zip(segments_b).each do |a, b|
+        result = segments_overlap?(a, b)
+        return result if result == false || result.nil?
+      end
+      true
+    end
+
+    def segments_overlap?(segment_a, segment_b)
+      if segment_a == '*' || segment_b == '*'
+        true
+      elsif literal_segment?(segment_a) && literal_segment?(segment_b)
+        segment_a == segment_b
+      else
+        nil
+      end
+    end
+
+    def literal_segment?(segment)
+      !segment.include?('*') && !segment.include?(':')
+    end
+
+    def origins_can_overlap?(block_a, block_b)
+      return true if block_a.public_resources? || block_b.public_resources?
+
+      origins_a = block_a.concrete_origin_candidates
+      origins_b = block_b.concrete_origin_candidates
+      return true if origins_a.nil? || origins_b.nil?
+
+      origins_a.any? { |origin| block_b.allow_origin?(origin, {}) } ||
+        origins_b.any? { |origin| block_a.allow_origin?(origin, {}) }
     end
   end
 end

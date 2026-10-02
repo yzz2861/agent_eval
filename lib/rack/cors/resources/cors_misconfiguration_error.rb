@@ -4,9 +4,11 @@ module Rack
   class Cors
     class Resource
       class CorsMisconfigurationError < StandardError
-        def message
-          'Allowing credentials for wildcard origins is insecure.' \
-          " Please specify more restrictive origins or set 'credentials' to false in your CORS configuration."
+        DEFAULT_MESSAGE = 'Allowing credentials for wildcard origins is insecure.' \
+                          " Please specify more restrictive origins or set 'credentials' to false in your CORS configuration."
+
+        def initialize(message = DEFAULT_MESSAGE)
+          super
         end
       end
     end

@@ -7,18 +7,24 @@ module Rack
       # {https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Headers}
       CORS_SIMPLE_HEADERS = %w[accept accept-language content-language content-type].freeze
 
-      attr_accessor :path, :methods, :headers, :expose, :max_age, :credentials, :pattern, :if_proc, :vary_headers
+      DEFAULT_MAX_AGE = 7200
+
+      attr_accessor :path, :methods, :headers, :expose, :max_age, :credentials, :pattern, :if_proc, :vary_headers, :owner, :path_glob
+      attr_reader :headers_configured, :methods_configured, :max_age_configured, :expose_configured
 
       def initialize(public_resource, path, opts = {})
         raise CorsMisconfigurationError if public_resource && opts[:credentials] == true
 
         self.path         = path
         self.credentials  = public_resource ? false : (opts[:credentials] == true)
-        self.max_age      = opts[:max_age] || 7200
+        @max_age_configured = !opts[:max_age].nil?
+        self.max_age      = opts[:max_age] || DEFAULT_MAX_AGE
         self.pattern      = compile(path)
+        self.path_glob    = path if path.respond_to?(:to_str)
         self.if_proc      = opts[:if]
         self.vary_headers = opts[:vary] && [opts[:vary]].flatten
         @public_resource  = public_resource
+        @headers_configured = !opts[:headers].nil?
 
         self.headers = case opts[:headers]
                        when :any then :any
@@ -32,8 +38,14 @@ module Rack
                        else
                          ensure_enum(opts[:methods]) || [:get]
                        end.map(&:to_s)
+        @methods_configured = !opts[:methods].nil?
 
+        @expose_configured = !opts[:expose].nil?
         self.expose = opts[:expose] ? [opts[:expose]].flatten : nil
+      end
+
+      def public?
+        @public_resource
       end
 
       def matches_path?(path)

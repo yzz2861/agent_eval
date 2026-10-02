@@ -81,6 +81,7 @@ end
 #### Middleware Options
 * **debug** (boolean):  Enables debug logging and `X-Rack-CORS` HTTP headers for debugging.
 * **logger** (Object or Proc): Specify the logger to log to.  If a proc is provided, it will be called when a logger is needed.  This is helpful in cases where the logger is initialized after `Rack::Cors` is initially configured, like `Rails.logger`.
+* **combine** (symbol): Controls how multiple matching `resource` entries (across multiple `allow` blocks) are combined. Defaults to `:first_match`. See [Combining Matching Resources](#combining-matching-resources).
 
 #### Origin
 Origins can be specified as a string, a regular expression, or as '\*' to allow all origins.
@@ -101,6 +102,70 @@ A Resource path can be specified as exact string match (`/path/to/file.txt`) or 
 * **max_age** (number): Sets the `Access-Control-Max-Age` response header.
 * **if** (Proc): If the result of the proc is true, will process the request as a valid CORS request.
 * **vary** (string or array): A list of HTTP headers to add to the 'Vary' header.
+
+
+### Combining Matching Resources
+
+A request path can match more than one declared resource. This is common when a broad rule covers `/api/*` and a narrower rule adds stricter constraints on `/api/admin/*`. The `combine` middleware option chooses how those rules interact:
+
+* **`:first_match`** (default): Keeps the historical behavior. Resources are evaluated in declaration order and the first resource whose path (and `:if` guard) matches wins. Nothing declared after it is considered.
+
+* **`:intersection`**: Every resource whose path and `:if` guard matches the request is combined, and the effective permission is the intersection of the matching rules. The result does not depend on the order in which resources or `allow` blocks are declared.
+
+```ruby
+use Rack::Cors, combine: :intersection do
+  allow do
+    origins 'https://app.example.com'
+    resource '/api/*',
+      headers: :any,
+      methods: %i[get post put delete],
+      expose: %w[x-total x-request-id],
+      max_age: 600,
+      credentials: true
+  end
+
+  allow do
+    origins 'https://app.example.com'
+    resource '/api/admin/*',
+      headers: %w[x-admin-token],
+      methods: %i[get post],
+      expose: ['x-request-id'],
+      max_age: 300,
+      credentials: true
+  end
+end
+```
+
+With the configuration above, a request to `/api/admin/users` is only allowed when it satisfies **both** rules. The combination rules are:
+
+| Option | Intersection rule |
+| --- | --- |
+| `methods` | Intersection of the allowed methods. An empty intersection explicitly denies the request. Omitting `methods` means `[:get]`, exactly as in `:first_match` mode. |
+| `headers` | `:any` intersected with a list yields that list; a list intersected with a list yields the common headers; omitting `headers` narrows the result to CORS simple headers only. |
+| `origins` | The request origin must be permitted by **every** matching `allow` block. An empty intersection explicitly denies the request. |
+| `credentials` | `true` only when **every** matching resource sets `credentials: true`; an omitted value is `false`. |
+| `expose` | Intersection of the exposed header lists. Any matching resource that omits `expose` narrows the result to the empty set. |
+| `max_age` | The smallest explicitly configured value. Resources that omit `max_age` do not tighten the intersection; the default (`7200`) applies only when nothing is configured. |
+| `vary` | Union (de-duplicated) of every matching resource's `vary` headers. |
+
+`methods`, `headers` and `expose` results are sorted, so changing the declaration order never changes the outcome.
+
+#### Initialization-time vs request-time errors
+
+Contradictions that can be proven from the configuration alone raise `Rack::Cors::Resource::CorsMisconfigurationError` when the middleware is initialized, for example:
+
+* two resources with provably overlapping paths but disjoint `methods`,
+* two `allow` blocks with provably disjoint concrete `origins` governing overlapping paths,
+* an `allow` block that declares resources without any usable origin,
+* an explicitly empty `methods` list.
+
+Decisions that depend on the actual request are evaluated at request time instead:
+
+* origins given as a `Proc` or `Regexp`,
+* resources whose path is a `Regexp`,
+* resources gated by an `:if` proc.
+
+When such a request-dependent combination has an empty `methods` or `origins` intersection, the request is denied (reported as `deny-method` / `no-origin` in the debug `X-Rack-CORS` header) rather than raising.
 
 
 ## Common Gotchas

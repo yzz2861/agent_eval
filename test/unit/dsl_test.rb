@@ -67,4 +67,30 @@ describe Rack::Cors, 'DSL' do
     resources = cors.send :all_resources
     _(resources.first.resources.first.credentials).must_equal false
   end
+
+  it 'should distinguish :any, defaults and unconfigured values' do
+    cors = Rack::Cors.new(proc {}) do
+      allow do
+        origins 'example.net'
+        resource '/configured', methods: :any, headers: :any, max_age: 100, expose: 'x'
+        resource '/omitted'
+      end
+    end
+    configured, omitted = cors.send(:all_resources).first.resources
+
+    _(configured.methods_configured).must_equal true
+    _(configured.headers_configured).must_equal true
+    _(configured.max_age_configured).must_equal true
+    _(configured.expose_configured).must_equal true
+    _(configured.headers).must_equal :any
+
+    _(omitted.methods_configured).must_equal false
+    _(omitted.headers_configured).must_equal false
+    _(omitted.max_age_configured).must_equal false
+    _(omitted.expose_configured).must_equal false
+    _(omitted.methods).must_equal ['get']
+    _(omitted.headers).must_be_nil
+    _(omitted.max_age).must_equal 7200
+    _(omitted.expose).must_be_nil
+  end
 end

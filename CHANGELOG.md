@@ -1,6 +1,15 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+### Added
+- Add `combine` middleware option to control how multiple matching resources
+  interact: `:first_match` (default, existing behavior) and `:intersection`,
+  which intersects the `methods`, `headers` and origin permissions of every
+  matching resource and defines combination rules for `credentials`, `expose`,
+  `max_age` and `vary`. Provably contradictory configurations raise at
+  initialization; request-dependent contradictions are denied at request time.
+
 ## 3.0.0 - 2025-05-16
 ### Changed
 - Update Rack dependency to >= 3.0.14
