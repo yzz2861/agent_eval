@@ -1,0 +1,87 @@
+# frozen_string_literal: true
+
+require "net/imap"
+require "test/unit"
+require "yaml"
+
+module NetIMAPTestHelpers
+  module TestFixtureGenerators
+
+    attr_reader :fixtures
+
+    def load_fixture_data(*test_fixture_path)
+      dir = self::TEST_FIXTURE_PATH
+      YAML.unsafe_load_file File.join(dir, *test_fixture_path)
+    end
+
+    def generate_tests_from(fixture_data: nil, fixture_file: nil)
+      fixture_data ||= load_fixture_data fixture_file
+      tests = fixture_data.fetch(:tests)
+
+      tests.each do |name, test|
+        type = test.fetch(:test_type) {
+          test.key?(:expected) ? :parser_assert_equal : :parser_pending
+        }
+        name = "test_#{name}" unless name.start_with? "test_"
+        name = name.to_sym
+        raise "#{name} is already defined" if instance_methods.include?(name)
+        # warn "define_method :#{name} = #{type}..."
+
+        case type
+
+        when :parser_assert_equal
+          response = test.fetch(:response).force_encoding "ASCII-8BIT"
+          expected = test.fetch(:expected)
+          debug    = test.fetch(:debug, false)
+
+          define_method name do
+            with_debug do
+              parser = Net::IMAP::ResponseParser.new
+              actual = parser.parse response
+              binding.irb if debug
+              assert_equal expected, actual
+            rescue Test::Unit::AssertionFailedError
+              puts YAML.dump name => {response: response, expected: actual}
+              raise
+            end
+          end
+
+        when :parser_pending
+          response = test.fetch(:response)
+
+          define_method name do
+            with_debug do
+              parser = Net::IMAP::ResponseParser.new
+              actual = parser.parse response
+              puts YAML.dump "tests" => {
+                name => {response: response, expected: actual}
+              }
+              pend "update tests with expected data..."
+            end
+          end
+
+        when :assert_parse_failure
+          response = test.fetch(:response)
+          message  = test.fetch(:message)
+
+          define_method name do
+            err = assert_raise(Net::IMAP::ResponseParseError) do
+              Net::IMAP::ResponseParser.new.parse response
+            end
+            assert_match(message, err.message)
+          end
+
+        end
+      end
+
+    end
+  end
+
+  def with_debug(bool = true)
+    Net::IMAP.debug, original = bool, Net::IMAP.debug
+    yield
+  ensure
+    Net::IMAP.debug = original
+  end
+
+end

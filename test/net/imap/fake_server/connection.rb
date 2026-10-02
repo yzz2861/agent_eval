@@ -1,0 +1,54 @@
+# frozen_string_literal: true
+
+class Net::IMAP::FakeServer
+  # > "Connection" refers to the entire sequence of client/server interaction
+  # > from the initial establishment of the network connection until its
+  # > termination.
+  # --- https://www.rfc-editor.org/rfc/rfc9051#name-conventions-used-in-this-do
+  class Connection
+    attr_reader :config, :state
+
+    def initialize(server, tcp_socket:)
+      @config = server.config
+      @socket = Socket.new tcp_socket, config: config
+      @state  = ConnectionState.new socket: socket, config: config
+      @reader = CommandReader.new  socket, config: config
+      @writer = ResponseWriter.new socket, config: config, state: state
+      @router = CommandRouter.new  writer, config: config, state: state
+      @mutex  = Thread::Mutex.new
+    end
+
+    def commands; state.commands end
+    def on(...) router.on(...) end
+    def unsolicited(...) writer.untagged(...) end
+
+    def literal_acceptor =   reader.literal_acceptor
+    def literal_acceptor=(v) reader.literal_acceptor = v end
+
+    def run
+      writer.greeting
+      catch(:eof) do
+        router << reader.get_command until state.logout?
+      end
+    ensure
+      close
+    end
+
+    def close
+      @mutex.synchronize do
+        unless state.logout?
+          state.logout
+          writer.bye
+        end
+        socket&.close unless socket&.closed?
+      end
+    rescue Errno::EPIPE, Errno::ECONNRESET
+      raise unless config.ignore_abrupt_eof?
+    end
+
+    private
+
+    attr_reader :socket, :reader, :writer, :router
+
+  end
+end

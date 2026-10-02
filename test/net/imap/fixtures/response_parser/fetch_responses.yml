@@ -1,0 +1,217 @@
+---
+:tests:
+  # 7.4.2.  FETCH Response
+  #
+  #    Example:    S: * 23 FETCH (FLAGS (\Seen) RFC822.SIZE 44827)
+  rfc3501_7.4.2_FETCH_response_example:
+    :response: "* 23 FETCH (FLAGS (\\Seen) RFC822.SIZE 44827)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 23
+        attr:
+          FLAGS:
+          - :Seen
+          RFC822.SIZE: 44827
+      raw_data: "* 23 FETCH (FLAGS (\\Seen) RFC822.SIZE 44827)\r\n"
+
+  test_fetch_msg_att_uid:
+    :response: "* 1 FETCH (UID 92285)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 1
+        attr:
+          UID: 92285
+      raw_data: "* 1 FETCH (UID 92285)\r\n"
+
+  test_fetch_msg_att_flags_and_uid:
+    :response: "* 1 FETCH (FLAGS (\\Seen $MDNSent \\Flagged Custom) UID 5)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 1
+        attr:
+          FLAGS:
+          - :Seen
+          - "$MDNSent"
+          - :Flagged
+          - Custom
+          UID: 5
+      raw_data: "* 1 FETCH (FLAGS (\\Seen $MDNSent \\Flagged Custom) UID 5)\r\n"
+
+  test_fetch_msg_att_HEADER.FIELDS:
+    :response: &test_fetch_msg_att_HEADER_FIELDS
+      "* 20367 FETCH (BODY[HEADER.FIELDS (List-ID List-Unsubscribe
+      List-Unsubscribe-Post List-Owner List-Archive)] {291}\r\nList-Unsubscribe:
+        manage-example-lists
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n\r\n)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 20367
+        attr:
+          BODY[HEADER.FIELDS (List-ID List-Unsubscribe List-Unsubscribe-Post List-Owner List-Archive)]: "List-Unsubscribe:
+            manage-example-lists xxxxxxxxxxxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n
+            xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n
+            xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n\r\n"
+      raw_data: *test_fetch_msg_att_HEADER_FIELDS
+
+  test_fetch_msg_att_HEADER.FIELDS_quoted:
+    :response: &test_fetch_msg_att_HEADER_FIELDS_quoted
+      "* 10 FETCH (BODY[HEADER.FIELDS (\"Content-Type\")] {95}\r\nContent-Type: multipart/alternative;\r\n
+        boundary=\"--==_mimepart_66cfb08b4f249_34306b61811e5\"\r\n\r\n)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 10
+        attr:
+          "BODY[HEADER.FIELDS (Content-Type)]": "Content-Type: multipart/alternative;\r\n
+            boundary=\"--==_mimepart_66cfb08b4f249_34306b61811e5\"\r\n\r\n"
+      raw_data: *test_fetch_msg_att_HEADER_FIELDS_quoted
+
+  test_fetch_msg_att_HEADER.FIELDS.NOT:
+    :response: &test_fetch_msg_att_HEADER_FIELDS_NOT
+      "* 20368 FETCH (BODY[HEADER.FIELDS.NOT (Received DKIM-Signature List-Unsubscribe
+      ARC-Seal ARC-Authentication-Results Authentication-Results ARC-Message-Signature
+      Received-SPF X-Received Mime-Version Content-Type Content-Transfer-Encoding
+      X-AUTO-Response-Suppress X-Google-Smtp-Source)]
+      {307}\r\nDelivered-To: testy.mctester@mail.test\r\nReturn-Path:
+        <noreply@example.test>\r\nDate: Thu, 02 Nov 2023 10:10:17 -0700\r\nFrom:
+        Example <support@example.test>\r\nMessage-ID:
+        <xxxxxxxxxxxxxxxxxxxx@yyyyyyyyy-zzzzzzzz-example.mail>\r\nSubject:
+        [Example] You've hit 75% of your spending limit for the Tester\r\n
+        account\r\n\r\n)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 20368
+        attr:
+          ? BODY[HEADER.FIELDS.NOT (Received DKIM-Signature List-Unsubscribe ARC-Seal
+            ARC-Authentication-Results Authentication-Results ARC-Message-Signature
+            Received-SPF X-Received Mime-Version Content-Type Content-Transfer-Encoding
+            X-AUTO-Response-Suppress X-Google-Smtp-Source)]
+          : "Delivered-To: testy.mctester@mail.test\r\nReturn-Path: <noreply@example.test>\r\nDate:
+            Thu, 02 Nov 2023 10:10:17 -0700\r\nFrom: Example <support@example.test>\r\nMessage-ID:
+            <xxxxxxxxxxxxxxxxxxxx@yyyyyyyyy-zzzzzzzz-example.mail>\r\nSubject: [Example]
+            You've hit 75% of your spending limit for the Tester\r\n account\r\n\r\n"
+      raw_data: *test_fetch_msg_att_HEADER_FIELDS_NOT
+
+  test_invalid_fetch_msg_att_extra_space:
+    :response: "* 1 FETCH (UID 92285 )\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 1
+        attr:
+          UID: 92285
+      raw_data: "* 1 FETCH (UID 92285 )\r\n"
+
+  test_fetch_msg_att_modseq:
+    :comments: |
+      [Bug #10119]
+    :response: "* 1 FETCH (FLAGS (Seen) MODSEQ (12345) UID 5)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 1
+        attr:
+          FLAGS:
+          - Seen
+          MODSEQ: 12345
+          UID: 5
+      raw_data: "* 1 FETCH (FLAGS (Seen) MODSEQ (12345) UID 5)\r\n"
+
+  test_fetch_msg_att_rfc822:
+    :response: "* 123 FETCH (RFC822 {5}\r\nfoo\r\n)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 123
+        attr:
+          RFC822: "foo\r\n"
+      raw_data: "* 123 FETCH (RFC822 {5}\r\nfoo\r\n)\r\n"
+
+  test_fetch_msg_att_X-GM-MSGID:
+    :comments: |
+      Example copied from https://developers.google.com/gmail/imap/imap-extensions
+    :response: "* 1 FETCH (X-GM-MSGID 1278455344230334865)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 1
+        attr:
+          X-GM-MSGID: 1278455344230334865
+      raw_data: "* 1 FETCH (X-GM-MSGID 1278455344230334865)\r\n"
+
+  test_fetch_msg_att_X-GM-THRID:
+    :comments: |
+      Example copied from https://developers.google.com/gmail/imap/imap-extensions
+    :response: "* 4 FETCH (X-GM-THRID 1266894439832287888)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 4
+        attr:
+          X-GM-THRID: 1266894439832287888
+      raw_data: "* 4 FETCH (X-GM-THRID 1266894439832287888)\r\n"
+
+  test_fetch_msg_att_X-GM-LABELS_1:
+    :comments: |
+      Example copied from https://developers.google.com/gmail/imap/imap-extensions
+    :response: "* 1 FETCH (X-GM-LABELS (\\Inbox \\Sent Important \"Muy Importante\"))\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 1
+        attr:
+          X-GM-LABELS:
+          - :Inbox
+          - :Sent
+          - Important
+          - Muy Importante
+      raw_data: "* 1 FETCH (X-GM-LABELS (\\Inbox \\Sent Important \"Muy Importante\"))\r\n"
+
+  test_fetch_msg_att_X-GM-LABELS_2:
+    :comments: |
+      Example copied from https://developers.google.com/gmail/imap/imap-extensions
+    :response: "* 2 FETCH (X-GM-LABELS (foo))\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 2
+        attr:
+          X-GM-LABELS:
+          - foo
+      raw_data: "* 2 FETCH (X-GM-LABELS (foo))\r\n"
+
+  test_fetch_msg_att_X-GM-LABELS_3:
+    :comments: |
+      Example copied from https://developers.google.com/gmail/imap/imap-extensions
+    :response: "* 3 FETCH (X-GM-LABELS ())\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 3
+        attr:
+          X-GM-LABELS: []
+      raw_data: "* 3 FETCH (X-GM-LABELS ())\r\n"
+
+  test_invalid_fetch_msg_att_rfc822_with_brackets:
+    :response: "* 123 FETCH (RFC822[] {5}\r\nfoo\r\n)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: FETCH
+      data: !ruby/struct:Net::IMAP::FetchData
+        seqno: 123
+        attr:
+          RFC822: "foo\r\n"
+      raw_data: "* 123 FETCH (RFC822[] {5}\r\nfoo\r\n)\r\n"
+
+  test_invalid_fetch_msg_att_unknown_fails:
+    :test_type: :assert_parse_failure
+    :response: "* 123 FETCH (UNKNOWN 92285)\r\n"
+    :message: !ruby/regexp / for \{123\}/

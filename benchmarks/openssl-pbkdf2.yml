@@ -1,0 +1,40 @@
+prelude: |
+  require "openssl"
+  require "securerandom"
+
+  PWDS = Array.new(1024) {
+    Array.new(rand(1..8)) {
+      Array.new(4) { rand(97..122).chr }.join + rand(0..9).to_s
+    }.join(" -_".chars.sample)
+  }
+  SALTS = Array.new(1024) { SecureRandom.random_bytes(16) }
+  @idx = 0
+
+  $sha1_len   = OpenSSL::Digest.new("SHA1")  .digest_length
+  $sha256_len = OpenSSL::Digest.new("SHA256").digest_length
+
+  def sha1(iterations)
+    pass, salt, @idx = PWDS[@idx], SALTS[@idx], (@idx + 1) & 1023
+    OpenSSL::KDF.pbkdf2_hmac(
+      pass, salt:, iterations:, hash: "SHA1", length: $sha1_len
+    )
+  end
+
+  def sha256(iterations)
+    pass, salt, @idx = PWDS[@idx], SALTS[@idx], (@idx + 1) & 1023
+    OpenSSL::KDF.pbkdf2_hmac(
+      pass, salt:, iterations:, hash: "SHA256", length: $sha256_len
+    )
+  end
+
+benchmark:
+
+  # SHA1
+  "SHA1,     1m iterations": "sha1   1_000_000"
+  "SHA1,    10m iterations": "sha1  10_000_000"
+  "SHA1,   100m iterations": "sha1 100_000_000"
+
+  # SHA256
+  "SHA256,   1m iterations": "sha256   1_000_000"
+  "SHA256,  10m iterations": "sha256  10_000_000"
+  "SHA256, 100m iterations": "sha256 100_000_000"

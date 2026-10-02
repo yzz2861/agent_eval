@@ -1,0 +1,87 @@
+prelude: |
+  require "net/imap"
+  require "stringio"
+
+  @io = StringIO.new("", "rb")
+  client = Object.new
+  def client.config = @config ||= Net::IMAP::Config.new
+  def client.max_response_size = config.max_response_size
+  client.config # force memoization
+
+  @reader = Net::IMAP::ResponseReader.new(client, @io)
+  def read
+    @io.rewind
+    @reader.read_response_buffer
+  rescue Net::IMAP::ResponseTooLargeError
+    # intentionally ignoring this
+  end
+
+  def b(str) = str.to_str.b
+
+  # Pathological case: nothing but empty literals
+  EMPTY_CONT = "{0}\r\n"               #  5 bytes
+  SMALL_CONT = "{19}\r\nアイマップ4。" # 25 bytes
+  def pathological(size)   = b EMPTY_CONT * (size.to_int / EMPTY_CONT.bytesize) + "\r\n"
+  def small_literals(size) = b SMALL_CONT * (size.to_int / SMALL_CONT.bytesize) + "\r\n"
+  def no_literals(size)    = b "a" * size + "\r\n"
+  def pathological!(...)   = @io.string = pathological(...)
+  def small_literals!(...) = @io.string = small_literals(...)
+  def no_literals!(...)    = @io.string = no_literals(...)
+
+  def warmup(input)
+    @io.string = input
+    output = read
+    output == input or raise "Invalid input? output=%p" % [output]
+    1000.times do read end
+  end
+
+  warmup no_literals    100
+  warmup small_literals 100
+  warmup pathological   100
+
+  no_literals!(1)
+
+benchmark:
+  - { name: "100  B with no literals", prelude: "no_literals!    1e2", script: "read" }
+  - { name: "  1KiB with no literals", prelude: "no_literals!    1e3", script: "read" }
+  - { name: " 10KiB with no literals", prelude: "no_literals!    1e4", script: "read" }
+  - { name: "100KiB with no literals", prelude: "no_literals!    1e5", script: "read" }
+  - { name: "  1MiB with no literals", prelude: "no_literals!    1e6", script: "read" }
+
+  - { name: "100  B of  25B literals", prelude: "small_literals! 1e2", script: "read" }
+  - { name: "  1KiB of  25B literals", prelude: "small_literals! 1e3", script: "read" }
+  - { name: " 10KiB of  25B literals", prelude: "small_literals! 1e4", script: "read" }
+  - { name: "100KiB of  25B literals", prelude: "small_literals! 1e5", script: "read" }
+  # - { name: "  1MiB of  25 byte literals", prelude: "small_literals! 1e6", script: "read" }
+  # - { name: "100MiB of  25 byte literals", prelude: "small_literals! 1e8", script: "read" }
+
+  - { name: "100  B of   0B literals", prelude: "pathological!   1e2", script: "read" }
+  - { name: "  1KiB of   0B literals", prelude: "pathological!   1e3", script: "read" }
+  - { name: " 10KiB of   0B literals", prelude: "pathological!   1e4", script: "read" }
+  - { name: "100KiB of   0B literals", prelude: "pathological!   1e5", script: "read" }
+  # - { name: "  1MiB of   0 byte literals", prelude: "pathological!   1e6", script: "read" }
+  # - { name: "100MiB of   0 byte literals", prelude: "pathological!   1e8", script: "read" }
+
+contexts:
+  - name: local
+    prelude: |
+      $LOAD_PATH.unshift "./lib"
+    require: false
+  - name: local YJIT
+    prelude: |
+      $LOAD_PATH.unshift "./lib"
+      RubyVM::YJIT.enable
+    require: false
+
+  # - name: v0.6.3
+  #   gems:
+  #     net-imap: 0.6.3
+  #   require: false
+  # - name: v0.5.13
+  #   gems:
+  #     net-imap: 0.5.13
+  #   require: false
+  # - name: v0.4.23
+  #   gems:
+  #     net-imap: 0.4.23
+  #   require: false
