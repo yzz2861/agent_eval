@@ -163,6 +163,279 @@ class TestConfDict(unittest.TestCase):
         root._make_overlay()  # This triggers the weakref-collect
         self.assertEqual(len(root._overlays), 1)
 
+    def test_overlay_set_rolls_back_when_listener_fails(self):
+        root = ConfigDict()
+        first = root._make_overlay()
+        second = root._make_overlay()
+        root['key'] = 'old'
+
+        def fail(config, key, value):
+            if key == 'key':
+                raise RuntimeError('listener failed')
+
+        second._add_change_listener(fail)
+
+        with self.assertRaises(RuntimeError):
+            root['key'] = 'new'
+
+        self.assertEqual(root['key'], 'old')
+        self.assertEqual(first['key'], 'old')
+        self.assertEqual(second['key'], 'old')
+        self.assertNotIn('key', root._virtual_keys)
+        self.assertIn('key', first._virtual_keys)
+        self.assertIn('key', second._virtual_keys)
+
+    def test_overlay_delete_rolls_back_when_listener_fails(self):
+        root = ConfigDict()
+        first = root._make_overlay()
+        second = root._make_overlay()
+        root['key'] = 'old'
+
+        def fail(config, key, value):
+            if key == 'key':
+                raise RuntimeError('listener failed')
+
+        second._add_change_listener(fail)
+
+        with self.assertRaises(RuntimeError):
+            del root['key']
+
+        self.assertEqual(root['key'], 'old')
+        self.assertEqual(first['key'], 'old')
+        self.assertEqual(second['key'], 'old')
+        self.assertNotIn('key', root._virtual_keys)
+        self.assertIn('key', first._virtual_keys)
+        self.assertIn('key', second._virtual_keys)
+
+    def test_overlay_restore_rolls_back_when_nested_listener_fails(self):
+        root = ConfigDict()
+        middle = root._make_overlay()
+        leaf = middle._make_overlay()
+        root['key'] = 'root'
+        middle['key'] = 'override'
+
+        def fail(config, key, value):
+            if key == 'key':
+                raise RuntimeError('listener failed')
+
+        leaf._add_change_listener(fail)
+
+        with self.assertRaises(RuntimeError):
+            del middle['key']
+
+        self.assertEqual(root['key'], 'root')
+        self.assertEqual(middle['key'], 'override')
+        self.assertEqual(leaf['key'], 'override')
+        self.assertNotIn('key', middle._virtual_keys)
+        self.assertIn('key', leaf._virtual_keys)
+
+    def test_nested_overlay_restore_receives_inherited_value(self):
+        root = ConfigDict()
+        root['key'] = 'root'
+        middle = root._make_overlay()
+        leaf = middle._make_overlay()
+        middle['key'] = 'override'
+
+        self.assertEqual(leaf['key'], 'override')
+
+        del middle['key']
+
+        self.assertEqual(root['key'], 'root')
+        self.assertEqual(middle['key'], 'root')
+        self.assertEqual(leaf['key'], 'root')
+        self.assertIn('key', middle._virtual_keys)
+        self.assertIn('key', leaf._virtual_keys)
+
+    def test_overlay_filter_failure_keeps_virtual_override_state(self):
+        root = ConfigDict()
+        first = root._make_overlay()
+        second = root._make_overlay()
+        root['key'] = 'old'
+        root.meta_set('key', 'filter', lambda value: (_ for _ in ()).throw(ValueError()))
+
+        with self.assertRaises(ValueError):
+            first['key'] = 'new'
+
+        self.assertEqual(root['key'], 'old')
+        self.assertEqual(first['key'], 'old')
+        self.assertEqual(second['key'], 'old')
+        self.assertIn('key', first._virtual_keys)
+        self.assertIn('key', second._virtual_keys)
+
+    def test_root_filter_failure_discards_queued_listener_writes(self):
+        root = ConfigDict()
+        first = root._make_overlay()
+        second = root._make_overlay()
+        root['key'] = 'old'
+        root.meta_set('key', 'filter', lambda value: (_ for _ in ()).throw(ValueError()))
+
+        def queue_write(config, key, value):
+            if key == 'key':
+                config['queued'] = 'value'
+
+        root._add_change_listener(queue_write)
+
+        with self.assertRaises(ValueError):
+            root['key'] = 'new'
+
+        self.assertNotIn('queued', root)
+        self.assertNotIn('queued', first)
+        self.assertNotIn('queued', second)
+
+    def test_explicit_overlay_is_not_changed_by_parent_propagation(self):
+        root = ConfigDict()
+        first = root._make_overlay()
+        first_child = first._make_overlay()
+        second = root._make_overlay()
+        root['key'] = 'root'
+        first['key'] = 'override'
+
+        root['key'] = 'new root'
+
+        self.assertEqual(root['key'], 'new root')
+        self.assertEqual(first['key'], 'override')
+        self.assertEqual(first_child['key'], 'override')
+        self.assertEqual(second['key'], 'new root')
+        self.assertNotIn('key', first._virtual_keys)
+        self.assertIn('key', first_child._virtual_keys)
+        self.assertIn('key', second._virtual_keys)
+
+        del root['key']
+
+        self.assertNotIn('key', root)
+        self.assertEqual(first['key'], 'override')
+        self.assertEqual(first_child['key'], 'override')
+        self.assertNotIn('key', second)
+        self.assertNotIn('key', first._virtual_keys)
+        self.assertIn('key', first_child._virtual_keys)
+        self.assertNotIn('key', second._virtual_keys)
+
+        del first['key']
+
+        self.assertNotIn('key', first)
+        self.assertNotIn('key', first_child)
+        self.assertNotIn('key', first._virtual_keys)
+        self.assertNotIn('key', first_child._virtual_keys)
+
+    def test_listeners_observe_a_consistent_overlay_tree(self):
+        root = ConfigDict()
+        root['key'] = 'old'
+        first = root._make_overlay()
+        second = root._make_overlay()
+        observed = []
+
+        def observe(config, key, value):
+            if key == 'key':
+                observed.append((
+                    root.get('key'), first.get('key'), second.get('key')
+                ))
+
+        root._add_change_listener(observe)
+        first._add_change_listener(observe)
+        second._add_change_listener(observe)
+
+        root['key'] = 'new'
+
+        self.assertEqual(observed, [('new', 'new', 'new')] * 3)
+
+    def test_listener_writes_are_deferred_until_propagation_finishes(self):
+        root = ConfigDict()
+        root['key'] = 'old'
+        root['queued'] = 'before'
+        first = root._make_overlay()
+        second = root._make_overlay()
+        events = []
+
+        def listener(config, key, value):
+            events.append(('notify', key))
+            if key == 'key' and config is root:
+                config['queued'] = 'value'
+                events.append(('queued', root['queued'], second['queued']))
+
+        root._add_change_listener(listener)
+        first._add_change_listener(listener)
+        second._add_change_listener(listener)
+
+        root['key'] = 'value'
+
+        self.assertEqual(root['queued'], 'value')
+        self.assertEqual(first['queued'], 'value')
+        self.assertEqual(second['queued'], 'value')
+        self.assertEqual(events, [
+            ('notify', 'key'),
+            ('queued', 'before', 'before'),
+            ('notify', 'key'),
+            ('notify', 'key'),
+            ('notify', 'queued'),
+            ('notify', 'queued'),
+            ('notify', 'queued'),
+        ])
+
+    def test_failed_propagation_discards_queued_listener_writes(self):
+        root = ConfigDict()
+        root['key'] = 'old'
+        first = root._make_overlay()
+        second = root._make_overlay()
+
+        def queue_write(config, key, value):
+            if key == 'key':
+                config['queued'] = 'value'
+
+        def fail(config, key, value):
+            if key == 'key':
+                raise RuntimeError('listener failed')
+
+        root._add_change_listener(queue_write)
+        second._add_change_listener(fail)
+
+        with self.assertRaises(RuntimeError):
+            root['key'] = 'new'
+
+        self.assertNotIn('queued', root)
+        self.assertNotIn('queued', first)
+        self.assertNotIn('queued', second)
+
+    def test_listener_can_queue_delete_until_propagation_finishes(self):
+        root = ConfigDict()
+        root['key'] = 'old'
+        root['remove'] = 'before'
+        first = root._make_overlay()
+        second = root._make_overlay()
+
+        def queue_delete(config, key, value):
+            if key == 'key':
+                del config['remove']
+
+        root._add_change_listener(queue_delete)
+
+        root['key'] = 'new'
+
+        self.assertNotIn('remove', root)
+        self.assertNotIn('remove', first)
+        self.assertNotIn('remove', second)
+
+    def test_failed_queued_write_keeps_successful_primary_change(self):
+        root = ConfigDict()
+        root['key'] = 'old'
+        first = root._make_overlay()
+        second = root._make_overlay()
+        root.meta_set('queued', 'filter',
+                      lambda value: (_ for _ in ()).throw(ValueError()))
+
+        def queue_failing_write(config, key, value):
+            if key == 'key':
+                config['queued'] = 'value'
+
+        root._add_change_listener(queue_failing_write)
+
+        with self.assertRaises(ValueError):
+            root['key'] = 'new'
+
+        self.assertEqual(root['key'], 'new')
+        self.assertEqual(first['key'], 'new')
+        self.assertEqual(second['key'], 'new')
+        self.assertNotIn('queued', root)
+
 
 class TestINIConfigLoader(unittest.TestCase):
     @classmethod

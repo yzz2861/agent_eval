@@ -68,7 +68,7 @@ if __name__ == '__main__':
 # Imports and Helpers used everywhere else #####################################
 ###############################################################################
 
-import base64, calendar, email.utils, functools, hmac, itertools, \
+import base64, calendar, contextlib, email.utils, functools, hmac, itertools, \
     mimetypes, os, re, tempfile, threading, time, warnings, weakref, hashlib
 
 from types import FunctionType
@@ -101,6 +101,8 @@ import inspect
 json_loads = lambda s: json_lds(touni(s))
 callable = lambda x: hasattr(x, '__call__')
 _UNSET = object()
+_CONFIG_MISSING = object()
+_CONFIG_NO_NOTIFY = object()
 
 
 def _wsgi_recode(src):
@@ -2263,6 +2265,8 @@ class ConfigDict(dict):
 
     __slots__ = ('_meta', '_change_listener', '_overlays', '_virtual_keys', '_source', '__weakref__')
 
+    _change_context = threading.local()
+
     def __init__(self):
         self._meta = {}
         self._change_listener = []
@@ -2363,17 +2367,19 @@ class ConfigDict(dict):
         if not isinstance(key, str):
             raise TypeError('Key has type %r (not a string)' % type(key))
 
-        self._virtual_keys.discard(key)
-
-        value = self.meta_get(key, 'filter', lambda x: x)(value)
-        if key in self and self[key] is value:
+        pending = getattr(self._change_context, 'pending', None)
+        if pending is not None:
+            pending.append(('set', self, key, value))
             return
 
-        self._on_change(key, value)
-        dict.__setitem__(self, key, value)
+        with self._change_transaction():
+            value = self.meta_get(key, 'filter', lambda x: x)(value)
+            if key in self and self[key] is value and key not in self._virtual_keys:
+                return
 
-        for overlay in self._iter_overlays():
-            overlay._set_virtual(key, value)
+            changes = []
+            self._plan_set(key, value, changes)
+            self._commit_changes(key, changes)
 
     def __delitem__(self, key):
         if key not in self:
@@ -2381,39 +2387,144 @@ class ConfigDict(dict):
         if key in self._virtual_keys:
             raise KeyError("Virtual keys cannot be deleted: %s" % key)
 
-        if self._source and key in self._source:
-            # Not virtual, but present in source -> Restore virtual value
-            dict.__delitem__(self, key)
-            self._set_virtual(key, self._source[key])
-        else:  # not virtual, not present in source. This is OUR value
-            self._on_change(key, None)
-            dict.__delitem__(self, key)
-            for overlay in self._iter_overlays():
-                overlay._delete_virtual(key)
+        pending = getattr(self._change_context, 'pending', None)
+        if pending is not None:
+            pending.append(('delete', self, key, None))
+            return
 
-    def _set_virtual(self, key, value):
-        """ Recursively set or update virtual keys. """
+        with self._change_transaction():
+            changes = []
+            if self._source and key in self._source:
+                # Not virtual, but present in source -> Restore virtual value
+                value = self._source[key]
+                notify_value = value if self[key] is not value else _CONFIG_NO_NOTIFY
+                changes.append((
+                    self,
+                    self[key],
+                    key in self._virtual_keys,
+                    value,
+                    True,
+                    notify_value,
+                ))
+                for overlay in list(self._iter_overlays()):
+                    overlay._plan_virtual_set(key, value, changes)
+            else:  # not virtual, not present in source. This is OUR value
+                changes.append((
+                    self,
+                    self[key],
+                    False,
+                    _CONFIG_MISSING,
+                    False,
+                    None,
+                ))
+                for overlay in list(self._iter_overlays()):
+                    overlay._plan_virtual_delete(key, changes)
+
+            self._commit_changes(key, changes)
+
+    def _plan_set(self, key, value, changes):
+        """ Plan a local set and the virtual-key updates in child overlays. """
+        existed = key in self
+        old_value = self[key] if existed else _CONFIG_MISSING
+        was_virtual = key in self._virtual_keys
+        notify_value = value if not existed or old_value is not value else _CONFIG_NO_NOTIFY
+        changes.append((
+            self, old_value, was_virtual, value, False, notify_value
+        ))
+
+        for overlay in list(self._iter_overlays()):
+            overlay._plan_virtual_set(key, value, changes)
+
+    def _plan_virtual_set(self, key, value, changes):
+        """ Recursively plan setting or updating virtual keys. """
         if key in self and key not in self._virtual_keys:
             return  # Do nothing for non-virtual keys.
 
-        self._virtual_keys.add(key)
-        if key in self and self[key] is not value:
-            self._on_change(key, value)
-        dict.__setitem__(self, key, value)
-        for overlay in self._iter_overlays():
-            overlay._set_virtual(key, value)
+        existed = key in self
+        old_value = self[key] if existed else _CONFIG_MISSING
+        was_virtual = key in self._virtual_keys
+        notify_value = value if existed and old_value is not value else _CONFIG_NO_NOTIFY
+        changes.append((
+            self, old_value, was_virtual, value, True, notify_value
+        ))
 
-    def _delete_virtual(self, key):
-        """ Recursively delete virtual entry. """
+        for overlay in list(self._iter_overlays()):
+            overlay._plan_virtual_set(key, value, changes)
+
+    def _plan_virtual_delete(self, key, changes):
+        """ Recursively plan deleting virtual entries. """
         if key not in self._virtual_keys:
             return  # Do nothing for non-virtual keys.
 
-        if key in self:
-            self._on_change(key, None)
-        dict.__delitem__(self, key)
-        self._virtual_keys.discard(key)
-        for overlay in self._iter_overlays():
-            overlay._delete_virtual(key)
+        changes.append((
+            self,
+            self[key],
+            True,
+            _CONFIG_MISSING,
+            False,
+            None,
+        ))
+        for overlay in list(self._iter_overlays()):
+            overlay._plan_virtual_delete(key, changes)
+
+    def _apply_changes(self, key, changes):
+        for config, old_value, was_virtual, new_value, is_virtual, notify_value in changes:
+            if new_value is _CONFIG_MISSING:
+                dict.__delitem__(config, key)
+            else:
+                dict.__setitem__(config, key, new_value)
+            if is_virtual:
+                config._virtual_keys.add(key)
+            else:
+                config._virtual_keys.discard(key)
+
+    def _restore_changes(self, key, changes):
+        for config, old_value, was_virtual, new_value, is_virtual, notify_value in reversed(changes):
+            if old_value is _CONFIG_MISSING:
+                dict.__delitem__(config, key)
+            else:
+                dict.__setitem__(config, key, old_value)
+            if was_virtual:
+                config._virtual_keys.add(key)
+            else:
+                config._virtual_keys.discard(key)
+
+    def _commit_changes(self, key, changes):
+        self._apply_changes(key, changes)
+        try:
+            self._notify_changes(key, changes)
+        except BaseException:
+            self._restore_changes(key, changes)
+            raise
+
+    def _notify_changes(self, key, changes):
+        for config, old_value, was_virtual, new_value, is_virtual, notify_value in changes:
+            if notify_value is not _CONFIG_NO_NOTIFY:
+                config._on_change(key, notify_value)
+
+    @contextlib.contextmanager
+    def _change_transaction(self):
+        pending = getattr(self._change_context, 'pending', None)
+        if pending is not None:
+            yield
+            return
+
+        pending = []
+        self._change_context.pending = pending
+        try:
+            yield pending
+        except BaseException:
+            del pending[:]
+            raise
+        finally:
+            self._change_context.pending = None
+
+        while pending:
+            operation, config, key, value = pending.pop(0)
+            if operation == 'set':
+                config[key] = value
+            else:
+                del config[key]
 
     def _on_change(self, key, value):
         for cb in self._change_listener:
@@ -2471,10 +2582,11 @@ class ConfigDict(dict):
             lookup-overhead. Read-access is as fast as a build-in dict for both
             virtual and non-virtual keys.
 
-            Changes are propagated recursively and depth-first. A failing
-            on-change handler in an overlay stops the propagation of virtual
-            values and may result in an partly updated tree. Take extra care
-            here and make sure that on-change handlers never fail.
+            Changes are propagated recursively and depth-first. Each single-key
+            change is applied to the entire tree before change listeners run,
+            and a failing listener restores all values and virtual-key markers
+            for that change. Writes attempted from a listener are delayed until
+            propagation finishes and discarded if propagation fails.
 
             Used by Route.config
         """
@@ -2486,7 +2598,8 @@ class ConfigDict(dict):
         overlay._source = self
         self._overlays.append(weakref.ref(overlay))
         for key in self:
-            overlay._set_virtual(key, self[key])
+            dict.__setitem__(overlay, key, self[key])
+            overlay._virtual_keys.add(key)
         return overlay
 
 
