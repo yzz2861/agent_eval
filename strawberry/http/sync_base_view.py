@@ -98,16 +98,20 @@ class SyncBaseHTTPView(
                 for data in request_data
             ]
 
+        resolved_request_data = self.resolve_persisted_query(request_data)
+        if isinstance(resolved_request_data, ExecutionResult):
+            return resolved_request_data
+
         return self.execute_single(
             request=request,
             request_adapter=request_adapter,
             sub_response=sub_response,
             context=context,
             root_value=root_value,
-            request_data=request_data,
+            request_data=resolved_request_data,
         )
 
-    def execute_single(  # noqa: PLR0917
+    def execute_single(
         self,
         request: Request,
         request_adapter: SyncHTTPRequestAdapter,

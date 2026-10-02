@@ -1,3 +1,4 @@
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from functools import cached_property
@@ -8,12 +9,14 @@ from cross_web import HTTPException
 
 from strawberry.http import GraphQLRequestData, GraphQLRequestProtocol
 from strawberry.http.ides import GraphQL_IDE, get_graphql_ide_html
+from strawberry.http.persisted_queries import PersistedQueryResolver
 from strawberry.http.types import HTTPMethod, QueryParams
 from strawberry.schema.base import BaseSchema
 from strawberry.subscriptions import (
     GRAPHQL_SSE_PROTOCOL,
     MULTIPART_SUBSCRIPTION_PROTOCOL,
 )
+from strawberry.types.execution import ExecutionResult
 
 from .streaming import HTTPStreamTransport, MultipartSubscriptionTransport, SSETransport
 from .typevars import Request
@@ -141,6 +144,33 @@ class BaseView(Generic[Request]):
 
         if len(request_data) > self.schema.config.batching_config["max_operations"]:
             raise HTTPException(400, "Too many operations")
+
+    @cached_property
+    def _persisted_query_schema_version(self) -> str:
+        config = self.schema.config.persisted_queries_config
+        if config is not None and config.schema_version is not None:
+            return config.schema_version
+        return hashlib.sha256(self.schema.as_str().encode()).hexdigest()
+
+    @cached_property
+    def _persisted_query_resolver(self) -> PersistedQueryResolver | None:
+        config = self.schema.config.persisted_queries_config
+        if config is None:
+            return None
+        return PersistedQueryResolver(config, self._persisted_query_schema_version)
+
+    def resolve_persisted_query(
+        self, request_data: GraphQLRequestData
+    ) -> GraphQLRequestData | ExecutionResult:
+        resolver = self._persisted_query_resolver
+        if resolver is None:
+            return request_data
+
+        resolution = resolver.resolve(request_data)
+        if resolution.error is not None:
+            return resolution.error
+        assert resolution.request_data is not None
+        return resolution.request_data
 
 
 __all__ = ["BaseView"]

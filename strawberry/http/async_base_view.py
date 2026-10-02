@@ -184,7 +184,7 @@ class AsyncBaseHTTPView(
             if protocol in (GRAPHQL_TRANSPORT_WS_PROTOCOL, GRAPHQL_WS_PROTOCOL)
         ]
 
-    async def execute_operation(  # noqa: PLR0917
+    async def execute_operation(
         self,
         request: Request,
         request_adapter: AsyncHTTPRequestAdapter,
@@ -214,6 +214,11 @@ class AsyncBaseHTTPView(
                 ]
             )
 
+        resolved_request_data = self.resolve_persisted_query(request_data)
+        if isinstance(resolved_request_data, ExecutionResult):
+            return resolved_request_data
+        request_data = resolved_request_data
+
         if transport := self._get_stream_transport(request_data.protocol):
             return await self.schema.stream(
                 request_data.query,  # type: ignore
@@ -236,7 +241,7 @@ class AsyncBaseHTTPView(
             request_data=request_data,
         )
 
-    async def execute_single(  # noqa: PLR0917
+    async def execute_single(
         self,
         request: Request,
         request_adapter: AsyncHTTPRequestAdapter,
