@@ -291,6 +291,44 @@ which should in this case indicate the example data is invalid:
 
 Retrieving resources from a SQLite database or some other network-accessible resource should be more or less similar, replacing the HTTP client with one for your database of course.
 
+Preparing an Offline Registry Asynchronously
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The retrieval callable accepted by `referencing.Registry` is synchronous, which does not fit an asynchronous configuration service or HTTP client.
+For these cases, prepare all referenced resources before constructing a validator:
+
+.. code-block:: python
+
+    import asyncio
+
+    from jsonschema import Draft202012Validator, prepare_registry
+
+
+    async def load_schema(uri):
+        # Return parsed JSON, bytes/text, referencing.Resource, or a
+        # LoadedSchema when the exact response byte count is known.
+        pass
+
+
+    async def main(schema, instance):
+        registry = await prepare_registry(
+            schema,
+            load_schema,
+            allowed_schemes=("https",),
+            allowed_targets=("https://schemas.example.test/",),
+            max_concurrency=8,
+            max_resources=128,
+            max_bytes=1048576,
+            timeout=30,
+        )
+        validator = Draft202012Validator(schema, registry=registry)
+        validator.validate(instance)
+
+Each distinct URI is fetched at most once, including references in cycles.
+Relative references are resolved against the active resource's internal ID.
+If any resource fails or violates a configured policy or limit, no registry is returned.
+The returned registry is fully crawled and has no retrieval callback, so validation cannot call the async loader again.
+
 .. warning::
 
     Be sure you understand the security implications of the reference resolution you configure.
