@@ -7,6 +7,20 @@ This project adheres to `Semantic Versioning <https://semver.org/>`__.
 `Unreleased <https://github.com/jpadilla/pyjwt/compare/2.15.0...HEAD>`__
 -------------------------------------------------------------------------
 
+Added
+~~~~~
+
+- Add an optional ``JWKImportPolicy`` for ``PyJWKSet`` and ``PyJWKClient``
+  that screens JWK Set members on import: ``kty``/``alg`` consistency,
+  ``use``, ``key_ops``, allowed curves, and a configurable minimum RSA key
+  size. Evaluation returns a per-key ``JWKImportReport`` with sanitized
+  accept/reject reasons (never key material). Keys sharing a ``kid`` with
+  different key material are all rejected instead of silently picking the
+  first. Callers choose between quarantining rejected keys (default) or
+  failing the whole set (``strict=True``, raising ``PyJWKSetImportError``).
+  The policy is applied on every import, including JWK Set cache hits, so
+  only policy-accepted keys can reach the signing key cache.
+
 `v2.15.0 <https://github.com/jpadilla/pyjwt/compare/2.14.0...2.15.0>`__
 -----------------------------------------------------------------------
 

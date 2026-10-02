@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from .api_jwk import PyJWK, PyJWKSet
 from .api_jwt import decode_complete as decode_token
 from .exceptions import PyJWKClientConnectionError, PyJWKClientError
+from .jwk_import_policy import JWKImportPolicy
 from .jwk_set_cache import JWKSetCache
 
 
@@ -43,6 +44,7 @@ class PyJWKClient:
         timeout: float = 30,
         ssl_context: SSLContext | None = None,
         cooldown_duration: float = 30,
+        jwk_import_policy: JWKImportPolicy | None = None,
     ):
         """A client for retrieving signing keys from a JWKS endpoint.
 
@@ -96,6 +98,11 @@ class PyJWKClient:
         :param cooldown_duration: Minimum time in seconds between forced
             refreshes after an unknown key ID. Defaults to ``30``.
         :type cooldown_duration: float
+        :param jwk_import_policy: An optional
+            :class:`jwt.jwk_import_policy.JWKImportPolicy` applied every
+            time a JWK Set is imported, including on cache hits. Only keys
+            accepted by the policy can reach the signing key cache.
+        :type jwk_import_policy: JWKImportPolicy or None
         """
         if headers is None:
             headers = {}
@@ -126,6 +133,7 @@ class PyJWKClient:
         self.cooldown_duration = cooldown_duration
         self._last_successful_fetch: float | None = None
         self._client_lock = threading.RLock()
+        self.jwk_import_policy = jwk_import_policy
 
         if cache_jwk_set:
             # Init jwt set cache with default or given lifespan.
@@ -212,8 +220,21 @@ class PyJWKClient:
         # `fetch_data()` may be overridden by a subclass.
         if isinstance(data, PyJWKSet):
             jwk_set = data
+            if (
+                self.jwk_import_policy is not None
+                and jwk_set.import_policy is not self.jwk_import_policy
+            ):
+                # A cached set must not bypass the client's import policy:
+                # re-import the cached keys under the configured policy.
+                jwk_set = PyJWKSet(
+                    [key.jwk_data for key in jwk_set.keys],
+                    import_policy=self.jwk_import_policy,
+                )
         else:
-            jwk_set = PyJWKSet.from_dict(self._as_jwk_set_payload(data))
+            jwk_set = PyJWKSet.from_dict(
+                self._as_jwk_set_payload(data),
+                import_policy=self.jwk_import_policy,
+            )
 
         # `fetch_data()` caches the payload it received from the endpoint,
         # but a subclass may filter or transform it before returning. Cache

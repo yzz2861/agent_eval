@@ -11,8 +11,10 @@ from .exceptions import (
     MissingCryptographyError,
     PyJWKError,
     PyJWKSetError,
+    PyJWKSetImportError,
     PyJWTError,
 )
+from .jwk_import_policy import JWKImportPolicy, JWKImportReport
 from .types import JWKDict
 
 
@@ -121,6 +123,14 @@ class PyJWK:
         return self._jwk_data.get("kty", None)
 
     @property
+    def jwk_data(self) -> JWKDict:
+        """The original JWK data this key was built from.
+
+        :rtype: dict[str, typing.Any]
+        """
+        return self._jwk_data
+
+    @property
     def key_id(self) -> str | None:
         """The `kid` property from the JWK.
 
@@ -138,8 +148,27 @@ class PyJWK:
 
 
 class PyJWKSet:
-    def __init__(self, keys: list[JWKDict]) -> None:
+    def __init__(
+        self,
+        keys: list[JWKDict],
+        import_policy: JWKImportPolicy | None = None,
+    ) -> None:
+        """A class that represents a `JSON Web Key Set <https://www.rfc-editor.org/rfc/rfc7517#section-5>`_.
+
+        :param keys: The JWK data, as a list of dictionaries.
+        :type keys: list[dict[str, typing.Any]]
+        :param import_policy: An optional :class:`JWKImportPolicy` used to
+            screen keys before they are imported. When omitted, keys are
+            loaded leniently (unusable keys are silently skipped), matching
+            the historical behavior.
+        :type import_policy: JWKImportPolicy or None
+        :raises PyJWKSetError: If the set is empty or contains no usable keys.
+        :raises PyJWKSetImportError: If a strict ``import_policy`` rejects
+            any key.
+        """
         self.keys: list[PyJWK] = []
+        self.import_policy = import_policy
+        self.import_report: JWKImportReport | None = None
 
         if not keys:
             raise PyJWKSetError("The JWK Set did not contain any keys")
@@ -147,17 +176,26 @@ class PyJWKSet:
         if not isinstance(keys, list):
             raise PyJWKSetError("Invalid JWK Set value")
 
-        for key in keys:
-            if not isinstance(key, dict):
-                # skip members that aren't JWK objects
-                continue
-            try:
-                self.keys.append(PyJWK(key))
-            except PyJWTError as error:
-                if isinstance(error, MissingCryptographyError):
-                    raise error
-                # skip unusable keys
-                continue
+        if import_policy is None:
+            for key in keys:
+                if not isinstance(key, dict):
+                    # skip members that aren't JWK objects
+                    continue
+                try:
+                    self.keys.append(PyJWK(key))
+                except PyJWTError as error:
+                    if isinstance(error, MissingCryptographyError):
+                        raise error
+                    # skip unusable keys
+                    continue
+        else:
+            report = import_policy.evaluate(keys)
+            self.import_report = report
+            if report.rejected and import_policy.strict:
+                raise PyJWKSetImportError(report)
+            # Quarantine mode: only policy-accepted keys are imported.
+            for index in report.accepted_indices:
+                self.keys.append(PyJWK(keys[index]))
 
         if len(self.keys) == 0:
             raise PyJWKSetError(
@@ -165,14 +203,16 @@ class PyJWKSet:
             )
 
     @staticmethod
-    def from_dict(obj: dict[str, Any]) -> PyJWKSet:
+    def from_dict(
+        obj: dict[str, Any], import_policy: JWKImportPolicy | None = None
+    ) -> PyJWKSet:
         keys = obj.get("keys", [])
-        return PyJWKSet(keys)
+        return PyJWKSet(keys, import_policy=import_policy)
 
     @staticmethod
-    def from_json(data: str) -> PyJWKSet:
+    def from_json(data: str, import_policy: JWKImportPolicy | None = None) -> PyJWKSet:
         obj = json.loads(data)
-        return PyJWKSet.from_dict(obj)
+        return PyJWKSet.from_dict(obj, import_policy=import_policy)
 
     def __getitem__(self, kid: str) -> PyJWK:
         for key in self.keys:

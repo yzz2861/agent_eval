@@ -93,6 +93,21 @@ class PyJWKSetError(PyJWTError):
     pass
 
 
+class PyJWKSetImportError(PyJWKSetError):
+    """Raised when a strict JWK import policy rejects keys from a JWK Set.
+
+    The message is built from sanitized per-key rejection reasons and never
+    contains key material. The full report is available on ``report``.
+    """
+
+    def __init__(self, report) -> None:
+        self.report = report
+        super().__init__(
+            f"The JWK import policy rejected {len(report.rejected)} key(s):\n"
+            f"{report.summary()}"
+        )
+
+
 class PyJWKClientError(PyJWTError):
     pass
 

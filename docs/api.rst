@@ -34,6 +34,16 @@ API Reference
     :class-doc-from: init
     :members:
 
+.. autoclass:: jwt.jwk_import_policy.JWKImportPolicy
+    :class-doc-from: init
+    :members:
+
+.. autoclass:: jwt.jwk_import_policy.JWKImportReport
+    :members:
+
+.. autoclass:: jwt.jwk_import_policy.JWKImportDecision
+    :members:
+
 .. note:: TODO: Finish documenting PyJWS class
 .. module:: jwt.api_jws
 
