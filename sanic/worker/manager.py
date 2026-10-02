@@ -12,7 +12,9 @@ from multiprocessing.context import BaseContext
 from random import choice
 from signal import SIGINT, SIGTERM, Signals
 from signal import signal as signal_func
+from threading import RLock, Thread
 from typing import Any, Callable
+from uuid import uuid4
 
 from sanic.compat import OS_IS_WINDOWS
 from sanic.exceptions import ServerKilled
@@ -20,6 +22,11 @@ from sanic.log import error_logger, logger
 from sanic.worker.constants import RestartOrder
 from sanic.worker.process import ProcessState, Worker, WorkerProcess
 from sanic.worker.restarter import Restarter
+from sanic.worker.upgrade import (
+    UpgradeItem,
+    UpgradeOperation,
+    UpgradeStatus,
+)
 
 
 SIGKILL: int
@@ -83,6 +90,8 @@ class WorkerManager:
         self._serve = serve
         self._server_settings = server_settings
         self._server_count = count()
+        self.upgrade_operations: dict[str, UpgradeOperation] = {}
+        self._upgrade_lock = RLock()
 
         if number == 0:
             raise RuntimeError("Cannot serve with no workers")
@@ -252,6 +261,9 @@ class WorkerManager:
             restart_order (RestartOrder, optional): The order in which to restart the processes.
                 Defaults to `RestartOrder.SHUTDOWN_FIRST`.
         """  # noqa: E501
+        if restart_order is RestartOrder.STARTUP_FIRST:
+            return self.upgrade(process_names=process_names, config=kwargs)
+
         self.restarter.restart(
             transient_processes=list(self.transient_processes),
             durable_processes=list(self.durable_processes),
@@ -259,6 +271,91 @@ class WorkerManager:
             restart_order=restart_order,
             **kwargs,
         )
+
+    def upgrade(
+        self,
+        process_names: list[str] | None = None,
+        *,
+        operation_id: str | None = None,
+        max_unavailable: int = 1,
+        timeout: float = WorkerProcess.THRESHOLD / 10,
+        readiness_check: Callable[[WorkerProcess, dict[str, Any]], bool]
+        | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> UpgradeOperation:
+        """Start a bounded, startup-first rolling worker upgrade."""
+        if max_unavailable < 1:
+            raise ValueError("max_unavailable must be greater than zero")
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+
+        selected = [
+            process
+            for process in self.transient_processes
+            if process.restartable
+            and (not process_names or process.name in process_names)
+        ]
+        processes = sorted(selected, key=lambda process: process.name)
+        missing = set(process_names or []) - {
+            process.name for process in processes
+        }
+        if missing:
+            raise KeyError(", ".join(sorted(missing)))
+        if not processes:
+            raise ValueError("No restartable processes selected for upgrade")
+
+        targets = [process.name for process in processes]
+        with self._upgrade_lock:
+            if operation_id and operation_id in self.upgrade_operations:
+                return self.upgrade_operations[operation_id]
+
+            active = self._active_upgrade(targets)
+            if active is not None:
+                return active
+
+            operation = UpgradeOperation(
+                operation_id=operation_id or f"upgrade-{uuid4().hex}",
+                items=[
+                    UpgradeItem(
+                        process=process,
+                        generation=process.generation,
+                    )
+                    for process in processes
+                ],
+                max_unavailable=max_unavailable,
+                timeout=timeout,
+                readiness_check=readiness_check,
+                config=dict(config or {}),
+            )
+            self.upgrade_operations[operation.operation_id] = operation
+
+        Thread(
+            name=f"sanic-upgrade-{operation.operation_id}",
+            target=operation.run,
+            daemon=True,
+        ).start()
+        return operation
+
+    def upgrade_status(self, operation_id: str) -> dict[str, Any]:
+        operation = self.upgrade_operations[operation_id]
+        generations = {
+            process.name: process.generation
+            for process in self.transient_processes
+        }
+        return operation.snapshot(generations)
+
+    def _active_upgrade(self, names: list[str]) -> UpgradeOperation | None:
+        targets = set(names)
+        for operation in self.upgrade_operations.values():
+            if operation.status not in (
+                UpgradeStatus.PENDING,
+                UpgradeStatus.RUNNING,
+            ):
+                continue
+            operation_targets = set(item.name for item in operation.items)
+            if targets.intersection(operation_targets):
+                return operation
+        return None
 
     def scale(self, num_worker: int):
         if num_worker <= 0:
@@ -375,16 +472,18 @@ class WorkerManager:
     def kill(self):
         """Kill all of the processes."""
         for process in self.processes:
-            logger.info("Killing %s [%s]", process.name, process.pid)
-            with suppress(ProcessLookupError):
-                if os.name == "nt":
-                    # Windows has no os.killpg and SIGKILL doesn't seem to work
-                    os.kill(process.pid, signal.CTRL_C_EVENT)
-                else:
-                    try:
-                        os.killpg(os.getpgid(process.pid), SIGKILL)
-                    except OSError:
-                        os.kill(process.pid, SIGKILL)
+            for pid in process.pids:
+                logger.info("Killing %s [%s]", process.name, pid)
+                with suppress(ProcessLookupError):
+                    if os.name == "nt":
+                        # Windows has no os.killpg and SIGKILL
+                        # doesn't seem to work
+                        os.kill(pid, signal.CTRL_C_EVENT)
+                    else:
+                        try:
+                            os.killpg(os.getpgid(pid), SIGKILL)
+                        except OSError:
+                            os.kill(pid, SIGKILL)
         raise ServerKilled
 
     def shutdown_signal(self, signal, frame):
@@ -431,19 +530,24 @@ class WorkerManager:
         return os.getpid()
 
     def _all_workers_ack(self):
-        acked = [
-            worker_state.get("state") == ProcessState.ACKED.name
-            for worker_state in self.worker_state.values()
-            if worker_state.get("server")
+        server_processes = [
+            process
+            for process in self.transient_processes
+            if process.name.startswith(WorkerProcess.SERVER_LABEL)
         ]
-        return all(acked) and len(acked) == self.num_server
+        return len(server_processes) == self.num_server and all(
+            process.current_state().get("state") == ProcessState.ACKED.name
+            and process.is_alive()
+            for process in server_processes
+        )
 
     def _sync_states(self):
-        for process in self.processes:
+        for process in self.transient_processes:
             try:
-                state = self.worker_state[process.name].get("state")
+                state = self.worker_state[process.state_name].get("state")
             except KeyError:
                 process.set_state(ProcessState.TERMINATED, True)
+                process.mirror_logical_state()
                 continue
             # Skip state sync if process is restarting to avoid race condition
             if process.state == ProcessState.RESTARTING:
@@ -452,6 +556,7 @@ class WorkerManager:
                 state = "FAILED" if process.exitcode else "COMPLETED"
             if state and process.state.name != state:
                 process.set_state(ProcessState[state], True)
+            process.mirror_logical_state()
 
     def _cleanup_non_tracked_workers(self) -> None:
         to_remove = [
@@ -472,6 +577,11 @@ class WorkerManager:
             elif message == "__TERMINATE__":
                 self._handle_terminate()
                 return MonitorCycle.BREAK
+            elif message == "__TERMINATE_EARLY__":
+                error_logger.error(
+                    "Monitor received an early worker termination notice"
+                )
+                return MonitorCycle.CONTINUE
             elif isinstance(message, tuple) and (
                 len(message) == 7 or len(message) == 8
             ):

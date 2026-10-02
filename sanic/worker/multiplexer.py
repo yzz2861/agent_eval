@@ -156,7 +156,9 @@ class WorkerMultiplexer:
     @property
     def name(self) -> str:
         """The name of the worker."""
-        return environ.get("SANIC_WORKER_NAME", "")
+        return environ.get("SANIC_WORKER_STATE_NAME") or environ.get(
+            "SANIC_WORKER_NAME", ""
+        )
 
     @property
     def state(self):

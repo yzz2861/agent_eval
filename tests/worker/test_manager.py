@@ -8,7 +8,7 @@ from sanic.compat import OS_IS_WINDOWS
 from sanic.exceptions import ServerKilled
 from sanic.worker.constants import RestartOrder
 from sanic.worker.manager import WorkerManager
-from sanic.worker.process import Worker
+from sanic.worker.process import Worker, _worker_entry
 
 
 if not OS_IS_WINDOWS:
@@ -108,26 +108,50 @@ def test_restart_all():
         [
             call(
                 name="Sanic-Server-0-0",
-                target=fake_serve,
-                kwargs={},
+                target=_worker_entry,
+                kwargs={
+                    "target": fake_serve,
+                    "kwargs": {},
+                    "name": "Sanic-Server-0-0",
+                    "ident": "Srv 0",
+                    "state_name": "Sanic-Server-0-0",
+                },
                 daemon=True,
             ),
             call(
                 name="Sanic-Server-1-0",
-                target=fake_serve,
-                kwargs={},
+                target=_worker_entry,
+                kwargs={
+                    "target": fake_serve,
+                    "kwargs": {},
+                    "name": "Sanic-Server-1-0",
+                    "ident": "Srv 1",
+                    "state_name": "Sanic-Server-1-0",
+                },
                 daemon=True,
             ),
             call(
                 name="Sanic-Server-0-0",
-                target=fake_serve,
-                kwargs={},
+                target=_worker_entry,
+                kwargs={
+                    "target": fake_serve,
+                    "kwargs": {},
+                    "name": "Sanic-Server-0-0",
+                    "ident": "Srv 0",
+                    "state_name": "Sanic-Server-0-0",
+                },
                 daemon=True,
             ),
             call(
                 name="Sanic-Server-1-0",
-                target=fake_serve,
-                kwargs={},
+                target=_worker_entry,
+                kwargs={
+                    "target": fake_serve,
+                    "kwargs": {},
+                    "name": "Sanic-Server-1-0",
+                    "ident": "Srv 1",
+                    "state_name": "Sanic-Server-1-0",
+                },
                 daemon=True,
             ),
         ]

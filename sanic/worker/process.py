@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from collections.abc import MutableMapping
+from contextlib import suppress
 from datetime import datetime, timezone
 from inspect import signature
 from multiprocessing.context import BaseContext
@@ -18,6 +19,18 @@ from sanic.worker.constants import ProcessState, RestartOrder
 def get_now():
     now = datetime.now(tz=timezone.utc)
     return now
+
+
+def _worker_entry(target, kwargs, name, ident, state_name):
+    os.environ["SANIC_WORKER_NAME"] = name
+    os.environ["SANIC_WORKER_IDENTIFIER"] = ident
+    os.environ["SANIC_WORKER_STATE_NAME"] = state_name
+    try:
+        return target(**kwargs)
+    finally:
+        os.environ.pop("SANIC_WORKER_NAME", None)
+        os.environ.pop("SANIC_WORKER_IDENTIFIER", None)
+        os.environ.pop("SANIC_WORKER_STATE_NAME", None)
 
 
 class WorkerProcess:
@@ -45,24 +58,32 @@ class WorkerProcess:
         self.kwargs = kwargs
         self.worker_state = worker_state
         self.restartable = restartable
-        if self.name not in self.worker_state:
-            self.worker_state[self.name] = {
-                "server": self.SERVER_LABEL in self.name
-            }
+        self.generation = 0
+        self.state_name = self.name
+        self._current_process: Any
+        self._old_process = None
+        self._old_state_name = ""
+        self._previous_kwargs: dict[str, Any] | None = None
+        if self.state_name not in self.worker_state:
+            self.worker_state[self.state_name] = self._initial_state()
         self.spawn()
+
+    def _initial_state(self) -> dict[str, Any]:
+        return {
+            "server": self.SERVER_LABEL in self.name,
+            "generation": self.generation,
+        }
 
     def set_state(self, state: ProcessState, force=False):
         if not force and state < self.state:
             raise Exception("...")
         self.state = state
-        self.worker_state[self.name] = {
-            **self.worker_state[self.name],
+        self.worker_state[self.state_name] = {
+            **self.worker_state.get(self.state_name, {}),
             "state": self.state.name,
         }
 
     def start(self):
-        os.environ["SANIC_WORKER_NAME"] = self.name
-        os.environ["SANIC_WORKER_IDENTIFIER"] = self.ident
         logger.debug(
             f"{Colors.BLUE}Starting a process: {Colors.BOLD}"
             f"{Colors.SANIC}%s{Colors.END}",
@@ -71,19 +92,13 @@ class WorkerProcess:
         self.set_state(ProcessState.STARTING)
         self._current_process.start()
         self.set_state(ProcessState.STARTED)
-        if not self.worker_state[self.name].get("starts"):
-            self.worker_state[self.name] = {
-                **self.worker_state[self.name],
+        if not self.worker_state[self.state_name].get("starts"):
+            self.worker_state[self.state_name] = {
+                **self.worker_state[self.state_name],
                 "pid": self.pid,
                 "start_at": get_now(),
                 "starts": 1,
             }
-        del os.environ["SANIC_WORKER_NAME"]
-        del os.environ["SANIC_WORKER_IDENTIFIER"]
-
-    def join(self):
-        self.set_state(ProcessState.JOINED)
-        self._current_process.join()
 
     def exit(self):
         limit = 100
@@ -93,7 +108,9 @@ class WorkerProcess:
 
         if not self.is_alive():
             try:
-                del self.worker_state[self.name]
+                del self.worker_state[self.state_name]
+                if self.name != self.state_name:
+                    del self.worker_state[self.name]
             except (
                 BrokenPipeError,
                 ConnectionRefusedError,
@@ -121,6 +138,17 @@ class WorkerProcess:
                 os.kill(self.pid, SIGINT)
             except (KeyError, AttributeError, ProcessLookupError):
                 ...
+        if self._old_process and self._old_process.is_alive():
+            try:
+                os.kill(self._old_process.pid, SIGINT)
+            except (KeyError, AttributeError, ProcessLookupError):
+                self._old_process.terminate()
+
+    def join(self, timeout: float | None = None):
+        self.set_state(ProcessState.JOINED)
+        self._current_process.join(timeout)
+        if self._old_process:
+            self._old_process.join(timeout)
 
     def restart(self, restart_order=RestartOrder.SHUTDOWN_FIRST, **kwargs):
         logger.debug(
@@ -135,8 +163,14 @@ class WorkerProcess:
         else:
             self._old_process = self._current_process
         if self._add_config():
+            current = self.kwargs.get("config", {})
             self.kwargs.update(
-                {"config": {k.upper(): v for k, v in kwargs.items()}}
+                {
+                    "config": {
+                        **current,
+                        **{k.upper(): v for k, v in kwargs.items()},
+                    }
+                }
             )
         try:
             self.spawn()
@@ -147,12 +181,104 @@ class WorkerProcess:
         if restart_order is RestartOrder.STARTUP_FIRST:
             self._terminate_soon()
 
-        self.worker_state[self.name] = {
-            **self.worker_state[self.name],
+        self.worker_state[self.state_name] = {
+            **self.worker_state[self.state_name],
             "pid": self.pid,
-            "starts": self.worker_state[self.name]["starts"] + 1,
+            "starts": self.worker_state[self.state_name]["starts"] + 1,
             "restart_at": get_now(),
         }
+
+    def begin_startup_first(self, **kwargs) -> str:
+        if self._old_process is not None:
+            raise RuntimeError(f"Worker {self.name} is already restarting")
+
+        old_process: Any = self._current_process
+        old_state_name = self.state_name
+        self._previous_kwargs = dict(self.kwargs)
+        self.generation += 1
+        self._old_process = old_process
+        self._old_state_name = old_state_name
+        self.state_name = f"{self.name}#generation-{self.generation}"
+        self.worker_state[self.state_name] = {
+            **self._initial_state(),
+            "state": ProcessState.RESTARTING.name,
+        }
+        self.state = ProcessState.RESTARTING
+
+        if self._add_config():
+            current = self.kwargs.get("config", {})
+            self.kwargs.update(
+                {
+                    "config": {
+                        **current,
+                        **{k.upper(): v for k, v in kwargs.items()},
+                    }
+                }
+            )
+
+        try:
+            self.spawn()
+            self.start()
+        except BaseException:
+            self.rollback_startup_first()
+            raise
+
+        return self.state_name
+
+    def commit_startup_first(self) -> None:
+        old_process = self._old_process
+        if old_process is None:
+            raise RuntimeError(f"Worker {self.name} is not restarting")
+
+        candidate_state = dict(self.worker_state.get(self.state_name, {}))
+        self._stop_process(old_process)
+        self.worker_state.pop(self._old_state_name, None)
+
+        self._old_process = None
+        self._old_state_name = ""
+        self._previous_kwargs = None
+        self.worker_state[self.name] = {
+            **candidate_state,
+            "pid": self.pid,
+            "starts": candidate_state.get("starts", 1),
+            "restart_at": get_now(),
+            "generation": self.generation,
+        }
+        self.set_state(ProcessState.ACKED, force=True)
+        with suppress(Exception):
+            old_process.close()
+
+    def rollback_startup_first(self, timeout: float = 1.0) -> None:
+        candidate: Any = self._current_process
+        candidate_state_name = self.state_name
+        failed_generation = self.generation
+        try:
+            self._stop_process(candidate, timeout=timeout)
+            self.worker_state.pop(candidate_state_name, None)
+        finally:
+            if self._old_process is not None:
+                self._current_process = self._old_process
+                self.state_name = self._old_state_name
+                self.kwargs = self._previous_kwargs or self.kwargs
+                state = self.worker_state.get(self.state_name, {})
+                state_name = state.get("state", ProcessState.ACKED.name)
+                self.state = ProcessState[state_name]
+                self.generation = failed_generation - 1
+            self._old_process = None
+            self._old_state_name = ""
+            self._previous_kwargs = None
+
+    def current_state(self) -> dict[str, Any]:
+        return dict(self.worker_state.get(self.state_name, {}))
+
+    def mirror_logical_state(self) -> None:
+        if self.state_name == self.name or self._old_process is not None:
+            return
+        state = self.current_state()
+        if state:
+            self.worker_state[self.name] = state
+        else:
+            self.worker_state.pop(self.name, None)
 
     def is_alive(self):
         try:
@@ -165,8 +291,14 @@ class WorkerProcess:
             raise Exception("Cannot spawn a worker process until it is idle.")
         self._current_process = self.factory(
             name=self.name,
-            target=self.target,
-            kwargs=self.kwargs,
+            target=_worker_entry,
+            kwargs={
+                "target": self.target,
+                "kwargs": self.kwargs,
+                "name": self.name,
+                "ident": self.ident,
+                "state_name": self.state_name,
+            },
             daemon=True,
         )
 
@@ -177,6 +309,17 @@ class WorkerProcess:
     @property
     def exitcode(self):
         return self._current_process.exitcode
+
+    @property
+    def pids(self) -> tuple[int, ...]:
+        pids = [self.pid]
+        if self._old_process is not None:
+            pids.append(self._old_process.pid)
+        return tuple(pid for pid in pids if pid)
+
+    @property
+    def is_replacing(self) -> bool:
+        return self._old_process is not None
 
     def _terminate_now(self):
         if not self._current_process.is_alive():
@@ -237,6 +380,18 @@ class WorkerProcess:
         ):
             return True
         return False
+
+    @staticmethod
+    def _stop_process(process, timeout: float = 5.0) -> None:
+        if process.is_alive():
+            try:
+                os.kill(process.pid, SIGINT)
+            except (AttributeError, ProcessLookupError):
+                process.terminate()
+        process.join(timeout)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout)
 
 
 class Worker:
