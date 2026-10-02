@@ -135,3 +135,29 @@ class CoalescePolicy(Enum):
     earliest = auto()
     latest = auto()
     all = auto()
+
+
+class FireTimeDecision(Enum):
+    """
+    Indicates what would happen to a fire time of a schedule, as reported by
+    :meth:`AsyncScheduler.preview_schedule`.
+
+    .. attribute:: create_job
+
+        a job would be created for this fire time
+
+    .. attribute:: coalesced
+
+        this fire time would be merged into another fire time by the schedule's
+        coalesce policy, and no job would be created for it
+
+    .. attribute:: missed
+
+        a job would be created for this fire time, but its start deadline (fire time +
+        misfire grace time) has already passed, so it would be released with the
+        ``missed_start_deadline`` outcome
+    """
+
+    create_job = auto()
+    coalesced = auto()
+    missed = auto()

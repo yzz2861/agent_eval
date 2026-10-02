@@ -10,7 +10,7 @@ from attr.setters import frozen
 from attrs.validators import and_, gt, instance_of, matches_re, min_len, optional
 
 from ._converters import as_aware_datetime, as_enum, as_timedelta
-from ._enums import CoalescePolicy, JobOutcome
+from ._enums import CoalescePolicy, FireTimeDecision, JobOutcome
 from ._utils import UnsetValue, unset
 from ._validators import if_not_unset, valid_metadata
 from .abc import Serializer, Trigger
@@ -255,6 +255,67 @@ class ScheduleResult:
     task_id: str
     trigger: Trigger
     last_fire_time: datetime
+    next_fire_time: datetime | None
+
+
+@attrs.define(kw_only=True, frozen=True)
+class FireTimePreview:
+    """
+    Describes what would happen to a single fire time of a schedule, as computed by
+    :meth:`AsyncScheduler.preview_schedule`.
+
+    :ivar ~datetime.datetime fire_time: the nominal fire time produced by the trigger
+        (without jitter applied)
+    :ivar FireTimeDecision decision: what would happen to this fire time
+    :ivar str reason: a human readable explanation of the rule that led to the
+        decision
+    :ivar ~datetime.timedelta | None jitter: the concrete jitter that would be added
+        to the fire time (only computed when a ``jitter_seed`` was passed to the
+        preview; ``None`` otherwise)
+    :ivar tuple[~datetime.timedelta, ~datetime.timedelta] | None jitter_range: the
+        inclusive range of jitter values that could be added to this fire time, or
+        ``None`` if the schedule has no jitter configured
+    :ivar ~datetime.datetime | None start_deadline: the latest time a job created for
+        this fire time would be allowed to start (``None`` if the schedule has no
+        misfire grace time)
+    """
+
+    fire_time: datetime
+    decision: FireTimeDecision
+    reason: str
+    jitter: timedelta | None = None
+    jitter_range: tuple[timedelta, timedelta] | None = None
+    start_deadline: datetime | None = None
+
+
+@attrs.define(kw_only=True, frozen=True)
+class SchedulePreview:
+    """
+    The result of previewing the upcoming fire times of a schedule, as computed by
+    :meth:`AsyncScheduler.preview_schedule`.
+
+    :ivar str schedule_id: the ID of the previewed schedule
+    :ivar str task_id: the ID of the task targeted by the schedule
+    :ivar ~datetime.datetime now: the observation time the preview was made against
+    :ivar ~datetime.datetime | None until: the end of the preview horizon (``None`` if
+        the preview was only limited by ``max_results``)
+    :ivar bool paused: whether the schedule is paused (a paused schedule never
+        produces jobs)
+    :ivar str | None note: an optional human readable note applying to the whole
+        preview (for example, why there are no fire times)
+    :ivar list[FireTimePreview] fire_times: the previewed fire times, in chronological
+        order
+    :ivar ~datetime.datetime | None next_fire_time: the first fire time beyond the
+        preview horizon (``None`` if the trigger was exhausted within the horizon)
+    """
+
+    schedule_id: str
+    task_id: str
+    now: datetime
+    until: datetime | None
+    paused: bool
+    note: str | None
+    fire_times: list[FireTimePreview]
     next_fire_time: datetime | None
 
 

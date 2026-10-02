@@ -18,7 +18,15 @@ from anyio.from_thread import BlockingPortal, start_blocking_portal
 from .. import current_scheduler
 from .._enums import CoalescePolicy, ConflictPolicy, RunState, SchedulerRole
 from .._events import Event, T_Event
-from .._structures import Job, JobResult, MetadataType, Schedule, Task, TaskDefaults
+from .._structures import (
+    Job,
+    JobResult,
+    MetadataType,
+    Schedule,
+    SchedulePreview,
+    Task,
+    TaskDefaults,
+)
 from .._utils import UnsetValue, create_repr, unset
 from ..abc import DataStore, EventBroker, JobExecutor, Subscription, Trigger
 from .async_ import AsyncScheduler, TaskType
@@ -307,6 +315,33 @@ class Scheduler:
     def get_schedules(self) -> list[Schedule]:
         portal = self._ensure_services_ready()
         return portal.call(self._async_scheduler.get_schedules)
+
+    def preview_schedule(
+        self,
+        id: str,
+        *,
+        now: datetime | None = None,
+        until: datetime | None = None,
+        max_results: int = 10,
+        jitter_seed: int | None = None,
+    ) -> SchedulePreview:
+        """
+        Preview the jobs a schedule would generate, without changing any state.
+
+        See :meth:`AsyncScheduler.preview_schedule` for details.
+
+        """
+        portal = self._ensure_services_ready()
+        return portal.call(
+            partial(
+                self._async_scheduler.preview_schedule,
+                id,
+                now=now,
+                until=until,
+                max_results=max_results,
+                jitter_seed=jitter_seed,
+            )
+        )
 
     def remove_schedule(self, id: str) -> None:
         portal = self._ensure_services_ready()

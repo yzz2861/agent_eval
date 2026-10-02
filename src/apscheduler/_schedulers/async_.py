@@ -50,11 +50,13 @@ from .._exceptions import (
     ScheduleLookupError,
 )
 from .._marshalling import callable_from_ref, callable_to_ref
+from .._preview import preview_schedule as _preview_schedule
 from .._structures import (
     Job,
     JobResult,
     MetadataType,
     Schedule,
+    SchedulePreview,
     ScheduleResult,
     Task,
     TaskDefaults,
@@ -587,6 +589,48 @@ class AsyncScheduler:
         """
         self._check_initialized()
         return await self.data_store.get_schedules()
+
+    async def preview_schedule(
+        self,
+        id: str,
+        *,
+        now: datetime | None = None,
+        until: datetime | None = None,
+        max_results: int = 10,
+        jitter_seed: int | None = None,
+    ) -> SchedulePreview:
+        """
+        Preview the jobs a schedule would generate, without changing any state.
+
+        The preview simulates the schedule processing loop against an isolated copy
+        of the schedule's trigger, honoring the coalesce policy, misfire grace time,
+        paused flag and jitter bounds of the schedule. It never adds jobs to the
+        data store, never updates the schedule and never consumes the global random
+        state, so it is safe to call while the scheduler is running.
+
+        :param id: the ID of the schedule to preview
+        :param now: the observation time (defaults to the current time); fire times
+            at or before this time are considered due
+        :param until: the end of the preview horizon; fire times after this time are
+            not included in the preview (``None`` to only limit the preview by
+            ``max_results``)
+        :param max_results: maximum number of fire times to include in the preview
+        :param jitter_seed: seed for a dedicated random number generator used to
+            compute concrete jitter values; if ``None``, no concrete jitter is
+            computed and only the possible jitter range is reported for each fire
+            time
+        :raises ScheduleLookupError: if the schedule could not be found
+        :return: the computed preview
+
+        """
+        schedule = await self.get_schedule(id)
+        return _preview_schedule(
+            schedule,
+            now=now,
+            until=until,
+            max_results=max_results,
+            jitter_seed=jitter_seed,
+        )
 
     async def remove_schedule(self, id: str) -> None:
         """
