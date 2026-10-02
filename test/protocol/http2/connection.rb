@@ -1,0 +1,936 @@
+# frozen_string_literal: true
+
+# Released under the MIT License.
+# Copyright, 2019-2026, by Samuel Williams.
+# Copyright, 2023, by Marco Concetto Rudilosso.
+# Copyright, 2026, by Denis Talakevich.
+
+require "protocol/http2/connection_context"
+
+describe Protocol::HTTP2::Connection do
+	let(:stream) {StringIO.new}
+	let(:framer) {Protocol::HTTP2::Framer.new(stream)}
+	let(:connection) {subject.new(framer, 1)}
+	
+	with "#maximum_concurrent_streams" do
+		it "is the remote peer's maximum concurrent streams" do
+			connection.remote_settings.maximum_concurrent_streams = 10
+			connection.local_settings.current.maximum_concurrent_streams = 5
+			
+			expect(connection.maximum_concurrent_streams).to be == 10
+		end
+	end
+	
+	with "#receive_headers" do
+		it "fails with protocol error if exceeding the maximum concurrent connections" do
+			connection.local_settings.current.maximum_concurrent_streams = 1
+			# Create a stream to 
+			connection.streams[1] = Protocol::HTTP2::Stream.new(connection, 1)
+			
+			frame = Protocol::HTTP2::HeadersFrame.new(3)
+			
+			expect do
+				connection.receive_headers(frame)
+			end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Exceeded maximum concurrent streams/)
+		end
+	end
+	
+	it "reports the connection id 0 is not closed" do
+		expect(connection).not.to be(:closed_stream_id?, 0)
+	end
+	
+	it "does not report any stream_id as being remote" do
+		expect(connection).not.to be(:valid_remote_stream_id?, 1)
+	end
+	
+	it "does not report any stream_id as being local" do
+		expect(connection).not.to be(:local_stream_id?, 1)
+	end
+	
+	it "rejects a push promise" do
+		frame = Protocol::HTTP2::PushPromiseFrame.new
+		
+		expect do
+			connection.receive_push_promise(frame)
+		end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Unable to receive push promise/)
+	end
+	
+	it "rejects a stream reset to stream id 0" do
+		frame = Protocol::HTTP2::ResetStreamFrame.new(0)
+		
+		expect do
+			connection.receive_reset_stream(frame)
+		end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Cannot reset connection/)
+	end
+	
+	it "rejects headers to stream id 0" do
+		frame = Protocol::HTTP2::HeadersFrame.new(0)
+		
+		expect do
+			connection.receive_headers(frame)
+		end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Cannot receive headers for stream 0/)
+	end
+	
+	it "rejects continuation" do
+		frame = Protocol::HTTP2::ContinuationFrame.new(1)
+		
+		expect do
+			connection.receive_continuation(frame)
+		end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Received unexpected continuation/)
+	end
+	
+	it "rejects incorrectly encoded headers" do
+		expect(connection).to receive(:valid_remote_stream_id?).and_return(true)
+		
+		invalid_headers_frame = Protocol::HTTP2::HeadersFrame.new(1)
+		invalid_headers_frame.pack("\xFF")
+		invalid_headers_frame.write(stream)
+		stream.rewind
+		
+		expect(connection).to receive(:send_goaway)
+		
+		expect do
+			connection.read_frame
+		end.to raise_exception(Protocol::HPACK::Error)
+	end
+	
+	it "can't write frames to a closed connection" do
+		connection.close
+		
+		expect do
+			connection.write_frames do |framer|
+			end
+		end.to raise_exception(EOFError, message: be =~ /Connection closed/)
+	end
+	
+	with "#close" do
+		it "closes the connection without active streams" do
+			# No active streams
+			expect(connection.streams).to be(:empty?)
+			
+			# Close the connection - should not raise:
+			connection.close(nil)
+			
+			expect(connection).to be(:closed?)
+		end
+		
+		it "generates an error when closing with active streams" do
+			# Create an active stream:
+			stream = Protocol::HTTP2::Stream.new(connection, 1)
+			connection.streams[1] = stream
+			
+			expect(stream).to receive(:close) do |error|
+				expect(error).to be_a(EOFError)
+				expect(error.message).to be =~ /Connection closed with 1 active stream/
+			end
+			
+			# Close the connection without an error:
+			connection.close(nil)
+		end
+		
+		it "passes through the error when closing with active streams and an explicit error" do
+			# Create an active stream:
+			stream = Protocol::HTTP2::Stream.new(connection, 1)
+			connection.streams[1] = stream
+			
+			custom_error = RuntimeError.new("Connection failed!")
+			
+			expect(stream).to receive(:close) do |error|
+				expect(error).to be === custom_error
+			end
+			
+			# Close the connection with an explicit error:
+			connection.close(custom_error)
+		end
+		
+		it "generates an error for multiple active streams" do
+			# Create multiple active streams:
+			stream1 = Protocol::HTTP2::Stream.new(connection, 1)
+			stream2 = Protocol::HTTP2::Stream.new(connection, 3)
+			connection.streams[1] = stream1
+			connection.streams[3] = stream2
+			
+			expect(stream1).to receive(:close) do |error|
+				expect(error).to be_a(EOFError)
+				expect(error.message).to be =~ /Connection closed with 2 active stream/
+			end
+			
+			expect(stream2).to receive(:close) do |error|
+				expect(error).to be_a(EOFError)
+				expect(error.message).to be =~ /Connection closed with 2 active stream/
+			end
+			
+			# Close the connection without an error:
+			connection.close(nil)
+		end
+	end
+end
+
+with "client and server" do
+	include_context Protocol::HTTP2::ConnectionContext
+	
+	it "can negotiate connection" do
+		first_server_frame = nil
+		
+		first_client_frame = client.send_connection_preface do
+			first_server_frame = server.read_connection_preface([])
+		end
+		
+		expect(first_client_frame).to be_a Protocol::HTTP2::SettingsFrame
+		expect(first_client_frame).not.to be(:acknowledgement?)
+		
+		expect(first_server_frame).to be_a Protocol::HTTP2::SettingsFrame
+		expect(first_server_frame).not.to be(:acknowledgement?)
+		
+		frame = client.read_frame
+		expect(frame).to be_a Protocol::HTTP2::SettingsFrame
+		expect(frame).to be(:acknowledgement?)
+		
+		frame = server.read_frame
+		expect(frame).to be_a Protocol::HTTP2::SettingsFrame
+		expect(frame).to be(:acknowledgement?)
+		
+		expect(client.state).to be == :open
+		expect(server.state).to be == :open
+	end
+	
+	describe Protocol::HTTP2::PingFrame do
+		def before
+			client.open!
+			server.open!
+			
+			super
+		end
+		
+		it "can send ping and receive pong" do
+			expect(server).to receive(:receive_ping)
+			
+			client.send_ping("12345678")
+			
+			server.read_frame
+			
+			expect(client).to receive(:receive_ping)
+			
+			client.read_frame
+		end
+	end
+	
+	describe Protocol::HTTP2::Stream do
+		def before
+			client.open!
+			server.open!
+			
+			super
+		end
+		
+		let(:request_data) {"Hello World!"}
+		let(:stream) {client.create_stream}
+		
+		let(:request_headers) {[[":method", "GET"], [":path", "/"], [":authority", "localhost"]]}
+		let(:response_headers) {[[":status", "200"]]}
+		
+		it "can determine who initiated stream" do
+			expect(client).to be(:client_stream_id?, stream.id)
+			expect(client).not.to be(:server_stream_id?, stream.id)
+		end
+		
+		it "can determine closed streams" do
+			expect(client).not.to be(:idle_stream_id?, stream.id)
+			expect(server).to be(:idle_stream_id?, stream.id)
+			
+			stream.send_headers(request_headers)
+			
+			server.read_frame
+			
+			# `closed_stream_id?` is true even if the stream is still open. It implies that if the stream is not otherwise open, it is closed.
+			expect(server[stream.id]).not.to be_nil
+			expect(server).to be(:closed_stream_id?, stream.id)
+		end
+		
+		with "server created stream" do
+			let(:stream) {server.create_stream}
+			
+			it "can determine who initiated stream" do
+				expect(client).to be(:idle_stream_id?, stream.id)
+				expect(server).not.to be(:idle_stream_id?, stream.id)
+			end
+		end
+		
+		it "can create new stream and send response" do
+			# First argument is deprecated priority.
+			stream.send_headers(request_headers)
+			expect(stream.id).to be == 1
+			
+			expect(server).to receive(:receive_headers) do |frame|
+				headers = super(frame)
+				
+				expect(headers).to be == request_headers
+			end
+			
+			server.read_frame
+			expect(server.streams).not.to be(:empty?)
+			expect(server.streams[1].state).to be == :open
+			
+			stream.send_data(request_data, Protocol::HTTP2::END_STREAM)
+			expect(stream.state).to be == :half_closed_local
+			
+			expect(server).to receive(:receive_data)
+			
+			data_frame = server.read_frame
+			expect(data_frame.unpack).to be == request_data
+			expect(server.streams[1].state).to be == :half_closed_remote
+			
+			server.streams[1].send_headers(response_headers, Protocol::HTTP2::END_STREAM)
+			
+			expect(stream).to receive(:process_headers) do |frame|
+				headers = super(frame)
+				
+				expect(headers).to be == response_headers
+			end
+			
+			client.read_frame
+			expect(stream.state).to be == :closed
+			
+			expect(stream.remote_window.used).to be == data_frame.length
+		end
+		
+		it "can update settings while sending response" do
+			stream.send_headers(request_headers)
+			server.read_frame
+			
+			client.send_settings([
+				[Protocol::HTTP2::Settings::INITIAL_WINDOW_SIZE, 100]
+			])
+			
+			frame = server.read_frame
+			expect(frame).to be_a(Protocol::HTTP2::SettingsFrame)
+			
+			frame = client.read_frame
+			expect(frame).to be_a(Protocol::HTTP2::SettingsFrame)
+			expect(frame).to be(:acknowledgement?)
+		end
+		
+		it "can update concurrent streams" do
+			initial_maximum_concurrent_streams = server.maximum_concurrent_streams
+			inform "Initial maximum concurrent streams: #{initial_maximum_concurrent_streams}"
+			
+			server.send_settings([
+				[Protocol::HTTP2::Settings::MAXIMUM_CONCURRENT_STREAMS, 1]
+			])
+			
+			# It's not acknowledged until the client sends an acknowledgement:
+			expect(server).to have_attributes(
+				maximum_concurrent_streams: be == initial_maximum_concurrent_streams
+			)
+			
+			expect(client).to have_attributes(
+				maximum_concurrent_streams: be == initial_maximum_concurrent_streams
+			)
+			
+			frame = client.read_frame
+			expect(frame).to be_a(Protocol::HTTP2::SettingsFrame)
+			
+			expect(client).to have_attributes(
+				maximum_concurrent_streams: be == 1
+			)
+			
+			frame = server.read_frame
+			expect(frame).to be_a(Protocol::HTTP2::SettingsFrame)
+			expect(frame).to be(:acknowledgement?)
+			
+			expect(server.local_settings).to have_attributes(
+				maximum_concurrent_streams: be == 1
+			)
+			
+			# The client maximum concurrent streams was not changed because the client did not `send_settings`:
+			expect(server).to have_attributes(
+				maximum_concurrent_streams: be == initial_maximum_concurrent_streams
+			)
+		end
+		
+		it "doesn't accept headers for an existing stream" do
+			stream.send_headers(request_headers)
+			expect(stream.id).to be == 1
+			
+			server.read_frame
+			expect(server.streams).not.to be(:empty?)
+			expect(server.streams[1].state).to be == :open
+			
+			stream.send_headers(request_headers)
+			
+			# Simulate a closed stream:
+			server.streams.clear
+			
+			expect do
+				server.read_frame
+			end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Invalid stream id/)
+		end
+		
+		with "response headers in flight when the stream is cancelled" do
+			# The custom header is added to the HPACK dynamic table when it is first encoded, so subsequent header blocks refer to it by index:
+			let(:response_headers) {[[":status", "200"], ["x-request-id", "7f0c9a1e"]]}
+			
+			def before
+				super
+				
+				stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+				server.read_frame
+			end
+			
+			def cancel_stream
+				stream.send_reset_stream(Protocol::HTTP2::CANCEL)
+				
+				expect(stream.state).to be == :closed
+				expect(client.streams).not.to have_keys(stream.id)
+				
+				frame = server.read_frame
+				expect(frame).to be_a(Protocol::HTTP2::ResetStreamFrame)
+				expect(server.streams).not.to have_keys(stream.id)
+			end
+			
+			def write_headers(stream_id, data, **options)
+				frame = Protocol::HTTP2::HeadersFrame.new(stream_id, Protocol::HTTP2::END_STREAM)
+				frame.pack(data, **options)
+				
+				yield frame if block_given?
+				
+				server.write_frame(frame)
+				
+				return frame
+			end
+			
+			def expect_synchronized_decoder
+				another_stream = client.create_stream
+				another_stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+				server.read_frame
+				
+				server.streams[another_stream.id].send_headers(response_headers, Protocol::HTTP2::END_STREAM)
+				
+				expect(another_stream).to receive(:process_headers) do |frame|
+					headers = super(frame)
+					
+					expect(headers).to be == response_headers
+				end
+				
+				frame = client.read_frame
+				expect(frame).to be_a(Protocol::HTTP2::HeadersFrame)
+				
+				# Both fields are encoded as a single byte index, the custom header referring to the dynamic table entry introduced by the discarded header block:
+				expect(frame.unpack.bytesize).to be == 2
+				
+				expect(another_stream.state).to be == :closed
+			end
+			
+			it "discards the headers and keeps the connection usable" do
+				server.streams[stream.id].send_headers(response_headers, Protocol::HTTP2::END_STREAM)
+				
+				cancel_stream
+				
+				frame = client.read_frame
+				expect(frame).to be_a(Protocol::HTTP2::HeadersFrame)
+				expect(frame.stream_id).to be == stream.id
+				
+				expect(client).not.to be(:closed?)
+				expect(client.streams).not.to have_keys(stream.id)
+				
+				expect_synchronized_decoder
+			end
+			
+			it "decodes the complete header block split across continuation frames" do
+				cancel_stream
+				
+				frame = write_headers(stream.id, server.encode_headers(response_headers), maximum_size: 4)
+				expect(frame).to be(:continued?)
+				
+				expect(client.read_frame).to be_a(Protocol::HTTP2::HeadersFrame)
+				expect(client).not.to be(:closed?)
+				expect(client.streams).not.to have_keys(stream.id)
+				
+				expect_synchronized_decoder
+			end
+			
+			it "rejects malformed header blocks" do
+				cancel_stream
+				
+				write_headers(stream.id, "\xFF".b)
+				
+				expect do
+					client.read_frame
+				end.to raise_exception(Protocol::HPACK::Error)
+				
+				expect(client).to be(:closed?)
+			end
+			
+			it "rejects invalid continuation sequences" do
+				cancel_stream
+				
+				write_headers(stream.id, server.encode_headers(response_headers), maximum_size: 4) do |frame|
+					frame.continuation.stream_id = stream.id + 2
+				end
+				
+				expect do
+					client.read_frame
+				end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Invalid stream id/)
+			end
+			
+			it "rejects headers for idle local streams" do
+				write_headers(stream.id + 2, server.encode_headers(response_headers))
+				
+				expect do
+					client.read_frame
+				end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Invalid stream id/)
+				
+				expect(client).to be(:closed?)
+			end
+		end
+		
+		it "client can handle graceful shutdown" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Establish request stream on server:
+			server.read_frame
+			
+			# Graceful shutdown
+			server.send_goaway(0)
+			
+			another_stream = client.create_stream
+			another_stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			expect(client.read_frame).to be_a Protocol::HTTP2::GoawayFrame
+			expect(client.goaway_stream_id).to be == 1
+			expect(client.remote_stream_id).to be == 0
+			
+			# The server accepted stream 1 and is still processing it, so the connection is not closed yet:
+			expect(client).to be(:goaway_received?)
+			expect(client).not.to be(:closed?)
+			
+			# The server will ignore this frame as it was sent after the graceful shutdown:
+			server.read_frame
+			expect(server.streams[another_stream.id]).to be_nil
+			
+			# The pre-existing stream is still functional:
+			expect(server.streams[1].state).to be == :half_closed_remote
+			
+			server.streams[1].send_headers(response_headers, Protocol::HTTP2::END_STREAM)
+			
+			client.read_frame
+			
+			expect(stream.state).to be == :closed
+			
+			# There is nothing left to drain, so the connection is closed:
+			expect(client).to be(:closed?)
+		end
+		
+		it "keeps peer-initiated streams open when receiving GOAWAY" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			server.read_frame
+			
+			# The client's GOAWAY stream ID applies to streams initiated by the server, not the client's request stream:
+			client.send_goaway(0)
+			server.read_frame
+			
+			expect(server.goaway_stream_id).to be == 0
+			expect(server.remote_stream_id).to be == 1
+			expect(server.streams.keys).to be == [1]
+			expect(server.streams[1].state).to be == :half_closed_remote
+			expect(server).to be(:goaway_received?)
+			expect(server).not.to be(:closed?)
+		end
+		
+		let(:stream_class) do
+			Class.new(Protocol::HTTP2::Stream) do
+				attr_reader :error
+				
+				def closed(error)
+					@error = error
+					super
+				end
+			end
+		end
+		
+		it "closes stream with RefusedError on REFUSED_STREAM" do
+			stream = client.create_stream do |connection, id|
+				stream_class.create(connection, id)
+			end
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Establish request stream on server:
+			server.read_frame
+			
+			# Server refuses the stream:
+			server.streams[stream.id].send_reset_stream(Protocol::HTTP2::REFUSED_STREAM)
+			
+			client.read_frame
+			
+			expect(stream.state).to be == :closed
+			expect(stream.error).to be_a(Protocol::HTTP::RefusedError)
+		end
+		
+		it "closes stream without an error on NO_ERROR" do
+			stream = client.create_stream do |connection, id|
+				stream_class.create(connection, id)
+			end
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Establish request stream on server:
+			server.read_frame
+			
+			# Server closes the stream without an error:
+			server.streams[stream.id].send_reset_stream(Protocol::HTTP2::NO_ERROR)
+			
+			client.read_frame
+			
+			expect(stream.state).to be == :closed
+			expect(stream.error).to be_nil
+		end
+		
+		it "closes unprocessed streams with RefusedError on graceful GOAWAY" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Establish request stream on server:
+			server.read_frame
+			
+			another_stream = client.create_stream do |connection, id|
+				stream_class.create(connection, id)
+			end
+			another_stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Server sends GOAWAY with last_stream_id=1, meaning stream 3 was not processed:
+			server.send_goaway(0)
+			
+			client.read_frame
+			
+			# The unprocessed stream (id=3) should be closed with RefusedError:
+			expect(another_stream.state).to be == :closed
+			expect(another_stream.error).to be_a(Protocol::HTTP::RefusedError)
+			
+			# The processed stream (id=1) should still be open:
+			expect(stream.state).not.to be == :closed
+			
+			# Unprocessed streams are removed from the connection, so what remains is exactly what we are waiting for:
+			expect(client.streams.keys).to be == [1]
+		end
+		
+		it "uses the lowest stream ID from successive GOAWAY frames" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			another_stream = client.create_stream do |connection, id|
+				stream_class.create(connection, id)
+			end
+			another_stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			goaway = Protocol::HTTP2::GoawayFrame.new
+			goaway.pack(3, 0, "")
+			server.write_frame(goaway)
+			client.read_frame
+			
+			expect(client.goaway_stream_id).to be == 3
+			expect(another_stream.state).not.to be == :closed
+			
+			goaway = Protocol::HTTP2::GoawayFrame.new
+			goaway.pack(1, 0, "")
+			server.write_frame(goaway)
+			client.read_frame
+			
+			expect(client.goaway_stream_id).to be == 1
+			expect(another_stream.state).to be == :closed
+			expect(another_stream.error).to be_a(Protocol::HTTP::RefusedError)
+			expect(client.streams.keys).to be == [1]
+			
+			goaway = Protocol::HTTP2::GoawayFrame.new
+			goaway.pack(3, 0, "")
+			server.write_frame(goaway)
+			client.read_frame
+			
+			# A later GOAWAY cannot raise the effective cutoff:
+			expect(client.goaway_stream_id).to be == 1
+		end
+		
+		it "drains the streams which were accepted before a graceful GOAWAY" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			another_stream = client.create_stream do |connection, id|
+				stream_class.create(connection, id)
+			end
+			another_stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Establish both request streams on the server:
+			server.read_frame
+			server.read_frame
+			
+			# The server accepted both streams, but will not accept any more:
+			server.send_goaway(0)
+			
+			client.read_frame
+			
+			expect(client).to be(:goaway_received?)
+			expect(client).not.to be(:closed?)
+			expect(client.streams.keys).to be == [1, 3]
+			
+			# Both streams still receive their response:
+			server.streams[1].send_headers(response_headers, Protocol::HTTP2::END_STREAM)
+			client.read_frame
+			
+			expect(stream.state).to be == :closed
+			expect(client).not.to be(:closed?)
+			expect(client.streams.keys).to be == [3]
+			
+			server.streams[3].send_headers(response_headers, Protocol::HTTP2::END_STREAM)
+			client.read_frame
+			
+			expect(another_stream.state).to be == :closed
+			expect(another_stream.error).to be_nil
+			
+			# The last accepted stream completed, so the connection is closed:
+			expect(client).to be(:closed?)
+		end
+		
+		it "refuses to create new streams after a graceful GOAWAY" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			server.read_frame
+			
+			server.send_goaway(0)
+			client.read_frame
+			
+			expect(client).to be(:goaway_received?)
+			expect(client).not.to be(:closed?)
+			
+			expect do
+				client.create_stream
+			end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Cannot create stream 3 after GOAWAY/)
+			
+			# The stream the server accepted is unaffected:
+			expect(client.streams.keys).to be == [1]
+		end
+		
+		it "still accepts streams initiated by the remote peer after GOAWAY" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			server.read_frame
+			
+			server.send_goaway(0)
+			client.read_frame
+			
+			expect(client).to be(:goaway_received?)
+			expect(client).not.to be(:closed?)
+			
+			# `last_stream_id` only covers the streams we initiate, so the server can still push on the stream it accepted. Its frames must be processed like any other: dropping them would desynchronise the HPACK context shared by the whole connection.
+			promised_stream = server.streams[1].send_push_promise(request_headers)
+			client.read_frame
+			
+			expect(client.streams.keys).to be == [1, promised_stream.id]
+			
+			promised_stream.send_headers(response_headers, Protocol::HTTP2::END_STREAM)
+			
+			expect(client.read_frame).to be_a(Protocol::HTTP2::HeadersFrame)
+			expect(client.streams[promised_stream.id].state).to be == :half_closed_local
+		end
+		
+		it "decides the state of the connection even if a stream callback raises" do
+			raising_stream_class = Class.new(Protocol::HTTP2::Stream) do
+				def closed(error)
+					super
+					
+					raise "Error in closed callback!" if error
+				end
+			end
+			
+			another_stream = client.create_stream do |connection, id|
+				raising_stream_class.create(connection, id)
+			end
+			another_stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# The server did not process anything, so the stream is refused and its callback raises:
+			server.send_goaway(0)
+			
+			expect do
+				client.read_frame
+			end.to raise_exception(RuntimeError, message: be =~ /Error in closed callback/)
+			
+			expect(client).to be(:goaway_received?)
+			expect(client).to be(:closed?)
+		end
+		
+		it "closes the connection immediately if there is nothing to drain" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			server.read_frame
+			
+			# The server processes the stream before shutting down:
+			server.streams[1].send_headers(response_headers, Protocol::HTTP2::END_STREAM)
+			server.send_goaway(0)
+			
+			client.read_frame
+			expect(stream.state).to be == :closed
+			
+			client.read_frame
+			
+			expect(client).to be(:goaway_received?)
+			expect(client).to be(:closed?)
+		end
+		
+		it "closes all streams with RefusedError on GOAWAY with last_stream_id=0" do
+			another_stream = client.create_stream do |connection, id|
+				stream_class.create(connection, id)
+			end
+			another_stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Server sends GOAWAY with last_stream_id=0, meaning no streams were processed:
+			server.send_goaway(0)
+			
+			client.read_frame
+			
+			expect(another_stream.state).to be == :closed
+			expect(another_stream.error).to be_a(Protocol::HTTP::RefusedError)
+		end
+		
+		it "closes unprocessed streams with RefusedError on non-graceful GOAWAY" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Establish request stream on server:
+			server.read_frame
+			
+			another_stream = client.create_stream do |connection, id|
+				stream_class.create(connection, id)
+			end
+			another_stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Server sends non-graceful GOAWAY with last_stream_id=1:
+			server.send_goaway(1, "Shutting down")
+			
+			expect do
+				client.read_frame
+			end.to raise_exception(Protocol::HTTP2::GoawayError)
+			
+			# The unprocessed stream should still have been closed with RefusedError:
+			expect(another_stream.state).to be == :closed
+			expect(another_stream.error).to be_a(Protocol::HTTP::RefusedError)
+		end
+		
+		it "client can handle non-graceful shutdown" do
+			stream.send_headers(request_headers, Protocol::HTTP2::END_STREAM)
+			
+			# Establish request stream on server:
+			server.read_frame
+			
+			# Send connection error to client:
+			server.send_goaway(1, "Bugger off!")
+			
+			expect(stream).to receive(:close)
+			
+			expect do
+				client.read_frame
+			end.to raise_exception(Protocol::HTTP2::GoawayError)
+			
+			client.close
+			
+			expect(client.goaway_stream_id).to be == 1
+			expect(client.remote_stream_id).to be == 0
+			expect(client).to be(:closed?)
+		end
+		
+		it "can stream data" do
+			stream.send_headers(request_headers)
+			stream.send_data("A")
+			stream.send_data("B")
+			stream.send_data("C")
+			stream.send_data("", Protocol::HTTP2::END_STREAM)
+			
+			frame = server.read_frame
+			expect(frame).to be_a(Protocol::HTTP2::HeadersFrame)
+			
+			expect(stream.available_frame_size).to be >= 3
+			
+			frame = server.read_frame
+			expect(frame).to be_a(Protocol::HTTP2::DataFrame)
+			expect(frame.unpack).to be == "A"
+			
+			frame = server.read_frame
+			expect(frame).to be_a(Protocol::HTTP2::DataFrame)
+			expect(frame.unpack).to be == "B"
+			
+			frame = server.read_frame
+			expect(frame).to be_a(Protocol::HTTP2::DataFrame)
+			expect(frame.unpack).to be == "C"
+			
+			frame = server.read_frame
+			expect(frame).to be_a(Protocol::HTTP2::DataFrame)
+			expect(frame.unpack).to be == ""
+			expect(frame).to be(:end_stream?)
+		end
+	end
+	
+	it "allows client to create new stream and send headers when client maximum concurrent streams is 0" do
+		client.local_settings.current.maximum_concurrent_streams = 0
+		client_stream = client.create_stream
+		request_headers = [[":method", "GET"], [":path", "/"], [":authority", "localhost"]]
+		client_stream.send_headers(request_headers)
+		
+		expect(server).to receive(:receive_headers) do |frame|
+			headers = super(frame)
+			
+			expect(headers).to be == request_headers
+		end
+		
+		server.read_frame
+	end
+	
+	it "does not allow client to create new stream and send headers when server maximum concurrent streams is 0" do
+		server.local_settings.current.maximum_concurrent_streams = 0
+		client_stream = client.create_stream
+		request_headers = [[":method", "GET"], [":path", "/"], [":authority", "localhost"]]
+		client_stream.send_headers(request_headers)
+		
+		expect{server.read_frame}.to raise_exception(Protocol::HTTP2::ProtocolError)
+	end
+	
+	it "allows server to create new stream and send headers when server maximum concurrent streams is 0" do
+		server.local_settings.current.maximum_concurrent_streams = 0
+		server_stream = server.create_stream
+		request_headers = [[":method", "GET"], [":path", "/"], [":authority", "localhost"]]
+		server_stream.send_headers(request_headers)
+		
+		expect(client).to receive(:receive_headers) do |frame|
+			headers = super(frame)
+			
+			expect(headers).to be == request_headers
+		end
+		
+		client.read_frame
+	end
+	
+	it "does not allow server to create new stream send headers when client maximum concurrent streams is 0" do
+		client.local_settings.current.maximum_concurrent_streams = 0
+		server_stream = server.create_stream
+		request_headers = [[":method", "GET"], [":path", "/"], [":authority", "localhost"]]
+		server_stream.send_headers(request_headers)
+		
+		expect{client.read_frame}.to raise_exception(Protocol::HTTP2::ProtocolError)
+	end
+	
+	with "closed client" do
+		def before
+			client.close!
+			
+			super
+		end
+		
+		it "cannot receive settings" do
+			expect do
+				settings_frame = Protocol::HTTP2::SettingsFrame.new
+				client.receive_settings(settings_frame)
+			end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Cannot receive settings/)
+		end
+		
+		it "cannot send ping" do
+			expect do
+				client.send_ping("Hello World!")
+			end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Cannot send ping/)
+		end
+		
+		it "cannot receive ping" do
+			expect do
+				ping_frame = Protocol::HTTP2::PingFrame.new
+				client.receive_ping(ping_frame)
+			end.to raise_exception(Protocol::HTTP2::ProtocolError, message: be =~ /Cannot receive ping/)
+		end
+	end
+end
