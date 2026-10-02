@@ -1,0 +1,60 @@
+name: libyaml
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '21 11 * * 0'
+  workflow_dispatch:
+
+jobs:
+  ruby-versions:
+    uses: ruby/actions/.github/workflows/ruby_versions.yml@master
+    with:
+      engine: cruby
+      min_version: 2.5
+
+  build:
+    needs: ruby-versions
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ${{ fromJson(needs.ruby-versions.outputs.versions) }}
+        libyaml: [0.1.7, 0.2.5]
+        libyaml-prefix: [/tmp/local, '']
+
+    steps:
+      - name: Install libraries
+        run: sudo apt install haveged
+      - uses: actions/checkout@v7.0.1
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - name: Set up libyaml ${{ matrix.libyaml }}
+        run: |
+          wget https://pyyaml.org/download/libyaml/yaml-${{ matrix.libyaml }}.tar.gz
+          tar xzf yaml-${{ matrix.libyaml }}.tar.gz
+      - name: Compile libyaml ${{ matrix.libyaml }}
+        run: |
+          cd yaml-${{ matrix.libyaml }}
+          ./configure --prefix=${{ matrix.libyaml-prefix }}
+          make
+          make install
+        if: ${{ matrix.libyaml-prefix != '' }}
+      - name: Install dependencies
+        run: bundle install
+      - name: Compile with libyaml
+        run: rake compile -- --with-libyaml-dir=${{ matrix.libyaml-prefix }}
+        if: ${{ matrix.libyaml-prefix != '' }}
+      - name: Compile with libyaml source
+        run: rake compile -- --with-libyaml-source-dir=$(pwd)/yaml-${{ matrix.libyaml }}
+        if: ${{ matrix.libyaml-prefix == '' }}
+      - name: Run test
+        run: rake
+      - name: Install gem
+        run: |
+          rake build
+          gem install pkg/psych-*.gem -- --with-libyaml-dir=${{ matrix.libyaml-prefix }}
+        if: ${{ matrix.ruby != 'head' && matrix.ruby != '3.1' && matrix.libyaml-prefix != '' }}
