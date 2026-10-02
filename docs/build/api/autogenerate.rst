@@ -213,6 +213,12 @@ to whatever is in this list.
 
 .. autofunction:: alembic.autogenerate.render_python_code
 
+Migration Operation Risk Checks
+-------------------------------
+
+.. automodule:: alembic.autogenerate.checks
+    :members:
+
 .. _autogen_rewriter:
 
 Fine-Grained Autogenerate Generation with Rewriters
@@ -628,4 +634,3 @@ in our migration file::
 
 These are our custom directives that will invoke when ``alembic upgrade``
 or ``alembic downgrade`` is run.
-

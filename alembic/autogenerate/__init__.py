@@ -1,3 +1,4 @@
+from . import checks as checks
 from .api import _render_migration_diffs as _render_migration_diffs
 from .api import compare_metadata as compare_metadata
 from .api import produce_migrations as produce_migrations

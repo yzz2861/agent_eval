@@ -205,6 +205,9 @@ def configure(
         | None
     ) = None,
     autogenerate_plugins: Sequence[str] | None = None,
+    migration_risk_type_fn: (
+        Callable[[MigrationContext, Any, Any], Any] | None
+    ) = None,
     **kw: Any,
 ) -> None:
     """Configure a :class:`.MigrationContext` within this

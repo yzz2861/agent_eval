@@ -747,6 +747,52 @@ local model environment.  A return value of ``None`` indicates that default
 type comparison to proceed.
 
 
+.. _migration_risk_checks:
+
+Checking Migration Operations for Data Loss Risks
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Revision generation can inspect the final
+:class:`.MigrationScript` operation trees before a file is written.  The
+check walks regular operations, operations nested in a table modification or
+batch rendering group, and each upgrade/downgrade branch produced for
+multiple engines.  It does not parse generated Python text and does not modify
+the migration when risk reporting is enabled.
+
+Enable the check in ``alembic.ini``::
+
+    migration_risk_check = true
+    migration_risk_check_levels = danger,unknown,error
+    migration_risk_report_file = migration-risk.json
+
+Set ``migration_risk_check_levels`` to an empty value to report without
+blocking revision generation.  Built-in findings use ``danger``, ``unknown``
+and ``warning``.  Checker exceptions are recorded separately at ``error``.
+
+The machine-readable report can also be produced directly from an operation
+tree::
+
+    from alembic.autogenerate.checks import check_migration_script
+
+    report = check_migration_script(migration_script)
+    data = report.to_dict()
+
+Dropping tables and columns is reported as ``danger``.  An
+:class:`.AlterColumnOp` is not considered dangerous merely because its type
+is present.  The type change is evaluated as narrowing, widening, or unknown;
+insufficient type information remains ``unknown``.  A dialect strategy or this
+``context.configure()`` callback can customize the decision::
+
+    def migration_risk_type_fn(context, existing_type, new_type):
+        return None  # True = risk, False = safe, None = unknown
+
+    context.configure(migration_risk_type_fn=migration_risk_type_fn)
+
+Custom operations can register their own checkers with
+:func:`.register_operation_checker`.  A checker may return a finding, a
+level, or an iterable of either.
+
+
 .. _post_write_hooks:
 
 Applying Post Processing and Python Code Formatters to Generated Revisions

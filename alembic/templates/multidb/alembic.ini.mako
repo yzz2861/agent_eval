@@ -82,6 +82,13 @@ path_separator = os
 # are written from script.py.mako
 # output_encoding = utf-8
 
+# Check generated migration operation trees before writing a revision.
+# migration_risk_check = false
+# Comma-separated levels that prevent revision generation.
+# migration_risk_check_levels = danger,unknown,error
+# Write a machine-readable JSON risk report to this path.
+# migration_risk_report_file = migration-risk.json
+
 # for multiple database configuration, new named sections are added
 # which each include a distinct ``sqlalchemy.url`` entry.  A custom value
 # ``databases`` is added which indicates a listing of the per-database sections.

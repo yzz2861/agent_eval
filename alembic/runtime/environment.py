@@ -43,6 +43,7 @@ _RevNumber = Optional[Union[str, tuple[str, ...]]]
 ProcessRevisionDirectiveFn = Callable[
     [MigrationContext, _GetRevArg, list["MigrationScript"]], None
 ]
+MigrationRiskTypeFn = Callable[..., Any]
 
 RenderItemFn = Callable[
     [str, Any, "AutogenContext"], Union[str, Literal[False]]
@@ -440,6 +441,7 @@ class EnvironmentContext(util.ModuleClsProxy):
         user_module_prefix: str | None = None,
         on_version_apply: OnVersionApplyFn | None = None,
         autogenerate_plugins: Sequence[str] | None = None,
+        migration_risk_type_fn: MigrationRiskTypeFn | None = None,
         **kw: Any,
     ) -> None:
         """Configure a :class:`.MigrationContext` within this
@@ -881,6 +883,10 @@ class EnvironmentContext(util.ModuleClsProxy):
             :ref:`alembic.plugins.toplevel` - Introduction and documentation
             to the plugin system
 
+        :param migration_risk_type_fn: A callback used by migration operation
+         risk checks to decide whether a type change is narrowing. Return
+         ``True`` for risk, ``False`` for safe, or ``None`` for unknown.
+
         Parameters specific to individual backends:
 
         :param mssql_batch_separator: The "batch separator" which will
@@ -926,6 +932,8 @@ class EnvironmentContext(util.ModuleClsProxy):
 
         if autogenerate_plugins is not None:
             opts["autogenerate_plugins"] = autogenerate_plugins
+        if migration_risk_type_fn is not None:
+            opts["migration_risk_type_fn"] = migration_risk_type_fn
 
         if render_item is not None:
             opts["render_item"] = render_item

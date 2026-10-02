@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from . import autogenerate as autogen
@@ -200,6 +201,9 @@ def revision(
     rev_id: str | None = None,
     depends_on: str | None = None,
     process_revision_directives: ProcessRevisionDirectiveFn | None = None,
+    migration_risk_check: bool | None = None,
+    migration_risk_check_levels: Sequence[str] | None = None,
+    migration_risk_report_file: str | os.PathLike[str] | None = None,
 ) -> Script | None | list[Script | None]:
     """Create a new revision file.
 
@@ -244,6 +248,13 @@ def revision(
      the other parameters, this option is only available via programmatic
      use of :func:`.command.revision`.
 
+    :param migration_risk_check: check the generated migration operation
+     tree before writing the revision file.
+    :param migration_risk_check_levels: levels that prevent revision
+     generation.
+    :param migration_risk_report_file: write the machine-readable risk
+     report to this JSON file.
+
     """
 
     script_directory = ScriptDirectory.from_config(config)
@@ -258,6 +269,9 @@ def revision(
         version_path=version_path,
         rev_id=rev_id,
         depends_on=depends_on,
+        migration_risk_check=migration_risk_check,
+        migration_risk_check_levels=migration_risk_check_levels,
+        migration_risk_report_file=migration_risk_report_file,
     )
     revision_context = autogen.RevisionContext(
         config,
@@ -309,6 +323,8 @@ def revision(
         # these could theoretically be further processed / rewritten *here*,
         # in addition to the hooks present within each run_migrations() call,
         # or at the end of env.py run_migrations_online().
+
+    revision_context.run_risk_checks()
 
     scripts = [script for script in revision_context.generate_scripts()]
     if len(scripts) == 1:

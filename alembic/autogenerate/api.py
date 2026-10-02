@@ -3,12 +3,16 @@ from __future__ import annotations
 from collections.abc import Iterator
 from collections.abc import Sequence
 import contextlib
+import json
 import logging
+import os
+from pathlib import Path
 from typing import Any
 from typing import TYPE_CHECKING
 
 from sqlalchemy import inspect
 
+from . import checks
 from . import compare
 from . import render
 from .. import util
@@ -540,6 +544,8 @@ class RevisionContext:
         self.script_directory = script_directory
         self.command_args = command_args
         self.process_revision_directives = process_revision_directives
+        self._risk_contexts: dict[int, list[MigrationContext]] = {}
+        self.risk_report: checks.RiskReport | None = None
         self.template_args = {
             "config": config  # Let templates use config for
             # e.g. multiple databases
@@ -639,6 +645,94 @@ class RevisionContext:
 
         for migration_script in self.generated_revisions:
             migration_script._needs_render = True
+
+        for migration_script in self.generated_revisions:
+            self._risk_contexts.setdefault(id(migration_script), []).append(
+                migration_context
+            )
+
+    def _risk_option(
+        self,
+        name: str,
+        command_value: Any = None,
+        default: Any = None,
+    ) -> Any:
+        if command_value is not None:
+            return command_value
+        return self.config.get_alembic_option(name, default)
+
+    @staticmethod
+    def _risk_levels(value: Any) -> set[str]:
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            values = value.split(",")
+        else:
+            values = list(value)
+        levels: set[str] = set()
+        for value_item in values:
+            level = str(value_item).strip().lower()
+            if level:
+                levels.add(level)
+        return levels
+
+    def run_risk_checks(self) -> checks.RiskReport | None:
+        """Check final migration operation trees before scripts are written."""
+
+        enabled = self._risk_option(
+            "migration_risk_check",
+            self.command_args.get("migration_risk_check"),
+        )
+        if not util.asbool(enabled):
+            return None
+
+        report = checks.RiskReport()
+        for migration_script in self.generated_revisions:
+            script_report = checks.check_migration_script(
+                migration_script,
+                migration_contexts=self._risk_contexts.get(
+                    id(migration_script), []
+                ),
+            )
+            report.findings.extend(script_report.findings)
+            report.errors.extend(script_report.errors)
+
+        report_path = self._risk_option(
+            "migration_risk_report_file",
+            self.command_args.get("migration_risk_report_file"),
+        )
+        if report_path is not None:
+            path = Path(os.fspath(report_path))
+            if not path.is_absolute() and self.config.config_file_name:
+                path = Path(self.config.config_file_name).parent / path
+            with open(path, "w", encoding="utf-8") as file_obj:
+                json.dump(report.to_dict(), file_obj, indent=2)
+                file_obj.write("\n")
+
+        blocking_levels = self._risk_levels(
+            self._risk_option(
+                "migration_risk_check_levels",
+                self.command_args.get("migration_risk_check_levels"),
+                "danger,unknown,error",
+            )
+        )
+        blocking_findings = report.findings_for(*blocking_levels)
+        blocking_errors = [
+            error for error in report.errors if "error" in blocking_levels
+        ]
+
+        self.risk_report = report
+        self.config.attributes["migration_risk_report"] = report
+
+        if blocking_findings or blocking_errors:
+            raise util.MigrationRiskCheckError(
+                "Migration risk check found blocking issues: "
+                f"{len(blocking_findings)} finding(s), "
+                f"{len(blocking_errors)} checker error(s)",
+                report,
+            )
+
+        return report
 
     def _default_revision(self) -> MigrationScript:
         command_args: dict[str, Any] = self.command_args

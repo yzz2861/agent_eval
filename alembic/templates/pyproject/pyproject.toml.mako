@@ -56,6 +56,9 @@ prepend_sys_path = [
 # the output encoding used when revision files
 # are written from script.py.mako
 # output_encoding = "utf-8"
+# migration_risk_check = false
+# migration_risk_check_levels = ["danger", "unknown", "error"]
+# migration_risk_report_file = "migration-risk.json"
 
 # This section defines scripts or Python functions that are run
 # on newly generated revision scripts.  See the documentation for further
@@ -81,4 +84,3 @@ prepend_sys_path = [
 # type = "exec"
 # executable = "ruff"
 # options = "check --fix REVISION_SCRIPT_FILENAME"
-
