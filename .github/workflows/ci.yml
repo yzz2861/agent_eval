@@ -1,0 +1,337 @@
+name: sqlite3-ruby test suite
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * 3" # At 08:00 on Wednesday # https://crontab.guru/#0_8_*_*_3
+  push:
+    branches:
+      - main
+      - "*-stable"
+    tags:
+      - v*.*.*
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - '*'
+
+permissions:
+  contents: read
+
+env:
+  BUNDLE_WITHOUT: "development"
+
+jobs:
+  ruby_versions:
+    outputs:
+      setup_ruby: "['3.2', '3.3', '3.4', '4.0']"
+      image_tag: "['3.2', '3.3', '3.4', '4.0']"
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "generating rubies ..."
+
+  #
+  #  basic tests
+  #
+  rubocop:
+    runs-on: ubuntu-latest
+    env:
+      BUNDLE_WITHOUT: "" # we need rubocop, obviously
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true # zizmor: ignore[cache-poisoning]
+      - run: bundle exec rake rubocop
+
+  basic:
+    needs: rubocop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby-pkgs@2233d39c1315c667a2970436418b520a6300124e # v1.33.5
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+          apt-get: libsqlite3-dev
+      - run: bundle exec rake compile -- --enable-system-libraries
+      - run: bundle exec rake test
+
+  test:
+    needs: [basic, ruby_versions]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu, macos, windows]
+        ruby: ${{ fromJSON(needs.ruby_versions.outputs.setup_ruby) }}
+        syslib: [enable, disable]
+        include:
+          # additional compilation flags for homebrew
+          - { os: macos, syslib: enable, compile_flags: "--with-opt-dir=$(brew --prefix sqlite3)" }
+          # additional versions of ruby to test
+          - { os: ubuntu, ruby: truffleruby, syslib: disable }
+          - { os: windows, ruby: ucrt, syslib: enable }
+          - { os: windows, ruby: mswin, syslib: enable }
+    runs-on: ${{ matrix.os }}-latest
+    steps:
+      - if: matrix.os == 'windows'
+        name: configure git crlf
+        run: |
+          git config --system core.autocrlf false
+          git config --system core.eol lf
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby-pkgs@2233d39c1315c667a2970436418b520a6300124e # v1.33.5
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          apt-get: libsqlite3-dev
+          mingw: sqlite3
+          vcpkg: sqlite3
+      - if: matrix.syslib == 'disable'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.3 # zizmor: ignore[cache-poisoning]
+        with:
+          path: ports
+          key: ports-${{ matrix.os }}-${{ hashFiles('ext/sqlite3/extconf.rb','dependencies.yml') }}
+      - run: bundle exec rake compile -- --${{ matrix.syslib }}-system-libraries ${{ matrix.compile_flags }}
+      - run: bundle exec rake test
+
+  fedora:
+    # reported at https://github.com/sparklemotion/sqlite3-ruby/issues/354
+    # TODO remove once https://github.com/flavorjones/mini_portile/issues/118 is fixed
+    needs: basic
+    name: "fedora:40"
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:40
+    steps:
+      - run: |
+          dnf group install -y "C Development Tools and Libraries"
+          dnf install -y ruby ruby-devel patch
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bundle install
+      - run: bundle exec rake compile -- --disable-system-libraries
+      - run: bundle exec rake test
+
+  bsd:
+    needs: basic
+    name: "FreeBSD"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3 # v1.5.7
+        with:
+          usesh: true
+          copyback: false
+          prepare: pkg install -y ruby devel/ruby-gems pkgconf
+          envs: BUNDLE_WITHOUT
+          run: |
+            gem install bundler
+            bundle install --local || bundle install
+            bundle exec rake compile -- --disable-system-libraries
+            bundle exec rake test
+
+  sqlcipher:
+    needs: [basic, ruby_versions]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu, macos, windows]
+        ruby: ${{ fromJSON(needs.ruby_versions.outputs.setup_ruby) }}
+        include:
+          - { os: windows, ruby: mingw }
+          - { os: windows, ruby: mswin }
+    runs-on: ${{ matrix.os }}-latest
+    steps:
+      - if: matrix.os == 'windows'
+        name: configure git crlf
+        run: |
+          git config --system core.autocrlf false
+          git config --system core.eol lf
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby-pkgs@2233d39c1315c667a2970436418b520a6300124e # v1.33.5
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          apt-get: libsqlcipher-dev
+          brew: sqlcipher
+          mingw: sqlcipher
+          vcpkg: sqlcipher
+      - run: bundle exec rake compile -- --with-sqlcipher
+      - run: bundle exec rake test
+
+  valgrind:
+    needs: basic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby-pkgs@2233d39c1315c667a2970436418b520a6300124e # v1.33.5
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+          apt-get: valgrind
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.3 # zizmor: ignore[cache-poisoning]
+        with:
+          path: ports
+          key: ports-ubuntu-${{ hashFiles('ext/sqlite3/extconf.rb','dependencies.yml') }}
+      - run: bundle exec rake compile
+      - run: bundle exec rake test:valgrind
+
+  #
+  #  gem build (source and native)
+  #
+  build_gems:
+    needs: basic
+    uses: ./.github/workflows/build-gems.yml
+
+  #
+  #  gem tests (source and native)
+  #
+  install_source_linux:
+    needs: [build_gems, ruby_versions]
+    name: "test source"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu, macos, windows]
+        ruby: ${{ fromJSON(needs.ruby_versions.outputs.setup_ruby) }}
+        syslib: [enable, disable]
+        include:
+          # additional compilation flags for homebrew
+          - { os: macos, syslib: enable, compile_flags: "--with-opt-dir=$(brew --prefix sqlite3)" }
+    runs-on: ${{ matrix.os }}-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby-pkgs@2233d39c1315c667a2970436418b520a6300124e # v1.33.5
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          apt-get: libsqlite3-dev pkg-config
+          mingw: sqlite3
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: source-gem
+          path: gems
+      - run: ./bin/test-gem-install gems -- --${{ matrix.syslib }}-system-libraries ${{ matrix.compile_flags }}
+        shell: sh
+
+  test_architecture_matrix:
+    name: "${{ matrix.platform }} ${{ matrix.ruby }}"
+    needs: [build_gems, ruby_versions]
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - aarch64-linux-gnu
+          - aarch64-linux-musl
+          - arm-linux-gnu
+          - arm-linux-musl
+          - x86-linux-gnu
+          - x86-linux-musl
+          - x86_64-linux-gnu
+          - x86_64-linux-musl
+        ruby: ${{ fromJSON(needs.ruby_versions.outputs.image_tag) }}
+        include:
+          # declare docker image for each platform
+          - { runner: ubuntu-latest, platform: aarch64-linux-musl, docker_tag: "-alpine", bootstrap: "apk add build-base &&" }
+          - { runner: ubuntu-latest, platform: arm-linux-musl, docker_tag: "-alpine", bootstrap: "apk add build-base &&" }
+          - { runner: ubuntu-latest, platform: x86-linux-musl, docker_tag: "-alpine", bootstrap: "apk add build-base &&" }
+          - { runner: ubuntu-latest, platform: x86_64-linux-musl, docker_tag: "-alpine", bootstrap: "apk add build-base &&" }
+          # declare docker platform for each platform
+          - { runner: ubuntu-24.04-arm, platform: aarch64-linux-gnu, docker_platform: "--platform=linux/arm64" }
+          - { runner: ubuntu-24.04-arm, platform: aarch64-linux-musl, docker_platform: "--platform=linux/arm64" }
+          - { runner: ubuntu-24.04-arm, platform: arm-linux-gnu, docker_platform: "--platform=linux/arm/v7" }
+          - { runner: ubuntu-24.04-arm, platform: arm-linux-musl, docker_platform: "--platform=linux/arm/v7" }
+          - { runner: ubuntu-latest, platform: x86-linux-gnu, docker_platform: "--platform=linux/386" }
+          - { runner: ubuntu-latest, platform: x86-linux-musl, docker_platform: "--platform=linux/386" }
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cruby-${{ matrix.platform }}-gem
+          path: gems
+      - run: |
+          docker run --rm -v $PWD:/work -w /work \
+            ${{ matrix.docker_platform }} ruby:${MATRIX_RUBY}${{ matrix.docker_tag }} \
+            sh -c "
+              ${{ matrix.bootstrap }}
+              ./bin/test-gem-install ./gems
+            "
+        env:
+          MATRIX_RUBY: ${{ matrix.ruby }}
+
+  test_the_rest:
+    name: "${{ matrix.platform }} ${{ matrix.ruby }}"
+    needs: [build_gems, ruby_versions]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15-intel, macos-15]
+        ruby: ${{ fromJSON(needs.ruby_versions.outputs.setup_ruby) }}
+        include:
+          - os: macos-15-intel
+            platform: x86_64-darwin
+          - os: macos-15
+            platform: arm64-darwin
+          - os: windows-latest
+            platform: x64-mingw-ucrt
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
+        with:
+          ruby-version: "${{ matrix.ruby }}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cruby-${{ matrix.platform }}-gem
+          path: gems
+      - run: ./bin/test-gem-install gems
+        shell: sh
+
+  cruby-x86_64-linux-musl-install:
+    needs: build_gems
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { ruby: "3.2", flavor: "alpine3.18" }
+          - { ruby: "3.2", flavor: "alpine3.19" }
+          - { ruby: "3.3", flavor: "alpine3.18" }
+          - { ruby: "3.3", flavor: "alpine3.19" }
+          - { ruby: "3.4", flavor: "alpine" }
+          - { ruby: "4.0", flavor: "alpine" }
+    runs-on: ubuntu-latest
+    container:
+      image: ruby:${{ matrix.ruby }}-${{ matrix.flavor }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cruby-x86_64-linux-musl-gem
+          path: gems
+      - run: apk add build-base
+      - run: ./bin/test-gem-install ./gems

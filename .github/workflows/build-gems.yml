@@ -1,0 +1,108 @@
+name: Build gems
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: "Pass --release to bin/test-gem-build (skip timestamp version)"
+        type: boolean
+        default: false
+      artifact_prefix:
+        description: "Prefix for artifact names (e.g., 'release-v2.9.1-')"
+        type: string
+        default: ""
+      ref:
+        description: "Git ref to check out (e.g., a version tag). Defaults to the caller's ref."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  native_setup:
+    name: "Setup for native gem build"
+    runs-on: ubuntu-latest
+    outputs:
+      rcd_image_version: ${{ steps.rcd_image_version.outputs.rcd_image_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ports/archives
+          key: ports-archives-tarball-${{ hashFiles('ext/sqlite3/extconf.rb','dependencies.yml') }}
+      - uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+      - run: bundle exec ruby ./ext/sqlite3/extconf.rb --download-dependencies
+      - id: rcd_image_version
+        run: bundle exec ruby -e 'require "rake_compiler_dock"; puts "rcd_image_version=#{RakeCompilerDock::IMAGE_VERSION}"' >> $GITHUB_OUTPUT
+
+  build_source_gem:
+    name: "build source"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ports/archives
+          key: ports-archives-tarball-${{ hashFiles('ext/sqlite3/extconf.rb','dependencies.yml') }}
+      - uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+      - run: ./bin/test-gem-build ${RELEASE_FLAG} gems ruby
+        env:
+          RELEASE_FLAG: ${{ inputs.release && '--release' || '' }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: "${{ inputs.artifact_prefix }}source-gem"
+          path: gems
+          retention-days: 1
+
+  build_native_gem:
+    needs: native_setup
+    name: "build native"
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - aarch64-linux-gnu
+          - aarch64-linux-musl
+          - arm-linux-gnu
+          - arm-linux-musl
+          - arm64-darwin
+          - x64-mingw-ucrt
+          - x86-linux-gnu
+          - x86-linux-musl
+          - x86_64-darwin
+          - x86_64-linux-gnu
+          - x86_64-linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ports/archives
+          key: ports-archives-tarball-${{ hashFiles('ext/sqlite3/extconf.rb', 'dependencies.yml') }}
+      - run: |
+          docker run --rm -v $PWD:/work -w /work \
+            ghcr.io/rake-compiler/rake-compiler-dock-image:${RCD_IMAGE_VERSION}-mri-${{ matrix.platform }} \
+            ./bin/test-gem-build ${RELEASE_FLAG} gems ${{ matrix.platform }}
+        env:
+          RCD_IMAGE_VERSION: ${{ needs.native_setup.outputs.rcd_image_version }}
+          RELEASE_FLAG: ${{ inputs.release && '--release' || '' }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: "${{ inputs.artifact_prefix }}cruby-${{ matrix.platform }}-gem"
+          path: gems
+          retention-days: 1

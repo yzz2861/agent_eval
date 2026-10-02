@@ -1,0 +1,17 @@
+*.so
+*.bundle
+*.swp
+*.log
+*.o
+
+test/test.db
+
+Gemfile.lock
+
+doc/
+gems/
+issues/
+pkg/
+ports/
+tmp/
+vendor/

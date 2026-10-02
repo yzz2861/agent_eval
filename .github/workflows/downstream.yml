@@ -1,0 +1,52 @@
+name: downstream
+concurrency:
+  group: "${{github.workflow}}-${{github.ref}}"
+  cancel-in-progress: true
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * 3" # At 08:00 on Wednesday # https://crontab.guru/#0_8_*_*_3
+  push:
+    branches:
+      - main
+      - "*-stable"
+    tags:
+      - v*.*.*
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - '*'
+
+permissions:
+  contents: read
+
+jobs:
+  activerecord:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby-pkgs@2233d39c1315c667a2970436418b520a6300124e # v1.33.5
+        with:
+          ruby-version: "4.0"
+          bundler: latest
+          bundler-cache: true
+          apt-get: sqlite3 # active record test suite uses the sqlite3 cli
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.3 # zizmor: ignore[cache-poisoning]
+        with:
+          path: ports
+          key: ports-ubuntu-${{ hashFiles('ext/sqlite3/extconf.rb','dependencies.yml') }}
+      - run: bundle exec rake compile
+      - name: checkout rails and configure
+        run: |
+          git clone --depth 1 --branch main https://github.com/rails/rails
+          cd rails
+          bundle install --prefer-local
+          bundle remove sqlite3
+          bundle add sqlite3 --path=".."
+      - name: run tests
+        run: |
+          cd rails/activerecord
+          bundle show --paths sqlite3
+          bundle exec rake test:sqlite3

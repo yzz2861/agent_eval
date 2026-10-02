@@ -1,0 +1,43 @@
+#! /usr/bin/env bash
+#
+#  run as part of CI, or as part of the release pipeline with --release
+#
+RELEASE=false
+if [[ "${1:-}" == "--release" ]] ; then
+  RELEASE=true
+  shift
+fi
+
+if [[ $# -lt 2 ]] ; then
+  echo "usage: $(basename $0) [--release] <output_dir> <platform>"
+  exit 1
+fi
+
+set -e -u
+
+OUTPUT_DIR=$1
+BUILD_NATIVE_GEM=$2
+
+test -e /etc/os-release && cat /etc/os-release
+
+set -x
+
+bundle config set without development
+bundle install --local || bundle install
+
+if [[ "${RELEASE}" == "false" ]] ; then
+  bundle exec rake set-version-to-timestamp
+fi
+
+if [[ "${BUILD_NATIVE_GEM}" == "ruby" ]] ; then
+  bundle exec ruby ext/sqlite3/extconf.rb --download-dependencies
+  bundle exec rake gem
+else
+  bundle exec rake gem:${BUILD_NATIVE_GEM}:buildit
+fi
+
+./bin/test-gem-file-contents pkg/*.gem
+
+mkdir -p ${OUTPUT_DIR}
+cp -v pkg/*.gem ${OUTPUT_DIR}
+ls -l ${OUTPUT_DIR}/*
