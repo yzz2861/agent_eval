@@ -3,6 +3,7 @@
 import errno
 import hashlib
 import io
+import multiprocessing as mp
 import os
 import os.path as op
 import pathlib
@@ -1405,3 +1406,329 @@ def test_memoize_iter(cache):
     assert len(cache) == 3
     for key in cache:
         assert cache[key] == 6
+
+
+def test_get_version(cache):
+    assert cache.get_version('abc') is None
+
+    cache.set('abc', 123)
+    token = cache.get_version('abc')
+    assert token is not None
+    assert token == cache.get_version('abc')
+
+    # Reads do not change the version.
+    assert cache.get('abc') == 123
+    assert token == cache.get_version('abc')
+
+    # Writes change the version.
+    cache.set('abc', 456)
+    assert token != cache.get_version('abc')
+
+    # Deletes remove the version.
+    cache.delete('abc')
+    assert cache.get_version('abc') is None
+
+
+def test_get_version_mutations(cache):
+    cache.set('abc', 1)
+    token = cache.get_version('abc')
+
+    cache.touch('abc', expire=60)
+    assert cache.get_version('abc') != token
+    token = cache.get_version('abc')
+
+    cache.incr('abc')
+    assert cache.get_version('abc') != token
+
+
+def test_get_version_migration():
+    # Databases created before version support are migrated in place.
+    directory = tempfile.mkdtemp(prefix='diskcache-migration-')
+
+    try:
+        con = sqlite3.connect(op.join(directory, 'cache.db'))
+        con.execute(
+            'CREATE TABLE Settings (key TEXT NOT NULL UNIQUE, value)'
+        )
+        con.execute(
+            'CREATE TABLE Cache ('
+            ' rowid INTEGER PRIMARY KEY,'
+            ' key BLOB,'
+            ' raw INTEGER,'
+            ' store_time REAL,'
+            ' expire_time REAL,'
+            ' access_time REAL,'
+            ' access_count INTEGER DEFAULT 0,'
+            ' tag BLOB,'
+            ' size INTEGER DEFAULT 0,'
+            ' mode INTEGER DEFAULT 0,'
+            ' filename TEXT,'
+            ' value BLOB)'
+        )
+        con.execute(
+            'CREATE UNIQUE INDEX Cache_key_raw ON Cache(key, raw)'
+        )
+        con.execute(
+            'INSERT INTO Cache('
+            ' key, raw, store_time, access_time, access_count,'
+            ' size, mode, value'
+            ') VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            ('abc', True, 0.0, 0.0, 0, 0, 1, 123),
+        )
+        con.commit()
+        con.close()
+
+        cache = dc.Cache(directory)
+        token = cache.get_version('abc')
+        assert token is not None
+        assert cache.get('abc') == 123
+
+        # New writes receive fresh versions from the global counter.
+        conflicts = cache.compare_and_swap({'abc': token}, sets={'abc': 456})
+        assert conflicts == []
+        assert cache.get('abc') == 456
+        assert cache.get_version('abc') != token
+        cache.close()
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_get_version_aba(cache):
+    # Deleting and re-writing an equal value still changes the version.
+    cache.set('abc', 123)
+    token = cache.get_version('abc')
+    cache.delete('abc')
+    cache.set('abc', 123)
+    assert cache.get_version('abc') is not None
+    assert cache.get_version('abc') != token
+
+
+def test_get_version_expired(cache):
+    cache.set('abc', 123, expire=0.1)
+    assert cache.get_version('abc') is not None
+    time.sleep(0.2)
+    assert cache.get_version('abc') is None
+
+
+def test_get_with_version(cache):
+    cache.set('abc', 123, expire=60, tag='group')
+
+    value, token = cache.get('abc', version=True)
+    assert value == 123
+    assert token == cache.get_version('abc')
+
+    assert cache.get('missing', version=True) == (None, None)
+    assert cache.get('missing', default=0, version=True) == (0, None)
+
+    value, expire_time, tag, token = cache.get(
+        'abc', expire_time=True, tag=True, version=True
+    )
+    assert value == 123
+    assert expire_time is not None
+    assert tag == 'group'
+    assert token == cache.get_version('abc')
+
+    # Slow path with statistics enabled.
+    cache.stats(enable=True)
+    value, token = cache.get('abc', version=True)
+    assert (value, token) == (123, cache.get_version('abc'))
+
+
+def test_compare_and_swap_set_and_delete(cache):
+    cache.set('a', 1)
+    cache.set('b', 2)
+    token_a = cache.get_version('a')
+    token_b = cache.get_version('b')
+
+    conflicts = cache.compare_and_swap(
+        {'a': token_a, 'b': token_b, 'c': None},
+        sets={'a': 10, 'c': 30},
+        deletes=['b'],
+    )
+
+    assert conflicts == []
+    assert cache.get('a') == 10
+    assert 'b' not in cache
+    assert cache.get('c') == 30
+    cache.check()
+
+
+def test_compare_and_swap_conflict_atomic(cache):
+    cache.set('a', 1)
+    cache.set('b', 2)
+    token_a = cache.get_version('a')
+    token_b = cache.get_version('b')
+
+    # Another writer bumps 'b' before the batch commits.
+    cache.set('b', 20)
+
+    conflicts = cache.compare_and_swap(
+        {'a': token_a, 'b': token_b},
+        sets={'a': 10, 'b': 200},
+    )
+
+    assert conflicts == ['b']
+    # Whole batch is untouched.
+    assert cache.get('a') == 1
+    assert cache.get('b') == 20
+    cache.check()
+
+
+def test_compare_and_swap_conflict_delete(cache):
+    cache.set('a', 1)
+    cache.set('b', 2)
+    token_a = cache.get_version('a')
+
+    conflicts = cache.compare_and_swap(
+        {'a': token_a, 'b': None},
+        sets={'a': 10},
+        deletes=['b'],
+    )
+
+    # 'b' exists but was expected to be missing.
+    assert conflicts == ['b']
+    assert cache.get('a') == 1
+    assert cache.get('b') == 2
+
+
+def test_compare_and_swap_aba(cache):
+    cache.set('a', 1)
+    token = cache.get_version('a')
+
+    # Delete and re-write the same value; the old token must not match.
+    cache.delete('a')
+    cache.set('a', 1)
+
+    conflicts = cache.compare_and_swap({'a': token}, sets={'a': 2})
+    assert conflicts == ['a']
+    assert cache.get('a') == 1
+
+
+def test_compare_and_swap_expired(cache):
+    cache.set('a', 1, expire=0.1)
+    token = cache.get_version('a')
+    time.sleep(0.2)
+
+    # Expired rows no longer match a live token.
+    conflicts = cache.compare_and_swap({'a': token}, sets={'a': 2})
+    assert conflicts == ['a']
+
+    # A None expectation matches the expired row and replaces it.
+    conflicts = cache.compare_and_swap({'a': None}, sets={'a': 2})
+    assert conflicts == []
+    assert cache.get('a') == 2
+    cache.check()
+
+
+def test_compare_and_swap_expire_and_tag(cache):
+    token = None
+    conflicts = cache.compare_and_swap(
+        {'a': token},
+        sets={'a': dc.CasSet(1, expire=60, tag='group')},
+    )
+    assert conflicts == []
+
+    value, expire_time, tag = cache.get('a', expire_time=True, tag=True)
+    assert value == 1
+    assert expire_time is not None
+    assert tag == 'group'
+
+
+def test_compare_and_swap_read_file(cache):
+    conflicts = cache.compare_and_swap(
+        {'a': None},
+        sets={'a': dc.CasSet(io.BytesIO(b'xyz'), read=True)},
+    )
+    assert conflicts == []
+    assert cache.get('a') == b'xyz'
+
+
+def test_compare_and_swap_staged_file_cleanup(cache):
+    # Large values are staged in external files before the transaction.
+    cache.reset('disk_min_file_size', 64)
+    cache.set('a', 1)
+    token_a = cache.get_version('a')
+    cache.set('b', 2)
+    token_b = cache.get_version('b')
+    cache.set('b', 20)  # Bump 'b' so the batch conflicts.
+
+    start_count = len(os.listdir(cache.directory))
+
+    conflicts = cache.compare_and_swap(
+        {'a': token_a, 'b': token_b},
+        sets={'a': b'x' * 2**10},
+    )
+
+    assert conflicts == ['b']
+    assert cache.get('a') == 1
+    # Staged file was removed after the conflict.
+    assert len(os.listdir(cache.directory)) == start_count
+    cache.check()
+
+
+def test_compare_and_swap_validation(cache):
+    cache.set('a', 1)
+    token = cache.get_version('a')
+
+    with pytest.raises(ValueError):
+        cache.compare_and_swap({'a': token}, sets={'a': 1}, deletes=['a'])
+
+    with pytest.raises(ValueError):
+        cache.compare_and_swap({'a': token}, sets={'b': 1})
+
+    with pytest.raises(ValueError):
+        cache.compare_and_swap({'a': token}, deletes=['b'])
+
+
+def _cas_race_worker(directory, token, value, barrier, queue):
+    cache = dc.Cache(directory)
+    try:
+        barrier.wait(timeout=60)
+        conflicts = cache.compare_and_swap(
+            {'race': token}, sets={'race': value}, retry=True
+        )
+        queue.put(not conflicts)
+    finally:
+        cache.close()
+
+
+def test_compare_and_swap_multiprocess_race():
+    # Two processes commit from the same old version simultaneously; a
+    # single-process transaction cannot stand in for this race. Exactly one
+    # process may commit.
+    directory = tempfile.mkdtemp(prefix='diskcache-cas-race-')
+
+    try:
+        cache = dc.Cache(directory)
+        cache.set('race', 'initial')
+        token = cache.get_version('race')
+        cache.close()
+
+        context = mp.get_context('spawn')
+        barrier = context.Barrier(2)
+        queue = context.Queue()
+        workers = [
+            context.Process(
+                target=_cas_race_worker,
+                args=(directory, token, value, barrier, queue),
+            )
+            for value in ('first', 'second')
+        ]
+
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(120)
+
+        for worker in workers:
+            assert worker.exitcode == 0
+
+        results = sorted(queue.get(timeout=10) for _ in workers)
+        assert results == [False, True]
+
+        cache = dc.Cache(directory)
+        assert cache.get('race') in ('first', 'second')
+        assert cache.get_version('race') != token
+        cache.close()
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)

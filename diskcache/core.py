@@ -39,6 +39,35 @@ DBNAME = 'cache.db'
 ENOVAL = Constant('ENOVAL')
 UNKNOWN = Constant('UNKNOWN')
 
+
+class CasSet:
+    """Value and options for setting a key with compare_and_swap.
+
+    :param value: value for item
+    :param float expire: seconds until item expires (default None, no expiry)
+    :param str tag: text to associate with key (default None)
+    :param bool read: read value as bytes from file-like object (default False)
+
+    """
+
+    __slots__ = ('value', 'expire', 'tag', 'read')
+
+    def __init__(self, value, expire=None, tag=None, read=False):
+        self.value = value
+        self.expire = expire
+        self.tag = tag
+        self.read = read
+
+    def __repr__(self):
+        return '%s(value=%r, expire=%r, tag=%r, read=%r)' % (
+            type(self).__name__,
+            self.value,
+            self.expire,
+            self.tag,
+            self.read,
+        )
+
+
 MODE_NONE = 0
 MODE_RAW = 1
 MODE_BINARY = 2
@@ -538,6 +567,50 @@ class Cache:
 
         if query is not None:
             sql(query)
+
+        # Setup version column and counter for compare-and-swap. Existing
+        # databases are migrated in place. Versions are assigned from a
+        # global, monotonically-increasing counter so that deleting and
+        # re-creating a key always yields a new version (avoids ABA).
+
+        columns = sql('PRAGMA table_info(Cache)').fetchall()
+
+        if not any(column[1] == 'version' for column in columns):
+            try:
+                sql(
+                    'ALTER TABLE Cache'
+                    ' ADD COLUMN version INTEGER NOT NULL DEFAULT 0'
+                )
+            except sqlite3.OperationalError as exc:
+                # Another process may have added the column concurrently.
+                if 'duplicate column name' not in str(exc):
+                    raise
+
+        sql('INSERT OR IGNORE INTO Settings VALUES (?, ?)', ('version', 0))
+
+        # Use triggers to keep row versions updated. Recursive triggers are
+        # disabled by default so the inner UPDATE does not re-fire triggers.
+        # Single quotes are used for the 'version' string literal because
+        # double quotes would resolve to the version column of the Cache
+        # table within the trigger body.
+
+        sql(
+            'CREATE TRIGGER IF NOT EXISTS Cache_version_insert'
+            ' AFTER INSERT ON Cache FOR EACH ROW BEGIN'
+            " UPDATE Settings SET value = value + 1 WHERE key = 'version';"
+            ' UPDATE Cache SET version ='
+            " (SELECT value FROM Settings WHERE key = 'version')"
+            ' WHERE rowid = NEW.rowid; END'
+        )
+
+        sql(
+            'CREATE TRIGGER IF NOT EXISTS Cache_version_update'
+            ' AFTER UPDATE ON Cache FOR EACH ROW BEGIN'
+            " UPDATE Settings SET value = value + 1 WHERE key = 'version';"
+            ' UPDATE Cache SET version ='
+            " (SELECT value FROM Settings WHERE key = 'version')"
+            ' WHERE rowid = NEW.rowid; END'
+        )
 
         # Use triggers to keep Metadata updated.
 
@@ -1128,6 +1201,7 @@ class Cache:
         expire_time=False,
         tag=False,
         retry=False,
+        version=False,
     ):
         """Retrieve value from cache. If `key` is missing, return `default`.
 
@@ -1142,6 +1216,8 @@ class Cache:
             (default False)
         :param bool tag: if True, return tag in tuple (default False)
         :param bool retry: retry if database timeout occurs (default False)
+        :param bool version: if True, return version token in tuple
+            (default False)
         :return: value for item or default if key not found
         :raises Timeout: if database timeout occurs
 
@@ -1149,15 +1225,15 @@ class Cache:
         db_key, raw = self._disk.put(key)
         update_column = EVICTION_POLICY[self.eviction_policy]['get']
         select = (
-            'SELECT rowid, expire_time, tag, mode, filename, value'
+            'SELECT rowid, expire_time, tag, mode, filename, value, version'
             ' FROM Cache WHERE key = ? AND raw = ?'
             ' AND (expire_time IS NULL OR expire_time > ?)'
         )
 
-        if expire_time and tag:
-            default = (default, None, None)
-        elif expire_time or tag:
-            default = (default, None)
+        extras = int(bool(expire_time)) + int(bool(tag)) + int(bool(version))
+
+        if extras:
+            default = (default,) + (None,) * extras
 
         if not self.statistics and update_column is None:
             # Fast path, no transaction necessary.
@@ -1167,7 +1243,9 @@ class Cache:
             if not rows:
                 return default
 
-            ((rowid, db_expire_time, db_tag, mode, filename, db_value),) = rows
+            row = rows[0]
+            (rowid, db_expire_time, db_tag, mode, filename, db_value) = row[:6]
+            db_version = row[6]
 
             try:
                 value = self._disk.fetch(mode, filename, db_value, read)
@@ -1191,9 +1269,16 @@ class Cache:
                         sql(cache_miss)
                     return default
 
+                row = rows[0]
                 (
-                    (rowid, db_expire_time, db_tag, mode, filename, db_value),
-                ) = rows  # noqa: E127
+                    rowid,
+                    db_expire_time,
+                    db_tag,
+                    mode,
+                    filename,
+                    db_value,
+                ) = row[:6]
+                db_version = row[6]
 
                 try:
                     value = self._disk.fetch(mode, filename, db_value, read)
@@ -1212,14 +1297,233 @@ class Cache:
                 if update_column is not None:
                     sql(update % update_column.format(now=now), (rowid,))
 
-        if expire_time and tag:
-            return (value, db_expire_time, db_tag)
-        elif expire_time:
-            return (value, db_expire_time)
-        elif tag:
-            return (value, db_tag)
-        else:
-            return value
+        if extras:
+            result = [value]
+            if expire_time:
+                result.append(db_expire_time)
+            if tag:
+                result.append(db_tag)
+            if version:
+                result.append(db_version)
+            return tuple(result)
+
+        return value
+
+    def get_version(self, key):
+        """Return version token for `key` in cache.
+
+        The token identifies the current state of `key` for use with
+        compare_and_swap. Every mutation of the key assigns a new, strictly
+        greater token, including deletion followed by re-creation with an
+        equal value (no ABA problem).
+
+        Missing and expired keys are both reported as `None`. A `None`
+        expectation in compare_and_swap therefore matches a key that is
+        absent or expired at commit time.
+
+        >>> cache = Cache()
+        >>> cache.get_version('abc') is None
+        True
+        >>> cache.set('abc', 123)
+        True
+        >>> token = cache.get_version('abc')
+        >>> token == cache.get_version('abc')
+        True
+        >>> cache.set('abc', 456)
+        True
+        >>> token == cache.get_version('abc')
+        False
+        >>> cache.close()
+
+        :param key: key for item
+        :return: version token or None if key is missing or expired
+
+        """
+        db_key, raw = self._disk.put(key)
+        rows = self._sql(
+            'SELECT version FROM Cache WHERE key = ? AND raw = ?'
+            ' AND (expire_time IS NULL OR expire_time > ?)',
+            (db_key, raw, time.time()),
+        ).fetchall()
+
+        if not rows:
+            return None
+
+        (version_token,) = rows[0]
+        return version_token
+
+    def compare_and_swap(self, checks, sets=None, deletes=None, retry=False):
+        """Atomically verify version tokens and commit a batch of changes.
+
+        Every key in `checks` is compared against its expected version token
+        (as returned by :meth:`Cache.get_version` or `get(...,
+        version=True)`). If and only if all expectations match, the batch is
+        committed: keys in `sets` are stored and keys in `deletes` are
+        removed. If any expectation fails, the cache is left untouched and
+        the conflicting keys are returned.
+
+        A `None` expectation matches a key that is missing or expired. An
+        expired key never matches a non-None token, even if the row has not
+        been evicted yet.
+
+        Values in `sets` may be plain values or :class:`CasSet` instances
+        to specify `expire`, `tag`, or `read` options. Large values are
+        staged in external files before the transaction; on conflict the
+        staged files are removed.
+
+        Every key in `sets` and `deletes` must also appear in `checks`.
+        Keys that are only checked (read-compute-write dependencies) simply
+        omit a corresponding entry in `sets` and `deletes`.
+
+        >>> cache = Cache()
+        >>> cache.set('a', 1)
+        True
+        >>> cache.set('b', 2)
+        True
+        >>> token_a = cache.get_version('a')
+        >>> token_b = cache.get_version('b')
+        >>> conflicts = cache.compare_and_swap(
+        ...     {'a': token_a, 'b': token_b, 'c': None},
+        ...     sets={'a': 10, 'c': CasSet(30, tag='new')},
+        ...     deletes=['b'],
+        ... )
+        >>> conflicts
+        []
+        >>> cache.get('a'), 'b' in cache, cache.get('c', tag=True)
+        (10, False, (30, 'new'))
+        >>> conflicts = cache.compare_and_swap(
+        ...     {'a': token_a}, sets={'a': 100}
+        ... )
+        >>> conflicts
+        ['a']
+        >>> cache.get('a')
+        10
+        >>> cache.close()
+
+        :param dict checks: mapping of key to expected version token
+        :param dict sets: mapping of key to value or :class:`CasSet`
+        :param deletes: iterable of keys to delete
+        :param bool retry: retry if database timeout occurs (default False)
+        :return: list of conflicting keys, empty if batch was committed
+        :raises ValueError: if a key in `sets` or `deletes` is missing
+            from `checks` or present in both
+        :raises Timeout: if database timeout occurs
+
+        """
+        now = time.time()
+        sets = {} if sets is None else dict(sets)
+        deletes = set() if deletes is None else set(deletes)
+
+        both = [key for key in deletes if key in sets]
+
+        if both:
+            raise ValueError('keys in both sets and deletes: %r' % (both,))
+
+        unchecked = [key for key in deletes if key not in checks]
+        unchecked += [key for key in sets if key not in checks]
+
+        if unchecked:
+            raise ValueError('keys missing from checks: %r' % (unchecked,))
+
+        # Stage values before entering the transaction. Large values are
+        # written to external files which are removed if the batch conflicts
+        # or an error occurs.
+
+        staged_filenames = []
+        plans = []
+
+        for key, expected in checks.items():
+            db_key, raw = self._disk.put(key)
+            kind = 'check'
+            columns = None
+
+            if key in sets:
+                kind = 'set'
+                action = sets[key]
+
+                if not isinstance(action, CasSet):
+                    action = CasSet(action)
+
+                expire = action.expire
+                expire_time = None if expire is None else now + expire
+                size, mode, filename, db_value = self._disk.store(
+                    action.value, action.read, key=key
+                )
+
+                if filename is not None:
+                    staged_filenames.append(filename)
+
+                columns = (
+                    expire_time,
+                    action.tag,
+                    size,
+                    mode,
+                    filename,
+                    db_value,
+                )
+            elif key in deletes:
+                kind = 'delete'
+
+            plans.append((key, db_key, raw, expected, kind, columns))
+
+        conflicts = []
+
+        try:
+            with self._transact(retry) as (sql, cleanup):
+                # Verify all expected versions before applying any change.
+
+                found = []
+
+                for key, db_key, raw, expected, kind, columns in plans:
+                    rows = sql(
+                        'SELECT rowid, version, expire_time, filename'
+                        ' FROM Cache WHERE key = ? AND raw = ?',
+                        (db_key, raw),
+                    ).fetchall()
+                    row = rows[0] if rows else None
+                    found.append(row)
+
+                    live = row is not None and (
+                        row[2] is None or row[2] > now
+                    )
+
+                    if expected is None:
+                        match = not live
+                    else:
+                        match = live and row[1] == expected
+
+                    if not match:
+                        conflicts.append(key)
+
+                if not conflicts:
+                    for plan, row in zip(plans, found):
+                        key, db_key, raw, expected, kind, columns = plan
+
+                        if kind == 'set':
+                            if row is not None:
+                                cleanup(row[3])
+                                self._row_update(row[0], now, columns)
+                            else:
+                                self._row_insert(db_key, raw, now, columns)
+                        elif kind == 'delete':
+                            if row is not None:
+                                sql(
+                                    'DELETE FROM Cache WHERE rowid = ?',
+                                    (row[0],),
+                                )
+                                cleanup(row[3])
+
+                    self._cull(now, sql, cleanup)
+        except BaseException:
+            for filename in staged_filenames:
+                self._disk.remove(filename)
+            raise
+
+        if conflicts:
+            for filename in staged_filenames:
+                self._disk.remove(filename)
+
+        return conflicts
 
     def __getitem__(self, key):
         """Return corresponding value for `key` from cache.

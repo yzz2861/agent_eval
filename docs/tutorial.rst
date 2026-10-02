@@ -663,6 +663,45 @@ transaction support may be requested.
 The cache shard exists in a subdirectory of the fanout-cache with the given
 name.
 
+.. _tutorial-compare-and-swap:
+
+Compare and Swap
+----------------
+
+For read-compute-write cycles, :meth:`.Cache.compare_and_swap` commits a
+batch of changes only when none of the read keys changed in the meantime.
+Version tokens identify the state of a key and are read together with the
+value::
+
+    >>> from diskcache import CasSet
+    >>> cas_cache = Cache()
+    >>> cas_cache['alpha'] = 1
+    >>> value, token = cas_cache.get('alpha', version=True)
+    >>> conflicts = cas_cache.compare_and_swap(
+    ...     {'alpha': token, 'beta': None},
+    ...     sets={'alpha': value + 1, 'beta': CasSet(100, tag='greek')},
+    ... )
+    >>> conflicts
+    []
+    >>> cas_cache.get('alpha'), cas_cache.get('beta', tag=True)
+    (2, (100, 'greek'))
+
+Each call may set or delete multiple keys and the whole batch is atomic:
+when any version does not match, nothing is applied and the conflicting
+keys are returned::
+
+    >>> cas_cache.compare_and_swap({'alpha': token}, sets={'alpha': -1})
+    ['alpha']
+    >>> cas_cache['alpha']
+    2
+
+A ``None`` token matches a key that is missing or expired. Deleting and
+re-writing an equal value still produces a new version so stale tokens
+never match again (no ABA problem). Versions are assigned from a global
+counter shared by all processes accessing the cache. Like transactions,
+compare-and-swap is not implemented by :class:`.FanoutCache` due to key
+sharding.
+
 .. _tutorial-recipes:
 
 Recipes
