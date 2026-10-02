@@ -521,6 +521,179 @@ describe Rack::Cors do
     end
   end
 
+  describe 'with strict origin checking' do
+    def build_strict_app(options)
+      test = self
+      Rack::Builder.new do
+        use CaptureResult, holder: test
+        use Rack::Cors, options do
+          allow do
+            origins 'localhost:3000', 'example.com', '[2001:db8::1]:8080'
+            resource '/', headers: :any, methods: :any
+          end
+          allow do
+            origins '*'
+            resource '/public', methods: :get
+          end
+        end
+        map('/') do
+          run ->(_env) { [200, { 'content-type' => 'text/html' }, ['success']] }
+        end
+      end
+    end
+
+    let(:app) { build_strict_app(strict_origins: true) }
+
+    it 'allows a well-formed origin and echoes the normalized value' do
+      successful_cors_request '/', origin: 'http://LOCALHOST:3000'
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal 'http://localhost:3000'
+      _(cors_result).must_be :hit
+    end
+
+    it 'matches scheme and host case-insensitively' do
+      successful_cors_request '/', origin: 'HTTP://Example.COM'
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal 'http://example.com'
+    end
+
+    it 'treats default ports as equivalent to no port' do
+      successful_cors_request '/', origin: 'http://example.com:80'
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal 'http://example.com'
+
+      successful_cors_request '/', origin: 'https://example.com:443'
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal 'https://example.com'
+    end
+
+    it 'keeps non-default ports significant' do
+      cors_request '/', origin: 'http://localhost:4000'
+      _(last_response).wont_render_cors_success
+      # matches no hostname rule; the public '/public' rule makes this a path miss
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_NO_PATH
+    end
+
+    it 'supports IPv6 literal hosts' do
+      successful_cors_request '/', origin: 'http://[2001:DB8::1]:8080'
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal 'http://[2001:db8::1]:8080'
+    end
+
+    it 'echoes the normalized origin in preflight responses' do
+      preflight_request('http://LOCALHOST:3000', '/')
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal 'http://localhost:3000'
+    end
+
+    it 'rejects comma-joined origins' do
+      cors_request '/', origin: 'http://localhost:3000, http://example.com'
+      _(last_response).wont_render_cors_success
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_INVALID_ORIGIN
+    end
+
+    it 'rejects origins with userinfo' do
+      cors_request '/', origin: 'http://user@localhost:3000'
+      _(last_response).wont_render_cors_success
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_INVALID_ORIGIN
+    end
+
+    it 'rejects origins with path segments' do
+      cors_request '/', origin: 'http://localhost:3000/path'
+      _(last_response).wont_render_cors_success
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_INVALID_ORIGIN
+    end
+
+    it 'rejects origins with a port out of range' do
+      cors_request '/', origin: 'http://localhost:99999'
+      _(last_response).wont_render_cors_success
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_INVALID_ORIGIN
+    end
+
+    it 'rejects origins containing control characters' do
+      cors = Rack::Cors.new(->(_env) { [200, {}, ['ok']] }, strict_origins: true) do
+        allow do
+          origins 'localhost:3000'
+          resource '/'
+        end
+      end
+      env = Rack::MockRequest.env_for('/', 'HTTP_ORIGIN' => "http://localhost:3000\r\nX-Evil: 1")
+      _status, headers, = cors.call(env)
+      _(headers['access-control-allow-origin']).must_be_nil
+      _(env[Rack::Cors::ENV_KEY].miss_reason).must_equal Rack::Cors::Result::MISS_INVALID_ORIGIN
+    end
+
+    it 'does not leak abnormal input into debug logs' do
+      log_output = StringIO.new
+      cors = Rack::Cors.new(->(_env) { [200, {}, ['ok']] }, strict_origins: true, debug: true, logger: Logger.new(log_output)) do
+        allow do
+          origins 'localhost:3000'
+          resource '/'
+        end
+      end
+      env = Rack::MockRequest.env_for('/', 'HTTP_ORIGIN' => "http://localhost:3000\r\nX-Injected: yes")
+      cors.call(env)
+      _(log_output.string).wont_match(/\r/)
+      _(log_output.string).must_match(/\\x0D\\x0A/)
+      _(log_output.string).must_match(/rejected/)
+    end
+
+    it 'rejects the null origin unless explicitly allowed' do
+      cors_request '/', origin: 'null'
+      _(last_response).wont_render_cors_success
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_NULL_ORIGIN
+    end
+
+    it 'returns 400 on preflight requests with a malformed origin' do
+      preflight_request('http://localhost:3000, http://example.com', '/')
+      _(last_response.status).must_equal 400
+      _(last_response).wont_render_cors_success
+      _(cors_result).must_be :preflight
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_INVALID_ORIGIN
+    end
+
+    it 'follows the regular miss flow on preflight requests with a null origin' do
+      preflight_request('null', '/')
+      _(last_response.status).must_equal 200
+      _(last_response).wont_render_cors_success
+      _(cors_result).must_be :preflight
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_NULL_ORIGIN
+    end
+
+    describe 'with allow_null_origin enabled' do
+      let(:app) { build_strict_app(strict_origins: true, allow_null_origin: true) }
+
+      it 'allows the null origin for public resources' do
+        successful_cors_request '/public', origin: 'null'
+        _(last_response.headers['Access-Control-Allow-Origin']).must_equal '*'
+      end
+
+      it 'does not treat null as a regular hostname' do
+        cors_request '/', origin: 'null'
+        _(last_response).wont_render_cors_success
+        # passes origin validation but matches no hostname rule
+        _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_NO_PATH
+      end
+    end
+  end
+
+  describe 'with loose origin handling (default)' do
+    it 'ignores malformed origins without failing the request' do
+      cors_request '/', origin: 'http://localhost:3000, http://example.com'
+      _(last_response.status).must_equal 200
+      _(last_response).wont_render_cors_success
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_NO_PATH
+    end
+
+    it 'does not fail preflight requests with malformed origins' do
+      preflight_request('http://localhost:3000, http://example.com', '/')
+      _(last_response.status).must_equal 200
+      _(last_response).wont_render_cors_success
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_NO_PATH
+    end
+
+    it 'treats the null origin as a regular non-matching origin' do
+      cors_request '/', origin: 'null'
+      _(last_response).wont_render_cors_success
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_NO_PATH
+    end
+  end
+
   protected
 
   def cors_request(*args)

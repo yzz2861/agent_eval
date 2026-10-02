@@ -81,6 +81,8 @@ end
 #### Middleware Options
 * **debug** (boolean):  Enables debug logging and `X-Rack-CORS` HTTP headers for debugging.
 * **logger** (Object or Proc): Specify the logger to log to.  If a proc is provided, it will be called when a logger is needed.  This is helpful in cases where the logger is initialized after `Rack::Cors` is initially configured, like `Rails.logger`.
+* **strict_origins** (boolean, default: `false`): When enabled, the `Origin` header is validated as a serialized origin (RFC 6454) before any rule runs. Comma-joined values, userinfo, path/query/fragment segments, control characters and other malformed input are rejected with the `invalid-origin` miss reason (and a `400` response for preflight requests) instead of being matched against rules. Valid origins are normalized (scheme/host lowercased, default ports dropped, IPv6 literals kept in brackets) and the normalized value is what rules match against and what gets echoed back in the `Access-Control-Allow-Origin` response header. Leave disabled (the default) for the legacy, permissive matching behavior.
+* **allow_null_origin** (boolean, default: `false`): Only relevant together with **strict_origins**. The `null` origin (sent e.g. by sandboxed iframes or redirects from opaque origins) is rejected with the `null-origin` miss reason unless this option is enabled. `null` is never treated as a regular hostname; when allowed, it still has to match your origin rules (e.g. `origins '*'`).
 
 #### Origin
 Origins can be specified as a string, a regular expression, or as '\*' to allow all origins.

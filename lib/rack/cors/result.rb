@@ -8,6 +8,13 @@ module Rack
       MISS_NO_ORIGIN = 'no-origin'
       MISS_NO_PATH   = 'no-path'
 
+      # The Origin header is not a valid serialized origin (strict mode).
+      MISS_INVALID_ORIGIN = 'invalid-origin'
+
+      # The Origin header is the literal "null" origin, which requires
+      # explicit opt-in via the :allow_null_origin option (strict mode).
+      MISS_NULL_ORIGIN = 'null-origin'
+
       MISS_NO_METHOD   = 'no-method'
       MISS_DENY_METHOD = 'deny-method'
       MISS_DENY_HEADER = 'deny-header'

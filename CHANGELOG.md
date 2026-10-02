@@ -1,6 +1,12 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+### Added
+- Add optional strict Origin validation via the `strict_origins` middleware option. Malformed Origin headers (comma-joined values, userinfo, path segments, control characters, ...) are rejected with the new `invalid-origin` miss reason before any rule runs; preflight requests with a malformed Origin get a `400` response. Valid origins are normalized (case-insensitive scheme/host, default ports dropped, IPv6 literals supported) and the normalized value is echoed in response headers.
+- Add `allow_null_origin` middleware option to explicitly opt in to the `null` origin, which is otherwise rejected with the new `null-origin` miss reason in strict mode and is never treated as a regular hostname.
+- Abnormal Origin values are escaped before being written to debug logs.
+
 ## 3.0.0 - 2025-05-16
 ### Changed
 - Update Rack dependency to >= 3.0.14

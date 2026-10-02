@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'logger'
+require_relative 'cors/origin'
 require_relative 'cors/resources'
 require_relative 'cors/resource'
 require_relative 'cors/result'
@@ -29,6 +30,8 @@ module Rack
     def initialize(app, opts = {}, &block)
       @app = app
       @debug_mode = !!opts[:debug]
+      @strict_origins = !!opts[:strict_origins]
+      @allow_null_origin = !!opts[:allow_null_origin]
       @logger = @logger_proc = nil
 
       logger = opts[:logger]
@@ -53,6 +56,10 @@ module Rack
       @debug_mode
     end
 
+    def strict_origins?
+      @strict_origins
+    end
+
     def allow(&block)
       all_resources << (resources = Resources.new)
 
@@ -72,13 +79,25 @@ module Rack
       if env[HTTP_ORIGIN]
         debug(env) do
           ['Incoming Headers:',
-           "  Origin: #{env[HTTP_ORIGIN]}",
+           "  Origin: #{Origin.sanitize_for_log(env[HTTP_ORIGIN])}",
            "  Path-Info: #{path}",
            "  Access-Control-Request-Method: #{env[HTTP_ACCESS_CONTROL_REQUEST_METHOD]}",
            "  Access-Control-Request-Headers: #{env[HTTP_ACCESS_CONTROL_REQUEST_HEADERS]}"].join("\n")
         end
 
-        if env[REQUEST_METHOD] == OPTIONS && env[HTTP_ACCESS_CONTROL_REQUEST_METHOD]
+        origin_error = validate_origin_header(env)
+
+        if origin_error
+          if env[REQUEST_METHOD] == OPTIONS && env[HTTP_ACCESS_CONTROL_REQUEST_METHOD]
+            result = Result.preflight(env)
+            result.miss(origin_error)
+            # A malformed Origin is a client error; a merely disallowed one
+            # (e.g. "null") follows the regular preflight miss flow.
+            status = origin_error == Result::MISS_INVALID_ORIGIN ? 400 : 200
+            return [status, {}, []]
+          end
+          Result.miss(env, origin_error)
+        elsif env[REQUEST_METHOD] == OPTIONS && env[HTTP_ACCESS_CONTROL_REQUEST_METHOD]
           return [400, {}, []] unless Rack::Utils.valid_path?(path)
 
           headers = process_preflight(env, path)
@@ -162,6 +181,35 @@ module Rack
       end
 
       path
+    end
+
+    # Returns a Result miss reason when the Origin header must be rejected
+    # before any rule runs, or nil when the request may proceed. In strict
+    # mode the header is also replaced with its normalized form so that rule
+    # matching and the echoed response header always use a canonical, safe
+    # value.
+    def validate_origin_header(env)
+      return nil unless strict_origins?
+
+      origin = env[HTTP_ORIGIN]
+
+      if Origin.null?(origin)
+        return nil if @allow_null_origin
+
+        debug(env) { 'Origin header rejected: the "null" origin requires the :allow_null_origin option' }
+        return Result::MISS_NULL_ORIGIN
+      end
+
+      invalid_reason = Origin.invalid_reason(origin)
+      if invalid_reason
+        debug(env) do
+          "Origin header rejected (#{invalid_reason}): #{Origin.sanitize_for_log(origin)}"
+        end
+        return Result::MISS_INVALID_ORIGIN
+      end
+
+      env[HTTP_ORIGIN] = Origin.normalize(origin)
+      nil
     end
 
     def all_resources
