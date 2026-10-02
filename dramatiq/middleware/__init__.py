@@ -26,6 +26,7 @@ from .middleware import Middleware, MiddlewareError, SkipMessage
 from .pipelines import Pipelines
 from .retries import Retries
 from .shutdown import Shutdown, ShutdownNotifications
+from .subprocess import Subprocess
 from .threading import Interrupt, raise_thread_exception
 from .time_limit import TimeLimit, TimeLimitExceeded
 
@@ -47,6 +48,7 @@ __all__ = [
     "Retries",
     "Shutdown",
     "ShutdownNotifications",
+    "Subprocess",
     "TimeLimit",
     "TimeLimitExceeded",
 ]
@@ -60,4 +62,5 @@ default_middleware = [
     Callbacks,
     Pipelines,
     Retries,
+    Subprocess,
 ]

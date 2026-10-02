@@ -164,6 +164,18 @@ def worker_fork_timeout_type(value: str) -> float:
     return ms
 
 
+def subprocess_processes_type(value: str) -> int:
+    try:
+        processes = int(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("subprocess-processes must be an integer.") from e
+
+    if processes < 1:
+        raise argparse.ArgumentTypeError("subprocess-processes must be greater than 0.")
+
+    return processes
+
+
 def make_argument_parser():
     parser = argparse.ArgumentParser(
         prog="dramatiq",
@@ -194,6 +206,12 @@ def make_argument_parser():
         default=8,
         type=int,
         help="the number of worker threads per process (default: 8)",
+    )
+    parser.add_argument(
+        "--subprocess-processes",
+        type=subprocess_processes_type,
+        default=1,
+        help="the maximum number of subprocess-backed actors each worker process may run concurrently (default: 1)",
     )
     parser.add_argument(
         "--path",
@@ -456,7 +474,12 @@ def worker_process(args, worker_id, logging_pipe, canteen, event):
                         canteen_add(canteen, fork_path)
 
         logger.debug("Starting worker threads...")
-        worker = Worker(broker, queues=args.queues, worker_threads=args.threads)
+        worker = Worker(
+            broker,
+            queues=args.queues,
+            worker_threads=args.threads,
+            subprocess_processes=args.subprocess_processes,
+        )
         worker.start()
     except ImportError:
         logger.exception("Failed to import module.")

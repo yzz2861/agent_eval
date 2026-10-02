@@ -97,6 +97,7 @@ The following middleware classes are all enabled by default, with their default 
 .. autoclass:: dramatiq.middleware.Pipelines
 .. autoclass:: dramatiq.middleware.Retries
 .. autoclass:: dramatiq.middleware.ShutdownNotifications
+.. autoclass:: dramatiq.middleware.Subprocess
 .. autoclass:: dramatiq.middleware.TimeLimit
 
 .. _optional-middleware:

@@ -88,6 +88,9 @@ class TimeLimit(Middleware):
 
     def before_process_message(self, broker, message):
         actor = broker.get_actor(message.actor_name)
+        if actor.options.get("subprocess"):
+            return
+
         limit = message.options.get("time_limit") or actor.options.get("time_limit", self.time_limit)
         self.manager.add_timeout(threading.get_ident(), limit)
 

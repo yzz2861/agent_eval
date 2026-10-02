@@ -31,7 +31,10 @@ from .common import current_millis, iter_queue, join_all, q_name
 from .errors import ActorNotFound, BrokerConnectionError, RateLimitExceeded, Retry
 from .logging import get_logger
 from .middleware import Middleware, SkipMessage
+from .middleware.subprocess import Subprocess
+from .middleware.time_limit import TimeLimit
 from .results.middleware import Results
+from .subprocess import SubprocessPool
 
 #: The number of milliseconds to wait before restarting consumers
 #: after a connection error.
@@ -74,6 +77,8 @@ class Worker:
       worker_timeout(int): The number of milliseconds workers should
         wake up after if the queue is idle.
       worker_threads(int): The number of worker threads to spawn.
+      subprocess_processes(int): The maximum number of actors allowed to run
+        concurrently in isolated spawn subprocesses.
     """
 
     def __init__(
@@ -83,6 +88,7 @@ class Worker:
         queues: Optional[set[str]] = None,
         worker_timeout: int = WORKER_TIMEOUT,
         worker_threads: int = 8,
+        subprocess_processes: int = 1,
     ) -> None:
         self.logger = get_logger(__name__, type(self))
         self.broker = broker
@@ -101,6 +107,7 @@ class Worker:
         self.work_queue: PriorityQueue[_WorkQueueItem] = PriorityQueue()
         self.worker_timeout = worker_timeout
         self.worker_threads = worker_threads
+        self.subprocess_pool = SubprocessPool(max_workers=subprocess_processes)
 
     def start(self) -> None:
         """Initialize the worker boot sequence and start up all the
@@ -148,6 +155,7 @@ class Worker:
         """
         self.broker.emit_before("worker_shutdown", self)
         self.logger.info("Shutting down...")
+        self.subprocess_pool.shutdown()
 
         thread: Union[WorkerThread, ConsumerThread]
 
@@ -159,6 +167,7 @@ class Worker:
             thread.stop()
 
         join_all(self.workers, timeout)
+        self.subprocess_pool.shutdown()
         self.logger.debug("Workers stopped.")
         self.logger.debug("Stopping consumers...")
         for thread in self.consumers.values():
@@ -233,6 +242,7 @@ class Worker:
             consumers=self.consumers,
             work_queue=self.work_queue,
             worker_timeout=self.worker_timeout,
+            subprocess_pool=self.subprocess_pool,
         )
         worker.start()
         self.workers.append(worker)
@@ -507,6 +517,7 @@ class WorkerThread(Thread):
         consumers: dict[str, ConsumerThread],
         work_queue: PriorityQueue[_WorkQueueItem],
         worker_timeout: int,
+        subprocess_pool: SubprocessPool,
     ) -> None:
         super().__init__(daemon=True)
 
@@ -518,6 +529,7 @@ class WorkerThread(Thread):
         self.consumers = consumers
         self.work_queue = work_queue
         self.timeout = worker_timeout / 1000
+        self.subprocess_pool = subprocess_pool
 
     def run(self) -> None:
         self.logger.debug("Running worker thread...")
@@ -557,7 +569,28 @@ class WorkerThread(Thread):
             res = None
             if not message.failed:
                 actor = self.broker.get_actor(message.actor_name)
-                res = actor(*message.args, **message.kwargs)
+                if actor.options.get("subprocess"):
+                    subprocess_middleware = next(
+                        (middleware for middleware in self.broker.middleware if isinstance(middleware, Subprocess)),
+                        None,
+                    )
+                    if subprocess_middleware is not None:
+                        time_limit = subprocess_middleware.get_time_limit(actor, message)
+                    else:
+                        time_limit_middleware = next(
+                            (middleware for middleware in self.broker.middleware if isinstance(middleware, TimeLimit)),
+                            None,
+                        )
+                        time_limit = (
+                            message.options.get("subprocess_time_limit")
+                            or message.options.get("time_limit")
+                            or actor.options.get("subprocess_time_limit")
+                            or actor.options.get("time_limit")
+                            or (time_limit_middleware.time_limit if time_limit_middleware is not None else None)
+                        )
+                    res = self.subprocess_pool.execute(actor, message, time_limit=time_limit)
+                else:
+                    res = actor(*message.args, **message.kwargs)
                 if (
                     res is not None
                     and message.options.get("pipe_target") is None

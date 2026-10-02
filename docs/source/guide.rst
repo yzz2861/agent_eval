@@ -101,6 +101,20 @@ This will spin up as many processes as there are CPU cores on your
 machine with 8 worker threads per process.  Run ``dramatiq -h`` if you
 want to see a list of the available command line flags.
 
+Actors that call native libraries which may block in a system call can
+opt in to hard process isolation with ``subprocess=True``::
+
+  @dramatiq.actor(subprocess=True, time_limit=60000)
+  def unsafe_native_call():
+      ...
+
+Subprocess actors still acknowledge and retry from the parent worker.
+The child executes only the registered actor and returns JSON-encodable
+results or exception information.  The ``--subprocess-processes`` flag
+limits how many subprocess actors each worker process can run at once::
+
+  $ dramatiq --subprocess-processes 2 count_words
+
 As soon as you run that command you'll see log output along these
 lines::
 
