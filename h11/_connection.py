@@ -162,14 +162,21 @@ class Connection:
             exceeded, then :meth:`next_event` will raise
             :exc:`RemoteProtocolError`.
 
+        strict (bool):
+            Require CRLF for request/status lines, header lines, and chunked
+            framing, and reject obsolete header line folding. The default is
+            false, preserving h11's historical tolerance of bare LF.
+
     """
 
     def __init__(
         self,
         our_role: Type[Sentinel],
         max_incomplete_event_size: int = DEFAULT_MAX_INCOMPLETE_EVENT_SIZE,
+        strict: bool = False,
     ) -> None:
         self._max_incomplete_event_size = max_incomplete_event_size
+        self.strict = strict
         # State and role tracking
         if our_role not in (CLIENT, SERVER):
             raise ValueError(f"expected CLIENT or SERVER, not {our_role!r}")
@@ -187,7 +194,7 @@ class Connection:
         self._reader = self._get_io_object(self.their_role, None, READERS)
 
         # Holds any unprocessed received data
-        self._receive_buffer = ReceiveBuffer()
+        self._receive_buffer = ReceiveBuffer(strict=strict)
         # If this is true, then it indicates that the incoming connection was
         # closed *after* the end of whatever's in self._receive_buffer:
         self._receive_buffer_closed = False
@@ -331,6 +338,12 @@ class Connection:
             framing_type, args = _body_framing(
                 cast(bytes, self._request_method), cast(Union[Request, Response], event)
             )
+            if io_dict is READERS and framing_type == "chunked":
+                reader_factories = cast(
+                    Dict[str, Callable[..., Any]], READERS[SEND_BODY]
+                )
+                reader = reader_factories[framing_type](*args, strict=self.strict)
+                return cast(Callable[..., Any], reader)
             return io_dict[SEND_BODY][framing_type](*args)  # type: ignore[index]
         else:
             # General case: the io_dict just has the appropriate reader/writer

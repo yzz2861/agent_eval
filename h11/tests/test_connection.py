@@ -238,6 +238,317 @@ def test_chunk_boundaries() -> None:
     assert conn.next_event() == EndOfMessage()
 
 
+@pytest.mark.parametrize(
+    "role, message",
+    [
+        (
+            SERVER,
+            b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+            b"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n",
+        ),
+        (
+            CLIENT,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+            b"HTTP/1.1 204 No Content\r\n\r\n",
+        ),
+    ],
+)
+def test_strict_crlf_accepts_arbitrary_splits(
+    role: Type[Sentinel], message: bytes
+) -> None:
+    conn = Connection(role, strict=True)
+    if role is CLIENT:
+        conn.send(
+            Request(method="GET", target="/", headers=[("Host", "example.com")])
+        )
+        conn.send(EndOfMessage())
+    first_complete = False
+    second_started = False
+    second_complete = False
+
+    for index in range(len(message)):
+        conn.receive_data(message[index : index + 1])
+        while True:
+            event = conn.next_event()
+            if event in (NEED_DATA, PAUSED):
+                break
+            if type(event) in (Request, Response):
+                if not first_complete:
+                    first_complete = True
+                else:
+                    second_started = True
+            elif event == EndOfMessage():
+                if not first_complete:
+                    raise AssertionError("received EndOfMessage before first message")
+                if not second_started:
+                    if role is SERVER:
+                        conn.send(
+                            Response(
+                                status_code=200,
+                                headers=[("Content-Length", "0")],
+                            )
+                        )
+                        conn.send(EndOfMessage())
+                    conn.start_next_cycle()
+                else:
+                    second_complete = True
+
+    assert first_complete
+    assert second_started
+    assert second_complete
+
+
+@pytest.mark.parametrize(
+    "role, message, error_index",
+    [
+        (
+            SERVER,
+            b"GET / HTTP/1.1\nHost: example.com\r\n\r\n",
+            b"GET / HTTP/1.1\n".index(b"\n"),
+        ),
+        (
+            SERVER,
+            b"GET / HTTP/1.1\r\nHost: example.com\n\r\n",
+            len(b"GET / HTTP/1.1\r\nHost: example.com"),
+        ),
+        (
+            CLIENT,
+            b"HTTP/1.1 200 OK\nContent-Length: 0\r\n\r\n",
+            b"HTTP/1.1 200 OK\n".index(b"\n"),
+        ),
+        (
+            CLIENT,
+            b"HTTP/1.1 200 OK\r\nX-Test: value\n\r\n",
+            len(b"HTTP/1.1 200 OK\r\nX-Test: value"),
+        ),
+        (
+            SERVER,
+            b"GET / HTTP/1.1\r\nHost: example.com\r\n continuation\r\n\r\n",
+            len(b"GET / HTTP/1.1\r\nHost: example.com\r\n"),
+        ),
+        (
+            CLIENT,
+            b"HTTP/1.1 200 OK\r\nX-Test: value\r\n continuation\r\n\r\n",
+            len(b"HTTP/1.1 200 OK\r\nX-Test: value\r\n"),
+        ),
+    ],
+)
+def test_strict_rejects_bare_lf_and_obs_fold_early(
+    role: Type[Sentinel], message: bytes, error_index: int
+) -> None:
+    default_conn = Connection(role)
+    strict_conn = Connection(role, strict=True)
+
+    for index in range(error_index + 1):
+        chunk = message[index : index + 1]
+        default_conn.receive_data(chunk)
+        strict_conn.receive_data(chunk)
+
+    assert default_conn.next_event() is NEED_DATA
+    with pytest.raises(RemoteProtocolError):
+        strict_conn.next_event()
+    assert strict_conn.their_state is ERROR
+    assert strict_conn.trailing_data == (message[: error_index + 1], False)
+
+    strict_conn.receive_data(message[error_index + 1 :])
+    with pytest.raises(RemoteProtocolError):
+        strict_conn.next_event()
+    assert strict_conn.their_state is ERROR
+    assert strict_conn.trailing_data == (message, False)
+
+    default_conn.receive_data(message[error_index + 1 :])
+    assert type(default_conn.next_event()) in (Request, Response)
+    if role is SERVER:
+        assert default_conn.next_event() == EndOfMessage()
+
+
+@pytest.mark.parametrize("role", [SERVER, CLIENT])
+@pytest.mark.parametrize(
+    "name, body",
+    [
+        ("bare_lf", b"1\r\na\r\n0\r\nX: y\n\r\npipeline"),
+        (
+            "obs_fold",
+            b"1\r\na\r\n0\r\nX: y\r\n z\r\n\r\npipeline",
+        ),
+    ],
+)
+def test_strict_chunked_uses_same_raw_trailer_for_both_modes(
+    role: Type[Sentinel], name: str, body: bytes
+) -> None:
+    if role is CLIENT:
+        header = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    else:
+        header = (
+            b"POST / HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+        )
+
+    default_conn = Connection(role)
+    strict_conn = Connection(role, strict=True)
+    if role is CLIENT:
+        for conn in (default_conn, strict_conn):
+            conn.send(
+                Request(method="GET", target="/", headers=[("Host", "example.com")])
+            )
+            conn.send(EndOfMessage())
+
+    default_conn.receive_data(header)
+    strict_conn.receive_data(header)
+    assert type(default_conn.next_event()) in (Request, Response)
+    assert type(strict_conn.next_event()) in (Request, Response)
+    assert default_conn.next_event() is NEED_DATA
+    assert strict_conn.next_event() is NEED_DATA
+
+    strict_error = None
+    index = -1
+    for index in range(len(body)):
+        default_conn.receive_data(body[index : index + 1])
+        strict_conn.receive_data(body[index : index + 1])
+        try:
+            strict_conn.next_event()
+        except RemoteProtocolError as error:
+            strict_error = error
+            break
+
+    assert strict_error is not None
+    assert index >= 0
+    assert strict_conn.their_state is ERROR
+    trailer_start = len(header + b"1\r\na\r\n0\r\n")
+    trailer_relative_index = index - (trailer_start - len(header))
+    assert strict_conn.trailing_data == (
+        (header + body)[
+            trailer_start : trailer_start + trailer_relative_index + 1
+        ],
+        False,
+    )
+
+    default_conn.receive_data(body[index + 1 :])
+    assert bytes(default_conn.next_event().data) == b"a"  # type: ignore[union-attr]
+    assert default_conn.next_event() == EndOfMessage(
+        headers=[("X", "y z") if name == "obs_fold" else ("X", "y")]
+    )
+    assert default_conn.next_event() is PAUSED
+    assert default_conn.trailing_data == (b"pipeline", False)
+
+
+@pytest.mark.parametrize("role", [SERVER, CLIENT])
+@pytest.mark.parametrize(
+    "body, error_index, strict_residual, default_residual",
+    [
+        (
+            b"1\na\r\n0\r\n\r\n",
+            1,
+            b"1\n",
+            b"0\r\n\r\n",
+        ),
+        (
+            b"1\rXa\r\n0\r\n\r\n",
+            2,
+            b"1\rX",
+            b"0\r\n\r\n",
+        ),
+        (
+            b"1\r\na\n0\r\n\r\n",
+            4,
+            b"\n",
+            b"\n0\r\n\r\n",
+        ),
+        (
+            b"1\r\na\rX\n0\r\n\r\n",
+            5,
+            b"\rX",
+            b"\rX\n0\r\n\r\n",
+        ),
+    ],
+)
+def test_strict_chunked_rejects_non_crlf_separators(
+    role: Type[Sentinel],
+    body: bytes,
+    error_index: int,
+    strict_residual: bytes,
+    default_residual: bytes,
+) -> None:
+    if role is CLIENT:
+        header = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    else:
+        header = (
+            b"POST / HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+        )
+
+    default_conn = Connection(role)
+    strict_conn = Connection(role, strict=True)
+    if role is CLIENT:
+        for conn in (default_conn, strict_conn):
+            conn.send(
+                Request(method="GET", target="/", headers=[("Host", "example.com")])
+            )
+            conn.send(EndOfMessage())
+
+    for conn in (default_conn, strict_conn):
+        conn.receive_data(header)
+        assert type(conn.next_event()) in (Request, Response)
+        assert conn.next_event() is NEED_DATA
+
+    default_conn.receive_data(body)
+    with pytest.raises(RemoteProtocolError):
+        while True:
+            default_conn.next_event()
+    assert default_conn.their_state is ERROR
+    assert default_conn.trailing_data == (default_residual, False)
+
+    strict_conn.receive_data(body[:error_index])
+    strict_conn.next_event()
+    strict_conn.receive_data(bytes([body[error_index]]))
+    with pytest.raises(RemoteProtocolError):
+        strict_conn.next_event()
+    assert strict_conn.their_state is ERROR
+    assert strict_conn.trailing_data == (strict_residual, False)
+
+
+@pytest.mark.parametrize("role", [SERVER, CLIENT])
+def test_strict_chunked_valid_trailer_arbitrary_splits(
+    role: Type[Sentinel],
+) -> None:
+    header = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        if role is CLIENT
+        else b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n"
+    )
+    body = b"1\r\na\r\n0\r\nX: y\r\n\r\npipeline"
+
+    for strict in (False, True):
+        conn = Connection(role, strict=strict)
+        if role is CLIENT:
+            conn.send(
+                Request(method="GET", target="/", headers=[("Host", "example.com")])
+            )
+            conn.send(EndOfMessage())
+        conn.receive_data(header)
+        assert type(conn.next_event()) in (Request, Response)
+        saw_end_of_message = False
+        for index in range(len(body)):
+            conn.receive_data(body[index : index + 1])
+            event = conn.next_event()
+            if event is NEED_DATA:
+                continue
+            if type(event) is Data:
+                assert bytes(event.data) == b"a"
+            elif event == EndOfMessage(headers=[("X", "y")]):
+                assert event == EndOfMessage(headers=[("X", "y")])
+                saw_end_of_message = True
+                conn.receive_data(body[index + 1 :])
+                assert conn.next_event() is PAUSED
+                break
+        assert saw_end_of_message
+        assert conn.trailing_data == (b"pipeline", False)
+
+
 def test_client_talking_to_http10_server() -> None:
     c = Connection(CLIENT)
     c.send(Request(method="GET", target="/", headers=[("Host", "example.com")]))

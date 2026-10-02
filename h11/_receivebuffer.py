@@ -1,6 +1,7 @@
 import re
-import sys
 from typing import List, Optional, Union
+
+from ._util import LocalProtocolError
 
 __all__ = ["ReceiveBuffer"]
 
@@ -45,10 +46,15 @@ blank_line_regex = re.compile(b"\n\r?\n", re.MULTILINE)
 
 
 class ReceiveBuffer:
-    def __init__(self) -> None:
+    def __init__(self, strict: bool = False) -> None:
+        self._strict = strict
         self._data = bytearray()
         self._next_line_search = 0
         self._multiple_lines_search = 0
+        self._strict_next_line_search = 0
+        self._strict_lines_search = 0
+        self._strict_lines_at_line_start = True
+        self._strict_lines_seen_line_ending = False
 
     def __iadd__(self, byteslike: Union[bytes, bytearray]) -> "ReceiveBuffer":
         self._data += byteslike
@@ -59,6 +65,10 @@ class ReceiveBuffer:
 
     def __len__(self) -> int:
         return len(self._data)
+
+    @property
+    def strict(self) -> bool:
+        return self._strict
 
     # for @property unprocessed_data
     def __bytes__(self) -> bytes:
@@ -71,8 +81,86 @@ class ReceiveBuffer:
 
         self._next_line_search = 0
         self._multiple_lines_search = 0
+        self._strict_next_line_search = 0
+        self._strict_lines_search = 0
+        self._strict_lines_at_line_start = True
+        self._strict_lines_seen_line_ending = False
 
         return out
+
+    def _strict_maybe_extract_next_line(self) -> Optional[bytearray]:
+        data = self._data
+        index = self._strict_next_line_search
+        crlf_index = -1
+
+        while index < len(data):
+            byte = data[index]
+            if byte == 0x0A:
+                raise LocalProtocolError("illegal line ending: expected CRLF")
+            if byte == 0x0D:
+                if index + 1 == len(data):
+                    self._strict_next_line_search = index
+                    return None
+                if data[index + 1] != 0x0A:
+                    raise LocalProtocolError("illegal line ending: expected CRLF")
+                crlf_index = index
+                break
+            index += 1
+
+        if crlf_index == -1:
+            self._strict_next_line_search = max(0, len(data) - 1)
+            return None
+
+        return self._extract(crlf_index + 2)
+
+    def _strict_maybe_extract_lines(self) -> Optional[List[bytearray]]:
+        data = self._data
+        index = self._strict_lines_search
+        at_line_start = self._strict_lines_at_line_start
+        seen_line_ending = self._strict_lines_seen_line_ending
+
+        while index < len(data):
+            byte = data[index]
+
+            if at_line_start and byte in (0x20, 0x09):
+                raise LocalProtocolError("obsolete line folding is not allowed")
+
+            if byte == 0x0A:
+                raise LocalProtocolError("illegal line ending: expected CRLF")
+
+            if byte == 0x0D:
+                if index + 1 == len(data):
+                    self._strict_lines_search = index
+                    self._strict_lines_at_line_start = at_line_start
+                    self._strict_lines_seen_line_ending = seen_line_ending
+                    return None
+                if data[index + 1] != 0x0A:
+                    raise LocalProtocolError("illegal line ending: expected CRLF")
+                if at_line_start and (seen_line_ending or index == 0):
+                    return self._extract_lines(index)
+                at_line_start = True
+                seen_line_ending = True
+                index += 2
+            else:
+                at_line_start = False
+                index += 1
+
+        self._strict_lines_search = index
+        self._strict_lines_at_line_start = at_line_start
+        self._strict_lines_seen_line_ending = seen_line_ending
+        return None
+
+    def _extract_lines(self, blank_line_start: int) -> List[bytearray]:
+        if blank_line_start == 0:
+            self._extract(2)
+            return []
+
+        idx = blank_line_start + 2
+        out = self._extract(idx)
+        lines = out.split(b"\r\n")
+        assert lines[-2] == lines[-1] == b""
+        del lines[-2:]
+        return lines
 
     def maybe_extract_at_most(self, count: int) -> Optional[bytearray]:
         """
@@ -88,6 +176,9 @@ class ReceiveBuffer:
         """
         Extract the first line, if it is completed in the buffer.
         """
+        if self._strict:
+            return self._strict_maybe_extract_next_line()
+
         # Only search in buffer space that we've not already looked at.
         search_start_index = max(0, self._next_line_search - 1)
         partial_idx = self._data.find(b"\r\n", search_start_index)
@@ -105,6 +196,9 @@ class ReceiveBuffer:
         """
         Extract everything up to the first blank line, and return a list of lines.
         """
+        if self._strict:
+            return self._strict_maybe_extract_lines()
+
         # Handle the case where we have an immediate empty line.
         if self._data[:1] == b"\n":
             self._extract(1)

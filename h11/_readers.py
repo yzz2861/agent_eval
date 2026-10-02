@@ -40,12 +40,16 @@ header_field_re = re.compile(header_field.encode("ascii"))
 obs_fold_re = re.compile(rb"[ \t]+")
 
 
-def _obsolete_line_fold(lines: Iterable[bytes]) -> Iterable[bytes]:
+def _obsolete_line_fold(
+    lines: Iterable[bytes], strict: bool = False
+) -> Iterable[bytes]:
     it = iter(lines)
     last: Optional[bytes] = None
     for line in it:
         match = obs_fold_re.match(line)
         if match:
+            if strict:
+                raise LocalProtocolError("obsolete line folding is not allowed")
             if last is None:
                 raise LocalProtocolError("continuation line at start of headers")
             if not isinstance(last, bytearray):
@@ -63,8 +67,9 @@ def _obsolete_line_fold(lines: Iterable[bytes]) -> Iterable[bytes]:
 
 def _decode_header_lines(
     lines: Iterable[bytes],
+    strict: bool = False,
 ) -> Iterable[Tuple[bytes, bytes]]:
-    for line in _obsolete_line_fold(lines):
+    for line in _obsolete_line_fold(lines, strict=strict):
         matches = validate(header_field_re, line, "illegal header line: {!r}", line)
         yield (matches["field_name"], matches["field_value"])
 
@@ -84,7 +89,9 @@ def maybe_read_from_IDLE_client(buf: ReceiveBuffer) -> Optional[Request]:
         request_line_re, lines[0], "illegal request line: {!r}", lines[0]
     )
     return Request(
-        headers=list(_decode_header_lines(lines[1:])), _parsed=True, **matches
+        headers=list(_decode_header_lines(lines[1:], strict=buf.strict)),
+        _parsed=True,
+        **matches,
     )
 
 
@@ -111,7 +118,7 @@ def maybe_read_from_SEND_RESPONSE_server(
         InformationalResponse if status_code < 200 else Response
     )
     return class_(
-        headers=list(_decode_header_lines(lines[1:])),
+        headers=list(_decode_header_lines(lines[1:], strict=buf.strict)),
         _parsed=True,
         status_code=status_code,
         reason=reason,
@@ -146,11 +153,12 @@ chunk_header_re = re.compile(chunk_header.encode("ascii"))
 
 
 class ChunkedReader:
-    def __init__(self) -> None:
+    def __init__(self, strict: bool = False) -> None:
+        self._strict = strict
         self._bytes_in_chunk = 0
-        # After reading a chunk, we have to throw away the trailing \r\n.
-        # This tracks the bytes that we need to match and throw away.
-        self._bytes_to_discard = b""
+        # After reading a chunk, we have to verify the trailing CRLF without
+        # consuming it until both bytes are known.
+        self._waiting_for_chunk_footer = False
         self._reading_trailer = False
 
     def __call__(self, buf: ReceiveBuffer) -> Union[Data, EndOfMessage, None]:
@@ -158,20 +166,28 @@ class ChunkedReader:
             lines = buf.maybe_extract_lines()
             if lines is None:
                 return None
-            return EndOfMessage(headers=list(_decode_header_lines(lines)))
-        if self._bytes_to_discard:
-            data = buf.maybe_extract_at_most(len(self._bytes_to_discard))
-            if data is None:
+            return EndOfMessage(
+                headers=list(_decode_header_lines(lines, strict=self._strict))
+            )
+        if self._waiting_for_chunk_footer:
+            if not buf:
                 return None
-            if data != self._bytes_to_discard[: len(data)]:
+            data = bytes(buf)[:1]
+            if data != b"\r":
                 raise LocalProtocolError(
-                    f"malformed chunk footer: {data!r} (expected {self._bytes_to_discard!r})"
+                    f"malformed chunk footer: {data!r} (expected b'\\r')"
                 )
-            self._bytes_to_discard = self._bytes_to_discard[len(data) :]
-            if self._bytes_to_discard:
+            if len(buf) < 2:
                 return None
+            data = bytes(buf)[:2]
+            if data != b"\r\n":
+                raise LocalProtocolError(
+                    f"malformed chunk footer: {bytes(data)!r} (expected b'\\r\\n')"
+                )
+            buf.maybe_extract_at_most(2)
+            self._waiting_for_chunk_footer = False
             # else, fall through and read some more
-        assert self._bytes_to_discard == b""
+        assert not self._waiting_for_chunk_footer
         if self._bytes_in_chunk == 0:
             # We need to refill our chunk count
             chunk_header = buf.maybe_extract_next_line()
@@ -197,7 +213,7 @@ class ChunkedReader:
             return None
         self._bytes_in_chunk -= len(data)
         if self._bytes_in_chunk == 0:
-            self._bytes_to_discard = b"\r\n"
+            self._waiting_for_chunk_footer = True
             chunk_end = True
         else:
             chunk_end = False
