@@ -1,5 +1,6 @@
 # This contains the main Connection class. Everything in h11 revolves around
 # this.
+import copy
 from typing import (
     Any,
     Callable,
@@ -67,6 +68,35 @@ class PAUSED(Sentinel, metaclass=Sentinel):
 # - IIS: 16 * 1024
 # - Apache: <8 KiB per line>
 DEFAULT_MAX_INCOMPLETE_EVENT_SIZE = 16 * 1024
+
+
+class _SendPlan:
+    def __init__(
+        self,
+        connection: "Connection",
+        generation: int,
+        cstate: ConnectionState,
+        writer: Optional[Callable[..., Any]],
+        reader: Optional[Callable[..., Any]],
+        request_method: Optional[bytes],
+        their_http_version: Optional[bytes],
+        client_is_waiting_for_100_continue: bool,
+    ) -> None:
+        self._connection = connection
+        self._generation = generation
+        self._committed = False
+        self._cstate = cstate
+        self._writer = writer
+        self._reader = reader
+        self._request_method = request_method
+        self._their_http_version = their_http_version
+        self._client_is_waiting_for_100_continue = (
+            client_is_waiting_for_100_continue
+        )
+
+    def commit(self) -> None:
+        """Commit this plan on the connection that created it."""
+        self._connection.commit_send(self)
 
 
 # RFC 7230's rules for connection lifecycles:
@@ -203,6 +233,9 @@ class Connection:
         # transitions, so no need to bother ConnectionState with it:
         self.client_is_waiting_for_100_continue = False
 
+        # Each pending send plan belongs to one generation of this connection.
+        self._send_generation = 0
+
     @property
     def states(self) -> Dict[Type[Sentinel], Type[Sentinel]]:
         """A dictionary like::
@@ -232,6 +265,9 @@ class Connection:
     def they_are_waiting_for_100_continue(self) -> bool:
         return self.their_role is CLIENT and self.client_is_waiting_for_100_continue
 
+    def _invalidate_send_plans(self) -> None:
+        self._send_generation += 1
+
     def start_next_cycle(self) -> None:
         """Attempt to reset our connection state for a new request/response
         cycle.
@@ -244,6 +280,7 @@ class Connection:
         See :ref:`keepalive-and-pipelining`.
 
         """
+        self._invalidate_send_plans()
         old_states = dict(self._cstate.states)
         self._cstate.start_next_cycle()
         self._request_method = None
@@ -253,6 +290,7 @@ class Connection:
         self._respond_to_state_changes(old_states)
 
     def _process_error(self, role: Type[Sentinel]) -> None:
+        self._invalidate_send_plans()
         old_states = dict(self._cstate.states)
         self._cstate.process_error(role)
         self._respond_to_state_changes(old_states)
@@ -400,6 +438,7 @@ class Connection:
                 and equivalent to calling it once.)
 
         """
+        self._invalidate_send_plans()
         if data:
             if self._receive_buffer_closed:
                 raise RuntimeError("received close, then received more data?")
@@ -475,6 +514,7 @@ class Connection:
 
         """
 
+        self._invalidate_send_plans()
         if self.their_state is ERROR:
             raise RemoteProtocolError("Can't receive data when peer state is ERROR")
         try:
@@ -535,11 +575,67 @@ class Connection:
         :ref:`error-handling` for discussion.
 
         """
-        data_list = self.send_with_data_passthrough(event)
-        if data_list is None:
-            return None
-        else:
+        self._invalidate_send_plans()
+        try:
+            data_list, plan = self._prepare_send(event)
+            self.commit_send(plan)
+            if data_list is None:
+                return None
             return b"".join(data_list)
+        except:
+            self._process_error(self.our_role)
+            raise
+
+    @overload
+    def prepare_send(self, event: ConnectionClosed) -> Tuple[None, _SendPlan]:
+        ...
+
+    @overload
+    def prepare_send(
+        self,
+        event: Union[Request, InformationalResponse, Response, Data, EndOfMessage],
+    ) -> Tuple[bytes, _SendPlan]:
+        ...
+
+    @overload
+    def prepare_send(self, event: Event) -> Tuple[Optional[bytes], _SendPlan]:
+        ...
+
+    def prepare_send(self, event: Event) -> Tuple[Optional[bytes], _SendPlan]:
+        """Prepare an event for sending without changing connection state.
+
+        The returned data is valid for the state in which the plan was
+        created. Call :meth:`commit_send` after accepting the data; abandon
+        the plan without any cleanup if it is not used.
+        """
+        data_list, plan = self.prepare_send_with_data_passthrough(event)
+        if data_list is None:
+            return None, plan
+        return b"".join(data_list), plan
+
+    def commit_send(self, plan: _SendPlan) -> None:
+        """Apply the state transition represented by a send plan."""
+        if not isinstance(plan, _SendPlan):
+            raise LocalProtocolError("Invalid send plan")
+        if plan._connection is not self:
+            raise LocalProtocolError("Send plan belongs to a different connection")
+        if plan._committed:
+            raise LocalProtocolError("Send plan has already been committed")
+        if plan._generation != self._send_generation:
+            raise LocalProtocolError("Send plan is no longer valid")
+
+        plan._committed = True
+        self._invalidate_send_plans()
+        self._cstate = plan._cstate
+        self._writer = plan._writer
+        self._reader = plan._reader
+        self._request_method = plan._request_method
+        self.their_http_version = plan._their_http_version
+        self.client_is_waiting_for_100_continue = (
+            plan._client_is_waiting_for_100_continue
+        )
+
+    commit = commit_send
 
     def send_with_data_passthrough(self, event: Event) -> Optional[List[bytes]]:
         """Identical to :meth:`send`, except that in situations where
@@ -549,30 +645,58 @@ class Connection:
         :attr:`Data.data`. See :ref:`sendfile` for discussion.
 
         """
-        if self.our_state is ERROR:
-            raise LocalProtocolError("Can't send data when our state is ERROR")
+        self._invalidate_send_plans()
         try:
-            if type(event) is Response:
-                event = self._clean_up_response_headers_for_sending(event)
-            # We want to call _process_event before calling the writer,
-            # because if someone tries to do something invalid then this will
-            # give a sensible error message, while our writers all just assume
-            # they will only receive valid events. But, _process_event might
-            # change self._writer. So we have to do a little dance:
-            writer = self._writer
-            self._process_event(self.our_role, event)
-            if type(event) is ConnectionClosed:
-                return None
-            else:
-                # In any situation where writer is None, process_event should
-                # have raised ProtocolError
-                assert writer is not None
-                data_list: List[bytes] = []
-                writer(event, data_list.append)
-                return data_list
+            data_list, plan = self._prepare_send(event)
+            self.commit_send(plan)
+            return data_list
         except:
             self._process_error(self.our_role)
             raise
+
+    def prepare_send_with_data_passthrough(
+        self, event: Event
+    ) -> Tuple[Optional[List[bytes]], _SendPlan]:
+        """Prepare a send plan while preserving the original body object."""
+        if self.our_state is ERROR:
+            raise LocalProtocolError("Can't send data when our state is ERROR")
+        return self._prepare_send(event)
+
+    def _prepare_send(
+        self, event: Event
+    ) -> Tuple[Optional[List[bytes]], _SendPlan]:
+        if type(event) is Response:
+            event = self._clean_up_response_headers_for_sending(event)
+
+        cstate = copy.copy(self._cstate)
+        cstate.states = dict(self._cstate.states)
+        cstate.pending_switch_proposals = set(self._cstate.pending_switch_proposals)
+        writer = copy.copy(self._writer) if self._writer is not None else None
+
+        shadow = copy.copy(self)
+        shadow._cstate = cstate
+        shadow._writer = writer
+        shadow._process_event(shadow.our_role, event)
+
+        data_list: Optional[List[bytes]] = None
+        if type(event) is not ConnectionClosed:
+            assert writer is not None
+            data_list = []
+            writer(event, data_list.append)
+
+        plan = _SendPlan(
+            connection=self,
+            generation=self._send_generation,
+            cstate=cstate,
+            writer=shadow._writer,
+            reader=shadow._reader,
+            request_method=shadow._request_method,
+            their_http_version=shadow.their_http_version,
+            client_is_waiting_for_100_continue=(
+                shadow.client_is_waiting_for_100_continue
+            ),
+        )
+        return data_list, plan
 
     def send_failed(self) -> None:
         """Notify the state machine that we failed to send the data it gave

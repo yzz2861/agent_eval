@@ -397,7 +397,10 @@ The Connection object
    .. automethod:: receive_data
    .. automethod:: next_event
    .. automethod:: send
+   .. automethod:: prepare_send
+   .. automethod:: commit_send
    .. automethod:: send_with_data_passthrough
+   .. automethod:: prepare_send_with_data_passthrough
    .. automethod:: send_failed
 
    .. automethod:: start_next_cycle
