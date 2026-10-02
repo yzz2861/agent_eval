@@ -1,0 +1,25 @@
+# frozen_string_literal: true
+
+require 'test_helper'
+
+class CallbackWithApplicationBoundObjectTest < StateMachinesTest
+  def setup
+    @original_bind_to_object = StateMachines::Callback.bind_to_object
+    StateMachines::Callback.bind_to_object = true
+
+    context = nil
+    @callback = StateMachines::Callback.new(:before, do: ->(*_args) { context = self })
+
+    @object = Object.new
+    @callback.call(@object)
+    @context = context
+  end
+
+  def teardown
+    StateMachines::Callback.bind_to_object = @original_bind_to_object
+  end
+
+  def test_should_call_method_within_the_context_of_the_object
+    assert_equal @object, @context
+  end
+end

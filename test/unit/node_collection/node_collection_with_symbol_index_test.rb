@@ -1,0 +1,22 @@
+# frozen_string_literal: true
+
+require 'test_helper'
+require 'files/node'
+
+class NodeCollectionWithSymbolIndexTest < StateMachinesTest
+  def setup
+    machine = StateMachines::Machine.new(Class.new)
+    @collection = StateMachines::NodeCollection.new(machine, index: %i[name value])
+
+    @parked = Node.new('parked', 1)
+    @collection << @parked
+  end
+
+  def test_should_index_by_name
+    assert_equal @parked, @collection['parked']
+  end
+
+  def test_should_index_by_symbol_name
+    assert_equal @parked, @collection[:parked]
+  end
+end

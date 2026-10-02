@@ -1,0 +1,19 @@
+# frozen_string_literal: true
+
+require 'test_helper'
+require 'files/models/traffic_light'
+
+class TrafficLightProceedTest < Minitest::Test
+  def setup
+    @light = TrafficLight.new
+    @light.state = 'proceed'
+  end
+
+  def test_should_use_proceed_color
+    assert_equal 'green', @light.color
+  end
+
+  def test_should_use_proceed_capture_violations
+    refute_predicate @light, :capture_violations?
+  end
+end

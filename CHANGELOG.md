@@ -1,0 +1,190 @@
+## 0.6.0
+
+* Drop support to EOL rubies.
+* Support kwargs for ruby 3.0+.
+
+## [0.202.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.201.0...state_machines/v0.202.0) (2026-07-18)
+
+
+### Features
+
+* show owner class and source location in method conflict warnings ([#171](https://github.com/state-machines/state_machines/issues/171)) ([d6183d1](https://github.com/state-machines/state_machines/commit/d6183d1cd780ae5c4c9e9bc594be660e2604fd13))
+
+## [0.201.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.200.0...state_machines/v0.201.0) (2026-06-12)
+
+
+### Bug Fixes
+
+* complete nested attribute event transitions in the same action cycle ([6295cc0](https://github.com/state-machines/state_machines/commit/6295cc0f87ba8feda1e18f54947e22ba3b7860bc))
+
+## [0.200.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.101.0...state_machines/v0.200.0) (2026-06-11)
+
+
+### Features
+
+* consolidate duplicated internal logic ([c1507a0](https://github.com/state-machines/state_machines/commit/c1507a07fc37a84b5bd308be086a5c01e608f394))
+* consolidate duplicated internal logic ([20c2408](https://github.com/state-machines/state_machines/commit/20c24088092b146a977f66552b3d62f85dcf656f))
+
+## [0.101.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.100.4...state_machines/v0.101.0) (2026-03-22)
+
+
+### Features
+
+* add hook to defer conflicting attribute default check ([4c0aea0](https://github.com/state-machines/state_machines/commit/4c0aea0228eba97dea55891f900189447a7b9a3c))
+* add hook to defer conflicting attribute default check ([dfc244a](https://github.com/state-machines/state_machines/commit/dfc244a227196c20bb9cfcfa6275bf326b5093d6))
+
+
+### Bug Fixes
+
+* force release ([21c5a7f](https://github.com/state-machines/state_machines/commit/21c5a7f8f88d163d1469625678b6a8d7529b026e))
+* remove bump-patch-for-minor-pre-major so feat bumps minor version ([0c384e5](https://github.com/state-machines/state_machines/commit/0c384e5fac59f221a6abb48759da94dbf6ebaebe))
+
+## [0.100.4](https://github.com/state-machines/state_machines/compare/state_machines/v0.100.3...state_machines/v0.100.4) (2025-10-10)
+
+
+### Bug Fixes
+
+* export and restore Thread.current storage from Fiber to after callbacks ([#152](https://github.com/state-machines/state_machines/issues/152)) ([38ba8ca](https://github.com/state-machines/state_machines/commit/38ba8ca56497d0af15798ac972cff6e64856630d))
+
+## [0.100.3](https://github.com/state-machines/state_machines/compare/state_machines/v0.100.2...state_machines/v0.100.3) (2025-09-27)
+
+
+### Bug Fixes
+
+* preserve Thread.current storage object identity across Fiber boundaries ([#152](https://github.com/state-machines/state_machines/issues/152)) ([#156](https://github.com/state-machines/state_machines/issues/156)) ([ff79cd4](https://github.com/state-machines/state_machines/commit/ff79cd4742b9cb9b48ac9091eeb89a5aabf75a6f)), closes [#157](https://github.com/state-machines/state_machines/issues/157)
+
+## [0.100.2](https://github.com/state-machines/state_machines/compare/state_machines/v0.100.1...state_machines/v0.100.2) (2025-09-11)
+
+
+### Features
+
+* Fix Thread.current/Fiber deadlock in pausable transitions ([#152](https://github.com/state-machines/state_machines/issues/152)) ([#153](https://github.com/state-machines/state_machines/issues/153)) ([7472b51](https://github.com/state-machines/state_machines/commit/7472b51c2d8d0dd7fe2e0f8044cc55d9119d536d))
+
+## [0.100.1](https://github.com/state-machines/state_machines/compare/state_machines/v0.100.0...state_machines/v0.100.1) (2025-07-25)
+
+
+### Features
+
+* allow integration to append their own options ([#150](https://github.com/state-machines/state_machines/issues/150)) ([0540d3b](https://github.com/state-machines/state_machines/commit/0540d3be07ab28c6d73353b2f2c99936b8abb8b3))
+
+## [0.100.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.50.0...state_machines/v0.100.0) (2025-07-16)
+
+
+### Features
+
+* replace deprecated callc with Fiber ([#147](https://github.com/state-machines/state_machines/issues/147)) ([2ca2b29](https://github.com/state-machines/state_machines/commit/2ca2b29caa13500d29b65957cecfe0578e5800ce))
+
+## [0.50.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.40.0...state_machines/v0.50.0) (2025-07-12)
+
+
+### Features
+
+* Add coordinated state management guards ([#145](https://github.com/state-machines/state_machines/issues/145)) ([97eb6ef](https://github.com/state-machines/state_machines/commit/97eb6ef28958e7a6a61fed205e5e02752a95b6a4))
+
+## [0.40.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.31.0...state_machines/v0.40.0) (2025-07-12)
+
+
+### Features
+
+* add async support with declarative async: true parameter ([#144](https://github.com/state-machines/state_machines/issues/144)) ([5fcbbd7](https://github.com/state-machines/state_machines/commit/5fcbbd72cd7c43c6e946afd242e85b0d9c781251))
+
+
+### Bug Fixes
+
+* prevent event_transition overwriting with multiple state machines ([fab957e](https://github.com/state-machines/state_machines/commit/fab957e6c4deb5486f5f817f98e410d17d2a45bf))
+* prevent event_transition overwriting with multiple state machines ([a8c6017](https://github.com/state-machines/state_machines/commit/a8c60175bd0f7b8c0ea65c5f50229be94bc314c5))
+
+## [0.31.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.30.0...state_machines/v0.31.0) (2025-06-29)
+
+
+### Features
+
+* modernize codebase with Ruby 3.2+ features ([#134](https://github.com/state-machines/state_machines/issues/134)) ([b3ab92d](https://github.com/state-machines/state_machines/commit/b3ab92de9c90826a521097a863a137fd2cb429c2))
+* respect ignore_method_conflicts in State#add_predicate ([#139](https://github.com/state-machines/state_machines/issues/139)) ([d897c50](https://github.com/state-machines/state_machines/commit/d897c5042aa4b6160da80b73fc352da0f2aacd8e)), closes [#135](https://github.com/state-machines/state_machines/issues/135)
+
+
+### Bug Fixes
+
+* Add run_action as a hash option ([#137](https://github.com/state-machines/state_machines/issues/137)) ([d213cd0](https://github.com/state-machines/state_machines/commit/d213cd0fa1e5ba51dce81816672ed0532ee364b0))
+* Passing event arguments to guards ([#132](https://github.com/state-machines/state_machines/issues/132)) ([4e21b79](https://github.com/state-machines/state_machines/commit/4e21b79a16d2ea3ef6fcb3e882fb2b6288f0c132))
+
+
+### Miscellaneous Chores
+
+* release 0.31.0 ([c75d9b8](https://github.com/state-machines/state_machines/commit/c75d9b84cf0b2cc6a2a7ec2f9262fd5bb2db5adf))
+
+## [0.30.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.20.0...state_machines/v0.30.0) (2025-06-19)
+
+
+### Features
+
+* add basic safety check for eval_helpers ([#126](https://github.com/state-machines/state_machines/issues/126)) ([604e3e6](https://github.com/state-machines/state_machines/commit/604e3e6f3958f2b4be7a9fcbac9502b4583946de))
+* add more test_helper after receiving feedback ([#128](https://github.com/state-machines/state_machines/issues/128)) ([4f3ab0a](https://github.com/state-machines/state_machines/commit/4f3ab0a4733d2aabfe78b193cde426b354e96d33))
+* add support to kwargs ([#130](https://github.com/state-machines/state_machines/issues/130)) ([9be0c8f](https://github.com/state-machines/state_machines/commit/9be0c8f6cd20990745878bfd0dd4ce6d6c8ff8a1))
+
+
+### Bug Fixes
+
+* extract internal into modules ([#131](https://github.com/state-machines/state_machines/issues/131)) ([9f4850d](https://github.com/state-machines/state_machines/commit/9f4850d032d374239cf261cc4abcfed09e49ea3d))
+* restore jruby support and tests ([#129](https://github.com/state-machines/state_machines/issues/129)) ([2bcb42e](https://github.com/state-machines/state_machines/commit/2bcb42e80afff2eefb29c475cd667184061109ab))
+
+## [0.20.0](https://github.com/state-machines/state_machines/compare/state_machines/v0.10.1...state_machines/v0.20.0) (2025-06-17)
+
+
+### Features
+
+* remove Hash hack that haunted me for years ([#122](https://github.com/state-machines/state_machines/issues/122)) ([8e5de38](https://github.com/state-machines/state_machines/commit/8e5de3867aed2599d4ada6f32ced2bf95c328f9f))
+
+## [0.10.1](https://github.com/state-machines/state_machines/compare/state_machines/v0.10.0...state_machines/v0.10.1) (2025-06-15)
+
+
+### Features
+
+* expose test helper ([74d2f5b](https://github.com/state-machines/state_machines/commit/74d2f5bb9b4718c1acfc9d11fc4bdf9a2d713622))
+* expose test helper ([170f277](https://github.com/state-machines/state_machines/commit/170f27708ab324c0622db462e76db79a181dafd4))
+
+## [0.10.0](https://github.com/state-machines/state_machines/compare/state_machines-v0.6.0...state_machines/v0.10.0) (2025-05-28)
+
+
+### Features
+
+* Add `all.except` as an alias for `all -` ([da99aee](https://github.com/state-machines/state_machines/commit/da99aeefa4ec99dc72da188d09a14227e49e8412))
+* Allow customization of default error messages ([106033f](https://github.com/state-machines/state_machines/commit/106033fea5120a98790d73a6d155c60bcd39ffb6))
+* drop support ruby prior 2.7. ([#87](https://github.com/state-machines/state_machines/issues/87)) ([f9cb1e0](https://github.com/state-machines/state_machines/commit/f9cb1e0aa80a7465e1677a80265fa5ae270cb1f9))
+* Drop support to ruby prior 3.0 ([#95](https://github.com/state-machines/state_machines/issues/95)) ([0ce8030](https://github.com/state-machines/state_machines/commit/0ce80309941fccd208dfbe9a88b7590d9cae8717))
+* improve STDIO renderer ([4ee3edc](https://github.com/state-machines/state_machines/commit/4ee3edc58e67d313f07fc9e125373db0e12a84b2))
+* introduce STDIO renderer ([#109](https://github.com/state-machines/state_machines/issues/109)) ([1bee973](https://github.com/state-machines/state_machines/commit/1bee973af26cbe969fd3e9ae094c6829e995b251))
+
+
+### Bug Fixes
+
+* enhance evaluate_method to support keyword arguments and improve block handling for Procs and Methods ([8b6ebb1](https://github.com/state-machines/state_machines/commit/8b6ebb1ece7cb4a2b7e51f6c752af9ae437b30c0))
+* extract Machine class_methods to it own file to reduce file loc ([5d56ad0](https://github.com/state-machines/state_machines/commit/5d56ad036cc4a9d99650764891dca72bdc697b39))
+* Implement conflict check in State#add_predicate ([316cb1a](https://github.com/state-machines/state_machines/commit/316cb1a663169127dac8e24508fed785505f483a))
+* improve method argument handling to support jruby and truffleruby and add temporary evaluation for strings ([64f9cca](https://github.com/state-machines/state_machines/commit/64f9cca3d1b744e49e9caadfc21d5ff2aa930c5c))
+* update documentation and improve STDIO renderer ([15bcd40](https://github.com/state-machines/state_machines/commit/15bcd403e5f0a24fde8d9b8be6b642ab0fcf851f))
+* use symbol syntax for instance variable checks ([75a832c](https://github.com/state-machines/state_machines/commit/75a832c39cf2d8a6c29be5b13d7e454cd179c834))
+* use symbol syntax for instance variable checks ([0f01465](https://github.com/state-machines/state_machines/commit/0f014651b4709e707d658517e3f85e366f45bac5))
+
+## 0.5.0
+
+*   Fix states being evaluated with wrong `owner_class` context
+
+*   Fixed state machine false duplication
+
+*   Fixed inconsistent use of :use_transactions
+
+*   Namespaced integrations are not registered by default anymore
+
+*   Pass `static: false` in case you don't want initial states to be forced. e.g.
+
+    ```ruby
+    # will set the initial machine state
+    @machines.initialize_states(@object)
+
+    # optionally you can pass the attributes to have that as the initial state
+    @machines.initialize_states(@object, {}, { state: 'finished' })
+
+    # or pass set `static` to false if you want to keep the `object.state` current value
+    @machines.initialize_states(@object, { static: false })
+    ```

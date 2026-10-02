@@ -1,0 +1,14 @@
+# frozen_string_literal: true
+
+require 'test_helper'
+
+class TransitionCollectionEmptyWithoutBlockTest < StateMachinesTest
+  def setup
+    @transitions = StateMachines::TransitionCollection.new
+    @result = @transitions.perform
+  end
+
+  def test_should_succeed
+    assert @result
+  end
+end

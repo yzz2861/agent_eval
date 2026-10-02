@@ -1,0 +1,199 @@
+# frozen_string_literal: true
+
+require 'test_helper'
+
+class STDIORendererTest < Minitest::Test
+  def test_draw_machine
+    machine = StateMachines::Machine.new(Class.new) do
+      state :parked
+      state :idling
+      event :ignite do
+        transition parked: :idling
+      end
+    end
+
+    io = StringIO.new
+    machine.draw(io: io)
+
+    assert_includes(io.string, 'Class: ')
+    assert_includes(io.string, 'States:')
+    assert_includes(io.string, 'parked')
+    assert_includes(io.string, 'idling')
+    assert_includes(io.string, 'Events:')
+    assert_includes(io.string, 'ignite')
+    assert_includes(io.string, 'parked => idling')
+  end
+
+  def test_draw_machine_with_no_events
+    machine = StateMachines::Machine.new(Class.new) do
+      state :parked
+    end
+
+    io = StringIO.new
+    machine.draw(io: io)
+
+    assert_includes(io.string, 'Class: ')
+    assert_includes(io.string, 'States:')
+    assert_includes(io.string, 'parked')
+    assert_includes(io.string, 'Events:')
+    assert_includes(io.string, 'None')
+  end
+
+  def test_draw_machine_with_custom_io
+    machine = StateMachines::Machine.new(Class.new) do
+      state :parked
+    end
+
+    io = StringIO.new
+    machine.draw(io: io)
+
+    assert_includes(io.string, 'Class: ')
+    assert_includes(io.string, 'States:')
+    assert_includes(io.string, 'parked')
+    assert_includes(io.string, 'Events:')
+    assert_includes(io.string, 'None')
+  end
+
+  def test_draw_class
+    machine = StateMachines::Machine.new(Class.new) {}
+    io = StringIO.new
+    machine.renderer.draw_class(machine: machine, io: io)
+
+    assert_includes(io.string, 'Class: ')
+  end
+
+  def test_draw_states
+    machine = StateMachines::Machine.new(Class.new) do
+      state :parked
+      state :idling
+    end
+    io = StringIO.new
+    machine.renderer.draw_states(machine: machine, io: io)
+
+    assert_includes(io.string, 'States:')
+    assert_includes(io.string, 'parked')
+    assert_includes(io.string, 'idling')
+  end
+
+  def test_draw_event
+    machine = StateMachines::Machine.new(Class.new) {}
+    event = StateMachines::Event.new(machine, :ignite)
+    graph = {}
+    io = StringIO.new
+    machine.renderer.draw_event(event, graph, options: {}, io: io)
+
+    assert_includes(io.string, 'Event: ignite')
+  end
+
+  def test_draw_branch
+    machine = StateMachines::Machine.new(Class.new) {}
+    branch = StateMachines::Branch.new
+    graph = {}
+    event = StateMachines::Event.new(machine, :ignite)
+    io = StringIO.new
+    machine.renderer.draw_branch(branch, graph, event, [], io)
+
+    assert_includes(io.string, 'Branch: ')
+  end
+
+  def test_draw_state
+    machine = StateMachines::Machine.new(Class.new) {}
+    state = StateMachines::State.new(machine, :parked)
+    graph = {}
+    io = StringIO.new
+    machine.renderer.draw_state(state, graph, options: {}, io: io)
+
+    assert_includes(io.string, 'State: parked')
+  end
+
+  def test_draw_through_event_state_and_branch
+    machine = StateMachines::Machine.new(Class.new) do
+      event :ignite do
+        transition parked: :idling
+      end
+    end
+    event = machine.events[:ignite]
+    io = StringIO.new
+    event.draw({}, {}, io)
+    machine.states[:parked].draw({}, {}, io)
+    event.branches.first.draw({}, event, [], io)
+
+    assert_match(/Event: ignite\n.*State: parked\n.*Branch: /, io.string)
+  end
+
+  def test_draw_events
+    machine = StateMachines::Machine.new(Class.new) do
+      state :parked
+      state :idling
+      event :ignite do
+        transition parked: :idling
+      end
+    end
+    io = StringIO.new
+    machine.renderer.draw_events(machine: machine, io: io)
+
+    assert_includes(io.string, 'Events:')
+    assert_includes(io.string, 'ignite')
+    assert_includes(io.string, 'parked => idling')
+  end
+
+  def test_draw_if_unless_condition
+    machine = StateMachines::Machine.new(Class.new) do
+      state :parked
+      state :idling
+      event :ignite do
+        transition parked: :idling, if: :key_inserted?
+      end
+    end
+    io = StringIO.new
+    machine.renderer.draw_events(machine: machine, io: io)
+
+    assert_includes(io.string, 'Events:')
+    assert_includes(io.string, 'ignite')
+    assert_includes(io.string, 'parked => idling IF key_inserted?')
+  end
+
+  def test_draw_state_guards
+    machine = StateMachines::Machine.new(Class.new) do
+      event :fire do
+        transition loaded: :fired, if_state: { bay_doors: :open }, unless_all_states: { shields: :up, weapons: :safe }
+      end
+    end
+    io = StringIO.new
+    machine.renderer.draw_events(machine: machine, io: io)
+
+    assert_includes(io.string, 'loaded => fired IF_STATE bay_doors: open UNLESS_ALL_STATES shields: up, weapons: safe')
+  end
+
+  def test_draw_blacklist_matcher
+    machine = StateMachines::Machine.new(Class.new) do
+      state :parked
+      state :idling
+      event :turn_of do
+        transition all - [:parked] => :parked
+      end
+    end
+    io = StringIO.new
+    machine.renderer.draw_events(machine: machine, io: io)
+
+    assert_includes(io.string, 'Events:')
+    assert_includes(io.string, 'turn_of')
+    assert_includes(io.string, 'ALL EXCEPT parked => parked')
+  end
+
+  def test_draw_all_and_same_matcher
+    machine = StateMachines::Machine.new(Class.new) do
+      state :parked
+      state :idling
+      event :wave do
+        transition all => same
+      end
+    end
+    io = StringIO.new
+    machine.renderer.draw_events(machine: machine, io: io)
+
+    assert_includes(io.string, 'Events:')
+    assert_includes(io.string, 'wave')
+    assert_includes(io.string, 'ALL => SAME')
+  end
+end
