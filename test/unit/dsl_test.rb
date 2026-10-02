@@ -67,4 +67,55 @@ describe Rack::Cors, 'DSL' do
     resources = cors.send :all_resources
     _(resources.first.resources.first.credentials).must_equal false
   end
+
+  it 'should return a structured origin result for block decisions' do
+    cors = Rack::Cors.new(proc {}) do
+      allow do
+        origins '*' do |source, _env|
+          { credentials: true, max_age: 3600 } if source == 'https://admin.example.com'
+        end
+        resource '/', headers: :any
+      end
+    end
+    resources = cors.send :all_resources
+
+    trusted = resources.first.match_origin('https://admin.example.com')
+    _(trusted).wont_be_nil
+    _(trusted.credentials).must_equal true
+    _(trusted.max_age).must_equal 3600
+    _(trusted.public_resource?).must_equal false
+
+    other = resources.first.match_origin('https://other.example.com')
+    _(other).wont_be_nil
+    _(other.credentials).must_be_nil
+    _(other.public_resource?).must_equal true
+
+    _(resources.first.allow_origin?('https://admin.example.com')).must_equal true
+    _(resources.first.allow_origin?('https://other.example.com')).must_equal true
+  end
+
+  it 'should keep specificity deterministic with strings and regexp' do
+    cors = Rack::Cors.new(proc {}) do
+      allow do
+        origins '*', 'https://exact.example.com', /\.specific\.com\z/
+        resource '/'
+      end
+    end
+    resources = cors.send :all_resources
+
+    _(resources.first.match_origin('https://exact.example.com').public_resource?).must_equal false
+    _(resources.first.match_origin('https://app.specific.com').public_resource?).must_equal false
+    _(resources.first.match_origin('https://random.example.org').public_resource?).must_equal true
+  end
+
+  it 'should raise when credentials are enabled for a wildcard mixed with specific origins' do
+    _(proc do
+      Rack::Cors.new(proc {}) do
+        allow do
+          origins '*', 'https://admin.example.com'
+          resource '/', credentials: true
+        end
+      end
+    end).must_raise Rack::Cors::Resource::CorsMisconfigurationError
+  end
 end

@@ -521,6 +521,147 @@ describe Rack::Cors do
     end
   end
 
+  describe 'with per-origin structured decisions' do
+    let(:app) { load_app('structured_origin') }
+
+    TRUSTED_SITES = %w[
+      https://admin.example.com
+      https://admin-backup.example.com
+    ].freeze
+    ARBITRARY_SITE = 'https://random.example.org'
+    PATH = '/readonly/items'
+
+    TRUSTED_SITES.each do |site|
+      it "shares credentials with trusted site #{site} on actual requests" do
+        cors_request PATH, origin: site
+        _(last_response.headers['Access-Control-Allow-Origin']).must_equal site
+        _(last_response.headers['Access-Control-Allow-Credentials']).must_equal 'true'
+        _(last_response.headers['Vary']).must_equal 'Origin'
+      end
+
+      it "uses the same credential decision for #{site} on preflight" do
+        preflight_request(site, PATH, method: :get)
+        _(last_response.headers['Access-Control-Allow-Origin']).must_equal site
+        _(last_response.headers['Access-Control-Allow-Credentials']).must_equal 'true'
+        _(last_response.headers['Access-Control-Max-Age']).must_equal '3600'
+        _(last_response.headers['Vary']).must_equal 'Origin'
+      end
+    end
+
+    it 'answers arbitrary sites with * and no credentials on actual requests' do
+      cors_request PATH, origin: ARBITRARY_SITE
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal '*'
+      _(last_response.headers['Access-Control-Allow-Credentials']).must_be_nil
+      _(last_response.headers['Access-Control-Max-Age']).must_equal '600'
+      _(last_response.headers['Vary']).must_equal 'Origin'
+    end
+
+    it 'uses the same wildcard decision for arbitrary sites on preflight' do
+      preflight_request(ARBITRARY_SITE, PATH, method: :get)
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal '*'
+      _(last_response.headers['Access-Control-Allow-Credentials']).must_be_nil
+      _(last_response.headers['Access-Control-Max-Age']).must_equal '600'
+      _(last_response.headers['Vary']).must_equal 'Origin'
+    end
+
+    it 'never emits * together with credentials' do
+      [TRUSTED_SITES.first, ARBITRARY_SITE].each do |site|
+        preflight_request(site, PATH, method: :get)
+        if last_response.headers['Access-Control-Allow-Origin'] == '*'
+          _(last_response.headers['Access-Control-Allow-Credentials']).must_be_nil
+        end
+      end
+    end
+
+    it 'prefers a specific block decision over a wildcard declared first' do
+      app = Rack::Builder.new do
+        use Rack::Cors do
+          allow do
+            origins '*' do |source, _env|
+              source == 'https://admin.example.com' ? { credentials: true, max_age: 10 } : true
+            end
+            resource '/', methods: :any, headers: :any
+          end
+        end
+        run ->(_env) { [200, {}, ['ok']] }
+      end
+
+      env = Rack::MockRequest.env_for('/', 'HTTP_ORIGIN' => 'https://admin.example.com')
+      status, headers, = app.call(env)
+      _(status).must_equal 200
+      _(headers['access-control-allow-origin']).must_equal 'https://admin.example.com'
+      _(headers['access-control-allow-credentials']).must_equal 'true'
+    end
+
+    it 'keeps exact string and regexp origins working without a structured result' do
+      app = Rack::Builder.new do
+        use Rack::Cors do
+          allow do
+            origins 'https://exact.example', %r{\Ahttps://regexp\.example\z}
+            resource '/', methods: :get
+          end
+        end
+        run ->(_env) { [200, {}, ['ok']] }
+      end
+
+      status, headers, = app.call(Rack::MockRequest.env_for('/', 'HTTP_ORIGIN' => 'https://exact.example'))
+      _(status).must_equal 200
+      _(headers['access-control-allow-origin']).must_equal 'https://exact.example'
+      _(headers['access-control-allow-credentials']).must_be_nil
+
+      status, headers, = app.call(Rack::MockRequest.env_for('/', 'HTTP_ORIGIN' => 'https://regexp.example'))
+      _(headers['access-control-allow-origin']).must_equal 'https://regexp.example'
+
+      status, headers, = app.call(Rack::MockRequest.env_for('/', 'HTTP_ORIGIN' => 'https://nope.example'))
+      _(headers['access-control-allow-origin']).must_be_nil
+    end
+
+    it 'keeps boolean blocks working the old way' do
+      app = Rack::Builder.new do
+        use Rack::Cors do
+          allow do
+            origins { |source, _env| source == 'https://bool.example' }
+            resource '/', methods: :get
+          end
+        end
+        run ->(_env) { [200, {}, ['ok']] }
+      end
+
+      _, headers, = app.call(Rack::MockRequest.env_for('/', 'HTTP_ORIGIN' => 'https://bool.example'))
+      _(headers['access-control-allow-origin']).must_equal 'https://bool.example'
+      _(headers['access-control-allow-credentials']).must_be_nil
+
+      _, headers, = app.call(Rack::MockRequest.env_for('/', 'HTTP_ORIGIN' => 'https://other.example'))
+      _(headers['access-control-allow-origin']).must_be_nil
+    end
+
+    it 'treats truthy non-hash block results as a plain boolean match' do
+      resources = Rack::Cors::Resources.new
+      resources.origins { |source, _env| source =~ /allowed/ }
+      result = resources.match_origin('https://allowed.example')
+      _(result).wont_be_nil
+      _(result.credentials).must_be_nil
+      _(result.public_resource?).must_equal false
+      _(resources.match_origin('https://denied.example')).must_be_nil
+    end
+
+    it 'orders specificity regardless of declaration order (wildcard last)' do
+      resources = Rack::Cors::Resources.new
+      resources.origins 'https://trusted.example', '*'
+      result = resources.match_origin('https://trusted.example')
+      _(result).wont_be_nil
+      _(result.public_resource?).must_equal false
+      _(resources.match_origin('https://other.example').public_resource?).must_equal true
+    end
+
+    it 'orders specificity regardless of declaration order (wildcard first)' do
+      resources = Rack::Cors::Resources.new
+      resources.origins '*', 'https://trusted.example'
+      result = resources.match_origin('https://trusted.example')
+      _(result.public_resource?).must_equal false
+    end
+  end
+
   protected
 
   def cors_request(*args)

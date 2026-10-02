@@ -9,8 +9,10 @@ module Rack
 
       attr_accessor :path, :methods, :headers, :expose, :max_age, :credentials, :pattern, :if_proc, :vary_headers
 
-      def initialize(public_resource, path, opts = {})
-        raise CorsMisconfigurationError if public_resource && opts[:credentials] == true
+      def initialize(public_resource, wildcard_origin, path, opts = {})
+        # '*' must never be combined with credentials=true, even when more
+        # specific origins are declared alongside the wildcard.
+        raise CorsMisconfigurationError if wildcard_origin && opts[:credentials] == true
 
         self.path         = path
         self.credentials  = public_resource ? false : (opts[:credentials] == true)
@@ -44,7 +46,7 @@ module Rack
         matches_path?(path) && (if_proc.nil? || if_proc.call(env))
       end
 
-      def process_preflight(env, result)
+      def process_preflight(env, result, origin_result = nil)
         headers = {}
 
         request_method = env[Rack::Cors::HTTP_ACCESS_CONTROL_REQUEST_METHOD]
@@ -55,17 +57,17 @@ module Rack
         result.miss(Result::MISS_DENY_HEADER) && (return headers) if request_headers && !allow_headers?(request_headers)
 
         result.hit = true
-        headers.merge(to_preflight_headers(env))
+        headers.merge(to_preflight_headers(env, origin_result))
       end
 
-      def to_headers(env)
+      def to_headers(env, origin_result = nil)
         h = {
-          'access-control-allow-origin' => origin_for_response_header(env[Rack::Cors::HTTP_ORIGIN]),
+          'access-control-allow-origin' => origin_for_response_header(env[Rack::Cors::HTTP_ORIGIN], origin_result),
           'access-control-allow-methods' => methods.collect { |m| m.to_s.upcase }.join(', '),
           'access-control-expose-headers' => expose.nil? ? '' : expose.join(', '),
-          'access-control-max-age' => max_age.to_s
+          'access-control-max-age' => effective_max_age(origin_result).to_s
         }
-        h['access-control-allow-credentials'] = 'true' if credentials
+        h['access-control-allow-credentials'] = 'true' if effective_credentials?(origin_result)
         header_proc.call(h)
       end
 
@@ -75,14 +77,31 @@ module Rack
         @public_resource
       end
 
-      def origin_for_response_header(origin)
-        return '*' if public_resource?
-
+      def origin_for_response_header(origin, origin_result = nil)
+        return '*' if origin_result&.public_resource? || (origin_result.nil? && public_resource?)
         origin
       end
 
-      def to_preflight_headers(env)
-        h = to_headers(env)
+      def effective_credentials?(origin_result)
+        return false if origin_result&.public_resource?
+
+        if origin_result && !origin_result.credentials.nil?
+          origin_result.credentials == true
+        else
+          credentials
+        end
+      end
+
+      def effective_max_age(origin_result)
+        if origin_result && !origin_result.max_age.nil?
+          origin_result.max_age
+        else
+          max_age
+        end
+      end
+
+      def to_preflight_headers(env, origin_result)
+        h = to_headers(env, origin_result)
         h.merge!('access-control-allow-headers' => env[Rack::Cors::HTTP_ACCESS_CONTROL_REQUEST_HEADERS]) if env[Rack::Cors::HTTP_ACCESS_CONTROL_REQUEST_HEADERS]
         h
       end

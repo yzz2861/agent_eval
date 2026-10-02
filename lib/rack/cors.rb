@@ -3,6 +3,7 @@
 require 'logger'
 require_relative 'cors/resources'
 require_relative 'cors/resource'
+require_relative 'cors/origin_result'
 require_relative 'cors/result'
 require_relative 'cors/version'
 
@@ -171,21 +172,27 @@ module Rack
     def process_preflight(env, path)
       result = Result.preflight(env)
 
-      resource, error = match_resource(path, env)
+      resource, origin_result, error = match_resource(path, env)
       unless resource
         result.miss(error)
         return {}
       end
 
-      resource.process_preflight(env, result)
+      headers = resource.process_preflight(env, result, origin_result)
+
+      if result.hit?
+        cors_vary_headers = resource.vary_headers&.any? ? resource.vary_headers : DEFAULT_VARY_HEADERS
+        headers['vary'] = cors_vary_headers.uniq.join(', ')
+      end
+
+      headers
     end
 
     def process_cors(env, path)
-      resource, error = match_resource(path, env)
+      resource, origin_result, error = match_resource(path, env)
       if resource
         Result.hit(env)
-        cors = resource.to_headers(env)
-        cors
+        resource.to_headers(env, origin_result)
 
       else
         Result.miss(env, error)
@@ -206,14 +213,15 @@ module Rack
 
       origin_matched = false
       all_resources.each do |r|
-        next unless r.allow_origin?(origin, env)
+        origin_result = r.match_origin(origin, env)
+        next unless origin_result
 
         origin_matched = true
         found = r.match_resource(path, env)
-        return [found, nil] if found
+        return [found, origin_result, nil] if found
       end
 
-      [nil, origin_matched ? Result::MISS_NO_PATH : Result::MISS_NO_ORIGIN]
+      [nil, nil, origin_matched ? Result::MISS_NO_PATH : Result::MISS_NO_ORIGIN]
     end
   end
 end

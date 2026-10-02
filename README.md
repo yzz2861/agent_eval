@@ -92,6 +92,44 @@ Additionally, origins can be specified dynamically via a block of the following 
   origins { |source, env| true || false }
 ```
 
+A block may also return a Hash to make a structured decision for a specific
+source, overriding the resource-level `credentials` and `max_age` options.
+Returning a falsey value means the block does not match; the next rule is
+tried, so a `'*'` rule can still provide a public fallback:
+
+```ruby
+  TRUSTED_ADMIN_SITES = %w[https://admin.example.com https://admin-backup.example.com]
+
+  allow do
+    origins '*' do |source, env|
+      if TRUSTED_ADMIN_SITES.include?(source)
+        # Trusted sites: echo the origin, allow cookies, cache preflight longer
+        { credentials: true, max_age: 3600 }
+      end
+      # Any other source: fall through to the '*' rule (public, no credentials)
+    end
+
+    resource '/readonly/items', methods: [:get, :options], max_age: 600
+  end
+```
+
+The resulting response for the same path depends on the source:
+
+| Source | `Access-Control-Allow-Origin` | `Access-Control-Allow-Credentials` | `Access-Control-Max-Age` |
+| --- | --- | --- | --- |
+| `https://admin.example.com` | `https://admin.example.com` | `true` | `3600` |
+| `https://admin-backup.example.com` | `https://admin-backup.example.com` | `true` | `3600` |
+| any other origin | `*` | *(not sent)* | `600` |
+
+When several rules match the same source, specificity decides instead of
+declaration order: exact strings first, then regular expressions, then
+blocks, with `'*'` last; within the same rank the earlier rule wins. This
+prevents a wildcard listed before a trusted-site rule from accidentally
+enabling credentials. Preflight and actual requests always use the same
+decision, responses carry `Vary: Origin`, and
+`Access-Control-Allow-Origin: *` is never emitted together with
+`Access-Control-Allow-Credentials: true`.
+
 A Resource path can be specified as exact string match (`/path/to/file.txt`) or with a '\*' wildcard (`/all/files/in/*`).  A resource can take the following options:
 
 * **methods** (string or array or `:any`): The HTTP methods allowed for the resource.

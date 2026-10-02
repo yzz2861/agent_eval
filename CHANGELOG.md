@@ -1,6 +1,20 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+### Changed
+- Origin blocks may return a Hash with `:credentials` and `:max_age` to make a
+  structured, per-source decision while plain strings, Regexps and boolean
+  blocks keep their previous behavior.
+- Matching multiple origin rules is now deterministic: exact string > Regexp >
+  block > `*`, with declaration order breaking ties. A wildcard can no longer
+  grant credentials for a more specific trusted source.
+- Preflight and actual requests use the same origin decision; preflight
+  responses carry `Vary: Origin`.
+- `Access-Control-Allow-Origin: *` is never emitted together with
+  `Access-Control-Allow-Credentials: true`, including wildcard rules mixed with
+  structured block decisions.
+
 ## 3.0.0 - 2025-05-16
 ### Changed
 - Update Rack dependency to >= 3.0.14
