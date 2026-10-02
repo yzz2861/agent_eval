@@ -176,6 +176,12 @@ worker_class               ``-k``, ``--worker-class``    The type of worker to u
                                                          hypercorn[uvloop]), and trio (pip install
                                                          hypercorn[trio]).
 workers                    ``-w``, ``--workers``         The number of workers to spawn and use.         1
+wsgi_max_concurrency      ``--wsgi-max-concurrency``  Maximum number of synchronously executing WSGI     Unlimited
+                                                        calls.
+wsgi_max_queue_size       ``--wsgi-max-queue-size`` Maximum number of WSGI calls waiting for an         Unlimited
+                                                        execution slot.
+wsgi_queue_timeout        ``--wsgi-queue-timeout``  Seconds to wait for a WSGI execution slot         No timeout
+                                                        before receiving a 503 response.
 wsgi_max_body_size         N/A                           The maximum size of a body that will be         16MiB
                                                          accepted in WSGI mode.
 ========================== ============================= =============================================== ========================

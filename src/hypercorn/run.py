@@ -48,7 +48,13 @@ def run(config: Config) -> int:
         if config.use_reloader:
             # Load the application so that the correct paths are checked for
             # changes, but only when the reloader is being used.
-            load_application(config.application_path, config.wsgi_max_body_size)
+            load_application(
+                config.application_path,
+                config.wsgi_max_body_size,
+                config.wsgi_max_concurrency,
+                config.wsgi_max_queue_size,
+                config.wsgi_queue_timeout,
+            )
 
         ctx = get_context("spawn")
 

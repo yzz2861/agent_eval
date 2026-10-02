@@ -109,6 +109,24 @@ def main(sys_args: list[str] | None = None) -> int:
         type=int,
     )
     parser.add_argument(
+        "--wsgi-max-concurrency",
+        help="Maximum number of WSGI calls that can execute synchronously",
+        default=sentinel,
+        type=int,
+    )
+    parser.add_argument(
+        "--wsgi-max-queue-size",
+        help="Maximum number of WSGI calls allowed to wait for an execution slot",
+        default=sentinel,
+        type=int,
+    )
+    parser.add_argument(
+        "--wsgi-queue-timeout",
+        help="Seconds to wait for a WSGI execution slot before returning 503",
+        default=sentinel,
+        type=float,
+    )
+    parser.add_argument(
         "-g", "--group", help="Group to own any unix sockets.", default=sentinel, type=int
     )
     parser.add_argument(
@@ -277,6 +295,12 @@ def main(sys_args: list[str] | None = None) -> int:
         config.max_requests = args.max_requests
     if args.max_requests_jitter is not sentinel:
         config.max_requests_jitter = args.max_requests
+    if args.wsgi_max_concurrency is not sentinel:
+        config.wsgi_max_concurrency = args.wsgi_max_concurrency
+    if args.wsgi_max_queue_size is not sentinel:
+        config.wsgi_max_queue_size = args.wsgi_max_queue_size
+    if args.wsgi_queue_timeout is not sentinel:
+        config.wsgi_queue_timeout = args.wsgi_queue_timeout
     if args.pid is not sentinel:
         config.pid_path = args.pid
     if args.root_path is not sentinel:

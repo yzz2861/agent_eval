@@ -50,6 +50,9 @@ def test_load_config(monkeypatch: MonkeyPatch) -> None:
         ("--pid", "/path", "pid_path"),
         ("--root-path", "/path", "root_path"),
         ("--workers", 2, "workers"),
+        ("--wsgi-max-concurrency", 2, "wsgi_max_concurrency"),
+        ("--wsgi-max-queue-size", 3, "wsgi_max_queue_size"),
+        ("--wsgi-queue-timeout", 4, "wsgi_queue_timeout"),
     ],
 )
 def test_main_cli_override(

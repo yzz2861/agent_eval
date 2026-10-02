@@ -39,3 +39,14 @@ When using middleware the ``AsyncioWSGIMiddleware`` and
 .. code-block:: python
 
     app = AsyncioWSGIMiddleware(wsgi_app, max_body_size=20)  # Bytes
+
+Limiting synchronous execution
+------------------------------
+
+WSGI applications run in worker threads. The ``wsgi_max_concurrency``
+configuration limits how many calls can execute at once, including response
+iteration and ``close()``. Calls that have not started can wait in a queue
+configured by ``wsgi_max_queue_size`` for at most
+``wsgi_queue_timeout`` seconds. Full queues and wait timeouts receive a
+``503 Service Unavailable`` response. Client cancellation removes only calls still
+waiting; calls already executing continue until their synchronous work exits.

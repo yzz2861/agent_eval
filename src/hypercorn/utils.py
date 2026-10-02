@@ -78,7 +78,13 @@ def filter_pseudo_headers(headers: list[tuple[bytes, bytes]]) -> list[tuple[byte
     return filtered_headers
 
 
-def load_application(path: str, wsgi_max_body_size: int) -> AppWrapper:
+def load_application(
+    path: str,
+    wsgi_max_body_size: int,
+    wsgi_max_concurrency: int | None = None,
+    wsgi_max_queue_size: int | None = None,
+    wsgi_queue_timeout: float | None = None,
+) -> AppWrapper:
     mode: Literal["asgi", "wsgi"] | None = None
     if ":" not in path:
         module_name, app_name = path, "app"
@@ -107,18 +113,36 @@ def load_application(path: str, wsgi_max_body_size: int) -> AppWrapper:
     except NameError:
         raise NoAppError(f"Cannot load application from '{path}', application not found.")
     else:
-        return wrap_app(app, wsgi_max_body_size, mode)
+        return wrap_app(
+            app,
+            wsgi_max_body_size,
+            mode,
+            wsgi_max_concurrency,
+            wsgi_max_queue_size,
+            wsgi_queue_timeout,
+        )
 
 
 def wrap_app(
-    app: Framework, wsgi_max_body_size: int, mode: Literal["asgi", "wsgi"] | None
+    app: Framework,
+    wsgi_max_body_size: int,
+    mode: Literal["asgi", "wsgi"] | None,
+    wsgi_max_concurrency: int | None = None,
+    wsgi_max_queue_size: int | None = None,
+    wsgi_queue_timeout: float | None = None,
 ) -> AppWrapper:
     if mode is None:
         mode = "asgi" if is_asgi(app) else "wsgi"
     if mode == "asgi":
         return ASGIWrapper(cast(ASGIFramework, app))
     else:
-        return WSGIWrapper(cast(WSGIFramework, app), wsgi_max_body_size)
+        return WSGIWrapper(
+            cast(WSGIFramework, app),
+            wsgi_max_body_size,
+            wsgi_max_concurrency=wsgi_max_concurrency,
+            wsgi_max_queue_size=wsgi_max_queue_size,
+            wsgi_queue_timeout=wsgi_queue_timeout,
+        )
 
 
 def files_to_watch() -> dict[Path, float]:
