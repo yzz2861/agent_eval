@@ -102,6 +102,43 @@ A Resource path can be specified as exact string match (`/path/to/file.txt`) or 
 * **if** (Proc): If the result of the proc is true, will process the request as a valid CORS request.
 * **vary** (string or array): A list of HTTP headers to add to the 'Vary' header.
 
+### Combining Overlapping Resources
+
+When several `allow` blocks (or several `resource` entries) cover the same path, `Rack::Cors` can combine them in one of two ways, selected with the middleware-level `combine` option:
+
+* **`:first_match`** (default): the first resource matching the request is used, exactly as in previous versions.
+* **`:intersect`**: every resource matching the request must permit it. Their permissions are intersected.
+
+```ruby
+use Rack::Cors, combine: :intersect do
+  # Broad rule: the whole /api namespace allows GET and POST from any origin.
+  allow do
+    origins '*'
+    resource '/api/*', methods: [:get, :post], headers: :any, max_age: 600
+  end
+
+  # Narrow rule: the admin section additionally only allows GET and a
+  # specific header.  Requests to /api/admin/* must satisfy both rules.
+  allow do
+    origins 'https://trusted.example'
+    resource '/api/admin/*', methods: [:get], headers: 'X-Admin'
+  end
+end
+```
+
+Combination rules used by `:intersect`:
+
+* **origins**: the request origin must be permitted by *every* `allow` block that covers the path. If all covering blocks use wildcard origins, the response uses `*`; otherwise the specific origin is echoed.
+* **methods**: the intersection of the configured method sets. `:any` stands for the full method set; an unconfigured `methods` option means `[:get]` (these three cases are never conflated). If the intersection is empty, the request is denied (`deny-method`).
+* **headers**: the intersection of the configured header lists. `:any` stands for any header; an unconfigured (or empty) list only allows the CORS simple headers. CORS simple headers are always allowed.
+* **credentials**: `true` only when *every* matched rule sets `credentials: true`.
+* **expose**: the union of the matched rules' `expose` lists; unconfigured rules contribute nothing.
+* **max_age**: the minimum of the matched rules' explicitly configured values; `7200` is used when no rule configures it (the default is not mixed into a configured minimum).
+
+Contradictions that can be detected without a request (e.g. two unconditional resources on the same literal path with disjoint method lists, or `allow` blocks with disjoint literal origin lists) raise `Rack::Cors::Resource::CorsMisconfigurationError` when the middleware initializes. Decisions that depend on the request — origins declared as regular expressions or Procs, and `:if` blocks — are evaluated for each request, so an empty intersection discovered there denies the request instead.
+
+Intersection is computed from the set of matching rules, not from their order: declaring the broad and narrow rules in either order gives identical responses.
+
 
 ## Common Gotchas
 

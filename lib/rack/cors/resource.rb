@@ -8,12 +8,14 @@ module Rack
       CORS_SIMPLE_HEADERS = %w[accept accept-language content-language content-type].freeze
 
       attr_accessor :path, :methods, :headers, :expose, :max_age, :credentials, :pattern, :if_proc, :vary_headers
+      attr_reader :any_methods, :max_age_configured
 
       def initialize(public_resource, path, opts = {})
         raise CorsMisconfigurationError if public_resource && opts[:credentials] == true
 
         self.path         = path
         self.credentials  = public_resource ? false : (opts[:credentials] == true)
+        @max_age_configured = opts.key?(:max_age)
         self.max_age      = opts[:max_age] || 7200
         self.pattern      = compile(path)
         self.if_proc      = opts[:if]
@@ -27,6 +29,7 @@ module Rack
                          [opts[:headers]].flatten.collect(&:downcase)
                        end
 
+        @any_methods = opts[:methods] == :any
         self.methods = case opts[:methods]
                        when :any then %i[get head post put patch delete options]
                        else
@@ -42,6 +45,22 @@ module Rack
 
       def match?(path, env)
         matches_path?(path) && (if_proc.nil? || if_proc.call(env))
+      end
+
+      def public_resource?
+        @public_resource
+      end
+
+      # Combine all the resources that match a request by intersecting their
+      # permissions.  Order of the matched resources must not affect the
+      # result, so collections are normalized (sorted/uniq) here.
+      def self.combine(matched_resources)
+        resources = matched_resources
+        public_all = resources.all?(&:public_resource?)
+
+        combined = new(public_all, resources.first.path)
+        combined.send(:combine_attributes, resources)
+        combined
       end
 
       def process_preflight(env, result)
@@ -70,10 +89,6 @@ module Rack
       end
 
       protected
-
-      def public_resource?
-        @public_resource
-      end
 
       def origin_for_response_header(origin)
         return '*' if public_resource?
@@ -133,8 +148,58 @@ module Rack
           if defined?(Rack::Headers)
             ->(h) { h }
           else
-            ->(h) { Rack::Utils::HeaderHash.new(h) }
+              ->(h) { Rack::Utils::HeaderHash.new(h) }
+            end
+        end
+      end
+
+      def combine_attributes(resources)
+        combine_methods(resources)
+        combine_headers(resources)
+
+        # expose only grants the client visibility into response headers, so
+        # matched rules accumulate: the union is allowed.
+        self.expose = resources.flat_map { |r| r.expose || [] }.uniq.sort
+        self.expose = nil if expose.empty?
+
+        configured_ages = resources.select(&:max_age_configured).map(&:max_age)
+        self.max_age = configured_ages.empty? ? 7200 : configured_ages.min
+        @max_age_configured = !configured_ages.empty?
+
+        # Credentials are only sent when every matched rule grants them.
+        self.credentials = resources.all?(&:credentials)
+
+        self.vary_headers = resources.flat_map { |r| r.vary_headers || [] }.uniq.sort
+        self.vary_headers = nil if vary_headers.empty?
+      end
+
+      def combine_methods(resources)
+        if resources.any?(&:any_methods)
+          explicit = resources.reject(&:any_methods)
+          if explicit.empty?
+            @any_methods = true
+            self.methods = %w[get head post put patch delete options]
+          else
+            self.methods = explicit.map(&:methods).reduce(:&)
+            @any_methods = false
           end
+        else
+          self.methods = resources.map(&:methods).reduce(:&)
+          @any_methods = false
+        end
+        self.methods = methods.sort.uniq
+      end
+
+      def combine_headers(resources)
+        if resources.any? { |r| r.headers == :any }
+          explicit = resources.reject { |r| r.headers == :any }
+          if explicit.empty?
+            self.headers = :any
+          else
+            self.headers = explicit.map { |r| r.headers || [] }.reduce(:&).sort
+          end
+        else
+          self.headers = resources.map { |r| r.headers || [] }.reduce(:&).sort
         end
       end
     end

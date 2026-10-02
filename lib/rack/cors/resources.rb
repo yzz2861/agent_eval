@@ -6,15 +6,18 @@ module Rack
   class Cors
     class Resources
       attr_reader :resources
+      attr_reader :origin_rules
 
       def initialize
-        @origins = []
+        @origin_rules = []
         @resources = []
         @public_resources = false
       end
 
       def origins(*args, &blk)
-        @origins = args.flatten.reject { |s| s == '' }.map do |n|
+        return @origin_rules if args.empty? && blk.nil?
+
+        @origin_rules = args.flatten.reject { |s| s == '' }.map do |n|
           case n
           when Proc, Regexp, %r{^[a-z][a-z0-9.+-]*://}
             n
@@ -25,7 +28,7 @@ module Rack
             Regexp.compile("^[a-z][a-z0-9.+-]*:\\\/\\\/#{Regexp.quote(n)}$")
           end
         end.flatten
-        @origins.push(blk) if blk
+        @origin_rules.push(blk) if blk
       end
 
       def resource(path, opts = {})
@@ -39,7 +42,7 @@ module Rack
       def allow_origin?(source, env = {})
         return true if public_resources?
 
-        !!@origins.detect do |origin|
+        !!@origin_rules.detect do |origin|
           if origin.is_a?(Proc)
             origin.call(source, env)
           elsif origin.is_a?(Regexp)

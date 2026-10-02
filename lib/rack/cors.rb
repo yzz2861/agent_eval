@@ -26,9 +26,18 @@ module Rack
 
     DEFAULT_VARY_HEADERS = ['Origin'].freeze
 
+    COMBINE_FIRST_MATCH = :first_match
+    COMBINE_INTERSECT   = :intersect
+    COMBINE_MODES       = [COMBINE_FIRST_MATCH, COMBINE_INTERSECT].freeze
+
     def initialize(app, opts = {}, &block)
       @app = app
       @debug_mode = !!opts[:debug]
+      @combine = opts[:combine] || COMBINE_FIRST_MATCH
+      unless COMBINE_MODES.include?(@combine)
+        raise ArgumentError,
+              "unknown :combine mode #{@combine.inspect}; expected one of #{COMBINE_MODES.inspect}"
+      end
       @logger = @logger_proc = nil
 
       logger = opts[:logger]
@@ -47,10 +56,16 @@ module Rack
       else
         instance_eval(&block)
       end
+
+      validate_intersection_configuration! if @combine == COMBINE_INTERSECT
     end
 
     def debug?
       @debug_mode
+    end
+
+    def intersect?
+      @combine == COMBINE_INTERSECT
     end
 
     def allow(&block)
@@ -202,6 +217,8 @@ module Rack
     end
 
     def match_resource(path, env)
+      return match_resource_intersect(path, env) if intersect?
+
       origin = env[HTTP_ORIGIN]
 
       origin_matched = false
@@ -214,6 +231,95 @@ module Rack
       end
 
       [nil, origin_matched ? Result::MISS_NO_PATH : Result::MISS_NO_ORIGIN]
+    end
+
+    def match_resource_intersect(path, env)
+      origin = env[HTTP_ORIGIN]
+
+      # Only (allow-block, resource) pairs whose path AND request-time
+      # conditions (the :if proc) match take part in the intersection.
+      covering_blocks = 0
+      allowing_blocks = 0
+      matched = []
+
+      all_resources.each do |block|
+        found = block.resources.select { |r| r.match?(path, env) }
+        next if found.empty?
+
+        covering_blocks += 1
+        next unless block.allow_origin?(origin, env)
+
+        allowing_blocks += 1
+        matched.concat(found)
+      end
+
+      return [nil, Result::MISS_NO_PATH] if covering_blocks.zero?
+
+      # An origin must be permitted by every allow block covering the path.
+      return [nil, Result::MISS_NO_ORIGIN] unless allowing_blocks == covering_blocks
+
+      combined = Resource.combine(matched)
+
+      # Empty method intersection is an explicit deny even for actual
+      # (non-preflight) requests.
+      return [nil, Result::MISS_DENY_METHOD] if combined.methods.empty?
+
+      [combined, nil]
+    end
+
+    # Surface contradictions that can be proven without seeing a request.
+    # Decisions depending on a request (origins given as Regexp/Proc, :if
+    # blocks, wildcard path overlap) are deferred to request time.
+    def validate_intersection_configuration!
+      groups = Hash.new { |hash, key| hash[key] = [] }
+
+      all_resources.each do |block|
+        block.resources.each do |resource|
+          next if resource.if_proc
+
+          groups[resource.path] << { block: block, resource: resource }
+        end
+      end
+
+      groups.each_value do |members|
+        next if members.length < 2
+
+        validate_method_intersection!(members.map { |m| m[:resource] })
+        validate_origin_intersection!(members)
+      end
+    end
+
+    def validate_method_intersection!(resources)
+      explicit = resources.reject(&:any_methods)
+      return if explicit.length < 2
+
+      intersection = explicit.map(&:methods).reduce(:&)
+      return unless intersection.empty?
+
+      raise Resource::CorsMisconfigurationError,
+            'Intersection mode is enabled but resources covering the same '
+            'path have no HTTP methods in common.  The empty intersection '
+            'would deny every request.'
+    end
+
+    def validate_origin_intersection!(members)
+      return if members.any? { |m| m[:block].public_resources? }
+
+      literal_sets = members.map do |m|
+        block = m[:block]
+        next if block.origin_rules.any? { |origin| origin.is_a?(Regexp) || origin.is_a?(Proc) }
+
+        block.origin_rules.grep(String)
+      end
+
+      return if literal_sets.any?(&:nil?)
+      return if literal_sets.any?(&:empty?)
+      return unless literal_sets.reduce(:&).empty?
+
+      raise Resource::CorsMisconfigurationError,
+            'Intersection mode is enabled but allow blocks covering the same '
+            'path permit no common origin.  The empty intersection would '
+            'deny every request.'
     end
   end
 end

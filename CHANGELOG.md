@@ -1,6 +1,23 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+### Added
+- `combine: :intersect` middleware option: intersect the methods, headers
+  and origin permissions of every resource matching a request. `credentials`
+  uses AND, `expose` uses the union, and `max_age` uses the minimum
+  explicitly configured value.
+- Contradictions provable at initialization (disjoint method sets or literal
+  origin sets on the same unconditional path) raise
+  `CorsMisconfigurationError`; request-dependent decisions (Regexp/Proc
+  origins and `:if` blocks) are evaluated per request and deny on empty
+  intersection.
+### Changed
+- `:first_match` remains the default; intersection results do not depend on
+  declaration order.
+- `Resources#origins` with no arguments returns the configured origin rules
+  instead of resetting them.
+
 ## 3.0.0 - 2025-05-16
 ### Changed
 - Update Rack dependency to >= 3.0.14
