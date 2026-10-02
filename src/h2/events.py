@@ -593,6 +593,53 @@ class ConnectionTerminated(Event):
         )
 
 
+@dataclass(**kw_only)
+class ConnectionDraining(Event):
+    """
+    The ConnectionDraining event is fired when the connection begins a
+    graceful shutdown in response to a GOAWAY frame sent by the local or the
+    remote peer. New streams can no longer be initiated on the affected side,
+    but streams that were already accepted by the peer remain fully usable:
+    DATA and WINDOW_UPDATE frames continue to flow until each stream ends,
+    at which point the connection may be torn down with
+    :meth:`close_connection <h2.connection.H2Connection.close_connection>`.
+
+    This differs from :class:`ConnectionTerminated
+    <h2.events.ConnectionTerminated>`, which represents an immediate close.
+
+    .. versionadded:: 4.5.0
+    """
+
+    error_code: ErrorCodes | int
+    """The error code advertised by the GOAWAY frame."""
+
+    last_stream_id: int
+    """
+    The last stream ID that was (or may have been) processed by the peer
+    that sent the GOAWAY frame.
+    """
+
+    additional_data: bytes | None = None
+    """Additional debug data carried by the GOAWAY frame."""
+
+    stream_ids: list[int] = _LAZY_INIT
+    """
+    Stream IDs of streams initiated by this peer that were *not* accepted by
+    the remote peer. The caller is responsible for deciding what to do with
+    these streams (typically retrying them on a new connection); h2 does not
+    reset them or discard data that was queued on their behalf.
+
+    For GOAWAY frames sent locally this list is always empty.
+    """
+
+    def __repr__(self) -> str:
+        return (
+            f"<ConnectionDraining error_code:{self.error_code!s}, "
+            f"last_stream_id:{self.last_stream_id}, "
+            f"stream_ids:{self.stream_ids}>"
+        )
+
+
 class AlternativeServiceAvailable(Event):
     """
     The AlternativeServiceAvailable event is fired when the remote peer

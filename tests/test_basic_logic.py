@@ -1763,48 +1763,81 @@ class TestBasicServer:
 
     def test_receiving_goaway_frame(self, frame_factory) -> None:
         """
-        Receiving a GOAWAY frame causes a ConnectionTerminated event to be
-        fired and transitions the connection to the CLOSED state, and clears
-        the outbound data buffer.
+        Receiving a GOAWAY frame causes a ConnectionDraining event to be
+        fired and transitions the connection to the DRAINING state. The
+        outbound data buffer is preserved so that queued bytes are not lost.
         """
         c = h2.connection.H2Connection(config=self.server_config)
         c.initiate_connection()
         c.receive_data(frame_factory.preamble())
+        request_frame = frame_factory.build_headers_frame(
+            self.example_request_headers,
+        )
+        c.receive_data(request_frame.serialize())
+        c.send_headers(stream_id=1, headers=self.example_response_headers)
+        c.clear_outbound_data_buffer()
 
         f = frame_factory.build_goaway_frame(
-            last_stream_id=5, error_code=h2.errors.ErrorCodes.SETTINGS_TIMEOUT,
+            last_stream_id=5,
+            error_code=h2.errors.ErrorCodes.SETTINGS_TIMEOUT,
         )
         events = c.receive_data(f.serialize())
 
         assert len(events) == 1
         event = events[0]
 
-        assert isinstance(event, h2.events.ConnectionTerminated)
+        assert isinstance(event, h2.events.ConnectionDraining)
         assert event.error_code == h2.errors.ErrorCodes.SETTINGS_TIMEOUT
         assert isinstance(event.error_code, h2.errors.ErrorCodes)
         assert event.last_stream_id == 5
         assert event.additional_data is None
-        assert c.state_machine.state == h2.connection.ConnectionState.CLOSED
+        assert event.stream_ids == []
+        assert c.state_machine.state == h2.connection.ConnectionState.DRAINING
+        assert c.draining is True
+        assert c.draining_side == h2.connection.DrainSide.REMOTE
 
-        assert not c.data_to_send()
+        # Already accepted streams keep working.
+        c.send_data(stream_id=1, data=b"some data")
+        assert c.data_to_send()
 
     def test_receiving_multiple_goaway_frames(self, frame_factory) -> None:
         """
         Multiple GOAWAY frames can be received at once, and are allowed. Each
-        one fires a ConnectionTerminated event.
+        one fires a ConnectionDraining event, as long as each tightens (or
+        keeps) the last stream ID.
         """
         c = h2.connection.H2Connection(config=self.server_config)
         c.receive_data(frame_factory.preamble())
         c.clear_outbound_data_buffer()
 
-        f = frame_factory.build_goaway_frame(last_stream_id=0)
-        events = c.receive_data(f.serialize() * 3)
+        first = frame_factory.build_goaway_frame(last_stream_id=10)
+        second = frame_factory.build_goaway_frame(last_stream_id=5)
+        third = frame_factory.build_goaway_frame(last_stream_id=5)
+        events = c.receive_data(
+            first.serialize() + second.serialize() + third.serialize(),
+        )
 
         assert len(events) == 3
         assert all(
-            isinstance(event, h2.events.ConnectionTerminated)
+            isinstance(event, h2.events.ConnectionDraining)
             for event in events
         )
+        assert [event.last_stream_id for event in events] == [10, 5, 5]
+
+    def test_receiving_widening_goaway_frame_is_error(self, frame_factory) -> None:
+        """
+        A later GOAWAY frame whose last stream ID is greater than that of an
+        earlier one is a protocol error: GOAWAY may only tighten the range.
+        """
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.receive_data(frame_factory.preamble())
+
+        first = frame_factory.build_goaway_frame(last_stream_id=5)
+        second = frame_factory.build_goaway_frame(last_stream_id=7)
+        c.receive_data(first.serialize())
+
+        with pytest.raises(h2.exceptions.ProtocolError):
+            c.receive_data(second.serialize())
 
     def test_receiving_goaway_frame_with_additional_data(self, frame_factory) -> None:
         """
@@ -1823,14 +1856,13 @@ class TestBasicServer:
         assert len(events) == 1
         event = events[0]
 
-        assert isinstance(event, h2.events.ConnectionTerminated)
+        assert isinstance(event, h2.events.ConnectionDraining)
         assert event.additional_data == additional_data
 
     def test_receiving_goaway_frame_with_unknown_error(self, frame_factory) -> None:
         """
-        Receiving a GOAWAY frame with an unknown error code behaves exactly the
-        same as receiving one we know about, but the code is reported as an
-        integer instead of as an ErrorCodes.
+        An unknown error code is reported as an integer instead of as an
+        ErrorCodes, and the connection still drains gracefully.
         """
         c = h2.connection.H2Connection(config=self.server_config)
         c.initiate_connection()
@@ -1844,14 +1876,12 @@ class TestBasicServer:
         assert len(events) == 1
         event = events[0]
 
-        assert isinstance(event, h2.events.ConnectionTerminated)
+        assert isinstance(event, h2.events.ConnectionDraining)
         assert event.error_code == 250
         assert not isinstance(event.error_code, h2.errors.ErrorCodes)
         assert event.last_stream_id == 5
         assert event.additional_data is None
-        assert c.state_machine.state == h2.connection.ConnectionState.CLOSED
-
-        assert not c.data_to_send()
+        assert c.state_machine.state == h2.connection.ConnectionState.DRAINING
 
     def test_cookies_are_joined(self, frame_factory) -> None:
         """

@@ -1,6 +1,28 @@
 Release History
 ===============
 
+4.5.0 (unreleased)
+------------------
+
+**API Changes (Backward Compatible)**
+
+- Added ``H2Connection.graceful_close()`` for graceful connection shutdown
+  ("draining"). Unlike ``close_connection()`` it emits a GOAWAY frame without
+  closing the connection: new streams are no longer accepted on the affected
+  side, while streams already accepted by the peer keep exchanging DATA and
+  WINDOW_UPDATE frames and can end normally. Repeated calls may only tighten
+  the GOAWAY ``last_stream_id``.
+- Added the ``H2Connection.draining`` and ``H2Connection.draining_side``
+  properties and the ``h2.connection.DrainSide`` enum.
+- Added the ``ConnectionDraining`` event, fired when a GOAWAY initiates a
+  graceful shutdown (locally or remotely). For remotely initiated draining it
+  carries the ``stream_ids`` of locally initiated streams that were not
+  accepted, so callers can retry them; each stream is reported once.
+- Receiving a GOAWAY frame no longer closes the connection or discards the
+  outbound data buffer: the connection enters the draining state instead and
+  queued bytes on accepted streams are preserved. Widening GOAWAY
+  ``last_stream_id`` values are now rejected as protocol errors.
+
 4.4.1 (2026-08-03)
 ------------------
 

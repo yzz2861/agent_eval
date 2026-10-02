@@ -20,6 +20,10 @@ Connection
    :exclude-members: inbound_flow_control_window
 
 
+.. autoclass:: h2.connection.DrainSide
+   :members:
+
+
 Configuration
 -------------
 
@@ -75,6 +79,9 @@ Events
    :members:
 
 .. autoclass:: h2.events.ConnectionTerminated
+   :members:
+
+.. autoclass:: h2.events.ConnectionDraining
    :members:
 
 .. autoclass:: h2.events.AlternativeServiceAvailable

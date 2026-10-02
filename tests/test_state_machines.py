@@ -65,6 +65,55 @@ class TestConnectionStateMachine:
 
         c.process_input(input_)
 
+    @pytest.mark.parametrize(
+        "state",
+        [
+            h2.connection.ConnectionState.IDLE,
+            h2.connection.ConnectionState.CLIENT_OPEN,
+            h2.connection.ConnectionState.SERVER_OPEN,
+            h2.connection.ConnectionState.DRAINING,
+        ],
+    )
+    def test_drain_input_enters_or_stays_draining(self, state) -> None:
+        """
+        The DRAIN input begins graceful shutdown: open and idle states move
+        to DRAINING, and DRAINING is idempotent.
+        """
+        c = h2.connection.H2ConnectionStateMachine()
+        c.state = state
+
+        c.process_input(h2.connection.ConnectionInputs.DRAIN)
+        assert c.state == h2.connection.ConnectionState.DRAINING
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            h2.connection.ConnectionState.IDLE,
+            h2.connection.ConnectionState.CLIENT_OPEN,
+            h2.connection.ConnectionState.SERVER_OPEN,
+        ],
+    )
+    def test_receiving_goaway_enters_draining(self, state) -> None:
+        """
+        Receiving a GOAWAY drains an open connection rather than closing it.
+        """
+        c = h2.connection.H2ConnectionStateMachine()
+        c.state = state
+
+        c.process_input(h2.connection.ConnectionInputs.RECV_GOAWAY)
+        assert c.state == h2.connection.ConnectionState.DRAINING
+
+    def test_sending_goaway_from_draining_closes(self) -> None:
+        """
+        The final GOAWAY, sent once drained streams complete, closes the
+        connection.
+        """
+        c = h2.connection.H2ConnectionStateMachine()
+        c.state = h2.connection.ConnectionState.DRAINING
+
+        c.process_input(h2.connection.ConnectionInputs.SEND_GOAWAY)
+        assert c.state == h2.connection.ConnectionState.CLOSED
+
 
 class TestStreamStateMachine:
     """
