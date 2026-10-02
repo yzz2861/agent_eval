@@ -1,3 +1,5 @@
+require_relative 'render_budget'
+
 module Tilt
   # @private
   module CompiledTemplates
@@ -106,7 +108,16 @@ module Tilt
       scope ||= Object.new
       current_template = Thread.current[:tilt_current_template]
       Thread.current[:tilt_current_template] = self
-      evaluate(scope, locals || {}, &block)
+      if budget = RenderBudget.current
+        budget.enter(self)
+        begin
+          evaluate(scope, locals || {}, &block)
+        ensure
+          budget.exit
+        end
+      else
+        evaluate(scope, locals || {}, &block)
+      end
     ensure
       Thread.current[:tilt_current_template] = current_template
     end
