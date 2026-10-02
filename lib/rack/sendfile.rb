@@ -102,9 +102,29 @@ module Rack
   # === Mapping parameter
   #
   # The third parameter allows for an overriding extension of the
-  # `x-accel-mapping` header. Mappings should be provided in tuples of internal to
-  # external. The internal values may contain regular expression syntax, they
-  # will be matched with case indifference.
+  # `x-accel-mapping` header. Mappings should be provided in tuples of a
+  # filesystem directory to an internal proxy URI prefix. The non-strict internal
+  # values may contain regular expression syntax; they are matched with case
+  # indifference.
+  #
+  # Pass <tt>strict_mappings: true</tt> with <tt>x-accel-redirect</tt> (or
+  # without a variation) to declare the complete set of directories that may
+  # be delegated to the proxy. In that mode the
+  # `x-accel-mapping` request header is always ignored and the real path of each
+  # response file is checked before a mapping is applied. Symbolic links are
+  # resolved, so a link which points outside of every declared directory cannot
+  # produce an `x-accel-redirect` header.
+  #
+  # <tt>on_unmatched:</tt> is required in strict mode and must be either:
+  #
+  # * +:fallback+ - return the original Rack response unchanged.
+  # * +:reject+ - close the original body and return a 403 response.
+  #
+  # Mappings use directory boundaries, which avoids +/srv/files+ matching
+  # +/sail/files-secret+. The longest matching directory is used for nested
+  # mappings. URI prefixes must already be valid URI paths; file names are
+  # percent-encoded once, including non-ASCII characters, spaces, and percent
+  # characters.
   #
   # When `x-accel-redirect` is explicitly enabled via the variation parameter,
   # and no application-level mappings are provided, the middleware will read
@@ -119,11 +139,53 @@ module Rack
   # where attackers could bypass proxy restrictions.
 
   class Sendfile
-    def initialize(app, variation = nil, mappings = [])
+    def initialize(
+      app,
+      variation = nil,
+      mappings = [],
+      strict_mappings: false,
+      on_unmatched: nil
+    )
       @app = app
-      @variation = variation
+      @variation = strict_mappings ? variation || 'x-accel-redirect' : variation
       @mappings = mappings.map do |internal, external|
         [/\A#{internal}/i, external]
+      end
+
+      @strict_mapping_enabled = strict_mappings
+      @on_unmatched = on_unmatched
+
+      if @strict_mapping_enabled
+        unless variation.nil? || variation.to_s.downcase == 'x-accel-redirect'
+          raise ArgumentError, "strict mappings require x-accel-redirect"
+        end
+
+        unless [:fallback, :reject].include?(on_unmatched)
+          raise ArgumentError, "on_unmatched must be :fallback or :reject"
+        end
+
+        if mappings.empty?
+          raise ArgumentError, "strict mappings require at least one mapping"
+        end
+
+        @strict_mappings = mappings.map do |internal, external|
+          root = ::File.realpath(::File.expand_path(internal))
+          prefix = validate_accel_prefix(external)
+
+          unless ::File.directory?(root)
+            raise ArgumentError, "not a directory: #{internal}"
+          end
+
+          [root, prefix]
+        end
+
+        if @strict_mappings.map(&:first).uniq.size != @strict_mappings.size
+          raise ArgumentError, "duplicate strict mapping directory"
+        end
+
+        if @strict_mappings.map(&:last).uniq.size != @strict_mappings.size
+          raise ArgumentError, "duplicate strict mapping URI prefix"
+        end
       end
     end
 
@@ -133,17 +195,23 @@ module Rack
       if body.respond_to?(:to_path)
         case type = variation(env)
         when /x-accel-redirect/i
-          path = ::File.expand_path(body.to_path)
-          if url = map_accel_path(env, path)
-            headers[CONTENT_LENGTH] = '0'
-            # '?' must be percent-encoded because it is not query string but a part of path
-            headers[type.downcase] = ::Rack::Utils.escape_path(url).gsub('?', '%3F')
-            obody = body
-            response[2] = Rack::BodyProxy.new([]) do
-              obody.close if obody.respond_to?(:close)
+          if @strict_mappings
+            mapped_path = strict_accel_path(body)
+
+            if mapped_path
+              replace_with_sendfile(response, headers, body, type, mapped_path)
+            elsif @on_unmatched == :reject
+              body.close if body.respond_to?(:close)
+              return [403, { CONTENT_TYPE => 'text/plain', CONTENT_LENGTH => '0' }, []]
             end
           else
-            env[RACK_ERRORS].puts "x-accel-mapping header missing"
+            path = ::File.expand_path(body.to_path)
+            if url = map_accel_path(env, path)
+              url = ::Rack::Utils.escape_path(url).gsub('?', '%3F')
+              replace_with_sendfile(response, headers, body, type, url)
+            else
+              env[RACK_ERRORS].puts "x-accel-mapping header missing"
+            end
           end
         when /x-sendfile|x-lighttpd-send-file/i
           path = ::File.expand_path(body.to_path)
@@ -162,6 +230,72 @@ module Rack
     end
 
     private
+
+    def validate_accel_prefix(prefix)
+      unless prefix.is_a?(::String) && prefix.start_with?('/') &&
+             prefix.valid_encoding? &&
+             !prefix.match?(/[\p{Cntrl}\s?#]/) &&
+             !prefix.match?(%r{//|%2f|%5c}i) &&
+             !prefix.match?(/%(?![0-9a-fA-F]{2})/) &&
+             !prefix.match?(/%0[ad]/i)
+        raise ArgumentError, "invalid x-accel-redirect URI prefix: #{prefix.inspect}"
+      end
+
+      if prefix == '/'
+        prefix
+      elsif prefix.split('/').drop(1).any? { |segment| traversal_segment?(segment) }
+        raise ArgumentError, "invalid x-accel-redirect URI prefix: #{prefix.inspect}"
+      else
+        prefix.chomp('/') + '/'
+      end
+    end
+
+    def traversal_segment?(segment)
+      decoded_dots = segment.gsub(/%2e/i, '.')
+      decoded_dots == '.' || decoded_dots == '..'
+    end
+
+    def strict_accel_path(body)
+      path = ::File.realpath(body.to_path)
+      return nil unless ::File.file?(path)
+
+      root, prefix = @strict_mappings
+        .select { |directory, _| path_within?(directory, path) }
+        .max_by { |directory, _| directory.bytesize }
+
+      return nil unless root
+
+      relative_path = if root == ::File::SEPARATOR
+        path.byteslice(1, path.bytesize - 1)
+      else
+        path.delete_prefix(root + ::File::SEPARATOR)
+      end
+
+      url = prefix + ::Rack::Utils.escape_path(relative_path).gsub('?', '%3F')
+
+      if url.match?(/[\r\n]/)
+        raise ArgumentError, "x-accel-redirect header must not contain a newline"
+      end
+
+      url
+    rescue SystemCallError, ArgumentError, TypeError
+      nil
+    end
+
+    def path_within?(directory, path)
+      directory == ::File::SEPARATOR ||
+        path == directory ||
+        path.start_with?(directory + ::File::SEPARATOR)
+    end
+
+    def replace_with_sendfile(response, headers, body, type, url)
+      headers[CONTENT_LENGTH] = '0'
+      headers[type.downcase] = url
+      original_body = body
+      response[2] = Rack::BodyProxy.new([]) do
+        original_body.close if original_body.respond_to?(:close)
+      end
+    end
 
     def variation(env)
       # Note: HTTP_X_SENDFILE_TYPE is intentionally NOT read for security reasons.

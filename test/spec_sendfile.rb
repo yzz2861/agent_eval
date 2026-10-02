@@ -6,6 +6,7 @@ require 'tmpdir'
 
 separate_testing do
   require_relative '../lib/rack/sendfile'
+  require_relative '../lib/rack/files'
   require_relative '../lib/rack/lint'
   require_relative '../lib/rack/mock_request'
 end
@@ -226,6 +227,319 @@ describe Rack::Sendfile do
       FileUtils.remove_entry_secure dir1
       FileUtils.remove_entry_secure dir2
       FileUtils.remove_entry_secure dir3
+    end
+  end
+
+  describe "strict x-accel mappings" do
+    def strict_app(app, mappings, on_unmatched)
+      Rack::Lint.new(
+        raw_strict_app(app, mappings, on_unmatched)
+      )
+    end
+
+    def raw_strict_app(app, mappings, on_unmatched)
+      Rack::Sendfile.new(
+        app,
+        'X-Accel-Redirect',
+        mappings,
+        strict_mappings: true,
+        on_unmatched: on_unmatched
+      )
+    end
+
+    def path_body(path, content = 'Hello World')
+      body = [content]
+      body.define_singleton_method(:to_path) { path }
+      body
+    end
+
+    def strict_tmpdir(&block)
+      Dir.mktmpdir('sendfile', File.expand_path('tmp', __dir__), &block)
+    end
+
+    it "maps an ordinary Rack::Files download and rejects links outside the root" do
+      strict_tmpdir do |root|
+        File.write(File.join(root, 'ordinary.txt'), 'safe download')
+
+        outside = strict_tmpdir
+        secret = File.join(outside, 'secret.txt')
+        File.write(secret, 'secret download')
+        File.symlink(secret, File.join(root, 'outside-link.txt'))
+
+        app = strict_app(Rack::Files.new(root), [[root, '/downloads/']], :reject)
+        request_headers = { 'HTTP_X_ACCEL_MAPPING' => "#{outside}=/attacker/".b }
+        begin
+          response = Rack::MockRequest.new(app).get('/ordinary.txt', request_headers)
+          response.must_be :ok?
+          response.body.must_be :empty?
+          response.headers['content-length'].must_equal '0'
+          response.headers['x-accel-redirect'].must_equal '/downloads/ordinary.txt'
+
+          response = Rack::MockRequest.new(app).get('/outside-link.txt', request_headers)
+          response.status.must_equal 403
+          response.body.must_be :empty?
+          response.headers.wont_include 'x-accel-redirect'
+        ensure
+          FileUtils.remove_entry_secure outside
+        end
+      end
+    end
+
+    it "uses the real path of a symlink inside an allowed directory" do
+      strict_tmpdir do |root|
+        FileUtils.mkdir_p(File.join(root, 'nested'))
+        target = File.join(root, 'nested', 'target.txt')
+        File.write(target, 'inside target')
+        link = File.join(root, 'link.txt')
+        File.symlink(target, link)
+
+        app = strict_app(simple_app(path_body(link)), [[root, '/downloads/']], :reject)
+        response = Rack::MockRequest.new(app).get('/')
+
+        response.must_be :ok?
+        response.headers['x-accel-redirect'].must_equal '/downloads/nested/target.txt'
+      end
+    end
+
+    it "uses the real directory when a configured root is itself a symlink" do
+      strict_tmpdir do |base|
+        real_root = File.join(base, 'real-root')
+        linked_root = File.join(base, 'linked-root')
+        FileUtils.mkdir_p(real_root)
+        File.symlink(real_root, linked_root)
+        file = File.join(real_root, 'file.txt')
+        File.write(file, 'content')
+
+        app = strict_app(simple_app(path_body(file)), [[linked_root, '/downloads/']], :reject)
+        response = Rack::MockRequest.new(app).get('/')
+
+        response.headers['x-accel-redirect'].must_equal '/downloads/file.txt'
+      end
+    end
+
+    it "supports the filesystem root prefix without adding an extra slash" do
+      strict_tmpdir do |root|
+        file = File.join(root, 'file.txt')
+        File.write(file, 'content')
+        app = strict_app(simple_app(path_body(file)), [['/', '/']], :reject)
+        response = Rack::MockRequest.new(app).get('/')
+
+        response.headers['x-accel-redirect'].must_equal(
+          '/' + Rack::Utils.escape_path(file.delete_prefix('/')).gsub('?', '%3F')
+        )
+      end
+    end
+
+    it "does not allow request mappings to expand the configured roots" do
+      strict_tmpdir do |root|
+        strict_tmpdir do |outside|
+          file = File.join(outside, 'secret.txt')
+          File.write(file, 'secret')
+          app = strict_app(simple_app(path_body(file)), [[root, '/downloads/']], :reject)
+
+          response = Rack::MockRequest.new(app).get(
+            '/',
+            'HTTP_X_ACCEL_MAPPING' => "#{outside}=/attacker/".b
+          )
+
+          response.status.must_equal 403
+          response.headers.wont_include 'x-accel-redirect'
+        end
+      end
+    end
+
+    it "respects directory boundaries and nested roots" do
+      strict_tmpdir do |base|
+        root = File.join(base, 'files')
+        nested = File.join(root, 'nested')
+        sibling = File.join(base, 'files-secret')
+        FileUtils.mkdir_p(nested)
+        FileUtils.mkdir_p(sibling)
+
+        mappings = [[root, '/files/'], [nested, '/nested/']]
+        root_file = File.join(root, 'root.txt')
+        nested_file = File.join(nested, 'child.txt')
+        sibling_file = File.join(sibling, 'child.txt')
+        File.write(root_file, 'root')
+        File.write(nested_file, 'nested')
+        File.write(sibling_file, 'sibling')
+
+        response = Rack::MockRequest.new(strict_app(simple_app(path_body(root_file)), mappings, :reject)).get('/')
+        response.headers['x-accel-redirect'].must_equal '/files/root.txt'
+
+        response = Rack::MockRequest.new(strict_app(simple_app(path_body(nested_file)), mappings, :reject)).get('/')
+        response.headers['x-accel-redirect'].must_equal '/nested/child.txt'
+
+        response = Rack::MockRequest.new(strict_app(simple_app(path_body(sibling_file)), mappings, :reject)).get('/')
+        response.status.must_equal 403
+        response.headers.wont_include 'x-accel-redirect'
+      end
+    end
+
+    it "encodes file names once and leaves a valid encoded URI prefix unchanged" do
+      strict_tmpdir do |root|
+        names = {
+          '中文 文件%.txt' => '/downloads/%E4%B8%AD%E6%96%87%20%E6%96%87%E4%BB%B6%25.txt',
+          "line\nbreak.txt" => '/downloads/line%0Abreak.txt',
+          '%2e%2e' => '/downloads/%252e%252e'
+        }
+
+        names.each do |name, expected|
+          path = File.join(root, name)
+          File.write(path, 'content')
+          app = strict_app(simple_app(path_body(path)), [[root, '/downloads/']], :reject)
+          response = Rack::MockRequest.new(app).get('/')
+
+          response.headers['x-accel-redirect'].must_equal expected
+          response.headers['x-accel-redirect'].wont_match(/[\r\n]/)
+        end
+
+        path = File.join(root, 'percent.txt')
+        File.write(path, 'content')
+        app = strict_app(simple_app(path_body(path)), [[root, '/down%20loads/']], :reject)
+        response = Rack::MockRequest.new(app).get('/')
+
+        response.headers['x-accel-redirect'].must_equal '/down%20loads/percent.txt'
+      end
+    end
+
+    it "falls back without closing the body when no root matches" do
+      strict_tmpdir do |root|
+        strict_tmpdir do |outside|
+          path = File.join(outside, 'secret.txt')
+          File.write(path, 'secret')
+          body = path_body(path)
+          closed = false
+          body.define_singleton_method(:close) { closed = true }
+
+          app = raw_strict_app(simple_app(body), [[root, '/downloads/']], :fallback)
+          status, headers, returned_body = app.call(Rack::MockRequest.env_for('/'))
+
+          status.must_equal 200
+          returned_body.must_equal body
+          headers.wont_include 'x-accel-redirect'
+          headers.wont_include 'content-length'
+          closed.must_equal false
+          body.close
+        end
+      end
+    end
+
+    it "closes the original body after delegating or rejecting" do
+      strict_tmpdir do |root|
+        strict_tmpdir do |outside|
+          inside = File.join(root, 'inside.txt')
+          secret = File.join(outside, 'secret.txt')
+          File.write(inside, 'inside')
+          File.write(secret, 'secret')
+
+          body = path_body(inside)
+          closed = false
+          body.define_singleton_method(:close) { closed = true }
+          app = strict_app(simple_app(body), [[root, '/downloads/']], :reject)
+          Rack::MockRequest.new(app).get('/')
+          closed.must_equal true
+
+          body = path_body(secret)
+          closed = false
+          body.define_singleton_method(:close) { closed = true }
+          app = strict_app(simple_app(body), [[root, '/downloads/']], :reject)
+          Rack::MockRequest.new(app).get('/')
+          closed.must_equal true
+        end
+      end
+    end
+
+    it "rejects files whose path cannot be represented as a real file" do
+      strict_tmpdir do |root|
+        body = path_body("#{root}/bad\0name.txt")
+        app = strict_app(simple_app(body), [[root, '/downloads/']], :reject)
+        response = Rack::MockRequest.new(app).get('/')
+
+        response.status.must_equal 403
+        response.headers.wont_include 'x-accel-redirect'
+      end
+    end
+
+    it "rejects bodies whose to_path does not return a path" do
+      strict_tmpdir do |root|
+        body = []
+        body.define_singleton_method(:to_path) { nil }
+        app = strict_app(simple_app(body), [[root, '/downloads/']], :reject)
+        response = Rack::MockRequest.new(app).get('/')
+
+        response.status.must_equal 403
+        response.headers.wont_include 'x-accel-redirect'
+      end
+    end
+
+    it "requires explicit safe configuration" do
+      strict_tmpdir do |root|
+        proc do
+          Rack::Sendfile.new(simple_app, 'X-Accel-Redirect', [[root, '/downloads/']], strict_mappings: true)
+        end.must_raise ArgumentError
+
+        proc do
+          Rack::Sendfile.new(simple_app, 'X-Accel-Redirect', [], strict_mappings: true, on_unmatched: :reject)
+        end.must_raise ArgumentError
+
+        proc do
+          Rack::Sendfile.new(
+            simple_app,
+            'X-Sendfile',
+            [[root, '/downloads/']],
+            strict_mappings: true,
+            on_unmatched: :reject
+          )
+        end.must_raise ArgumentError
+
+        proc do
+          Rack::Sendfile.new(
+            simple_app,
+            'X-Accel-Redirect',
+            [[root, "/down\nloads/"]],
+            strict_mappings: true,
+            on_unmatched: :reject
+          )
+        end.must_raise ArgumentError
+
+        proc do
+          Rack::Sendfile.new(
+            simple_app,
+            'X-Accel-Redirect',
+            [[root, '/downloads/../files/']],
+            strict_mappings: true,
+            on_unmatched: :reject
+          )
+        end.must_raise ArgumentError
+
+        proc do
+          Rack::Sendfile.new(
+            simple_app,
+            'X-Accel-Redirect',
+            [[root, '/down%2floads/']],
+            strict_mappings: true,
+            on_unmatched: :reject
+          )
+        end.must_raise ArgumentError
+      end
+    end
+
+    it "uses x-accel-redirect when strict mappings are enabled without a variation" do
+      strict_tmpdir do |root|
+        file = File.join(root, 'file.txt')
+        File.write(file, 'content')
+        middleware = Rack::Sendfile.new(
+          simple_app(path_body(file)),
+          nil,
+          [[root, '/downloads/']],
+          strict_mappings: true,
+          on_unmatched: :reject
+        )
+        response = Rack::MockRequest.new(Rack::Lint.new(middleware)).get('/')
+
+        response.headers['x-accel-redirect'].must_equal '/downloads/file.txt'
+      end
     end
   end
 
