@@ -612,6 +612,44 @@ module Sequel
         end
       end
 
+      # Strict version of .lit for developer-written SQL fragments.  Like
+      # <tt>Sequel.lit</tt>, but placeholders are only recognized in the SQL
+      # code area: colons and question marks inside string literals, quoted
+      # identifiers, and comments are treated as literal text.  Named
+      # placeholders may be repeated and are bound to the same value.
+      #
+      # The template is validated when the expression is created, before any
+      # SQL is executed, raising a +Sequel::Error+ for:
+      #
+      # * missing or unused named arguments
+      # * positional argument/placeholder count mismatches
+      # * mixing named and positional placeholders
+      # * unterminated strings, quoted identifiers, dollar quotes, and block
+      #   comments (with the line and column of the opening token)
+      #
+      # Supports PostgreSQL dollar quotes (<tt>$tag$...$tag$</tt>) and the
+      # string and identifier quoting forms common to PostgreSQL and SQLite:
+      # single quoted strings (with doubled-quote escaping and E/B/X/N/U&
+      # prefixes), double quoted identifiers, backtick identifiers, and --
+      # and C-style comments.  The type cast operator <tt>::</tt> and
+      # PostgreSQL jsonb/hstore operators such as <tt>?|</tt> are never
+      # treated as placeholders.
+      #
+      #   DB.literal(Sequel.strict_lit('price < :price', price: 10)) #=> "price < 10"
+      #   DB.literal(Sequel.strict_lit("a = 'x:y'::text"))         #=> "a = 'x:y'::text"
+      #
+      # The loose parsing of .lit is unchanged; historical templates keep
+      # their existing interpretation.
+      def strict_lit(s, *args)
+        if s.is_a?(SQL::StrictPlaceholderLiteralString)
+          s
+        elsif args.empty?
+          SQL::StrictPlaceholderLiteralString.new(s, [].freeze)
+        else
+          SQL::StrictPlaceholderLiteralString.new(s, args)
+        end
+      end
+
       # Return a <tt>Sequel::SQL::BooleanExpression</tt> created from the condition
       # specifier, matching none of the conditions.
       #
@@ -2061,6 +2099,8 @@ module Sequel
   
   SQL::Constants::OLD = SQL::Identifier.new(LiteralString.new("OLD").freeze)
   SQL::Constants::NEW = SQL::Identifier.new(LiteralString.new("NEW").freeze)
+
+  require_relative "sql/strict_literal_string"
 
   include SQL::Constants
   extend SQL::Builders
