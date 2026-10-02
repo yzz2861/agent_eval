@@ -66,7 +66,8 @@ class Huey(object):
     :param bool immediate: useful for debugging; causes tasks to be executed
         synchronously in the application.
     :param Serializer serializer: serializer implementation for tasks and
-        result data. The default implementation uses pickle.
+        result data. The default implementation uses pickle. JsonSerializer
+        provides a versioned, inspectable JSON message format.
     :param bool compression: compress tasks and result data (gzip by default).
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param bool immediate_use_memory: automatically switch to a local in-memory

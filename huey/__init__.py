@@ -17,6 +17,11 @@ from huey.api import chord
 from huey.api import crontab
 from huey.api import group
 from huey.exceptions import CancelExecution
+from huey.exceptions import SerializationError
 from huey.exceptions import RetryTask
 from huey.utils import Error
 from huey.utils import SKIPPED
+from huey.serializer import JsonSerializer
+from huey.serializer import SignedJsonSerializer
+from huey.serializer import SignedSerializer
+from huey.serializer import Serializer

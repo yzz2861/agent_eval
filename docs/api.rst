@@ -2189,6 +2189,35 @@ Serializer
         :param bytes data: serialized data.
         :returns: the deserialized object.
 
+.. py:class:: JsonSerializer(compression=False, compression_level=6, use_zlib=False, allow_pickle=False)
+
+    Versioned JSON serializer for tasks, pipeline/chord messages and result
+    data. Supported values include ``None``, booleans, integers, floats,
+    strings, bytes, timezone-aware datetimes, tuples, lists and dictionaries
+    containing nested supported values.
+
+    Every value is stored with an explicit ``__huey_type__`` tag, so user
+    dictionaries may use the same keys without ambiguity. Task messages use a
+    versioned envelope with explicit ``Message`` fields, and unknown versions,
+    types or task parameters raise a serialization error before the task is
+    executed.
+
+    Pickle messages are not read unless ``allow_pickle=True`` is supplied
+    explicitly. JSON decoding failures never fall back to pickle.
+
+    .. code-block:: python
+
+        from huey import RedisHuey
+        from huey.serializer import JsonSerializer
+
+        huey = RedisHuey(
+            'my-app',
+            serializer=JsonSerializer())
+
+    During migration, legacy producers can be drained with
+    ``JsonSerializer(allow_pickle=True)``. Remove the option after all legacy
+    messages have been consumed.
+
 
 .. py:class:: SignedSerializer(secret, salt='huey', **kwargs)
 
@@ -2220,6 +2249,12 @@ Serializer
 
     Both the application and the consumer must use the same ``secret`` and
     ``salt``.
+
+.. py:class:: SignedJsonSerializer(secret, salt='huey', **kwargs)
+
+    Signed variant of :py:class:`JsonSerializer`. Compression and legacy
+    pickle reading are configured with the same keyword arguments as
+    :py:class:`JsonSerializer`.
 
 .. _exceptions:
 
@@ -2485,4 +2520,3 @@ Huey comes with several built-in storage implementations:
 
 .. autoclass:: huey.storage.BaseStorage
    :members:
-
