@@ -1,0 +1,14 @@
+/vendor
+today
+Gemfile.lock
+*.gem
+website/.sass-cache
+.yardoc
+test.rb
+.rspec
+.bundle
+doc
+pkg
+rdoc
+.DS_Store
+tags
