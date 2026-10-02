@@ -1,0 +1,16 @@
+/coverage
+/doc
+/pkg
+/rgl
+/vendor/bundle
+/TAGS
+/tags
+graph.dot
+.project
+.yardoc
+Gemfile.lock
+/.buildpath
+/dep_graph.dot
+/graph.*
+/.claude/settings.local.json
+/.bundle/
