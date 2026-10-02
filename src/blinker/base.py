@@ -87,6 +87,7 @@ class Signal:
         self._by_receiver: dict[t.Any, set[t.Any]] = defaultdict(self.set_class)
         self._by_sender: dict[t.Any, set[t.Any]] = defaultdict(self.set_class)
         self._weak_senders: dict[t.Any, weakref.ref[t.Any]] = {}
+        self._connection_owners: dict[tuple[t.Any, t.Any], t.Any] = {}
 
     def connect(self, receiver: F, sender: t.Any = ANY, weak: bool = True) -> F:
         """Connect ``receiver`` to be called when the signal is sent by
@@ -100,22 +101,38 @@ class Signal:
             receiver will be called for any sender. A receiver may be connected
             to multiple senders by calling :meth:`connect` multiple times.
         :param weak: Track the receiver with a :mod:`weakref`. The receiver will
-            be automatically disconnected when it is garbage collected. When
-            connecting a receiver defined within a function, set to ``False``,
-            otherwise it will be disconnected when the function scope ends.
+        be automatically disconnected when it is garbage collected. When
+        connecting a receiver defined within a function, set to ``False``,
+        otherwise it will be disconnected when the function scope ends.
         """
+        return self._connect(receiver, sender=sender, weak=weak)
+
+    def _connect(
+        self,
+        receiver: F,
+        sender: t.Any = ANY,
+        weak: bool = True,
+        *,
+        _owner: t.Any = None,
+    ) -> F:
+        """Perform a connection, optionally assigning it a temporary owner."""
         receiver_id = make_id(receiver)
         sender_id = ANY_ID if sender is ANY else make_id(sender)
+        had_receiver = receiver_id in self.receivers
+        had_connection = sender_id in self._by_receiver.get(receiver_id, ())
 
         if weak:
             self.receivers[receiver_id] = make_ref(
                 receiver, self._make_cleanup_receiver(receiver_id)
             )
-        else:
+        elif _owner is None or not had_receiver:
             self.receivers[receiver_id] = receiver
 
         self._by_sender[sender_id].add(receiver_id)
         self._by_receiver[receiver_id].add(sender_id)
+
+        if not had_connection:
+            self._connection_owners[(receiver_id, sender_id)] = _owner
 
         if sender is not ANY and sender_id not in self._weak_senders:
             # store a cleanup for weakref-able senders
@@ -168,9 +185,9 @@ class Signal:
     def connected_to(
         self, receiver: c.Callable[..., t.Any], sender: t.Any = ANY
     ) -> c.Generator[None, None, None]:
-        """A context manager that temporarily connects ``receiver`` to the
-        signal while a ``with`` block executes. When the block exits, the
-        receiver is disconnected. Useful for tests.
+        """Temporarily connect ``receiver`` while a ``with`` block executes.
+        Only the connection created by this context is removed when the block
+        exits; existing connections are left unchanged. Useful for tests.
 
         :param receiver: The callable to call when :meth:`send` is called with
             the given ``sender``, passing ``sender`` as a positional argument
@@ -181,12 +198,25 @@ class Signal:
 
         .. versionadded:: 1.1
         """
-        self.connect(receiver, sender=sender, weak=False)
+        owner = object()
+        self._connect(receiver, sender=sender, weak=False, _owner=owner)
 
         try:
             yield None
         finally:
-            self.disconnect(receiver)
+            receiver_id = make_id(receiver)
+            sender_id = ANY_ID if sender is ANY else make_id(sender)
+
+            if self._connection_owners.get((receiver_id, sender_id)) is owner:
+                self._disconnect_connection(receiver_id, sender_id)
+
+                if (
+                    "receiver_disconnected" in self.__dict__
+                    and self.receiver_disconnected.receivers
+                ):
+                    self.receiver_disconnected.send(
+                        self, receiver=receiver, sender=sender
+                    )
 
     @contextmanager
     def muted(self) -> c.Generator[None, None, None]:
@@ -387,14 +417,26 @@ class Signal:
 
     def _disconnect(self, receiver_id: c.Hashable, sender_id: c.Hashable) -> None:
         if sender_id == ANY_ID:
+            for connected_sender_id in self._by_receiver.get(receiver_id, ()):
+                self._connection_owners.pop((receiver_id, connected_sender_id), None)
+
             if self._by_receiver.pop(receiver_id, None) is not None:
                 for bucket in self._by_sender.values():
                     bucket.discard(receiver_id)
 
             self.receivers.pop(receiver_id, None)
         else:
-            self._by_sender[sender_id].discard(receiver_id)
-            self._by_receiver[receiver_id].discard(sender_id)
+            self._disconnect_connection(receiver_id, sender_id)
+
+    def _disconnect_connection(
+        self, receiver_id: c.Hashable, sender_id: c.Hashable
+    ) -> None:
+        self._by_sender[sender_id].discard(receiver_id)
+        self._by_receiver[receiver_id].discard(sender_id)
+        self._connection_owners.pop((receiver_id, sender_id), None)
+
+        if not self._by_receiver[receiver_id]:
+            self.receivers.pop(receiver_id, None)
 
     def _make_cleanup_receiver(
         self, receiver_id: c.Hashable
@@ -424,6 +466,7 @@ class Signal:
 
             for receiver_id in self._by_sender.pop(sender_id, ()):
                 self._by_receiver[receiver_id].discard(sender_id)
+                self._connection_owners.pop((receiver_id, sender_id), None)
 
         return cleanup
 
@@ -459,6 +502,7 @@ class Signal:
         self.receivers.clear()
         self._by_sender.clear()
         self._by_receiver.clear()
+        self._connection_owners.clear()
 
 
 class NamedSignal(Signal):

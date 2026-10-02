@@ -3,6 +3,10 @@ Version 1.10.0
 
 Unreleased
 
+-   Fix ``Signal.connected_to`` to remove only the receiver/sender connection
+    it created, preserving existing subscriptions and weak or strong receiver
+    behavior on context exit.
+
 
 Version 1.9.0
 -------------
