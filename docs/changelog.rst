@@ -54,6 +54,11 @@ Release 0.14 (in development)
 .. rubric:: New features
 
 * ``bottle.HTTPError`` raised on invalid JSON now include the underlying exception in the ``exception`` field.
+* SimpleTemplate supports named slots. The ``capture_slot``, ``append_slot``
+  and ``replace_slot`` block helpers (with short ``capture``, ``append`` and
+  ``replace`` aliases) collect rendered sections for a rebased layout, ``slot``
+  reads them, nested includes share slot state for one render, and
+  already-rendered slot content is not escaped twice.
 
 
 Release 0.13
@@ -272,4 +277,3 @@ This is an incomplete list of new features and improved functionality.
 * New :func:`get`, :func:`post`, :func:`put` and :func:`delete` decorators.
 * The :class:`SimpleTemplate` engine got full unicode support.
 * Lots of non-critical bugfixes.
-

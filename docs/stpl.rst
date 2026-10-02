@@ -167,6 +167,74 @@ Each template is preloaded with a bunch of functions that help with the most com
     </body>
     </html>
 
+Named Slots
+-----------
+
+Templates can capture named output blocks and let a rebased layout read them
+later. The blocks behave like regular template text: plain text is emitted as
+is, expressions still use the normal ``{{ ... }}`` escaping rules, and content
+read with :func:`slot` is not escaped a second time.
+
+.. function:: capture_slot(name)
+
+  Capture a block into a slot only if that slot has no value yet. This is
+  useful for layout defaults.
+
+.. function:: append_slot(name)
+
+  Capture a block and append it to an existing slot.
+
+.. function:: replace_slot(name)
+
+  Capture a block and replace an existing slot.
+
+.. function:: slot(name, default='')
+
+  Return the rendered content stored in a slot. Undefined slots return the
+  supplied default, or an empty string when no default is given.
+
+The short aliases ``capture``, ``append`` and ``replace`` are also available.
+Operations on the same slot take effect in execution order. A page is
+rendered before its rebased layout, so ``capture()`` in a layout can provide a
+fallback without overwriting content supplied by the page, while ``append()``
+is useful for scripts contributed from several nested templates::
+
+  # page.tpl
+  % rebase('middle.tpl')
+  %with replace_slot('head'):
+  <title>Page</title>
+  %end
+  %with append_slot('scripts'):
+  <script src="/page.js"></script>
+  %end
+  % include('widget.tpl')
+
+  # middle.tpl
+  % rebase('outer.tpl')
+  %with capture_slot('head'):
+  <title>Default</title>
+  %end
+  %with append_slot('scripts'):
+  <script src="/middle.js"></script>
+  %end
+  {{!base}}
+
+  # outer.tpl
+  <head>{{slot('head')}}</head>
+  <body>{{!base}}{{slot('scripts')}}</body>
+
+Included templates share the current render's slot dictionary, so even nested
+includes may contribute to the final layout. Their ordinary local variables do
+not leak: an included template receives a copy of the render environment and
+does not change the caller's variables. Recursive includes are allowed when
+the recursion terminates; their slot operations are applied in the same order
+as each include executes. An include cycle with no terminating condition keeps
+recursing and eventually raises Python's recursion error.
+
+Each call to :meth:`SimpleTemplate.render` creates a fresh slot dictionary.
+Rendering the same cached template object again never exposes slot values from
+a previous render.
+
 
 Accessing undefined variables in a template raises :exc:`NameError` and
 stops rendering immediately. This is standard python behavior and nothing new,

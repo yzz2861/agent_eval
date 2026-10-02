@@ -4,6 +4,7 @@ import unittest
 from bottle import SimpleTemplate, TemplateError, view, template, touni, tob, html_quote
 import re, os
 import traceback
+from textwrap import dedent
 from .tools import chdir
 
 
@@ -163,6 +164,154 @@ class TestSimpleTemplate(unittest.TestCase):
             t = SimpleTemplate(name='stpl_t2main', lookup=['./views/'])
             result='+base+\n+main+\n!1234!\n+include+\n-main-\n+include+\n-base-\n'
             self.assertRenders(t, result, content='1234')
+
+    def test_named_slots(self):
+        source = "%with capture_slot('head'):\n" \
+                 "<title>{{title}}</title>\n" \
+                 "%end\n" \
+                 "%with append_slot('head'):\n" \
+                 '<meta name="value" content="{{value}}">\n' \
+                 "%end\n" \
+                 "%with append_slot('head'):\n" \
+                 '<meta name="more">\n' \
+                 "%end\n" \
+                 "%with replace_slot('aside'):\n" \
+                 "<aside>{{value}}</aside>\n" \
+                 "%end\n" \
+                 "HEAD:{{slot('head')}}\n" \
+                 "ASIDE:{{slot('aside')}}\n" \
+                 "DEFAULT:{{slot('missing', value)}}\n"
+        result = "HEAD:<title>Home</title>\n" \
+                 '<meta name="value" content="&lt;b&gt;">\n' \
+                 '<meta name="more">\n' \
+                 "ASIDE:<aside>&lt;b&gt;</aside>\n" \
+                 "DEFAULT:&lt;b&gt;\n"
+        self.assertRenders(source, result, title='Home', value='<b>')
+
+    def test_rendered_slots_are_not_double_escaped(self):
+        layout = SimpleTemplate("{{slot('content')}}|{{base}}")
+        page = SimpleTemplate(dedent("""\
+            %with replace('content'):
+            <b>{{value}}</b>
+            %end
+            <i>{{value}}</i>
+            %rebase('layout')
+        """))
+        page.cache.update(layout=layout)
+        self.assertRenders(
+            page,
+            '<b>&lt;b&gt;</b>|&lt;i&gt;&amp;lt;b&amp;gt;&lt;/i&gt;\n',
+            value='<b>')
+
+    def test_named_slots_in_rebase_and_nested_includes(self):
+        outer = SimpleTemplate(dedent("""
+            HEAD:{{slot('head')}}
+            ASIDE:{{slot('aside')}}
+            {{!base}}
+            SCRIPTS:{{slot('scripts')}}"""))
+        middle = SimpleTemplate(dedent("""
+            %with capture('head'):
+            <meta name="middle">
+            %end
+            %with capture('aside'):
+            <aside>middle default</aside>
+            %end
+            %with append('scripts'):
+            <script>middle</script>
+            %end
+            MIDDLE-START
+            {{!base}}
+            MIDDLE-END
+            %rebase('outer')
+        """))
+        child_a = SimpleTemplate(dedent("""
+            CHILD-A
+            %with append('scripts'):
+            <script>a</script>
+            %end
+            %child_a_local = 'private-a'
+            %_ = include('child_b')
+            {{'defined' if defined('child_b_local') else 'isolated'}}
+        """))
+        child_b = SimpleTemplate(dedent("""
+            CHILD-B {{value}}
+            %with append('aside'):
+            <aside>b {{value}}</aside>
+            %end
+            %with append('scripts'):
+            <script>b {{value}}</script>
+            %end
+            %child_b_local = 'private-b'
+        """))
+        child_a.cache.update(child_b=child_b)
+        middle.cache.update(outer=outer)
+        page = SimpleTemplate(dedent("""
+            %with replace('head'):
+            <title>{{title}}</title>
+            %end
+            %with append('scripts'):
+            <script>page</script>
+            %end
+            %_ = include('child_a')
+            PAGE {{'defined' if defined('child_a_local') else 'isolated'}}
+            %page_local = 'private-page'
+            %rebase('middle')
+        """))
+        page.cache.update(middle=middle, child_a=child_a)
+
+        result = '\n'.join((
+            '',
+            'HEAD:<title>Home &amp; away</title>',
+            'ASIDE:<aside>b &lt;b&gt;</aside>',
+            '',
+            'MIDDLE-START',
+            '',
+            '',
+            'CHILD-A',
+            '',
+            'CHILD-B &lt;b&gt;',
+            'isolated',
+            'PAGE isolated',
+            '',
+            'MIDDLE-END',
+            '',
+            'SCRIPTS:<script>page</script>',
+            '<script>a</script>',
+            '<script>b &lt;b&gt;</script>',
+            '<script>middle</script>',
+        ))
+        self.assertRenders(page, result, title='Home & away', value='<b>')
+
+    def test_named_slots_are_render_scoped_and_repeatable(self):
+        child = SimpleTemplate(dedent("""\
+            %with append('slot'):
+            {{value}}
+            %end
+            %child_local = True
+        """))
+        page = SimpleTemplate(dedent("""\
+            %_ = include('child')
+            {{slot('slot')}}|{{'yes' if defined('child_local') else 'no'}}|{{slot('missing')}}"""))
+        page.cache.update(child=child)
+        self.assertRenders(page, 'first|no|', value='first')
+        self.assertRenders(page, 'second|no|', value='second')
+
+    def test_recursive_include_terminates_and_shares_slots(self):
+        recursive = SimpleTemplate(dedent("""\
+            {{depth}}
+            %with append('path'):
+            {{depth}}
+            %end
+            %if depth:
+            %_ = include('recursive', depth=depth - 1)
+            %end
+        """))
+        recursive.cache.update(recursive=recursive)
+        page = SimpleTemplate(dedent("""\
+            %_ = include('recursive', depth=2)
+            |{{slot('path')}}"""))
+        page.cache.update(recursive=recursive)
+        self.assertRenders(page, '2\n1\n0\n|2\n1\n0')
 
     def test_get(self):
         self.assertRenders('{{get("x", "default")}}', '1234', x='1234')

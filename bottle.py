@@ -4107,6 +4107,60 @@ class Jinja2Template(BaseTemplate):
             return (f.read().decode(self.encoding), fname, lambda: False)
 
 
+class _RenderedSlot(str):
+    """A slot value that has already been rendered by a template."""
+
+
+class _SlotBuffer:
+    def __init__(self, env, name, mode):
+        self.env = env
+        self.name = name
+        self.mode = mode
+        self.buffer = None
+        self.old_stdout = None
+        self.old_printlist = None
+
+    def __enter__(self):
+        self.old_stdout = self.env['_stdout']
+        self.old_printlist = self.env['_printlist']
+        self.buffer = []
+        self.env['_stdout'] = self.buffer
+        self.env['_printlist'] = self.buffer.extend
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            if exc_type is None:
+                rendered, newline = self._split_trailing_newline(
+                    ''.join(self.buffer))
+                rendered = _RenderedSlot(rendered)
+                slots = self.env['_slots']
+                if self.mode == 'capture':
+                    slots.setdefault(self.name, rendered)
+                elif self.mode == 'append':
+                    previous = str(slots.get(self.name, ''))
+                    if previous and not self._ends_with_newline(previous):
+                        previous += newline
+                    slots[self.name] = _RenderedSlot(previous + str(rendered))
+                else:
+                    slots[self.name] = rendered
+        finally:
+            self.env['_stdout'] = self.old_stdout
+            self.env['_printlist'] = self.old_printlist
+
+    @staticmethod
+    def _split_trailing_newline(value):
+        if value.endswith('\r\n'):
+            return value[:-2], '\r\n'
+        if value.endswith('\n'):
+            return value[:-1], '\n'
+        return value, ''
+
+    @staticmethod
+    def _ends_with_newline(value):
+        return value.endswith('\n') or value.endswith('\r\n')
+
+
 class SimpleTemplate(BaseTemplate):
     def prepare(self,
                 escape_func=html_escape,
@@ -4114,8 +4168,18 @@ class SimpleTemplate(BaseTemplate):
                 syntax=None, **ka):
         self.cache = {}
         enc = self.encoding
-        self._str = lambda x: touni(x, enc)
-        self._escape = lambda x: escape_func(touni(x, enc))
+        def to_string(value):
+            if isinstance(value, _RenderedSlot):
+                return value
+            return touni(value, enc)
+
+        def escape(value):
+            if isinstance(value, _RenderedSlot):
+                return value
+            return escape_func(touni(value, enc))
+
+        self._str = to_string
+        self._escape = escape
         self.syntax = syntax
         if noescape:
             self._str, self._escape = self._escape, self._str
@@ -4142,21 +4206,48 @@ class SimpleTemplate(BaseTemplate):
     def _rebase(self, _env, _name=None, **kwargs):
         _env['_rebase'] = (_name, kwargs)
 
+    def _capture_slot(self, _env, _name):
+        return _SlotBuffer(_env, _name, 'capture')
+
+    def _append_slot(self, _env, _name):
+        return _SlotBuffer(_env, _name, 'append')
+
+    def _replace_slot(self, _env, _name):
+        return _SlotBuffer(_env, _name, 'replace')
+
+    def _get_slot(self, _env, _name, _default=''):
+        return _env['_slots'].get(_name, _default)
+
     def _include(self, _env, _name=None, **kwargs):
         env = _env.copy()
         env.update(kwargs)
         if _name not in self.cache:
             self.cache[_name] = self.__class__(name=_name, lookup=self.lookup, syntax=self.syntax)
-        return self.cache[_name].execute(env['_stdout'], env)
+        stdout = _env['_stdout']
+        printlist = _env['_printlist']
+        try:
+            return self.cache[_name].execute(stdout, env)
+        finally:
+            _env['_stdout'] = stdout
+            _env['_printlist'] = printlist
 
     def execute(self, _stdout, kwargs):
         env = self.defaults.copy()
         env.update(kwargs)
+        env.setdefault('_slots', {})
         env.update({
             '_stdout': _stdout,
             '_printlist': _stdout.extend,
             'include': functools.partial(self._include, env),
             'rebase': functools.partial(self._rebase, env),
+            'capture': functools.partial(self._capture_slot, env),
+            'capture_slot': functools.partial(self._capture_slot, env),
+            'append': functools.partial(self._append_slot, env),
+            'append_slot': functools.partial(self._append_slot, env),
+            'replace': functools.partial(self._replace_slot, env),
+            'replace_slot': functools.partial(self._replace_slot, env),
+            'slot': functools.partial(self._get_slot, env),
+            'get_slot': functools.partial(self._get_slot, env),
             '_rebase': None,
             '_str': self._str,
             '_escape': self._escape,
@@ -4167,8 +4258,8 @@ class SimpleTemplate(BaseTemplate):
         exec(self.co, env)
         if env.get('_rebase'):
             subtpl, rargs = env.pop('_rebase')
-            rargs['base'] = ''.join(_stdout)  # copy stdout
-            del _stdout[:]  # clear stdout
+            rargs['base'] = ''.join(_stdout)
+            del _stdout[:]
             return self._include(env, subtpl, **rargs)
         return env
 
@@ -4179,6 +4270,7 @@ class SimpleTemplate(BaseTemplate):
         for dictarg in args:
             env.update(dictarg)
         env.update(kwargs)
+        env['_slots'] = {}
         self.execute(stdout, env)
         return ''.join(stdout)
 
