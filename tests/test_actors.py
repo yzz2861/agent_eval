@@ -458,6 +458,23 @@ def test_actors_can_prioritize_work(stub_broker):
         assert calls == ["hi"] * 10 + ["lo"] * 10
 
 
+@pytest.mark.parametrize("priority", [-1, 256])
+def test_actors_reject_priorities_outside_bounded_range(stub_broker, priority):
+    with pytest.raises(ValueError):
+        @dramatiq.actor(priority=priority)
+        def do_work():
+            pass
+
+
+@pytest.mark.parametrize("priority", [0, 255])
+def test_actors_accept_bounded_priorities(stub_broker, priority):
+    @dramatiq.actor(priority=priority)
+    def do_work():
+        pass
+
+    assert do_work.priority == priority
+
+
 def test_can_call_str_on_actors(stub_broker):
     # Given that I have an actor
     @dramatiq.actor

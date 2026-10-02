@@ -89,7 +89,8 @@ class GenericActor(metaclass=generic_actor):
       broker(Broker): The broker this actor is bound to.
       actor_name(str): The actor's name.
       queue_name(str): The actor's queue.
-      priority(int): The actor's priority.
+      priority(int): The actor's priority, from 0 through 255. Lower
+        numbers represent higher priorities.
       options(dict): Arbitrary options that are passed to the broker
         and middleware.
     """

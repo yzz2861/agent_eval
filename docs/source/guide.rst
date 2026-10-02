@@ -370,9 +370,9 @@ That way if messages for both ``generate_report`` and ``sync_order_to_warehouse`
 have been consumed from the queue at the same time but there's only capacity to run
 one of them, ``generate_report`` will always run *first*.
 
-Although all positive integers represent valid priorities, if you're
-going to use this feature, I'd recommend setting up constants for the
-various priorities you plan to use::
+Priorities are integers from ``0`` through ``255``. Even within that
+range, it's a good idea to set up constants for the priorities you plan
+to use::
 
   PRIORITY_LOW = 100
   PRIORITY_MEDIUM = 50
@@ -387,6 +387,46 @@ various priorities you plan to use::
 Because actor ``priority`` does not effect messages waiting in the queues,
 it is most useful for making Dramatiq treat certain queues as higher priority than others.
 To make this work best, all the actors for a queue should have the same actor ``priority``.
+
+Priority Aging
+^^^^^^^^^^^^^^
+
+Static priorities can starve a prefetched low-priority message when a
+worker keeps receiving new high-priority messages. To compensate for
+waiting time, enable priority aging on the worker::
+
+   worker = Worker(broker, priority_aging_interval=1000)
+
+The interval is specified in milliseconds. Once a message enters the
+worker's in-memory *ready* queue, every interval it waits reduces its
+effective numeric priority by one, down to ``0``. With the example
+above, a priority-``10`` message that has waited for ten seconds is
+selected as if it had priority ``0``::
+
+   effective_priority = max(0, configured_priority - wait_ms // 1000)
+
+Aging is disabled by default (``priority_aging_interval=0``), so
+existing static-priority behavior is unchanged. It can also be
+configured with the ``dramatiq_priority_aging_interval`` environment
+variable.
+
+Ordering and timing rules:
+
+* Messages with the same effective priority run in ready-queue FIFO order.
+* Delay-queue ETA values are scheduling timestamps, not priorities for
+  aging. Waiting before a message becomes ready does not count.
+* A delayed retry gets a fresh ready time after its retry ETA is reached
+  and it enters the ready queue again.
+* Pausing a worker does not reset or freeze ready-time compensation;
+  messages already in its ready queue continue to age while paused.
+* Messages requeued back to the broker during shutdown or a consumer
+  restart leave the ready queue and start aging again after they are
+  consumed and become ready.
+
+The lowest configured priority reaches effective priority ``0`` after at
+most ``255 * priority_aging_interval`` milliseconds. While workers keep
+taking messages, an already-ready low-priority message can therefore be
+displaced by newer messages for only a bounded amount of time.
 
 .. seealso::
    The |RabbitmqBroker| supports prioritizing messages while they are waiting in the queue

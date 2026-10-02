@@ -20,14 +20,15 @@ from __future__ import annotations
 import dataclasses
 import os
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from functools import lru_cache
-from queue import Empty, PriorityQueue
+from itertools import count
+from queue import Empty, PriorityQueue, Queue
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Iterable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 
 from .broker import Broker, Consumer, MessageProxy
-from .common import current_millis, iter_queue, join_all, q_name
+from .common import MAX_ACTOR_PRIORITY, MIN_ACTOR_PRIORITY, current_millis, iter_queue, join_all, q_name
 from .errors import ActorNotFound, BrokerConnectionError, RateLimitExceeded, Retry
 from .logging import get_logger
 from .middleware import Middleware, SkipMessage
@@ -57,6 +58,10 @@ DELAY_QUEUE_PREFETCH = int(os.getenv("dramatiq_delay_queue_prefetch", 0))
 #: The number of milliseconds workers should wake up after if the queue is idle.
 WORKER_TIMEOUT = int(os.getenv("dramatiq_worker_timeout", 1000))
 
+#: The number of milliseconds a ready message waits for its effective
+#: priority to be increased by one level. ``0`` disables priority aging.
+PRIORITY_AGING_INTERVAL = int(os.getenv("dramatiq_priority_aging_interval", 0))
+
 
 class Worker:
     """Workers consume messages off of all declared queues and
@@ -74,6 +79,9 @@ class Worker:
       worker_timeout(int): The number of milliseconds workers should
         wake up after if the queue is idle.
       worker_threads(int): The number of worker threads to spawn.
+      priority_aging_interval(int): Milliseconds a ready message waits
+        before its numeric priority is reduced by one. ``0`` preserves
+        static priority behavior.
     """
 
     def __init__(
@@ -83,6 +91,7 @@ class Worker:
         queues: Optional[set[str]] = None,
         worker_timeout: int = WORKER_TIMEOUT,
         worker_threads: int = 8,
+        priority_aging_interval: int = PRIORITY_AGING_INTERVAL,
     ) -> None:
         self.logger = get_logger(__name__, type(self))
         self.broker = broker
@@ -98,7 +107,17 @@ class Worker:
         self.delay_prefetch = DELAY_QUEUE_PREFETCH or min(worker_threads * 1000, 65535)
 
         self.workers: list[WorkerThread] = []
-        self.work_queue: PriorityQueue[_WorkQueueItem] = PriorityQueue()
+        if not isinstance(priority_aging_interval, int) or isinstance(priority_aging_interval, bool):
+            raise TypeError("priority_aging_interval must be an integer.")
+        if priority_aging_interval < 0:
+            raise ValueError("priority_aging_interval must be greater than or equal to 0.")
+
+        self.priority_aging_interval = priority_aging_interval
+        self.work_queue: Union[PriorityQueue[_WorkQueueItem], _AgingPriorityQueue]
+        if priority_aging_interval:
+            self.work_queue = _AgingPriorityQueue(priority_aging_interval)
+        else:
+            self.work_queue = PriorityQueue()
         self.worker_timeout = worker_timeout
         self.worker_threads = worker_threads
 
@@ -267,6 +286,96 @@ class _WorkQueueItem:
     priority: int
     message: MessageProxy = dataclasses.field(compare=False)
     _queued_time: int = dataclasses.field(default_factory=time.monotonic_ns)
+    _sequence: int = dataclasses.field(default_factory=count().__next__)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _AgingWorkQueueItem:
+    priority: int
+    ready_time: int
+    sequence: int
+    message: MessageProxy
+
+
+class _AgingPriorityQueue(Queue):
+    """A bounded-bucket queue with age-adjusted effective priorities.
+
+    Messages remain in FIFO buckets keyed by configured priority. A
+    dequeue inspects each bucket's oldest item instead of reordering
+    the whole queue. Items tied on effective priority are selected by
+    their ready-queue sequence number.
+    """
+
+    def __init__(
+        self,
+        aging_interval: int,
+        *,
+        time_func: Callable[[], int] = lambda: time.monotonic_ns() // 1_000_000,
+    ) -> None:
+        self.aging_interval = aging_interval
+        self.time_func = time_func
+        super().__init__()
+
+    def _init(self, maxsize: int = 0) -> None:
+        self._buckets: list[deque[_AgingWorkQueueItem]] = [
+            deque() for _ in range(MAX_ACTOR_PRIORITY + 1)
+        ]
+        self._next_sequence = 0
+        self._size = 0
+
+    def _qsize(self) -> int:
+        return self._size
+
+    def put(self, item: _WorkQueueItem, block: bool = True, timeout: Optional[float] = None) -> None:
+        priority = item.priority
+        if not MIN_ACTOR_PRIORITY <= priority <= MAX_ACTOR_PRIORITY:
+            raise ValueError(
+                f"Actor priority must be between {MIN_ACTOR_PRIORITY} and {MAX_ACTOR_PRIORITY}, inclusive."
+            )
+        super().put(item, block=block, timeout=timeout)
+
+    def _put(self, item: _WorkQueueItem) -> None:
+        self._buckets[item.priority].append(
+            _AgingWorkQueueItem(
+                priority=item.priority,
+                ready_time=self.time_func(),
+                sequence=self._next_sequence,
+                message=item.message,
+            )
+        )
+        self._next_sequence += 1
+        self._size += 1
+
+    def _get(self) -> _AgingWorkQueueItem:
+        now = self.time_func()
+        best_priority: Optional[int] = None
+        best_effective_priority = MAX_ACTOR_PRIORITY + 1
+        best_sequence = 0
+
+        for priority, bucket in enumerate(self._buckets):
+            if not bucket:
+                continue
+
+            head = bucket[0]
+            age_levels = (now - head.ready_time) // self.aging_interval
+            effective_priority = max(MIN_ACTOR_PRIORITY, priority - age_levels)
+            if (
+                best_priority is None
+                or effective_priority < best_effective_priority
+                or effective_priority == best_effective_priority
+                and head.sequence < best_sequence
+            ):
+                best_priority = priority
+                best_effective_priority = effective_priority
+                best_sequence = head.sequence
+
+        if best_priority is None:
+            raise IndexError("empty queue")
+
+        item = self._buckets[best_priority].popleft()
+        item = dataclasses.replace(item, priority=best_effective_priority)
+        self._size -= 1
+        return item
 
 
 class ConsumerThread(Thread):
@@ -276,7 +385,7 @@ class ConsumerThread(Thread):
         broker: Broker,
         queue_name: str,
         prefetch: int,
-        work_queue: PriorityQueue[_WorkQueueItem],
+        work_queue: Union[PriorityQueue[_WorkQueueItem], _AgingPriorityQueue],
         worker_timeout: int,
     ) -> None:
         super().__init__(daemon=True)
@@ -505,7 +614,7 @@ class WorkerThread(Thread):
         *,
         broker: Broker,
         consumers: dict[str, ConsumerThread],
-        work_queue: PriorityQueue[_WorkQueueItem],
+        work_queue: Union[PriorityQueue[_WorkQueueItem], _AgingPriorityQueue],
         worker_timeout: int,
     ) -> None:
         super().__init__(daemon=True)

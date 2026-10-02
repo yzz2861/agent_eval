@@ -5,6 +5,7 @@ import logging
 import time
 import weakref
 from unittest import mock
+from typing import Optional
 
 import pytest
 
@@ -14,6 +15,22 @@ import dramatiq.worker
 from dramatiq.brokers.stub import StubBroker
 
 from .common import worker
+
+
+class FixedClock:
+    def __init__(self) -> None:
+        self.now = 0
+
+    def __call__(self) -> int:
+        return self.now
+
+
+def work_queue_item(actor, *, priority: Optional[int] = None):
+    return dramatiq.worker._WorkQueueItem(
+        priority=actor.priority if priority is None else priority,
+        message=dramatiq.MessageProxy(actor.message()),
+        _queued_time=0,
+    )
 
 
 def test_workers_dont_register_queues_that_arent_whitelisted(stub_broker):
@@ -85,8 +102,12 @@ def test_queue_item_order():
     message_proxy2 = dramatiq.MessageProxy(message2)
 
     # messages/items with different priorities,
-    message_1_item_priority_0 = dramatiq.worker._WorkQueueItem(priority=0, message=message_proxy1, _queued_time=0)
-    message_2_item_priority_1 = dramatiq.worker._WorkQueueItem(priority=1, message=message_proxy2, _queued_time=0)
+    message_1_item_priority_0 = dramatiq.worker._WorkQueueItem(
+        priority=0, message=message_proxy1, _queued_time=0, _sequence=0
+    )
+    message_2_item_priority_1 = dramatiq.worker._WorkQueueItem(
+        priority=1, message=message_proxy2, _queued_time=0, _sequence=0
+    )
     assert message_1_item_priority_0 < message_2_item_priority_1
     assert message_1_item_priority_0 <= message_2_item_priority_1
     assert not message_1_item_priority_0 > message_2_item_priority_1
@@ -99,8 +120,12 @@ def test_queue_item_order():
     assert message_2_item_priority_1 != message_1_item_priority_0
 
     # messages/items with same priority and different queue times,
-    message_1_item_time_0 = dramatiq.worker._WorkQueueItem(priority=0, message=message_proxy1, _queued_time=0)
-    message_2_item_time_1 = dramatiq.worker._WorkQueueItem(priority=0, message=message_proxy2, _queued_time=1)
+    message_1_item_time_0 = dramatiq.worker._WorkQueueItem(
+        priority=0, message=message_proxy1, _queued_time=0, _sequence=0
+    )
+    message_2_item_time_1 = dramatiq.worker._WorkQueueItem(
+        priority=0, message=message_proxy2, _queued_time=1, _sequence=0
+    )
     assert message_1_item_time_0 < message_2_item_time_1
     assert message_1_item_time_0 <= message_2_item_time_1
     assert not message_1_item_time_0 > message_2_item_time_1
@@ -112,19 +137,193 @@ def test_queue_item_order():
     assert not message_2_item_time_1 <= message_1_item_time_0
     assert message_2_item_time_1 != message_1_item_time_0
 
-    # Messages/items with same priority and queue time
-    message_1_item_equal = dramatiq.worker._WorkQueueItem(priority=0, message=message_proxy1, _queued_time=0)
-    message_2_item_equal = dramatiq.worker._WorkQueueItem(priority=0, message=message_proxy2, _queued_time=0)
-    assert not message_1_item_equal < message_2_item_equal
-    assert not message_1_item_equal > message_2_item_equal
+    # Messages/items with same priority and queue time but different sequence
+    message_1_item_equal = dramatiq.worker._WorkQueueItem(
+        priority=0, message=message_proxy1, _queued_time=0, _sequence=0
+    )
+    message_2_item_equal = dramatiq.worker._WorkQueueItem(
+        priority=0, message=message_proxy2, _queued_time=0, _sequence=1
+    )
+    assert message_1_item_equal < message_2_item_equal
     assert message_1_item_equal <= message_2_item_equal
-    assert message_1_item_equal >= message_2_item_equal
-    assert message_1_item_equal == message_2_item_equal
-    assert not message_2_item_equal < message_1_item_equal
-    assert not message_2_item_equal > message_1_item_equal
-    assert message_2_item_equal <= message_1_item_equal
+    assert not message_1_item_equal > message_2_item_equal
+    assert not message_1_item_equal >= message_2_item_equal
+    assert message_1_item_equal != message_2_item_equal
+    assert message_2_item_equal > message_1_item_equal
     assert message_2_item_equal >= message_1_item_equal
-    assert message_2_item_equal == message_1_item_equal
+    assert not message_2_item_equal < message_1_item_equal
+    assert not message_2_item_equal <= message_1_item_equal
+    assert message_2_item_equal != message_1_item_equal
+
+
+def test_aging_priority_queue_raises_waiting_messages(stub_broker):
+    clock = FixedClock()
+    queue = dramatiq.worker._AgingPriorityQueue(100, time_func=clock)
+
+    @dramatiq.actor(priority=10)
+    def low_priority():
+        pass
+
+    @dramatiq.actor(priority=0)
+    def high_priority():
+        pass
+
+    queue.put(work_queue_item(low_priority))
+    clock.now = 999
+    queue.put(work_queue_item(high_priority))
+
+    assert queue.get_nowait().message.actor_name == "high_priority"
+
+    clock.now = 1000
+    assert queue.get_nowait().message.actor_name == "low_priority"
+
+
+def test_aging_priority_queue_bounds_waiting_under_continuous_arrivals(stub_broker):
+    clock = FixedClock()
+    queue = dramatiq.worker._AgingPriorityQueue(100, time_func=clock)
+
+    @dramatiq.actor(priority=2)
+    def low_priority():
+        pass
+
+    @dramatiq.actor(priority=0)
+    def high_priority():
+        pass
+
+    queue.put(work_queue_item(low_priority))
+
+    for clock.now in (99, 199):
+        queue.put(work_queue_item(high_priority))
+        assert queue.get_nowait().message.actor_name == "high_priority"
+
+    clock.now = 200
+    assert queue.get_nowait().message.actor_name == "low_priority"
+
+
+def test_aging_uses_ready_queue_wait_time(stub_broker):
+    clock = FixedClock()
+    queue = dramatiq.worker._AgingPriorityQueue(100, time_func=clock)
+
+    @dramatiq.actor(priority=1)
+    def low_priority():
+        pass
+
+    queue.put(work_queue_item(low_priority))
+    clock.now = 100
+
+    assert queue.get_nowait().priority == 0
+
+
+def test_aging_priority_queue_preserves_fifo_for_equal_effective_priority(stub_broker):
+    clock = FixedClock()
+    queue = dramatiq.worker._AgingPriorityQueue(100, time_func=clock)
+
+    @dramatiq.actor(priority=2)
+    def low_priority():
+        pass
+
+    @dramatiq.actor(priority=0)
+    def high_priority():
+        pass
+
+    queue.put(work_queue_item(low_priority))
+    clock.now = 199
+    queue.put(work_queue_item(high_priority))
+
+    clock.now = 200
+    assert [item.message.actor_name for item in dramatiq.common.iter_queue(queue)] == [
+        "low_priority",
+        "high_priority",
+    ]
+
+
+def test_aging_priority_queue_restarts_ready_time_after_requeue(stub_broker):
+    clock = FixedClock()
+    queue = dramatiq.worker._AgingPriorityQueue(100, time_func=clock)
+
+    @dramatiq.actor(priority=1)
+    def low_priority():
+        pass
+
+    item = work_queue_item(low_priority)
+    queue.put(item)
+    clock.now = 100
+    queued_item = queue.get_nowait()
+    assert queued_item.priority == 0
+
+    clock.now = 0
+    queue.put(dramatiq.worker._WorkQueueItem(low_priority.priority, queued_item.message, 0))
+    requeued_item = queue.get_nowait()
+    assert requeued_item.priority == 1
+    assert requeued_item.ready_time == 0
+
+
+def test_aging_priority_queue_validates_priority(stub_broker):
+    queue = dramatiq.worker._AgingPriorityQueue(100)
+
+    @dramatiq.actor(priority=0)
+    def do_work():
+        pass
+
+    with pytest.raises(ValueError):
+        queue.put(work_queue_item(do_work, priority=256))
+
+    assert queue.qsize() == 0
+    queue.join()
+
+
+def test_worker_validates_priority_aging_interval(stub_broker):
+    with pytest.raises(ValueError):
+        dramatiq.Worker(stub_broker, priority_aging_interval=-1)
+
+    with pytest.raises(TypeError):
+        dramatiq.Worker(stub_broker, priority_aging_interval=1.5)
+
+
+def test_delay_eta_does_not_age_until_message_is_ready(stub_broker):
+    stub_broker.declare_queue("default")
+    clock = FixedClock()
+    work_queue = dramatiq.worker._AgingPriorityQueue(100, time_func=clock)
+
+    @dramatiq.actor(priority=10)
+    def delayed_actor():
+        pass
+
+    delay_consumer = dramatiq.worker.ConsumerThread(
+        broker=stub_broker,
+        queue_name="default.DQ",
+        prefetch=10,
+        work_queue=work_queue,
+        worker_timeout=100,
+    )
+    ready_consumer = dramatiq.worker.ConsumerThread(
+        broker=stub_broker,
+        queue_name="default",
+        prefetch=10,
+        work_queue=work_queue,
+        worker_timeout=100,
+    )
+    delay_consumer.consumer = stub_broker.consume("default.DQ")
+    ready_consumer.consumer = stub_broker.consume("default")
+
+    future_eta = dramatiq.common.current_millis() + 60_000
+    future_message = dramatiq.MessageProxy(delayed_actor.message_with_options(eta=future_eta))
+    delay_consumer.handle_message(future_message)
+    assert work_queue.qsize() == 0
+    delay_consumer.handle_delayed_messages()
+    assert work_queue.qsize() == 0
+
+    due_message = dramatiq.MessageProxy(delayed_actor.message_with_options(eta=0))
+    delay_consumer.handle_message(due_message)
+    delay_consumer.handle_delayed_messages()
+
+    proxied_message = ready_consumer.consumer.__next__()
+    assert proxied_message is not None
+    ready_consumer.handle_message(proxied_message)
+
+    ready_item = work_queue.get_nowait()
+    assert ready_item.priority == 10
+    assert ready_item.ready_time == 0
 
 
 def test_exception_from_actor_doesnt_leak(

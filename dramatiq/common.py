@@ -26,6 +26,11 @@ from typing import Union
 
 from .errors import QueueJoinTimeout
 
+#: The lowest/highest numeric actor priority. Lower numbers represent
+#: higher priorities.
+MIN_ACTOR_PRIORITY = 0
+MAX_ACTOR_PRIORITY = 255
+
 
 def getenv_int(name: str) -> Union[int, None]:
     """Parse an optional environment variable as an integer."""

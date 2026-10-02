@@ -35,6 +35,7 @@ from typing import (
 
 from .asyncio import async_to_sync
 from .broker import Broker, get_broker
+from .common import MAX_ACTOR_PRIORITY, MIN_ACTOR_PRIORITY
 from .logging import get_logger
 from .message import Message
 
@@ -202,6 +203,20 @@ class Actor(Generic[P, R]):
     def __str__(self) -> str:
         return "Actor(%(actor_name)s)" % vars(self)
 
+    @property
+    def priority(self) -> int:
+        return self._priority
+
+    @priority.setter
+    def priority(self, priority: int) -> None:
+        if not isinstance(priority, int) or isinstance(priority, bool):
+            raise TypeError("Actor priority must be an integer.")
+        if not MIN_ACTOR_PRIORITY <= priority <= MAX_ACTOR_PRIORITY:
+            raise ValueError(
+                f"Actor priority must be between {MIN_ACTOR_PRIORITY} and {MAX_ACTOR_PRIORITY}, inclusive."
+            )
+        self._priority = priority
+
 
 class ActorDecorator(Protocol):
     @overload
@@ -277,10 +292,10 @@ def actor(
         actor and takes the same arguments as the :class:`Actor` class.
       actor_name(str): The name of the actor.
       queue_name(str): The name of the queue to use.
-      priority(int): The actor's global priority.  If two tasks have
-        been pulled on a worker concurrently and one has a higher
-        priority than the other then it will be processed first.
-        Lower numbers represent higher priorities.
+      priority(int): The actor's global priority, from 0 through 255.
+        If two tasks have been pulled on a worker concurrently and one
+        has a higher priority than the other then it will be processed
+        first. Lower numbers represent higher priorities.
       broker(Broker): The broker to use with this actor.
       **options: Arbitrary options that vary with the set of
         middleware that you use.  See ``get_broker().actor_options``.

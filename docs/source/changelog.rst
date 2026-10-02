@@ -9,6 +9,15 @@ All notable changes to this project will be documented in this file.
 -------------
 
 
+Added
+^^^^^
+
+* Added optional worker priority aging. Set ``priority_aging_interval``
+  (or the ``dramatiq_priority_aging_interval`` environment variable) to
+  gradually increase the effective priority of messages waiting in the
+  worker's in-memory ready queue.
+* Limited actor priorities to the inclusive range ``0`` through ``255``.
+
 `2.2.1`_ -- 2026-09-01
 ----------------------
 
