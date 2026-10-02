@@ -1,0 +1,283 @@
+require_relative "helper"
+require_relative "toml_examples"
+require "json"
+require "pathname"
+require "stringio"
+
+class TomlTest < Minitest::Test
+  def test_file_v_0_4_0
+    path = File.join(File.dirname(__FILE__), "example-v0.4.0.toml")
+    parsed = TomlRB.load_file(path)
+    hash = TomlRB::Examples.example_v_0_4_0
+
+    assert_equal hash["array"], parsed["array"]
+    assert_equal hash["boolean"], parsed["boolean"]
+    assert_equal hash["datetime"], parsed["datetime"]
+    assert_equal hash["float"], parsed["float"]
+    assert_equal hash["integer"], parsed["integer"]
+    assert_equal hash["string"], parsed["string"]
+    assert_equal hash["table"], parsed["table"]
+    assert_equal hash["products"], parsed["products"]
+    assert_equal hash["fruit"], parsed["fruit"]
+  end
+
+  def test_file_v_0_5_0
+    path = File.join(File.dirname(__FILE__), "example-v0.5.0.toml")
+    parsed = TomlRB.load_file(path)
+    hash = TomlRB::Examples.example_v_0_5_0
+    assert_equal hash["keys"], parsed["keys"]
+    assert_equal hash["string"], parsed["string"]
+    assert_equal hash["integer"], parsed["integer"]
+    assert_equal hash["float"], parsed["float"]
+    assert_equal hash["boolean"], parsed["boolean"]
+    assert_equal hash["offset-date-time"], parsed["offset-date-time"]
+    assert_equal hash["local-date-time"], parsed["local-date-time"]
+    assert_equal hash["local-date"], parsed["local-date"]
+    assert_equal hash["local-time"], parsed["local-time"]
+    assert_equal hash["array"], parsed["array"]
+    assert_equal hash["table"], parsed["table"]
+    assert_equal hash["inline-table"], parsed["inline-table"]
+    assert_equal hash["array-of-tables"], parsed["array-of-tables"]
+  end
+
+  def test_file
+    path = File.join(File.dirname(__FILE__), "example.toml")
+    parsed = TomlRB.load_file(path)
+
+    assert_equal TomlRB::Examples.example, parsed
+  end
+
+  def test_hard_example
+    path = File.join(File.dirname(__FILE__), "hard_example.toml")
+    parsed = TomlRB.load_file(path)
+
+    assert_equal TomlRB::Examples.hard_example, parsed
+  end
+
+  def test_parse_reads_io_path_and_to_str_objects
+    path = File.join(File.dirname(__FILE__), "example.toml")
+    text = File.read(path, encoding: "UTF-8")
+    expected = TomlRB::Examples.example
+
+    assert_equal expected, TomlRB.parse(StringIO.new(text))
+    File.open(path, encoding: "UTF-8") { |file| assert_equal expected, TomlRB.parse(file) }
+    assert_equal expected, TomlRB.parse(Pathname.new(path))
+    assert_equal expected, TomlRB.parse(Struct.new(:to_str).new(text))
+    assert_raises(ArgumentError) { TomlRB.parse(42) }
+  end
+
+  def test_symbolize_keys
+    path = File.join(File.dirname(__FILE__), "example.toml")
+    parsed = TomlRB.load_file(path, symbolize_keys: true)
+
+    hash = {
+      title: "TomlRB Example",
+
+      owner: {
+        name: "Tom Preston-Werner",
+        organization: "GitHub",
+        bio: "GitHub Cofounder & CEO\nLikes tater tots and beer.",
+        dob: Time.utc(1979, 0o5, 27, 0o7, 32, 0o0)
+      },
+
+      database: {
+        server: "192.168.1.1",
+        ports: [8001, 8001, 8002],
+        connection_max: 5000,
+        enabled: true
+      },
+
+      servers: {
+        alpha: {
+          ip: "10.0.0.1",
+          dc: "eqdc10"
+        },
+        beta: {
+          ip: "10.0.0.2",
+          dc: "eqdc10"
+        }
+      },
+
+      clients: {
+        data: [%w[gamma delta], [1, 2]],
+        hosts: %w[alpha omega]
+      },
+
+      amqp: {
+        exchange: {
+          durable: true,
+          auto_delete: false
+        }
+      },
+
+      products: [
+        {name: "Hammer", sku: 738_594_937},
+        {},
+        {name: "Nail", sku: 284_758_393, color: "gray"}
+      ]
+
+    }
+
+    assert_equal(hash, parsed)
+  end
+
+  def test_symbolize_keys_in_arrays
+    {
+      "a = [{b = 1}, {c = 2}]" => {a: [{b: 1}, {c: 2}]},
+      "a = [[{b = 1}], [[{c = 2}], 3]]" => {a: [[{b: 1}], [[{c: 2}], 3]]},
+      "a = [{b = {c = 1, d = [{e.f = 2}]}}]" => {a: [{b: {c: 1, d: [{e: {f: 2}}]}}]},
+      "a = [{b = 1}]\n[[x]]\ny = [{z = 2}]\n[[x]]\ny = []" => {a: [{b: 1}], x: [{y: [{z: 2}]}, {y: []}]}
+    }.each do |toml, symbolized|
+      assert_equal symbolized, TomlRB.parse(toml, symbolize_keys: true), toml
+    end
+  end
+
+  def test_datetime_classes
+    parsed = TomlRB.parse("odt = 1979-05-27T07:32:00Z\nldt = 1979-05-27T07:32:00\nld = 1979-05-27\nlt = 07:32:00")
+
+    assert_instance_of Time, parsed["odt"]
+    assert_instance_of TomlRB::LocalDateTime, parsed["ldt"]
+    assert_instance_of TomlRB::LocalDate, parsed["ld"]
+    assert_instance_of TomlRB::LocalTime, parsed["lt"]
+
+    parsed = TomlRB.parse("odt = 1979-05-27T07:32Z\nldt = 2025-01-01T10:30\nlt = 10:30")
+
+    assert_instance_of Time, parsed["odt"]
+    assert_instance_of TomlRB::LocalDateTime, parsed["ldt"]
+    assert_instance_of TomlRB::LocalTime, parsed["lt"]
+    assert_equal Time.utc(1979, 5, 27, 7, 32, 0), parsed["odt"]
+    assert_equal Time.utc(2025, 1, 1, 10, 30, 0), parsed["ldt"]
+    assert_equal Time.utc(1970, 1, 1, 10, 30, 0), parsed["lt"]
+  end
+
+  def test_local_values_ignore_the_process_time_zone
+    toml = "a = 2021-03-14T02:30:00\nb = 2021-03-28T02:30:00\nc = 2021-09-05\n"
+    gaps = {
+      "America/New_York" => [2021, 3, 14, 2, 30, 0],
+      "Europe/Warsaw" => [2021, 3, 28, 2, 30, 0],
+      "America/Santiago" => [2021, 9, 5, 0, 0, 0]
+    }
+    wall_clock = ->(time) { [time.year, time.mon, time.day, time.hour, time.min, time.sec] }
+    tz = ENV["TZ"]
+
+    gaps.each do |zone, gap|
+      ENV["TZ"] = zone
+      refute_equal gap, wall_clock.call(Time.local(*gap)), "Time.local keeps #{gap} in TZ=#{zone}"
+
+      parsed = TomlRB.parse(toml)
+      assert_equal gaps.values, parsed.values.map(&wall_clock), zone
+      assert_equal toml, TomlRB.dump(parsed), zone
+    end
+  ensure
+    ENV["TZ"] = tz
+  end
+
+  def test_line_break
+    parsed = TomlRB.parse("hello = 'world'\r\nline_break = true")
+    assert_equal({"hello" => "world", "line_break" => true}, parsed)
+  end
+
+  def test_statements_require_a_line_end
+    ["a=1 b=2", "a=[] b=2", "a={} b=2", "[a] b=2", "[[a]] b=2",
+      "a=1[a]", "a=[][b]", "[a][b]", "[[a]][b]"].each do |input|
+      assert_raises(TomlRB::ParseError, input) { TomlRB.parse(input) }
+    end
+  end
+
+  def test_statement_line_end_variants
+    ["\n", "\r\n", " # comment\n", " # comment\r\n"].each do |ending|
+      input = ["a=[]", "[b]", "c={d=1, e=2}", "[[f]]", "g=3"].join(ending)
+      expected = {"a" => [], "b" => {"c" => {"d" => 1, "e" => 2}}, "f" => [{"g" => 3}]}
+      assert_equal expected, TomlRB.parse(input), ending.inspect
+    end
+
+    ["[a]", "[[a]]", "a=1", "a=[]", "a={b=1}"].each do |input|
+      ["", " \t", " # comment"].each do |ending|
+        assert_equal TomlRB.parse(input), TomlRB.parse(input + ending)
+      end
+    end
+  end
+
+  def test_whitespace_only_document
+    ["", " ", "\t", " \t ", " \n\t\r\n "].each do |input|
+      assert_equal({}, TomlRB.parse(input), input.inspect)
+    end
+  end
+
+  def test_array_comma_requires_an_element
+    ["a=[,]", "a=[ , ]", "a=[# comment\n,]", "a=[1,,]"].each do |input|
+      assert_raises(TomlRB::ParseError, input) { TomlRB.parse(input) }
+    end
+
+    assert_equal({"a" => []}, TomlRB.parse("a=[ # comment\n ]"))
+    assert_equal({"a" => [1]}, TomlRB.parse("a=[1,]"))
+  end
+
+  def test_array_comments_before_commas
+    assert_equal({"a" => [1, 2]}, TomlRB.parse("a=[1 # comment\n, 2]"))
+    assert_equal({"a" => [1]}, TomlRB.parse("a=[1 # comment\n, # trailing\n]"))
+    assert_equal({"a" => [[1], {"b" => 2}]}, TomlRB.parse("a=[[1] # nested\n, {b=2}]"))
+  end
+
+  def test_comments_do_not_affect_table_structure
+    parsed = TomlRB.parse("# [x]\nroot = 1\n[x]\nvalue = 2")
+    assert_equal({"root" => 1, "x" => {"value" => 2}}, parsed)
+
+    parsed = TomlRB.parse("# [[x]]\nroot = 1\n[[x]]\nvalue = 2")
+    assert_equal({"root" => 1, "x" => [{"value" => 2}]}, parsed)
+
+    parsed = TomlRB.parse("#[a.b]\nroot = 1\n[a.b]\nvalue = 2")
+    assert_equal({"root" => 1, "a" => {"b" => {"value" => 2}}}, parsed)
+
+    parsed = TomlRB.parse("[a] # [b]\nvalue = 1\n[b]\nvalue = 2")
+    assert_equal({"a" => {"value" => 1}, "b" => {"value" => 2}}, parsed)
+  end
+
+  def test_trailing_whitespace_after_keyvalue
+    parsed = TomlRB.parse("a = 1   ")
+    assert_equal({"a" => 1}, parsed)
+  end
+
+  def test_trailing_whitespace_after_line_break
+    parsed = TomlRB.parse("[table]\r\na = 1\r\n  ")
+    assert_equal({"table" => {"a" => 1}}, parsed)
+  end
+
+  def test_tables_and_dotted_keys
+    parsed = TomlRB.parse("[\"a.b\"]\nx = 1\n[a.b]\nx = 2")
+    assert_equal({"a.b" => {"x" => 1}, "a" => {"b" => {"x" => 2}}}, parsed)
+
+    parsed = TomlRB.parse("a = {b.c = 1, b.d = 2}")
+    assert_equal({"a" => {"b" => {"c" => 1, "d" => 2}}}, parsed)
+
+    parsed = TomlRB.parse("[fruit]\napple.color = \"red\"\n[fruit.apple.texture]\nsmooth = true")
+    assert_equal({"fruit" => {"apple" => {"color" => "red", "texture" => {"smooth" => true}}}}, parsed)
+
+    parsed = TomlRB.parse("[a.b.c]\n[a]\nb.d = 1")
+    assert_equal({"a" => {"b" => {"c" => {}, "d" => 1}}}, parsed)
+  end
+
+  def test_valid_cases
+    Dir["test/examples/valid/**/*.json"].each do |json_file|
+      toml_file = File.join(File.dirname(json_file),
+        File.basename(json_file, ".json")) + ".toml"
+      begin
+        toml = TomlRB.load_file(toml_file)
+      rescue TomlRB::Error => e
+        assert false, "Error: #{e} in #{toml_file}"
+      end
+
+      json = JSON.parse(File.read(json_file))
+
+      assert_equal json, toml, "In file '#{toml_file}'"
+    end
+  end
+
+  def test_invalid_cases
+    Dir["test/examples/invalid/**/*.toml"].each do |toml_file|
+      assert_raises(TomlRB::Error, "For file #{toml_file}") do
+        TomlRB.load_file(toml_file)
+      end
+    end
+  end
+end
