@@ -5,6 +5,12 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add optional versioned signatures that carry a key id. Pass a mapping
+    of ``key id`` to secret key for direct key selection during rotation.
+    Unversioned signatures are only accepted with ``accept_legacy=True``,
+    and ``loads_with_info`` reports the selected key and whether the token
+    should be resigned. Works with normal, timestamped, and URL-safe
+    serializers.
 
 
 Version 2.2.0

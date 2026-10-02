@@ -33,6 +33,28 @@ To serialize to a format that is safe to use in URLs, see
 :doc:`/url_safe`.
 
 
+Versioned Keys
+--------------
+
+For faster verification during key rotation, pass a mapping of key ids
+to secret keys. New tokens are signed with the last key and their
+version and key id are covered by the signature. Set
+``accept_legacy=True`` only while unversioned tokens still exist:
+
+.. code-block:: python
+
+    s = Serializer({"old": "old-secret", "new": "new-secret"},
+                   accept_legacy=True)
+    result = s.loads_with_info(data)
+    result.info.key_id
+    result.info.should_resign
+
+Use :meth:`~itsdangerous.timed.TimedSerializer.loads_with_info` with
+timed serializers to also get the signing timestamp. Unknown key ids and
+unsupported versions are rejected without trying other keys or fallback
+signers.
+
+
 Responding to Failure
 ---------------------
 

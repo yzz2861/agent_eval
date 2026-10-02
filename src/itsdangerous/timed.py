@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections.abc as cabc
 import time
 import typing as t
+from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 
@@ -11,12 +12,31 @@ from .encoding import base64_encode
 from .encoding import bytes_to_int
 from .encoding import int_to_bytes
 from .encoding import want_bytes
+from .exc import BadHeader
 from .exc import BadSignature
 from .exc import BadTimeSignature
 from .exc import SignatureExpired
 from .serializer import _TSerialized
 from .serializer import Serializer
+from .signer import SignatureInfo
 from .signer import Signer
+
+
+@dataclass(frozen=True)
+class TimestampedSignatureInfo(SignatureInfo):
+    date_signed: datetime | None = None
+
+
+@dataclass(frozen=True)
+class TimestampedUnsignResult:
+    value: bytes
+    info: TimestampedSignatureInfo
+
+
+@dataclass(frozen=True)
+class TimestampedLoadResult:
+    payload: t.Any
+    info: TimestampedSignatureInfo
 
 
 class TimestampSigner(Signer):
@@ -47,8 +67,8 @@ class TimestampSigner(Signer):
         value = want_bytes(value)
         timestamp = base64_encode(int_to_bytes(self.get_timestamp()))
         sep = want_bytes(self.sep)
-        value = value + sep + timestamp
-        return value + sep + self.get_signature(value)
+        authenticated_value = self._wrap_value(value + sep + timestamp)
+        return authenticated_value + sep + self.get_signature(authenticated_value)
 
     # Ignore overlapping signatures check, return_timestamp is the only
     # parameter that affects the return type.
@@ -85,12 +105,37 @@ class TimestampSigner(Signer):
             The timestamp is returned as a timezone-aware ``datetime``
             in UTC rather than a naive ``datetime`` assumed to be UTC.
         """
+        result = self._unsign_with_timestamp(signed_value, max_age=max_age)
+
+        if return_timestamp:
+            return result.value, result.info.date_signed
+
+        return result.value
+
+    def unsign_with_info(
+        self,
+        signed_value: str | bytes,
+        max_age: int | None = None,
+    ) -> TimestampedUnsignResult:
+        """Unsign a timestamped value and return signature metadata."""
+        return self._unsign_with_timestamp(signed_value, max_age=max_age)
+
+    def _unsign_with_timestamp(
+        self,
+        signed_value: str | bytes,
+        max_age: int | None,
+    ) -> TimestampedUnsignResult:
+        authenticated_payload = b""
+
         try:
-            result = super().unsign(signed_value)
+            result = super().unsign_with_info(signed_value)
             sig_error = None
+            authenticated_payload = result.value
+        except BadHeader:
+            raise
         except BadSignature as e:
             sig_error = e
-            result = e.payload or b""
+            authenticated_payload = e.payload or b""
 
         sep = want_bytes(self.sep)
 
@@ -99,13 +144,13 @@ class TimestampSigner(Signer):
         # that one directly, otherwise we have a weird situation in
         # which we shouldn't have come except someone uses a time-based
         # serializer on non-timestamp data, so catch that.
-        if sep not in result:
+        if sep not in authenticated_payload:
             if sig_error:
                 raise sig_error
 
-            raise BadTimeSignature("timestamp missing", payload=result)
+            raise BadTimeSignature("timestamp missing", payload=authenticated_payload)
 
-        value, ts_bytes = result.rsplit(sep, 1)
+        value, ts_bytes = authenticated_payload.rsplit(sep, 1)
         ts_int: int | None = None
         ts_dt: datetime | None = None
 
@@ -152,10 +197,14 @@ class TimestampSigner(Signer):
                     date_signed=self.timestamp_to_datetime(ts_int),
                 )
 
-        if return_timestamp:
-            return value, self.timestamp_to_datetime(ts_int)
-
-        return value
+        info = TimestampedSignatureInfo(
+            version=result.info.version,
+            key_id=result.info.key_id,
+            active_key_id=result.info.active_key_id,
+            should_resign=result.info.should_resign,
+            date_signed=self.timestamp_to_datetime(ts_int),
+        )
+        return TimestampedUnsignResult(value, info)
 
     def validate(self, signed_value: str | bytes, max_age: int | None = None) -> bool:
         """Only validates the given signed value. Returns ``True`` if
@@ -213,6 +262,34 @@ class TimedSerializer(Serializer[_TSerialized]):
             except SignatureExpired:
                 # The signature was unsigned successfully but was
                 # expired. Do not try the next signer.
+                raise
+            except BadHeader:
+                raise
+            except BadSignature as err:
+                last_exception = err
+
+        raise t.cast(BadSignature, last_exception)
+
+    def loads_with_info(  # type: ignore[override]
+        self,
+        s: str | bytes,
+        max_age: int | None = None,
+        salt: str | bytes | None = None,
+    ) -> TimestampedLoadResult:
+        """Load and return timestamp, key, and resign metadata."""
+        s = want_bytes(s)
+        last_exception = None
+
+        for signer in self.iter_unsigners(salt):
+            try:
+                result = signer.unsign_with_info(s, max_age=max_age)
+                payload = self.load_payload(result.value)
+                return TimestampedLoadResult(payload, result.info)
+            except SignatureExpired:
+                # The signature was unsigned successfully but was
+                # expired. Do not try the next signer.
+                raise
+            except BadHeader:
                 raise
             except BadSignature as err:
                 last_exception = err

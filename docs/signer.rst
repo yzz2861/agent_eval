@@ -25,6 +25,22 @@ If unicode strings are provided, an implicit encoding to UTF-8 happens.
 However after unsigning you won't be able to tell if it was unicode or
 a bytestring.
 
+To avoid trying every key during key rotation, provide a mapping from a
+key id to a secret key. New signatures use the last key and include a
+versioned, authenticated key id. Pass ``accept_legacy=True`` while old,
+unversioned signatures may still be presented:
+
+.. code-block:: python
+
+    s = Signer({"2026-01": "old-secret", "2026-10": "new-secret"},
+               accept_legacy=True)
+    result = s.unsign_with_info(signed)
+    result.info.key_id
+    result.info.should_resign
+
+An unknown key or unsupported version fails immediately. When
+``accept_legacy`` is not enabled, unversioned signatures are rejected.
+
 If the value is changed, the signature will no longer match, and
 unsigning will raise a :exc:`~itsdangerous.exc.BadSignature` exception:
 

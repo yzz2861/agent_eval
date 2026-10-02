@@ -3,11 +3,15 @@ from __future__ import annotations
 import collections.abc as cabc
 import json
 import typing as t
+from dataclasses import dataclass
 
 from .encoding import want_bytes
+from .exc import BadHeader
 from .exc import BadPayload
 from .exc import BadSignature
-from .signer import _make_keys_list
+from .signer import _make_key_bundle
+from .signer import _SecretKeyInput
+from .signer import SignatureInfo
 from .signer import Signer
 
 if t.TYPE_CHECKING:
@@ -19,6 +23,14 @@ if t.TYPE_CHECKING:
 else:
     # Still available at runtime on Python < 3.13, but without the default.
     _TSerialized = t.TypeVar("_TSerialized", bound=str | bytes)
+
+
+@dataclass(frozen=True)
+class LoadResult:
+    """The loaded payload and information about its verified signature."""
+
+    payload: t.Any
+    info: SignatureInfo
 
 
 class _PDataSerializer(t.Protocol[_TSerialized]):
@@ -52,7 +64,8 @@ class Serializer(t.Generic[_TSerialized]):
     for information about the security of the secret key and salt.
 
     :param secret_key: The secret key to sign and verify with. Can be a
-        list of keys, oldest to newest, to support key rotation.
+        list of keys, oldest to newest, to support key rotation, or a
+        mapping of key ids to secret keys to use versioned signatures.
     :param salt: Extra key to combine with ``secret_key`` to distinguish
         signatures in different contexts.
     :param serializer: An object that provides ``dumps`` and ``loads``
@@ -70,6 +83,8 @@ class Serializer(t.Generic[_TSerialized]):
         of ``signer_kwargs``, a ``Signer`` class, or a tuple of
         ``(signer, signer_kwargs)``. Defaults to
         :attr:`default_fallback_signers`.
+    :param accept_legacy: Accept unversioned signatures when a mapping
+        of keys is provided, while new signatures use the active key id.
 
     .. versionchanged:: 2.0
         Added support for key rotation by passing a list to
@@ -107,7 +122,7 @@ class Serializer(t.Generic[_TSerialized]):
     @t.overload
     def __init__(
         self: Serializer[str],
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _SecretKeyInput,
         salt: str | bytes | None = b"itsdangerous",
         serializer: None | _PDataSerializer[str] = None,
         serializer_kwargs: dict[str, t.Any] | None = None,
@@ -117,13 +132,14 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        accept_legacy: bool = False,
     ): ...
 
     # Serializer[bytes] with a bytes data serializer positional argument.
     @t.overload
     def __init__(
         self: Serializer[bytes],
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _SecretKeyInput,
         salt: str | bytes | None,
         serializer: _PDataSerializer[bytes],
         serializer_kwargs: dict[str, t.Any] | None = None,
@@ -133,13 +149,14 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        accept_legacy: bool = False,
     ): ...
 
     # Serializer[bytes] with a bytes data serializer keyword argument.
     @t.overload
     def __init__(
         self: Serializer[bytes],
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _SecretKeyInput,
         salt: str | bytes | None = b"itsdangerous",
         *,
         serializer: _PDataSerializer[bytes],
@@ -150,6 +167,7 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        accept_legacy: bool = False,
     ): ...
 
     # Fall back with a positional argument. If the strict signature of
@@ -158,7 +176,7 @@ class Serializer(t.Generic[_TSerialized]):
     @t.overload
     def __init__(
         self,
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _SecretKeyInput,
         salt: str | bytes | None,
         serializer: t.Any,
         serializer_kwargs: dict[str, t.Any] | None = None,
@@ -168,13 +186,14 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        accept_legacy: bool = False,
     ): ...
 
     # Fall back with a keyword argument.
     @t.overload
     def __init__(
         self,
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _SecretKeyInput,
         salt: str | bytes | None = b"itsdangerous",
         *,
         serializer: t.Any,
@@ -185,11 +204,12 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        accept_legacy: bool = False,
     ): ...
 
     def __init__(
         self,
-        secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
+        secret_key: _SecretKeyInput,
         salt: str | bytes | None = b"itsdangerous",
         serializer: t.Any | None = None,
         serializer_kwargs: dict[str, t.Any] | None = None,
@@ -199,13 +219,15 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        accept_legacy: bool = False,
     ):
         #: The list of secret keys to try for verifying signatures, from
         #: oldest to newest. The newest (last) key is used for signing.
         #:
         #: This allows a key rotation system to keep a list of allowed
         #: keys and remove expired ones.
-        self.secret_keys: list[bytes] = _make_keys_list(secret_key)
+        self._secret_key = secret_key
+        self.secret_keys, _, _ = _make_key_bundle(secret_key)
 
         if salt is not None:
             salt = want_bytes(salt)
@@ -224,6 +246,7 @@ class Serializer(t.Generic[_TSerialized]):
 
         self.signer: type[Signer] = signer
         self.signer_kwargs: dict[str, t.Any] = signer_kwargs or {}
+        self.accept_legacy: bool = accept_legacy
 
         if fallback_signers is None:
             fallback_signers = list(self.default_fallback_signers)
@@ -282,7 +305,12 @@ class Serializer(t.Generic[_TSerialized]):
         if salt is None:
             salt = self.salt
 
-        return self.signer(self.secret_keys, salt=salt, **self.signer_kwargs)
+        kwargs = dict(self.signer_kwargs)
+
+        if isinstance(self._secret_key, cabc.Mapping):
+            kwargs.setdefault("accept_legacy", self.accept_legacy)
+
+        return self.signer(self._secret_key, salt=salt, **kwargs)
 
     def iter_unsigners(self, salt: str | bytes | None = None) -> cabc.Iterator[Signer]:
         """Iterates over all signers to be tried for unsigning. Starts
@@ -303,8 +331,12 @@ class Serializer(t.Generic[_TSerialized]):
             else:
                 kwargs = self.signer_kwargs
 
-            for secret_key in self.secret_keys:
-                yield fallback(secret_key, salt=salt, **kwargs)
+            if isinstance(self._secret_key, cabc.Mapping):
+                kwargs.setdefault("accept_legacy", self.accept_legacy)
+                yield fallback(self._secret_key, salt=salt, **kwargs)
+            else:
+                for secret_key in self.secret_keys:
+                    yield fallback(secret_key, salt=salt, **kwargs)
 
     def dumps(self, obj: t.Any, salt: str | bytes | None = None) -> _TSerialized:
         """Returns a signed string serialized with the internal
@@ -337,6 +369,26 @@ class Serializer(t.Generic[_TSerialized]):
         for signer in self.iter_unsigners(salt):
             try:
                 return self.load_payload(signer.unsign(s))
+            except BadHeader:
+                raise
+            except BadSignature as err:
+                last_exception = err
+
+        raise t.cast(BadSignature, last_exception)
+
+    def loads_with_info(
+        self, s: str | bytes, salt: str | bytes | None = None
+    ) -> LoadResult:
+        """Load and return information about the verifying key."""
+        s = want_bytes(s)
+        last_exception = None
+
+        for signer in self.iter_unsigners(salt):
+            try:
+                result = signer.unsign_with_info(s)
+                return LoadResult(self.load_payload(result.value), result.info)
+            except BadHeader:
+                raise
             except BadSignature as err:
                 last_exception = err
 
