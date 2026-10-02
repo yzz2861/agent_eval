@@ -28,6 +28,7 @@ class TestSettings:
         assert s[h2.settings.SettingCodes.INITIAL_WINDOW_SIZE] == 65535
         assert s[h2.settings.SettingCodes.MAX_FRAME_SIZE] == 16384
         assert s[h2.settings.SettingCodes.ENABLE_CONNECT_PROTOCOL] == 0
+        assert s[h2.settings.SettingCodes.NO_RFC7540_PRIORITIES] == 0
 
     def test_settings_defaults_server(self) -> None:
         """
@@ -40,6 +41,7 @@ class TestSettings:
         assert s[h2.settings.SettingCodes.INITIAL_WINDOW_SIZE] == 65535
         assert s[h2.settings.SettingCodes.MAX_FRAME_SIZE] == 16384
         assert s[h2.settings.SettingCodes.ENABLE_CONNECT_PROTOCOL] == 0
+        assert s[h2.settings.SettingCodes.NO_RFC7540_PRIORITIES] == 0
 
     @pytest.mark.parametrize("client", [True, False])
     def test_can_set_initial_values(self, client) -> None:
@@ -110,6 +112,7 @@ class TestSettings:
             h2.settings.SettingCodes.INITIAL_WINDOW_SIZE: 60,
             h2.settings.SettingCodes.MAX_FRAME_SIZE: 16385,
             h2.settings.SettingCodes.ENABLE_CONNECT_PROTOCOL: 1,
+            h2.settings.SettingCodes.NO_RFC7540_PRIORITIES: 0,
         }
         s.update(new_settings)
 
@@ -173,16 +176,16 @@ class TestSettings:
         Length is related only to the number of keys.
         """
         s = h2.settings.Settings(client=True)
-        assert len(s) == 5
+        assert len(s) == 6
 
         s[h2.settings.SettingCodes.HEADER_TABLE_SIZE] == 8000
-        assert len(s) == 5
+        assert len(s) == 6
 
         s.acknowledge()
-        assert len(s) == 5
+        assert len(s) == 6
 
         del s[h2.settings.SettingCodes.HEADER_TABLE_SIZE]
-        assert len(s) == 4
+        assert len(s) == 5
 
     def test_new_values_work(self) -> None:
         """

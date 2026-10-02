@@ -38,6 +38,7 @@ from .events import (
     InformationalResponseReceived,
     PingAckReceived,
     PingReceived,
+    PriorityUpdateReceived,
     PriorityUpdated,
     RemoteSettingsChanged,
     RequestReceived,
@@ -50,6 +51,7 @@ from .events import (
 from .exceptions import (
     DenialOfServiceError,
     FlowControlError,
+    FrameSizeError,
     FrameTooLargeError,
     NoAvailableStreamIDError,
     NoSuchStreamError,
@@ -60,6 +62,11 @@ from .exceptions import (
     TooManyStreamsError,
 )
 from .frame_buffer import FrameBuffer
+from .priorities import (
+    PriorityUpdateFrame,
+    parse_priority_field_value,
+    serialize_priority_field_value,
+)
 from .settings import ChangedSetting, SettingCodes, Settings
 from .stream import H2Stream, StreamClosedBy
 from .utilities import SizeLimitDict, guard_increment_window
@@ -101,6 +108,8 @@ class ConnectionInputs(Enum):
     RECV_PRIORITY = 17
     SEND_ALTERNATIVE_SERVICE = 18  # Added in 2.3.0
     RECV_ALTERNATIVE_SERVICE = 19  # Added in 2.3.0
+    SEND_PRIORITY_UPDATE = 20
+    RECV_PRIORITY_UPDATE = 21
 
 
 class AllowedStreamIDs(IntEnum):
@@ -158,6 +167,10 @@ class H2ConnectionStateMachine:
             (None, ConnectionState.SERVER_OPEN),
         (ConnectionState.IDLE, ConnectionInputs.RECV_ALTERNATIVE_SERVICE):
             (None, ConnectionState.CLIENT_OPEN),
+        (ConnectionState.IDLE, ConnectionInputs.SEND_PRIORITY_UPDATE):
+            (None, ConnectionState.IDLE),
+        (ConnectionState.IDLE, ConnectionInputs.RECV_PRIORITY_UPDATE):
+            (None, ConnectionState.IDLE),
 
         # State: open, client side.
         (ConnectionState.CLIENT_OPEN, ConnectionInputs.SEND_HEADERS):
@@ -197,6 +210,10 @@ class H2ConnectionStateMachine:
         (ConnectionState.CLIENT_OPEN,
             ConnectionInputs.RECV_ALTERNATIVE_SERVICE):
                 (None, ConnectionState.CLIENT_OPEN),
+        (ConnectionState.CLIENT_OPEN, ConnectionInputs.SEND_PRIORITY_UPDATE):
+            (None, ConnectionState.CLIENT_OPEN),
+        (ConnectionState.CLIENT_OPEN, ConnectionInputs.RECV_PRIORITY_UPDATE):
+            (None, ConnectionState.CLIENT_OPEN),
 
         # State: open, server side.
         (ConnectionState.SERVER_OPEN, ConnectionInputs.SEND_HEADERS):
@@ -239,6 +256,10 @@ class H2ConnectionStateMachine:
         (ConnectionState.SERVER_OPEN,
             ConnectionInputs.RECV_ALTERNATIVE_SERVICE):
                 (None, ConnectionState.SERVER_OPEN),
+        (ConnectionState.SERVER_OPEN, ConnectionInputs.SEND_PRIORITY_UPDATE):
+            (None, ConnectionState.SERVER_OPEN),
+        (ConnectionState.SERVER_OPEN, ConnectionInputs.RECV_PRIORITY_UPDATE):
+            (None, ConnectionState.SERVER_OPEN),
 
         # State: closed
         (ConnectionState.CLOSED, ConnectionInputs.SEND_GOAWAY):
@@ -821,6 +842,7 @@ class H2Connection:
             if not self.config.client_side:
                 msg = "Servers SHOULD NOT prioritize streams."
                 raise RFC1122Error(msg)
+            self._reject_remote_rfc7540_priorities()
 
             headers_frame = frames[0]
             assert isinstance(headers_frame, HeadersFrame)
@@ -1283,10 +1305,70 @@ class H2Connection:
             ConnectionInputs.SEND_PRIORITY,
         )
 
+        self._reject_remote_rfc7540_priorities()
         frame = PriorityFrame(stream_id)
         frame_prio = _add_frame_priority(frame, weight, depends_on, exclusive)
-
         self._prepare_for_sending([frame_prio])
+
+    def send_priority_update(
+        self,
+        stream_id: int,
+        urgency: int = 3,
+        incremental: bool = False,
+        extensions: bytes | None = None,
+        priority_field_value: bytes | None = None,
+    ) -> None:
+        """
+        Send an RFC 9218 PRIORITY_UPDATE frame for ``stream_id``.
+
+        The frame is always carried on connection stream 0. It may refer to a
+        request stream that has not yet been opened or has already been closed;
+        h2 neither stores that information nor schedules DATA frames.
+        """
+        if not isinstance(stream_id, int) or isinstance(stream_id, bool):
+            msg = "Stream ID must be an integer"
+            raise ValueError(msg)
+        if not 1 <= stream_id <= self.HIGHEST_ALLOWED_STREAM_ID:
+            msg = "Invalid prioritized stream ID"
+            raise ValueError(msg)
+
+        if priority_field_value is not None:
+            if not isinstance(priority_field_value, bytes):
+                msg = "Priority field value must be bytes"
+                raise ValueError(msg)
+            if extensions is not None:
+                msg = "Do not provide extensions with a raw priority field value"
+                raise ValueError(msg)
+            parse_priority_field_value(priority_field_value)
+            field_value = priority_field_value
+        else:
+            field_value = serialize_priority_field_value(
+                urgency=urgency,
+                incremental=incremental,
+                extensions=extensions,
+            )
+        self.state_machine.process_input(
+            ConnectionInputs.SEND_PRIORITY_UPDATE,
+        )
+        frame = PriorityUpdateFrame(stream_id, field_value)
+        self._prepare_for_sending([frame])
+
+    def reprioritize(
+        self,
+        stream_id: int,
+        urgency: int = 3,
+        incremental: bool = False,
+        extensions: bytes | None = None,
+        priority_field_value: bytes | None = None,
+    ) -> None:
+        """Compatibility alias for :meth:`send_priority_update`."""
+        self.send_priority_update(
+            stream_id,
+            urgency,
+            incremental,
+            extensions,
+            priority_field_value,
+        )
 
     def local_flow_control_window(self, stream_id: int) -> int:
         """
@@ -1596,6 +1678,9 @@ class H2Connection:
         """
         Receive a headers frame on the connection.
         """
+        if "PRIORITY" in frame.flags:
+            self._reject_local_rfc7540_priorities()
+
         # If necessary, check we can open the stream. Also validate that the
         # stream ID is valid.
         if frame.stream_id not in self.streams:
@@ -1869,6 +1954,7 @@ class H2Connection:
         """
         Receive a PRIORITY frame on the connection.
         """
+        self._reject_local_rfc7540_priorities()
         events = self.state_machine.process_input(
             ConnectionInputs.RECV_PRIORITY,
         )
@@ -1976,12 +2062,59 @@ class H2Connection:
         RFC 7540 § 5.5 says that we MUST ignore unknown frame types: so we
         do. We do notify the user that we received one, however.
         """
+        if frame.type == PriorityUpdateFrame.type:
+            return self._receive_priority_update_frame(frame)
+
         # All we do here is log.
         self.config.logger.debug(
             "Received unknown extension frame (ID %d)", frame.stream_id,
         )
         event = UnknownFrameReceived(frame=frame)
         return [], [event]
+
+    def _receive_priority_update_frame(
+        self,
+        frame: ExtensionFrame,
+    ) -> tuple[list[Frame], list[Event]]:
+        """
+        Receive an RFC 9218 PRIORITY_UPDATE frame.
+        """
+        if frame.stream_id != 0:
+            msg = "PRIORITY_UPDATE must be sent on stream 0"
+            raise ProtocolError(msg)
+        if len(frame.body) < 4:
+            msg = "PRIORITY_UPDATE frame payload must be at least 4 bytes"
+            raise FrameSizeError(msg)
+
+        if int.from_bytes(frame.body[:4], "big") & 0x80000000:
+            msg = "PRIORITY_UPDATE reserved bit must be clear"
+            raise ProtocolError(msg)
+        prioritized_stream_id = int.from_bytes(frame.body[:4], "big") & 0x7FFFFFFF
+        priority_field_value = frame.body[4:]
+        if prioritized_stream_id == 0:
+            msg = "PRIORITY_UPDATE must reference a request stream"
+            raise ProtocolError(msg)
+        urgency = 3
+        incremental = False
+        extensions: dict[bytes, object] = {}
+        raw_value = b""
+        if priority_field_value:
+            urgency, incremental, extensions, raw_value = parse_priority_field_value(
+                priority_field_value,
+            )
+        events = self.state_machine.process_input(
+            ConnectionInputs.RECV_PRIORITY_UPDATE,
+        )
+        event = PriorityUpdateReceived(
+            prioritized_stream_id=prioritized_stream_id,
+            urgency=urgency if urgency is not None else 3,
+            incremental=bool(incremental),
+            extensions=extensions,
+            priority_field_value=raw_value,
+            frame_stream_id=frame.stream_id,
+        )
+        events.append(event)
+        return [], events
 
     def _local_settings_acked(self) -> dict[SettingCodes | int, ChangedSetting]:
         """
@@ -2018,6 +2151,16 @@ class H2Connection:
         (one initiated by this peer), returns ``False`` otherwise.
         """
         return (stream_id % 2 == int(self.config.client_side))
+
+    def _reject_local_rfc7540_priorities(self) -> None:
+        if self.local_settings._proposed_value(SettingCodes.NO_RFC7540_PRIORITIES) == 1:
+            msg = "Received RFC 7540 priority signaling after disabling it"
+            raise ProtocolError(msg)
+
+    def _reject_remote_rfc7540_priorities(self) -> None:
+        if self.remote_settings.no_rfc7540_priorities:
+            msg = "RFC 7540 priority signaling is disabled by remote peer"
+            raise ProtocolError(msg)
 
     def _stream_closed_by(self, stream_id: int) -> StreamClosedBy | None:
         """

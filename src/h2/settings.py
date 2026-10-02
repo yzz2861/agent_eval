@@ -55,6 +55,10 @@ class SettingCodes(enum.IntEnum):
     #: client set this to 1.
     ENABLE_CONNECT_PROTOCOL = SettingsFrame.ENABLE_CONNECT_PROTOCOL
 
+    #: Indicates that the sender will use the extensible priority scheme
+    #: defined by RFC 9218 instead of the RFC 7540 priority tree.
+    NO_RFC7540_PRIORITIES = 0x9
+
 
 def _setting_code_from_int(code: int) -> SettingCodes | int:
     """
@@ -125,7 +129,11 @@ class Settings(MutableMapping[SettingCodes | int, int]):
     :type initial_vales: ``MutableMapping``
     """
 
-    def __init__(self, client: bool = True, initial_values: dict[SettingCodes, int] | None = None) -> None:
+    def __init__(
+        self,
+        client: bool = True,
+        initial_values: dict[SettingCodes, int] | None = None,
+    ) -> None:
         self._client = client
 
         # Backing object for the settings. This is a dictionary of
@@ -140,6 +148,7 @@ class Settings(MutableMapping[SettingCodes | int, int]):
             SettingCodes.INITIAL_WINDOW_SIZE: collections.deque([65535]),
             SettingCodes.MAX_FRAME_SIZE: collections.deque([16384]),
             SettingCodes.ENABLE_CONNECT_PROTOCOL: collections.deque([0]),
+            SettingCodes.NO_RFC7540_PRIORITIES: collections.deque([0]),
         }
         if initial_values is not None:
             for key, value in initial_values.items():
@@ -261,6 +270,18 @@ class Settings(MutableMapping[SettingCodes | int, int]):
     def enable_connect_protocol(self, value: int) -> None:
         self[SettingCodes.ENABLE_CONNECT_PROTOCOL] = value
 
+    @property
+    def no_rfc7540_priorities(self) -> int:
+        """
+        The current value of the :data:`NO_RFC7540_PRIORITIES
+        <h2.settings.SettingCodes.NO_RFC7540_PRIORITIES>` setting.
+        """
+        return self[SettingCodes.NO_RFC7540_PRIORITIES]
+
+    @no_rfc7540_priorities.setter
+    def no_rfc7540_priorities(self, value: int) -> None:
+        self[SettingCodes.NO_RFC7540_PRIORITIES] = value
+
     # Implement the MutableMapping API.
     def __getitem__(self, key: SettingCodes | int) -> int:
         val = self._settings[key][0]
@@ -329,6 +350,15 @@ class Settings(MutableMapping[SettingCodes | int, int]):
     # see https://docs.python.org/3/reference/datamodel.html#object.__hash__
     __hash__ = MutableMapping.__hash__
 
+    def _proposed_value(self, key: SettingCodes | int) -> int | None:
+        """
+        Return the most recently proposed value, even before acknowledgement.
+        """
+        values = self._settings.get(key)
+        if values is None:
+            return None
+        return values[-1]
+
 
 def _validate_setting(
     setting: SettingCodes | int,
@@ -358,6 +388,8 @@ def _validate_setting(
         if value < 0:
             return ErrorCodes.PROTOCOL_ERROR
     elif setting == SettingCodes.ENABLE_CONNECT_PROTOCOL and value not in (0, 1):
+        return ErrorCodes.PROTOCOL_ERROR
+    elif setting == SettingCodes.NO_RFC7540_PRIORITIES and value not in (0, 1):
         return ErrorCodes.PROTOCOL_ERROR
 
     return ErrorCodes.NO_ERROR

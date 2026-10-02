@@ -74,6 +74,9 @@ Events
 .. autoclass:: h2.events.PriorityUpdated
    :members:
 
+.. autoclass:: h2.events.PriorityUpdateReceived
+   :members:
+
 .. autoclass:: h2.events.ConnectionTerminated
    :members:
 
@@ -115,6 +118,10 @@ Protocol Errors
    :members:
 
 .. autoclass:: h2.exceptions.FrameDataMissingError
+   :show-inheritance:
+   :members:
+
+.. autoclass:: h2.exceptions.FrameSizeError
    :show-inheritance:
    :members:
 

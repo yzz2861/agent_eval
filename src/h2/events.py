@@ -559,6 +559,37 @@ class PriorityUpdated(Event):
         )
 
 
+@dataclass(**kw_only)
+class PriorityUpdateReceived(Event):
+    """
+    The PriorityUpdateReceived event is fired whenever an RFC 9218
+    PRIORITY_UPDATE frame is received.
+
+    The frame is sent on stream 0; ``prioritized_stream_id`` identifies the
+    request stream whose priority is being updated.
+    """
+
+    prioritized_stream_id: int
+    urgency: int
+    incremental: bool
+    extensions: dict[bytes, object]
+    priority_field_value: bytes
+
+    #: The stream on which the frame was carried. Always 0 for HTTP/2.
+    frame_stream_id: int = 0
+
+    @property
+    def stream_id(self) -> int:
+        """Compatibility accessor for the stream being prioritized."""
+        return self.prioritized_stream_id
+
+    def __repr__(self) -> str:
+        return (
+            f"<PriorityUpdateReceived prioritized_stream_id:{self.prioritized_stream_id}, "
+            f"urgency:{self.urgency}, incremental:{self.incremental}, extensions:{self.extensions!r}>"
+        )
+
+
 class ConnectionTerminated(Event):
     """
     The ConnectionTerminated event is fired when a connection is torn down by

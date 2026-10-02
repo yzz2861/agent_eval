@@ -44,6 +44,14 @@ class FrameDataMissingError(ProtocolError):
     error_code = ErrorCodes.FRAME_SIZE_ERROR
 
 
+class FrameSizeError(ProtocolError):
+    """
+    A frame had an invalid length for its type.
+    """
+
+    error_code = ErrorCodes.FRAME_SIZE_ERROR
+
+
 class TooManyStreamsError(ProtocolError):
     """
     An attempt was made to open a stream that would lead to too many concurrent

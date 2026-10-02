@@ -1730,7 +1730,7 @@ class TestBasicServer:
         with pytest.raises(h2.exceptions.ProtocolError):
             c.send_headers(1, trailers)
 
-    @pytest.mark.parametrize("frame_id", range(12, 256))
+    @pytest.mark.parametrize("frame_id", [frame_id for frame_id in range(12, 256) if frame_id != 0x10])
     def test_unknown_frames_are_ignored(self, frame_factory, frame_id) -> None:
         c = h2.connection.H2Connection(config=self.server_config)
         c.receive_data(frame_factory.preamble())
