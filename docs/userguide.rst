@@ -269,6 +269,40 @@ still running, the later job is terminated with the outcome of
 To allow more jobs to be concurrently running for a task, pass the desired maximum
 number as the ``max_running_jobs`` keyword argument to :meth:`~Scheduler.add_schedule`.
 
+Limiting concurrency with named resource quotas
+-----------------------------------------------
+
+**Option**: ``resources``
+
+.. note:: Resource quotas are currently only supported by the
+    :class:`~apscheduler.datastores.memory.MemoryDataStore` and
+    :class:`~apscheduler.datastores.sqlalchemy.SQLAlchemyDataStore` data
+    stores. You can check for support via the
+    :attr:`~apscheduler.abc.DataStore.supports_resource_quotas` attribute.
+
+While ``max_running_jobs`` limits concurrency per task, named resource quotas
+limit concurrency based on shared, finite resources of the host machine (such as CPU
+cores or GPUs). Each task can declare the amounts of named resources each of its jobs
+requires, for example ```resources={`cpu`: 2, `gpu`: 1}```. When a scheduler
+acquires jobs, the data store only hands out a job if the full set of required
+resources can be allocated at once; otherwise the job stays pending until enough
+resources have been freed. The quotas are enforced collectively by all the schedulers
+sharing the same data store, and the allocated amounts are released when the job
+finishes, is cancelled or its lease expires (for example when the scheduler running
+it dies).
+
+Resource capacities are configured on the data store (or through the scheduler)::
+
+    async with AsyncScheduler() as scheduler:
+        await scheduler.set_resource_capacity(`cpu`, 8)
+        await scheduler.set_resource_capacity(`gpu`, 1)
+
+Lowering a capacity below the currently allocated amount does not interrupt any
+running jobs, but no new jobs requiring that resource will be started until the
+allocated amount drops below the capacity again. A resource that has no configured
+capacity is treated as having a capacity of 0, so jobs requiring it will remain
+pending.
+
 .. _controlling-how-much-a-job-can-be-started-late:
 
 Controlling how much a job can be started late

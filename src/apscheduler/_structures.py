@@ -12,7 +12,7 @@ from attrs.validators import and_, gt, instance_of, matches_re, min_len, optiona
 from ._converters import as_aware_datetime, as_enum, as_timedelta
 from ._enums import CoalescePolicy, JobOutcome
 from ._utils import UnsetValue, unset
-from ._validators import if_not_unset, valid_metadata
+from ._validators import if_not_unset, valid_metadata, valid_resources
 from .abc import Serializer, Trigger
 
 MetadataType: TypeAlias = dict[
@@ -38,6 +38,8 @@ class Task:
     :var str job_executor: name of the job executor that will run this task
     :var int | None max_running_jobs: maximum number of instances of this task that are
         allowed to run concurrently
+    :var dict[str, int] resources: named resources (and their amounts) that each job
+        of this task requires in order to run
     :var ~datetime.timedelta | None misfire_grace_time: maximum number of seconds the
         run time of jobs created for this task are allowed to be late, compared to the
         scheduled run time
@@ -54,6 +56,9 @@ class Task:
         default=None,
         validator=optional(and_(instance_of(int), gt(0))),
         on_setattr=frozen,
+    )
+    resources: dict[str, int] = attrs.field(
+        validator=valid_resources, factory=dict, on_setattr=frozen
     )
     misfire_grace_time: timedelta | None = attrs.field(
         default=None,
@@ -96,6 +101,8 @@ class TaskDefaults:
     :param str job_executor: name of the job executor that will run this task
     :param int | None max_running_jobs: maximum number of instances of this task that are
         allowed to run concurrently
+    :param dict[str, int] resources: named resources (and their amounts) that each job
+        of a task requires in order to run
     :param ~datetime.timedelta | None misfire_grace_time: maximum number of seconds the
         run time of jobs created for this task are allowed to be late, compared to the
         scheduled run time
@@ -108,6 +115,7 @@ class TaskDefaults:
     max_running_jobs: int | None | UnsetValue = attrs.field(
         validator=optional(instance_of(int)), default=1
     )
+    resources: dict[str, int] = attrs.field(validator=valid_resources, factory=dict)
     misfire_grace_time: timedelta | None = attrs.field(
         converter=as_timedelta,
         validator=optional(instance_of(timedelta)),

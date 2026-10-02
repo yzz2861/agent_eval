@@ -164,6 +164,11 @@ class DataStore(metaclass=ABCMeta):
     data store publishes events to the associated event broker accordingly.
     """
 
+    #: Whether this data store supports named resource quotas. Data stores that
+    #: support them enforce the quotas collectively for all schedulers sharing the
+    #: same store.
+    supports_resource_quotas: bool = False
+
     @abstractmethod
     async def start(
         self, exit_stack: AsyncExitStack, event_broker: EventBroker, logger: Logger
@@ -407,6 +412,73 @@ class DataStore(metaclass=ABCMeta):
         * Purge finished schedules (where ``next_run_time`` is ``None``) that have no
           running jobs associated with them
         """
+
+    async def set_resource_capacity(self, name: str, capacity: int) -> None:
+        """
+        Set the capacity of a named resource.
+
+        The capacity is the maximum total amount of the resource that can be
+        concurrently allocated to acquired jobs. Lowering the capacity below the
+        currently allocated amount does not affect any running jobs, but no new jobs
+        requiring the resource will be acquired until the allocated amount drops below
+        the capacity again.
+
+        This method publishes a :class:`~apscheduler.ResourceCapacityUpdated`
+        event.
+
+        :param name: name of the resource
+        :param capacity: the new capacity of the resource (must be a non-negative
+            integer)
+        :raises NotImplementedError: if the data store does not support resource
+            quotas (see :attr:`supports_resource_quotas`)
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support resource quotas"
+        )
+
+    async def remove_resource_capacity(self, name: str) -> None:
+        """
+        Remove a named resource from the data store.
+
+        Jobs requiring a resource that has no capacity set cannot be acquired, so any
+        pending jobs requiring the removed resource will remain pending. Does nothing
+        if the resource does not exist.
+
+        This method publishes a :class:`~apscheduler.ResourceCapacityUpdated`
+        event.
+
+        :param name: name of the resource
+        :raises NotImplementedError: if the data store does not support resource
+            quotas (see :attr:`supports_resource_quotas`)
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support resource quotas"
+        )
+
+    async def get_resource_capacities(self) -> dict[str, int]:
+        """
+        Return the configured capacities of all named resources.
+
+        :return: a dict mapping resource names to their capacities
+        :raises NotImplementedError: if the data store does not support resource
+            quotas (see :attr:`supports_resource_quotas`)
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support resource quotas"
+        )
+
+    async def get_resource_usage(self) -> dict[str, int]:
+        """
+        Return the amounts of named resources currently allocated to acquired jobs.
+
+        :return: a dict mapping resource names to their currently allocated amounts
+            (resources with no allocations are omitted)
+        :raises NotImplementedError: if the data store does not support resource
+            quotas (see :attr:`supports_resource_quotas`)
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support resource quotas"
+        )
 
 
 class JobExecutor(metaclass=ABCMeta):

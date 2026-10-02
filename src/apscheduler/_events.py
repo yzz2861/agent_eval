@@ -96,6 +96,20 @@ class ScheduleAdded(DataStoreEvent):
 
 
 @attrs.define(kw_only=True, frozen=True)
+class ResourceCapacityUpdated(DataStoreEvent):
+    """
+    Signals that the capacity of a named resource has changed in the data store.
+
+    :ivar name: name of the resource
+    :ivar capacity: the new capacity of the resource (``None`` if the resource was
+        removed from the data store)
+    """
+
+    name: str
+    capacity: int | None
+
+
+@attrs.define(kw_only=True, frozen=True)
 class ScheduleUpdated(DataStoreEvent):
     """
     Signals that a schedule has been updated in the store.

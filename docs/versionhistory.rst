@@ -6,6 +6,13 @@ APScheduler, see the :doc:`migration section <migration>`.
 
 **UNRELEASED**
 
+- Added named resource quotas: tasks can now declare resource requirements (for
+  example ```resources={`cpu`: 2, `gpu`: 1}```) which are enforced collectively
+  by all schedulers sharing the same data store. Jobs are only acquired when their
+  full resource combination can be allocated, and the allocations are released when
+  the jobs complete, are cancelled or their leases expire. Currently supported by
+  ``MemoryDataStore`` and ``SQLAlchemyDataStore``; other data stores declare this
+  via the ``supports_resource_quotas`` attribute
 - **BREAKING** Switched the MongoDB data store to use the asynchronous API in
   ``pymongo`` and bumped the minimum ``pymongo`` version to v4.13.0
 - Bumped up the CBOR serializer's ``cbor2`` dependency to v6.0+

@@ -35,6 +35,7 @@ from .._enums import CoalescePolicy, ConflictPolicy, JobOutcome, RunState, Sched
 from .._events import (
     Event,
     JobReleased,
+    ResourceCapacityUpdated,
     ScheduleAdded,
     SchedulerStarted,
     SchedulerStopped,
@@ -317,6 +318,7 @@ class AsyncScheduler:
         job_executor: str | UnsetValue = unset,
         misfire_grace_time: float | timedelta | None | UnsetValue = unset,
         max_running_jobs: int | None | UnsetValue = unset,
+        resources: dict[str, int] | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
     ) -> Task:
         """
@@ -328,6 +330,7 @@ class AsyncScheduler:
         * ``job_executor``: the value of ``default_job_executor`` scheduler attribute
         * ``misfire_grace_time``: ``None``
         * ``max_running_jobs``: 1
+        * ``resources``: {}
 
         When updating a task, any options not explicitly passed will remain the same.
 
@@ -342,6 +345,8 @@ class AsyncScheduler:
             run time is allowed to be late, compared to the scheduled run time
         :param max_running_jobs: maximum number of instances of the task that are
             allowed to run concurrently
+        :param resources: named resources (and their amounts) that each job of this
+            task requires in order to run
         :param metadata: key-value pairs for storing JSON compatible custom information
         :raises TypeError: if ``func_or_task_id`` is neither a task, task ID or a
             callable
@@ -362,6 +367,7 @@ class AsyncScheduler:
                 id=func_or_task_id.id,
                 job_executor=func_or_task_id.job_executor,
                 max_running_jobs=func_or_task_id.max_running_jobs,
+                resources=func_or_task_id.resources,
                 misfire_grace_time=func_or_task_id.misfire_grace_time,
                 metadata=func_or_task_id.metadata,
             )
@@ -372,6 +378,7 @@ class AsyncScheduler:
                     id=task.id,
                     job_executor=task.job_executor,
                     max_running_jobs=task.max_running_jobs,
+                    resources=task.resources,
                     misfire_grace_time=task.misfire_grace_time,
                     metadata=task.metadata,
                 )
@@ -392,6 +399,8 @@ class AsyncScheduler:
             task_params.job_executor = job_executor
         if max_running_jobs is not unset:
             task_params.max_running_jobs = max_running_jobs
+        if resources is not unset:
+            task_params.resources = resources
         if misfire_grace_time is not unset:
             task_params.misfire_grace_time = misfire_grace_time
 
@@ -400,6 +409,8 @@ class AsyncScheduler:
             task_params.job_executor = self.task_defaults.job_executor
         if task_params.max_running_jobs is unset:
             task_params.max_running_jobs = self.task_defaults.max_running_jobs
+        if task_params.resources is unset:
+            task_params.resources = self.task_defaults.resources
         if task_params.misfire_grace_time is unset:
             task_params.misfire_grace_time = self.task_defaults.misfire_grace_time
 
@@ -425,6 +436,7 @@ class AsyncScheduler:
                 func=func_ref,
                 job_executor=task_params.job_executor,
                 max_running_jobs=task_params.max_running_jobs,
+                resources=task_params.resources,
                 misfire_grace_time=task_params.misfire_grace_time,
                 metadata=task_params.metadata,
             )
@@ -439,6 +451,9 @@ class AsyncScheduler:
 
             if task_params.max_running_jobs != task.max_running_jobs:
                 changes["max_running_jobs"] = task_params.max_running_jobs
+
+            if task_params.resources != task.resources:
+                changes["resources"] = task_params.resources
 
             if task_params.misfire_grace_time != task.misfire_grace_time:
                 changes["misfire_grace_time"] = task_params.misfire_grace_time
@@ -464,6 +479,56 @@ class AsyncScheduler:
         """
         self._check_initialized()
         return await self.data_store.get_tasks()
+
+    async def set_resource_capacity(self, name: str, capacity: int) -> None:
+        """
+        Set the capacity of a named resource.
+
+        The capacity is enforced collectively by all the schedulers sharing the data
+        store. Lowering the capacity below the currently allocated amount does not
+        affect any running jobs, but no new jobs requiring the resource will be
+        started until the allocated amount drops below the capacity again.
+
+        :param name: name of the resource
+        :param capacity: the new capacity of the resource (must be a non-negative
+            integer)
+
+        """
+        self._check_initialized()
+        await self.data_store.set_resource_capacity(name, capacity)
+
+    async def remove_resource_capacity(self, name: str) -> None:
+        """
+        Remove a named resource from the data store.
+
+        Any pending jobs requiring the removed resource will remain pending, as jobs
+        requiring a resource with no configured capacity cannot be started.
+
+        :param name: name of the resource
+
+        """
+        self._check_initialized()
+        await self.data_store.remove_resource_capacity(name)
+
+    async def get_resource_capacities(self) -> dict[str, int]:
+        """
+        Return the configured capacities of all named resources.
+
+        :return: a dict mapping resource names to their capacities
+
+        """
+        self._check_initialized()
+        return await self.data_store.get_resource_capacities()
+
+    async def get_resource_usage(self) -> dict[str, int]:
+        """
+        Return the amounts of named resources currently allocated to running jobs.
+
+        :return: a dict mapping resource names to their currently allocated amounts
+
+        """
+        self._check_initialized()
+        return await self.data_store.get_resource_usage()
 
     async def add_schedule(
         self,
@@ -1143,7 +1208,8 @@ class AsyncScheduler:
             # Fetch new jobs every time
             exit_stack.enter_context(
                 self.event_broker.subscribe(
-                    check_queue_capacity, {JobAdded, JobReleased}
+                    check_queue_capacity,
+                    {JobAdded, JobReleased, ResourceCapacityUpdated},
                 )
             )
 

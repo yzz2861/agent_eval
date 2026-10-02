@@ -244,6 +244,7 @@ class Scheduler:
         job_executor: str | UnsetValue = unset,
         misfire_grace_time: float | timedelta | None | UnsetValue = unset,
         max_running_jobs: int | None | UnsetValue = unset,
+        resources: dict[str, int] | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
     ) -> Task:
         portal = self._ensure_services_ready()
@@ -255,6 +256,7 @@ class Scheduler:
                 job_executor=job_executor,
                 misfire_grace_time=misfire_grace_time,
                 max_running_jobs=max_running_jobs,
+                resources=resources,
                 metadata=metadata,
             )
         )
@@ -262,6 +264,26 @@ class Scheduler:
     def get_tasks(self) -> Sequence[Task]:
         portal = self._ensure_services_ready()
         return portal.call(self._async_scheduler.get_tasks)
+
+    def set_resource_capacity(self, name: str, capacity: int) -> None:
+        portal = self._ensure_services_ready()
+        return portal.call(
+            partial(self._async_scheduler.set_resource_capacity, name, capacity)
+        )
+
+    def remove_resource_capacity(self, name: str) -> None:
+        portal = self._ensure_services_ready()
+        return portal.call(
+            partial(self._async_scheduler.remove_resource_capacity, name)
+        )
+
+    def get_resource_capacities(self) -> dict[str, int]:
+        portal = self._ensure_services_ready()
+        return portal.call(self._async_scheduler.get_resource_capacities)
+
+    def get_resource_usage(self) -> dict[str, int]:
+        portal = self._ensure_services_ready()
+        return portal.call(self._async_scheduler.get_resource_usage)
 
     def add_schedule(
         self,

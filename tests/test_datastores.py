@@ -22,6 +22,7 @@ from apscheduler import (
     Job,
     JobOutcome,
     JobResult,
+    ResourceCapacityUpdated,
     Schedule,
     ScheduleAdded,
     ScheduleRemoved,
@@ -898,6 +899,338 @@ async def test_reap_abandoned_jobs(
 
     task = await datastore.get_task("task1")
     assert task.running_jobs == 0
+
+
+@pytest.fixture
+def resource_datastore(datastore: DataStore) -> DataStore:
+    if not datastore.supports_resource_quotas:
+        pytest.skip(f"{datastore.__class__.__name__} does not support resource quotas")
+
+    return datastore
+
+
+async def test_resource_capacity_management(resource_datastore: DataStore) -> None:
+    async with capture_events(
+        resource_datastore, 3, {ResourceCapacityUpdated}
+    ) as events:
+        await resource_datastore.set_resource_capacity("cpu", 4)
+        await resource_datastore.set_resource_capacity("gpu", 1)
+        await resource_datastore.set_resource_capacity("cpu", 8)
+
+    assert [event.capacity for event in events] == [4, 1, 8]
+    assert await resource_datastore.get_resource_capacities() == {
+        "cpu": 8,
+        "gpu": 1,
+    }
+
+    async with capture_events(
+        resource_datastore, 1, {ResourceCapacityUpdated}
+    ) as events:
+        await resource_datastore.remove_resource_capacity("gpu")
+
+    assert events[0].capacity is None
+    assert await resource_datastore.get_resource_capacities() == {"cpu": 8}
+
+    # Removing a nonexistent resource is a no-op
+    await resource_datastore.remove_resource_capacity("gpu")
+    assert await resource_datastore.get_resource_capacities() == {"cpu": 8}
+
+
+@pytest.mark.parametrize(
+    "name, capacity",
+    [("", 1), (None, 1), ("cpu", -1), ("cpu", 1.5), ("cpu", True)],
+    ids=["empty-name", "none-name", "negative", "non-integer", "bool"],
+)
+async def test_resource_capacity_validation(
+    resource_datastore: DataStore, name: str, capacity: int
+) -> None:
+    with pytest.raises(ValueError):
+        await resource_datastore.set_resource_capacity(name, capacity)
+
+
+async def test_acquire_jobs_resource_quota(resource_datastore: DataStore) -> None:
+    await resource_datastore.set_resource_capacity("cpu", 4)
+    await resource_datastore.set_resource_capacity("gpu", 1)
+    await resource_datastore.add_task(
+        Task(
+            id="task1",
+            func="contextlib:asynccontextmanager",
+            job_executor="async",
+            resources={"cpu": 2, "gpu": 1},
+        )
+    )
+    jobs = [Job(task_id="task1", executor="async") for _ in range(2)]
+    for job in jobs:
+        await resource_datastore.add_job(job)
+
+    assert (await resource_datastore.get_task("task1")).resources == {
+        "cpu": 2,
+        "gpu": 1,
+    }
+
+    # The first job gets the full resource combination; the second one must wait
+    # because there is not enough "gpu" left for it
+    acquired = await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 2
+    )
+    assert [job.id for job in acquired] == [jobs[0].id]
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2, "gpu": 1}
+
+    # The second job must not be acquired, and no partial allocation may be made
+    assert not await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 2
+    )
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2, "gpu": 1}
+    remaining_jobs = await resource_datastore.get_jobs()
+    assert len(remaining_jobs) == 2
+    unacquired_jobs = [job for job in remaining_jobs if job.acquired_by is None]
+    assert [job.id for job in unacquired_jobs] == [jobs[1].id]
+
+    # Releasing the first job frees its resources for the second job
+    await resource_datastore.release_job(
+        "worker1",
+        acquired[0],
+        JobResult.from_job(acquired[0], JobOutcome.success),
+    )
+    assert await resource_datastore.get_resource_usage() == {}
+
+    acquired = await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 2
+    )
+    assert [job.id for job in acquired] == [jobs[1].id]
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2, "gpu": 1}
+
+
+async def test_acquire_jobs_resource_quota_unconfigured_resource(
+    resource_datastore: DataStore,
+) -> None:
+    # A resource with no configured capacity is treated as having a capacity of 0
+    await resource_datastore.add_task(
+        Task(
+            id="task1",
+            func="contextlib:asynccontextmanager",
+            job_executor="async",
+            resources={"tpu": 1},
+        )
+    )
+    job = Job(task_id="task1", executor="async")
+    await resource_datastore.add_job(job)
+
+    assert not await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 1
+    )
+    assert await resource_datastore.get_resource_usage() == {}
+
+    # Once the capacity is configured, the job can be acquired
+    await resource_datastore.set_resource_capacity("tpu", 1)
+    acquired = await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 1
+    )
+    assert [job.id for job in acquired] == [job.id]
+    assert await resource_datastore.get_resource_usage() == {"tpu": 1}
+
+
+async def test_acquire_jobs_resource_quota_shared_between_schedulers(
+    resource_datastore: DataStore,
+) -> None:
+    await resource_datastore.set_resource_capacity("cpu", 2)
+    await resource_datastore.set_resource_capacity("gpu", 2)
+    await resource_datastore.add_task(
+        Task(
+            id="task1",
+            func="contextlib:asynccontextmanager",
+            job_executor="async",
+            resources={"cpu": 1, "gpu": 1},
+        )
+    )
+    jobs = [Job(task_id="task1", executor="async") for _ in range(4)]
+    for job in jobs:
+        await resource_datastore.add_job(job)
+
+    # The first worker acquires 2 jobs, exhausting the shared capacity
+    acquired1 = await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 4
+    )
+    assert len(acquired1) == 2
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2, "gpu": 2}
+
+    # The second worker shares the same bookkeeping, so it cannot acquire any jobs
+    assert not await resource_datastore.acquire_jobs(
+        "worker2", timedelta(seconds=30), 4
+    )
+
+    # When the first worker releases a job, the second worker can acquire exactly one
+    await resource_datastore.release_job(
+        "worker1",
+        acquired1[0],
+        JobResult.from_job(acquired1[0], JobOutcome.success),
+    )
+    acquired2 = await resource_datastore.acquire_jobs(
+        "worker2", timedelta(seconds=30), 4
+    )
+    assert len(acquired2) == 1
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2, "gpu": 2}
+
+
+async def test_resource_capacity_shrink(resource_datastore: DataStore) -> None:
+    await resource_datastore.set_resource_capacity("cpu", 2)
+    await resource_datastore.add_task(
+        Task(
+            id="task1",
+            func="contextlib:asynccontextmanager",
+            job_executor="async",
+            resources={"cpu": 1},
+        )
+    )
+    jobs = [Job(task_id="task1", executor="async") for _ in range(3)]
+    for job in jobs:
+        await resource_datastore.add_job(job)
+
+    acquired = await resource_datastore.acquire_jobs("worker", timedelta(seconds=30), 2)
+    assert len(acquired) == 2
+
+    # Shrinking the capacity below the current usage must not affect the running
+    # jobs, but no new jobs can be acquired while the usage exceeds the capacity
+    await resource_datastore.set_resource_capacity("cpu", 1)
+    assert not await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 2
+    )
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2}
+
+    # Releasing one job is not enough to get below the shrunken capacity
+    await resource_datastore.release_job(
+        "worker1",
+        acquired[0],
+        JobResult.from_job(acquired[0], JobOutcome.success),
+    )
+    assert not await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 2
+    )
+
+    # Once the usage drops below the capacity, new jobs can be acquired again
+    await resource_datastore.release_job(
+        "worker1",
+        acquired[1],
+        JobResult.from_job(acquired[1], JobOutcome.success),
+    )
+    acquired = await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 2
+    )
+    assert [job.id for job in acquired] == [jobs[2].id]
+
+
+@pytest.mark.skipif(
+    platform.python_implementation() != "CPython",
+    reason="time-machine is not available",
+)
+async def test_resource_reclaim_on_lease_expiry(
+    resource_datastore: DataStore, time_machine: TimeMachineFixture
+) -> None:
+    await resource_datastore.set_resource_capacity("cpu", 2)
+    await resource_datastore.add_task(
+        Task(
+            id="task1",
+            func="contextlib:asynccontextmanager",
+            job_executor="async",
+            resources={"cpu": 2},
+        )
+    )
+    job = Job(task_id="task1", executor="async")
+    await resource_datastore.add_job(job)
+
+    time_machine.move_to(datetime.now(timezone.utc), tick=False)
+    acquired = await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 1
+    )
+    assert len(acquired) == 1
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2}
+
+    # The worker dies; once the lease expires, clean-up reclaims the resources
+    time_machine.shift(31)
+    await resource_datastore.cleanup()
+    assert await resource_datastore.get_resource_usage() == {}
+    assert not await resource_datastore.get_jobs()
+
+
+@pytest.mark.skipif(
+    platform.python_implementation() != "CPython",
+    reason="time-machine is not available",
+)
+async def test_resource_reclaim_on_reacquisition(
+    resource_datastore: DataStore, time_machine: TimeMachineFixture
+) -> None:
+    await resource_datastore.set_resource_capacity("cpu", 2)
+    await resource_datastore.add_task(
+        Task(
+            id="task1",
+            func="contextlib:asynccontextmanager",
+            job_executor="async",
+            resources={"cpu": 2},
+        )
+    )
+    job = Job(task_id="task1", executor="async")
+    await resource_datastore.add_job(job)
+
+    time_machine.move_to(datetime.now(timezone.utc), tick=False)
+    acquired = await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 1
+    )
+    assert len(acquired) == 1
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2}
+
+    # The worker dies; another worker re-acquires the job after the lease expires.
+    # The stale allocation must be replaced, not added to.
+    time_machine.shift(31)
+    acquired = await resource_datastore.acquire_jobs(
+        "worker2", timedelta(seconds=30), 1
+    )
+    assert len(acquired) == 1
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2}
+
+
+async def test_reap_abandoned_jobs_releases_resources(
+    resource_datastore: DataStore,
+) -> None:
+    await resource_datastore.set_resource_capacity("cpu", 2)
+    await resource_datastore.add_task(
+        Task(
+            id="task1",
+            func="contextlib:asynccontextmanager",
+            job_executor="async",
+            resources={"cpu": 2},
+        )
+    )
+    job = Job(task_id="task1", executor="async")
+    await resource_datastore.add_job(job)
+
+    acquired = await resource_datastore.acquire_jobs(
+        "worker1", timedelta(seconds=30), 1
+    )
+    assert len(acquired) == 1
+    assert await resource_datastore.get_resource_usage() == {"cpu": 2}
+
+    await resource_datastore.reap_abandoned_jobs("worker1")
+    assert await resource_datastore.get_resource_usage() == {}
+
+
+async def test_resource_quotas_capability_declaration() -> None:
+    assert MemoryDataStore.supports_resource_quotas
+    assert SQLAlchemyDataStore.supports_resource_quotas
+    assert not MongoDBDataStore.supports_resource_quotas
+
+    # The default implementations must raise NotImplementedError
+    mongodb_store = object.__new__(MongoDBDataStore)
+    with pytest.raises(NotImplementedError):
+        await mongodb_store.set_resource_capacity("cpu", 1)
+
+    with pytest.raises(NotImplementedError):
+        await mongodb_store.remove_resource_capacity("cpu")
+
+    with pytest.raises(NotImplementedError):
+        await mongodb_store.get_resource_capacities()
+
+    with pytest.raises(NotImplementedError):
+        await mongodb_store.get_resource_usage()
 
 
 class TestRepr:

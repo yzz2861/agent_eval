@@ -122,6 +122,9 @@ class MongoDBDataStore(BaseExternalDataStore):
         default="apscheduler", kw_only=True, validator=instance_of(str)
     )
 
+    #: Named resource quotas are not supported by this data store
+    supports_resource_quotas = False
+
     _client: AsyncMongoClient = attrs.field(init=False)
     _close_on_exit: bool = attrs.field(init=False, default=False)
     _task_attrs: ClassVar[list[str]] = [field.name for field in attrs.fields(Task)]

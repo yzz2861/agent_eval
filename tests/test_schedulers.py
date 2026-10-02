@@ -244,6 +244,96 @@ class TestAsyncScheduler:
             assert tasks[0].job_executor == "threadpool"
             assert tasks[0].metadata == {"global": "foo", "local": 6, "direct": [1, 9]}
 
+    async def test_configure_task_resources(self) -> None:
+        @task(id="resource_task", resources={"gpu": 1})
+        def resource_task() -> None:
+            pass
+
+        async with AsyncScheduler() as scheduler:
+            # The resources from the decorator are applied to the new task
+            task_ = await scheduler.configure_task(resource_task)
+            assert task_.resources == {"gpu": 1}
+
+            # Resources can be set and replaced explicitly
+            task_ = await scheduler.configure_task(
+                resource_task, resources={"cpu": 2, "gpu": 1}
+            )
+            assert task_.resources == {"cpu": 2, "gpu": 1}
+
+            # Omitting the resources argument leaves them unchanged
+            task_ = await scheduler.configure_task(resource_task)
+            assert task_.resources == {"cpu": 2, "gpu": 1}
+
+            stored_task = (await scheduler.get_tasks())[0]
+            assert stored_task.resources == {"cpu": 2, "gpu": 1}
+
+    async def test_resource_capacity_increase_starts_pending_jobs(self) -> None:
+        async with AsyncScheduler() as scheduler:
+            await scheduler.set_resource_capacity("gpu", 0)
+            task_ = await scheduler.configure_task(
+                dummy_async_job, resources={"gpu": 1}
+            )
+            job_id = await scheduler.add_job(task_.id, result_expiration_time=60)
+            await scheduler.start_in_background()
+
+            # The job cannot start while the resource capacity is 0
+            await sleep(0.5)
+            assert await scheduler.get_jobs()
+
+            # Raising the capacity must wake the scheduler up to run the pending job
+            await scheduler.set_resource_capacity("gpu", 1)
+            with fail_after(5):
+                result = await scheduler.get_job_result(job_id)
+
+            assert result
+            assert result.outcome is JobOutcome.success
+
+    async def test_resource_quotas_shared_between_schedulers(self) -> None:
+        data_store = MemoryDataStore()
+        event_broker = LocalEventBroker()
+        running_jobs = 0
+        max_running_jobs = 0
+
+        async def tracked_job() -> None:
+            nonlocal running_jobs, max_running_jobs
+            running_jobs += 1
+            max_running_jobs = max(max_running_jobs, running_jobs)
+            await anyio.sleep(0.1)
+            running_jobs -= 1
+
+        tracked_job = task(
+            id="tracked_job", max_running_jobs=None, resources={"gpu": 1}
+        )(tracked_job)
+
+        async with AsyncExitStack() as exit_stack:
+            schedulers = [
+                await exit_stack.enter_async_context(
+                    AsyncScheduler(data_store=data_store, event_broker=event_broker)
+                )
+                for _ in range(2)
+            ]
+            for scheduler in schedulers:
+                await scheduler.configure_task(tracked_job)
+
+            await schedulers[0].set_resource_capacity("gpu", 1)
+            job_ids = [
+                await schedulers[0].add_job("tracked_job", result_expiration_time=60)
+                for _ in range(4)
+            ]
+            for scheduler in schedulers:
+                await scheduler.start_in_background()
+
+            with fail_after(10):
+                for job_id in job_ids:
+                    result = await schedulers[0].get_job_result(job_id)
+                    assert result
+                    assert result.outcome is JobOutcome.success
+
+        # The quota must have been enforced collectively across both schedulers,
+        # and all the allocations must have been released afterwards
+        assert max_running_jobs == 1
+        assert await data_store.get_resource_usage() == {}
+
     async def test_add_pause_unpause_remove_schedule(
         self, raw_datastore: DataStore, timezone: ZoneInfo
     ) -> None:

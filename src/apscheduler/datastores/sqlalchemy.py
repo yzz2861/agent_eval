@@ -34,6 +34,7 @@ from sqlalchemy import (
     bindparam,
     create_engine,
     false,
+    func,
     or_,
     select,
 )
@@ -61,6 +62,7 @@ from .._events import (
     JobAdded,
     JobDeserializationFailed,
     JobReleased,
+    ResourceCapacityUpdated,
     ScheduleAdded,
     ScheduleDeserializationFailed,
     ScheduleRemoved,
@@ -169,6 +171,8 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
     )
     schema: str | None = attrs.field(kw_only=True, default=None)
 
+    supports_resource_quotas = True
+
     _engine: Engine | AsyncEngine = attrs.field(init=False)
     _close_on_exit: bool = attrs.field(init=False, default=False)
     _supports_update_returning: bool = attrs.field(init=False, default=False)
@@ -180,6 +184,8 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
     _t_schedules: Table = attrs.field(init=False)
     _t_jobs: Table = attrs.field(init=False)
     _t_job_results: Table = attrs.field(init=False)
+    _t_resource_capacities: Table = attrs.field(init=False)
+    _t_resource_allocations: Table = attrs.field(init=False)
 
     def __attrs_post_init__(self) -> None:
         if isinstance(self.engine_or_url, (str, URL)):
@@ -205,6 +211,12 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
         self._t_schedules = self._metadata.tables[prefix + "schedules"]
         self._t_jobs = self._metadata.tables[prefix + "jobs"]
         self._t_job_results = self._metadata.tables[prefix + "job_results"]
+        self._t_resource_capacities = self._metadata.tables[
+            prefix + "resource_capacities"
+        ]
+        self._t_resource_allocations = self._metadata.tables[
+            prefix + "resource_allocations"
+        ]
 
     def __repr__(self) -> str:
         return create_repr(self, url=repr(self._engine.url), schema=self.schema)
@@ -338,6 +350,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             Column("func", Unicode(500)),
             Column("job_executor", Unicode(500), nullable=False),
             Column("max_running_jobs", Integer),
+            Column("resources", json_type, nullable=False),
             Column("misfire_grace_time", interval_type),
             Column("metadata", json_type, nullable=False),
             Column("running_jobs", Integer, nullable=False, server_default=literal(0)),
@@ -390,6 +403,19 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             Column("expires_at", timestamp_type, nullable=False, index=True),
             Column("exception", LargeBinary),
             Column("return_value", LargeBinary),
+        )
+        Table(
+            "resource_capacities",
+            metadata,
+            Column("name", Unicode(500), primary_key=True),
+            Column("capacity", Integer, nullable=False),
+        )
+        Table(
+            "resource_allocations",
+            metadata,
+            Column("job_id", Uuid, primary_key=True),
+            Column("resource", Unicode(500), primary_key=True),
+            Column("amount", Integer, nullable=False),
         )
         return metadata
 
@@ -489,6 +515,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             func=task.func,
             job_executor=task.job_executor,
             max_running_jobs=task.max_running_jobs,
+            resources=task.resources,
             misfire_grace_time=task.misfire_grace_time,
             metadata=task.metadata,
         )
@@ -504,6 +531,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                     func=task.func,
                     job_executor=task.job_executor,
                     max_running_jobs=task.max_running_jobs,
+                    resources=task.resources,
                     misfire_grace_time=task.misfire_grace_time,
                     metadata=task.metadata,
                 )
@@ -882,6 +910,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                             self._t_jobs,
                             self._t_tasks.c.max_running_jobs,
                             self._t_tasks.c.running_jobs,
+                            self._t_tasks.c.resources,
                         )
                         .join(
                             self._t_tasks, self._t_tasks.c.id == self._t_jobs.c.task_id
@@ -908,18 +937,55 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                     if not result:
                         return []
 
+                    rows = list(result)
+
+                    # Free resources allocated to jobs whose previous leases have
+                    # expired (their previous owners are presumed dead)
+                    expired_job_ids = [
+                        row.id for row in rows if row.acquired_by is not None
+                    ]
+                    if expired_job_ids:
+                        delete = self._t_resource_allocations.delete().where(
+                            self._t_resource_allocations.c.job_id.in_(expired_job_ids)
+                        )
+                        await self._execute(conn, delete)
+
+                    # Load the resource capacities and current usage if any of the
+                    # candidate jobs require resources. The capacity rows are locked
+                    # to serialize resource bookkeeping between schedulers.
+                    resource_capacities: dict[str, int] = {}
+                    resource_usage: dict[str, int] = defaultdict(int)
+                    if any(row.resources for row in rows):
+                        capacities_query = select(
+                            self._t_resource_capacities
+                        ).with_for_update()
+                        capacities_result = await self._execute(conn, capacities_query)
+                        resource_capacities = {
+                            capacity_row.name: capacity_row.capacity
+                            for capacity_row in capacities_result
+                        }
+                        usage_query = select(
+                            self._t_resource_allocations.c.resource,
+                            func.sum(self._t_resource_allocations.c.amount),
+                        ).group_by(self._t_resource_allocations.c.resource)
+                        usage_result = await self._execute(conn, usage_query)
+                        for usage_row in usage_result:
+                            resource_usage[usage_row[0]] = usage_row[1]
+
                     acquired_jobs: list[Job] = []
                     discarded_jobs: list[_JobDiscard] = []
+                    resource_allocations: dict[UUID, dict[str, int]] = {}
                     task_job_slots_left: dict[str, float] = defaultdict(
                         lambda: float("inf")
                     )
                     running_job_count_increments: dict[str, int] = defaultdict(
                         lambda: 0
                     )
-                    for row in result:
+                    for row in rows:
                         job_dict = row._asdict()
                         task_max_running_jobs = job_dict.pop("max_running_jobs")
                         task_running_jobs = job_dict.pop("running_jobs")
+                        task_resources: dict[str, int] = job_dict.pop("resources") or {}
                         if task_max_running_jobs is not None:
                             task_job_slots_left.setdefault(
                                 row.task_id, task_max_running_jobs - task_running_jobs
@@ -969,11 +1035,33 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                             )
                             continue
 
+                        # Skip the job if its resource requirements cannot be fully
+                        # satisfied right now (the job must not hold on to a partial
+                        # set of resources)
+                        if task_resources and any(
+                            resource_usage[name] + amount
+                            > resource_capacities.get(name, 0)
+                            for name, amount in task_resources.items()
+                        ):
+                            self._logger.debug(
+                                "Skipping job %s because the resource requirements "
+                                "of task %r cannot be fulfilled with the current "
+                                "resource capacities",
+                                job.id,
+                                job.task_id,
+                            )
+                            continue
+
                         task_job_slots_left[job.task_id] -= 1
                         running_job_count_increments[job.task_id] += 1
                         job.acquired_by = scheduler_id
                         job.acquired_until = acquired_until
                         acquired_jobs.append(job)
+                        if task_resources:
+                            resource_allocations[job.id] = task_resources
+                            for name, amount in task_resources.items():
+                                resource_usage[name] += amount
+
                         events.append(
                             JobAcquired.from_job(job, scheduler_id=scheduler_id)
                         )
@@ -1005,6 +1093,16 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                             .where(self._t_tasks.c.id == p_id)
                         )
                         await self._execute(conn, update, params)
+
+                        # Record the resource allocations of the acquired jobs
+                        allocation_params = [
+                            {"job_id": job_id, "resource": name, "amount": amount}
+                            for job_id, resources in resource_allocations.items()
+                            for name, amount in resources.items()
+                        ]
+                        if allocation_params:
+                            insert = self._t_resource_allocations.insert()
+                            await self._execute(conn, insert, allocation_params)
 
                     # Discard the jobs that could not start
                     for discard in discarded_jobs:
@@ -1058,6 +1156,12 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                 .where(self._t_tasks.c.id == task_id)
             )
             await self._execute(conn, update)
+
+        # Free any resources allocated to the job
+        delete = self._t_resource_allocations.delete().where(
+            self._t_resource_allocations.c.job_id == result.job_id
+        )
+        await self._execute(conn, delete)
 
         # Delete the job
         delete = self._t_jobs.delete().where(self._t_jobs.c.id == result.job_id)
@@ -1271,3 +1375,70 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                 # Publish any events produced from the operations
                 for event in events:
                     await self._event_broker.publish(event)
+
+    async def set_resource_capacity(self, name: str, capacity: int) -> None:
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"resource name must be a non-empty string, got: {name!r}")
+
+        if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity < 0:
+            raise ValueError(
+                f"capacity must be a non-negative integer, got: {capacity!r}"
+            )
+
+        insert = self._t_resource_capacities.insert().values(
+            name=name, capacity=capacity
+        )
+        try:
+            async for attempt in self._retry():
+                with attempt:
+                    async with self._begin_transaction() as conn:
+                        await self._execute(conn, insert)
+        except IntegrityError:
+            update = (
+                self._t_resource_capacities.update()
+                .values(capacity=capacity)
+                .where(self._t_resource_capacities.c.name == name)
+            )
+            async for attempt in self._retry():
+                with attempt:
+                    async with self._begin_transaction() as conn:
+                        await self._execute(conn, update)
+
+        await self._event_broker.publish(
+            ResourceCapacityUpdated(name=name, capacity=capacity)
+        )
+
+    async def remove_resource_capacity(self, name: str) -> None:
+        delete = self._t_resource_capacities.delete().where(
+            self._t_resource_capacities.c.name == name
+        )
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    result = await self._execute(conn, delete)
+
+        if result.rowcount:
+            await self._event_broker.publish(
+                ResourceCapacityUpdated(name=name, capacity=None)
+            )
+
+    async def get_resource_capacities(self) -> dict[str, int]:
+        query = select(self._t_resource_capacities)
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    result = await self._execute(conn, query)
+
+        return {row.name: row.capacity for row in result}
+
+    async def get_resource_usage(self) -> dict[str, int]:
+        query = select(
+            self._t_resource_allocations.c.resource,
+            func.sum(self._t_resource_allocations.c.amount),
+        ).group_by(self._t_resource_allocations.c.resource)
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    result = await self._execute(conn, query)
+
+        return {row[0]: row[1] for row in result}

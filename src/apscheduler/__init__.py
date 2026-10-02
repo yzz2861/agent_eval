@@ -18,6 +18,7 @@ from ._events import JobAdded as JobAdded
 from ._events import JobDeserializationFailed as JobDeserializationFailed
 from ._events import JobReleased as JobReleased
 from ._events import JobRemoved as JobRemoved
+from ._events import ResourceCapacityUpdated as ResourceCapacityUpdated
 from ._events import ScheduleAdded as ScheduleAdded
 from ._events import ScheduleDeserializationFailed as ScheduleDeserializationFailed
 from ._events import ScheduleRemoved as ScheduleRemoved

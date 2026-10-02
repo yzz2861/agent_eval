@@ -55,3 +55,21 @@ def valid_metadata(instance: Any, attribute: Attribute, value: Any) -> None:
 
     for key, val in value.items():
         check_value(key, val)
+
+
+def valid_resources(instance: Any, attribute: Attribute, value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"{attribute.name} must be a dict, got: {value!r}")
+
+    for name, amount in value.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"{attribute.name} has an invalid resource name ({name!r}); "
+                f"resource names must be non-empty strings"
+            )
+
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount < 1:
+            raise ValueError(
+                f"{attribute.name}[{name!r}] must be a positive integer, "
+                f"got: {amount!r}"
+            )

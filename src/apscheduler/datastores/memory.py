@@ -15,6 +15,7 @@ from .._events import (
     JobAcquired,
     JobAdded,
     JobReleased,
+    ResourceCapacityUpdated,
     ScheduleAdded,
     ScheduleRemoved,
     ScheduleUpdated,
@@ -38,6 +39,8 @@ class MemoryDataStore(BaseDataStore):
     Can be shared between multiple schedulers within the same event loop.
     """
 
+    supports_resource_quotas = True
+
     _tasks: dict[str, Task] = attrs.Factory(dict)
     _schedules: list[Schedule] = attrs.Factory(list)
     _schedules_by_id: dict[str, Schedule] = attrs.Factory(dict)
@@ -48,6 +51,8 @@ class MemoryDataStore(BaseDataStore):
     _jobs_by_task_id: dict[str, set[Job]] = attrs.Factory(partial(defaultdict, set))
     _jobs_by_schedule_id: dict[str, set[Job]] = attrs.Factory(partial(defaultdict, set))
     _job_results: dict[UUID, JobResult] = attrs.Factory(dict)
+    _resource_capacities: dict[str, int] = attrs.Factory(dict)
+    _resource_allocations: dict[UUID, dict[str, int]] = attrs.Factory(dict)
 
     def __repr__(self) -> str:
         return create_repr(self)
@@ -229,6 +234,7 @@ class MemoryDataStore(BaseDataStore):
         acquired_until = now + lease_duration
         jobs: list[Job] = []
         job_results: dict[Job, JobResult] = {}
+        resource_usage = self._get_resource_usage()
         for job in self._jobs_by_id.values():
             task = self._tasks[job.task_id]
 
@@ -238,6 +244,9 @@ class MemoryDataStore(BaseDataStore):
                     continue
                 else:
                     task.running_jobs -= 1
+                    if old_allocation := self._resource_allocations.pop(job.id, None):
+                        for name, amount in old_allocation.items():
+                            resource_usage[name] -= amount
 
             # Discard the job if its start deadline has passed
             if job.start_deadline and job.start_deadline < now:
@@ -263,6 +272,20 @@ class MemoryDataStore(BaseDataStore):
                 )
                 continue
 
+            # Skip the job if its resource requirements cannot be fully satisfied
+            # right now (the job must not hold on to a partial set of resources)
+            if task.resources and any(
+                resource_usage[name] + amount > self._resource_capacities.get(name, 0)
+                for name, amount in task.resources.items()
+            ):
+                self._logger.debug(
+                    "Skipping job %s because the resource requirements of task %r "
+                    "cannot be fulfilled with the current resource capacities",
+                    job.id,
+                    job.task_id,
+                )
+                continue
+
             # Mark the job as acquired by this worker
             jobs.append(job)
             job.acquired_by = scheduler_id
@@ -270,6 +293,12 @@ class MemoryDataStore(BaseDataStore):
 
             # Increment the number of running jobs for this task
             task.running_jobs += 1
+
+            # Allocate the resources required by this job
+            if task.resources:
+                self._resource_allocations[job.id] = dict(task.resources)
+                for name, amount in task.resources.items():
+                    resource_usage[name] += amount
 
             # Exit the loop if enough jobs have been acquired
             if len(jobs) == limit:
@@ -295,6 +324,9 @@ class MemoryDataStore(BaseDataStore):
         # Decrement the number of running jobs for this task
         if job.acquired_by:
             self._tasks[job.task_id].running_jobs -= 1
+
+        # Free any resources allocated to the job
+        self._resource_allocations.pop(result.job_id, None)
 
         # Delete the job
         job = self._jobs_by_id.pop(result.job_id)
@@ -396,3 +428,37 @@ class MemoryDataStore(BaseDataStore):
             and schedule_id not in self._jobs_by_schedule_id
         ]
         await self.remove_schedules(finished_schedule_ids, finished=True)
+
+    def _get_resource_usage(self) -> dict[str, int]:
+        resource_usage: dict[str, int] = defaultdict(int)
+        for allocation in self._resource_allocations.values():
+            for name, amount in allocation.items():
+                resource_usage[name] += amount
+
+        return resource_usage
+
+    async def set_resource_capacity(self, name: str, capacity: int) -> None:
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"resource name must be a non-empty string, got: {name!r}")
+
+        if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity < 0:
+            raise ValueError(
+                f"capacity must be a non-negative integer, got: {capacity!r}"
+            )
+
+        self._resource_capacities[name] = capacity
+        await self._event_broker.publish(
+            ResourceCapacityUpdated(name=name, capacity=capacity)
+        )
+
+    async def remove_resource_capacity(self, name: str) -> None:
+        if self._resource_capacities.pop(name, None) is not None:
+            await self._event_broker.publish(
+                ResourceCapacityUpdated(name=name, capacity=None)
+            )
+
+    async def get_resource_capacities(self) -> dict[str, int]:
+        return dict(self._resource_capacities)
+
+    async def get_resource_usage(self) -> dict[str, int]:
+        return self._get_resource_usage()
