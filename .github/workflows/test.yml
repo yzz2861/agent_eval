@@ -1,0 +1,131 @@
+name: Test
+on:
+  - push
+  - pull_request
+jobs:
+  ruby-versions-inplace:
+    uses: ruby/actions/.github/workflows/ruby_versions.yml@master
+    with:
+      engine: cruby-jruby
+      min_version: 2.6
+
+  inplace:
+    needs: ruby-versions-inplace
+    name: "Inplace: ${{ matrix.ruby-version }} on ${{ matrix.runs-on }}"
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runs-on:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        ruby-version: ${{ fromJson(needs.ruby-versions-inplace.outputs.versions) }}
+        # include:
+        #   - runs-on: ubuntu-latest
+        #     ruby-version: truffleruby
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+      - name: Test
+        run: bundle exec rake test
+
+  frozen-string-literal:
+    name: frozen-string-literal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ruby
+          bundler-cache: true
+      - name: Test
+        run: bundle exec rake test RUBYOPT="--enable-frozen-string-literal"
+
+  ruby-versions-gems:
+    uses: ruby/actions/.github/workflows/ruby_versions.yml@master
+    with:
+      engine: cruby-jruby
+      min_version: 2.6 # REXML is a default gem since Ruby 2.6
+
+  gem:
+    needs: ruby-versions-gems
+    name: "Gem: ${{ matrix.ruby-version }} on ${{ matrix.runs-on }}"
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runs-on:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        ruby-version: ${{ fromJson(needs.ruby-versions-gems.outputs.versions) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+      - name: Install as gem
+        run: |
+          rake install
+      - name: Install test dependencies on non-Windows
+        if: matrix.runs-on != 'windows-latest'
+        run: |
+          for gem in $(ruby -e 'puts ARGF.read[/^group :test do(.*)^end/m, 1].scan(/"(.+?)"/)' Gemfile); do
+            gem install ${gem}
+          done
+      - name: Install test dependencies on Windows
+        if: matrix.runs-on == 'windows-latest'
+        run: |
+          gem install test-unit
+          gem install test-unit-ruby-core
+      - name: Test
+        run: |
+          ruby -run -e mkdir -- tmp
+          ruby -run -e cp -- -p -r test tmp
+          cd tmp
+          ruby test/run.rb
+
+  document:
+    name: "Document"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ruby
+      - name: Install dependencies
+        run: |
+          bundle install
+      - name: Build document
+        run: |
+          bundle exec rake warning:error rdoc
+      - uses: actions/checkout@v7
+        if: |
+          github.event_name == 'push'
+        with:
+          ref: gh-pages
+          path: gh-pages
+      - name: Deploy
+        if: |
+          github.event_name == 'push'
+        run: |
+          rm html/created.rid
+          touch html/.nojekyll
+          cd gh-pages
+          rsync \
+            -a \
+            --delete \
+            --exclude "/.git/" \
+            ../html/ \
+            ./
+          if [ "$(git status --porcelain)" != "" ]; then
+            git add --all
+            git config user.name github-actions
+            git config user.email github-actions@github.com
+            git commit -m "Generate (${GITHUB_SHA})"
+            git push
+          fi

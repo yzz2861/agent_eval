@@ -1,0 +1,58 @@
+loop_count: 100
+contexts:
+  - gems:
+      rexml: 3.2.6
+    require: false
+    prelude: require 'rexml'
+  - name: master
+    prelude: |
+      $LOAD_PATH.unshift(File.expand_path("lib"))
+      require 'rexml'
+  - name: 3.2.6(YJIT)
+    gems:
+      rexml: 3.2.6
+    require: false
+    prelude: |
+      require 'rexml'
+      RubyVM::YJIT.enable
+  - name: master(YJIT)
+    prelude: |
+      $LOAD_PATH.unshift(File.expand_path("lib"))
+      require 'rexml'
+      RubyVM::YJIT.enable
+
+prelude: |
+  require 'rexml/document'
+
+  # The sizes below are picked to keep one run short.  Both cases went from
+  # quadratic to linear, so the gap widens with the size: raising WIDTH or
+  # ITEMS makes "before" slower without making "after" much slower.
+
+  # Wide parent: REXML::XPathParser.sort keys every hit on its index under
+  # the parent, so the whole child list is walked once per hit.
+  #
+  # The hits must be scattered through the list, not gathered at its front:
+  # a hit near the front is found early and hides the cost of the walk.
+  WIDTH = 1000
+  xml_wide = '<root>' +
+             WIDTH.times.collect {|i| i % 7 == 0 ? '<leaf/>' : '<other/>' }.join +
+             '</root>'
+  doc_wide = REXML::Document.new(xml_wide)
+
+  # Predicate: string() takes the first node of its argument in document
+  # order, so it sorts once per candidate node, and every one of those sorts
+  # walks up to the wide parent the candidates hang off.
+  #
+  # Each item needs two <a>: with one, string()'s argument is a single node
+  # and sort returns it untouched, so no sorting happens at all.
+  ITEMS = 300
+  xml_items = '<root>' +
+              ITEMS.times.collect {|i| "<item><a>v#{i}</a><a>z</a></item>" }.join +
+              '</root>'
+  doc_items = REXML::Document.new(xml_items)
+
+benchmark:
+  "//leaf (hits scattered among a wide parent)": |
+    REXML::XPath.match(doc_wide, "//leaf")
+  "//item[string(a) = 'v3'] (sort per candidate)": |
+    REXML::XPath.match(doc_items, "//item[string(a) = 'v3']")
