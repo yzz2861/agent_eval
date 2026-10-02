@@ -19,6 +19,7 @@ ANY = Symbol("ANY")
 """Symbol for "any sender"."""
 
 ANY_ID = 0
+ConnectionKey = tuple[t.Hashable, t.Hashable]
 
 
 class Signal:
@@ -87,6 +88,10 @@ class Signal:
         self._by_receiver: dict[t.Any, set[t.Any]] = defaultdict(self.set_class)
         self._by_sender: dict[t.Any, set[t.Any]] = defaultdict(self.set_class)
         self._weak_senders: dict[t.Any, weakref.ref[t.Any]] = {}
+        self._explicit_weak_connections: set[ConnectionKey] = set()
+        self._explicit_strong_connections: set[ConnectionKey] = set()
+        self._temporary_connections: dict[ConnectionKey, set[object]] = {}
+        self._temporary_receivers: dict[t.Any, int] = defaultdict(int)
 
     def connect(self, receiver: F, sender: t.Any = ANY, weak: bool = True) -> F:
         """Connect ``receiver`` to be called when the signal is sent by
@@ -106,25 +111,17 @@ class Signal:
         """
         receiver_id = make_id(receiver)
         sender_id = ANY_ID if sender is ANY else make_id(sender)
+        key = (receiver_id, sender_id)
 
-        if weak:
-            self.receivers[receiver_id] = make_ref(
-                receiver, self._make_cleanup_receiver(receiver_id)
-            )
-        else:
-            self.receivers[receiver_id] = receiver
-
-        self._by_sender[sender_id].add(receiver_id)
-        self._by_receiver[receiver_id].add(sender_id)
-
-        if sender is not ANY and sender_id not in self._weak_senders:
-            # store a cleanup for weakref-able senders
-            try:
-                self._weak_senders[sender_id] = make_ref(
-                    sender, self._make_cleanup_sender(sender_id)
-                )
-            except TypeError:
-                pass
+        self._connect(receiver, sender, receiver_id, sender_id, weak)
+        self._explicit_weak_connections.discard(key)
+        self._explicit_strong_connections.discard(key)
+        (
+            self._explicit_weak_connections
+            if weak
+            else self._explicit_strong_connections
+        ).add(key)
+        self._reconcile_receiver(receiver_id, receiver, remove_if_empty=False)
 
         if "receiver_connected" in self.__dict__ and self.receiver_connected.receivers:
             try:
@@ -133,7 +130,13 @@ class Signal:
                 )
             except TypeError:
                 # TODO no explanation or test for this
-                self.disconnect(receiver, sender)
+                self._explicit_weak_connections.discard(key)
+                self._explicit_strong_connections.discard(key)
+
+                if not self._temporary_connections.get(key):
+                    self._disconnect(receiver_id, sender_id)
+
+                self._reconcile_receiver(receiver_id, receiver, remove_if_empty=True)
                 raise
 
         return receiver
@@ -168,9 +171,9 @@ class Signal:
     def connected_to(
         self, receiver: c.Callable[..., t.Any], sender: t.Any = ANY
     ) -> c.Generator[None, None, None]:
-        """A context manager that temporarily connects ``receiver`` to the
-        signal while a ``with`` block executes. When the block exits, the
-        receiver is disconnected. Useful for tests.
+        """Temporarily connect ``receiver`` to the signal while a ``with`` block
+        executes. When the block exits, only the connection established by this
+        context is disconnected. Useful for tests.
 
         :param receiver: The callable to call when :meth:`send` is called with
             the given ``sender``, passing ``sender`` as a positional argument
@@ -181,12 +184,21 @@ class Signal:
 
         .. versionadded:: 1.1
         """
-        self.connect(receiver, sender=sender, weak=False)
+        receiver_id = make_id(receiver)
+        sender_id = ANY_ID if sender is ANY else make_id(sender)
+        key = (receiver_id, sender_id)
+        connection = object()
+
+        self._temporary_receivers[receiver_id] += 1
+        self._temporary_connections.setdefault(key, set()).add(connection)
+        self._connect(receiver, sender, receiver_id, sender_id, weak=False)
 
         try:
             yield None
         finally:
-            self.disconnect(receiver)
+            self._disconnect_temporary(
+                receiver, receiver_id, sender_id, connection
+            )
 
     @contextmanager
     def muted(self) -> c.Generator[None, None, None]:
@@ -354,6 +366,13 @@ class Signal:
                 strong = receiver()
 
                 if strong is None:
+                    for connected_sender_id in list(
+                        self._by_receiver.get(receiver_id, ())
+                    ):
+                        self._remove_connection_ownership(
+                            (receiver_id, connected_sender_id)
+                        )
+
                     self._disconnect(receiver_id, ANY_ID)
                     continue
 
@@ -377,7 +396,28 @@ class Signal:
             sender_id = make_id(sender)
 
         receiver_id = make_id(receiver)
-        self._disconnect(receiver_id, sender_id)
+
+        if sender_id == ANY_ID:
+            for connected_sender_id in list(self._by_receiver.get(receiver_id, ())):
+                self._remove_connection_ownership(
+                    (receiver_id, connected_sender_id)
+                )
+
+            self._disconnect(receiver_id, ANY_ID)
+        elif sender_id in self._by_receiver.get(receiver_id, ()):
+            removed_temporary = self._remove_connection_ownership(
+                (receiver_id, sender_id)
+            )
+            self._disconnect(receiver_id, sender_id)
+
+            if self._by_receiver.get(receiver_id):
+                self._reconcile_receiver(
+                    receiver_id,
+                    receiver,
+                    remove_if_empty=False,
+                )
+            elif removed_temporary:
+                self.receivers.pop(receiver_id, None)
 
         if (
             "receiver_disconnected" in self.__dict__
@@ -396,6 +436,128 @@ class Signal:
             self._by_sender[sender_id].discard(receiver_id)
             self._by_receiver[receiver_id].discard(sender_id)
 
+    def _connect(
+        self,
+        receiver: c.Callable[..., t.Any],
+        sender: t.Any,
+        receiver_id: t.Hashable,
+        sender_id: t.Hashable,
+        weak: bool,
+    ) -> None:
+        if weak:
+            self.receivers[receiver_id] = make_ref(
+                receiver, self._make_cleanup_receiver(receiver_id)
+            )
+        else:
+            self.receivers[receiver_id] = receiver
+
+        self._by_sender[sender_id].add(receiver_id)
+        self._by_receiver[receiver_id].add(sender_id)
+
+        if sender is not ANY and sender_id not in self._weak_senders:
+            # store a cleanup for weakref-able senders
+            try:
+                self._weak_senders[sender_id] = make_ref(
+                    sender, self._make_cleanup_sender(sender_id)
+                )
+            except TypeError:
+                pass
+
+    def _remove_connection_ownership(self, key: ConnectionKey) -> int:
+        receiver_id, _sender_id = key
+        connections = self._temporary_connections.pop(key, None)
+        removed = 0 if connections is None else len(connections)
+
+        if removed:
+            remaining = self._temporary_receivers[receiver_id] - removed
+
+            if remaining:
+                self._temporary_receivers[receiver_id] = remaining
+            else:
+                self._temporary_receivers.pop(receiver_id, None)
+
+        self._explicit_weak_connections.discard(key)
+        self._explicit_strong_connections.discard(key)
+        return removed
+
+    def _receiver_has_temporary_connection(self, receiver_id: t.Hashable) -> bool:
+        return any(
+            connected_receiver_id == receiver_id and connections
+            for (connected_receiver_id, _sender_id), connections in (
+                self._temporary_connections.items()
+            )
+        )
+
+    def _reconcile_receiver(
+        self,
+        receiver_id: t.Hashable,
+        receiver: c.Callable[..., t.Any],
+        remove_if_empty: bool,
+    ) -> None:
+        if not self._by_receiver.get(receiver_id):
+            if remove_if_empty:
+                self.receivers.pop(receiver_id, None)
+
+            return
+
+        has_strong_connection = self._receiver_has_temporary_connection(receiver_id)
+
+        if not has_strong_connection:
+            has_strong_connection = any(
+                connected_receiver_id == receiver_id
+                for connected_receiver_id, _sender_id in (
+                    self._explicit_strong_connections
+                )
+            )
+
+        if has_strong_connection:
+            current = self.receivers.get(receiver_id)
+
+            if isinstance(current, weakref.ref):
+                strong = current()
+
+                if strong is not None:
+                    receiver = strong
+
+            self.receivers[receiver_id] = receiver
+        else:
+            self.receivers[receiver_id] = make_ref(
+                receiver, self._make_cleanup_receiver(receiver_id)
+            )
+
+    def _disconnect_temporary(
+        self,
+        receiver: c.Callable[..., t.Any],
+        receiver_id: t.Hashable,
+        sender_id: t.Hashable,
+        connection: object,
+    ) -> None:
+        key = (receiver_id, sender_id)
+        connections = self._temporary_connections.get(key)
+
+        if connections is None or connection not in connections:
+            return
+
+        connections.remove(connection)
+        self._temporary_receivers[receiver_id] -= 1
+
+        if not connections:
+            self._temporary_connections.pop(key)
+
+            if not any(
+                key in connections
+                for connections in (
+                    self._explicit_weak_connections,
+                    self._explicit_strong_connections,
+                )
+            ):
+                self._disconnect(receiver_id, sender_id)
+
+        if not self._temporary_receivers[receiver_id]:
+            self._temporary_receivers.pop(receiver_id, None)
+
+        self._reconcile_receiver(receiver_id, receiver, remove_if_empty=True)
+
     def _make_cleanup_receiver(
         self, receiver_id: c.Hashable
     ) -> c.Callable[[weakref.ref[c.Callable[..., t.Any]]], None]:
@@ -407,6 +569,9 @@ class Signal:
             # If the interpreter is shutting down, disconnecting can result in a
             # weird ignored exception. Don't call it in that case.
             if not sys.is_finalizing():
+                for sender_id in list(self._by_receiver.get(receiver_id, ())):
+                    self._remove_connection_ownership((receiver_id, sender_id))
+
                 self._disconnect(receiver_id, ANY_ID)
 
         return cleanup
@@ -423,7 +588,24 @@ class Signal:
             self._weak_senders.pop(sender_id, None)
 
             for receiver_id in self._by_sender.pop(sender_id, ()):
+                removed_temporary = self._remove_connection_ownership(
+                    (receiver_id, sender_id)
+                )
                 self._by_receiver[receiver_id].discard(sender_id)
+                current = self.receivers.get(receiver_id)
+
+                if removed_temporary:
+                    if isinstance(current, weakref.ref):
+                        strong = current()
+
+                        if strong is not None:
+                            self._reconcile_receiver(
+                                receiver_id, strong, remove_if_empty=True
+                            )
+                    elif current is not None:
+                        self._reconcile_receiver(
+                            receiver_id, current, remove_if_empty=True
+                        )
 
         return cleanup
 
@@ -459,6 +641,10 @@ class Signal:
         self.receivers.clear()
         self._by_sender.clear()
         self._by_receiver.clear()
+        self._explicit_weak_connections.clear()
+        self._explicit_strong_connections.clear()
+        self._temporary_connections.clear()
+        self._temporary_receivers.clear()
 
 
 class NamedSignal(Signal):

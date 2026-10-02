@@ -3,6 +3,9 @@ Version 1.10.0
 
 Unreleased
 
+-   ``connected_to`` only removes the temporary connection it created,
+    preserving existing receiver subscriptions and nested contexts.
+
 
 Version 1.9.0
 -------------
