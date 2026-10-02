@@ -337,19 +337,20 @@ event loop the following example can be used:
 Call receivers in order of registration
 ---------------------------------------
 
-It can be advantageous to call a signal's receivers in the order they
-were registered. To achieve this the storage class for receivers should
-be changed from an (unordered) set to an ordered set,
+Receivers are called highest ``priority`` first. Receivers with the same
+priority are called in the order they were first connected. A receiver that
+matches both :data:`ANY` and the sending sender is called only once, using the
+highest applicable priority. A snapshot is taken when a send starts, so
+connecting, disconnecting, or changing priority in a receiver callback only
+affects later sends; a reentrant ``send`` reads the current state at that
+point. Disconnecting and reconnecting a receiver counts as a new connection.
 
 .. code-block:: python
 
-    from blinker import Signal
-    from ordered_set import OrderedSet
-
-    Signal.set_class = OrderedSet
-
-Please note that ``ordered_set`` is a PyPI package and is not
-installed with blinker.
+    sig = blinker.Signal()
+    sig.connect(validate, priority=10)
+    sig.connect(audit, priority=0)
+    sig.connect(notify, priority=-10)
 
 
 API Documentation

@@ -498,3 +498,287 @@ def test_int_sender() -> None:
     assert count == 1
     sig.send(int("123456789"))  # Force different instance with same value.
     assert count == 2
+
+
+def test_priority_order() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def low(sender: t.Any) -> None:
+        calls.append("low")
+
+    def high(sender: t.Any) -> None:
+        calls.append("high")
+
+    def middle(sender: t.Any) -> None:
+        calls.append("middle")
+
+    sig.connect(low, weak=False, priority=-1)
+    sig.connect(high, weak=False, priority=10)
+    sig.connect(middle, weak=False, priority=5)
+
+    sig.send()
+    assert calls == ["high", "middle", "low"]
+
+
+def test_same_priority_stable_connection_order() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def first(sender: t.Any) -> None:
+        calls.append("first")
+
+    def second(sender: t.Any) -> None:
+        calls.append("second")
+
+    def third(sender: t.Any) -> None:
+        calls.append("third")
+
+    sig.connect(first, weak=False, priority=5)
+    sig.connect(second, weak=False, priority=5)
+    sig.connect(third, weak=False, priority=5)
+
+    sig.send()
+    assert calls == ["first", "second", "third"]
+
+
+def test_priority_mixed_with_connection_order() -> None:
+    sig = blinker.Signal()
+    calls2: list[str] = []
+
+    def recv(name: str) -> c.Callable[..., None]:
+        def receiver(sender: t.Any) -> None:
+            calls2.append(name)
+
+        return receiver
+
+    sig2 = blinker.Signal()
+    r0 = recv("0")
+    r1 = recv("1")
+    r2 = recv("2")
+    r3 = recv("3")
+    sig2.connect(r0, weak=False, priority=0)
+    sig2.connect(r1, weak=False, priority=10)
+    sig2.connect(r2, weak=False, priority=10)
+    sig2.connect(r3, weak=False, priority=-5)
+    sig2.send()
+    assert calls2 == ["1", "2", "0", "3"]
+
+
+def test_any_and_specific_called_once_with_highest_priority() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+    sender = object()
+
+    def both(sender: t.Any) -> None:
+        calls.append("both")
+
+    def only_any(sender: t.Any) -> None:
+        calls.append("any")
+
+    def only_sender(sender: t.Any) -> None:
+        calls.append("sender")
+
+    sig.connect(both, sender=blinker.ANY, weak=False, priority=1)
+    sig.connect(both, sender=sender, weak=False, priority=10)
+    sig.connect(only_any, weak=False, priority=5)
+    sig.connect(only_sender, sender=sender, weak=False, priority=5)
+
+    sig.send(sender)
+    assert calls == ["both", "any", "sender"]
+
+
+def test_any_specific_tie_uses_earliest_order() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+    sender = object()
+
+    def both(sender: t.Any) -> None:
+        calls.append("both")
+
+    def other(sender: t.Any) -> None:
+        calls.append("other")
+
+    sig.connect(both, sender=sender, weak=False, priority=5)
+    sig.connect(other, weak=False, priority=5)
+    sig.connect(both, weak=False, priority=5)
+
+    sig.send(sender)
+    assert calls == ["both", "other"]
+
+
+def test_reconnect_updates_priority_but_keeps_order() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def a(sender: t.Any) -> None:
+        calls.append("a")
+
+    def b(sender: t.Any) -> None:
+        calls.append("b")
+
+    sig.connect(a, weak=False, priority=0)
+    sig.connect(b, weak=False, priority=0)
+
+    sig.send()
+    assert calls == ["a", "b"]  # equal priority keeps connection order
+
+    # Updating the priority applies to the next send.
+    calls.clear()
+    sig.connect(a, weak=False, priority=5)
+    sig.connect(b, weak=False, priority=10)
+    sig.send()
+    assert calls == ["b", "a"]
+
+    # Equal priority again: a still keeps its earlier connection position.
+    calls.clear()
+    sig.connect(b, weak=False, priority=5)
+    sig.send()
+    assert calls == ["a", "b"]
+
+    # A full disconnect/reconnect counts as a new connection, so a moves last.
+    calls.clear()
+    sig.disconnect(a)
+    sig.connect(a, weak=False, priority=5)
+    sig.send()
+    assert calls == ["b", "a"]
+
+
+def test_reconnect_counts_as_new_connection_order() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def a(sender: t.Any) -> None:
+        calls.append("a")
+
+    def b(sender: t.Any) -> None:
+        calls.append("b")
+
+    sig.connect(a, weak=False)
+    sig.connect(b, weak=False)
+    assert calls == []
+    sig.send()
+    assert calls == ["a", "b"]
+
+    calls.clear()
+    sig.disconnect(a)
+    sig.connect(a, weak=False)
+    sig.send()
+    assert calls == ["b", "a"]
+
+
+def test_send_uses_subscription_snapshot() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    def late(sender: t.Any) -> None:
+        calls.append("late")
+
+    def dynamic(sender: t.Any) -> None:
+        calls.append("dynamic")
+        sig.connect(late, weak=False, priority=100)
+        sig.disconnect(static)
+        sig.connect(dynamic, weak=False, priority=100)
+
+    def static(sender: t.Any) -> None:
+        calls.append("static")
+
+    sig.connect(static, weak=False, priority=10)
+    sig.connect(dynamic, weak=False, priority=0)
+
+    sig.send()
+    assert calls == ["static", "dynamic"]
+
+    calls.clear()
+    sig.send()
+    assert calls == ["dynamic", "late"]
+
+
+def test_reentrant_send_reads_current_state() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+    depth = 0
+
+    def late(sender: t.Any) -> None:
+        calls.append("late")
+
+    def reentrant(sender: t.Any) -> None:
+        nonlocal depth
+        depth += 1
+        calls.append(f"enter{depth}")
+
+        if depth == 1:
+            sig.connect(late, weak=False, priority=10)
+            sig.send(sender)
+        else:
+            calls.append("nested")
+
+        calls.append(f"exit{depth}")
+        depth -= 1
+
+    sig.connect(reentrant, weak=False)
+    sig.send()
+    assert calls == [
+        "enter1",
+        "late",
+        "enter2",
+        "nested",
+        "exit2",
+        "exit1",
+    ]
+
+
+def test_priority_with_weak_bound_method_receivers() -> None:
+    class Recorder:
+        def __init__(self, name: str, bucket: list[str]) -> None:
+            self.name = name
+            self.bucket = bucket
+
+        def received(self, sender: t.Any) -> None:
+            self.bucket.append(self.name)
+
+    calls: list[str] = []
+    sig = blinker.Signal()
+    low = Recorder("low", calls)
+    high = Recorder("high", calls)
+    sig.connect(low.received, weak=True, priority=-1)
+    sig.connect(high.received, weak=True, priority=1)
+
+    sig.send()
+    assert calls == ["high", "low"]
+
+
+async def test_send_async_priority_order() -> None:
+    calls: list[str] = []
+    sig = blinker.Signal()
+
+    async def high(sender: t.Any) -> None:
+        calls.append("high")
+
+    async def low(sender: t.Any) -> None:
+        calls.append("low")
+
+    sig.connect(low, priority=-1)
+    sig.connect(high, priority=1)
+    await sig.send_async()
+    assert calls == ["high", "low"]
+
+
+def test_send_exception_propagation_unchanged() -> None:
+    sig = blinker.Signal()
+    calls: list[str] = []
+
+    def boom(sender: t.Any) -> None:
+        calls.append("boom")
+        raise ValueError("boom")
+
+    def after(sender: t.Any) -> None:
+        calls.append("after")
+
+    sig.connect(boom, weak=False, priority=1)
+    sig.connect(after, weak=False, priority=0)
+
+    with pytest.raises(ValueError, match="boom"):
+        sig.send()
+
+    assert calls == ["boom"]

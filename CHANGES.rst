@@ -3,6 +3,12 @@ Version 1.10.0
 
 Unreleased
 
+-   Add an optional ``priority`` argument to ``Signal.connect`` (and
+    ``connect_via`` / ``connected_to``). Receivers are dispatched with higher
+    priority first; equal priorities keep the first connection order. A
+    receiver matching both ``ANY`` and the sender is called once using the
+    highest applicable priority, each send dispatches from a subscription
+    snapshot, and disconnecting and reconnecting counts as a new connection.
 
 Version 1.9.0
 -------------
