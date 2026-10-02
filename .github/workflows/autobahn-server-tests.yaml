@@ -1,0 +1,33 @@
+name: Autobahn Server Tests
+
+on: [push, pull_request]
+
+env:
+  CONSOLE_OUTPUT: XTerm
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{matrix.experimental}}
+    
+    strategy:
+      matrix:
+        ruby:
+          - ruby
+        
+        experimental: [false]
+    
+    env:
+      BUNDLE_WITH: autobahn_tests
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{matrix.ruby}}
+        bundler-cache: true
+    
+    - name: Run Autobahn server tests
+      timeout-minutes: 30
+      run: ruby autobahn-tests/autobahn-server-tests.rb
