@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'helper'
+require 'tmpdir'
 
 separate_testing do
   require_relative '../lib/rack/files'
@@ -13,6 +14,20 @@ describe Rack::Files do
 
   def files(*args)
     Rack::Lint.new Rack::Files.new(*args)
+  end
+
+  def read_body(body)
+    content = +''
+    body.each { |part| content << part }
+    content
+  ensure
+    body.close if body.respond_to?(:close)
+  end
+
+  def replace_file(path, contents)
+    temporary_path = "#{path}.tmp"
+    File.binwrite(temporary_path, contents)
+    File.rename(temporary_path, path)
   end
 
   it "can be used without root" do
@@ -216,6 +231,134 @@ describe Rack::Files do
 
     status.must_equal 206
     body.wont_respond_to :to_path
+  end
+
+  it "pins GET metadata and body to one opened file version" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "asset.txt")
+      File.binwrite(path, "old contents")
+      request = Rack::Request.new(Rack::MockRequest.env_for("/asset.txt"))
+
+      status, headers, body = Rack::Files.new(dir).serving(request, File.open(path, "rb"))
+      replace_file(path, "new and different contents")
+
+      status.must_equal 200
+      headers["content-length"].must_equal "old contents".bytesize.to_s
+      descriptor_path = body.to_path
+      descriptor_path.must_match(%r{\A/dev/fd/\d+\z})
+      read_body(body).must_equal "old contents"
+      body.must_be :closed?
+    end
+  end
+
+  it "pins single range metadata and body to one opened file version" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "asset.txt")
+      File.binwrite(path, "old range contents")
+      request = Rack::Request.new(Rack::MockRequest.env_for("/asset.txt", "HTTP_RANGE" => "bytes=4-8"))
+
+      status, headers, body = Rack::Files.new(dir).serving(request, File.open(path, "rb"))
+      replace_file(path, "new and different contents")
+
+      status.must_equal 206
+      headers["content-length"].must_equal "5"
+      headers["content-range"].must_equal "bytes 4-8/18"
+      read_body(body).must_equal "range"
+      body.to_path.must_be_nil
+      body.must_be :closed?
+    end
+  end
+
+  it "pins HEAD metadata to one opened file version and releases it" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "asset.txt")
+      File.binwrite(path, "old contents")
+      request = Rack::Request.new(Rack::MockRequest.env_for("/asset.txt", "REQUEST_METHOD" => "HEAD"))
+      file = File.open(path, "rb")
+
+      status, headers, body = Rack::Files.new(dir).serving(request, file)
+      replace_file(path, "new and different contents")
+
+      status.must_equal 200
+      headers["content-length"].must_equal "old contents".bytesize.to_s
+      body.must_equal []
+      file.must_be :closed?
+    end
+  end
+
+  it "pins conditional request metadata to one opened file version" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "asset.txt")
+      File.binwrite(path, "old contents")
+      last_modified = File.stat(path).mtime.httpdate
+      file = File.open(path, "rb")
+      request = Rack::Request.new(Rack::MockRequest.env_for("/asset.txt", "HTTP_IF_MODIFIED_SINCE" => last_modified))
+
+      status, _headers, body = Rack::Files.new(dir).serving(request, file)
+      replace_file(path, "new and different contents")
+
+      status.must_equal 304
+      body.must_equal []
+      file.must_be :closed?
+    end
+  end
+
+  it "closes a pinned file when iteration raises" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "asset.txt")
+      File.binwrite(path, "old contents")
+      request = Rack::Request.new(Rack::MockRequest.env_for("/asset.txt"))
+      _status, _headers, body = Rack::Files.new(dir).serving(request, File.open(path, "rb"))
+      body.instance_variable_get(:@file).define_singleton_method(:read) do |*|
+        raise IOError, "simulated read failure"
+      end
+
+      proc { read_body(body) }.must_raise(IOError)
+
+      body.must_be :closed?
+    end
+  end
+
+  it "closes a pinned file when the body is closed before complete iteration" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "asset.txt")
+      File.binwrite(path, "old contents")
+      request = Rack::Request.new(Rack::MockRequest.env_for("/asset.txt"))
+      _status, _headers, body = Rack::Files.new(dir).serving(request, File.open(path, "rb"))
+
+      body.each do
+        body.close
+        break
+      end
+
+      body.must_be :closed?
+    end
+  end
+
+  it "closes a pinned file when the file is truncated while streaming" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "asset.txt")
+      File.binwrite(path, "old contents")
+      request = Rack::Request.new(Rack::MockRequest.env_for("/asset.txt"))
+      _status, _headers, body = Rack::Files.new(dir).serving(request, File.open(path, "rb"))
+
+      File.binwrite(path, "")
+      read_body(body).must_equal ""
+      body.must_be :closed?
+    end
+  end
+
+  it "pins files when configured on Rack::Files" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "asset.txt")
+      File.binwrite(path, "old contents")
+      status, headers, body = files(dir, {}, 'text/plain', { pin: true }).call(Rack::MockRequest.env_for("/asset.txt"))
+      replace_file(path, "new and different contents")
+
+      status.must_equal 200
+      headers["content-length"].must_equal "old contents".bytesize.to_s
+      read_body(body).must_equal "old contents"
+    end
   end
 
   it "returns correct byte range in body" do

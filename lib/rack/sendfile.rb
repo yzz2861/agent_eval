@@ -22,6 +22,10 @@ module Rack
   # header is typically set in your web servers configuration. The following
   # sections attempt to document
   #
+  # A body may implement +to_path+ but return nil to opt out of this shortcut.
+  # This is used by pinned, ranged file responses where reopening the path would
+  # open a different file version or ignore the requested byte range.
+  #
   # === Nginx
   #
   # Nginx supports the `x-accel-redirect` header. This is similar to `x-sendfile`
@@ -130,10 +134,10 @@ module Rack
     def call(env)
       _, headers, body = response = @app.call(env)
 
-      if body.respond_to?(:to_path)
+      if body.respond_to?(:to_path) && (path = body.to_path)
+        path = ::File.expand_path(path)
         case type = variation(env)
         when /x-accel-redirect/i
-          path = ::File.expand_path(body.to_path)
           if url = map_accel_path(env, path)
             headers[CONTENT_LENGTH] = '0'
             # '?' must be percent-encoded because it is not query string but a part of path
@@ -146,7 +150,6 @@ module Rack
             env[RACK_ERRORS].puts "x-accel-mapping header missing"
           end
         when /x-sendfile|x-lighttpd-send-file/i
-          path = ::File.expand_path(body.to_path)
           headers[CONTENT_LENGTH] = '0'
           headers[type.downcase] = path
           obody = body

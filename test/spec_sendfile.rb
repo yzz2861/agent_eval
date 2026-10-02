@@ -6,6 +6,8 @@ require 'tmpdir'
 
 separate_testing do
   require_relative '../lib/rack/sendfile'
+  require_relative '../lib/rack/request'
+  require_relative '../lib/rack/files'
   require_relative '../lib/rack/lint'
   require_relative '../lib/rack/mock_request'
 end
@@ -79,6 +81,67 @@ describe Rack::Sendfile do
       response.headers['x-sendfile'].must_equal File.join(Dir.tmpdir,  "rack_sendfile")
     end
     closed.must_equal true
+  end
+
+  it "keeps a pinned file descriptor path with x-sendfile" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "rack_sendfile")
+      File.binwrite(path, "old contents")
+      body = nil
+      app = lambda do |_env|
+        request = Rack::Request.new(Rack::MockRequest.env_for("/"))
+        _status, _headers, body = Rack::Files.new(dir).serving(request, File.open(path, "rb"))
+        [200, { 'content-type' => 'text/plain' }, body]
+      end
+      sendfile = Rack::Sendfile.new(app, 'X-Sendfile')
+      _status, headers, response_body = sendfile.call(Rack::MockRequest.env_for('/'))
+
+      File.rename(path, File.join(dir, "replaced"))
+      File.binwrite(path, "new and different contents")
+
+      File.binread(headers['x-sendfile']).must_equal "old contents"
+      response_body.close
+
+      headers['x-sendfile'].must_match(/\A\/dev\/fd\/\d+\z/)
+      body.must_be :closed?
+    end
+  end
+
+  it "streams a pinned range instead of using a sendfile shortcut" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "rack_sendfile")
+      File.binwrite(path, "old range contents")
+      env = Rack::MockRequest.env_for('/', "HTTP_RANGE" => "bytes=4-8")
+      app = lambda do |request_env|
+        request = Rack::Request.new(request_env)
+        status, headers, body = Rack::Files.new(dir).serving(request, File.open(path, "rb"))
+        [status, headers, body]
+      end
+      sendfile = Rack::Sendfile.new(app, 'X-Sendfile')
+      status, headers, body = sendfile.call(env)
+      File.binwrite("#{path}.tmp", "new and different contents")
+      File.rename("#{path}.tmp", path)
+
+      status.must_equal 206
+      headers.wont_include 'x-sendfile'
+      headers['content-range'].must_equal 'bytes 4-8/18'
+      content = +''
+      body.each { |part| content << part }
+      body.close
+      content.must_equal 'range'
+    end
+  end
+
+  it "ignores a nil to_path and streams the body" do
+    body = ['Hello World']
+    body.define_singleton_method(:to_path) { nil }
+    body.define_singleton_method(:close) { }
+
+    request({}, body, [], 'X-Sendfile') do |response|
+      response.must_be :ok?
+      response.body.must_equal 'Hello World'
+      response.headers.wont_include 'x-sendfile'
+    end
   end
 
   it "sets x-lighttpd-send-file response header and discards body" do
