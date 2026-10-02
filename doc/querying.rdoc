@@ -746,6 +746,37 @@ Both the WHERE clause and the HAVING clause are removed by +unfiltered+:
    where(:name.like('A%')).unfiltered
   # SELECT artist_id, count(*) AS count FROM albums GROUP BY artist_id
 
+== Relational Division
+
+Relational division answers "find all parents that have ALL required
+children" questions, such as finding suppliers that have every required
+qualification.  Writing these by hand with GROUP BY/HAVING counts is
+error-prone, since duplicate child rows silently corrupt the counts.
+Dataset#divide performs the division directly, and is not affected by
+duplicate rows:
+
+  DB[:supplier_qualifications].divide(:supplier_id, [1, 2, 3], match: :qualification_id)
+  # SELECT DISTINCT supplier_qualifications.supplier_id
+  # FROM supplier_qualifications
+  # WHERE NOT (EXISTS (...))
+
+The first argument is the key column (or columns, for composite keys)
+identifying a parent row.  The second argument is the requirement, which
+can be an array of required values, a single required value, or a dataset
+whose rows are required.  The :match option names the dataset column(s)
+matched against the requirement; it defaults to the requirement dataset's
+selected columns when the requirement is a dataset.
+
+An empty requirement returns all distinct key values present in the
+dataset.  NULL handling is controlled with the :null option: by default
+NULL values never match, while <tt>null: :match</tt> treats NULL values
+as equal to each other.
+
+The result is a regular dataset, so it can be filtered, ordered, and
+paginated like any other dataset:
+
+  DB[:suppliers].where(id: DB[:supplier_qualifications].divide(:supplier_id, [1, 2, 3], match: :qualification_id)).order(:name).limit(10)
+
 == Joins
 
 Sequel has support for many different SQL join types.

@@ -40,7 +40,7 @@ module Sequel
     
     # Methods that return modified datasets
     QUERY_METHODS = ((<<-METHS).split.map(&:to_sym) + JOIN_METHODS).freeze
-      add_graph_aliases distinct except exclude exclude_having
+      add_graph_aliases distinct divide except exclude exclude_having
       filter for_update from from_self graph grep group group_and_count group_append group_by having intersect invert
       limit lock_style naked offset or order order_append order_by order_more order_prepend qualify
       reverse reverse_order select select_all select_append select_group select_more select_prepend server
@@ -135,6 +135,109 @@ module Sequel
         raise(InvalidOperation, "DISTINCT ON not supported") unless supports_distinct_on?
         clone(:distinct => args.freeze)
       end
+    end
+
+    # Performs a relational division of the dataset by the given requirement,
+    # returning the distinct values of the given key columns that are
+    # associated with every row in the requirement.
+    #
+    # This is designed for "find all parents that have ALL required children"
+    # queries, such as finding suppliers that have all required
+    # qualifications.  It avoids hand-written GROUP BY/HAVING clauses, whose
+    # counts are silently corrupted by duplicate child rows.  The returned
+    # dataset is a regular dataset, so additional filters, ordering, and
+    # pagination can be applied before it is executed.
+    #
+    # +keys+ is a column or array of columns identifying a parent row
+    # (composite keys are supported by using an array).
+    #
+    # +requirement+ provides the required rows, and can be:
+    #
+    # Dataset :: Used directly as the divisor relation.  If the :match option
+    #            is not given, the requirement's columns are matched against
+    #            dataset columns with the same names.
+    # Array :: An array of required values (or arrays of values when matching
+    #          multiple columns).  Requires the :match option to name the
+    #          matched dataset columns.  An empty array returns all distinct
+    #          key values present in the dataset, since every key trivially
+    #          satisfies all zero required rows.
+    # other :: Treated as a single required value.  Requires a single column
+    #          :match option.
+    #
+    # Options:
+    # :distinct :: Set to false to not use DISTINCT in the returned dataset,
+    #              returning one row per matching dataset row.
+    # :match :: The dataset column(s) matched against the requirement.  Can
+    #           be a column, an array of columns, or a hash mapping dataset
+    #           columns to requirement columns.  Defaults to the columns of
+    #           the requirement dataset's select list when the requirement
+    #           is a dataset; required otherwise.
+    # :null :: How to handle NULL values when matching, one of:
+    #          :ignore :: Use regular equality, so NULL values never match
+    #                     (the default, standard SQL behavior).
+    #          :match :: Treat NULL values as equal to each other, so rows
+    #                    with NULL in the matched columns satisfy requirement
+    #                    rows with NULL.
+    #
+    # Examples:
+    #
+    #   # Suppliers having all required qualifications (dataset requirement):
+    #   DB[:supplier_qualifications].divide(:supplier_id, DB[:required_qualifications].select(:qualification_id))
+    #   # SELECT DISTINCT supplier_qualifications.supplier_id
+    #   # FROM supplier_qualifications
+    #   # WHERE NOT (EXISTS (
+    #   #   SELECT 1 FROM (SELECT qualification_id FROM required_qualifications) AS divide_requirement
+    #   #   WHERE NOT (EXISTS (
+    #   #     SELECT 1 FROM (SELECT * FROM supplier_qualifications) AS divide_inner
+    #   #     WHERE ((divide_inner.supplier_id = supplier_qualifications.supplier_id)
+    #   #       AND (divide_inner.qualification_id = divide_requirement.qualification_id))))))
+    #
+    #   # Suppliers having all of qualifications 1, 2, and 3 (value list):
+    #   DB[:supplier_qualifications].divide(:supplier_id, [1, 2, 3], match: :qualification_id)
+    #
+    #   # Division results can be filtered and paginated like any dataset:
+    #   DB[:suppliers].where(id: DB[:supplier_qualifications].divide(:supplier_id, [1, 2, 3], match: :qualification_id)).order(:name).limit(10)
+    def divide(keys, requirement, opts=OPTS)
+      keys = Array(keys)
+      raise(Error, "divide requires at least one key column") if keys.empty?
+
+      null_strategy = opts.fetch(:null, :ignore)
+      unless null_strategy == :ignore || null_strategy == :match
+        raise(Error, "divide :null option must be :ignore or :match")
+      end
+
+      case requirement
+      when Dataset
+        pairs = _divide_match_pairs(opts[:match], requirement)
+        divisor = requirement
+      when Array
+        return _divide_project(self, keys, opts) if requirement.empty?
+        pairs = _divide_match_pairs(opts[:match], nil)
+        divisor = _divide_value_list(pairs.map{|_, column| column}, requirement)
+      else
+        return divide(keys, [requirement], opts)
+      end
+
+      raise(Error, "divide requires at least one match column") if pairs.empty?
+
+      outer_alias = first_source_alias
+      inner_alias = :divide_inner
+      requirement_alias = :divide_requirement
+
+      conds = keys.map{|k| {Sequel[inner_alias][k] => Sequel[outer_alias][k]}}
+      pairs.each do |dataset_column, requirement_column|
+        inner_ref = Sequel[inner_alias][dataset_column]
+        requirement_ref = Sequel[requirement_alias][requirement_column]
+        conds << if null_strategy == :match
+          Sequel.|({inner_ref => requirement_ref}, {inner_ref => nil, requirement_ref => nil})
+        else
+          {inner_ref => requirement_ref}
+        end
+      end
+
+      inner = db[SQL::AliasedExpression.new(self, inner_alias)].select(1).where(Sequel.&(*conds))
+      divisor = db[SQL::AliasedExpression.new(divisor, requirement_alias)].select(1).exclude(inner.exists)
+      _divide_project(exclude(divisor.exists), keys, opts)
     end
 
     # Adds an EXCEPT clause using a second dataset object.
@@ -1374,6 +1477,67 @@ module Sequel
       end
     end
     # simplecov:enable
+
+    # Normalize the divide :match option into an array of
+    # [dataset column, requirement column] pairs.  If the :match option is
+    # not given, infer the columns from the requirement dataset.
+    def _divide_match_pairs(match, requirement)
+      case match
+      when nil
+        unless requirement
+          raise(Error, "divide requires the :match option when the requirement is not a dataset")
+        end
+        _divide_requirement_columns(requirement).map{|c| [c, c]}
+      when Hash
+        match.map{|dataset_column, requirement_column| [dataset_column, requirement_column]}
+      else
+        Array(match).map{|c| [c, c]}
+      end
+    end
+
+    # Infer the requirement column names for divide from the requirement
+    # dataset's select list, without executing a query.  Raises if the
+    # columns cannot be determined without a query.
+    def _divide_requirement_columns(ds)
+      if (select = ds.opts[:select]) && !select.empty?
+        columns = select.map do |s|
+          case s
+          when Symbol
+            _, c, a = split_symbol(s)
+            (a || c).to_sym
+          when SQL::Identifier
+            s.value
+          when SQL::QualifiedIdentifier
+            s.column
+          when SQL::AliasedExpression
+            s.alias
+          end
+        end
+        return columns if columns.all?
+      end
+      raise(Error, "divide cannot infer requirement columns from the requirement dataset, provide the :match option")
+    end
+
+    # Project the result of a relational division on the given dataset: the
+    # distinct qualified key columns of the receiver.
+    def _divide_project(ds, keys, opts)
+      ds = ds.select(*keys.map{|k| Sequel[first_source_alias][k]})
+      opts.fetch(:distinct, true) ? ds.distinct : ds
+    end
+
+    # Build a divisor dataset for divide from an array of required values,
+    # using a UNION ALL of SELECTs so it is portable to databases without
+    # support for VALUES lists in FROM.
+    def _divide_value_list(columns, rows)
+      selects = rows.map do |row|
+        row = [row] unless row.is_a?(Array)
+        unless row.length == columns.length
+          raise(Error, "divide requirement row has #{row.length} values, but #{columns.length} match columns were given")
+        end
+        db.select(*columns.zip(row).map{|c, v| SQL::AliasedExpression.new(v, c)})
+      end
+      selects.reduce{|a, b| a.union(b, :all=>true, :from_self=>false)}
+    end
 
     # A frozen array for the currently selected columns.
     def _current_select(allow_plain_wildcard)

@@ -1163,3 +1163,49 @@ describe 'temporarily_release_connection plugin' do
     db[:i].count.must_equal 0
   end
 end if DB.adapter_scheme == :sqlite
+
+describe "Dataset#divide" do
+  before do
+    @db = DB
+    @db.create_table!(:divide_supplier_quals){Integer :supplier_id; Integer :qual_id}
+    @db.create_table!(:divide_composite){Integer :a; Integer :b; Integer :x; Integer :y}
+    # supplier 1 has qualifications 1, 2, 3 (with a duplicate row for 1),
+    # supplier 2 has qualifications 1, 2, supplier 3 has 1 and a NULL qualification
+    @db[:divide_supplier_quals].import([:supplier_id, :qual_id], [[1, 1], [1, 1], [1, 2], [1, 3], [2, 1], [2, 2], [3, 1], [3, nil]])
+  end
+  after do
+    @db.drop_table?(:divide_supplier_quals, :divide_composite)
+  end
+
+  it "should return keys associated with all required values, ignoring duplicate rows" do
+    ds = @db[:divide_supplier_quals]
+    ds.divide(:supplier_id, [1, 2], match: :qual_id).select_order_map(:supplier_id).must_equal [1, 2]
+    ds.divide(:supplier_id, [1, 2, 3], match: :qual_id).select_order_map(:supplier_id).must_equal [1]
+    ds.divide(:supplier_id, [1, 2, 3, 4], match: :qual_id).select_order_map(:supplier_id).must_equal []
+  end
+
+  it "should support dataset requirements" do
+    requirement = @db[:divide_supplier_quals].where(supplier_id: 2).select(:qual_id)
+    @db[:divide_supplier_quals].divide(:supplier_id, requirement).select_order_map(:supplier_id).must_equal [1, 2]
+  end
+
+  it "should return all distinct keys when the requirement is empty" do
+    @db[:divide_supplier_quals].divide(:supplier_id, []).select_order_map(:supplier_id).must_equal [1, 2, 3]
+  end
+
+  it "should control NULL matching with the :null option" do
+    ds = @db[:divide_supplier_quals]
+    ds.divide(:supplier_id, [nil], match: :qual_id).select_order_map(:supplier_id).must_equal []
+    ds.divide(:supplier_id, [nil], match: :qual_id, null: :match).select_order_map(:supplier_id).must_equal [3]
+  end
+
+  it "should support composite keys and composite match columns" do
+    @db[:divide_composite].import([:a, :b, :x, :y], [[1, 1, 10, 20], [1, 1, 30, 40], [1, 2, 10, 20], [2, 1, 10, 20], [2, 1, 30, 40], [2, 1, 30, 40]])
+    @db[:divide_composite].divide([:a, :b], [[10, 20], [30, 40]], match: [:x, :y]).select_order_map([:a, :b]).must_equal [[1, 1], [2, 1]]
+  end
+
+  it "should remain composable with filters and pagination" do
+    ds = @db[:divide_supplier_quals].divide(:supplier_id, [1, 2], match: :qual_id).where{supplier_id > 1}.order(:supplier_id).limit(1)
+    ds.select_map(:supplier_id).must_equal [2]
+  end
+end

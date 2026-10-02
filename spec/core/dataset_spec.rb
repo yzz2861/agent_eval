@@ -2356,6 +2356,67 @@ describe "Dataset#as_set" do
   end
 end
 
+describe "Dataset#divide" do
+  before do
+    @db = Sequel.mock
+    @dataset = @db[:supplier_qualifications]
+  end
+
+  it "should divide by a requirement dataset, inferring match columns from its select list" do
+    @dataset.divide(:supplier_id, @db[:required_qualifications].select(:qualification_id)).sql.must_equal "SELECT DISTINCT supplier_qualifications.supplier_id FROM supplier_qualifications WHERE NOT (EXISTS (SELECT 1 FROM (SELECT qualification_id FROM required_qualifications) AS divide_requirement WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM supplier_qualifications) AS divide_inner WHERE ((divide_inner.supplier_id = supplier_qualifications.supplier_id) AND (divide_inner.qualification_id = divide_requirement.qualification_id))))))"
+  end
+
+  it "should divide by an array of required values using the :match option" do
+    @dataset.divide(:supplier_id, [1, 2, 3], match: :qualification_id).sql.must_equal "SELECT DISTINCT supplier_qualifications.supplier_id FROM supplier_qualifications WHERE NOT (EXISTS (SELECT 1 FROM (SELECT 1 AS qualification_id UNION ALL SELECT 2 AS qualification_id UNION ALL SELECT 3 AS qualification_id) AS divide_requirement WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM supplier_qualifications) AS divide_inner WHERE ((divide_inner.supplier_id = supplier_qualifications.supplier_id) AND (divide_inner.qualification_id = divide_requirement.qualification_id))))))"
+  end
+
+  it "should treat a non-array, non-dataset requirement as a single required value" do
+    @dataset.divide(:supplier_id, 5, match: :qualification_id).sql.must_equal "SELECT DISTINCT supplier_qualifications.supplier_id FROM supplier_qualifications WHERE NOT (EXISTS (SELECT 1 FROM (SELECT 5 AS qualification_id) AS divide_requirement WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM supplier_qualifications) AS divide_inner WHERE ((divide_inner.supplier_id = supplier_qualifications.supplier_id) AND (divide_inner.qualification_id = divide_requirement.qualification_id))))))"
+  end
+
+  it "should support composite keys and composite match columns" do
+    @dataset.divide([:a, :b], [[1, 2], [3, 4]], match: [:x, :y]).sql.must_equal "SELECT DISTINCT supplier_qualifications.a, supplier_qualifications.b FROM supplier_qualifications WHERE NOT (EXISTS (SELECT 1 FROM (SELECT 1 AS x, 2 AS y UNION ALL SELECT 3 AS x, 4 AS y) AS divide_requirement WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM supplier_qualifications) AS divide_inner WHERE ((divide_inner.a = supplier_qualifications.a) AND (divide_inner.b = supplier_qualifications.b) AND (divide_inner.x = divide_requirement.x) AND (divide_inner.y = divide_requirement.y))))))"
+  end
+
+  it "should support mapping dataset columns to different requirement columns with a :match hash" do
+    @dataset.divide(:supplier_id, @db[:required_qualifications].select(:qual_id), match: {qualification_id: :qual_id}).sql.must_equal "SELECT DISTINCT supplier_qualifications.supplier_id FROM supplier_qualifications WHERE NOT (EXISTS (SELECT 1 FROM (SELECT qual_id FROM required_qualifications) AS divide_requirement WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM supplier_qualifications) AS divide_inner WHERE ((divide_inner.supplier_id = supplier_qualifications.supplier_id) AND (divide_inner.qualification_id = divide_requirement.qual_id))))))"
+  end
+
+  it "should return all distinct key values when the requirement array is empty" do
+    @dataset.divide(:supplier_id, []).sql.must_equal "SELECT DISTINCT supplier_qualifications.supplier_id FROM supplier_qualifications"
+    @dataset.divide(:supplier_id, [], distinct: false).sql.must_equal "SELECT supplier_qualifications.supplier_id FROM supplier_qualifications"
+  end
+
+  it "should support the :distinct=>false option" do
+    @dataset.divide(:supplier_id, [1], match: :qualification_id, distinct: false).sql.must_equal "SELECT supplier_qualifications.supplier_id FROM supplier_qualifications WHERE NOT (EXISTS (SELECT 1 FROM (SELECT 1 AS qualification_id) AS divide_requirement WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM supplier_qualifications) AS divide_inner WHERE ((divide_inner.supplier_id = supplier_qualifications.supplier_id) AND (divide_inner.qualification_id = divide_requirement.qualification_id))))))"
+  end
+
+  it "should support the :null=>:match option to treat NULL values as equal" do
+    @dataset.divide(:supplier_id, [nil], match: :qualification_id, null: :match).sql.must_equal "SELECT DISTINCT supplier_qualifications.supplier_id FROM supplier_qualifications WHERE NOT (EXISTS (SELECT 1 FROM (SELECT NULL AS qualification_id) AS divide_requirement WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM supplier_qualifications) AS divide_inner WHERE ((divide_inner.supplier_id = supplier_qualifications.supplier_id) AND ((divide_inner.qualification_id = divide_requirement.qualification_id) OR ((divide_inner.qualification_id IS NULL) AND (divide_requirement.qualification_id IS NULL))))))))"
+  end
+
+  it "should remain composable with filters, order, and pagination" do
+    @dataset.divide(:supplier_id, [1, 2], match: :qualification_id).where(active: true).order(:supplier_id).limit(10, 5).sql.must_equal "SELECT DISTINCT supplier_qualifications.supplier_id FROM supplier_qualifications WHERE (NOT (EXISTS (SELECT 1 FROM (SELECT 1 AS qualification_id UNION ALL SELECT 2 AS qualification_id) AS divide_requirement WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM supplier_qualifications) AS divide_inner WHERE ((divide_inner.supplier_id = supplier_qualifications.supplier_id) AND (divide_inner.qualification_id = divide_requirement.qualification_id)))))) AND (active IS TRUE)) ORDER BY supplier_id LIMIT 10 OFFSET 5"
+  end
+
+  it "should keep existing filters on the receiver in both the outer query and the inner copy" do
+    @dataset.where(verified: true).divide(:supplier_id, [1], match: :qualification_id).sql.must_equal "SELECT DISTINCT supplier_qualifications.supplier_id FROM supplier_qualifications WHERE ((verified IS TRUE) AND NOT (EXISTS (SELECT 1 FROM (SELECT 1 AS qualification_id) AS divide_requirement WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM supplier_qualifications WHERE (verified IS TRUE)) AS divide_inner WHERE ((divide_inner.supplier_id = supplier_qualifications.supplier_id) AND (divide_inner.qualification_id = divide_requirement.qualification_id)))))))"
+  end
+
+  it "should generate SQL with requirement values in the correct order on postgres" do
+    Sequel.mock(host: "postgres")[:sq].divide(:sid, [3, 1], match: :qid).sql.must_equal 'SELECT DISTINCT "sq"."sid" FROM "sq" WHERE NOT (EXISTS (SELECT 1 FROM (SELECT 3 AS "qid" UNION ALL (SELECT 1 AS "qid")) AS "divide_requirement" WHERE NOT (EXISTS (SELECT 1 FROM (SELECT * FROM "sq") AS "divide_inner" WHERE (("divide_inner"."sid" = "sq"."sid") AND ("divide_inner"."qid" = "divide_requirement"."qid"))))))'
+  end
+
+  it "should raise an error for invalid arguments" do
+    proc{@dataset.divide([], [1], match: :qualification_id)}.must_raise(Sequel::Error)
+    proc{@dataset.divide(:supplier_id, [1])}.must_raise(Sequel::Error)
+    proc{@dataset.divide(:supplier_id, [1], match: [])}.must_raise(Sequel::Error)
+    proc{@dataset.divide(:supplier_id, [1], match: :qualification_id, null: :bogus)}.must_raise(Sequel::Error)
+    proc{@dataset.divide(:supplier_id, [[1, 2]], match: :qualification_id)}.must_raise(Sequel::Error)
+    proc{@dataset.divide(:supplier_id, @db[:required_qualifications])}.must_raise(Sequel::Error)
+  end
+end
+
 describe "Dataset#distinct" do
   before do
     @db = Sequel.mock
