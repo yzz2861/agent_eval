@@ -2253,6 +2253,12 @@ class WSGIHeaderDict(DictMixin):
         return self._ekey(key) in self.environ
 
 
+#: Thread-local state that tracks the currently running ConfigDict change
+#: propagation (if any). Used to defer writes triggered by change listeners
+#: until the current propagation completed.
+_config_propagation = threading.local()
+
+
 class ConfigDict(dict):
     """ A dict-like configuration storage with additional support for
         namespaces, validators, meta-data and overlays.
@@ -2363,57 +2369,135 @@ class ConfigDict(dict):
         if not isinstance(key, str):
             raise TypeError('Key has type %r (not a string)' % type(key))
 
-        self._virtual_keys.discard(key)
+        context = getattr(_config_propagation, 'active', None)
+        if context is not None:
+            # Called from a change listener while a propagation is still in
+            # progress. Defer the actual write until the current propagation
+            # completed. It is discarded if the propagation fails.
+            context.append(lambda: self._setitem(key, value))
+            return
 
+        self._setitem(key, value)
+
+    def _setitem(self, key, value):
+        """ Set a key and propagate the change to all affected overlays. """
         value = self.meta_get(key, 'filter', lambda x: x)(value)
         if key in self and self[key] is value:
             return
 
-        self._on_change(key, value)
-        dict.__setitem__(self, key, value)
-
-        for overlay in self._iter_overlays():
-            overlay._set_virtual(key, value)
+        plan, notifications = [], []
+        self._plan_set(plan, notifications, key, value)
+        self._propagate(plan, notifications)
 
     def __delitem__(self, key):
+        context = getattr(_config_propagation, 'active', None)
+        if context is not None:
+            # See __setitem__ for why writes are deferred during propagation.
+            context.append(lambda: self._delitem(key))
+            return
+
+        self._delitem(key)
+
+    def _delitem(self, key):
         if key not in self:
             raise KeyError(key)
         if key in self._virtual_keys:
             raise KeyError("Virtual keys cannot be deleted: %s" % key)
 
+        plan, notifications = [], []
         if self._source and key in self._source:
             # Not virtual, but present in source -> Restore virtual value
-            dict.__delitem__(self, key)
-            self._set_virtual(key, self._source[key])
-        else:  # not virtual, not present in source. This is OUR value
-            self._on_change(key, None)
-            dict.__delitem__(self, key)
+            value = self._source[key]
+            plan.append((self, key, value, True))
             for overlay in self._iter_overlays():
-                overlay._delete_virtual(key)
+                overlay._plan_set_virtual(plan, notifications, key, value)
+        else:  # not virtual, not present in source. This is OUR value
+            plan.append((self, key, _UNSET, False))
+            notifications.append((self, key, None))
+            for overlay in self._iter_overlays():
+                overlay._plan_delete_virtual(plan, notifications, key)
+        self._propagate(plan, notifications)
 
-    def _set_virtual(self, key, value):
-        """ Recursively set or update virtual keys. """
+    def _plan_set(self, plan, notifications, key, value):
+        """ Plan an owned (non-virtual) value change for this config and
+            recursively for all affected overlays. """
+        plan.append((self, key, value, False))
+        notifications.append((self, key, value))
+        for overlay in self._iter_overlays():
+            overlay._plan_set_virtual(plan, notifications, key, value)
+
+    def _plan_set_virtual(self, plan, notifications, key, value):
+        """ Recursively plan a virtual value update, skipping overlays that
+            own their value for this key. """
         if key in self and key not in self._virtual_keys:
-            return  # Do nothing for non-virtual keys.
+            return  # Do not touch owned (non-virtual) values.
 
-        self._virtual_keys.add(key)
+        plan.append((self, key, value, True))
         if key in self and self[key] is not value:
-            self._on_change(key, value)
-        dict.__setitem__(self, key, value)
+            notifications.append((self, key, value))
         for overlay in self._iter_overlays():
-            overlay._set_virtual(key, value)
+            overlay._plan_set_virtual(plan, notifications, key, value)
 
-    def _delete_virtual(self, key):
-        """ Recursively delete virtual entry. """
+    def _plan_delete_virtual(self, plan, notifications, key):
+        """ Recursively plan the removal of a virtual entry. """
         if key not in self._virtual_keys:
-            return  # Do nothing for non-virtual keys.
+            return  # Do not touch owned (non-virtual) values.
 
+        plan.append((self, key, _UNSET, False))
         if key in self:
-            self._on_change(key, None)
-        dict.__delitem__(self, key)
-        self._virtual_keys.discard(key)
+            notifications.append((self, key, None))
         for overlay in self._iter_overlays():
-            overlay._delete_virtual(key)
+            overlay._plan_delete_virtual(plan, notifications, key)
+
+    def _propagate(self, plan, notifications):
+        """ Apply a mutation plan to this config and all affected overlays,
+            then notify change listeners.
+
+            The mutation is atomic: If a change listener (or any other step)
+            fails, all values and virtual-key markers are restored to their
+            previous state and any writes deferred by listeners are
+            discarded. Side effects of listeners that already ran are not
+            undone.
+        """
+        previous = getattr(_config_propagation, 'active', None)
+        deferred = []
+        _config_propagation.active = deferred
+        undo = []
+        try:
+            try:
+                for config, key, value, virtual in plan:
+                    undo.append((config, key, dict.get(config, key, _UNSET),
+                                 key in config._virtual_keys))
+                    if value is _UNSET:  # Delete the key
+                        dict.__delitem__(config, key)
+                    else:
+                        dict.__setitem__(config, key, value)
+                    if virtual:
+                        config._virtual_keys.add(key)
+                    else:
+                        config._virtual_keys.discard(key)
+                # Listeners are notified after the entire tree was updated,
+                # so they always see a consistent state.
+                for config, key, value in notifications:
+                    config._on_change(key, value)
+            except Exception:
+                # Roll back all internal state changed so far.
+                for config, key, old_value, was_virtual in reversed(undo):
+                    if old_value is _UNSET:
+                        dict.__delitem__(config, key)
+                    else:
+                        dict.__setitem__(config, key, old_value)
+                    if was_virtual:
+                        config._virtual_keys.add(key)
+                    else:
+                        config._virtual_keys.discard(key)
+                raise
+        finally:
+            _config_propagation.active = previous
+        # Run writes deferred by change listeners. If one of them fails, the
+        # remaining ones are discarded along with the exception.
+        while deferred:
+            deferred.pop(0)()
 
     def _on_change(self, key, value):
         for cb in self._change_listener:
@@ -2471,10 +2555,12 @@ class ConfigDict(dict):
             lookup-overhead. Read-access is as fast as a build-in dict for both
             virtual and non-virtual keys.
 
-            Changes are propagated recursively and depth-first. A failing
-            on-change handler in an overlay stops the propagation of virtual
-            values and may result in an partly updated tree. Take extra care
-            here and make sure that on-change handlers never fail.
+            Changes are propagated recursively and depth-first. Listeners are
+            notified after the entire overlay tree was updated, so they always
+            see a consistent state. If an on-change handler fails, all values
+            and virtual-key markers are rolled back to their previous state.
+            Writes triggered by on-change handlers are deferred until the
+            current propagation completed, and discarded if it fails.
 
             Used by Route.config
         """
@@ -2486,7 +2572,8 @@ class ConfigDict(dict):
         overlay._source = self
         self._overlays.append(weakref.ref(overlay))
         for key in self:
-            overlay._set_virtual(key, self[key])
+            dict.__setitem__(overlay, key, self[key])
+            overlay._virtual_keys.add(key)
         return overlay
 
 

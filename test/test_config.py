@@ -163,6 +163,193 @@ class TestConfDict(unittest.TestCase):
         root._make_overlay()  # This triggers the weakref-collect
         self.assertEqual(len(root._overlays), 1)
 
+    def test_overlay_atomic_set_two_overlays(self):
+        """ A failing change listener in one overlay must not leave the
+            source updated and the other overlays behind. """
+        source = ConfigDict()
+        source['key'] = 'old'
+        overlay_a = source._make_overlay()
+        overlay_b = source._make_overlay()
+
+        def fail(config, key, value):
+            raise RuntimeError('boom')
+
+        # Failing listener in the first overlay: source must be rolled back
+        # and the second overlay must stay untouched.
+        overlay_a._add_change_listener(fail)
+        with self.assertRaises(RuntimeError):
+            source['key'] = 'new'
+        for config in (source, overlay_a, overlay_b):
+            self.assertEqual(config['key'], 'old')
+        self.assertFalse('key' in source._virtual_keys)
+        self.assertTrue('key' in overlay_a._virtual_keys)
+        self.assertTrue('key' in overlay_b._virtual_keys)
+
+        # Same for a failing listener in the last overlay of the chain.
+        overlay_a._change_listener.remove(fail)
+        overlay_b._add_change_listener(fail)
+        with self.assertRaises(RuntimeError):
+            source['key'] = 'new'
+        for config in (source, overlay_a, overlay_b):
+            self.assertEqual(config['key'], 'old')
+
+        # Without a failing listener the change propagates to all overlays.
+        overlay_b._change_listener.remove(fail)
+        source['key'] = 'new'
+        for config in (source, overlay_a, overlay_b):
+            self.assertEqual(config['key'], 'new')
+
+    def test_overlay_atomic_set_keeps_owned_values(self):
+        """ Rollback must not touch values owned by an overlay. """
+        source = ConfigDict()
+        source['key'] = 'old'
+        overlay_a = source._make_overlay()
+        overlay_b = source._make_overlay()
+        overlay_a['key'] = 'owned'  # Explicit override, not virtual anymore
+
+        overlay_b._add_change_listener(
+            lambda c, k, v: (_ for _ in ()).throw(RuntimeError('boom')))
+        with self.assertRaises(RuntimeError):
+            source['key'] = 'new'
+        self.assertEqual(source['key'], 'old')
+        self.assertEqual(overlay_a['key'], 'owned')
+        self.assertFalse('key' in overlay_a._virtual_keys)
+        self.assertEqual(overlay_b['key'], 'old')
+        self.assertTrue('key' in overlay_b._virtual_keys)
+
+    def test_overlay_atomic_nested(self):
+        """ Rollback works for nested (multi-level) overlay trees. """
+        source = ConfigDict()
+        source['key'] = 'old'
+        intermediate = source._make_overlay()
+        overlay = intermediate._make_overlay()
+
+        def fail(config, key, value):
+            raise RuntimeError('boom')
+
+        overlay._add_change_listener(fail)
+        with self.assertRaises(RuntimeError):
+            source['key'] = 'new'
+        for config in (source, intermediate, overlay):
+            self.assertEqual(config['key'], 'old')
+        self.assertTrue('key' in intermediate._virtual_keys)
+        self.assertTrue('key' in overlay._virtual_keys)
+
+    def test_overlay_atomic_delete(self):
+        """ A failing listener during delete restores values and markers. """
+        source = ConfigDict()
+        source['key'] = 'value'
+        intermediate = source._make_overlay()
+        overlay = intermediate._make_overlay()
+
+        def fail(config, key, value):
+            raise RuntimeError('boom')
+
+        intermediate._add_change_listener(fail)
+        with self.assertRaises(RuntimeError):
+            del source['key']
+        for config in (source, intermediate, overlay):
+            self.assertEqual(config['key'], 'value')
+        self.assertFalse('key' in source._virtual_keys)
+        self.assertTrue('key' in intermediate._virtual_keys)
+        self.assertTrue('key' in overlay._virtual_keys)
+
+    def test_overlay_atomic_delete_restore(self):
+        """ A failing listener while restoring an inherited value rolls back
+            the owned value and its virtual-key markers. """
+        source = ConfigDict()
+        source['key'] = 'source'
+        overlay = source._make_overlay()
+        child = overlay._make_overlay()
+        overlay['key'] = 'owned'  # Explicit override on the overlay
+
+        def fail(config, key, value):
+            raise RuntimeError('boom')
+
+        child._add_change_listener(fail)
+        with self.assertRaises(RuntimeError):
+            del overlay['key']
+        self.assertEqual(overlay['key'], 'owned')
+        self.assertFalse('key' in overlay._virtual_keys)
+        self.assertEqual(child['key'], 'owned')
+        self.assertTrue('key' in child._virtual_keys)
+
+    def test_overlay_atomic_filter_failure(self):
+        """ A failing filter must not change values or virtual-key markers. """
+        source = ConfigDict()
+        source['key'] = 'old'
+        overlay = source._make_overlay()
+
+        def bad_filter(value):
+            raise ValueError('bad value')
+
+        source.meta_set('key', 'filter', bad_filter)
+        with self.assertRaises(ValueError):
+            overlay['key'] = 'new'
+        self.assertEqual(overlay['key'], 'old')
+        self.assertTrue('key' in overlay._virtual_keys)
+        with self.assertRaises(ValueError):
+            source['key'] = 'new'
+        self.assertEqual(source['key'], 'old')
+        self.assertEqual(overlay['key'], 'old')
+
+    def test_listener_sees_consistent_tree(self):
+        """ Listeners are notified after the whole tree was updated. """
+        source = ConfigDict()
+        source['key'] = 'old'
+        overlay_a = source._make_overlay()
+        overlay_b = source._make_overlay()
+        seen = []
+        source._add_change_listener(
+            lambda c, k, v: seen.append((overlay_a['key'], overlay_b['key'])))
+        source['key'] = 'new'
+        self.assertEqual(seen, [('new', 'new')])
+
+    def test_listener_writes_are_deferred(self):
+        """ Writes from within a change listener are deferred until the
+            current propagation completed. """
+        source = ConfigDict()
+        source['trigger'] = 'old'
+        source['other'] = 'old'
+        overlay = source._make_overlay()
+        observed = []
+
+        def writer(config, key, value):
+            if key == 'trigger':
+                config['other'] = 'deferred'
+                observed.append(config['other'])
+
+        source._add_change_listener(writer)
+        source['trigger'] = 'new'
+        # The write was not visible while the propagation was still running.
+        self.assertEqual(observed, ['old'])
+        # ... but was applied (and propagated) afterwards.
+        self.assertEqual(source['other'], 'deferred')
+        self.assertEqual(overlay['other'], 'deferred')
+
+    def test_listener_writes_discarded_on_failure(self):
+        """ Deferred writes are discarded if the propagation fails. """
+        source = ConfigDict()
+        source['trigger'] = 'old'
+        source['other'] = 'old'
+        overlay = source._make_overlay()
+
+        def writer(config, key, value):
+            if key == 'trigger':
+                config['other'] = 'deferred'
+
+        def fail(config, key, value):
+            raise RuntimeError('boom')
+
+        source._add_change_listener(writer)
+        overlay._add_change_listener(fail)
+        with self.assertRaises(RuntimeError):
+            source['trigger'] = 'new'
+        self.assertEqual(source['trigger'], 'old')
+        self.assertEqual(source['other'], 'old')
+        self.assertEqual(overlay['trigger'], 'old')
+        self.assertEqual(overlay['other'], 'old')
+
 
 class TestINIConfigLoader(unittest.TestCase):
     @classmethod
