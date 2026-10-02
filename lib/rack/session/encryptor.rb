@@ -54,6 +54,38 @@ module Rack
         def serializer
           @serializer ||= @options[:serialize_json] ? JSON : Marshal
         end
+
+        # Builds the authenticated data for a message. The +purpose+ and
+        # +audience+ are cryptographically bound to the message so that a
+        # ciphertext valid in one context cannot be replayed in another, even
+        # when the same secret key is shared.
+        #
+        # When only a +purpose+ is present the legacy construction
+        # (<tt>data + purpose</tt>) is retained so that existing cookies can
+        # be decrypted during a migration window. When an +audience+ is
+        # present, length-prefixed fields are used to remove any ambiguity
+        # between contexts.
+        def authenticated_context(data)
+          purpose = @options[:purpose]
+          audience = @options[:audience]
+
+          return data unless purpose || audience
+          return data + purpose if purpose && audience.nil?
+
+          context = data.b.dup
+
+          if purpose
+            purpose = purpose.b
+            context << [purpose.bytesize].pack('Q>') << purpose
+          end
+
+          if audience
+            audience = audience.b
+            context << [audience.bytesize].pack('Q>') << audience
+          end
+
+          context
+        end
       end
 
       class V1
@@ -75,6 +107,11 @@ module Rack
         #     Limit messages to a specific purpose. This can be viewed as a
         #     security enhancement to prevent message reuse from different contexts
         #     if keys are reused.
+        # * :audience
+        #     Limit messages to a specific application audience, identified by a
+        #     String (e.g. a mount path). Messages encrypted for one audience
+        #     cannot be decrypted by another audience even when they share the
+        #     same secret and purpose.
         #
         # Cryptography and Output Format:
         #
@@ -100,8 +137,12 @@ module Rack
           end
 
           @options = {
-            serialize_json: false, pad_size: 32, purpose: nil
+            serialize_json: false, pad_size: 32, purpose: nil, audience: nil
           }.update(opts)
+
+          unless @options[:audience].nil? || @options[:audience].is_a?(String)
+            raise ArgumentError, 'audience must be a String'
+          end
 
           @hmac_secret = secret.dup.force_encoding(Encoding::BINARY)
           @cipher_secret = @hmac_secret.slice!(0, 32)
@@ -181,10 +222,7 @@ module Rack
         end
 
         def compute_signature(data)
-          signing_data = data
-          signing_data += @options[:purpose] if @options[:purpose]
-
-          OpenSSL::HMAC.digest(OpenSSL::Digest.new('SHA256'), @hmac_secret, signing_data)
+          OpenSSL::HMAC.digest(OpenSSL::Digest.new('SHA256'), @hmac_secret, authenticated_context(data))
         end
 
         def verify_authenticity!(data, signature)
@@ -210,6 +248,11 @@ module Rack
         #     Limit messages to a specific purpose. This can be viewed as a
         #     security enhancement to prevent message reuse from different contexts
         #     if keys are reused.
+        # * :audience
+        #     Limit messages to a specific application audience, identified by a
+        #     String (e.g. a mount path). Messages encrypted for one audience
+        #     cannot be decrypted by another audience even when they share the
+        #     same secret and purpose.
         #
         # Cryptography and Output Format:
         #
@@ -245,8 +288,12 @@ module Rack
           end
 
           @options = {
-            serialize_json: false, pad_size: 32, purpose: nil
+            serialize_json: false, pad_size: 32, purpose: nil, audience: nil
           }.update(opts)
+
+          unless @options[:audience].nil? || @options[:audience].is_a?(String)
+            raise ArgumentError, 'audience must be a String'
+          end
 
           @cipher_secret = secret.dup.force_encoding(Encoding::BINARY).slice!(0, 32)
           @cipher_secret.freeze
@@ -271,7 +318,7 @@ module Rack
           set_cipher_key(cipher, message_secret_from_salt(salt))
           cipher.iv = cipher_iv
           cipher.auth_tag = auth_tag
-          cipher.auth_data = (purpose = @options[:purpose]) ? data + purpose : data
+          cipher.auth_data = authenticated_context(data)
 
           plaintext = cipher.update(ciphertext) << cipher.final
 
@@ -296,7 +343,7 @@ module Rack
           data << version
           data << salt
 
-          cipher.auth_data = (purpose = @options[:purpose]) ? data + purpose : data
+          cipher.auth_data = authenticated_context(data)
           encrypted_data = cipher.update(serialized_payload) << cipher.final
 
           data << cipher_iv

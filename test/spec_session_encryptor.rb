@@ -90,6 +90,36 @@ def all_versions_tests(opts = {})
           -> { encryptor.decrypt(message) }.must_raise Rack::Session::Encryptor::InvalidSignature
         end
 
+        it 'decrypts an encrypted message with audience' do
+          encryptor = new_encryptor(@secret, purpose: 'testing', audience: '/app-a')
+
+          message = encryptor.encrypt({ 'foo' => 'bar' })
+
+          encryptor.decrypt(message).must_equal({ 'foo' => 'bar' })
+        end
+
+        it 'decrypts raises InvalidSignature with different audience' do
+          encryptor = new_encryptor(@secret, purpose: 'testing', audience: '/app-a')
+          other_encryptor = new_encryptor(@secret, purpose: 'testing', audience: '/app-b')
+
+          message = other_encryptor.encrypt({ 'foo' => 'bar' })
+
+          -> { encryptor.decrypt(message) }.must_raise Rack::Session::Encryptor::InvalidSignature
+        end
+
+        it 'decrypts raises InvalidSignature without audience' do
+          encryptor = new_encryptor(@secret, purpose: 'testing', audience: '/app-a')
+          other_encryptor = new_encryptor(@secret, purpose: 'testing')
+
+          message = other_encryptor.encrypt({ 'foo' => 'bar' })
+
+          -> { encryptor.decrypt(message) }.must_raise Rack::Session::Encryptor::InvalidSignature
+        end
+
+        it 'initialize raises ArgumentError on invalid audience' do
+          -> { new_encryptor @secret, audience: :app_a }.must_raise ArgumentError
+        end
+
         it 'initialize raises ArgumentError on invalid pad_size' do
           -> { new_encryptor @secret, pad_size: :bar }.must_raise ArgumentError
         end

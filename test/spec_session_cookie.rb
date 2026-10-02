@@ -8,6 +8,7 @@ require_relative 'helper'
 require 'rack/response'
 require 'rack/lint'
 require 'rack/mock'
+require 'rack/urlmap'
 require 'json'
 
 require_relative '../lib/rack/session/cookie'
@@ -618,5 +619,278 @@ describe Rack::Session::Cookie do
     response.body.must_match /"value"\s*=>\s*"#{'A' * 256}"/
     response.body.must_match /"counter"\s*=>\s*2/
     response.body.must_match(/\A{[^}]+}\z/)
+  end
+
+  describe 'audience binding' do
+    def audience_incrementor
+      @audience_incrementor ||= lambda do |env|
+      env["rack.session"]["counter"] ||= 0
+      env["rack.session"]["counter"] += 1
+      hash = env["rack.session"].dup
+      hash.delete("session_id")
+      Rack::Response.new(hash.inspect).to_a
+      end
+    end
+
+    def mounted_app(secret, extra = {})
+      Rack::URLMap.new(
+        '/app-a' => Rack::Session::Cookie.new(
+          audience_incrementor, { secrets: secret, audience: '/app-a' }.merge(extra)
+        ),
+        '/app-b' => Rack::Session::Cookie.new(
+          audience_incrementor, { secrets: secret, audience: '/app-b' }.merge(extra)
+        )
+      )
+    end
+
+    def get_from(app, path, cookie = nil)
+      env = cookie ? { 'HTTP_COOKIE' => cookie } : {}
+      Rack::MockRequest.new(app).get("#{path}/", env)
+    end
+
+    def cookie_value(response)
+      response["Set-Cookie"].split('=', 2).last.split(';').first
+    end
+
+    def old_format_cookie(secret)
+      response = response_for(app: [audience_incrementor, { secrets: secret }])
+      Rack::Utils.unescape(cookie_value(response))
+    end
+
+    it 'rejects a cookie replayed from one audience into another' do
+      app = mounted_app(@secret)
+
+      response_a = get_from(app, '/app-a')
+      response_a.body.must_equal({ "counter" => 1 }.to_s)
+
+      # The cookie minted for /app-a must not establish a session on /app-b.
+      response_b = get_from(app, '/app-b', response_a["Set-Cookie"])
+      response_b.body.must_equal({ "counter" => 1 }.to_s)
+
+      # ... while still being valid for /app-a.
+      response_a2 = get_from(app, '/app-a', response_a["Set-Cookie"])
+      response_a2.body.must_equal({ "counter" => 2 }.to_s)
+    end
+
+    it 'accepts an old format cookie only inside the migration window and reissues it' do
+      old_value = old_format_cookie(@secret)
+
+      app = mounted_app(@secret, accept_legacy_cookies_until: 3600)
+
+      response = get_from(app, '/app-a', "rack.session=#{old_value}")
+      response.body.must_equal({ "counter" => 2 }.to_s)
+
+      new_value = Rack::Utils.unescape(cookie_value(response))
+      new_value.wont_equal old_value
+
+      # The reissued cookie is audience-bound: it decrypts for /app-a only.
+      app_a_encryptor = Rack::Session::Encryptor.new(
+        @secret, purpose: 'rack.session', audience: '/app-a'
+      )
+      app_b_encryptor = Rack::Session::Encryptor.new(
+        @secret, purpose: 'rack.session', audience: '/app-b'
+      )
+      old_encryptor = Rack::Session::Encryptor.new(
+        @secret, purpose: 'rack.session'
+      )
+
+      app_a_encryptor.decrypt(new_value)["counter"].must_equal 2
+      -> { app_b_encryptor.decrypt(new_value) }.must_raise(
+        Rack::Session::Encryptor::Error
+      )
+      -> { old_encryptor.decrypt(new_value) }.must_raise(
+        Rack::Session::Encryptor::Error
+      )
+
+      # Subsequent requests use the new audience-bound cookie directly.
+      follow_up = get_from(app, '/app-a', "rack.session=#{new_value}")
+      follow_up.body.must_equal({ "counter" => 3 }.to_s)
+    end
+
+    it 'migrates a read-only old session even when the app does not write it' do
+      old_value = old_format_cookie(@secret)
+      app = mounted_app(@secret, accept_legacy_cookies_until: 3600)
+
+      reader = Rack::URLMap.new(
+        '/app-a' => Rack::Session::Cookie.new(
+          only_session_id,
+          secrets: @secret,
+          audience: '/app-a',
+          accept_legacy_cookies_until: 3600
+        )
+      )
+
+      response = get_from(reader, '/app-a', "rack.session=#{old_value}")
+      response["Set-Cookie"].wont_be_nil
+
+      new_value = Rack::Utils.unescape(cookie_value(response))
+      app_a_encryptor = Rack::Session::Encryptor.new(
+        @secret, purpose: 'rack.session', audience: '/app-a'
+      )
+      app_a_encryptor.decrypt(new_value).wont_be_nil
+    end
+
+    it 'rejects an old format cookie when the migration window has expired' do
+      old_value = old_format_cookie(@secret)
+
+      app = mounted_app(@secret, accept_legacy_cookies_until: Time.now - 60)
+      response = get_from(app, '/app-a', "rack.session=#{old_value}")
+      response.body.must_equal({ "counter" => 1 }.to_s)
+    end
+
+    it 'rejects an old format cookie without an explicit migration window' do
+      old_value = old_format_cookie(@secret)
+
+      app = mounted_app(@secret)
+      response = get_from(app, '/app-a', "rack.session=#{old_value}")
+      response.body.must_equal({ "counter" => 1 }.to_s)
+    end
+
+    it 'selects the uniquely valid cookie regardless of order' do
+      app = mounted_app(@secret)
+
+      response_a1 = get_from(app, '/app-a')
+      response_a2 = get_from(app, '/app-a', response_a1["Set-Cookie"])
+      response_b = get_from(app, '/app-b')
+
+      value_a = Rack::Utils.unescape(cookie_value(response_a2))
+      value_b = Rack::Utils.unescape(cookie_value(response_b))
+
+      [
+        "rack.session=#{value_a}; rack.session=#{value_b}",
+        "rack.session=#{value_b}; rack.session=#{value_a}"
+      ].each do |cookie|
+        response = get_from(app, '/app-a', cookie)
+        response.body.must_equal({ "counter" => 3 }.to_s)
+      end
+    end
+
+    it 'rejects two distinct cookies that both validate for this audience' do
+      app = mounted_app(@secret)
+
+      response_a1 = get_from(app, '/app-a')
+      response_a2 = get_from(app, '/app-a', response_a1["Set-Cookie"])
+      response_a3 = get_from(app, '/app-a', response_a2["Set-Cookie"])
+
+      value_2 = Rack::Utils.unescape(cookie_value(response_a2))
+      value_3 = Rack::Utils.unescape(cookie_value(response_a3))
+
+      [
+        "rack.session=#{value_2}; rack.session=#{value_3}",
+        "rack.session=#{value_3}; rack.session=#{value_2}"
+      ].each do |cookie|
+        response = get_from(app, '/app-a', cookie)
+        response.body.must_equal({ "counter" => 1 }.to_s)
+      end
+    end
+
+    it 'accepts a duplicated, identical valid cookie' do
+      app = mounted_app(@secret)
+
+      response_a1 = get_from(app, '/app-a')
+      response_a2 = get_from(app, '/app-a', response_a1["Set-Cookie"])
+      value = Rack::Utils.unescape(cookie_value(response_a2))
+
+      cookie = "rack.session=#{value}; rack.session=#{value}"
+      response = get_from(app, '/app-a', cookie)
+      response.body.must_equal({ "counter" => 3 }.to_s)
+    end
+
+    it 'rejects two distinct legacy cookies during the migration window' do
+      old_value_1 = old_format_cookie(@secret)
+
+      other = response_for(app: [audience_incrementor, { secrets: @secret }])
+      old_value_2 = Rack::Utils.unescape(cookie_value(other))
+
+      app = mounted_app(@secret, accept_legacy_cookies_until: 3600)
+
+      [
+        "rack.session=#{old_value_1}; rack.session=#{old_value_2}",
+        "rack.session=#{old_value_2}; rack.session=#{old_value_1}"
+      ].each do |cookie|
+        response = get_from(app, '/app-a', cookie)
+        response.body.must_equal({ "counter" => 1 }.to_s)
+      end
+    end
+
+    it 'binds audiences in v1 encryption mode too' do
+      app = Rack::URLMap.new(
+        '/app-a' => Rack::Session::Cookie.new(
+          audience_incrementor,
+          secrets: @secret, audience: '/app-a', mode: :v1
+        ),
+        '/app-b' => Rack::Session::Cookie.new(
+          audience_incrementor,
+          secrets: @secret, audience: '/app-b', mode: :v1
+        )
+      )
+
+      response_a = get_from(app, '/app-a')
+      response_a.body.must_equal({ "counter" => 1 }.to_s)
+
+      response_b = get_from(app, '/app-b', response_a["Set-Cookie"])
+      response_b.body.must_equal({ "counter" => 1 }.to_s)
+
+      response_a2 = get_from(app, '/app-a', response_a["Set-Cookie"])
+      response_a2.body.must_equal({ "counter" => 2 }.to_s)
+    end
+
+    it 'only accepts legacy HMAC cookies inside the migration window' do
+      legacy_secret = 'test legacy secret'
+      legacy_session =
+        Rack::Session::Cookie::Base64::Marshal.new.encode(
+          { 'counter' => 1, 'session_id' => 'abcdef' }
+        )
+      legacy_digest = OpenSSL::HMAC.hexdigest('SHA1', legacy_secret, legacy_session)
+      legacy_cookie = "rack.session=#{legacy_session}--#{legacy_digest}"
+
+      options = {
+        secrets: @secret,
+        audience: '/app-a',
+        legacy_hmac_secret: legacy_secret
+      }
+
+      # No explicit migration window: rejected.
+      app = Rack::Session::Cookie.new(audience_incrementor, options)
+      response = Rack::MockRequest.new(app).get(
+        '/', 'HTTP_COOKIE' => legacy_cookie
+      )
+      response.body.must_equal({ "counter" => 1 }.to_s)
+
+      # Expired window: rejected.
+      app = Rack::Session::Cookie.new(
+        audience_incrementor,
+        options.merge(accept_legacy_cookies_until: Time.now - 60)
+      )
+      response = Rack::MockRequest.new(app).get(
+        '/', 'HTTP_COOKIE' => legacy_cookie
+      )
+      response.body.must_equal({ "counter" => 1 }.to_s)
+
+      # Open window: accepted and reissued as a new format cookie.
+      app = Rack::Session::Cookie.new(
+        audience_incrementor,
+        options.merge(accept_legacy_cookies_until: 3600)
+      )
+      response = Rack::MockRequest.new(app).get(
+        '/', 'HTTP_COOKIE' => legacy_cookie
+      )
+      response.body.must_equal({ "counter" => 2 }.to_s)
+      response["Set-Cookie"].wont_be_nil
+
+      new_value = Rack::Utils.unescape(cookie_value(response))
+      app_a_encryptor = Rack::Session::Encryptor.new(
+        @secret, purpose: 'rack.session', audience: '/app-a'
+      )
+      app_a_encryptor.decrypt(new_value)["counter"].must_equal 2
+    end
+
+    it 'requires :audience to be a String' do
+      -> do
+        Rack::Session::Cookie.new(
+          audience_incrementor, secrets: @secret, audience: :app_a
+        )
+      end.must_raise ArgumentError
+    end
   end
 end
