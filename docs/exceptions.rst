@@ -18,5 +18,8 @@ Exceptions
 .. autoexception:: BadHeader
     :members:
 
+.. autoexception:: BadRecordStream
+    :members:
+
 .. autoexception:: BadPayload
     :members:

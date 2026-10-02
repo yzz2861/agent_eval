@@ -89,6 +89,15 @@ class BadHeader(BadSignature):
         self.original_error: Exception | None = original_error
 
 
+class BadRecordStream(BadSignature):
+    """Raised if a record stream is malformed, incomplete, or not
+    authenticated as a record stream.
+
+    Once this is raised while reading a stream, the reader may not be
+    reused.
+    """
+
+
 class BadPayload(BadData):
     """Raised if a payload is invalid. This could happen if the payload
     is loaded despite an invalid signature, or if there is a mismatch

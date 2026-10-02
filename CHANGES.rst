@@ -5,6 +5,9 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add :class:`RecordStreamSigner` for authenticated, ordered record
+    streams with a random stream identifier, chained records, and an
+    authenticated final count.
 
 
 Version 2.2.0
