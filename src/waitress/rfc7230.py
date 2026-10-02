@@ -112,3 +112,33 @@ HEADER_FIELD_RE = re.compile(
 QUOTED_PAIR_RE = re.compile(QUOTED_PAIR)
 QUOTED_STRING_RE = re.compile(QUOTED_STRING)
 CHUNK_EXT_RE = re.compile(("^" + CHUNK_EXT + "$").encode("latin-1"))
+
+# RFC 9110 section 6.5 ("Field-Line and Trailer Sections") lists the fields
+# that a sender MUST NOT generate in the trailer section of a chunked message,
+# because their interpretation changes message framing, request routing,
+# authentication, payload decoding or cache handling. RFC 7230 section 4.1.2
+# additionally forbids TE and Max-Forwards. Waitress rejects requests that
+# carry any of these fields as trailers so that they can not be used to alter
+# the meaning of a request after its headers and body have been processed.
+FORBIDDEN_TRAILER_FIELDS = frozenset(
+    (
+        # HTTP message framing
+        b"content-length",
+        b"transfer-encoding",
+        # request routing
+        b"host",
+        b"max-forwards",
+        # request and response authentication
+        b"authorization",
+        b"proxy-authenticate",
+        b"proxy-authorization",
+        b"www-authenticate",
+        # control data for the payload
+        b"cache-control",
+        b"content-encoding",
+        b"content-range",
+        b"content-type",
+        b"te",
+        b"trailer",
+    )
+)

@@ -804,6 +804,7 @@ class TestWSGITask(unittest.TestCase):
                 "SERVER_PROTOCOL",
                 "SERVER_SOFTWARE",
                 "waitress.client_disconnected",
+                "waitress.trailers",
                 "wsgi.errors",
                 "wsgi.file_wrapper",
                 "wsgi.input",
@@ -838,6 +839,43 @@ class TestWSGITask(unittest.TestCase):
         self.assertTrue(environ["wsgi.multithread"])
         self.assertFalse(environ["wsgi.multiprocess"])
         self.assertFalse(environ["wsgi.run_once"])
+
+    def test_get_environment_trailers_separate_from_headers(self):
+        inst = self._makeOne()
+        request = DummyParser()
+        request.headers = {
+            "CONTENT_TYPE": "application/json",
+            "X_BATCH": "original",
+        }
+        request.trailers = (
+            ("X-Batch", "trailer-value"),
+            ("X-Batch", "second"),
+            ("X-Other", "other"),
+        )
+        inst.request = request
+        environ = inst.get_environment()
+
+        # Trailers are exposed independently and read-only, keeping repeated
+        # names and arrival order.
+        self.assertEqual(
+            environ["waitress.trailers"],
+            (
+                ("X-Batch", "trailer-value"),
+                ("X-Batch", "second"),
+                ("X-Other", "other"),
+            ),
+        )
+        self.assertIsInstance(environ["waitress.trailers"], tuple)
+
+        # The trailer fields must not leak into the HTTP_* request headers.
+        self.assertEqual(environ["HTTP_X_BATCH"], "original")
+        self.assertNotIn("HTTP_X_OTHER", environ)
+
+    def test_get_environment_no_trailers(self):
+        inst = self._makeOne()
+        inst.request = DummyParser()
+        environ = inst.get_environment()
+        self.assertEqual(environ["waitress.trailers"], ())
         self.assertEqual(environ["wsgi.input"], "stream")
         self.assertTrue(environ["wsgi.input_terminated"])
         self.assertEqual(inst.environ, environ)

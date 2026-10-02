@@ -42,6 +42,22 @@ Backward Incompatibilities
 Bugfix
 ~~~~~~
 
+- Chunked request trailer fields are no longer discarded. They are parsed
+  and exposed to the WSGI application as the immutable, read-only
+  ``waitress.trailers`` environ variable, an ordered tuple of ``(name,
+  value)`` string pairs that preserves repeated field names and their arrival
+  order. Trailer fields are kept separate from the request headers and never
+  appear as ``HTTP_*`` keys. The trailer section is now parsed line by line
+  rather than located by scanning for the terminating blank line, and it is
+  limited to a total of 65536 bytes, 1024 bytes per line and 100 fields.
+  Fields that RFC 9110 section 6.5 forbids from a trailer section because
+  they control framing, routing or authentication (Host, Content-Length,
+  Transfer-Encoding, Authorization and related fields) cause the request to
+  be rejected with a 400 (Bad Request); malformed or oversized trailers are
+  rejected with a 400 (Bad Request) or 431 (Request Header Fields Too Large)
+  before the WSGI application is called. Bytes following the trailer
+  terminator are correctly delimited for the next pipelined request.
+
 - Ignore ``EBADF`` from ``select``/``poll`` when a socket is closed while
   the server is waiting for I/O, instead of crashing the worker loop.
   See https://github.com/Pylons/waitress/issues/468

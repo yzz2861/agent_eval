@@ -556,6 +556,12 @@ class WSGITask(Task):
             "wsgi.input": request.get_body_stream(),
             "wsgi.file_wrapper": ReadOnlyFileBasedBuffer,
             "wsgi.input_terminated": True,  # wsgi.input is EOF terminated
+            # Chunked request trailer fields, kept separate from the request
+            # headers above. It is an immutable ordered tuple of (name,
+            # value) string pairs; repeated field names are preserved in the
+            # order received. It is an empty tuple for requests without
+            # trailers. Trailer fields never appear as HTTP_* keys.
+            "waitress.trailers": getattr(request, "trailers", ()),
         }
 
         for key, value in dict(request.headers).items():

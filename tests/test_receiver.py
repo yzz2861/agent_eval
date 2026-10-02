@@ -52,10 +52,10 @@ class TestFixedStreamReceiver(unittest.TestCase):
 
 
 class TestChunkedReceiver(unittest.TestCase):
-    def _makeOne(self, buf):
+    def _makeOne(self, buf, **kw):
         from waitress.receiver import ChunkedReceiver
 
-        return ChunkedReceiver(buf)
+        return ChunkedReceiver(buf, **kw)
 
     def test_alreadycompleted(self):
         buf = DummyBuffer()
@@ -136,10 +136,191 @@ class TestChunkedReceiver(unittest.TestCase):
         buf = DummyBuffer()
         inst = self._makeOne(buf)
         inst.all_chunks_received = True
-        result = inst.received(b"abc\r\n\r\n")
-        self.assertEqual(inst.trailer, b"abc\r\n\r\n")
-        self.assertEqual(result, 7)
+        result = inst.received(b"X-Test: abc\r\n\r\n")
+        self.assertEqual(inst.trailers, (("X-Test", "abc"),))
+        self.assertEqual(result, 15)
         self.assertTrue(inst.completed)
+
+    def test_received_empty_trailer(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+        result = inst.received(b"\r\n")
+        self.assertEqual(result, 2)
+        self.assertTrue(inst.completed)
+        self.assertEqual(inst.trailers, ())
+        self.assertIsNone(inst.error)
+
+    def test_received_trailer_multiple_fields_preserve_order_and_dupes(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+        data = (
+            b"X-Chunk: one\r\n"
+            b"X-Other: two\r\n"
+            b"X-Chunk: three\r\n"
+            b"\r\n"
+        )
+        result = inst.received(data)
+        self.assertEqual(result, len(data))
+        self.assertTrue(inst.completed)
+        self.assertEqual(
+            inst.trailers,
+            (
+                ("X-Chunk", "one"),
+                ("X-Other", "two"),
+                ("X-Chunk", "three"),
+            ),
+        )
+
+    def test_received_trailer_split_across_reads(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+
+        pieces = [b"X-Batch:", b" abc", b"\r\nX-More: def\r", b"\n", b"\r\n"]
+        consumed = 0
+
+        for index, piece in enumerate(pieces[:-1]):
+            consumed += inst.received(piece)
+            self.assertFalse(
+                inst.completed,
+                "receiver completed early after piece %d" % index,
+            )
+
+        consumed += inst.received(pieces[-1])
+        self.assertTrue(inst.completed)
+        self.assertEqual(consumed, sum(len(p) for p in pieces))
+        self.assertEqual(
+            inst.trailers,
+            (("X-Batch", "abc"), ("X-More", "def")),
+        )
+
+    def test_received_trailer_followed_by_next_request(self):
+        # The bytes belonging to the next pipelined request must not be
+        # consumed by the trailer receiver.
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+        trailer = b"X-Batch: abc\r\n\r\n"
+        next_request = b"GET /next HTTP/1.1\r\nHost: example.com\r\n\r\n"
+        result = inst.received(trailer + next_request)
+        self.assertEqual(result, len(trailer))
+        self.assertTrue(inst.completed)
+        self.assertEqual(inst.trailers, (("X-Batch", "abc"),))
+
+    def test_received_trailer_split_followed_by_next_request(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+
+        first = b"X-Batch: abc\r\n"
+        second = b"\r\nGET /next HTTP/1.1\r\nHost: example.com\r\n\r\n"
+
+        self.assertEqual(inst.received(first), len(first))
+        self.assertFalse(inst.completed)
+
+        result = inst.received(second)
+        self.assertEqual(result, 2)
+        self.assertTrue(inst.completed)
+
+    def test_received_trailer_with_full_chunked_body(self):
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        data = (
+            b"4\r\nWiki\r\n"
+            b"5\r\npedia\r\n"
+            b"0\r\n"
+            b"X-Batch: one\r\n"
+            b"X-Batch: two\r\n"
+            b"\r\n"
+        )
+        result = inst.received(data)
+        self.assertEqual(result, len(data))
+        self.assertTrue(inst.completed)
+        self.assertEqual(b"".join(buf.data), b"Wikipedia")
+        self.assertEqual(
+            inst.trailers,
+            (("X-Batch", "one"), ("X-Batch", "two")),
+        )
+
+    def test_received_trailer_invalid_field(self):
+        from waitress.utilities import BadRequest
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+        data = b"abc\r\n\r\n"
+        result = inst.received(data)
+        self.assertEqual(result, len(data))
+        self.assertIsInstance(inst.error, BadRequest)
+        self.assertEqual(inst.error.body, "Invalid trailer field")
+
+    def test_received_trailer_forbidden_field(self):
+        from waitress.utilities import BadRequest
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+        data = b"Content-Length: 5\r\n\r\n"
+        result = inst.received(data)
+        self.assertEqual(result, len(data))
+        self.assertIsInstance(inst.error, BadRequest)
+        self.assertIn("Forbidden trailer field", inst.error.body)
+
+    def test_received_trailer_too_many_fields(self):
+        from waitress.utilities import RequestHeaderFieldsTooLarge
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf, max_trailer_fields=2)
+        inst.all_chunks_received = True
+        data = b"X-One: 1\r\nX-Two: 2\r\nX-Three: 3\r\n\r\n"
+        result = inst.received(data)
+        self.assertEqual(result, len(data))
+        self.assertIsInstance(inst.error, RequestHeaderFieldsTooLarge)
+
+    def test_received_trailer_line_too_long(self):
+        from waitress.utilities import RequestHeaderFieldsTooLarge
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf, max_trailer_line_size=10)
+        inst.all_chunks_received = True
+        result = inst.received(b"X-Too-Long: value value")
+        self.assertEqual(result, 23)
+        self.assertIsInstance(inst.error, RequestHeaderFieldsTooLarge)
+
+    def test_received_trailer_line_too_long_completed(self):
+        from waitress.utilities import RequestHeaderFieldsTooLarge
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf, max_trailer_line_size=10)
+        inst.all_chunks_received = True
+        data = b"X-Too-Long: value\r\n\r\n"
+        self.assertGreater(len(b"X-Too-Long: value"), 10)
+        result = inst.received(data)
+        self.assertEqual(result, len(data))
+        self.assertIsInstance(inst.error, RequestHeaderFieldsTooLarge)
+
+    def test_received_trailer_too_large(self):
+        from waitress.utilities import RequestHeaderFieldsTooLarge
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf, max_trailer_size=15)
+        inst.all_chunks_received = True
+        result = inst.received(b"X-Batch: value one")
+        self.assertEqual(result, 18)
+        self.assertIsInstance(inst.error, RequestHeaderFieldsTooLarge)
+
+    def test_received_trailer_too_large_completed(self):
+        from waitress.utilities import RequestHeaderFieldsTooLarge
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf, max_trailer_size=15)
+        inst.all_chunks_received = True
+        data = b"X-Batch: value one two\r\n\r\n"
+        result = inst.received(data)
+        self.assertEqual(result, len(data))
+        self.assertIsInstance(inst.error, RequestHeaderFieldsTooLarge)
 
     def test_getfile(self):
         buf = DummyBuffer()
@@ -257,6 +438,38 @@ class TestChunkedReceiverParametrized:
         result = inst.received(data)
         assert result == len(data)
         assert inst.error is None
+
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "Host",
+            "host",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Authorization",
+            "Proxy-Authorization",
+            "WWW-Authenticate",
+            "Content-Type",
+            "Content-Encoding",
+            "Cache-Control",
+            "Te",
+            "Trailer",
+            "Max-Forwards",
+            "Proxy-Authenticate",
+            "Content-Range",
+        ],
+    )
+    def test_received_trailer_forbidden_field(self, field_name):
+        from waitress.utilities import BadRequest
+
+        buf = DummyBuffer()
+        inst = self._makeOne(buf)
+        inst.all_chunks_received = True
+        data = field_name.encode("latin-1") + b": value\r\n\r\n"
+        result = inst.received(data)
+        assert result == len(data)
+        assert isinstance(inst.error, BadRequest)
+        assert "Forbidden trailer field" in inst.error.body
 
     @pytest.mark.parametrize(
         "invalid_size", [b"0x04", b"+0x04", b"x04", b"+04", b" 04", b" 0x04"]

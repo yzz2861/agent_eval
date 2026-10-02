@@ -400,6 +400,148 @@ class TestHTTPRequestParser(unittest.TestCase):
         self.assertIsNone(self.parser.error)
         self.assertEqual(self.parser.headers["CONTENT_LENGTH"], "29")
 
+    def test_received_chunked_with_trailers(self):
+        data = (
+            b"GET /foobar HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"4\r\nWiki\r\n"
+            b"0\r\n"
+            b"X-Batch: one\r\n"
+            b"X-Batch: two\r\n"
+            b"\r\n"
+        )
+        result = self.parser.received(data)
+        self.parser.received(data[result:])
+        self.assertTrue(self.parser.completed)
+        self.assertIsNone(self.parser.error)
+        self.assertEqual(self.parser.headers["CONTENT_LENGTH"], "4")
+        self.assertEqual(
+            self.parser.trailers,
+            (("X-Batch", "one"), ("X-Batch", "two")),
+        )
+        # Trailers must never be mixed into the request headers.
+        self.assertNotIn("X_BATCH", self.parser.headers)
+        self.assertNotIn("HTTP_X_BATCH", self.parser.headers)
+
+    def test_received_chunked_empty_trailer(self):
+        data = (
+            b"GET /foobar HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"0\r\n"
+            b"\r\n"
+        )
+        result = self.parser.received(data)
+        self.parser.received(data[result:])
+        self.assertTrue(self.parser.completed)
+        self.assertIsNone(self.parser.error)
+        self.assertEqual(self.parser.trailers, ())
+
+    def test_received_chunked_trailer_split_reads(self):
+        header = (
+            b"GET /foobar HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"0\r\n"
+            b"X-Batch: one\r\n"
+        )
+        result = self.parser.received(header)
+        self.assertFalse(self.parser.completed)
+
+        rest = b"X-Other: two\r\n\r\n"
+        self.parser.received(header[result:] + rest)
+        self.assertTrue(self.parser.completed)
+        self.assertIsNone(self.parser.error)
+        self.assertEqual(
+            self.parser.trailers,
+            (("X-Batch", "one"), ("X-Other", "two")),
+        )
+
+    def test_received_chunked_trailer_followed_by_next_request(self):
+        data = (
+            b"GET /first HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"0\r\n"
+            b"X-Batch: one\r\n"
+            b"\r\n"
+            b"GET /second HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"\r\n"
+        )
+        result = self.parser.received(data)
+        result += self.parser.received(data[result:])
+        self.assertTrue(self.parser.completed)
+        self.assertIsNone(self.parser.error)
+        self.assertEqual(self.parser.command, "GET")
+        self.assertEqual(self.parser.path, "/first")
+        self.assertEqual(self.parser.trailers, (("X-Batch", "one"),))
+
+        # Everything after the trailer terminator must remain unconsumed so
+        # the next request is parsed with its own, independent headers.
+        leftover = data[result:]
+        self.assertTrue(leftover.startswith(b"GET /second HTTP/1.1"))
+
+        parser = HTTPRequestParser(self.parser.adj)
+        consumed = parser.received(leftover)
+        self.assertTrue(parser.completed)
+        self.assertIsNone(parser.error)
+        self.assertEqual(parser.path, "/second")
+        self.assertEqual(consumed, len(leftover))
+        self.assertEqual(parser.trailers, ())
+
+    def test_received_chunked_forbidden_trailer_field(self):
+        data = (
+            b"GET /foobar HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"0\r\n"
+            b"Authorization: Bearer x\r\n"
+            b"\r\n"
+        )
+        result = self.parser.received(data)
+        self.parser.received(data[result:])
+        self.assertTrue(self.parser.completed)
+        self.assertIsInstance(self.parser.error, BadRequest)
+
+    def test_received_chunked_invalid_trailer_field(self):
+        data = (
+            b"GET /foobar HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"0\r\n"
+            b"not a trailer\r\n"
+            b"\r\n"
+        )
+        result = self.parser.received(data)
+        self.parser.received(data[result:])
+        self.assertTrue(self.parser.completed)
+        self.assertIsInstance(self.parser.error, BadRequest)
+
+    def test_received_chunked_trailer_too_many_fields(self):
+        data = (
+            b"GET /foobar HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"0\r\n"
+            + b"\r\n".join(b"X-%d: v" % index for index in range(101))
+            + b"\r\n\r\n"
+        )
+        result = self.parser.received(data)
+        self.parser.received(data[result:])
+        self.assertTrue(self.parser.completed)
+        self.assertIsInstance(
+            self.parser.error, RequestHeaderFieldsTooLarge
+        )
+
     def test_parse_header_gardenpath(self):
         data = b"GET /foobar HTTP/8.4\r\nfoo: bar\r\n"
         self.parser.parse_header(data)

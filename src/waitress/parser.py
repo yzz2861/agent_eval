@@ -69,6 +69,7 @@ class HTTPRequestParser:
     version = "1.0"
     error = None
     connection_close = False
+    trailers = ()
 
     # Other attributes: first_line, header, headers, command, uri, version,
     # path, query, fragment
@@ -198,6 +199,12 @@ class HTTPRequestParser:
                     # appear to the client to be an entirely non-chunked HTTP
                     # request with a valid content-length.
                     self.headers["CONTENT_LENGTH"] = str(br.__len__())
+
+                    # The trailer fields were validated by the body receiver
+                    # and are kept separate from the original request headers.
+                    # They are an ordered tuple of (name, value) pairs, with
+                    # duplicates preserved in the order in which they arrived.
+                    self.trailers = br.trailers
 
             return consumed
 

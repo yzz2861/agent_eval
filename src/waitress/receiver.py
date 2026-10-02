@@ -13,8 +13,20 @@
 ##############################################################################
 """Data Chunk Receiver"""
 
-from waitress.rfc7230 import CHUNK_EXT_RE, ONLY_HEXDIG_RE
-from waitress.utilities import BadRequest, find_double_newline
+from waitress.rfc7230 import (
+    CHUNK_EXT_RE,
+    FORBIDDEN_TRAILER_FIELDS,
+    HEADER_FIELD_RE,
+    ONLY_HEXDIG_RE,
+)
+from waitress.utilities import BadRequest, RequestHeaderFieldsTooLarge
+
+# Limits for the trailer section of a chunked request body. They keep a
+# client from exhausting memory or header parsing effort after the request
+# body itself has already been fully buffered.
+MAX_TRAILER_SIZE = 65536
+MAX_TRAILER_LINE_SIZE = 1024
+MAX_TRAILER_FIELDS = 100
 
 
 class FixedStreamReceiver:
@@ -64,15 +76,24 @@ class ChunkedReceiver:
     control_line = b""
     chunk_end = b""
     all_chunks_received = False
-    trailer = b""
+    trailer_buffer = b""
+    trailers = ()
     completed = False
     error = None
 
-    # max_control_line = 1024
-    # max_trailer = 65536
-
-    def __init__(self, buf):
+    def __init__(
+        self,
+        buf,
+        max_trailer_size=MAX_TRAILER_SIZE,
+        max_trailer_line_size=MAX_TRAILER_LINE_SIZE,
+        max_trailer_fields=MAX_TRAILER_FIELDS,
+    ):
         self.buf = buf
+        self.max_trailer_size = max_trailer_size
+        self.max_trailer_line_size = max_trailer_line_size
+        self.max_trailer_fields = max_trailer_fields
+        self.trailer_fields = []
+        self.trailer_size = 0
 
     def __len__(self):
         return self.buf.__len__()
@@ -168,27 +189,107 @@ class ChunkedReceiver:
                     # else expect a control line.
             else:
                 # Receive the trailer.
-                trailer = self.trailer + s
-
-                if trailer.startswith(b"\r\n"):
-                    # No trailer.
-                    self.completed = True
-
-                    return orig_size - (len(trailer) - 2)
-                pos = find_double_newline(trailer)
-
-                if pos < 0:
-                    # Trailer not finished.
-                    self.trailer = trailer
-                    s = b""
-                else:
-                    # Finished the trailer.
-                    self.completed = True
-                    self.trailer = trailer[:pos]
-
-                    return orig_size - (len(trailer) - pos)
+                already_consumed = orig_size - len(s)
+                return already_consumed + self._receive_trailer(s)
 
         return orig_size
+
+    def _receive_trailer(self, s):
+        # Parse the trailer section one field line at a time, rather than
+        # scanning for the terminating blank line, so that the fields can be
+        # validated and handed to the application. Returns the number of bytes
+        # of s that belong to (and thus delimit) this trailer section.
+        orig_size = len(s)
+        data = self.trailer_buffer + s
+
+        while True:
+            pos = data.find(b"\r\n")
+
+            if pos < 0:
+                # No complete line yet. Everything buffered so far is part of
+                # the trailer section, as a pipelined request can not begin
+                # until the section is terminated.
+                pending = self.trailer_size + len(data)
+
+                if len(data) > self.max_trailer_line_size:
+                    self.error = RequestHeaderFieldsTooLarge(
+                        "Trailer line exceeds max_trailer_line_size of %s"
+                        % self.max_trailer_line_size
+                    )
+                elif pending > self.max_trailer_size:
+                    self.error = RequestHeaderFieldsTooLarge(
+                        "Trailer exceeds max_trailer_size of %s"
+                        % self.max_trailer_size
+                    )
+                else:
+                    self.trailer_buffer = data
+
+                return orig_size
+
+            if pos > self.max_trailer_line_size:
+                self.error = RequestHeaderFieldsTooLarge(
+                    "Trailer line exceeds max_trailer_line_size of %s"
+                    % self.max_trailer_line_size
+                )
+
+                return orig_size
+
+            line = data[:pos]
+            data = data[pos + 2 :]
+
+            if not line:
+                # The empty line terminates the trailer section. Anything left
+                # in data is the start of the next pipelined request and must
+                # not be consumed. The trailer size limit was enforced above.
+                # The terminating CRLF is framing and is not counted.
+
+                self.trailer_buffer = b""
+                self.trailers = tuple(self.trailer_fields)
+                self.completed = True
+
+                return orig_size - len(data)
+
+            self.trailer_size += pos + 2
+
+            if self.trailer_size > self.max_trailer_size:
+                self.error = RequestHeaderFieldsTooLarge(
+                    "Trailer exceeds max_trailer_size of %s"
+                    % self.max_trailer_size
+                )
+
+                return orig_size
+
+            header = HEADER_FIELD_RE.match(line)
+
+            if header is None:
+                self.error = BadRequest("Invalid trailer field")
+
+                return orig_size
+
+            name, value = header.group("name", "value")
+
+            # RFC 9110 section 6.5 forbids generating framing, routing and
+            # authentication fields as trailers, since they are only
+            # interpreted from the header section. Accepting them would let a
+            # client change the meaning of a request after its body was read.
+            if name.lower() in FORBIDDEN_TRAILER_FIELDS:
+                self.error = BadRequest(
+                    'Forbidden trailer field "%s"' % name.decode("latin-1")
+                )
+
+                return orig_size
+
+            if len(self.trailer_fields) >= self.max_trailer_fields:
+                self.error = RequestHeaderFieldsTooLarge(
+                    "Trailer fields exceed max_trailer_fields of %s"
+                    % self.max_trailer_fields
+                )
+
+                return orig_size
+
+            self.trailer_fields.append(
+                (name.decode("latin-1"), value.strip(b" \t").decode("latin-1"))
+            )
 
     def getfile(self):
         return self.buf.getfile()
