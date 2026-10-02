@@ -13,6 +13,7 @@ from hyperframe.exceptions import InvalidDataError, InvalidFrameError
 from hyperframe.frame import ContinuationFrame, Frame, HeadersFrame, PushPromiseFrame
 
 from .exceptions import FrameDataMissingError, FrameTooLargeError, ProtocolError
+from .rfc9218 import PRIORITY_UPDATE_FRAME_TYPE, PriorityUpdateFrame
 
 if TYPE_CHECKING:  # pragma: no cover
     from ._typing import Buffer
@@ -130,7 +131,13 @@ class FrameBuffer:
             raise StopIteration
 
         try:
-            f, length = Frame.parse_frame_header(memoryview(self._data[:9]))
+            if self._data[3] == PRIORITY_UPDATE_FRAME_TYPE:
+                stream_id = int.from_bytes(bytes(self._data[5:9]), "big") & 0x7FFFFFFF
+                f: Frame = PriorityUpdateFrame(stream_id=stream_id)
+                f.parse_flags(self._data[4])
+                length = (self._data[0] << 16) | (self._data[1] << 8) | self._data[2]
+            else:
+                f, length = Frame.parse_frame_header(memoryview(self._data[:9]))
         except (InvalidDataError, InvalidFrameError) as err:  # pragma: no cover
             msg = f"Received frame with invalid header: {err!s}"
             raise ProtocolError(msg) from err
@@ -147,6 +154,8 @@ class FrameBuffer:
         try:
             f.parse_body(memoryview(self._data[9:9+length]))
         except InvalidDataError as err:
+            if isinstance(f, PriorityUpdateFrame):
+                raise
             msg = "Received frame with non-compliant data"
             raise ProtocolError(msg) from err
         except InvalidFrameError as err:

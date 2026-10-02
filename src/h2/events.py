@@ -559,6 +559,35 @@ class PriorityUpdated(Event):
         )
 
 
+@dataclass(**kw_only)
+class PriorityUpdateReceived(Event):
+    """
+    An RFC 9218 PRIORITY_UPDATE frame was received on stream zero.
+
+    The frame is carried by the connection stream, but updates the request
+    stream identified by :attr:`stream_id`. h2 does not retain this priority
+    information for future streams or perform DATA scheduling.
+    """
+
+    stream_id: int
+    """The ID of the request stream whose priority is updated."""
+
+    urgency: int
+    """The ``u`` parameter. RFC 9218 defines valid values from 0 to 7."""
+
+    incremental: bool
+    """Whether the ``i`` boolean parameter is set."""
+
+    extension_parameters: dict[bytes, bytes]
+    """Raw serialized values of unrecognized top-level structured fields."""
+
+    def __repr__(self) -> str:
+        return (
+            f"<PriorityUpdateReceived stream_id:{self.stream_id}, urgency:{self.urgency}, "
+            f"incremental:{self.incremental}, extension_parameters:{self.extension_parameters!r}>"
+        )
+
+
 class ConnectionTerminated(Event):
     """
     The ConnectionTerminated event is fired when a connection is torn down by

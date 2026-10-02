@@ -55,6 +55,10 @@ class SettingCodes(enum.IntEnum):
     #: client set this to 1.
     ENABLE_CONNECT_PROTOCOL = SettingsFrame.ENABLE_CONNECT_PROTOCOL
 
+    #: Indicates that the sender uses the priority scheme defined in RFC 9218
+    #: and will not use the stream priority fields defined in RFC 7540.
+    NO_RFC7540_PRIORITIES = 0x9
+
 
 def _setting_code_from_int(code: int) -> SettingCodes | int:
     """
@@ -358,6 +362,8 @@ def _validate_setting(
         if value < 0:
             return ErrorCodes.PROTOCOL_ERROR
     elif setting == SettingCodes.ENABLE_CONNECT_PROTOCOL and value not in (0, 1):
+        return ErrorCodes.PROTOCOL_ERROR
+    elif setting == SettingCodes.NO_RFC7540_PRIORITIES and value not in (0, 1):
         return ErrorCodes.PROTOCOL_ERROR
 
     return ErrorCodes.NO_ERROR
