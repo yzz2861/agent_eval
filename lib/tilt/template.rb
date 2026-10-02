@@ -9,6 +9,35 @@ module Tilt
   # @private
   LOCK = Mutex.new
 
+  # @private
+  # Monotonic counter ensuring compiled method names are unique even when
+  # one thread compiles more than one method concurrently (e.g. a nested
+  # render blocked while another compilation proceeds).
+  COMPILED_METHOD_COUNTER = Class.new do
+    def initialize
+      @counter = 0
+      @mutex = Mutex.new
+    end
+
+    def next!
+      @mutex.synchronize { @counter += 1 }
+    end
+  end.new
+
+  class << self
+    # The default maximum number of compiled methods kept resident per
+    # {Template} object. When +nil+ (the default), compiled methods are kept
+    # indefinitely, which matches the historical behavior.
+    #
+    # Per-template overrides can be given through the
+    # +:compiled_method_cache_size+ option (aliases: +:max_compiled_methods+
+    # and +:compiled_method_cache_capacity).
+    attr_accessor :default_compiled_method_cache_size
+
+    alias_method :compiled_method_cache_size, :default_compiled_method_cache_size
+    alias_method :compiled_method_cache_size=, :default_compiled_method_cache_size=
+  end
+
   # Base class for template implementations. Subclasses must implement
   # the #prepare method and one of the #evaluate or #precompiled_template
   # methods.
@@ -77,9 +106,22 @@ module Tilt
       # used to hold compiled template methods
       @compiled_method = {}
 
+      # statistics for the compiled method cache
+      @compiled_method_hits = 0
+      @compiled_method_misses = 0
+      @compiled_method_evictions = 0
+
       # used on 1.9 to set the encoding if it is not set elsewhere (like a magic comment)
       # currently only used if template compiles to ruby
       @default_encoding = @options.delete :default_encoding
+
+      # optional bound on how many compiled methods stay resident; nil means
+      # unlimited
+      @compiled_method_cache_size =
+        @options.delete(:compiled_method_cache_size) ||
+        @options.delete(:max_compiled_methods) ||
+        @options.delete(:compiled_method_cache_capacity) ||
+        @options.delete(:compiled_methods_limit)
 
       # load template data and prepare (uses binread to avoid encoding issues)
       @reader = block || lambda { |t| read_template_file }
@@ -145,6 +187,76 @@ module Tilt
         path = File.expand_path(path.sub(/\.rb\z/i, ''))
       end
       @compiled_path = path
+    end
+
+    # The maximum number of compiled methods kept resident for this template.
+    # Falls back to {Tilt.default_compiled_method_cache_size}; +nil+ means the
+    # cache is unbounded.
+    def compiled_method_cache_size
+      LOCK.synchronize do
+        @compiled_method_cache_size || Tilt.default_compiled_method_cache_size
+      end
+    end
+
+    # Limit the number of compiled methods kept resident for this template.
+    # Setting this to +nil+ restores unbounded caching. Lowering an active
+    # limit immediately evicts least recently used compiled methods.
+    def compiled_method_cache_size=(size)
+      LOCK.synchronize do
+        @compiled_method_cache_size = size
+        prune_compiled_methods
+      end
+    end
+
+    # Drop every cached compiled method and reset the hit/eviction counters.
+    # Methods already captured by an in-progress render remain usable for that
+    # render; subsequent renders transparently recompile. Returns the template.
+    def clear_compiled_methods
+      LOCK.synchronize do
+        @compiled_method.clear
+        @compiled_method_hits = 0
+        @compiled_method_misses = 0
+        @compiled_method_evictions = 0
+      end
+      self
+    end
+
+    # Number of compiled methods currently resident for this template.
+    def compiled_methods_count
+      LOCK.synchronize { @compiled_method.size }
+    end
+    alias_method :compiled_method_count, :compiled_methods_count
+
+    # Number of renders served from the compiled method cache.
+    def compiled_method_hits
+      LOCK.synchronize { @compiled_method_hits }
+    end
+
+    # Number of compiled methods evicted because the cache capacity was
+    # exceeded (including an immediate resize). Reset by
+    # #clear_compiled_methods.
+    def compiled_methods_evicted
+      LOCK.synchronize { @compiled_method_evictions }
+    end
+    alias_method :compiled_method_evictions, :compiled_methods_evicted
+
+    # A snapshot of compiled method cache statistics:
+    #
+    #   {
+    #     count:     current resident method count,
+    #     hits:      cache hits,
+    #     misses:    cache misses (compilations),
+    #     evictions: evicted methods
+    #   }
+    def compiled_method_stats
+      LOCK.synchronize do
+        {
+          :count     => @compiled_method.size,
+          :hits      => @compiled_method_hits,
+          :misses    => @compiled_method_misses,
+          :evictions => @compiled_method_evictions,
+        }
+      end
     end
 
     protected
@@ -256,8 +368,40 @@ module Tilt
 
     # The compiled method for the locals keys provided.
     def compiled_method(locals_keys, scope_class=nil)
+      key = [scope_class, locals_keys]
+
       LOCK.synchronize do
-        @compiled_method[[scope_class, locals_keys]] ||= compile_template_method(locals_keys, scope_class)
+        method = @compiled_method.delete(key)
+
+        if method
+          # Re-insert to mark the entry as most recently used for LRU order.
+          @compiled_method[key] = method
+          @compiled_method_hits += 1
+          method
+        else
+          @compiled_method_misses += 1
+
+          # Compile before touching the cache: a failed compilation must not
+          # occupy capacity or evict usable methods. Compiling while holding
+          # the lock also ensures concurrent first compilations of the same
+          # template/locals publish exactly one result.
+          method = compile_template_method(locals_keys, scope_class)
+          @compiled_method[key] = method
+          prune_compiled_methods
+          method
+        end
+      end
+    end
+
+    # Evict least recently used compiled methods while the resident count is
+    # above the configured limit. Must be called while holding LOCK.
+    def prune_compiled_methods
+      size = @compiled_method_cache_size || Tilt.default_compiled_method_cache_size
+      return unless size
+
+      while @compiled_method.size > size
+        @compiled_method.shift
+        @compiled_method_evictions += 1
       end
     end
 
@@ -275,7 +419,7 @@ module Tilt
       source, offset = precompiled(local_keys)
       local_code = local_extraction(local_keys)
 
-      method_name = "__tilt_#{Thread.current.object_id.abs}"
+      method_name = "__tilt_#{Thread.current.object_id.abs}_#{COMPILED_METHOD_COUNTER.next!}"
       method_source = String.new
 
       if method_source.respond_to?(:force_encoding)

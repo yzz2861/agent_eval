@@ -1,3 +1,9 @@
+## Unreleased
+
+* Add configurable per-template (`:compiled_method_cache_size` option) and global (`Tilt.default_compiled_method_cache_size`) limit on how many compiled methods stay resident, with LRU eviction
+* Add `Tilt::Template#clear_compiled_methods` and compiled method cache statistics (`#compiled_method_stats`, `#compiled_methods_count`, `#compiled_method_hits`, `#compiled_methods_evicted`)
+* Keep unbounded caching as the default; failed compilations do not occupy or evict cache entries, and methods in use by an active render survive eviction/clearing
+
 ## 2.1.0 (2023-02-17)
 
 * Use UnboundMethod#bind_call on Ruby 2.7+ for better performance (#380, jeremyevans)
