@@ -1,6 +1,10 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+### Added
+- Add `private_network` resource option to support Private Network Access preflight requests (`Access-Control-Request-Private-Network` / `Access-Control-Allow-Private-Network`)
+
 ## 3.0.0 - 2025-05-16
 ### Changed
 - Update Rack dependency to >= 3.0.14

@@ -11,6 +11,7 @@ module Rack
       MISS_NO_METHOD   = 'no-method'
       MISS_DENY_METHOD = 'deny-method'
       MISS_DENY_HEADER = 'deny-header'
+      MISS_DENY_PRIVATE_NETWORK = 'deny-private-network'
 
       attr_accessor :preflight, :hit, :miss_reason
 

@@ -25,6 +25,11 @@ use Rack::Cors do
     resource '/patch_test', methods: :patch
     resource '/$batch', methods: :post
     resource '/wildcard/*', methods: :any
+    resource '/private_network', methods: :any, headers: :any, private_network: true
+    resource '/private_network_get_only', methods: :get, private_network: true
+    resource '/private_network_restricted_headers', headers: 'x-domain-token', private_network: true
+    resource '/private_network_credentials', credentials: true, private_network: true
+    resource '/private_network_vary', methods: :get, vary: %w[Origin Host], private_network: true
     # resource '/file/at/*',
     #     :methods => [:get, :post, :put, :delete],
     #     :headers => :any,
@@ -46,6 +51,7 @@ use Rack::Cors do
   allow do
     origins '*'
     resource '/public'
+    resource '/public_private_network', private_network: true
     resource '/public/*'
     resource '/public_without_credentials', credentials: false
   end
