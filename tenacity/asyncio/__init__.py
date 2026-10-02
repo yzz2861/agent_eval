@@ -108,6 +108,9 @@ class AsyncRetrying(BaseRetrying):
             name=name,
             enabled=enabled,
         )
+        self._retry_state: RetryCallState
+        self._disabled_iter_done: bool
+        self._resume_delay: float = 0.0
 
     @override
     async def __call__(  # type: ignore[override]
@@ -120,8 +123,13 @@ class AsyncRetrying(BaseRetrying):
             return fn(*args, **kwargs)  # type: ignore[return-value]
 
         self.begin()
-
+        loaded = self._take_resumed_checkpoint()
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
+        resume_delay = 0.0
+        if loaded is not None:
+            resume_delay = self._apply_resumed_checkpoint(retry_state, loaded)
+        if resume_delay:
+            await self.sleep(resume_delay)  # type: ignore[misc]
         while True:
             do = await self.iter(retry_state=retry_state)
             if isinstance(do, DoAttempt):
@@ -169,6 +177,17 @@ class AsyncRetrying(BaseRetrying):
         )
 
     @override
+    async def _run_before_sleep(  # type: ignore[override]
+        self, retry_state: "RetryCallState"
+    ) -> None:
+        retry_state._set_checkpoint_allowed(True)  # noqa: SLF001
+        try:
+            if self.before_sleep is not None:
+                await _utils.wrap_to_async_func(self.before_sleep)(retry_state)
+        finally:
+            retry_state._set_checkpoint_allowed(False)  # noqa: SLF001
+
+    @override
     async def iter(self, retry_state: "RetryCallState") -> DoAttempt | DoSleep | t.Any:
         self._begin_iter(retry_state)
         result = None
@@ -184,10 +203,17 @@ class AsyncRetrying(BaseRetrying):
         if not self.enabled:
             self._retry_state = RetryCallState(self, fn=None, args=(), kwargs={})
             self._disabled_iter_done = False
+            self._resume_delay = 0.0
             return self
 
         self.begin()
+        loaded = self._take_resumed_checkpoint()
         self._retry_state = RetryCallState(self, fn=None, args=(), kwargs={})
+        self._resume_delay = 0.0
+        if loaded is not None:
+            self._resume_delay = self._apply_resumed_checkpoint(
+                self._retry_state, loaded
+            )
         return self
 
     async def __anext__(self) -> AttemptManager:
@@ -199,6 +225,11 @@ class AsyncRetrying(BaseRetrying):
                 raise StopAsyncIteration
             self._disabled_iter_done = True
             return AttemptManager(retry_state=self._retry_state)
+
+        if self._resume_delay:
+            resume_delay = self._resume_delay
+            self._resume_delay = 0.0
+            await self.sleep(resume_delay)  # type: ignore[misc]
 
         while True:
             do = await self.iter(retry_state=self._retry_state)

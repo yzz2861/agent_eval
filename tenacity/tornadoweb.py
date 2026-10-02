@@ -47,7 +47,13 @@ class TornadoRetrying(BaseRetrying):
     ) -> "typing.Generator[typing.Any, typing.Any, _RetValT]":
         self.begin()
 
+        loaded = self._take_resumed_checkpoint()
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
+        resume_delay = 0.0
+        if loaded is not None:
+            resume_delay = self._apply_resumed_checkpoint(retry_state, loaded)
+        if resume_delay:
+            yield self.sleep(resume_delay)
         while True:
             do = self.iter(retry_state=retry_state)
             if isinstance(do, DoAttempt):

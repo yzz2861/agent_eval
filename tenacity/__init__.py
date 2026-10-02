@@ -25,7 +25,7 @@ import warnings
 from abc import ABC, abstractmethod
 from concurrent import futures
 
-from . import _utils
+from . import _utils, checkpoint
 from ._utils import override
 
 # Import all built-in after strategies for easier usage.
@@ -36,6 +36,20 @@ from .before import before_log, before_nothing
 
 # Import all built-in before sleep strategies for easier usage.
 from .before_sleep import before_sleep_log, before_sleep_nothing
+from .checkpoint import (
+    CHECKPOINT_PHASE_BETWEEN_ATTEMPTS,
+    CHECKPOINT_VERSION,
+    CheckpointableWait,
+    CheckpointError,
+    LoadedRetryCheckpoint,
+    dump_wait,
+    export_checkpoint,
+    load_checkpoint,
+    load_wait,
+    register_wait_strategy,
+    remaining_delay,
+    restored_start_time,
+)
 
 # Import all nap strategies for easier usage.
 from .nap import sleep, sleep_using_event
@@ -275,6 +289,20 @@ class BaseRetrying(ABC):
         self.retry_error_callback = retry_error_callback
         self._name = name
         self.enabled = enabled
+        self._resumed_checkpoint: LoadedRetryCheckpoint | None = None
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint: dict[str, t.Any] | str | bytes | bytearray,
+        *,
+        secret: str | bytes | None = None,
+        **kwargs: t.Any,
+    ) -> "Self":
+        """Create a retrying controller initialized from a saved checkpoint."""
+        retrying = cls(**kwargs)
+        retrying.restore_checkpoint(checkpoint, secret=secret)
+        return retrying
 
     def copy(
         self,
@@ -411,6 +439,48 @@ class BaseRetrying(ABC):
         self.statistics["idle_for"] = 0
         self.statistics["delay_since_first_attempt"] = 0
 
+    def to_checkpoint(
+        self,
+        retry_state: "RetryCallState",
+        *,
+        secret: str | bytes | None = None,
+    ) -> dict[str, t.Any]:
+        """Export a safe JSON checkpoint from a before-sleep callback."""
+        return export_checkpoint(retry_state, secret=secret)
+
+    def restore_checkpoint(
+        self,
+        checkpoint: dict[str, t.Any] | str | bytes | bytearray,
+        *,
+        secret: str | bytes | None = None,
+    ) -> "BaseRetrying":
+        """Restore portable wait state and schedule a one-shot resumed run."""
+        loaded = load_checkpoint(checkpoint, secret=secret)
+        self.wait = loaded.wait
+        self._resumed_checkpoint = loaded
+        return self
+
+    def _take_resumed_checkpoint(self) -> LoadedRetryCheckpoint | None:
+        loaded = self._resumed_checkpoint
+        self._resumed_checkpoint = None
+        return loaded
+
+    def _apply_resumed_checkpoint(
+        self, retry_state: "RetryCallState", loaded: LoadedRetryCheckpoint
+    ) -> float:
+        now = checkpoint.wall_now()
+        start_time = restored_start_time(loaded, now)
+        retry_state.start_time = start_time
+        retry_state.attempt_number = loaded.attempt_number
+        delay = now - start_time
+        sleep_for = remaining_delay(loaded, now)
+        retry_state.idle_for = sleep_for
+        self.statistics["start_time"] = start_time
+        self.statistics["attempt_number"] = loaded.attempt_number
+        self.statistics["idle_for"] = sleep_for
+        self.statistics["delay_since_first_attempt"] = delay
+        return sleep_for
+
     def _add_action_func(self, fn: t.Callable[..., t.Any]) -> None:
         self.iter_state.actions.append(fn)
 
@@ -493,9 +563,17 @@ class BaseRetrying(ABC):
         self._add_action_func(next_action)
 
         if self.before_sleep is not None:
-            self._add_action_func(self.before_sleep)
+            self._add_action_func(self._run_before_sleep)
 
         self._add_action_func(lambda rs: DoSleep(rs.upcoming_sleep))
+
+    def _run_before_sleep(self, retry_state: "RetryCallState") -> None:
+        retry_state._set_checkpoint_allowed(True)  # noqa: SLF001
+        try:
+            if self.before_sleep is not None:
+                self.before_sleep(retry_state)
+        finally:
+            retry_state._set_checkpoint_allowed(False)  # noqa: SLF001
 
     def __iter__(self) -> t.Generator[AttemptManager, None, None]:
         if not self.enabled:
@@ -506,8 +584,12 @@ class BaseRetrying(ABC):
             return
 
         self.begin()
-
+        loaded = self._take_resumed_checkpoint()
         retry_state = RetryCallState(self, fn=None, args=(), kwargs={})
+        if loaded is not None:
+            resume_delay = self._apply_resumed_checkpoint(retry_state, loaded)
+            if resume_delay:
+                self.sleep(resume_delay)
         while True:
             do = self.iter(retry_state=retry_state)
             if isinstance(do, DoAttempt):
@@ -542,8 +624,13 @@ class Retrying(BaseRetrying):
             return fn(*args, **kwargs)
 
         self.begin()
-
+        loaded = self._take_resumed_checkpoint()
         retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
+        resume_delay = 0.0
+        if loaded is not None:
+            resume_delay = self._apply_resumed_checkpoint(retry_state, loaded)
+        if resume_delay:
+            self.sleep(resume_delay)
         while True:
             do = self.iter(retry_state=retry_state)
             if isinstance(do, DoAttempt):
@@ -618,6 +705,10 @@ class RetryCallState:
         self.next_action: RetryAction | None = None
         #: Next sleep time as decided by the retry manager.
         self.upcoming_sleep: float = 0.0
+        self._checkpoint_allowed = False
+
+    def _set_checkpoint_allowed(self, allowed: bool) -> None:
+        self._checkpoint_allowed = allowed
 
     def get_fn_name(self) -> str:
         """Get the name of the function being retried.
@@ -812,14 +903,19 @@ if _has_tornado():
 
 
 __all__ = [
+    "CHECKPOINT_PHASE_BETWEEN_ATTEMPTS",
+    "CHECKPOINT_VERSION",
     "NO_RESULT",
     "AsyncRetrying",
     "AttemptManager",
     "BaseAction",
     "BaseRetrying",
+    "CheckpointError",
+    "CheckpointableWait",
     "DoAttempt",
     "DoSleep",
     "Future",
+    "LoadedRetryCheckpoint",
     "RetryAction",
     "RetryCallState",
     "RetryError",
@@ -832,6 +928,13 @@ __all__ = [
     "before_nothing",
     "before_sleep_log",
     "before_sleep_nothing",
+    "dump_wait",
+    "export_checkpoint",
+    "load_checkpoint",
+    "load_wait",
+    "register_wait_strategy",
+    "remaining_delay",
+    "restored_start_time",
     "retry",
     "retry_all",
     "retry_always",

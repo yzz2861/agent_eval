@@ -47,6 +47,12 @@ Those functions can be used as the `before_sleep` keyword argument of
 .. automodule:: tenacity.before_sleep
    :members:
 
+Retry Checkpoints
+-----------------
+
+.. automodule:: tenacity.checkpoint
+   :members:
+
 Nap Functions
 -------------
 

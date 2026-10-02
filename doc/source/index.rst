@@ -538,6 +538,54 @@ The ``before_sleep`` callback runs after a failed attempt and before sleeping,
 making it ideal for re-establishing connections, refreshing tokens, or any
 other setup that needs to happen before the next attempt.
 
+**Persisting a retry across a process restart** is also possible from the
+``before_sleep`` phase. Checkpoints are plain JSON and contain the next attempt
+number, elapsed retry budget, next allowed wall-clock time, and wait-strategy
+state. They never contain the target callable, the last exception object, or a
+running coroutine; the restarted application supplies the callable again.
+
+.. code-block:: python
+
+    import json
+    from tenacity import Retrying, stop_after_attempt, stop_after_delay, wait_fixed
+
+    def persist_checkpoint(retry_state):
+        checkpoint = retryer.to_checkpoint(
+            retry_state, secret=b"application-managed-secret"
+        )
+        with open("retry.json", "w") as state_file:
+            json.dump(checkpoint, state_file)
+
+    retryer = Retrying(
+        stop=(stop_after_delay(300) | stop_after_attempt(10)),
+        wait=wait_fixed(30),
+        before_sleep=persist_checkpoint,
+    )
+    retryer(first_callable)
+
+After a restart, reconstruct the controller and pass the callable again:
+
+.. code-block:: python
+
+    with open("retry.json") as state_file:
+        checkpoint = json.load(state_file)
+
+    Retrying.from_checkpoint(
+        checkpoint,
+        secret=b"application-managed-secret",
+        stop=(stop_after_delay(300) | stop_after_attempt(10)),
+    )(first_callable)
+
+The wall clock is used to schedule the next attempt and the process monotonic
+clock is reconstructed so that downtime is included in time-based stop budgets.
+The remaining part of an in-progress wait is slept after restoration; if the
+deadline was passed while stopped, the retry policy is evaluated immediately.
+
+All built-in backoff strategies are serializable. Custom wait strategies must
+opt in explicitly by subclassing ``CheckpointableWait`` and registering a
+stable name and version. Plain callables and ``wait_exception`` are rejected
+because their predicates are callables. Pickle is never used.
+
 **Accessing the attempt number inside the function** using the iterator API:
 
 .. testcode::

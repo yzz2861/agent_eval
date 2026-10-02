@@ -1,0 +1,8 @@
+features:
+  - |
+    Retry controllers can now export and restore JSON checkpoints between
+    attempts. Checkpoints retain the attempt count, elapsed retry budget, next
+    allowed wall-clock time, and registered wait-strategy state, without
+    storing callables, exceptions, or running coroutines. Process downtime is
+    counted against time-based stop policies, and tampered, incompatible, or
+    unsafely staged checkpoints are rejected. Pickle is not used.
