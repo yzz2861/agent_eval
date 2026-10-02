@@ -1,0 +1,13 @@
+/.bundle
+/.rbenv-vars
+/.ruby-version
+/.rvmrc
+/bin
+/corpus
+/coverage
+/Gemfile.lock
+/gems
+/lib/mail/parsers/ragel/ruby/machines/*.dot
+/lib/mail/parsers/ragel/ruby/machines/*.svg
+/mail-*.gem
+/rdoc

@@ -1,0 +1,34 @@
+== Version 2.9.0 (unreleased)
+
+Breaking changes:
+* Mail::Field::FIELDS_MAP now contains class names, not Class instances (c960657)
+
+Compatibility:
+
+* Update MIME-Version to have correct case per RFC 2045 @mikel
+
+Features:
+
+* Updated README to improve around sending multipart mail @kapfenho
+* Add delivery_interceptors method to Mail class to fetch registered interceptors @ghousemohamed
+
+Code Improvements:
+
+* Use Rake's default rakelib/ directory @olleolleolle
+* refactor: Use Dir.glob only once in gemspec's "files" directive @olleolleolle
+* Configure RSpec's zero-monkey patching mode @olleolleolle
+* Added support for JRuby 9.4 @mikel
+* Prefer `__dir__` @olleolleolle
+
+Bug Fixes:
+
+* Regression: Preserve message-level charset when adding parts (related to Rails ActionMailer) @shields
+* Regression: Adding a part should not reset the mail's charset to nil @railsbob
+
+Performance:
+
+* reduce object allocations by replacing =~ and Regexp#match by Regexp#match? @ahorek
+* reduce object allocations by replacing String#unpack[0] by String#unpack1 @ahorek
+
+
+Please check [2-8-stable](https://github.com/mikel/mail/blob/2-8-stable/CHANGELOG.rdoc) for previous changes.
