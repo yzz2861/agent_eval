@@ -776,31 +776,159 @@ class MMC(TestModel):
     value = IntegerField()
     misc = TextField(null=True)
 
+class MMD(TestModel):
+    key = TextField()
+    code = IntegerField()
+    flag = BooleanField(null=True)
+
+class MME(TestModel):
+    key = TextField()
+    code = TextField(null=True)
+    active = BooleanField(null=True)
+    note = TextField(null=True)
+
+class MMNoPK(TestModel):
+    key = TextField()
+    class Meta:
+        primary_key = False
+
 
 class TestResolveMultiModelQuery(ModelTestCase):
-    requires = [MMA, MMB, MMC]
+    requires = [MMA, MMB, MMC, MMD, MME, MMNoPK]
 
     def test_resolve_multimodel_query(self):
         MMA.insert_many([('k0', 0), ('k1', 1)]).execute()
         MMB.insert_many([('k10',), ('k11',)]).execute()
         MMC.insert_many([('k20', 20, 'a'), ('k21', 21, 'b')]).execute()
 
-        mma = MMA.select(MMA.key, MMA.value)
-        mmb = MMB.select(MMB.key, Value(99).alias('value'))
-        mmc = MMC.select(MMC.key, MMC.value)
-        query = (mma | mmb | mmc).order_by(SQL('1'))
+        mma = MMA.select(MMA.id, MMA.key, MMA.value)
+        mmb = MMB.select(MMB.id, MMB.key, Value(99).alias('value'))
+        mmc = MMC.select(MMC.id, MMC.key, MMC.value)
+        query = (mma | mmb | mmc).order_by(SQL('2'))
         data = [obj for obj in resolve_multimodel_query(query)]
 
         expected = [
-            MMA(key='k0', value=0), MMA(key='k1', value=1),
-            MMB(key='k10', value=99), MMB(key='k11', value=99),
-            MMC(key='k20', value=20), MMC(key='k21', value=21)]
+            MMA(id=1, key='k0', value=0), MMA(id=2, key='k1', value=1),
+            MMB(id=1, key='k10'),
+            MMB(id=2, key='k11'),
+            MMC(id=1, key='k20', value=20),
+            MMC(id=2, key='k21', value=21)]
         self.assertEqual(len(data), len(expected))
 
         for row, exp_row in zip(data, expected):
             self.assertEqual(row.__class__, exp_row.__class__)
+            self.assertEqual(row.id, exp_row.id)
             self.assertEqual(row.key, exp_row.key)
-            self.assertEqual(row.value, exp_row.value)
+            if not isinstance(row, MMB):
+                self.assertEqual(row.value, exp_row.value)
+
+    def test_typed_union_field_mapping_ordering_nulls_and_converters(self):
+        MMD.create(id=1, key='d', code=42, flag=False)
+        MME.create(id=2, key='e')
+        marker = '_type'
+        mmd = MMD.select(
+            Value('d').alias(marker), MMD.id, MMD.key, MMD.code, MMD.flag)
+        mme = MME.select(
+            MME.key, MME.id, MME.note, SQL('NULL').alias('code'),
+            Value('e').alias(marker))
+        typed = resolve_multimodel_query(
+            mmd.union_all(mme),
+            key=marker,
+            models={'d': MMD, 'e': MME},
+            field_map={
+                MMD: [None, 'id', 'key', 'code', 'flag'],
+                MME: ['key', 'id', None, 'code', None]})
+
+        rows = sorted(typed, key=lambda row: row.key)
+        self.assertEqual([type(row) for row in rows], [MMD, MME])
+
+        mmd_row, mme_row = rows
+        self.assertEqual(mmd_row.id, 1)
+        self.assertEqual(mmd_row.code, 42)
+        self.assertIs(mmd_row.flag, False)
+
+        self.assertEqual(mme_row.id, 2)
+        self.assertIsNone(mme_row.code)
+        self.assertIn('code', mme_row.__data__)
+        self.assertNotIn('active', mme_row.__data__)
+        self.assertNotIn('note', mme_row.__data__)
+
+    def test_typed_union_order_limit_alias_and_iterator(self):
+        MMA.create(id=1, key='k0', value=0)
+        MMB.create(id=2, key='k1')
+        mma = MMA.select(MMA.id, MMA.key, MMA.value)
+        mmb = MMB.select(MMB.id, MMB.key, Value(99).alias('value'))
+        original = mma.union_all(mmb)
+        typed = resolve_multimodel_query(original)
+
+        page = typed.order_by(SQL('2')).limit(1)
+        self.assertIsNone(page._cursor_wrapper)
+        self.assertEqual([(type(row), row.key) for row in page],
+                         [(MMA, 'k0')])
+        self.assertEqual(len(list(typed.iterator())), 2)
+        aliased = typed.alias('mm')
+        self.assertIn('AS "mm"', Select((aliased,), [SQL('*')]).sql()[0])
+        self.assertNotIn('_model_identifier', original.sql()[0])
+
+    def test_typed_union_unknown_marker_fails(self):
+        marker = '_type'
+        mma = MMA.select(MMA.id, Value('zzz').alias(marker), MMA.key)
+        mmb = MMB.select(MMB.id, Value('mmb').alias(marker), MMB.key)
+        with self.assertRaises(ValueError) as exc:
+            resolve_multimodel_query(
+                mma.union_all(mmb),
+                key=marker,
+                models={'mma': MMA, 'mmb': MMB})
+        self.assertIn('Unknown multi-model type marker', str(exc.exception))
+
+    def test_typed_union_duplicate_mapping_fails(self):
+        marker = '_type'
+        mma = MMA.select(MMA.id, MMA.key, Value('mma').alias(marker))
+        mmb = MMB.select(MMB.id, Value('mmb').alias(marker))
+        with self.assertRaises(ValueError):
+            resolve_multimodel_query(
+                mma.union_all(mmb),
+                key=marker,
+                models={'mma': MMA, 'mmb': MMB},
+                field_map={MMA: {'id': 'id', 'key': 'id'}})
+
+    def test_typed_union_missing_primary_key_fails(self):
+        marker = '_type'
+        mma = MMA.select(MMA.key, Value('mma').alias(marker))
+        mmb = MMB.select(MMB.id, Value('mmb').alias(marker))
+        with self.assertRaises(ValueError) as exc:
+            resolve_multimodel_query(
+                mma.union_all(mmb),
+                key=marker,
+                models={'mma': MMA, 'mmb': MMB})
+        self.assertIn('Primary key id is missing', str(exc.exception))
+
+    def test_typed_union_model_without_primary_key_fails(self):
+        mma = MMA.select(MMA.id)
+        no_pk = MMNoPK.select(MMNoPK.key)
+        with self.assertRaises(ValueError) as exc:
+            resolve_multimodel_query(
+                mma.union_all(no_pk),
+                models={'mma': MMA, 'mmno_pk': MMNoPK})
+        self.assertIn('must declare a primary key', str(exc.exception))
+
+    def test_typed_union_unknown_mapped_field_fails(self):
+        marker = '_type'
+        mma = MMA.select(MMA.id, MMA.key, Value('mma').alias(marker))
+        mmb = MMB.select(MMB.id, Value('mmb').alias(marker), MMB.key)
+        with self.assertRaises(ValueError) as exc:
+            resolve_multimodel_query(
+                mma.union_all(mmb),
+                key=marker,
+                models={'mma': MMA, 'mmb': MMB},
+                field_map={MMA: {'key': 'unknown'}})
+        self.assertIn('Unknown field', str(exc.exception))
+
+    def test_typed_intersect_is_unsupported(self):
+        with self.assertRaises(ValueError) as exc:
+            resolve_multimodel_query(
+                MMA.select(MMA.id).intersect(MMB.select(MMB.id)))
+        self.assertIn('UNION', str(exc.exception))
 
 
 ts_database = get_in_memory_db()

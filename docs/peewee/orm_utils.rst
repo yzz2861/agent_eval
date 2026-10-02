@@ -103,15 +103,31 @@ Model Serialization
 Compound Query Resolution
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. function:: resolve_multimodel_query(query, key='_model_identifier')
+.. function:: resolve_multimodel_query(query, key='_model_identifier',
+   models=None, field_map=None)
 
-   Resolve rows from a compound ``UNION`` or similar query to the correct
-   model class. Useful when two tables are unioned and you need each row
-   as an instance of the appropriate model.
+   Resolve rows from a ``UNION`` or ``UNION ALL`` query to the correct
+   model class. Useful when two tables are unioned and each row must be an
+   instance of the branch's model.
 
-   :param query: A compound :class:`SelectQuery`.
-   :param str key: Name of the column used to identify the model.
-   :returns: An iterable that yields properly typed model instances.
+   :param query: A compound :class:`SelectQuery` made from model selects.
+   :param str key: Name of the column used to identify the model. When a
+       branch does not already project this column, the marker is appended.
+   :param models: Optional mapping of marker values to model classes, or an
+       iterable of model classes whose table names are used as markers.
+   :param field_map: Optional mapping of a model or marker value to either a
+       dictionary mapping selected column names/instances to target field
+       names/instances, or a positional tuple of target fields. ``None``
+       marks a position that should not be instantiated.
+   :returns: A compound select query that yields properly typed model
+       instances. Sorting, limits, offsets, aliases and ``iterator()`` remain
+       available on the returned query.
+
+   Field maps are resolved per branch, so branches may select common columns
+   in different orders. A field absent from a branch is omitted from the
+   model instance, while an explicitly selected ``NULL`` becomes ``None``.
+   Values use the converter from the target model's field. Unknown markers,
+   duplicate mappings and missing primary keys raise ``ValueError``.
 
 
 Thread-Safe Database Swapping

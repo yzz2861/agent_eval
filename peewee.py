@@ -407,7 +407,8 @@ ROW = attrdict(
     DICT=2,
     NAMED_TUPLE=3,
     CONSTRUCTOR=4,
-    MODEL=5)
+    MODEL=5,
+    MULTIMODEL=6)
 
 # Query type to use with prefetch
 PREFETCH_TYPE = attrdict(
@@ -8369,6 +8370,8 @@ class _ModelQueryHelper(object):
         elif row_type == ROW.CONSTRUCTOR:
             return ModelObjectCursorWrapper(cursor, self.model,
                                             self._returning, self._constructor)
+        elif row_type == ROW.MULTIMODEL:
+            return ModelMultiModelCursorWrapper(cursor, self._constructor)
         else:
             raise ValueError('Unrecognized row type: "%s".' % row_type)
 
@@ -9138,6 +9141,19 @@ class ModelObjectCursorWrapper(ModelDictCursorWrapper):
             return obj
         else:
             return self.constructor(**result)
+
+
+class ModelMultiModelCursorWrapper(CursorWrapper):
+    def __init__(self, cursor, constructor):
+        super(ModelMultiModelCursorWrapper, self).__init__(cursor)
+        self.constructor = constructor
+
+    def initialize(self):
+        self.ncols = len(self.cursor.description)
+        self.constructor.validate(self.ncols)
+
+    def process_row(self, row):
+        return self.constructor.row(row)
 
 
 class ModelCursorWrapper(BaseModelCursorWrapper):

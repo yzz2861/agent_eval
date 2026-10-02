@@ -1,10 +1,17 @@
 import threading
 
+from collections.abc import Mapping
+
 from peewee import *
 from peewee import Alias
 from peewee import CompoundSelectQuery
+from peewee import Column
+from peewee import Entity
+from peewee import FieldAlias
 from peewee import Metadata
+from peewee import ROW
 from peewee import callable_
+from peewee import is_model
 
 
 _clone_set = lambda s: set(s) if s else set()
@@ -287,27 +294,366 @@ class ReconnectMixin(object):
             return func(*args, **kwargs)
 
 
-def resolve_multimodel_query(query, key='_model_identifier'):
-    mapping = {}
-    accum = [query]
-    while accum:
-        curr = accum.pop()
-        if isinstance(curr, CompoundSelectQuery):
-            accum.extend((curr.lhs, curr.rhs))
-            continue
+class _MultiModelResult(object):
+    def __init__(self, key, label_to_model, field_map, leaves):
+        self.key = key
+        self.label_to_model = dict(label_to_model)
+        self.model_to_label = dict((model, label)
+                                   for label, model in self.label_to_model.items())
+        self.field_map = field_map or {}
+        self.leaves = tuple(leaves)
+        self.query = None
+        self.layouts = {}
 
-        model_class = curr.model
-        name = model_class._meta.table_name
-        mapping[name] = model_class
-        curr._returning = tuple(curr._returning) + (Value(name).alias(key),)
+    def prepare(self):
+        for model in self.label_to_model.values():
+            if not model._meta.get_primary_keys():
+                raise ValueError('Model %s must declare a primary key.' %
+                                 model.__name__)
 
-    def wrapped_iterator():
-        for row in query.dicts().iterator():
-            identifier = row.pop(key)
-            model = mapping[identifier]
-            yield model(**row)
+        clone = self._clone_with_markers(self.query)
+        for leaf in self.leaves:
+            self._add_leaf(leaf)
+            self._validate_leaf_marker(leaf.query)
+        if set(label for _, label in self.layouts) != \
+                set(self.label_to_model):
+            raise ValueError('Every mapped model must occur in the compound '
+                             'query.')
+        self._validate_layouts()
+        clone._row_type = ROW.MULTIMODEL
+        clone._constructor = self
+        return clone
 
-    return wrapped_iterator()
+    def validate(self, ncols):
+        for (marker_index, label), layout in self.layouts.items():
+            if marker_index >= ncols:
+                raise ValueError('Multi-model type marker %s is outside the '
+                                 'result set.' % label)
+            for index, _, _ in layout:
+                if index >= ncols:
+                    raise ValueError('Multi-model column index %s is outside '
+                                     'the result set.' % index)
+
+    def row(self, values):
+        candidates = []
+        for (marker_index, label), layout in self.layouts.items():
+            if (marker_index < len(values) and
+                    values[marker_index] == label):
+                candidates.append((label, layout))
+        if not candidates:
+            label = None
+            for index, _ in enumerate(values):
+                if values[index] in self.label_to_model:
+                    label = values[index]
+                    break
+            raise ValueError('Unknown multi-model type marker: %r.' % label)
+        labels = set(label for label, _ in candidates)
+        if len(labels) > 1:
+            raise ValueError('Ambiguous multi-model type marker: %r.' %
+                             sorted(labels))
+
+        label = next(iter(labels))
+        layout = next(layout for candidate_label, layout in candidates
+                      if candidate_label == label)
+
+        model = self.label_to_model[label]
+        data = {}
+        for index, field, converter in layout:
+            value = values[index]
+            if value is not None:
+                value = converter(value)
+            data[field.name] = value
+
+        for primary_key in model._meta.get_primary_keys():
+            if data.get(primary_key.name) is None:
+                raise ValueError(
+                    'Primary key %s is missing or NULL for %s.' %
+                    (primary_key.name, model.__name__))
+
+        instance = model(__no_default__=1, **data)
+        instance._dirty.clear()
+        return instance
+
+    def _clone_with_markers(self, query):
+        if isinstance(query, CompoundSelectQuery):
+            clone = query.clone()
+            clone.lhs = self._clone_with_markers(query.lhs)
+            clone.rhs = self._clone_with_markers(query.rhs)
+            return clone
+
+        clone = query.clone()
+        label = self._leaf_label(query.model)
+        marker_index = self._marker_index(query)
+        if marker_index is None:
+            clone._returning = tuple(clone._returning) + (
+                Value(label).alias(self.key),)
+            marker_index = len(query._returning)
+        return clone
+
+    def _add_leaf(self, leaf):
+        label = self._leaf_label(leaf.model)
+        marker_index = self._marker_index(leaf.query)
+        if marker_index is None:
+            marker_index = len(leaf.query._returning)
+
+        mapping = self._resolve_leaf_mapping(leaf.model, label,
+                                             leaf.query._returning,
+                                             marker_index)
+        layout_key = (marker_index, label)
+        existing_layout = self.layouts.get(layout_key)
+        layout = self.layouts.setdefault(layout_key, [])
+        by_target = dict((field.name, (index, field))
+                         for index, field, _ in layout)
+        for index, field, converter in mapping:
+            existing = by_target.get(field.name)
+            if existing is not None and existing[0] != index:
+                raise ValueError(
+                    'Duplicate field mapping for %s.%s.' %
+                    (label, field.name))
+            by_target[field.name] = (index, field)
+            if existing is None:
+                layout.append((index, field, converter))
+        if existing_layout is not None and \
+                [(i, f.name) for i, f, _ in existing_layout] != \
+                [(i, f.name) for i, f, _ in layout]:
+            raise ValueError('Branches with marker %r must use the same field '
+                             'mapping.' % label)
+
+        primary_keys = leaf.model._meta.get_primary_keys()
+        missing = [field.name for field in primary_keys
+                   if field.name not in by_target]
+        if missing:
+            raise ValueError(
+                'Primary key %s is missing from the field mapping for %s.' %
+                (', '.join(missing), label))
+
+    def _resolve_leaf_mapping(self, model, label, selection, marker_index):
+        config = self._config_for(model, label)
+        if isinstance(config, (list, tuple)):
+            return self._positional_mapping(model, label, config,
+                                            marker_index)
+
+        resolved = {}
+        for index, raw_node in enumerate(selection):
+            if index == marker_index:
+                continue
+            field = _selected_model_field(raw_node, model)
+            if field is not None:
+                resolved[index] = field
+
+        for selector, target in (config or {}).items():
+            index = self._selection_index(selection, marker_index,
+                                          selector, target)
+            if target is None:
+                resolved.pop(index, None)
+                continue
+            field = _resolve_target_field(model, target)
+            existing = resolved.get(index)
+            if existing is not None and existing is not field:
+                raise ValueError('Duplicate field mapping for column %s.' %
+                                 index)
+            for existing_index, existing_field in list(resolved.items()):
+                if (existing_field.name == field.name and
+                        existing_index != index):
+                    raise ValueError(
+                        'Duplicate field mapping for %s.%s.' %
+                        (label, field.name))
+            resolved[index] = field
+
+        return self._finalize_mapping(model, label, resolved,
+                                     len(selection))
+
+    def _positional_mapping(self, model, label, config, marker_index):
+        resolved = {}
+        for index, target in enumerate(config):
+            if target is None:
+                continue
+            if index == marker_index:
+                raise ValueError(
+                    'Field mapping for %s cannot map the type marker.' % label)
+            resolved[index] = _resolve_target_field(model, target)
+        return self._finalize_mapping(model, label, resolved, len(config))
+
+    def _finalize_mapping(self, model, label, resolved, ncols):
+        result = []
+        seen = set()
+        for index in sorted(resolved):
+            if index >= ncols:
+                raise ValueError('Multi-model column index %s is outside '
+                                 'the result set.' % index)
+            field = resolved[index]
+            if field.name in seen:
+                raise ValueError('Duplicate field mapping for %s.%s.' %
+                                 (label, field.name))
+            seen.add(field.name)
+            result.append((index, field, field.python_value))
+        return tuple(result)
+
+    def _selection_index(self, selection, marker_index, selector, target):
+        if isinstance(selector, Field):
+            for index, raw_node in enumerate(selection):
+                field = _selected_model_field(raw_node, selector.model)
+                if field is not None and field is selector:
+                    return index
+            raise ValueError('Field %s is not selected in branch %r.' %
+                             (selector.name, self.model_to_label.get(target)))
+
+        name = selector
+        for index, raw_node in enumerate(selection):
+            if index == marker_index:
+                continue
+            if _selection_name(raw_node) == name:
+                return index
+        raise ValueError('Column %r is not selected in branch %r.' %
+                         (name, self.model_to_label.get(target)))
+
+    def _config_for(self, model, label):
+        if model in self.field_map:
+            return self.field_map[model]
+        return self.field_map.get(label, {})
+
+    def _leaf_label(self, model):
+        if model in self.model_to_label:
+            return self.model_to_label[model]
+        label = model._meta.table_name
+        if label not in self.label_to_model:
+            raise ValueError('Model %s is not present in the type mapping.' %
+                             model.__name__)
+        if self.label_to_model[label] is not model:
+            raise ValueError('Duplicate model marker %r.' % label)
+        self.model_to_label[model] = label
+        return label
+
+    def _marker_index(self, query):
+        matches = [index for index, node in enumerate(query._returning)
+                   if node.is_alias() and getattr(node, '_alias', None) ==
+                   self.key]
+        if len(matches) > 1:
+            raise ValueError('Duplicate type marker %s in a query branch.' %
+                             self.key)
+        return matches[0] if matches else None
+
+    def _validate_leaf_marker(self, query):
+        index = self._marker_index(query)
+        if index is None:
+            return
+        node = query._returning[index].unwrap()
+        label = getattr(node, 'value', None)
+        if isinstance(node, Value) and label not in self.label_to_model:
+            raise ValueError('Unknown multi-model type marker: %r.' % label)
+
+    def _validate_layouts(self):
+        for (marker_index, label), layout in self.layouts.items():
+            positions = {}
+            for index, field, _ in layout:
+                if index == marker_index:
+                    raise ValueError(
+                        'Field mapping for %s cannot map the type marker.' %
+                        label)
+                if field.name in positions:
+                    raise ValueError('Duplicate field mapping for %s.%s.' %
+                                     (label, field.name))
+                positions[field.name] = index
+
+
+def _selected_model_field(raw_node, model):
+    node = raw_node.unwrap()
+    if not isinstance(node, Field):
+        return None
+    field = node.field if isinstance(node, FieldAlias) else node
+    if field.model is model:
+        return field
+    return None
+
+
+def _selection_name(raw_node):
+    node = raw_node.unwrap()
+    if raw_node.is_alias():
+        return raw_node._alias
+    if isinstance(node, Field):
+        field = node.field if isinstance(node, FieldAlias) else node
+        return field.name
+    if isinstance(node, Entity) and node._path:
+        return node._path[-1]
+    if isinstance(node, Column):
+        return node.name
+    return None
+
+
+def _resolve_target_field(model, target):
+    if isinstance(target, Field):
+        field = target.field if isinstance(target, FieldAlias) else target
+        if field.model is not model:
+            raise ValueError('Field %s does not belong to %s.' %
+                             (field.name, model.__name__))
+        return field
+    try:
+        return model._meta.combined[target]
+    except KeyError:
+        raise ValueError('Unknown field %r for model %s.' %
+                         (target, model.__name__))
+
+
+def _collect_model_leaves(query):
+    if isinstance(query, CompoundSelectQuery):
+        return (_collect_model_leaves(query.lhs) +
+                _collect_model_leaves(query.rhs))
+    if not hasattr(query, 'model') or not is_model(query.model):
+        raise ValueError('resolve_multimodel_query() requires model selects.')
+    return (_MultiModelLeaf(query, query.model),)
+
+
+class _MultiModelLeaf(object):
+    __slots__ = ('query', 'model')
+
+    def __init__(self, query, model):
+        self.query = query
+        self.model = model
+
+
+def resolve_multimodel_query(query, key='_model_identifier', models=None,
+                             field_map=None):
+    if not isinstance(query, CompoundSelectQuery):
+        raise ValueError('resolve_multimodel_query() requires a compound '
+                         'select query.')
+    nodes = [query]
+    while nodes:
+        node = nodes.pop()
+        if isinstance(node, CompoundSelectQuery):
+            if node.op not in ('UNION', 'UNION ALL'):
+                raise ValueError(
+                    'resolve_multimodel_query() requires a UNION or '
+                    'UNION ALL query.')
+            nodes.extend((node.lhs, node.rhs))
+
+    leaves = _collect_model_leaves(query)
+    if models is None:
+        label_to_model = {}
+        for leaf in leaves:
+            label = leaf.model._meta.table_name
+            if label in label_to_model and \
+                    label_to_model[label] is not leaf.model:
+                raise ValueError('Duplicate type marker %r.' % label)
+            label_to_model[label] = leaf.model
+    elif isinstance(models, Mapping):
+        label_to_model = dict(models)
+    else:
+        label_to_model = {}
+        for model in models:
+            label = model._meta.table_name
+            if label in label_to_model:
+                raise ValueError('Duplicate type marker %r.' % label)
+            label_to_model[label] = model
+
+    for label, model in label_to_model.items():
+        if not is_model(model):
+            raise ValueError('Type marker %r must map to a model.' % label)
+    if len(set(label_to_model.values())) != len(label_to_model):
+        raise ValueError('A model cannot be mapped to multiple type markers.')
+
+    result = _MultiModelResult(key, label_to_model, field_map, leaves)
+    result.query = query
+    return result.prepare()
 
 
 class ThreadSafeDatabaseMetadata(Metadata):
