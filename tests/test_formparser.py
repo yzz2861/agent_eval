@@ -1,10 +1,12 @@
 import io
+import typing as t
 from os.path import dirname
 from os.path import join
 
 import pytest
 
 from werkzeug import formparser
+from werkzeug.datastructures import FileStorage
 from werkzeug.datastructures import ImmutableMultiDict
 from werkzeug.datastructures import MultiDict
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -437,3 +439,192 @@ def test_multipart_max_form_memory_size() -> None:
 
     with pytest.raises(RequestEntityTooLarge):
         parser.parse(io.BytesIO(data), b"bound", None)
+
+
+@pytest.mark.parametrize("accessed", ["form", "files", "parts"])
+def test_request_parts_preserve_order_and_share_values(
+    monkeypatch: pytest.MonkeyPatch, accessed: str
+) -> None:
+    data = (
+        b"--foo\r\n"
+        b'Content-Disposition: form-data; name="shared"\r\n\r\n'
+        b"first\r\n"
+        b"--foo\r\n"
+        b'Content-Disposition: form-data; name="shared"; filename="a.txt"\r\n'
+        b"Content-Type: text/plain\r\n"
+        b"X-Custom: yes\r\n\r\n"
+        b"file one\r\n"
+        b"--foo\r\n"
+        b'Content-Disposition: form-data; name="shared"\r\n\r\n'
+        b"second\r\n--foo--"
+    )
+    parse_count = 0
+    original_parse = FormDataParser.parse
+
+    def counted_parse(self: FormDataParser, *args: t.Any, **kwargs: t.Any) -> t.Any:
+        nonlocal parse_count
+        parse_count += 1
+        return original_parse(self, *args, **kwargs)
+
+    monkeypatch.setattr(FormDataParser, "parse", counted_parse)
+
+    with Request.from_values(
+        data=data,
+        content_type="multipart/form-data; boundary=foo",
+        method="POST",
+    ) as request:
+        getattr(request, accessed)
+        assert parse_count == 1
+
+        assert request.form.getlist("shared") == ["first", "second"]
+        assert request.files.getlist("shared")[0].read() == b"file one"
+        parts = request.parts
+        assert [(part.name, type(part.value)) for part in parts] == [
+            ("shared", str),
+            ("shared", FileStorage),
+            ("shared", str),
+        ]
+        assert parts[0].value is request.form.getlist("shared")[0]
+        assert parts[1].value is request.files["shared"]
+        assert parts[1].value.stream is request.files["shared"].stream
+        assert parts[2].value is request.form.getlist("shared")[1]
+        assert parts[1].headers["X-Custom"] == "yes"
+        assert not parts[1].value.closed
+
+        getattr(request, "form" if accessed != "form" else "files")
+        assert parse_count == 1
+
+
+def test_request_parts_use_spooled_file_without_copy() -> None:
+    contents = b"a" * 100_000
+    data = (
+        b"--foo\r\n"
+        b'Content-Disposition: form-data; name="note"\r\n\r\n'
+        b"before\r\n"
+        b"--foo\r\n"
+        b'Content-Disposition: form-data; name="upload"; filename="a.bin"\r\n\r\n'
+        + contents
+        + b"\r\n--foo\r\n"
+        b'Content-Disposition: form-data; name="note"\r\n\r\n'
+        b"after\r\n--foo--"
+    )
+
+    with Request.from_values(
+        data=data,
+        content_type="multipart/form-data; boundary=foo",
+        method="POST",
+    ) as request:
+        request.max_form_memory_size = 70_000
+        parts = request.parts
+        uploaded = request.files["upload"]
+
+        assert [part.name for part in parts] == ["note", "upload", "note"]
+        assert parts[1].value is uploaded
+        assert parts[1].value.stream is uploaded.stream
+        assert isinstance(uploaded.stream.name, int)
+        assert not uploaded.closed
+        assert uploaded.read() == contents
+
+    assert uploaded.closed
+
+
+def test_broken_multipart_closes_spooled_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_streams = []
+    original_factory = formparser._make_stream_factory
+
+    def tracking_factory(max_size: int | None) -> t.Callable[..., t.IO[bytes]]:
+        factory = original_factory(max_size)
+
+        def stream_factory(*args: t.Any, **kwargs: t.Any) -> t.IO[bytes]:
+            stream = factory(*args, **kwargs)
+            created_streams.append(stream)
+            return stream
+
+        return stream_factory
+
+    monkeypatch.setattr(formparser, "_make_stream_factory", tracking_factory)
+    data = (
+        b"--foo\r\n"
+        b'Content-Disposition: form-data; name="first"; filename="first.bin"\r\n\r\n'
+        + b"a" * 100_000
+        + b"\r\n--foo\r\n"
+        b'Content-Disposition: form-data; name="second"; filename="second.bin"\r\n\r\n'
+        b"partial contents without an ending boundary"
+    )
+
+    with Request.from_values(
+        data=data,
+        content_type="multipart/form-data; boundary=foo",
+        method="POST",
+    ) as request:
+        request.max_form_memory_size = 70_000
+        assert request.parts == ()
+        assert request.form == {}
+        assert request.files == {}
+
+    assert len(created_streams) == 2
+    assert isinstance(created_streams[0].name, int)
+    assert all(stream.closed for stream in created_streams)
+
+
+@pytest.mark.parametrize(
+        ("attribute", "value"),
+        [
+            ("max_content_length", 10),
+            ("max_form_memory_size", 7),
+            ("max_form_parts", 1),
+        ],
+)
+def test_request_parts_apply_form_limits(attribute: str, value: int) -> None:
+    data = (
+        b"--foo\r\n"
+        b'Content-Disposition: form-data; name="field"\r\n\r\n'
+        b"value\r\n"
+        b"--foo\r\n"
+        b'Content-Disposition: form-data; name="other"\r\n\r\n'
+        b"other\r\n--foo--"
+    )
+    request = Request.from_values(
+        data=data,
+        content_type="multipart/form-data; boundary=foo",
+        method="POST",
+    )
+    setattr(request, attribute, value)
+
+    with pytest.raises(RequestEntityTooLarge):
+        _ = request.parts
+
+
+def test_parse_form_data_include_parts() -> None:
+    data = b"--boundary--"
+    environ = {
+        "REQUEST_METHOD": "POST",
+        "CONTENT_TYPE": "multipart/form-data; boundary=boundary",
+        "CONTENT_LENGTH": str(len(data)),
+        "wsgi.input": io.BytesIO(data),
+    }
+
+    stream, form, files, parts = parse_form_data(
+        environ, silent=False, include_parts=True
+    )
+
+    assert stream.read() == b""
+    assert form == ImmutableMultiDict()
+    assert files == ImmutableMultiDict()
+    assert parts == ()
+
+
+def test_request_parts_empty_for_non_multipart() -> None:
+    for request in (
+        Request.from_values(
+            data=b"a=1",
+            content_type="application/x-www-form-urlencoded",
+            method="POST",
+        ),
+        Request.from_values(
+            data=b"plain text", content_type="text/plain", method="POST"
+        ),
+    ):
+        assert request.parts == ()

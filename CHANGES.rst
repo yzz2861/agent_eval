@@ -129,6 +129,10 @@ Version 3.2.0
 -   ``Range.make_content_range`` uses the first range if multiple are given.
      :issue:`3291`
 -   Added the ``IfMatch.check`` method. :issue:`3291`
+-   Added the ``Request.parts`` ordered multipart form data view. Each
+    :class:`.formparser.FormDataPart` keeps its field name, headers, and text
+    value or :class:`FileStorage` in received order. It shares one parse and
+    the same resources as ``Request.form`` and ``Request.files``.
 -   ``is_resource_modified`` is deprecated. ``Response.apply_conditions`` and
     ``apply_range`` perform their own checks. :issue:`3291`
 -   ``is_byte_range_valid`` is deprecated. ``Range.from_header``,

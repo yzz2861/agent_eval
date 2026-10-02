@@ -196,4 +196,6 @@ environments for unittesting you might want to use the
 
 .. autoclass:: FormDataParser
 
+.. autoclass:: FormDataPart
+
 .. autofunction:: parse_form_data

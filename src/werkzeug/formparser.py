@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections.abc as cabc
 import typing as t
+from dataclasses import dataclass
 from tempfile import SpooledTemporaryFile
 from types import TracebackType
 from urllib.parse import parse_qsl
@@ -29,6 +30,12 @@ if t.TYPE_CHECKING:
     t_parse_result = tuple[
         t.IO[bytes], MultiDict[str, str], MultiDict[str, FileStorage]
     ]
+    t_parse_result_with_parts = tuple[
+        t.IO[bytes],
+        MultiDict[str, str],
+        MultiDict[str, FileStorage],
+        tuple["FormDataPart", ...],
+    ]
 
     class TStreamFactory(te.Protocol):
         def __call__(
@@ -41,6 +48,24 @@ if t.TYPE_CHECKING:
 
 
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
+
+
+@dataclass(frozen=True, slots=True)
+class FormDataPart:
+    """One multipart form part, in the order it was received.
+
+    :param name: The part's form field name from its ``Content-Disposition``
+        header.
+    :param headers: The headers sent with the part.
+    :param value: The decoded text value, or a :class:`FileStorage` if the
+        part has a filename.
+
+    .. versionadded:: 3.2
+    """
+
+    name: str
+    headers: Headers
+    value: str | FileStorage
 
 
 def _make_stream_factory(max_size: int | None) -> TStreamFactory:
@@ -62,6 +87,7 @@ def _make_stream_factory(max_size: int | None) -> TStreamFactory:
 _default_stream_factory = _make_stream_factory(1024 * 500)
 
 
+@t.overload
 def parse_form_data(
     environ: WSGIEnvironment,
     stream_factory: TStreamFactory | None = None,
@@ -70,10 +96,39 @@ def parse_form_data(
     silent: bool = True,
     *,
     max_form_parts: int | None = None,
+    include_parts: t.Literal[False] = False,
     **kwargs: t.Any,
-) -> t_parse_result:
+) -> t_parse_result: ...
+
+
+@t.overload
+def parse_form_data(
+    environ: WSGIEnvironment,
+    stream_factory: TStreamFactory | None = None,
+    max_form_memory_size: int | None = None,
+    max_content_length: int | None = None,
+    silent: bool = True,
+    *,
+    max_form_parts: int | None = None,
+    include_parts: t.Literal[True],
+    **kwargs: t.Any,
+) -> t_parse_result_with_parts: ...
+
+
+def parse_form_data(
+    environ: WSGIEnvironment,
+    stream_factory: TStreamFactory | None = None,
+    max_form_memory_size: int | None = None,
+    max_content_length: int | None = None,
+    silent: bool = True,
+    *,
+    max_form_parts: int | None = None,
+    include_parts: bool = False,
+    **kwargs: t.Any,
+) -> t_parse_result | t_parse_result_with_parts:
     """Parse the form data from the request body and return it as a
-    tuple ``(stream, form, files)``.
+    tuple ``(stream, form, files)``, or
+    ``(stream, form, files, parts)`` when ``include_parts`` is enabled.
 
     If the mimetype of the data transmitted is `multipart/form-data` the
     files multidict will be filled with `FileStorage` objects.  If the
@@ -99,10 +154,14 @@ def parse_form_data(
         parts are received, raise :exc:`.RequestEntityTooLarge`. This is an
         additional check, it does not replace using a limited stream and
         ``max_content_length``.
+    :param include_parts: Return multipart parts in their received order as a
+        fourth item. Text part values are decoded once and file parts use the
+        same :class:`FileStorage` objects as the files mapping.
     :param cls: an optional dict class to use.  If this is not specified
                        or `None` the default :class:`MultiDict` is used.
     :param silent: If set to False parsing errors will not be caught.
-    :return: A tuple in the form ``(stream, form, files)``.
+    :return: A tuple in the form ``(stream, form, files)``, or
+        ``(stream, form, files, parts)`` when ``include_parts`` is enabled.
 
     .. versionchanged:: 3.2
         The ``cls`` parameter is deprecated and will be removed in Werkzeug 4.0. It will
@@ -131,6 +190,7 @@ def parse_form_data(
         max_content_length=max_content_length,
         max_form_parts=max_form_parts,
         silent=silent,
+        include_parts=include_parts,
     )
 
     if "cls" in kwargs:
@@ -167,6 +227,8 @@ class FormDataParser:
         parts are received, raise :exc:`.RequestEntityTooLarge`. This is an
         additional check, it does not replace using a limited stream and
         ``max_content_length``.
+    :param include_parts: Parse and return multipart parts in their received
+        order as a fourth parse result item.
     :param cls: an optional dict class to use.  If this is not specified
                        or `None` the default :class:`MultiDict` is used.
     :param silent: If set to False parsing errors will not be caught.
@@ -199,12 +261,14 @@ class FormDataParser:
         silent: bool = True,
         *,
         max_form_parts: int | None = None,
+        include_parts: bool = False,
         **kwargs: t.Any,
     ) -> None:
         self.stream_factory = stream_factory
         self.max_content_length = max_content_length
         self.max_form_memory_size = max_form_memory_size
         self.max_form_parts = max_form_parts
+        self.include_parts = include_parts
 
         if "cls" in kwargs:
             import warnings
@@ -219,11 +283,14 @@ class FormDataParser:
         self.cls: type[ImmutableMultiDict[str, t.Any]] | None = kwargs.get("cls")
         self.silent = silent
 
-    def parse_from_environ(self, environ: WSGIEnvironment) -> t_parse_result:
+    def parse_from_environ(
+        self, environ: WSGIEnvironment
+    ) -> t_parse_result | t_parse_result_with_parts:
         """Parses the information from the environment as form data.
 
         :param environ: the WSGI environment to be used for parsing.
-        :return: A tuple in the form ``(stream, form, files)``.
+        :return: A tuple in the form ``(stream, form, files)``, or
+            ``(stream, form, files, parts)`` when ``include_parts`` is enabled.
         """
         stream = get_input_stream(environ, max_content_length=self.max_content_length)
         content_length = get_content_length(environ)
@@ -241,7 +308,7 @@ class FormDataParser:
         mimetype: str,
         content_length: int | None,
         options: cabc.Mapping[str, str] | None = None,
-    ) -> t_parse_result:
+    ) -> t_parse_result | t_parse_result_with_parts:
         """Parses the information from the given stream, mimetype,
         content length and mimetype parameters.
 
@@ -263,10 +330,7 @@ class FormDataParser:
         elif mimetype == "application/x-www-form-urlencoded":
             parse_func = self._parse_urlencoded
         else:
-            if self.cls is not None:
-                return stream, self.cls(), self.cls()
-
-            return stream, ImmutableMultiDict(), ImmutableMultiDict()
+            return self._empty_result(stream)
 
         if options is None:
             options = {}
@@ -277,10 +341,24 @@ class FormDataParser:
             if not self.silent:
                 raise
 
-        if self.cls is not None:
-            return stream, self.cls(), self.cls()
+        return self._empty_result(stream)
 
-        return stream, ImmutableMultiDict(), ImmutableMultiDict()
+    def _empty_form_data(self) -> MultiDict[str, t.Any]:
+        if self.cls is not None:
+            return self.cls()
+
+        return ImmutableMultiDict()
+
+    def _empty_result(
+        self, stream: t.IO[bytes]
+    ) -> t_parse_result | t_parse_result_with_parts:
+        form = self._empty_form_data()
+        files = self._empty_form_data()
+
+        if self.include_parts:
+            return stream, form, files, ()
+
+        return stream, form, files
 
     def _parse_multipart(
         self,
@@ -288,7 +366,7 @@ class FormDataParser:
         mimetype: str,
         content_length: int | None,
         options: cabc.Mapping[str, str],
-    ) -> t_parse_result:
+    ) -> t_parse_result | t_parse_result_with_parts:
         boundary = options.get("boundary", "").encode("ascii")
 
         if not boundary:
@@ -298,14 +376,29 @@ class FormDataParser:
             stream_factory=self.stream_factory,
             max_form_memory_size=self.max_form_memory_size,
             max_form_parts=self.max_form_parts,
+            include_parts=self.include_parts,
         )
 
         if self.cls is not None:
             kwargs["cls"] = self.cls
 
         with MultiPartParser(**kwargs) as parser:
-            form, files = parser.parse(stream, boundary, content_length)
+            result = parser.parse(stream, boundary, content_length)
 
+        if self.include_parts:
+            form, files, parts = t.cast(
+                tuple[
+                    MultiDict[str, str],
+                    MultiDict[str, FileStorage],
+                    tuple["FormDataPart", ...],
+                ],
+                result,
+            )
+            return stream, form, files, parts
+
+        form, files = t.cast(
+            tuple[MultiDict[str, str], MultiDict[str, FileStorage]], result
+        )
         return stream, form, files
 
     def _parse_urlencoded(
@@ -314,7 +407,7 @@ class FormDataParser:
         mimetype: str,
         content_length: int | None,
         options: cabc.Mapping[str, str],
-    ) -> t_parse_result:
+    ) -> t_parse_result | t_parse_result_with_parts:
         # The stream must already be limited to max_content_length.
         # max_form_memory_size can't apply, since the entire stream is read at
         # once instead of incrementally parsed.
@@ -327,10 +420,13 @@ class FormDataParser:
             errors="werkzeug.url_quote",
         )
 
-        if self.cls is not None:
-            return stream, self.cls(items), self.cls()
+        form = self.cls(items) if self.cls is not None else ImmutableMultiDict(items)
+        files = self._empty_form_data()
 
-        return stream, ImmutableMultiDict(items), ImmutableMultiDict()
+        if self.include_parts:
+            return stream, form, files, ()
+
+        return stream, form, files
 
 
 class MultiPartParser:
@@ -340,10 +436,13 @@ class MultiPartParser:
         max_form_memory_size: int | None = None,
         buffer_size: int = 64 * 1024,
         max_form_parts: int | None = None,
+        *,
+        include_parts: bool = False,
         **kwargs: t.Any,
     ) -> None:
         self.max_form_memory_size = max_form_memory_size
         self.max_form_parts = max_form_parts
+        self.include_parts = include_parts
 
         if stream_factory is None:
             stream_factory = _make_stream_factory(max_form_memory_size)
@@ -413,7 +512,14 @@ class MultiPartParser:
 
     def parse(
         self, stream: t.IO[bytes], boundary: bytes, content_length: int | None
-    ) -> tuple[MultiDict[str, str], MultiDict[str, FileStorage]]:
+    ) -> (
+        tuple[MultiDict[str, str], MultiDict[str, FileStorage]]
+        | tuple[
+            MultiDict[str, str],
+            MultiDict[str, FileStorage],
+            tuple[FormDataPart, ...],
+        ]
+    ):
         current_part: Field | File
         field_size: int | None = None
         container: t.IO[bytes] | list[bytes]
@@ -427,6 +533,7 @@ class MultiPartParser:
 
         fields = []
         files = []
+        parts: list[FormDataPart] = []
 
         for data in _chunk_iter(stream.read, self.buffer_size):
             parser.receive_data(data)
@@ -458,27 +565,46 @@ class MultiPartParser:
                                 self.get_part_charset(current_part.headers), "replace"
                             )
                             fields.append((current_part.name, value))
+                            if self.include_parts:
+                                parts.append(
+                                    FormDataPart(
+                                        current_part.name,
+                                        current_part.headers,
+                                        value,
+                                    )
+                                )
                         else:
                             container = t.cast(t.IO[bytes], container)
                             container.seek(0)
-                            files.append(
-                                (
-                                    current_part.name,
-                                    FileStorage(
-                                        container,
-                                        current_part.filename,
-                                        current_part.name,
-                                        headers=current_part.headers,
-                                    ),
-                                )
+                            file_storage = FileStorage(
+                                container,
+                                current_part.filename,
+                                current_part.name,
+                                headers=current_part.headers,
                             )
+                            files.append((current_part.name, file_storage))
+                            if self.include_parts:
+                                parts.append(
+                                    FormDataPart(
+                                        current_part.name,
+                                        current_part.headers,
+                                        file_storage,
+                                    )
+                                )
 
                 event = parser.next_event()
 
         if self.cls is not None:
-            return self.cls(fields), self.cls(files)
+            form = self.cls(fields)
+            files_multidict = self.cls(files)
+        else:
+            form = ImmutableMultiDict(fields)
+            files_multidict = ImmutableMultiDict(files)
 
-        return ImmutableMultiDict(fields), ImmutableMultiDict(files)
+        if self.include_parts:
+            return form, files_multidict, tuple(parts)
+
+        return form, files_multidict
 
 
 def _chunk_iter(read: t.Callable[[int], bytes], size: int) -> t.Iterator[bytes | None]:

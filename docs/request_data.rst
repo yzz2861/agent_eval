@@ -29,8 +29,8 @@ When does Werkzeug Parse?
 Werkzeug parses the incoming data under the following situations:
 
 -   you access either :attr:`~Request.form`, :attr:`~Request.files`,
-    or :attr:`~Request.stream` and the request method was
-    `POST` or `PUT`.
+    :attr:`~Request.parts`, or :attr:`~Request.stream` and the request method
+    was `POST` or `PUT`.
 -   if you call :func:`parse_form_data`.
 
 These calls are not interchangeable.  If you invoke :func:`parse_form_data`
@@ -55,7 +55,8 @@ The standard Werkzeug parsing behavior handles three cases:
     :class:`~Request.stream` will be empty and
     :class:`~Request.form` will contain the regular `POST` / `PUT`
     data, :class:`~Request.files` will contain the uploaded
-    files as :class:`FileStorage` objects.
+    files as :class:`FileStorage` objects, and :class:`~Request.parts` will
+    contain every part in the order it was received.
 -   input content type was `application/x-www-form-urlencoded`.  Then the
     :class:`~Request.stream` will be empty and
     :class:`~Request.form` will contain the regular `POST` / `PUT`
@@ -68,6 +69,25 @@ Special note on the :attr:`~Request.get_data` method: Calling this
 loads the full request data into memory.  This is only safe to do if the
 :attr:`~Request.max_content_length` is set.  Also you can *either*
 read the stream *or* call :meth:`~Request.get_data`.
+
+
+Ordered Multipart Parts
+-----------------------
+
+The :attr:`~Request.form` and :attr:`~Request.files` mappings group text and
+file values separately, so they cannot represent a form that alternates fields
+and files. Access :attr:`~Request.parts` when that sequence is significant.
+Each :class:`.formparser.FormDataPart` has the original ``name``, the part's
+``headers``, and either the decoded text value or the same
+:class:`FileStorage` object that is also in :attr:`~Request.files`. Parts with
+the same name remain separate.
+
+Accessing :attr:`~Request.parts`, :attr:`~Request.form`, or
+:attr:`~Request.files` runs the multipart parser once and caches all three
+results. File streams are not copied or closed early; they are closed when the
+request is closed. The request size, text part memory, and number of parts
+limits apply to the ordered view as well. Parsing failures close any temporary
+files that had already been created.
 
 
 Limiting Request Data

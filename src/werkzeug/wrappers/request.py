@@ -29,6 +29,8 @@ if t.TYPE_CHECKING:
     from _typeshed.wsgi import WSGIApplication
     from _typeshed.wsgi import WSGIEnvironment
 
+    from ..formparser import FormDataPart
+
 T = t.TypeVar("T")
 
 
@@ -324,6 +326,7 @@ class Request(_SansIORequest):
             "max_form_memory_size": self.max_form_memory_size,
             "max_content_length": self.max_content_length,
             "max_form_parts": self.max_form_parts,
+            "include_parts": True,
         }
 
         if type(self)._get_file_stream is not Request._get_file_stream:
@@ -357,17 +360,27 @@ class Request(_SansIORequest):
                 DeprecationWarning,
                 stacklevel=1,
             )
+            kwargs.pop("include_parts", None)
             return self.form_data_parser_class(**kwargs)
 
         return FormDataParser(**kwargs)
 
     def _parse_form_data(
         self, stream: t.IO[bytes]
-    ) -> tuple[MultiDict[str, str], MultiDict[str, FileStorage]] | None:
+    ) -> (
+        tuple[MultiDict[str, str], MultiDict[str, FileStorage]]
+        | tuple[
+            MultiDict[str, str],
+            MultiDict[str, FileStorage],
+            tuple[FormDataPart, ...],
+        ]
+        | None
+    ):
         """Parse the given stream as form data.
 
         :param stream: The stream to read the data from.
-        :return: ``(form, files)``, or ``None`` if the data could not be parsed.
+        :return: ``(form, files, parts)``, or ``None`` if the data could not be
+            parsed.
 
         .. versionadded:: 3.2
         """
@@ -385,13 +398,18 @@ class Request(_SansIORequest):
             # TODO inline after deprecation
             parser = self._private_make_form_data_parser()
 
-        _, form, files = parser.parse(
+        result = parser.parse(
             stream=stream,
             mimetype=self.mimetype,
             content_length=self.content_length,
             options=self.mimetype_params,
         )
-        return form, files
+        if len(result) == 3:
+            _, form, files = result
+            return form, files, t.cast("tuple[FormDataPart, ...]", ())
+
+        _, form, files, parts = result
+        return form, files, parts
 
     def _load_form_data(self) -> None:
         """Internal method to parse and cache form data.
@@ -430,6 +448,7 @@ class Request(_SansIORequest):
                 else:
                     self.form = ImmutableMultiDict()
                     self.files = ImmutableMultiDict()
+                    self.parts = ()
         else:
             if (
                 type(self)._get_stream_for_parsing
@@ -453,8 +472,12 @@ class Request(_SansIORequest):
             if result is None:
                 self.form = ImmutableMultiDict()
                 self.files = ImmutableMultiDict()
+                self.parts = ()
+            elif len(result) == 2:
+                self.form, self.files = result
+                self.parts = ()
             else:
-                self.form, self.files = result  # type: ignore[assignment]
+                self.form, self.files, self.parts = result  # type: ignore[assignment]
 
     def _get_stream_for_parsing(self) -> t.IO[bytes]:
         """Access :attr:`stream`. If :meth:`get_data` has already read and
@@ -686,6 +709,24 @@ class Request(_SansIORequest):
         """
         self._load_form_data()
         return self.files
+
+    @cached_property
+    def parts(self) -> tuple[FormDataPart, ...]:
+        """The parsed multipart parts in the order they were received.
+
+        Each item contains the original field name, part headers, and either a
+        decoded text value or a :class:`.FileStorage`. Values and file objects
+        are shared with :attr:`form` and :attr:`files`; files are not copied or
+        closed before request cleanup.
+
+        This is empty for non-multipart requests and if multipart parsing
+        fails. Accessing this, :attr:`form`, or :attr:`files` performs the same
+        single parse and caches all three results.
+
+        .. versionadded:: 3.2
+        """
+        self._load_form_data()
+        return self.parts
 
     @property
     def script_root(self) -> str:
