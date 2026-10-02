@@ -114,6 +114,11 @@ module Sequel
         super
       else
         case server
+        # The read_after_write extension sends this sentinel for automatic
+        # reads after a successful write; route them to the block's write
+        # shard, which is guaranteed to see the write.
+        when READ_AFTER_WRITE_PRIMARY
+          @default_servers[-1][0]
         when :default, nil
           @servers[@default_servers[-1][0]]
         when :read_only
@@ -160,6 +165,8 @@ module Sequel
       else
         # Hash handling required to work when loaded after arbitrary servers plugin.
         case server
+        when READ_AFTER_WRITE_PRIMARY
+          a[-1][0]
         when :default, nil
           v = a[-1][0]
           v = @servers[v] unless v.is_a?(Hash)

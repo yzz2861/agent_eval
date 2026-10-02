@@ -36,6 +36,15 @@ module Sequel
   # Frozen hash used as the default options hash for most options.
   OPTS = {}.freeze
 
+  # Internal frozen value used by the read_after_write extension to
+  # distinguish an automatic read that must go to the primary after a
+  # successful write.  It is a unique key that the pool's default servers
+  # hash (Hash.new(:default)) maps to the primary, while other extensions
+  # that override server routing (such as server_block) can recognize it and
+  # route to their write shard.  Defined here so such extensions can honor
+  # it without depending on the read_after_write extension being loaded.
+  READ_AFTER_WRITE_PRIMARY = Object.new.freeze
+
   SPLIT_SYMBOL_CACHE = {}  # SEQUEL6: Remove
 
   module SequelMethods

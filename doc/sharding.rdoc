@@ -226,6 +226,97 @@ to use, which can be useful if you are mixing sharding and primary/replica serve
     end
   end
 
+=== read_after_write Extension
+
+Even with a primary/replica configuration, a single business operation that
+writes and then reads can observe stale data because the read is sent to a
+replica that has not received the write yet.  The read_after_write extension
+adds an explicit scope for such operations: inside the scope, after the first
+successful write, all subsequent reads that do not specify an explicit server
+are sent to the primary (:default) server.  When the scope is exited, the
+normal routing is restored:
+
+  DB.extension :read_after_write
+  DB.with_read_after_write do
+    DB[:accounts].where(id: 1).update(balance: 100) # primary
+    DB[:accounts].where(id: 1).get(:balance)        # primary
+  end
+  DB[:accounts].where(id: 1).get(:balance)          # replica again
+
+Reads before the first successful write still use the read-only replica, so
+read-heavy scopes that never write are not penalized.  A write marks the
+scope only if it succeeds; a write that raises an exception does not pin
+later reads:
+
+  DB.with_read_after_write do
+    DB[:items].all                       # replica
+    begin
+      DB[:items].where(id: 1).update(a: 2)
+    rescue Sequel::DatabaseError
+    end
+    DB[:items].all                       # replica (write failed)
+    DB[:items].insert
+    DB[:items].all                       # primary (write succeeded)
+  end
+
+The flag is never reset within the scope after a successful write, which
+keeps the different transaction outcomes distinct:
+
+- A nested transaction (joined to the outer transaction or using a
+  savepoint) does not reset the flag, so reads after a write stay on the
+  primary.
+- Rolling an inner savepoint back does not clear the flag set by a write
+  before the savepoint; a successful write outside the rolled back savepoint
+  still pins later reads.
+- Rolling an entire transaction back also does not clear the flag, so reads
+  after the rollback still go to the primary (where they observe committed
+  state).
+- A write that raises before it succeeds never sets the flag.
+
+Scopes nest.  An inner scope inherits whether an enclosing scope has written,
+and a successful write inside an inner scope propagates to the enclosing
+scopes, so reads stay on the primary until the outermost scope exits:
+
+  DB.with_read_after_write do
+    DB[:items].all # replica
+    DB.with_read_after_write do
+      DB[:items].insert
+      DB[:items].all # primary
+    end
+    DB[:items].all   # primary
+  end
+  DB[:items].all     # replica
+
+Only automatically routed reads are affected.  A server explicitly chosen by
+the caller always takes precedence:
+
+  DB.with_read_after_write do
+    DB[:items].insert
+    DB[:items].all                      # primary
+    DB[:items].server(:read_only).all   # replica (explicit)
+    DB[:items].server(:other).all       # :other (explicit)
+  end
+
+The scope state is stored per concurrency context (Thread.current by
+default, or Fiber.current with the fiber_concurrency extension), so threads
+and fibers are isolated from each other.  The extension works with the
+sharded single, threaded, and timed_queue connection pools; on a non-sharded
+database the scope is a no-op.
+
+read_after_write integrates with the server_block extension: when both are
+in use, an automatic read after a successful write inside a with_server
+block is routed to that block's write shard instead of the global primary:
+
+  DB.extension :server_block
+  DB.extension :read_after_write
+  DB.with_read_after_write do
+    DB.with_server(:a, :a_read_only) do
+      DB[:items].all    # a_read_only
+      DB[:items].insert # a
+      DB[:items].all    # a (the write shard)
+    end
+  end
+
 === arbitrary_servers Extension
 
 By default, Sequel's sharding support is designed to work with predefined shards.  It ships
@@ -283,4 +374,3 @@ for that shard as the value.  Example:
 
   DB=Sequel.connect('jdbc:postgresql://primary_server/database', 
     servers: {read_only: {uri: 'jdbc:postgresql://replica_server/database'}})
-
