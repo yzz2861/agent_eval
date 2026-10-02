@@ -1,0 +1,5 @@
+Added optional soft-expiry DNS caching to :class:`~aiohttp.TCPConnector`.
+The new *ttl_dns_cache_hard* argument lets requests reuse a soft-expired entry
+while a single background refresh runs, blocking only once the hard deadline is
+reached, and *stale_dns_on_error* controls whether a failed refresh may keep
+serving the stale addresses up to that deadline -- by :user:`bdraco`.

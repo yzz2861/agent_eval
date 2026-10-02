@@ -528,6 +528,25 @@ end up making a DNS resolution, as the following example shows::
 
     conn = aiohttp.TCPConnector(use_dns_cache=False)
 
+Normally a request whose cached entry has expired waits for a fresh
+resolution. A *hard* TTL can instead allow serving the soft-expired
+addresses while a single background refresh runs, so slow upstream DNS does
+not stall new requests::
+
+    conn = aiohttp.TCPConnector(ttl_dns_cache=10, ttl_dns_cache_hard=30)
+
+Entries older than the hard TTL are never reused; those requests still wait
+for a fresh result. Whether a failed background refresh may keep serving the
+stale addresses (until the hard TTL) is controlled by
+*stale_dns_on_error* (disabled by default); a failed refresh never extends
+the hard deadline::
+
+    conn = aiohttp.TCPConnector(
+        ttl_dns_cache=10,
+        ttl_dns_cache_hard=30,
+        stale_dns_on_error=True,
+    )
+
 
 Resolving using custom nameservers
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

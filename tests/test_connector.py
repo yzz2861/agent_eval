@@ -390,6 +390,442 @@ async def test_get(key: ConnectionKey) -> None:
         await conn.close()
 
 
+def _dns_addr(host: str) -> ResolveResult:
+    return {
+        "hostname": "example.com",
+        "host": host,
+        "port": 80,
+        "family": socket.AF_INET,
+        "proto": 0,
+        "flags": socket.AI_NUMERICHOST,
+    }
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _GatedResolver(AbstractResolver):
+    """Resolver whose invocations are scripted and gated by events.
+
+    Each script entry is a ``(block, payload)`` tuple; *payload* is either
+    the list of addresses to return or an exception instance to raise. When
+    *block* is true the invocation waits until the test releases its gate.
+    """
+
+    def __init__(self, scripts: Sequence[tuple[bool, object]]) -> None:
+        self._scripts = list(scripts)
+        self.calls = 0
+        self.gates: list[asyncio.Event] = []
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: socket.AddressFamily = socket.AF_INET,
+    ) -> list[ResolveResult]:
+        index = self.calls
+        self.calls += 1
+        block, payload = self._scripts[index]
+        if block:
+            gate = asyncio.Event()
+            self.gates.append(gate)
+            await gate.wait()
+        if isinstance(payload, BaseException):
+            raise payload
+        return payload  # type: ignore[return-value]
+
+    async def close(self) -> None:
+        """Close the resolver."""
+
+
+async def test_dns_stale_served_while_single_background_refresh_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver(
+        [
+            (False, [_dns_addr("1.1.1.1")]),
+            (True, [_dns_addr("2.2.2.2")]),
+        ]
+    )
+    conn = TCPConnector(
+        resolver=resolver,
+        ttl_dns_cache=10,
+        ttl_dns_cache_hard=30,
+        stale_dns_on_error=True,
+    )
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    assert resolver.calls == 1
+
+    clock.advance(15)
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    assert resolver.calls == 2
+    assert len(resolver.gates) == 1
+
+    resolver.gates[0].set()
+    await asyncio.sleep(0)
+    assert resolver.calls == 2
+    assert (await conn._resolve_host("example.com", 80)) == [
+        _dns_addr("2.2.2.2")
+    ]
+
+    await conn.close()
+
+
+async def test_dns_hard_expiry_blocks_until_fresh_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver(
+        [
+            (False, [_dns_addr("1.1.1.1")]),
+            (True, [_dns_addr("2.2.2.2")]),
+        ]
+    )
+    conn = TCPConnector(resolver=resolver, ttl_dns_cache=10, ttl_dns_cache_hard=30)
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+
+    clock.advance(35)
+    pending = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    await asyncio.sleep(0)
+    assert not pending.done()
+    assert resolver.calls == 2
+
+    resolver.gates[0].set()
+    assert await pending == [_dns_addr("2.2.2.2")]
+    assert resolver.calls == 2
+
+    await conn.close()
+
+
+async def test_dns_without_hard_ttl_blocks_on_soft_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver(
+        [(False, [_dns_addr("1.1.1.1")]), (True, [_dns_addr("2.2.2.2")])]
+    )
+    conn = TCPConnector(resolver=resolver, ttl_dns_cache=10)
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+
+    clock.advance(11)
+    pending = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    await asyncio.sleep(0)
+    assert not pending.done()
+    assert resolver.calls == 2
+    resolver.gates[0].set()
+    assert await pending == [_dns_addr("2.2.2.2")]
+
+    await conn.close()
+
+
+async def test_dns_hard_miss_joins_running_background_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver(
+        [
+            (False, [_dns_addr("1.1.1.1")]),
+            (True, [_dns_addr("2.2.2.2")]),
+        ]
+    )
+    conn = TCPConnector(
+        resolver=resolver, ttl_dns_cache=10, ttl_dns_cache_hard=30
+    )
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+
+    clock.advance(15)
+    # Triggers the single background refresh but returns stale addresses.
+    stale = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    assert await stale == [_dns_addr("1.1.1.1")]
+    assert resolver.calls == 2
+
+    clock.advance(25)  # now past the hard deadline
+    waiting = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    assert resolver.calls == 2  # joins the already running refresh
+
+    resolver.gates[0].set()
+    assert await waiting == [_dns_addr("2.2.2.2")]
+
+    await conn.close()
+
+
+async def test_dns_concurrent_stale_requests_single_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver(
+        [
+            (False, [_dns_addr("1.1.1.1")]),
+            (True, [_dns_addr("2.2.2.2")]),
+        ]
+    )
+    conn = TCPConnector(
+        resolver=resolver, ttl_dns_cache=10, ttl_dns_cache_hard=30
+    )
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    clock.advance(15)
+
+    results = await asyncio.gather(
+        *(conn._resolve_host("example.com", 80) for _ in range(20))
+    )
+    assert results == [[_dns_addr("1.1.1.1")]] * 20
+    assert resolver.calls == 2
+    assert len(resolver.gates) == 1
+
+    resolver.gates[0].set()
+    await asyncio.sleep(0)
+    assert (await conn._resolve_host("example.com", 80)) == [
+        _dns_addr("2.2.2.2")
+    ]
+
+    await conn.close()
+
+
+async def test_dns_stale_kept_on_background_failure_until_hard_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver(
+        [
+            (False, [_dns_addr("1.1.1.1")]),
+            (True, socket.gaierror(-3, "boom")),
+            (True, socket.gaierror(-3, "boom again")),
+        ]
+    )
+    conn = TCPConnector(
+        resolver=resolver,
+        ttl_dns_cache=10,
+        ttl_dns_cache_hard=30,
+        stale_dns_on_error=True,
+    )
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+
+    clock.advance(15)
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    assert resolver.calls == 2
+    resolver.gates[0].set()
+    await asyncio.sleep(0)
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    assert resolver.calls == 3
+
+    clock.advance(20)
+    pending = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    await asyncio.sleep(0)
+    assert not pending.done()
+    resolver.gates[1].set()
+    with pytest.raises(socket.gaierror):
+        await pending
+
+    await conn.close()
+
+
+async def test_dns_stale_evicted_on_background_failure_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    error = socket.gaierror(-3, "boom")
+    resolver = _GatedResolver(
+        [
+            (False, [_dns_addr("1.1.1.1")]),
+            (True, error),
+            (False, error),
+        ]
+    )
+    conn = TCPConnector(resolver=resolver, ttl_dns_cache=10, ttl_dns_cache_hard=30)
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+
+    clock.advance(15)
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    resolver.gates[0].set()
+    await asyncio.sleep(0)
+
+    assert ("example.com", 80) not in conn._cached_hosts
+    pending = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    await asyncio.sleep(0)
+    assert pending.done()
+    with pytest.raises(socket.gaierror):
+        await pending
+    assert resolver.calls == 3
+
+    await conn.close()
+
+
+async def test_dns_clear_cache_prevents_inflight_refill_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver([(True, [_dns_addr("1.1.1.1")])])
+    conn = TCPConnector(resolver=resolver, ttl_dns_cache=10)
+
+    pending = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    await asyncio.sleep(0)
+    assert resolver.calls == 1
+    conn.clear_dns_cache()
+    resolver.gates[0].set()
+    assert await pending == [_dns_addr("1.1.1.1")]
+
+    assert ("example.com", 80) not in conn._cached_hosts
+    assert resolver.calls == 1
+
+    await conn.close()
+
+
+async def test_dns_clear_cache_prevents_inflight_refill_per_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver(
+        [
+            (True, [_dns_addr("1.1.1.1")]),
+            (True, [_dns_addr("3.3.3.3")]),
+        ]
+    )
+    conn = TCPConnector(resolver=resolver, ttl_dns_cache=10)
+
+    pending = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    other = asyncio.ensure_future(conn._resolve_host("other.com", 80))
+    await asyncio.sleep(0)
+    conn.clear_dns_cache("example.com", 80)
+    resolver.gates[0].set()
+    resolver.gates[1].set()
+    assert await pending == [_dns_addr("1.1.1.1")]
+    assert await other == [_dns_addr("3.3.3.3")]
+
+    assert ("example.com", 80) not in conn._cached_hosts
+    assert ("other.com", 80) in conn._cached_hosts
+
+    await conn.close()
+
+
+async def test_dns_clear_cache_invalidates_stale_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver(
+        [
+            (False, [_dns_addr("1.1.1.1")]),
+            (True, [_dns_addr("2.2.2.2")]),
+        ]
+    )
+    conn = TCPConnector(
+        resolver=resolver,
+        ttl_dns_cache=10,
+        ttl_dns_cache_hard=30,
+        stale_dns_on_error=True,
+    )
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    clock.advance(15)
+    # Serves stale and starts a background refresh.
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+
+    conn.clear_dns_cache("example.com", 80)
+
+    # Even though within the hard window and the old object existed, after a
+    # clear the stale addresses are not reused; this request must wait.
+    waiting = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    assert resolver.calls == 2  # joins the in-flight refresh, no new lookup
+
+    resolver.gates[0].set()
+    assert await waiting == [_dns_addr("2.2.2.2")]
+
+    await conn.close()
+
+
+async def test_dns_cancelling_one_waiter_keeps_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver([(True, [_dns_addr("2.2.2.2")])])
+    conn = TCPConnector(resolver=resolver, ttl_dns_cache=10)
+
+    first = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    second = asyncio.ensure_future(conn._resolve_host("example.com", 80))
+    await asyncio.sleep(0)
+    assert resolver.calls == 1
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    resolver.gates[0].set()
+    assert await second == [_dns_addr("2.2.2.2")]
+    assert resolver.calls == 1
+
+    await conn.close()
+
+
+async def test_dns_close_cancels_background_refresh_and_waiters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(connector_module, "monotonic", clock)
+    resolver = _GatedResolver(
+        [
+            (False, [_dns_addr("1.1.1.1")]),
+            (True, [_dns_addr("2.2.2.2")]),
+        ]
+    )
+    conn = TCPConnector(
+        resolver=resolver,
+        ttl_dns_cache=10,
+        ttl_dns_cache_hard=30,
+        stale_dns_on_error=True,
+    )
+
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    clock.advance(15)
+    assert (await conn._resolve_host("example.com", 80)) == [_dns_addr("1.1.1.1")]
+    assert resolver.calls == 2
+
+    await conn.close()
+    assert conn._resolve_host_tasks == set()
+    assert conn._throttle_dns_futures == {}
+
+
+async def test_dns_hard_ttl_requires_soft_ttl() -> None:
+    with pytest.raises(ValueError, match="ttl_dns_cache"):
+        TCPConnector(ttl_dns_cache=None, ttl_dns_cache_hard=30)
+
+
+async def test_dns_hard_ttl_cannot_be_shorter_than_soft_ttl() -> None:
+    with pytest.raises(ValueError, match="greater than or equal"):
+        TCPConnector(ttl_dns_cache=30, ttl_dns_cache_hard=10)
+
+
 async def test_get_unconnected_proto() -> None:
     loop = asyncio.get_running_loop()
     conn = aiohttp.BaseConnector()
@@ -4449,13 +4885,17 @@ async def test_connector_throttle_trace_race() -> None:
             """Dummy"""
 
         async def send_dns_cache_hit(self, *args: object, **kwargs: object) -> None:
-            futures = connector._throttle_dns_futures.pop(key)
-            for fut in futures:
-                fut.set_result(None)
-            connector._cached_hosts.add(key, [token])
+            state = connector._throttle_dns_futures.pop(key)
+            for fut in state.futures:
+                fut.set_result([token])
 
     connector = TCPConnector()
-    connector._throttle_dns_futures[key] = set()
+
+    class _FakeResolutionState:
+        def __init__(self) -> None:
+            self.futures: set[asyncio.Future[list[ResolveResult]]] = set()
+
+    connector._throttle_dns_futures[key] = _FakeResolutionState()
     traces = [DummyTracer()]
     assert await connector._resolve_host("", 0, traces) == [token]
 

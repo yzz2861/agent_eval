@@ -1213,6 +1213,7 @@ is controlled by *force_close* constructor's parameter).
 
 .. class:: TCPConnector(*, ssl=True, verify_ssl=True, fingerprint=None, \
                  use_dns_cache=True, ttl_dns_cache=10, \
+                 ttl_dns_cache_hard=None, stale_dns_on_error=False, \
                  family=0, ssl_context=None, local_addr=None, \
                  resolver=None, keepalive_timeout=sentinel, \
                  force_close=False, limit=100, limit_per_host=0, \
@@ -1275,6 +1276,25 @@ is controlled by *force_close* constructor's parameter).
       In some environments the IP addresses related to a specific HOST can
       change after a specific time. Use this option to keep the DNS cache
       updated refreshing each entry after N seconds.
+
+   :param int ttl_dns_cache_hard: hard time-to-live for cached DNS entries,
+      in seconds (optional). When set, an entry that has passed its soft
+      *ttl_dns_cache* may still be used to serve a request while a single
+      background refresh runs, but never after this hard deadline has been
+      reached; past it every request waits for a fresh resolution. Must be
+      greater than or equal to *ttl_dns_cache*, which cannot be ``None``
+      when this is set. By default there is no soft-expiry grace window.
+
+      .. versionadded:: 4.0
+
+   :param bool stale_dns_on_error: when a background refresh of a soft-expired
+      entry fails, keep serving the stale addresses until the hard deadline
+      (*ttl_dns_cache_hard*) is reached. When ``False`` (the default) the
+      stale entry is discarded on refresh failure and subsequent requests
+      wait for a new resolution. The original hard deadline is always kept;
+      a failed refresh never extends the lifetime of a stale entry.
+
+      .. versionadded:: 4.0
 
    :param int limit: total number simultaneous connections. If *limit* is
                      ``0`` the connector has no limit (default: 100).
