@@ -5,6 +5,15 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add an optional versioned envelope format that carries a key id, so
+-   verification selects the correct key directly instead of trying
+-   every key in rotation. The version and key id are covered by the
+-   signature, unknown key ids fail immediately, and legacy unversioned
+-   values are only accepted with an explicit flag. Adds
+-   ``KeyedSigner``, ``KeyedTimestampSigner``,
+-   ``KeyedSerializer``, ``KeyedTimedSerializer``,
+-   ``KeyedURLSafeSerializer``, ``KeyedURLSafeTimedSerializer``,
+-   ``KeyedVerification``, and ``UnknownKeyId``.
 
 
 Version 2.2.0

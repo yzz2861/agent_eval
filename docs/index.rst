@@ -58,6 +58,7 @@ Table of Contents
     exceptions
     timed
     url_safe
+    keyed
     encoding
     license
     changes

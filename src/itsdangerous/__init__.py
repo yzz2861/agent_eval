@@ -7,6 +7,14 @@ from .exc import BadPayload as BadPayload
 from .exc import BadSignature as BadSignature
 from .exc import BadTimeSignature as BadTimeSignature
 from .exc import SignatureExpired as SignatureExpired
+from .keyed import KeyedSerializer as KeyedSerializer
+from .keyed import KeyedSigner as KeyedSigner
+from .keyed import KeyedTimedSerializer as KeyedTimedSerializer
+from .keyed import KeyedTimestampSigner as KeyedTimestampSigner
+from .keyed import KeyedURLSafeSerializer as KeyedURLSafeSerializer
+from .keyed import KeyedURLSafeTimedSerializer as KeyedURLSafeTimedSerializer
+from .keyed import KeyedVerification as KeyedVerification
+from .keyed import UnknownKeyId as UnknownKeyId
 from .serializer import Serializer as Serializer
 from .signer import HMACAlgorithm as HMACAlgorithm
 from .signer import NoneAlgorithm as NoneAlgorithm
