@@ -240,6 +240,15 @@ describe Rack::Utils do
       message.must_equal "expected Array (got String) for param `y'"
   end
 
+  it "supports duplicate scalar handling when parsing nested queries" do
+    query = "order[id]=7&order[%69d]=9"
+    Rack::Utils.parse_nested_query(query, "&", duplicate_scalar_handling: :first).
+      must_equal "order" => {"id" => "7"}
+    proc {
+      Rack::Utils.parse_nested_query(query, "&", duplicate_scalar_handling: :reject)
+    }.must_raise(Rack::QueryParser::DuplicateParameterError)
+  end
+
   it "can parse a query string with a key that has invalid UTF-8 encoded bytes" do
     Rack::Utils.parse_nested_query("foo%81E=1").must_equal "foo\x81E"=>"1"
   end

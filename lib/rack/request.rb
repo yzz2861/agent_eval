@@ -782,9 +782,12 @@ module Rack
 
       def expand_param_pairs(pairs, query_parser = query_parser())
         params = query_parser.make_params
+        context = query_parser.make_normalize_context
 
-        pairs.each do |k, v|
-          query_parser.normalize_params(params, k, v)
+        pairs.each_with_index do |(key, value), index|
+          query_parser.normalize_params(
+            params, key, value, nil, position: index + 1, context: context
+          )
         end
 
         params.to_params_hash

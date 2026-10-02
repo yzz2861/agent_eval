@@ -740,6 +740,60 @@ class RackRequestTest < Minitest::Spec
     req.params.must_equal "foo" => "bar", "quux" => "b;la;wun=duh"
   end
 
+  it "applies duplicate scalar handling consistently through GET and POST" do
+    query = "order[id]=7&order[%69d]=9&items[][id]=1&items[][id]=2"
+    expected = {
+      first: {
+        "order" => {"id" => "7"},
+        "items" => [{"id" => "1"}, {"id" => "2"}]
+      },
+      last: {
+        "order" => {"id" => "9"},
+        "items" => [{"id" => "1"}, {"id" => "2"}]
+      }
+    }
+
+    [:first, :last].each do |handling|
+      parser = Rack::QueryParser.make_default(32, duplicate_scalar_handling: handling)
+      direct = parser.parse_nested_query(query)
+      direct.must_equal expected[handling]
+
+      get_request = Rack::Request.new(Rack::MockRequest.env_for("/?#{query}"))
+      get_request.query_parser = parser
+      get_request.GET.must_equal direct
+
+      post_request = Rack::Request.new(Rack::MockRequest.env_for("/",
+        "REQUEST_METHOD" => "POST",
+        "CONTENT_TYPE" => "application/x-www-form-urlencoded",
+        :input => query))
+      post_request.query_parser = parser
+      post_request.POST.must_equal direct
+    end
+  end
+
+  it "reports duplicate scalar positions consistently through GET and POST" do
+    query = "order[id]=7&order[%69d]=9"
+    parser = Rack::QueryParser.make_default(32, duplicate_scalar_handling: :reject)
+
+    get_request = Rack::Request.new(Rack::MockRequest.env_for("/?#{query}"))
+    get_request.query_parser = parser
+    post_request = Rack::Request.new(Rack::MockRequest.env_for("/",
+      "REQUEST_METHOD" => "POST",
+      "CONTENT_TYPE" => "application/x-www-form-urlencoded",
+      :input => query))
+    post_request.query_parser = parser
+
+    [
+      -> { get_request.GET },
+      -> { post_request.POST }
+    ].each do |request_params|
+      error = proc { request_params.call }.must_raise(Rack::QueryParser::DuplicateParameterError)
+      error.parameter_name.must_equal "order[id]"
+      error.first_position.must_equal 1
+      error.second_position.must_equal 2
+    end
+  end
+
   it "limit the allowed parameter depth when parsing parameters" do
     env = Rack::MockRequest.env_for("/?a#{'[a]' * 40}=b")
     req = make_request(env)

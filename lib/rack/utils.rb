@@ -18,7 +18,10 @@ module Rack
 
   module Utils
     ParameterTypeError = QueryParser::ParameterTypeError
+    ConflictingParameterError = QueryParser::ConflictingParameterError
     InvalidParameterError = QueryParser::InvalidParameterError
+    DuplicateParameterError = QueryParser::DuplicateParameterError
+    DuplicateScalarParameterError = QueryParser::DuplicateScalarParameterError
     ParamsTooDeepError = QueryParser::ParamsTooDeepError
     DEFAULT_SEP = QueryParser::DEFAULT_SEP
     COMMON_SEP = QueryParser::COMMON_SEP
@@ -102,8 +105,8 @@ module Rack
       Rack::Utils.default_query_parser.parse_query(qs, d, &unescaper)
     end
 
-    def parse_nested_query(qs, d = nil)
-      Rack::Utils.default_query_parser.parse_nested_query(qs, d)
+    def parse_nested_query(qs, d = nil, **options)
+      Rack::Utils.default_query_parser.parse_nested_query(qs, d, **options)
     end
 
     def build_query(params)

@@ -7,11 +7,31 @@ module Rack
   class QueryParser
     DEFAULT_SEP = /& */n
     COMMON_SEP = { ";" => /; */n, ";," => /[;,] */n, "&" => /& */n }
+    DUPLICATE_SCALAR_REJECT = :reject
+    DUPLICATE_SCALAR_FIRST = :first
+    DUPLICATE_SCALAR_LAST = :last
+    DUPLICATE_SCALAR_HANDLINGS = {
+      nil => :overwrite,
+      reject: DUPLICATE_SCALAR_REJECT,
+      first: DUPLICATE_SCALAR_FIRST,
+      last: DUPLICATE_SCALAR_LAST,
+    }.freeze
 
     # ParameterTypeError is the error that is raised when incoming structural
     # parameters (parsed by parse_nested_query) contain conflicting types.
     class ParameterTypeError < TypeError
       include BadRequest
+    end
+
+    class ConflictingParameterError < ParameterTypeError
+      attr_reader :parameter_name, :first_position, :second_position
+
+      def initialize(message, parameter_name:, first_position:, second_position:)
+        super(message)
+        @parameter_name = parameter_name
+        @first_position = first_position
+        @second_position = second_position
+      end
     end
 
     # InvalidParameterError is the error that is raised when incoming structural
@@ -31,6 +51,38 @@ module Rack
       include BadRequest
     end
 
+    class DuplicateParameterError < InvalidParameterError
+      attr_reader :parameter_name, :first_position, :second_position
+
+      def initialize(message, parameter_name:, first_position:, second_position:)
+        super(message)
+        @parameter_name = parameter_name
+        @first_position = first_position
+        @second_position = second_position
+      end
+    end
+
+    DuplicateScalarParameterError = DuplicateParameterError
+
+    class NormalizationContext # :nodoc: all
+      attr_reader :duplicate_scalar_handling, :structural_assignment_handling
+
+      def initialize(duplicate_scalar_handling, structural_assignment_handling = duplicate_scalar_handling)
+        @duplicate_scalar_handling = duplicate_scalar_handling
+        @structural_assignment_handling = structural_assignment_handling
+        @assignments = {}
+      end
+
+      def location_for(params, key)
+        @assignments.dig(params.object_id, key)
+      end
+
+      def register!(params, key, type, position, parameter_name)
+        @assignments[params.object_id] ||= {}
+        @assignments[params.object_id][key] = [type, position, parameter_name]
+      end
+    end
+
     # ParamsTooDeepError is the old name for the error that is raised when params
     # are recursively nested over the specified limit. Make it the same as
     # as QueryLimitError, so that code that rescues ParamsTooDeepError error
@@ -41,7 +93,7 @@ module Rack
       new(Params, param_depth_limit, **options)
     end
 
-    attr_reader :param_depth_limit
+    attr_reader :param_depth_limit, :duplicate_scalar_handling
 
     env_int = lambda do |key, val|
       if str_val = ENV[key]
@@ -63,11 +115,18 @@ module Rack
 
     attr_reader :bytesize_limit
 
-    def initialize(params_class, param_depth_limit, bytesize_limit: BYTESIZE_LIMIT, params_limit: PARAMS_LIMIT)
+    def initialize(
+      params_class,
+      param_depth_limit,
+      bytesize_limit: BYTESIZE_LIMIT,
+      params_limit: PARAMS_LIMIT,
+      duplicate_scalar_handling: nil
+    )
       @params_class = params_class
       @param_depth_limit = param_depth_limit
       @bytesize_limit = bytesize_limit
       @params_limit = params_limit
+      @duplicate_scalar_handling = duplicate_scalar_handling
     end
 
     # Stolen from Mongrel, with some small modifications:
@@ -110,11 +169,16 @@ module Rack
     # query strings with parameters of conflicting types, in this case a
     # ParameterTypeError is raised. Users are encouraged to return a 400 in this
     # case.
-    def parse_nested_query(qs, separator = nil)
+    # +duplicate_scalar_handling+ can be +:reject+, +:first+, or +:last+. The
+    # default of +nil+ preserves historical query parser behavior.
+    def parse_nested_query(qs, separator = nil, duplicate_scalar_handling: @duplicate_scalar_handling)
       params = make_params
+      context = make_normalize_context(duplicate_scalar_handling)
+      position = 0
 
       each_query_pair(qs, separator) do |k, v|
-        _normalize_params(params, k, v, 0)
+        position += 1
+        _normalize_params(params, k, v, 0, nil, nil, position, context)
       end
 
       return params.to_h
@@ -125,12 +189,32 @@ module Rack
     # conflict, a ParameterTypeError is raised.  The depth argument is deprecated
     # and should no longer be used, it is kept for backwards compatibility with
     # earlier versions of rack.
-    def normalize_params(params, name, v, _depth=nil)
-      _normalize_params(params, name, v, 0)
+    def normalize_params(
+      params,
+      name,
+      v,
+      _depth = nil,
+      position: nil,
+      context: nil,
+      duplicate_scalar_handling: @duplicate_scalar_handling
+    )
+      context ||= make_normalize_context(duplicate_scalar_handling)
+      result = _normalize_params(params, name, v, 0, nil, nil, position, context)
+      result.equal?(SKIP_ASSIGNMENT) ? params : result
     end
 
-    private def _normalize_params(params, name, v, depth)
+    def make_normalize_context(duplicate_scalar_handling = @duplicate_scalar_handling)
+      handling = self.class.send(:duplicate_scalar_handling_for, duplicate_scalar_handling)
+      structural_handling = handling == :overwrite ? :overwrite : handling
+      NormalizationContext.new(handling, structural_handling)
+    end
+
+    SKIP_ASSIGNMENT = :skip_assignment
+    private_constant :SKIP_ASSIGNMENT
+
+    private def _normalize_params(params, name, v, depth, full_parameter_name, path, position, context)
       raise ParamsTooDeepError if depth >= param_depth_limit
+      full_parameter_name = name.to_s if depth == 0
 
       if !name
         # nil name, treat same as empty string (required by tests)
@@ -167,31 +251,36 @@ module Rack
         if k == '[]' && depth != 0
           return [v]
         else
-          params[k] = v
+          assign_scalar(params, k, v, position, full_parameter_name, context)
         end
       elsif after == "["
-        params[name] = v
+        assign_scalar(params, name, v, position, full_parameter_name, context)
       elsif after == "[]"
-        params[k] ||= []
-        raise ParameterTypeError, "expected Array (got #{params[k].class.name}) for param `#{k}'" unless params[k].is_a?(Array)
-        params[k] << v
+        container_name = nested_parameter_name(path, depth, k)
+        array = use_array(params, k, position, container_name, context) or return SKIP_ASSIGNMENT
+        array << v
       elsif after.start_with?('[]')
         # Recognize x[][y] (hash inside array) parameters
         unless after[2] == '[' && after.end_with?(']') && (child_key = after[3, after.length-4]) && !child_key.empty? && !child_key.index('[') && !child_key.index(']')
           # Handle other nested array parameters
           child_key = after[2, after.length]
         end
-        params[k] ||= []
-        raise ParameterTypeError, "expected Array (got #{params[k].class.name}) for param `#{k}'" unless params[k].is_a?(Array)
-        if params_hash_type?(params[k].last) && !params_hash_has_key?(params[k].last, child_key)
-          _normalize_params(params[k].last, child_key, v, depth + 1)
+        container_name = nested_parameter_name(path, depth, k)
+        array = use_array(params, k, position, container_name, context) or return SKIP_ASSIGNMENT
+        if params_hash_type?(array.last) && !params_hash_has_key?(array.last, child_key)
+          result = _normalize_params(array.last, child_key, v, depth + 1, full_parameter_name, "#{container_name}[]", position, context)
+          return SKIP_ASSIGNMENT if result.equal?(SKIP_ASSIGNMENT)
         else
-          params[k] << _normalize_params(make_params, child_key, v, depth + 1)
+          child_params = make_params
+          result = _normalize_params(child_params, child_key, v, depth + 1, full_parameter_name, "#{container_name}[]", position, context)
+          return SKIP_ASSIGNMENT if result.equal?(SKIP_ASSIGNMENT)
+          array << (child_params.empty? ? result : child_params)
         end
       else
-        params[k] ||= make_params
-        raise ParameterTypeError, "expected Hash (got #{params[k].class.name}) for param `#{k}'" unless params_hash_type?(params[k])
-        params[k] = _normalize_params(params[k], after, v, depth + 1)
+        child_name = nested_parameter_name(path, depth, k)
+        child_params = use_params_hash(params, k, position, child_name, context) or return SKIP_ASSIGNMENT
+        result = _normalize_params(child_params, after, v, depth + 1, full_parameter_name, child_name, position, context)
+        return SKIP_ASSIGNMENT if result.equal?(SKIP_ASSIGNMENT)
       end
 
       params
@@ -199,12 +288,130 @@ module Rack
       raise IncompatibleEncodingError
     end
 
+    private def assign_scalar(params, key, value, position, parameter_name, context)
+      existing = context.location_for(params, key)
+
+      if existing
+        existing_type, existing_position, existing_name = existing
+
+        if existing_type == :scalar
+          case context.duplicate_scalar_handling
+          when :first
+            return
+          when :reject
+            raise_duplicate_parameter(existing_name || parameter_name, existing_position, position)
+          end
+        else
+          case context.structural_assignment_handling
+          when :first
+            return SKIP_ASSIGNMENT
+          when :reject
+            raise_conflicting_parameter(existing_name || parameter_name, existing_position, position)
+          end
+        end
+      end
+
+      params[key] = value
+      context.register!(params, key, :scalar, position, parameter_name)
+    end
+
+    private def nested_parameter_name(parameter_name, depth, key)
+      return key if depth.zero? || parameter_name.nil?
+      "#{parameter_name}[#{key}]"
+    end
+
+    private def use_array(params, key, position, parameter_name, context)
+      existing = context.location_for(params, key)
+
+      if existing
+        array = params[key]
+        return array if array.is_a?(Array)
+
+        case context.structural_assignment_handling
+        when :first
+          return nil
+        when :reject
+          _, existing_position, existing_name = existing
+          raise_conflicting_parameter(existing_name || parameter_name, existing_position, position)
+        when :overwrite
+          raise ParameterTypeError, "expected Array (got #{array.class.name}) for param `#{key}'"
+        end
+      end
+
+      array = []
+      params[key] = array
+      context.register!(params, key, :array, position, parameter_name)
+      array
+    end
+
+    private def use_params_hash(params, key, position, parameter_name, context)
+      existing = context.location_for(params, key)
+
+      if existing
+        child_params = params[key]
+        return child_params if params_hash_type?(child_params)
+
+        case context.structural_assignment_handling
+        when :first
+          return nil
+        when :reject
+          _, existing_position, existing_name = existing
+          raise_conflicting_parameter(existing_name || parameter_name, existing_position, position)
+        when :overwrite
+          raise ParameterTypeError, "expected Hash (got #{child_params.class.name}) for param `#{key}'"
+        end
+      end
+
+      child_params = make_params
+      params[key] = child_params
+      context.register!(params, key, :hash, position, parameter_name)
+      child_params
+    end
+
+    private def raise_duplicate_parameter(parameter_name, first_position, second_position)
+      raise DuplicateParameterError.new(
+        "duplicate scalar parameter `#{parameter_name}' assigned at positions #{first_position} and #{second_position}",
+        parameter_name: parameter_name,
+        first_position: first_position,
+        second_position: second_position
+      )
+    end
+
+    private def raise_conflicting_parameter(parameter_name, first_position, second_position)
+      message =
+        "conflicting parameter types for `#{parameter_name}' " \
+        "assigned at positions #{first_position} and #{second_position}"
+      raise ConflictingParameterError.new(
+        message,
+        parameter_name: parameter_name,
+        first_position: first_position,
+        second_position: second_position
+      )
+    end
+
+    def self.duplicate_scalar_handling_for(value)
+      value = value.to_sym if value.respond_to?(:to_sym)
+      handling = DUPLICATE_SCALAR_HANDLINGS.fetch(value, nil)
+      return handling if handling
+
+      raise ArgumentError,
+        "invalid duplicate scalar handling: #{value.inspect} " \
+        "(expected nil, :reject, :first, or :last)"
+    end
+    private_class_method :duplicate_scalar_handling_for
+
     def make_params
       @params_class.new
     end
 
     def new_depth_limit(param_depth_limit)
-      self.class.new @params_class, param_depth_limit
+      self.class.new(
+        @params_class,
+        param_depth_limit,
+        bytesize_limit: @bytesize_limit,
+        params_limit: @params_limit,
+        duplicate_scalar_handling: @duplicate_scalar_handling
+      )
     end
 
     private
@@ -254,6 +461,7 @@ module Rack
         end
       end
     rescue ArgumentError => e
+      raise if e.is_a?(BadRequest)
       raise InvalidParameterError, e.message, e.backtrace
     end
 

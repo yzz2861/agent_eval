@@ -27,7 +27,10 @@ module Rack
         new
       end
 
-      def self.normalize_params(params, key, value)
+      def self.make_normalize_context(*)
+      end
+
+      def self.normalize_params(params, key, value, *_args, **_options)
         params << [key, value]
       end
 
