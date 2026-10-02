@@ -1,0 +1,24 @@
+class Money
+  class Allocation
+    # Allocates a specified amount into parts based on their proportions or distributes
+    # it evenly when the number of parts is specified numerically.
+    #
+    # The total of the allocated amounts will always equal the original amount.
+    #
+    # The parts can be specified as:
+    #   Numeric — performs the split between a given number of parties evenly
+    #   Array<Numeric> — allocates the amounts proportionally to the given array
+    #
+    # @param amount [Numeric] The total amount to be allocated.
+    # @param parts [Numeric, Array<Numeric>] Number of parts to split into or an array (proportions for allocation).
+    # @param decimal_cutoff [bool | Integer] Controls per-split precision:
+    #   - When true, splits are truncated to whole amounts.
+    #   - When an Integer N, splits are rounded to N decimal places.
+    #   - When false or nil, no rounding/truncation is applied.
+    #   Defaults to true (whole amounts).
+    #
+    # @return [Array[Numeric]] An array containing the allocated amounts.
+    # @raise [ArgumentError] If parts is empty or not provided.
+    def self.generate: (Numeric amount, (Numeric | Array[Numeric]) parts, ?(bool | Integer) decimal_cutoff) -> Array[Numeric]
+  end
+end

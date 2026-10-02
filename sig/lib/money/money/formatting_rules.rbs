@@ -1,0 +1,32 @@
+class Money
+  class FormattingRules
+    @rules: Hash[Symbol, untyped]
+
+    def initialize: (untyped currency, *untyped raw_rules) -> void
+
+    def []: (untyped key) -> untyped
+
+    def has_key?: (untyped key) -> untyped
+
+    private
+
+    attr_reader currency: untyped
+
+    # Cleans up formatting rules.
+    #
+    # @param [Hash] rules
+    #
+    # @return [Hash]
+    def normalize_formatting_rules: (Hash[Symbol, untyped] rules) -> Hash[Symbol, untyped]
+
+    def default_formatting_rules: () -> Hash[Symbol, untyped]
+
+    def translate_formatting_rules: (Hash[Symbol, untyped] rules) -> Hash[Symbol, untyped]
+
+    def determine_format: () -> String
+
+    def default_format: () -> String
+
+    def delimiter_pattern_rule: (Hash[Symbol, untyped] rules) -> ::Regexp
+  end
+end

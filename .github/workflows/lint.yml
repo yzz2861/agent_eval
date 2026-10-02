@@ -1,0 +1,28 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: RuboCop
+        run: bin/rubocop --format github --format clang
+      - name: RBS
+        # Resolves sig/ via gem discovery so manifest.yaml is exercised;
+        # -I sig would skip it and miss bad manifest dependencies.
+        run: bin/rbs --no-collection -r money validate

@@ -1,0 +1,26 @@
+# Bundler
+.bundle
+Gemfile.lock
+pkg/*
+
+# Rubinius
+*.rbc
+
+# YARD
+.yardoc
+yardoc/
+doc/
+
+# Project
+.rbenv-version
+.rbx
+.rvmrc
+.ruby-version
+.ruby-gemset
+
+# Spec artifacts
+/coverage
+.gem_rbs_collection
+rbs_collection.lock.yaml
+.idea
+spec/examples.txt
