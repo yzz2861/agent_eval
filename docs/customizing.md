@@ -188,7 +188,7 @@ The hook factories are also good building blocks for more complex customizations
 Another reason is overriding behavior on a per-attribute basis.
 
 Currently, the overrides only support generating dictionary un/structuring hooks (as opposed to tuples),
-and support `omit_if_default`, `forbid_extra_keys`, `rename` and `omit`.
+and support `omit_if_default`, `forbid_extra_keys`, `rename`, `omit` and `path`.
 
 ### `omit_if_default`
 ```{currentmodule} cattrs.gen
@@ -304,6 +304,49 @@ This is useful if an attribute name is a reserved keyword in Python.
 {'class': 1}
 >>> c.structure({'class': 1}, ExampleClass)
 ExampleClass(klass=1)
+```
+
+### `path`
+
+Using the path override maps a flat attribute to a nested location in the
+(un)structured payload, without introducing wrapper classes.
+
+A path is a sequence of segments; a string segment is a mapping key and an
+integer segment is a sequence index. Since segments are structured, keys
+containing dots (or any other characters) are used as-is and never split.
+The path override is mutually exclusive with [`rename`](#rename).
+
+```{doctest}
+
+>>> from cattrs.gen import make_dict_unstructure_fn, make_dict_structure_fn, override
+
+>>> @define
+... class User:
+...     name: str
+...     city: str
+
+>>> c = cattrs.Converter()
+>>> overrides = {"city": override(path=("profile", "address", "city"))}
+>>> c.register_unstructure_hook(User, make_dict_unstructure_fn(User, c, **overrides))
+>>> c.register_structure_hook(User, make_dict_structure_fn(User, c, **overrides))
+>>> c.unstructure(User("Jane", "Paris"))
+{'name': 'Jane', 'profile': {'address': {'city': 'Paris'}}}
+>>> c.structure({'name': 'Jane', 'profile': {'address': {'city': 'Paris'}}}, User)
+User(name='Jane', city='Paris')
+```
+
+Multiple attributes may share path prefixes; the intermediate mappings and
+sequences are merged (and rebuilt fresh on every call, so results never share
+state). When structuring, a missing path falls back to the attribute default
+if one is defined, while an explicit `None` is passed to the attribute's hook
+like any other value. A `None` (or otherwise nonsubscriptable) intermediate
+value is an error, not a missing value.
+
+Paths conflict when they are identical, when one is a prefix of another, or
+when they require different container types at the same position; conflicts
+are detected and raised as `ValueError` when the hook is generated.
+
+```{versionadded} 26.3.0
 ```
 
 ### `omit`

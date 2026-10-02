@@ -157,6 +157,11 @@ def make_dict_unstructure_fn(
                 lines.append(f"  res.pop({attr_name!r}, None)")
                 continue
 
+            if override.path is not None:
+                raise NotImplementedError(
+                    "The `path` override is not supported for TypedDicts"
+                )
+
             if override.rename is not None:
                 # We also need to pop when renaming, since we're copying
                 # the original.
@@ -346,6 +351,10 @@ def make_dict_structure_fn(
                 override = _annotated_override_or_default(t, neutral)
                 if override != neutral:
                     kwargs[an] = override
+            if override.path is not None:
+                raise NotImplementedError(
+                    "The `path` override is not supported for TypedDicts"
+                )
             if override.omit:
                 continue
 
@@ -421,6 +430,10 @@ def make_dict_structure_fn(
                 override = _annotated_override_or_default(a.type, neutral)
                 if override != neutral:
                     kwargs[an] = override
+            if override.path is not None:
+                raise NotImplementedError(
+                    "The `path` override is not supported for TypedDicts"
+                )
             if override.omit:
                 continue
             if not attr_required:

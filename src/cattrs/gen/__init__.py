@@ -33,7 +33,16 @@ from ..types import SimpleStructureHook
 from ._consts import AttributeOverride, already_generating, neutral
 from ._generics import generate_mapping
 from ._lc import generate_unique_filename
-from ._shared import _annotated_override_or_default, find_structure_handler
+from ._shared import (
+    _annotated_override_or_default,
+    check_path_conflicts,
+    collect_effective_paths,
+    deep_get,
+    deep_set,
+    find_structure_handler,
+    format_path,
+    normalize_path,
+)
 
 if TYPE_CHECKING:
     from ..converters import BaseConverter
@@ -57,12 +66,27 @@ def override(
     omit: bool | None = None,
     struct_hook: Callable[[Any, Any], Any] | None = None,
     unstruct_hook: Callable[[Any], Any] | None = None,
+    path: Iterable[str | int] | None = None,
 ) -> AttributeOverride:
     """Override how a particular field is handled.
 
     :param omit: Whether to skip the field or not. `None` means apply default handling.
+    :param path: A path of mapping keys (strings) and sequence indices (integers)
+        under which the field is found when structuring, and placed when
+        unstructuring. Useful for mapping flat attributes to nested payloads.
+        Mutually exclusive with `rename`.
+
+    .. versionadded:: 26.3.0
+        The *path* parameter.
     """
-    return AttributeOverride(omit_if_default, rename, omit, struct_hook, unstruct_hook)
+    return AttributeOverride(
+        omit_if_default,
+        rename,
+        omit,
+        struct_hook,
+        unstruct_hook,
+        tuple(path) if path is not None else None,
+    )
 
 
 T = TypeVar("T")
@@ -103,6 +127,8 @@ def make_dict_unstructure_fn_from_attrs(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionchanged:: 26.3.0
+        The `path` override is now supported.
     .. versionchanged:: 26.1.0
         When `_cattrs_omit_if_default` is true and the attribute has an attrs converter
         specified, the converter is applied to the default value before checking if it
@@ -119,6 +145,13 @@ def make_dict_unstructure_fn_from_attrs(
         # BaseConverter doesn't have it so we're careful.
         _cattrs_use_alias = getattr(converter, "use_alias", False)
 
+    path_lines = []
+    effective_paths = collect_effective_paths(
+        attrs, kwargs, _cattrs_use_alias, _cattrs_include_init_false
+    )
+    if effective_paths is not None:
+        check_path_conflicts(effective_paths)
+
     for a in attrs:
         attr_name = a.name
         if attr_name in kwargs:
@@ -132,9 +165,14 @@ def make_dict_unstructure_fn_from_attrs(
             continue
         if override.omit is None and not a.init and not _cattrs_include_init_false:
             continue
+        if override.path is not None:
+            path = normalize_path(override.path, attr_name)
+            internal_arg_parts["__c_deep_set"] = deep_set
+        else:
+            path = None
         if override.rename is None:
             kn = attr_name if not _cattrs_use_alias else a.alias
-            if kn != attr_name:
+            if kn != attr_name and path is None:
                 kwargs[attr_name] = evolve(override, rename=kn)
         else:
             kn = override.rename
@@ -218,11 +256,17 @@ def make_dict_unstructure_fn_from_attrs(
                     internal_arg_parts[def_name] = c(d)
 
             lines.append(f"  if instance.{attr_name} != {def_str}:")
-            lines.append(f"    res[{kn!r}] = {invoke}")
+            if path is not None:
+                lines.append(f"    __c_deep_set(res, {path!r}, {invoke})")
+            else:
+                lines.append(f"    res[{kn!r}] = {invoke}")
 
         else:
             # No default or no override.
-            invocation_lines.append(f"{kn!r}: {invoke},")
+            if path is not None:
+                path_lines.append(f"  __c_deep_set(res, {path!r}, {invoke})")
+            else:
+                invocation_lines.append(f"{kn!r}: {invoke},")
 
     internal_arg_line = ", ".join([f"{i}={i}" for i in internal_arg_parts])
     if internal_arg_line:
@@ -236,6 +280,7 @@ def make_dict_unstructure_fn_from_attrs(
         + [f"    {line}" for line in invocation_lines]
         + ["  }"]
         + lines
+        + path_lines
         + ["  return res"]
     )
     script = "\n".join(total_lines)
@@ -282,6 +327,8 @@ def make_dict_unstructure_fn(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionchanged:: 26.3.0
+        The `path` override is now supported.
     """
     origin = get_origin(cl)
     attrs = adapted_fields(origin or cl)  # type: ignore
@@ -369,6 +416,8 @@ def make_dict_structure_fn_from_attrs(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionchanged:: 26.3.0
+        The `path` override is now supported.
     """
 
     cl_name = cl.__name__
@@ -411,6 +460,12 @@ def make_dict_structure_fn_from_attrs(
         _cattrs_detailed_validation = converter.detailed_validation
     if _cattrs_prefer_attrib_converters == "from_converter":
         _cattrs_prefer_attrib_converters = converter._prefer_attrib_converters
+
+    effective_paths = collect_effective_paths(
+        attrs, kwargs, _cattrs_use_alias, _cattrs_include_init_false
+    )
+    if effective_paths is not None:
+        check_path_conflicts(effective_paths)
 
     if _cattrs_forbid_extra_keys:
         globs["__c_a"] = allowed_fields
@@ -459,69 +514,98 @@ def make_dict_structure_fn_from_attrs(
             ian = a.alias
             if override.rename is None:
                 kn = an if not _cattrs_use_alias else a.alias
-                if kn != an:
+                if kn != an and override.path is None:
                     kwargs[an] = evolve(override, rename=kn)
             else:
                 kn = override.rename
 
-            allowed_fields.add(kn)
+            if override.path is not None:
+                path = normalize_path(override.path, an)
+                internal_arg_parts["__c_deep_get"] = deep_get
+                internal_arg_parts["__c_nothing"] = NOTHING
+            else:
+                path = None
+
+            allowed_fields.add(kn if path is None else path[0])
             i = "  "
 
-            if not a.init:
+            note_msg = f"Structuring class {cl.__qualname__} @ attribute {an}"
+            if path is not None:
+                note_msg = f"{note_msg} (path: {format_path(path)})"
                 if a.default is not NOTHING:
+                    val = "__c_pv"
+                else:
+                    val = f"__c_deep_get(o, {path!r})"
+            else:
+                val = f"o[{kn!r}]"
+
+            if not a.init:
+                if a.default is not NOTHING and path is None:
                     pi_lines.append(f"{i}if {kn!r} in o:")
                     i = f"{i}  "
                 pi_lines.append(f"{i}try:")
                 i = f"{i}  "
+                if a.default is not NOTHING and path is not None:
+                    pi_lines.append(
+                        f"{i}__c_pv = __c_deep_get(o, {path!r}, __c_nothing)"
+                    )
+                    pi_lines.append(f"{i}if __c_pv is not __c_nothing:")
+                    i = f"{i}  "
                 type_name = f"__c_type_{an}"
                 internal_arg_parts[type_name] = t
                 if handler is not None:
                     if handler == converter._structure_call:
                         internal_arg_parts[struct_handler_name] = t
                         pi_lines.append(
-                            f"{i}instance.{an} = {struct_handler_name}(o[{kn!r}])"
+                            f"{i}instance.{an} = {struct_handler_name}({val})"
                         )
                     else:
                         tn = f"__c_type_{an}"
                         internal_arg_parts[tn] = t
                         pi_lines.append(
-                            f"{i}instance.{an} = {struct_handler_name}(o[{kn!r}], {tn})"
+                            f"{i}instance.{an} = {struct_handler_name}({val}, {tn})"
                         )
                 else:
-                    pi_lines.append(f"{i}instance.{an} = o[{kn!r}]")
+                    pi_lines.append(f"{i}instance.{an} = {val}")
+                if a.default is not NOTHING and path is not None:
+                    i = i[:-2]
                 i = i[:-2]
                 pi_lines.append(f"{i}except Exception as e:")
                 i = f"{i}  "
                 pi_lines.append(
-                    f'{i}e.__notes__ = getattr(e, \'__notes__\', []) + [__c_avn("Structuring class {cl.__qualname__} @ attribute {an}", "{an}", __c_type_{an})]'
+                    f"{i}e.__notes__ = getattr(e, '__notes__', []) + [__c_avn({note_msg!r}, \"{an}\", __c_type_{an})]"
                 )
                 pi_lines.append(f"{i}errors.append(e)")
 
             else:
-                if a.default is not NOTHING:
+                if a.default is not NOTHING and path is None:
                     lines.append(f"{i}if {kn!r} in o:")
                     i = f"{i}  "
                 lines.append(f"{i}try:")
                 i = f"{i}  "
+                if a.default is not NOTHING and path is not None:
+                    lines.append(f"{i}__c_pv = __c_deep_get(o, {path!r}, __c_nothing)")
+                    lines.append(f"{i}if __c_pv is not __c_nothing:")
+                    i = f"{i}  "
                 type_name = f"__c_type_{an}"
                 internal_arg_parts[type_name] = t
                 if handler:
                     if handler == converter._structure_call:
                         internal_arg_parts[struct_handler_name] = t
-                        lines.append(
-                            f"{i}res['{ian}'] = {struct_handler_name}(o[{kn!r}])"
-                        )
+                        lines.append(f"{i}res['{ian}'] = {struct_handler_name}({val})")
                     else:
                         lines.append(
-                            f"{i}res['{ian}'] = {struct_handler_name}(o[{kn!r}], {type_name})"
+                            f"{i}res['{ian}'] = {struct_handler_name}({val}, {type_name})"
                         )
                 else:
-                    lines.append(f"{i}res['{ian}'] = o[{kn!r}]")
+                    lines.append(f"{i}res['{ian}'] = {val}")
+                if a.default is not NOTHING and path is not None:
+                    i = i[:-2]
                 i = i[:-2]
                 lines.append(f"{i}except Exception as e:")
                 i = f"{i}  "
                 lines.append(
-                    f'{i}e.__notes__ = getattr(e, \'__notes__\', []) + [__c_avn("Structuring class {cl.__qualname__} @ attribute {an}", "{an}", __c_type_{an})]'
+                    f"{i}e.__notes__ = getattr(e, '__notes__', []) + [__c_avn({note_msg!r}, \"{an}\", __c_type_{an})]"
                 )
                 lines.append(f"{i}errors.append(e)")
 
@@ -598,11 +682,19 @@ def make_dict_structure_fn_from_attrs(
 
             if override.rename is None:
                 kn = an if not _cattrs_use_alias else a.alias
-                if kn != an:
+                if kn != an and override.path is None:
                     kwargs[an] = evolve(override, rename=kn)
             else:
                 kn = override.rename
-            allowed_fields.add(kn)
+
+            if override.path is not None:
+                path = normalize_path(override.path, an)
+                internal_arg_parts["__c_deep_get"] = deep_get
+                val = f"__c_deep_get(o, {path!r})"
+            else:
+                path = None
+                val = f"o[{kn!r}]"
+            allowed_fields.add(kn if path is None else path[0])
 
             if not a.init:
                 if handler is not None:
@@ -610,15 +702,15 @@ def make_dict_structure_fn_from_attrs(
                     internal_arg_parts[struct_handler_name] = handler
                     if handler == converter._structure_call:
                         internal_arg_parts[struct_handler_name] = t
-                        pi_line = f"  instance.{an} = {struct_handler_name}(o[{kn!r}])"
+                        pi_line = f"  instance.{an} = {struct_handler_name}({val})"
                     else:
                         tn = f"__c_type_{an}"
                         internal_arg_parts[tn] = t
                         pi_line = (
-                            f"  instance.{an} = {struct_handler_name}(o[{kn!r}], {tn})"
+                            f"  instance.{an} = {struct_handler_name}({val}, {tn})"
                         )
                 else:
-                    pi_line = f"  instance.{an} = o[{kn!r}]"
+                    pi_line = f"  instance.{an} = {val}"
 
                 pi_lines.append(pi_line)
             else:
@@ -627,13 +719,13 @@ def make_dict_structure_fn_from_attrs(
                     internal_arg_parts[struct_handler_name] = handler
                     if handler == converter._structure_call:
                         internal_arg_parts[struct_handler_name] = t
-                        invocation_line = f"{struct_handler_name}(o[{kn!r}]),"
+                        invocation_line = f"{struct_handler_name}({val}),"
                     else:
                         tn = f"__c_type_{an}"
                         internal_arg_parts[tn] = t
-                        invocation_line = f"{struct_handler_name}(o[{kn!r}], {tn}),"
+                        invocation_line = f"{struct_handler_name}({val}, {tn}),"
                 else:
-                    invocation_line = f"o[{kn!r}],"
+                    invocation_line = f"{val},"
 
                 if a.kw_only:
                     invocation_line = f"{a.alias}={invocation_line}"
@@ -669,43 +761,66 @@ def make_dict_structure_fn_from_attrs(
 
                 if override.rename is None:
                     kn = an if not _cattrs_use_alias else a.alias
-                    if kn != an:
+                    if kn != an and override.path is None:
                         kwargs[an] = evolve(override, rename=kn)
                 else:
                     kn = override.rename
-                allowed_fields.add(kn)
-                if not a.init:
-                    pi_lines.append(f"  if {kn!r} in o:")
-                    if handler:
-                        if handler == converter._structure_call:
-                            internal_arg_parts[struct_handler_name] = t
-                            pi_lines.append(
-                                f"    instance.{an} = {struct_handler_name}(o[{kn!r}])"
-                            )
-                        else:
-                            tn = f"__c_type_{an}"
-                            internal_arg_parts[tn] = t
-                            pi_lines.append(
-                                f"    instance.{an} = {struct_handler_name}(o[{kn!r}], {tn})"
-                            )
-                    else:
-                        pi_lines.append(f"    instance.{an} = o[{kn!r}]")
+
+                if override.path is not None:
+                    path = normalize_path(override.path, an)
+                    internal_arg_parts["__c_deep_get"] = deep_get
+                    internal_arg_parts["__c_nothing"] = NOTHING
                 else:
-                    post_lines.append(f"  if {kn!r} in o:")
+                    path = None
+                allowed_fields.add(kn if path is None else path[0])
+                if not a.init:
+                    if path is not None:
+                        pi_lines.append(
+                            f"  __c_pv = __c_deep_get(o, {path!r}, __c_nothing)"
+                        )
+                        pi_lines.append("  if __c_pv is not __c_nothing:")
+                        val = "__c_pv"
+                    else:
+                        pi_lines.append(f"  if {kn!r} in o:")
+                        val = f"o[{kn!r}]"
+                    if handler:
+                        if handler == converter._structure_call:
+                            internal_arg_parts[struct_handler_name] = t
+                            pi_lines.append(
+                                f"    instance.{an} = {struct_handler_name}({val})"
+                            )
+                        else:
+                            tn = f"__c_type_{an}"
+                            internal_arg_parts[tn] = t
+                            pi_lines.append(
+                                f"    instance.{an} = {struct_handler_name}({val}, {tn})"
+                            )
+                    else:
+                        pi_lines.append(f"    instance.{an} = {val}")
+                else:
+                    if path is not None:
+                        post_lines.append(
+                            f"  __c_pv = __c_deep_get(o, {path!r}, __c_nothing)"
+                        )
+                        post_lines.append("  if __c_pv is not __c_nothing:")
+                        val = "__c_pv"
+                    else:
+                        post_lines.append(f"  if {kn!r} in o:")
+                        val = f"o[{kn!r}]"
                     if handler:
                         if handler == converter._structure_call:
                             internal_arg_parts[struct_handler_name] = t
                             post_lines.append(
-                                f"    res['{a.alias}'] = {struct_handler_name}(o[{kn!r}])"
+                                f"    res['{a.alias}'] = {struct_handler_name}({val})"
                             )
                         else:
                             tn = f"__c_type_{an}"
                             internal_arg_parts[tn] = t
                             post_lines.append(
-                                f"    res['{a.alias}'] = {struct_handler_name}(o[{kn!r}], {tn})"
+                                f"    res['{a.alias}'] = {struct_handler_name}({val}, {tn})"
                             )
                     else:
-                        post_lines.append(f"    res['{a.alias}'] = o[{kn!r}]")
+                        post_lines.append(f"    res['{a.alias}'] = {val}")
         if not pi_lines:
             instantiation_lines = (
                 ["  return __cl("]
@@ -799,6 +914,8 @@ def make_dict_structure_fn(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionchanged:: 26.3.0
+        The `path` override is now supported.
     """
 
     mapping = {}
