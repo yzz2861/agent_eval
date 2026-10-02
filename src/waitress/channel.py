@@ -11,6 +11,8 @@
 # FOR A PARTICULAR PURPOSE.
 #
 ##############################################################################
+import errno
+import os
 import socket
 import threading
 import time
@@ -22,6 +24,18 @@ from waitress.task import ErrorTask, WSGITask
 from waitress.utilities import InternalServerError
 
 from . import wasyncore
+
+# os.sendfile is not available on all platforms (notably Windows)
+sendfile = getattr(os, "sendfile", None)
+
+# Errnos raised by os.sendfile that indicate the kernel cannot use sendfile
+# for this file/socket combination; the buffered read/send path is used
+# instead. Checked before wasyncore._DISCONNECTED on purpose: EBADF may
+# also mean the file object has no usable descriptor, in which case the
+# buffered path will surface a genuinely disconnected socket itself.
+_SENDFILE_UNSUPPORTED_ERRNOS = frozenset(
+    {errno.ENOSYS, errno.EINVAL, errno.EBADF, errno.ENOTSOCK, errno.EOPNOTSUPP}
+)
 
 
 class ClientDisconnected(Exception):
@@ -270,8 +284,11 @@ class HTTPChannel(wasyncore.dispatcher):
             outbuflen = outbuf.__len__()
 
             while outbuflen > 0:
-                chunk = outbuf.get(self.sendbuf_len)
-                num_sent = self.send(chunk, do_close=do_close)
+                if self._sendfile_eligible(outbuf):
+                    num_sent = self._sendfile_some(outbuf, do_close=do_close)
+                else:
+                    chunk = outbuf.get(self.sendbuf_len)
+                    num_sent = self.send(chunk, do_close=do_close)
 
                 if num_sent:
                     outbuf.skip(num_sent, True)
@@ -305,6 +322,63 @@ class HTTPChannel(wasyncore.dispatcher):
             return True
 
         return False
+
+    def _sendfile_eligible(self, outbuf):
+        # The sendfile fast path only applies to file-backed outbufs created
+        # via wsgi.file_wrapper, on platforms where os.sendfile exists, and
+        # only until the kernel tells us it cannot handle this file/socket
+        # combination (sendfile_unsupported is set by _sendfile_some).
+        return (
+            sendfile is not None
+            and isinstance(outbuf, ReadOnlyFileBasedBuffer)
+            and not getattr(outbuf, "sendfile_unsupported", False)
+        )
+
+    def _sendfile_some(self, outbuf, do_close=True):
+        # Send as much of the remaining response as possible straight from
+        # the file to the socket, avoiding the Python-level read/send loop.
+        # Falls back to the buffered send path when sendfile cannot be used
+        # for this file/socket combination; bytes already sent are skipped
+        # in the buffer by the caller, so a fallback never re-sends or
+        # drops data. The file itself is left open; it is closed exactly
+        # once by the regular outbuf teardown in _flush_some/handle_close.
+        file = outbuf.getfile()
+        try:
+            in_fd = file.fileno()
+        except (AttributeError, OSError):
+            in_fd = None
+
+        if in_fd is None or in_fd < 0:
+            # The file object has no usable descriptor; don't retry on
+            # every iteration and fall through to the buffered send below.
+            outbuf.sendfile_unsupported = True
+        else:
+            # Bound the transfer by the file's current position and the
+            # remaining response length so we can never send past the end
+            # of the response body, no matter how large the file is.
+            offset = file.tell()
+            count = outbuf.remain
+            try:
+                return sendfile(self.socket.fileno(), in_fd, offset, count)
+            except BlockingIOError:
+                # The socket buffer is full; try again when the socket
+                # becomes writable.
+                return 0
+            except OSError as why:
+                if why.errno in _SENDFILE_UNSUPPORTED_ERRNOS:
+                    # The kernel can't sendfile this combination; remember
+                    # so we don't retry on every iteration and fall through
+                    # to the buffered send below.
+                    outbuf.sendfile_unsupported = True
+                elif why.errno in wasyncore._DISCONNECTED:
+                    if do_close:
+                        self.handle_close()
+                    return 0
+                else:
+                    raise
+
+        chunk = outbuf.get(self.sendbuf_len)
+        return self.send(chunk, do_close=do_close)
 
     def handle_close(self):
         with self.outbuf_lock:

@@ -99,6 +99,12 @@ Backward Incompatibilities
 Features
 ~~~~~~~~
 
+- Responses served through `wsgi.file_wrapper` now use `os.sendfile` when
+  the platform supports it, avoiding the Python-level read/send loop for
+  file-backed responses. When sendfile is unavailable or cannot handle the
+  file/socket combination, Waitress falls back to the regular buffered send
+  path without re-sending or dropping any bytes.
+
 - Added support for Python 3.13.
   See https://github.com/Pylons/waitress/pull/445.
 

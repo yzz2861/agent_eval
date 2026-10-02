@@ -1,5 +1,8 @@
+import errno
 import io
+import tempfile
 import unittest
+from unittest import mock
 
 
 class TestHTTPChannel(unittest.TestCase):
@@ -951,6 +954,246 @@ class TestHTTPChannelLookahead(TestHTTPChannel):
 
         data = self.sock.recv(256)
         self.assertEqual(len(data), 0)
+
+
+class TestHTTPChannelSendfile(unittest.TestCase):
+    def _makeOneWithMap(self, adj=None):
+        from waitress.channel import HTTPChannel
+
+        if adj is None:
+            adj = DummyAdjustments()
+        server = DummyServer()
+        sock = DummySock()
+        map = {}
+        inst = HTTPChannel(server, sock, "127.0.0.1", adj=adj, map=map)
+        inst.outbuf_lock = DummyLock()
+        return inst, sock.local(), map
+
+    def _makeFileOutbuf(self, content, size=None, start=0):
+        from waitress.buffers import ReadOnlyFileBasedBuffer
+
+        f = tempfile.TemporaryFile("w+b")
+        f.write(content)
+        f.seek(start)
+        buf = ReadOnlyFileBasedBuffer(f)
+        buf.prepare(size)
+        return buf
+
+    def _installOutbuf(self, inst, buf):
+        # mimic write_soon: the file-based outbuf is followed by a fresh
+        # writable outbuf
+        from waitress.buffers import OverflowableBuffer
+
+        inst.outbufs = [buf, OverflowableBuffer(inst.adj.outbuf_overflow)]
+        inst.total_outbufs_len = len(buf)
+
+    def _patchedSendfile(self, fake):
+        return mock.patch("waitress.channel.sendfile", fake)
+
+    def test_flush_some_sendfile_sends_everything(self):
+        content = b"hello world" * 100
+        inst, sock, map = self._makeOneWithMap()
+        buf = self._makeFileOutbuf(content)
+        self._installOutbuf(inst, buf)
+        calls = []
+
+        def fake_sendfile(out_fd, in_fd, offset, count):
+            calls.append((offset, count))
+            return inst.socket.send(content[offset : offset + count])
+
+        with self._patchedSendfile(fake_sendfile):
+            result = inst._flush_some()
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [(0, len(content))])
+        self.assertEqual(sock.sent, content)
+        self.assertEqual(inst.total_outbufs_len, 0)
+        self.assertEqual(buf.remain, 0)
+        # the file-based outbuf was popped and closed exactly once by the
+        # regular outbuf teardown
+        self.assertEqual(len(inst.outbufs), 1)
+        self.assertTrue(buf.file.closed)
+
+    def test_flush_some_sendfile_bounded_by_position_and_remain(self):
+        content = b"0123456789"
+        inst, sock, map = self._makeOneWithMap()
+        buf = self._makeFileOutbuf(content, size=4, start=2)
+        self._installOutbuf(inst, buf)
+        calls = []
+
+        def fake_sendfile(out_fd, in_fd, offset, count):
+            calls.append((offset, count))
+            return inst.socket.send(content[offset : offset + count])
+
+        with self._patchedSendfile(fake_sendfile):
+            result = inst._flush_some()
+
+        self.assertTrue(result)
+        # the transfer starts at the file's current position and may not
+        # send past the remaining response length
+        self.assertEqual(calls, [(2, 4)])
+        self.assertEqual(sock.sent, b"2345")
+        self.assertEqual(inst.total_outbufs_len, 0)
+
+    def test_flush_some_sendfile_short_writes(self):
+        content = b"0123456789"
+        inst, sock, map = self._makeOneWithMap()
+        buf = self._makeFileOutbuf(content)
+        self._installOutbuf(inst, buf)
+        calls = []
+
+        def fake_sendfile(out_fd, in_fd, offset, count):
+            calls.append((offset, count))
+            # simulate a kernel that only writes 3 bytes per call
+            return inst.socket.send(content[offset : offset + 3])
+
+        with self._patchedSendfile(fake_sendfile):
+            result = inst._flush_some()
+
+        self.assertTrue(result)
+        # each short write resumes exactly where the previous one stopped
+        self.assertEqual(calls, [(0, 10), (3, 7), (6, 4), (9, 1)])
+        self.assertEqual(sock.sent, content)
+        self.assertEqual(inst.total_outbufs_len, 0)
+
+    def test_flush_some_sendfile_eagain(self):
+        content = b"0123456789"
+        inst, sock, map = self._makeOneWithMap()
+        buf = self._makeFileOutbuf(content)
+        self._installOutbuf(inst, buf)
+        state = {"block": True}
+
+        def fake_sendfile(out_fd, in_fd, offset, count):
+            if state["block"]:
+                raise BlockingIOError(errno.EAGAIN, "try again")
+            return inst.socket.send(content[offset : offset + count])
+
+        with self._patchedSendfile(fake_sendfile):
+            result = inst._flush_some()
+
+        # nothing was sent, nothing was skipped, we'll retry when writable
+        self.assertFalse(result)
+        self.assertEqual(sock.sent, b"")
+        self.assertEqual(inst.total_outbufs_len, len(content))
+        self.assertEqual(buf.remain, len(content))
+
+        state["block"] = False
+        with self._patchedSendfile(fake_sendfile):
+            result = inst._flush_some()
+
+        self.assertTrue(result)
+        self.assertEqual(sock.sent, content)
+        self.assertEqual(inst.total_outbufs_len, 0)
+
+    def test_flush_some_sendfile_unsupported_falls_back(self):
+        content = b"0123456789"
+        inst, sock, map = self._makeOneWithMap()
+        buf = self._makeFileOutbuf(content)
+        self._installOutbuf(inst, buf)
+        calls = []
+
+        def fake_sendfile(out_fd, in_fd, offset, count):
+            calls.append((offset, count))
+            raise OSError(errno.ENOSYS, "not implemented")
+
+        # send one byte at a time through the buffered path so the flush
+        # loops several times; sendfile must only be attempted once
+        sent = []
+
+        def slow_send(data):
+            sent.append(data[:1])
+            return 1
+
+        sock.remote.send = slow_send
+
+        with self._patchedSendfile(fake_sendfile):
+            result = inst._flush_some()
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [(0, 10)])
+        self.assertTrue(buf.sendfile_unsupported)
+        self.assertEqual(b"".join(sent), content)
+        self.assertEqual(inst.total_outbufs_len, 0)
+
+    def test_flush_some_sendfile_partial_then_fallback(self):
+        content = b"0123456789"
+        inst, sock, map = self._makeOneWithMap()
+        buf = self._makeFileOutbuf(content)
+        self._installOutbuf(inst, buf)
+        calls = []
+
+        def fake_sendfile(out_fd, in_fd, offset, count):
+            calls.append((offset, count))
+            if len(calls) == 1:
+                # the kernel sends 3 bytes, then decides it can't continue
+                return inst.socket.send(content[offset : offset + 3])
+            raise OSError(errno.EINVAL, "invalid argument")
+
+        with self._patchedSendfile(fake_sendfile):
+            result = inst._flush_some()
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [(0, 10), (3, 7)])
+        # the buffered fallback resumes after the bytes already sent:
+        # nothing re-sent, nothing dropped
+        self.assertEqual(sock.sent, content)
+        self.assertEqual(inst.total_outbufs_len, 0)
+
+    def test_flush_some_sendfile_client_disconnected(self):
+        content = b"0123456789"
+        inst, sock, map = self._makeOneWithMap()
+        buf = self._makeFileOutbuf(content)
+        self._installOutbuf(inst, buf)
+
+        def fake_sendfile(out_fd, in_fd, offset, count):
+            raise BrokenPipeError(errno.EPIPE, "broken pipe")
+
+        with self._patchedSendfile(fake_sendfile):
+            result = inst._flush_some()
+
+        self.assertFalse(result)
+        self.assertFalse(inst.connected)
+        self.assertTrue(sock.closed)
+        self.assertEqual(inst.total_outbufs_len, 0)
+        # the file was closed by handle_close, not by the sendfile path
+        self.assertTrue(buf.file.closed)
+
+    def test_flush_some_sendfile_not_available_falls_back(self):
+        content = b"0123456789"
+        inst, sock, map = self._makeOneWithMap()
+        buf = self._makeFileOutbuf(content)
+        self._installOutbuf(inst, buf)
+
+        with self._patchedSendfile(None):
+            result = inst._flush_some()
+
+        self.assertTrue(result)
+        self.assertEqual(sock.sent, content)
+        self.assertEqual(inst.total_outbufs_len, 0)
+
+    def test_flush_some_sendfile_no_fileno_falls_back(self):
+        content = b"0123456789"
+        inst, sock, map = self._makeOneWithMap()
+        from waitress.buffers import ReadOnlyFileBasedBuffer
+
+        # a file-like object without a usable descriptor
+        buf = ReadOnlyFileBasedBuffer(io.BytesIO(content))
+        buf.prepare()
+        self._installOutbuf(inst, buf)
+        calls = []
+
+        def fake_sendfile(out_fd, in_fd, offset, count):
+            calls.append((offset, count))
+            return 0
+
+        with self._patchedSendfile(fake_sendfile):
+            result = inst._flush_some()
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [])
+        self.assertTrue(buf.sendfile_unsupported)
+        self.assertEqual(sock.sent, content)
+        self.assertEqual(inst.total_outbufs_len, 0)
 
 
 class DummySock:
