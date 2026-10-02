@@ -3,6 +3,7 @@
 
 import codecs
 import contextlib as cl
+import copy
 import errno
 import functools as ft
 import io
@@ -11,8 +12,10 @@ import os
 import os.path as op
 import pickle
 import pickletools
+import shutil
 import sqlite3
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -36,6 +39,7 @@ class Constant(tuple):
 
 
 DBNAME = 'cache.db'
+SNAPSHOTDIR = '.snapshots'
 ENOVAL = Constant('ENOVAL')
 UNKNOWN = Constant('UNKNOWN')
 
@@ -384,6 +388,55 @@ class EmptyDirWarning(UserWarning):
     """Warning used by Cache.check for empty directories."""
 
 
+if sys.platform == 'win32':  # pragma: no cover
+    import msvcrt
+else:
+    import fcntl
+
+
+def _acquire_snapshot_lock(path):
+    handle = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+
+    try:
+        if sys.platform == 'win32':  # pragma: no cover
+            os.write(handle, b'\0')
+            os.lseek(handle, 0, os.SEEK_SET)
+            msvcrt.locking(handle, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(handle)
+        return None
+
+    return handle
+
+
+def _create_snapshot_lock(path):
+    handle = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+
+    try:
+        if sys.platform == 'win32':  # pragma: no cover
+            os.write(handle, b'\0')
+            os.lseek(handle, 0, os.SEEK_SET)
+            msvcrt.locking(handle, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(handle)
+        raise
+
+    return handle
+
+
+def _release_snapshot_lock(handle):
+    if sys.platform == 'win32':  # pragma: no cover
+        os.lseek(handle, 0, os.SEEK_SET)
+        msvcrt.locking(handle, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    os.close(handle)
+
+
 def args_to_key(base, args, kwargs, typed, ignore):
     """Create cache key out of function arguments.
 
@@ -481,6 +534,13 @@ class Cache:
             'CREATE TABLE IF NOT EXISTS Settings ('
             ' key TEXT NOT NULL UNIQUE,'
             ' value)'
+        )
+
+        sql(
+            'CREATE TABLE IF NOT EXISTS Snapshot ('
+            ' path TEXT NOT NULL PRIMARY KEY,'
+            ' pid INTEGER NOT NULL,'
+            ' time REAL NOT NULL)'
         )
 
         # Setup Disk object (must happen after settings initialized).
@@ -583,6 +643,8 @@ class Cache:
             self.create_tag_index()
         else:
             self.drop_tag_index()
+
+        self._recover_snapshots()
 
         # Close and re-open database connection with given timeout.
 
@@ -706,21 +768,67 @@ class Cache:
             yield
 
     @cl.contextmanager
+    def snapshot(self, retry=False):
+        """Create a consistent read-only snapshot of the cache."""
+        snapshot_view = Snapshot(self, retry=retry)
+        try:
+            yield snapshot_view
+        finally:
+            snapshot_view.close()
+
+    def _retain_snapshot_file(self, snapshot_path, filename):
+        source = op.join(self._directory, filename)
+        snapshot_dir = self._snapshot_path(snapshot_path)
+        destination = op.join(snapshot_dir, filename)
+
+        if not op.isfile(source) or op.exists(destination):
+            return None
+
+        destination_dir = op.dirname(destination)
+
+        try:
+            os.makedirs(destination_dir, exist_ok=True)
+
+            try:
+                os.link(source, destination)
+            except OSError:
+                if op.exists(destination):
+                    raise
+                shutil.copyfile(source, destination)
+        except FileExistsError:
+            return destination
+        except OSError:
+            if not op.exists(destination):
+                raise
+
+        return destination
+
+    @cl.contextmanager
     def _transact(self, retry=False, filename=None):
         sql = self._sql
-        filenames = []
         _disk_remove = self._disk.remove
         tid = threading.get_ident()
         txn_id = self._txn_id
 
         if tid == txn_id:
             begin = False
+            commit_files = self._txn_commit_files
+            abort_files = self._txn_abort_files
+            discard_files = self._txn_discard_files
+            if filename is not None:
+                abort_files.append(filename)
         else:
+            commit_files = []
+            abort_files = [] if filename is None else [filename]
+            discard_files = []
             while True:
                 try:
                     sql('BEGIN IMMEDIATE')
                     begin = True
                     self._txn_id = tid
+                    self._txn_commit_files = commit_files
+                    self._txn_abort_files = abort_files
+                    self._txn_discard_files = discard_files
                     break
                 except sqlite3.OperationalError:
                     if retry:
@@ -729,22 +837,64 @@ class Cache:
                         _disk_remove(filename)
                     raise Timeout from None
 
+        def cleanup(name, pending=False, created=False):
+            if name is None:
+                return
+            if pending:
+                if name in abort_files:
+                    abort_files.remove(name)
+                discard_files.append(name)
+            elif created:
+                abort_files.append(name)
+            else:
+                commit_files.append(name)
+
         try:
-            yield sql, filenames.append
+            yield sql, cleanup
         except BaseException:
             if begin:
                 assert self._txn_id == tid
                 self._txn_id = None
                 sql('ROLLBACK')
+                for name in abort_files + discard_files:
+                    _disk_remove(name)
             raise
+
         else:
             if begin:
-                assert self._txn_id == tid
-                self._txn_id = None
-                sql('COMMIT')
-            for name in filenames:
-                if name is not None:
-                    _disk_remove(name)
+                snapshots = sql('SELECT path FROM Snapshot').fetchall()
+                retained = []
+
+                try:
+                    for name in commit_files:
+                        for (path,) in snapshots:
+                            destination = self._retain_snapshot_file(
+                                path, name
+                            )
+                            if destination is not None:
+                                retained.append(destination)
+
+                    assert self._txn_id == tid
+                    self._txn_id = None
+                    sql('COMMIT')
+                except BaseException:
+                    assert self._txn_id == tid
+                    self._txn_id = None
+                    sql('ROLLBACK')
+
+                    for name in abort_files + discard_files:
+                        _disk_remove(name)
+
+                    for destination in retained:
+                        with cl.suppress(OSError):
+                            os.remove(destination)
+
+                    raise
+
+            for name in commit_files:
+                _disk_remove(name)
+            for name in discard_files:
+                _disk_remove(name)
 
     def set(self, key, value, expire=None, read=False, tag=None, retry=False):
         """Set `key` and `value` item in cache.
@@ -1003,7 +1153,7 @@ class Cache:
                 ((rowid, old_filename, old_expire_time),) = rows
 
                 if old_expire_time is None or old_expire_time > now:
-                    cleanup(filename)
+                    cleanup(filename, pending=True)
                     return False
 
                 cleanup(old_filename)
@@ -1069,10 +1219,18 @@ class Cache:
                     raise KeyError(key)
 
                 value = default + delta
-                columns = (None, None) + self._disk.store(
-                    value, False, key=key
+                stored = self._disk.store(value, False, key=key)
+                new_size, new_mode, new_filename, new_value = stored
+                columns = (
+                    None,
+                    None,
+                    new_size,
+                    new_mode,
+                    new_filename,
+                    new_value,
                 )
                 self._row_update(rowid, now, columns)
+                cleanup(new_filename, created=True)
                 self._cull(now, sql, cleanup)
                 cleanup(filename)
                 return value
@@ -1305,7 +1463,7 @@ class Cache:
         elif expire_time or tag:
             default = default, None
 
-        with self._transact(retry) as (sql, _):
+        with self._transact(retry) as (sql, cleanup):
             rows = sql(select, (db_key, raw, time.time())).fetchall()
 
             if not rows:
@@ -1314,15 +1472,11 @@ class Cache:
             ((rowid, db_expire_time, db_tag, mode, filename, db_value),) = rows
 
             sql('DELETE FROM Cache WHERE rowid = ?', (rowid,))
-
-        try:
-            value = self._disk.fetch(mode, filename, db_value, False)
-        except IOError:
-            # Key was deleted before we could retrieve result.
-            return default
-        finally:
-            if filename is not None:
-                self._disk.remove(filename)
+            try:
+                value = self._disk.fetch(mode, filename, db_value, False)
+            except IOError:
+                return default
+            cleanup(filename)
 
         if expire_time and tag:
             return value, db_expire_time, db_tag
@@ -1566,33 +1720,31 @@ class Cache:
             default = default, None
 
         while True:
-            while True:
-                with self._transact(retry) as (sql, cleanup):
-                    rows = sql(select, (min_key, max_key)).fetchall()
+            expired = False
+            with self._transact(retry) as (sql, cleanup):
+                rows = sql(select, (min_key, max_key)).fetchall()
 
-                    if not rows:
+                if not rows:
+                    return default
+
+                (
+                    (rowid, key, db_expire, db_tag, mode, name, db_value),
+                ) = rows
+
+                sql('DELETE FROM Cache WHERE rowid = ?', (rowid,))
+
+                if db_expire is not None and db_expire < time.time():
+                    cleanup(name)
+                    expired = True
+                else:
+                    try:
+                        value = self._disk.fetch(mode, name, db_value, False)
+                    except IOError:
                         return default
+                    cleanup(name)
 
-                    (
-                        (rowid, key, db_expire, db_tag, mode, name, db_value),
-                    ) = rows
-
-                    sql('DELETE FROM Cache WHERE rowid = ?', (rowid,))
-
-                    if db_expire is not None and db_expire < time.time():
-                        cleanup(name)
-                    else:
-                        break
-
-            try:
-                value = self._disk.fetch(mode, name, db_value, False)
-            except IOError:
-                # Key was deleted before we could retrieve result.
-                continue
-            finally:
-                if name is not None:
-                    self._disk.remove(name)
-            break
+            if not expired:
+                break
 
         if expire_time and tag:
             return (key, value), db_expire, db_tag
@@ -1961,8 +2113,21 @@ class Cache:
                         sql('DELETE FROM Cache WHERE rowid = ?', (rowid,))
 
                 # Check file system against Cache.filename.
+                snapshots_root = op.abspath(
+                    op.join(self._directory, SNAPSHOTDIR)
+                )
 
                 for dirpath, _, files in os.walk(self._directory):
+                    try:
+                        in_snapshots = op.commonpath(
+                            [op.abspath(dirpath), snapshots_root]
+                        ) == snapshots_root
+                    except ValueError:
+                        in_snapshots = False
+
+                    if in_snapshots:
+                        continue
+
                     paths = [op.join(dirpath, filename) for filename in files]
                     error = set(paths) - filenames
 
@@ -1979,6 +2144,16 @@ class Cache:
                 # Check for empty directories.
 
                 for dirpath, dirs, files in os.walk(self._directory):
+                    try:
+                        in_snapshots = op.commonpath(
+                            [op.abspath(dirpath), snapshots_root]
+                        ) == snapshots_root
+                    except ValueError:
+                        in_snapshots = False
+
+                    if in_snapshots:
+                        continue
+
                     if not (dirs or files):
                         message = 'empty directory: %s' % dirpath
                         warnings.warn(message, EmptyDirWarning)
@@ -2453,3 +2628,360 @@ class Cache:
 
         setattr(self, key, value)
         return value
+
+    def recover_snapshots(self):
+        """Reclaim storage left by abnormally terminated snapshots."""
+        rows = self._sql(
+            'SELECT path FROM Snapshot ORDER BY path'
+        ).fetchall()
+        recorded = set()
+
+        for (relative_path,) in rows:
+            recorded.add(relative_path)
+            full_path = self._snapshot_path(relative_path)
+            lock_path = op.join(full_path, 'lock')
+
+            if not op.isdir(full_path):
+                self._delete_snapshot_record(relative_path)
+                continue
+
+            if op.exists(lock_path):
+                handle = self._try_snapshot_lock(lock_path)
+                if handle is None:
+                    continue
+            else:
+                handle = None
+
+            try:
+                shutil.rmtree(full_path, ignore_errors=True)
+                self._delete_snapshot_record(relative_path)
+            finally:
+                if handle is not None:
+                    _release_snapshot_lock(handle)
+
+        snapshots_root = op.join(self._directory, SNAPSHOTDIR)
+
+        if not op.isdir(snapshots_root):
+            return
+
+        for name in os.listdir(snapshots_root):
+            relative_path = op.join(SNAPSHOTDIR, name)
+
+            if relative_path in recorded:
+                continue
+
+            full_path = op.join(snapshots_root, name)
+            lock_path = op.join(full_path, 'lock')
+
+            if not op.isdir(full_path):
+                continue
+
+            if op.exists(lock_path):
+                handle = self._try_snapshot_lock(lock_path)
+                if handle is None:
+                    continue
+            else:
+                age = time.time() - op.getmtime(full_path)
+                if age < 60:
+                    continue
+                handle = None
+
+            try:
+                shutil.rmtree(full_path, ignore_errors=True)
+            finally:
+                if handle is not None:
+                    _release_snapshot_lock(handle)
+
+        with cl.suppress(OSError):
+            os.rmdir(snapshots_root)
+
+    def _snapshot_path(self, relative_path):
+        full_path = op.abspath(op.join(self._directory, relative_path))
+        root = op.abspath(op.join(self._directory, SNAPSHOTDIR))
+
+        try:
+            common_path = op.commonpath([full_path, root])
+        except ValueError:
+            raise ValueError('invalid snapshot path') from None
+
+        if common_path != root or full_path == root:
+            raise ValueError('invalid snapshot path')
+
+        return full_path
+
+    def _delete_snapshot_record(self, relative_path):
+        with self._transact(retry=True) as (sql, _):
+            sql('DELETE FROM Snapshot WHERE path = ?', (relative_path,))
+
+    @staticmethod
+    def _try_snapshot_lock(lock_path):
+        try:
+            return _acquire_snapshot_lock(lock_path)
+        except OSError:
+            return None
+
+    _recover_snapshots = recover_snapshots
+
+
+class Snapshot:
+    """Consistent read-only view of a cache at a single point in time."""
+
+    def __init__(self, cache, retry=False):
+        self._cache = cache
+        self._disk = copy.copy(cache.disk)
+        self._con = None
+        self._lock = None
+        self._path = None
+        self._now = None
+        self._closed = False
+
+        name = codecs.encode(os.urandom(16), 'hex').decode('utf-8')
+        relative_path = op.join(SNAPSHOTDIR, name)
+        full_path = cache._snapshot_path(relative_path)
+        lock_path = op.join(full_path, 'lock')
+
+        os.makedirs(full_path, exist_ok=False)
+
+        try:
+            self._lock = _create_snapshot_lock(lock_path)
+
+            with cache._transact(retry=retry) as (sql, _):
+                sql(
+                    'INSERT INTO Snapshot(path, pid, time) VALUES (?, ?, ?)',
+                    (relative_path, os.getpid(), time.time()),
+                )
+        except BaseException:
+            self._release_creation_lock()
+            shutil.rmtree(full_path, ignore_errors=True)
+            with cl.suppress(OSError):
+                os.rmdir(op.dirname(full_path))
+            raise
+
+        self._path = relative_path
+        self._disk._directory = full_path
+        self._con = sqlite3.connect(
+            op.join(cache.directory, DBNAME),
+            timeout=cache.timeout,
+            isolation_level=None,
+        )
+
+        try:
+            settings = self._con.execute(
+                'SELECT key, value FROM Settings'
+            ).fetchall()
+
+            for key, value in settings:
+                if key.startswith('sqlite_'):
+                    pragma = key[7:]
+                    self._con.execute('PRAGMA %s = %s' % (pragma, value))
+
+            self._con.execute('PRAGMA query_only = 1')
+            self._con.execute('BEGIN')
+            self._con.execute('SELECT MAX(rowid) FROM Cache').fetchall()
+            self._now = time.time()
+        except BaseException:
+            self.close()
+            raise
+
+    @property
+    def now(self):
+        """Logical time at which the snapshot was established."""
+        return self._now
+
+    def get(
+        self,
+        key,
+        default=None,
+        read=False,
+        expire_time=False,
+        tag=False,
+    ):
+        """Retrieve an item visible in the snapshot."""
+        db_key, raw = self._cache.disk.put(key)
+        select = (
+            'SELECT rowid, expire_time, tag, mode, filename, value FROM Cache'
+            ' WHERE key = ? AND raw = ?'
+            ' AND (expire_time IS NULL OR expire_time > ?)'
+        )
+
+        if expire_time and tag:
+            default = (default, None, None)
+        elif expire_time or tag:
+            default = (default, None)
+
+        rows = self._con.execute(
+            select, (db_key, raw, self._now)
+        ).fetchall()
+
+        if not rows:
+            return default
+
+        (
+            (
+                _rowid,
+                db_expire_time,
+                db_tag,
+                mode,
+                filename,
+                db_value,
+            ),
+        ) = rows
+
+        try:
+            value = self._fetch(mode, filename, db_value, read)
+        except IOError:
+            value = default if not (expire_time or tag) else default[0]
+
+        if expire_time and tag:
+            return value, db_expire_time, db_tag
+        elif expire_time:
+            return value, db_expire_time
+        elif tag:
+            return value, db_tag
+        return value
+
+    def read(self, key):
+        """Return a binary read handle for an item in the snapshot."""
+        handle = self.get(key, default=ENOVAL, read=True)
+        if handle is ENOVAL:
+            raise KeyError(key)
+        return handle
+
+    def __getitem__(self, key):
+        value = self.get(key, default=ENOVAL)
+        if value is ENOVAL:
+            raise KeyError(key)
+        return value
+
+    def __contains__(self, key):
+        db_key, raw = self._cache.disk.put(key)
+        rows = self._con.execute(
+            'SELECT rowid FROM Cache'
+            ' WHERE key = ? AND raw = ?'
+            ' AND (expire_time IS NULL OR expire_time > ?)',
+            (db_key, raw, self._now),
+        ).fetchall()
+        return bool(rows)
+
+    def __len__(self):
+        ((count,),) = self._con.execute(
+            'SELECT COUNT(key) FROM Cache'
+        ).fetchall()
+        return count
+
+    def iterkeys(self, reverse=False):
+        """Iterate all keys in the snapshot, including expired items."""
+        order = 'DESC' if reverse else 'ASC'
+        select = (
+            'SELECT key, raw FROM Cache ORDER BY key %s, raw %s'
+            % (order, order)
+        )
+
+        for db_key, raw in self._con.execute(select):
+            yield self._cache.disk.get(db_key, raw)
+
+    def keys(self):
+        """Iterate all keys in the snapshot, including expired items."""
+        return self.iterkeys()
+
+    def __iter__(self):
+        return self.iterkeys()
+
+    def __reversed__(self):
+        return self.iterkeys(reverse=True)
+
+    def iterrows(self):
+        """Iterate rows including keys, values, expiration times, and tags."""
+        rowid = 0
+        limit = 100
+        select = (
+            'SELECT rowid, key, raw, expire_time, tag, mode, filename, value'
+            ' FROM Cache WHERE rowid > ? ORDER BY rowid LIMIT ?'
+        )
+
+        while True:
+            rows = self._con.execute(select, (rowid, limit)).fetchall()
+
+            if not rows:
+                break
+
+            for (
+                rowid,
+                db_key,
+                raw,
+                db_expire_time,
+                db_tag,
+                mode,
+                filename,
+                db_value,
+            ) in rows:
+                key = self._cache.disk.get(db_key, raw)
+                value = self._fetch(mode, filename, db_value, False)
+                yield key, value, db_expire_time, db_tag
+
+    def items(self):
+        """Iterate key and value pairs, including expired items."""
+        for key, value, _, _ in self.iterrows():
+            yield key, value
+
+    def values(self):
+        """Iterate values, including expired items."""
+        for _, value, _, _ in self.iterrows():
+            yield value
+
+    def _fetch(self, mode, filename, value, read):
+        if filename is None:
+            return self._cache.disk.fetch(mode, filename, value, read)
+        self._cache._retain_snapshot_file(self._path, filename)
+
+        try:
+            return self._disk.fetch(mode, filename, value, read)
+        except OSError:
+            return self._cache.disk.fetch(mode, filename, value, read)
+
+    def _release_creation_lock(self):
+        if self._lock is not None:
+            _release_snapshot_lock(self._lock)
+            self._lock = None
+
+    def close(self):
+        """End the snapshot and allow retained files to be reclaimed."""
+        if self._closed:
+            return
+
+        self._closed = True
+        relative_path = self._path
+        full_path = (
+            None
+            if relative_path is None
+            else self._cache._snapshot_path(relative_path)
+        )
+
+        if self._con is not None:
+            with cl.suppress(sqlite3.Error):
+                self._con.rollback()
+            self._con.close()
+
+        if relative_path is not None:
+            with self._cache._transact(retry=True) as (sql, _):
+                sql(
+                    'DELETE FROM Snapshot WHERE path = ?',
+                    (relative_path,),
+                )
+
+            self._release_creation_lock()
+            shutil.rmtree(full_path, ignore_errors=True)
+            with cl.suppress(OSError):
+                os.rmdir(op.dirname(full_path))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

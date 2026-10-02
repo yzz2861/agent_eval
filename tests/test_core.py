@@ -3,6 +3,7 @@
 import errno
 import hashlib
 import io
+import multiprocessing as mp
 import os
 import os.path as op
 import pathlib
@@ -1405,3 +1406,178 @@ def test_memoize_iter(cache):
     assert len(cache) == 3
     for key in cache:
         assert cache[key] == 6
+
+
+def _snapshot_large_value_worker(directory, ready, proceed, results):
+    cache = dc.Cache(directory, disk_min_file_size=1024)
+
+    with cache.snapshot() as snapshot:
+        ready.set()
+        assert proceed.wait(10)
+        value, expire_at, tag = snapshot.get(
+            'large', expire_time=True, tag=True
+        )
+        results.put((value, tag, expire_at is not None))
+
+
+def test_snapshot_consistent_metadata(cache):
+    cache.reset('cull_limit', 0)
+    cache.set('a', 1, expire=60, tag='old')
+    cache.set('b', 2, expire=0.001, tag='expired')
+    cache.set('c', 3, tag='kept')
+    time.sleep(0.01)
+
+    with cache.snapshot() as snapshot:
+        cache.clear()
+        cache.set('a', 100, expire=60, tag='new')
+        cache.set('d', 4, tag='added')
+
+        assert len(snapshot) == 3
+        assert sorted(snapshot) == ['a', 'b', 'c']
+        assert snapshot.get('a', tag=True) == (1, 'old')
+        assert 'd' not in snapshot
+
+        rows = dict(
+            (key, (value, tag, expire_at is not None))
+            for key, value, expire_at, tag in snapshot.iterrows()
+        )
+        assert rows == {
+            'a': (1, 'old', True),
+            'b': (2, 'expired', True),
+            'c': (3, 'kept', False),
+        }
+        assert snapshot.get('b', default='missing') == 'missing'
+
+
+def test_add_rejects_large_temp_file_and_cleans_up(cache):
+    cache.close()
+    cache = dc.Cache(cache.directory, disk_min_file_size=1024)
+    cache.set('key', b'existing' * 1024)
+    cache.reset('cull_limit', 0)
+
+    assert not cache.add('key', b'replacement' * 1024)
+    assert cache['key'] == b'existing' * 1024
+    assert cache.check() == []
+
+
+def test_nested_transaction_rollback_cleans_temp_file(cache):
+    cache.close()
+    cache = dc.Cache(cache.directory, disk_min_file_size=1024)
+    cache.reset('cull_limit', 0)
+
+    with pytest.raises(RuntimeError):
+        with cache.transact():
+            cache.set('key', b'value' * 1024)
+            raise RuntimeError('rollback')
+
+    assert 'key' not in cache
+    assert cache.check() == []
+
+
+def test_snapshot_large_value_retained_across_processes(cache):
+    cache.close()
+    cache = dc.Cache(cache.directory, disk_min_file_size=1024)
+    cache.reset('cull_limit', 0)
+    cache.set('large', b'old' * 1024, expire=60, tag='old')
+    old_filename = cache._sql(
+        'SELECT filename FROM Cache WHERE key = ?', ('large',)
+    ).fetchone()[0]
+
+    ctx = mp.get_context('spawn')
+    ready = ctx.Event()
+    proceed = ctx.Event()
+    results = ctx.Queue()
+    process = ctx.Process(
+        target=_snapshot_large_value_worker,
+        args=(cache.directory, ready, proceed, results),
+    )
+    process.start()
+
+    try:
+        assert ready.wait(10)
+        cache.set('large', b'new' * 1024, expire=0.01, tag='new')
+        time.sleep(0.02)
+        assert cache.expire() == 1
+        assert not op.exists(op.join(cache.directory, old_filename))
+        proceed.set()
+        process.join(10)
+        assert process.exitcode == 0
+        value, tag, has_expire = results.get(timeout=1)
+        assert value == b'old' * 1024
+        assert tag == 'old'
+        assert has_expire
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+
+def test_snapshot_early_stop_and_exception_cleanup(cache):
+    for number in range(5):
+        cache.set(number, number)
+    cache.set('keep', 'kept')
+
+    snapshot = dc.Snapshot(cache)
+    rows = snapshot.iterrows()
+    assert next(rows)[:2] == (0, 0)
+    rows.close()
+    snapshot.close()
+    assert not op.exists(op.join(cache.directory, '.snapshots'))
+
+
+def test_snapshot_read_handle_survives_eviction(cache):
+    cache.close()
+    cache = dc.Cache(cache.directory, disk_min_file_size=1024)
+    cache.reset('cull_limit', 0)
+    value = b'readable' * 1024
+    cache.set('large', value, expire=0.01)
+
+    with cache.snapshot() as snapshot:
+        with snapshot.read('large') as reader:
+            time.sleep(0.02)
+            assert cache.expire() == 1
+            assert reader.read() == value
+
+
+def test_snapshot_check_ignores_retained_files(cache):
+    cache.set('large', b'value' * 1024)
+
+    with cache.snapshot() as snapshot:
+        cache.delete('large')
+        assert snapshot['large'] == b'value' * 1024
+        assert not cache.check()
+
+
+def _snapshot_crash_worker(directory, ready, proceed):
+    cache = dc.Cache(directory)
+    snapshot = dc.Snapshot(cache)
+    ready.set()
+    assert proceed.wait(10)
+    os._exit(1)
+
+
+def test_recover_snapshots_after_abnormal_exit(cache):
+    ctx = mp.get_context('spawn')
+    ready = ctx.Event()
+    proceed = ctx.Event()
+    process = ctx.Process(
+        target=_snapshot_crash_worker,
+        args=(cache.directory, ready, proceed),
+    )
+    process.start()
+
+    try:
+        assert ready.wait(10)
+        proceed.set()
+        process.join(10)
+        assert process.exitcode == 1
+        assert op.isdir(op.join(cache.directory, '.snapshots'))
+
+        cache.recover_snapshots()
+
+        assert not op.exists(op.join(cache.directory, '.snapshots'))
+        assert cache._sql('SELECT COUNT(*) FROM Snapshot').fetchone()[0] == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join()
