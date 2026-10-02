@@ -196,6 +196,10 @@ class AppConfig:
 
     These types will be added to the signature namespace using their ``__name__`` attribute.
     """
+    strict_route_conflicts: bool = field(default=False)
+    """If ``True``, raise during application initialization when a route declaration is shadowed or two parameter
+    routes accept overlapping ranges. Static-priority findings and unknown relations involving custom converters
+    do not prevent startup."""
     state: State = field(default_factory=State)
     """A :class:`State` <.datastructures.State>` instance holding application state."""
     stores: StoreRegistry | dict[str, Store] | None = None

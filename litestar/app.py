@@ -158,6 +158,7 @@ class Litestar(Router):
         "pdb_on_exception",
         "plugins",
         "response_cache_config",
+        "route_conflicts",
         "route_handler_method_map",
         "route_map",
         "routes",
@@ -209,6 +210,7 @@ class Litestar(Router):
         security: Sequence[SecurityRequirement] | None = None,
         signature_namespace: Mapping[str, Any] | None = None,
         signature_types: Sequence[Any] | None = None,
+        strict_route_conflicts: bool = False,
         state: State | None = None,
         stores: StoreRegistry | dict[str, Store] | None = None,
         tags: Sequence[str] | None = None,
@@ -304,6 +306,9 @@ class Litestar(Router):
             signature_namespace: A mapping of names to types for use in forward reference resolution during signature modelling.
             signature_types: A sequence of types for use in forward reference resolution during signature modelling.
                 These types will be added to the signature namespace using their ``__name__`` attribute.
+            strict_route_conflicts: If ``True``, raise during initialization when a route declaration is shadowed
+                or two parameter routes accept overlapping ranges. The full report is always available on the
+                application as ``route_conflicts`` regardless of this flag.
             state: An optional :class:`State <.datastructures.State>` for application state.
             stores: Central registry of :class:`Store <.stores.base.Store>` that will be available throughout the
                 application. If this is a dictionary to it will be passed to a
@@ -369,6 +374,7 @@ class Litestar(Router):
             security=list(security or []),
             signature_namespace=dict(signature_namespace or {}),
             signature_types=list(signature_types or []),
+            strict_route_conflicts=strict_route_conflicts,
             state=state or State(),
             stores=stores,
             tags=list(tags or []),
@@ -485,6 +491,15 @@ class Litestar(Router):
         self.route_handlers = ()
 
         self.asgi_router.construct_routing_trie()
+
+        from litestar.routing.conflicts import check_route_conflicts
+
+        self.route_conflicts = check_route_conflicts(self)
+        if config.strict_route_conflicts and not self.route_conflicts.is_clean:
+            formatted = "\n".join(conflict.format() for conflict in self.route_conflicts.conflicts)
+            raise ImproperlyConfiguredException(
+                "Conflicting route declarations detected (strict_route_conflicts=True):\n" + formatted
+            )
 
         self.asgi_handler = self._create_asgi_handler()
 
@@ -821,6 +836,17 @@ class Litestar(Router):
         self.route_handler_method_map = self._create_route_handler_method_map(self.routes)
 
         self.asgi_router.construct_routing_trie()
+
+        from litestar.routing.conflicts import check_route_conflicts
+
+        self.route_conflicts = check_route_conflicts(self)
+        if not self.route_conflicts.is_clean:
+            warnings.warn(
+                "Conflicting route declarations registered after application creation; inspect "
+                "`app.route_conflicts` for details.",
+                category=LitestarWarning,
+                stacklevel=2,
+            )
 
     def get_handler_index_by_name(self, name: str) -> HandlerIndex | None:
         """Receives a route handler name and returns an optional dictionary containing the route handler instance and
