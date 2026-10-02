@@ -383,7 +383,15 @@ module Sequel
         # but with the keys converted to strings.
         def map_to_prepared_args(hash)
           args = {}
-          hash.each{|k,v| args[k.to_s.gsub('.', '__')] = v}
+          hash.each do |k,v|
+            if v.is_a?(::Array)
+              v.flatten.each_with_index do |value, index|
+                args["#{k}__#{index}"] = value
+              end
+            else
+              args[k.to_s.gsub('.', '__')] = v
+            end
+          end
           args
         end
         
@@ -392,7 +400,16 @@ module Sequel
         # SQLite uses a : before the name of the argument for named
         # arguments.
         def prepared_arg(k)
+          if k.is_a?(Sequel::SQL::BoundVariableListItem)
+            k = :"#{k.name}__#{k.index}"
+          else
+            prepared_args << k
+          end
           LiteralString.new("#{prepared_arg_placeholder}#{k.to_s.gsub('.', '__')}".freeze)
+        end
+
+        def prepared_list_item_sql_append(sql, item)
+          sql << prepared_arg(item)
         end
       end
       

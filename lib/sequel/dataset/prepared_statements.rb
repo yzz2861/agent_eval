@@ -54,19 +54,25 @@ module Sequel
 
       # Set the bind arguments based on the hash and call super.
       def call(bind_vars=OPTS, &block)
-        sql = prepared_sql.freeze
-        prepared_args.freeze
-        ps = bind(bind_vars)
+        if send(:uses_bound_variable_lists?)
+          ps = bind(bind_vars)
+          sql = String.new(ps.send(:prepared_sql, true)).freeze
+          ps.prepared_args.freeze
+        else
+          sql = prepared_sql.freeze
+          prepared_args.freeze
+          ps = bind(bind_vars)
+        end
         ps.clone(:bind_arguments=>ps.map_to_prepared_args(ps.opts[:bind_vars]), :sql=>sql, :prepared_sql=>sql).run(&block)
       end
         
-      # Override the given *_sql method based on the type, and
-      # cache the result of the sql.
-      def prepared_sql
+      def prepared_sql(skip_cache=false)
         if sql = @opts[:prepared_sql] || cache_get(:_prepared_sql)
-          return sql
+          return sql unless skip_cache
         end
-        cache_set(:_prepared_sql, super)
+        sql = super()
+        cache_set(:_prepared_sql, sql) unless skip_cache
+        sql
       end
 
       private
@@ -106,6 +112,19 @@ module Sequel
       # The array/hash of bound variable placeholder names.
       def prepared_args
         @opts[:prepared_args]
+      end
+
+      # Fetch a value from the bound variable hash by key. List item keys
+      # contain a pair identifying the list name and flattened offset.
+      def prepared_bind_value(key)
+        case key
+        when SQL::BoundVariableListItem
+          @opts[:bind_vars].fetch(key.name).flatten.fetch(key.index)
+        when Symbol
+          @opts[:bind_vars][key]
+        else
+          key
+        end
       end
       
       # The dataset that created this prepared statement.
@@ -231,7 +250,13 @@ module Sequel
       
       # Returns the value of the prepared_args hash for the given key.
       def prepared_arg(k)
-        @opts[:bind_vars][k]
+        prepared_bind_value(k)
+      end
+
+      # Default emulated behavior binds and literalizes each expanded scalar.
+      # Native adapters override this to emit their own placeholder syntax.
+      def prepared_list_item_sql_append(sql, item)
+        literal_append(sql, prepared_bind_value(item))
       end
 
       # The symbol cache should always be skipped, since placeholders are symbols.
@@ -265,7 +290,13 @@ module Sequel
       # Keys in the input hash that are used more than once in the query
       # have multiple entries in the output array.
       def map_to_prepared_args(bind_vars)
-        prepared_args.map{|v| bind_vars[v]}
+        prepared_args.map do |v|
+          if v.is_a?(SQL::BoundVariableListItem)
+            bind_vars.fetch(v.name).flatten.fetch(v.index)
+          else
+            bind_vars[v]
+          end
+        end
       end
       
       private
@@ -273,8 +304,13 @@ module Sequel
       # Associates the argument with name k with the next position in
       # the output array.
       def prepared_arg(k)
+        return prepared_arg_placeholder if prepared_args.frozen?
         prepared_args << k
         prepared_arg_placeholder
+      end
+
+      def prepared_list_item_sql_append(sql, item)
+        sql << prepared_arg(item)
       end
     end
     
@@ -304,7 +340,7 @@ module Sequel
         
       def emulated_prepared_statement(type, name, values)
         prepared_sql, frags = Sequel::Dataset::PlaceholderLiteralizer::Recorder.new.send(:prepared_sql_and_frags, self, prepared_args) do |pl, ds|
-          ds = ds.clone(:recorder=>pl)
+          ds = ds.clone(:recorder=>pl, :bind_vars=>@opts[:bind_vars], :placeholder_literalizer=>pl)
 
           sql_type = prepared_sql_type || type
           case sql_type
@@ -333,12 +369,110 @@ module Sequel
         @opts[:recorder].arg
       end
 
+      def prepared_list_item_sql_append(sql, item)
+        prepared_args << item
+        sql << '$'
+        @opts[:recorder].list_arg(item.index).sql_literal_append(self, sql)
+      end
+
       def subselect_sql_dataset(sql, ds)
         super.clone(:recorder=>@opts[:recorder]).
           with_extend(EmulatePreparedStatementMethods)
       end
     end
     
+    module DynamicListPreparedStatementMethods
+      MAXIMUM_PREPARED_STATEMENT_CACHE_SIZE = 100
+
+      def call(bind_vars=OPTS, &block)
+        bind_vars = Hash[bind_vars]
+        key = prepared_list_shape_key(bind_vars)
+        prepare_list_statement(key, bind_vars).call(bind_vars, &block)
+      end
+
+      private
+
+      def prepare_list_statement(key, bind_vars)
+        slot, cached = DynamicListPreparedStatementMethods.reserve_list_prepared_statement_slot(self, key)
+        return cached if cached
+        name = dynamic_list_prepared_statement(slot)
+        ps = @opts[:orig_dataset].to_prepared_statement(prepared_type, prepared_modify_values, :name=>name, :extend=>prepared_statement_modules)
+        ps = if ps.send(:emulate_prepared_statements?)
+          bound = ps.bind(bind_vars).with_extend(EmulatePreparedStatementMethods)
+          bound.send(:emulated_prepared_statement, prepared_type, name, prepared_modify_values)
+        else
+          bound = ps.bind(bind_vars)
+          sql = bound.send(:prepared_sql, true).freeze
+          bound.prepared_args.freeze
+          bound.clone(:prepared_sql=>sql, :sql=>sql)
+        end
+        db.set_prepared_statement(name, ps)
+        DynamicListPreparedStatementMethods.cache_list_prepared_statement(self, key, slot, ps)
+        ps
+      end
+
+      def self.cache_list_prepared_statement(owner, key, slot, ps)
+        Sequel.synchronize do
+          owner.instance_variable_get(:@cache)[:_list_prepared_statement_cache] ||= {}
+          owner.instance_variable_get(:@cache)[:_list_prepared_statement_order] ||= []
+          cache = owner.instance_variable_get(:@cache)[:_list_prepared_statement_cache]
+          order = owner.instance_variable_get(:@cache)[:_list_prepared_statement_order]
+          order << key
+          cache[key] = {:slot=>slot, :ps=>ps}
+          while cache.length > MAXIMUM_PREPARED_STATEMENT_CACHE_SIZE
+            cache.delete(order.shift)
+          end
+        end
+      end
+
+      def self.reserve_list_prepared_statement_slot(owner, key)
+        Sequel.synchronize do
+          cache = owner.instance_variable_get(:@cache)[:_list_prepared_statement_cache]
+          order = owner.instance_variable_get(:@cache)[:_list_prepared_statement_order]
+          if cache && cache.key?(key)
+            value = cache.delete(key)
+            order.delete(key)
+            order << key
+            cache[key] = value
+            return [nil, value[:ps]]
+          end
+          unless cache
+            owner.instance_variable_get(:@cache)[:_list_prepared_statement_cache] = {}
+            owner.instance_variable_get(:@cache)[:_list_prepared_statement_order] = []
+            return [0, nil]
+          end
+          slot = if cache.length >= MAXIMUM_PREPARED_STATEMENT_CACHE_SIZE
+            old_key = order.shift
+            cache.delete(old_key)[:slot]
+          else
+            cache.length
+          end
+          [slot, nil]
+        end
+      end
+
+      def dynamic_list_prepared_statement(slot)
+        :"_sequel_list_#{opts[:prepared_statement_name] || :dynamic_list}_#{slot}"
+      end
+
+      def prepared_list_shape_key(bind_vars)
+        lists.map do |list|
+          values = bind_vars.fetch(list.name) do
+            raise Error, "missing list bound variable :#{list.name}"
+          end
+          unless values.is_a?(::Array)
+            raise Error, "list bound variable :#{list.name} must be an array"
+          end
+          arity = values.first.is_a?(::Array) ? values.first.length : 1
+          "#{list.name}=#{values.length}x#{arity}"
+        end.join(',')
+      end
+
+      def lists
+        @opts[:orig_dataset].send(:bound_variable_lists)
+      end
+    end
+
     # Set the bind variables to use for the call.  If bind variables have
     # already been set for this dataset, they are updated with the contents
     # of bind_vars.
@@ -408,9 +542,11 @@ module Sequel
     def prepare(type, name, *values)
       ps = to_prepared_statement(type, values, :name=>name, :extend=>prepared_statement_modules, :no_delayed_evaluations=>true)
 
-      ps = if ps.send(:emulate_prepared_statements?)
-        ps = ps.with_extend(EmulatePreparedStatementMethods)
-        ps.send(:emulated_prepared_statement, type, name, values)
+      if send(:uses_bound_variable_lists?)
+        ps = ps.with_extend(DynamicListPreparedStatementMethods)
+      elsif ps.send(:emulate_prepared_statements?)
+        ps = ps.with_extend(EmulatePreparedStatementMethods).
+          send(:emulated_prepared_statement, type, name, values)
       else
         sql = ps.prepared_sql.freeze
         ps.prepared_args.freeze
@@ -448,6 +584,29 @@ module Sequel
     end
 
     private
+
+    def uses_bound_variable_lists?
+      !send(:bound_variable_lists).empty?
+    end
+
+    def bound_variable_lists(value=@opts, lists=[], seen={})
+      case value
+      when SQL::BoundVariableList
+        lists << value unless lists.any?{|list| list.name == value.name}
+      when Symbol, Numeric, String, LiteralString, true, false, nil, Class, Module, Method, Proc
+      when Array, Hash, Set, SQL::Expression, Dataset
+        return lists if seen[value.object_id]
+        seen[value.object_id] = true
+        values = value.is_a?(Hash) ? value.values : value
+        if value.is_a?(SQL::Expression)
+          values = value.instance_variables.map{|ivar| value.instance_variable_get(ivar)}
+        elsif value.is_a?(Dataset)
+          return bound_variable_lists(value.opts, lists, seen.merge(value.object_id=>true))
+        end
+        values.each{|child| bound_variable_lists(child, lists, seen)}
+      end
+      lists
+    end
     
     # Don't allow preparing prepared statements by default.
     def allow_preparing_prepared_statements?

@@ -91,6 +91,11 @@ module Sequel
           Argument.new(self, v)
         end
 
+        def list_arg(v)
+          @argn = v if @argn < v
+          Argument.new(self, v)
+        end
+
         # Record the offset at which the argument is used in the SQL query, and any
         # transforming block.
         def use(sql, arg, transformer)

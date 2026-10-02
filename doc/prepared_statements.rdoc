@@ -37,6 +37,20 @@ raw SQL, you can do:
 
   ds = DB["SELECT * FROM items WHERE name = ?", :$n]
 
+For IN/NOT IN predicates where the number of values is not fixed, use
+<tt>Sequel.list</tt> to mark a bound variable as a list:
+
+  ds = DB[:items].where(id: Sequel.list(:$ids))
+  ds.call(:select, ids: [1, 2])
+
+Each value in the array is sent as a separate bound value, so the length of
+the SQL placeholder list can vary between calls. Empty arrays use constant
+true/false predicates for IN/NOT IN, and arrays of arrays are supported for
+composite keys:
+
+  ds = DB[:items].where([:group_id, :user_id] => Sequel.list(:$keys))
+  ds.call(:select, keys: [[1, 2], [3, 4]])
+
 == Bound Variables
 
 Using bound variables for this query is simple:

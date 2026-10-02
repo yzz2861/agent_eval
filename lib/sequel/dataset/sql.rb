@@ -376,6 +376,9 @@ module Sequel
       when :IN, :"NOT IN"
         cols = args[0]
         vals = args[1]
+        if vals.is_a?(SQL::BoundVariableList)
+          return bound_variable_list_predicate_sql_append(sql, op, cols, vals)
+        end
         col_array = true if cols.is_a?(Array)
         if vals.is_a?(Array) || vals.is_a?(Set)
           val_array = true
@@ -1230,6 +1233,88 @@ module Sequel
     # An expression for how to handle an empty array lookup.
     def empty_array_value(op, cols)
       {1 => ((op == :IN) ? 0 : 1)}
+    end
+
+    # List item placeholders are only valid inside prepared/bound queries.
+    def prepared_list_item_sql_append(sql, item)
+      raise Error, "list item bound variable can only be used in a query with bound variables"
+    end
+
+    # Expand each value in a bound list to its own scalar placeholder for an
+    # IN/NOT IN predicate. Composite-key lists expand in row-major order.
+    def bound_variable_list_predicate_sql_append(sql, op, cols, list)
+      expected_arity = cols.is_a?(Array) ? cols.length : 1
+      values = prepared_list_bind_values(list.name, expected_arity)
+      if values.empty?
+        literal_append(sql, empty_array_value(op, cols))
+        return sql
+      end
+
+      items = bound_variable_list_items(list.name, values)
+      if cols.is_a?(Array) && !supports_multiple_column_in?
+        columns = cols.to_a
+        expr = SQL::BooleanExpression.new(:OR, *items.map do |row|
+          SQL::BooleanExpression.from_value_pairs(columns.zip(row))
+        end)
+        literal_append(sql, op == :IN ? expr : ~expr)
+        return sql
+      end
+
+      sql << '('
+      literal_append(sql, cols)
+      sql << ' ' << op.to_s << ' '
+      array_sql_append(sql, items)
+      sql << ')'
+      sql
+    end
+
+    # Return the validated array bound to the given named list placeholder.
+    def prepared_list_bind_values(name, expected_arity=nil)
+      bind_vars = @opts[:bind_vars]
+      unless bind_vars
+        raise Error, "list bound variable :#{name} can only be used in a query with bound variables"
+      end
+      unless bind_vars.key?(name)
+        raise Error, "missing list bound variable :#{name}"
+      end
+
+      values = bind_vars[name]
+      unless values.is_a?(::Array)
+        raise Error, "list bound variable :#{name} must be an array"
+      end
+      unless values.empty?
+        tuple_values = values.first.is_a?(::Array)
+        if tuple_values
+          expected_arity ||= values.first.length
+          expected_arity = nil if expected_arity == 1
+        end
+        values.each_with_index do |value, index|
+          if tuple_values
+            unless value.is_a?(::Array) && !value.empty? && (!expected_arity || value.length == expected_arity)
+              raise Error, "list bound variable :#{name} contains invalid tuple at index #{index}"
+            end
+          elsif value.is_a?(::Array)
+            raise Error, "list bound variable :#{name} mixes scalar and tuple values"
+          elsif expected_arity && expected_arity != 1
+            raise Error, "list bound variable :#{name} contains invalid tuple at index #{index}"
+          end
+        end
+      end
+      values
+    end
+
+    # Build placeholder expressions for a validated scalar or tuple list.
+    def bound_variable_list_items(name, values)
+      arity = values.first.is_a?(::Array) ? values.first.length : 1
+      values.each_with_index.map do |value, row|
+        if arity == 1
+          SQL::BoundVariableListItem.new(name, row)
+        else
+          value.each_with_index.map do |_, column|
+            SQL::BoundVariableListItem.new(name, row * arity + column)
+          end
+        end
+      end
     end
     
     # Format the timestamp based on the default_timestamp_format.

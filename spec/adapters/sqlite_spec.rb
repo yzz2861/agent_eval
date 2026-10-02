@@ -378,6 +378,65 @@ describe "SQLite type conversion" do
   end
 end if DB.adapter_scheme == :sqlite
 
+describe 'SQLite bound variable list placeholders' do
+  before do
+    @db = Sequel.sqlite
+    @db.create_table(:list_items) do
+      Integer :id
+      Integer :a
+      Integer :b
+    end
+    [[1, 1, 2], [2, 3, 4], [3, nil, 2], [4, 1, nil]].each do |id, a, b|
+      @db[:list_items].insert(:id=>id, :a=>a, :b=>b)
+    end
+    @ids = Sequel.list(:$ids)
+    @pairs = Sequel.list(:$pairs)
+  end
+
+  after do
+    @db.disconnect
+  end
+
+  it 'binds scalar IN/NOT IN lists and implements NULL three-valued logic' do
+    in_ps = @db[:list_items].where(:id=>@ids).order(:id).prepare(:select, :list_in)
+    not_in_ps = @db[:list_items].exclude(:id=>@ids).order(:id).prepare(:select, :list_not_in)
+
+    in_ps.call(:ids=>[1, 2]).map{|row| row[:id]}.must_equal [1, 2]
+    in_ps.call(:ids=>[1, 2, 3]).map{|row| row[:id]}.must_equal [1, 2, 3]
+    in_ps.call(:ids=>[1, nil]).map{|row| row[:id]}.must_equal [1]
+    in_ps.call(:ids=>[]).must_equal []
+
+    not_in_ps.call(:ids=>[1, 2]).map{|row| row[:id]}.must_equal [3, 4]
+    not_in_ps.call(:ids=>[1, nil]).must_equal []
+    not_in_ps.call(:ids=>[]).map{|row| row[:id]}.must_equal [1, 2, 3, 4]
+  end
+
+  it 'binds composite-key tuple lists and follows row-major order' do
+    in_ps = @db[:list_items].where([:a, :b]=>@pairs).order(:id).prepare(:select, :list_pair_in)
+    not_in_ps = @db[:list_items].exclude([:a, :b]=>@pairs).order(:id).prepare(:select, :list_pair_not_in)
+
+    in_ps.call(:pairs=>[[1, 2], [3, 4]]).map{|row| row[:id]}.must_equal [1, 2]
+    in_ps.call(:pairs=>[[1, nil]]).must_equal []
+    not_in_ps.call(:pairs=>[[1, 2], [3, 4]]).must_equal []
+    not_in_ps.call(:pairs=>[[1, nil]]).map{|row| row[:id]}.must_equal [2]
+  end
+
+  it 'keeps duplicated list and scalar placeholders ordered' do
+    ds = @db[:list_items].
+      where(Sequel.expr(:a)=>@ids).or(Sequel.expr(:b)=>@ids).
+      where(Sequel.expr(:b)=>:$b)
+    ds.call(:select, :ids=>[3, 4], :b=>4).map{|row| row[:id]}.must_equal [2]
+  end
+
+  it 'raises for missing and malformed list variables' do
+    ps = @db[:list_items].where(:id=>@ids).prepare(:select, :list_missing)
+    proc{ps.call}.must_raise Sequel::Error
+    proc{ps.call(:ids=>1)}.must_raise Sequel::Error
+    tuple_ps = @db[:list_items].where([:a, :b]=>@pairs).prepare(:select, :list_pair_missing)
+    proc{tuple_ps.call(:pairs=>[[1]])}.must_raise Sequel::Error
+  end
+end if DB.adapter_scheme == :sqlite
+
 describe "An SQLite dataset" do
   before do
     @d = DB.dataset

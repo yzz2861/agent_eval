@@ -4646,6 +4646,94 @@ describe Sequel::Dataset::UnnumberedArgumentMapper do
   end
 end
 
+describe "bound variable list placeholders with unnumbered arguments" do
+  before do
+    @db = Sequel.mock
+    @db.extend_datasets do
+      def execute(sql, opts={}, &block)
+        super(sql, opts.merge(:arguments=>bind_arguments), &block)
+      end
+
+      def execute_dui(sql, opts={})
+        super(sql, opts.merge(:arguments=>bind_arguments))
+      end
+
+      def execute_insert(sql, opts={})
+        super(sql, opts.merge(:arguments=>bind_arguments))
+      end
+
+      def bound_variable_modules
+        [Sequel::Dataset::UnnumberedArgumentMapper]
+      end
+
+      def prepared_statement_modules
+        [Sequel::Dataset::UnnumberedArgumentMapper]
+      end
+    end
+    @ids = Sequel.list(:$ids)
+  end
+
+  it "expands scalar list placeholders for IN and NOT IN without interpolating values" do
+    @db[:items].where(:id=>@ids).call(:select, :ids=>[1, 2])
+    @db[:items].exclude(:id=>@ids).call(:select, :ids=>[1, 2, 3])
+    @db.sqls.must_equal [
+      "SELECT * FROM items WHERE (id IN (?, ?)) -- args: [1, 2]",
+      "SELECT * FROM items WHERE (id NOT IN (?, ?, ?)) -- args: [1, 2, 3]"]
+  end
+
+  it "expands tuple lists in row-major order" do
+    @db[:items].where([:a, :b]=>@ids).call(:select, :ids=>[[1, 2], [3, 4]])
+    @db.sqls.must_equal [
+      "SELECT * FROM items WHERE ((a, b) IN ((?, ?), (?, ?))) -- args: [1, 2, 3, 4]"]
+  end
+
+  it "preserves placeholder order when the same list appears more than once with other variables" do
+    @db[:items].where(Sequel.expr(:a)=>@ids).or(Sequel.expr(:b)=>@ids).where(Sequel.expr(:c)=>:$c).
+      call(:select, :ids=>[1, 2], :c=>9)
+    @db.sqls.must_equal [
+      "SELECT * FROM items WHERE (((a IN (?, ?)) OR (b IN (?, ?))) AND (c = ?)) -- args: [1, 2, 1, 2, 9]"]
+  end
+
+  it "uses no list placeholders for empty lists" do
+    @db[:items].where(:id=>@ids).call(:select, :ids=>[])
+    @db[:items].exclude(:id=>@ids).call(:select, :ids=>[])
+    @db.sqls.must_equal [
+      "SELECT * FROM items WHERE (1 = 0) -- args: []",
+      "SELECT * FROM items WHERE (1 = 1) -- args: []"]
+  end
+
+  it "raises for missing or malformed list variables" do
+    proc{@db[:items].where(:id=>@ids).call(:select)}.must_raise Sequel::Error
+    proc{@db[:items].where(:id=>@ids).call(:select, :ids=>1)}.must_raise Sequel::Error
+    proc{@db[:items].where([:a, :b]=>@ids).call(:select, :ids=>[[1]])}.must_raise Sequel::Error
+  end
+
+  it "does not change ordinary array value behavior" do
+    @db[:items].where(:id=>[1, 2]).call(:select)
+    @db.sqls.must_equal ["SELECT * FROM items WHERE (id IN (1, 2)) -- args: []"]
+  end
+
+  it "uses a bounded cache for prepared statements with different list shapes" do
+    ps = @db[:items].where(:id=>@ids).prepare(:select, :list_ids)
+    ps.call(:ids=>[1])
+    ps.call(:ids=>[1, 2])
+    ps.call(:ids=>[1])
+    cache = ps.send(:cache_get, :_list_prepared_statement_cache)
+    cache.length.must_equal 2
+    cache.keys.must_equal ["ids=2x1", "ids=1x1"]
+    cache["ids=1x1"][:slot].must_equal 0
+    cache["ids=2x1"][:slot].must_equal 1
+
+    (3..Sequel::Dataset::DynamicListPreparedStatementMethods::MAXIMUM_PREPARED_STATEMENT_CACHE_SIZE + 2).each do |n|
+      ps.call(:ids=>(1..n).to_a)
+    end
+    cache.length.must_equal 100
+    cache.keys.wont_include "ids=2x1"
+    @db.prepared_statements.length.must_equal 101
+    @db.prepared_statements.keys.count{|k| k.to_s.start_with?("_sequel_list_list_ids_")}.must_equal 100
+  end
+end
+
 describe "Sequel::Dataset#server" do
   it "should set the server to use for the dataset" do
     @db = Sequel.mock(:servers=>{:s=>{}, :i=>{}, :d=>{}, :u=>{}})

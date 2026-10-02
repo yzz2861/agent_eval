@@ -587,6 +587,21 @@ module Sequel
         SQL::StringExpression.like(*args)
       end
 
+      # Return a bound variable placeholder for an IN/NOT IN value list.  The
+      # bound variable must be an array, and unlike ordinary arrays the value is
+      # always expanded into individual bound values:
+      #
+      #   DB[:items].where(id: Sequel.list(:$ids)).call(:select, ids: [1, 2])
+      #   # SELECT * FROM items WHERE (id IN (?, ?)) -- args: [1, 2]
+      #
+      # Arrays of arrays are supported for composite-key predicates:
+      #
+      #   DB[:items].where([:a, :b] => Sequel.list(:$pairs)).
+      #     call(:select, pairs: [[1, 2], [3, 4]])
+      def list(placeholder)
+        SQL::BoundVariableList.new(placeholder)
+      end
+
       # Converts a string into a <tt>Sequel::LiteralString</tt>, in order to override string
       # literalization, e.g.:
       #
@@ -1115,6 +1130,8 @@ module Sequel
           when ::String
             r = r.dup.freeze unless r.frozen?
             new(:'=', l, r)
+          when SQL::BoundVariableList
+            new(:IN, l, r)
           when ::Sequel::Dataset
             new(:IN, l, r)
           when NegativeBooleanConstant
@@ -1852,6 +1869,45 @@ module Sequel
       # Show that this is a value list and not just an array
       def inspect
         "#<#{self.class} #{super}>"
+      end
+    end
+
+    # Represents a list-valued bound variable placeholder, used for IN/NOT IN
+    # predicates where the length of the list is not known until the prepared
+    # statement is called.  Use +Sequel.list+ to create instances.
+    class BoundVariableList < Expression
+      # Name of the bound variable containing the list.
+      attr_reader :name
+
+      # Store the bound variable name.
+      def initialize(name)
+        unless name.is_a?(::Symbol) && name.to_s.start_with?('$')
+          raise Error, 'argument to Sequel.list must be a named bound variable placeholder (Symbol beginning with $)'
+        end
+
+        @name = name.to_s[1..-1].to_sym.freeze
+        freeze
+      end
+
+      def to_s_append(ds, sql)
+        raise Error, "Sequel.list placeholders can only be used as IN/NOT IN bound variable lists"
+      end
+    end
+
+    # Represents one scalar value expanded from a BoundVariableList.
+    class BoundVariableListItem < Expression
+      # Name of the bound variable containing the list, and offset of this
+      # value within the flattened list.
+      attr_reader :name, :index
+
+      def initialize(name, index)
+        @name = name
+        @index = index
+        freeze
+      end
+
+      def to_s_append(ds, sql)
+        ds.send(:prepared_list_item_sql_append, sql, self)
       end
     end
 
