@@ -1,0 +1,94 @@
+name: Publish Website
+on:
+  # For some reason, `on: release: ...` didn't work with `nektos/act`
+  push:
+    # Sequence of patterns matched against refs/tags
+    tags:
+      - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+  workflow_dispatch:
+    inputs:
+      publish_website:
+        description: "Publish guides to website?"
+        type: boolean
+        required: true
+        default: true
+      publish_version:
+        description: "If present, pull this GraphQL-Ruby version to rebuild API docs"
+        required: false
+        type: string
+
+permissions: {}
+env:
+  BUNDLE_WITH: jekyll_plugins
+jobs:
+  website:
+    if: ${{ inputs.publish_website || github.ref_name }}
+    permissions:
+      contents: write
+    name: Publish Website
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout GitHub pages branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gh-pages
+          ref: gh-pages
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: '3.1'
+      - run: bundle install
+      - name: Build HTML, reindex
+        env:
+          ALGOLIA_API_KEY: ${{ secrets.ALGOLIA_API_KEY }}
+        run: |
+          bundle exec rake site:fetch_latest site:build_doc site:update_search_index site:clean_html site:build_html
+      - name: Commit changes as last committer
+        run: |
+          git config --global user.name "$(git log --format="%aN" -n 1)"
+          git config --global user.email "$(git log --format="%aE" -n 1)"
+          bundle exec rake site:commit_changes
+      - name: Deploy to GitHub pages via gh-pages branch
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gh-pages
+  api_docs:
+    needs: website
+    if: ${{ inputs.publish_version || github.ref_name }}
+    permissions:
+      contents: write
+    name: Publish API Docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.GITHUB_REF }}
+      - name: Checkout GitHub pages branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gh-pages
+          ref: gh-pages
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: '3.2'
+      - run: bundle install
+      - name: Build API docs
+        env:
+          PUBLISH_VERSION: ${{ inputs.publish_version || env.GITHUB_REF }}
+        run: |
+          bundle exec rake site:fetch_latest "apidocs:gen_version[${PUBLISH_VERSION}]"
+      - name: Commit changes as rmosolgo
+        run: |
+          git config --global user.name rmosolgo
+          git config --global user.email rdmosolgo@gmail.com
+          git status
+          bundle exec rake site:commit_changes
+          git status
+      - name: Deploy to GitHub pages via gh-pages branch
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gh-pages
