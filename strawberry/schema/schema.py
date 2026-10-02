@@ -32,6 +32,7 @@ from graphql import (
     OperationDefinitionNode,
     get_introspection_query,
     parse,
+    specified_rules,
     validate_schema,
 )
 from graphql.execution.middleware import MiddlewareManager
@@ -1369,6 +1370,10 @@ class Schema(BaseSchema):
 
     def as_str(self) -> str:
         return print_schema(self)
+
+    def validate_document(self, query: str) -> list[GraphQLError]:
+        document = parse(query, no_location=True)
+        return validate_document(self._schema, document, tuple(specified_rules))
 
     __str__ = as_str
 

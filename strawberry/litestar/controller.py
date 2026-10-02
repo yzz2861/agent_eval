@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 
     from strawberry.http import GraphQLHTTPResponse
     from strawberry.http.ides import GraphQL_IDE
+    from strawberry.http.persisted_queries import PersistedQueriesConfig
     from strawberry.schema import BaseSchema
 
 
@@ -386,6 +387,7 @@ def make_graphql_controller(  # noqa: PLR0917
     ),
     connection_init_wait_timeout: timedelta = timedelta(minutes=1),
     multipart_uploads_enabled: bool = False,
+    persisted_queries: PersistedQueriesConfig | None = None,
     max_subscriptions_per_connection: int | None = 100,
 ) -> type[GraphQLController]:  # sourcery skip: move-assign
     if context_getter is None:
@@ -401,6 +403,7 @@ def make_graphql_controller(  # noqa: PLR0917
     schema_: BaseSchema = schema
     allow_queries_via_get_: bool = allow_queries_via_get
     graphql_ide_: GraphQL_IDE | None = graphql_ide
+    persisted_queries_ = persisted_queries
 
     routes_path: str = path
 
@@ -423,6 +426,7 @@ def make_graphql_controller(  # noqa: PLR0917
     _GraphQLController.allow_queries_via_get = allow_queries_via_get_
     _GraphQLController.graphql_ide = graphql_ide_
     _GraphQLController.multipart_uploads_enabled = multipart_uploads_enabled
+    _GraphQLController.persisted_queries = persisted_queries_
     _GraphQLController.max_subscriptions_per_connection = (
         max_subscriptions_per_connection
     )

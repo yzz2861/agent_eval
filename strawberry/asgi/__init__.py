@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     from strawberry.http import GraphQLHTTPResponse
     from strawberry.http.ides import GraphQL_IDE
+    from strawberry.http.persisted_queries import PersistedQueriesConfig
     from strawberry.schema import BaseSchema
 
 
@@ -114,6 +115,7 @@ class GraphQL(
         ),
         connection_init_wait_timeout: timedelta = timedelta(minutes=1),
         multipart_uploads_enabled: bool = False,
+        persisted_queries: PersistedQueriesConfig | None = None,
         max_subscriptions_per_connection: int | None = 100,
     ) -> None:
         self.schema = schema
@@ -123,6 +125,7 @@ class GraphQL(
         self.protocols = subscription_protocols
         self.connection_init_wait_timeout = connection_init_wait_timeout
         self.multipart_uploads_enabled = multipart_uploads_enabled
+        self.persisted_queries = persisted_queries
         self.max_subscriptions_per_connection = max_subscriptions_per_connection
         self.graphql_ide = graphql_ide
 

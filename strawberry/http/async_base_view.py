@@ -588,7 +588,7 @@ class AsyncBaseHTTPView(
 
         if isinstance(data, list):
             self._validate_batch_request(data, protocol=protocol)
-            return [
+            request_data = [
                 GraphQLRequestData(
                     query=item.get("query"),
                     variables=item.get("variables"),
@@ -598,6 +598,8 @@ class AsyncBaseHTTPView(
                 )
                 for item in data
             ]
+            self.resolve_persisted_queries(request_data)
+            return request_data
 
         query = data.get("query")
         if not isinstance(query, (str, type(None))):
@@ -620,13 +622,15 @@ class AsyncBaseHTTPView(
                 "The GraphQL operation's `extensions` must be an object or null, if provided.",
             )
 
-        return GraphQLRequestData(
+        request_data = GraphQLRequestData(
             query=query,
             variables=variables,
             operation_name=data.get("operationName"),
             extensions=extensions,
             protocol=protocol,
         )
+        self.resolve_persisted_queries(request_data)
+        return request_data
 
     async def process_result(
         self, request: Request, result: ExecutionResult

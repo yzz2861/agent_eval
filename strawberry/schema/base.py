@@ -111,6 +111,10 @@ class BaseSchema(Protocol):
     def as_str(self) -> str:
         raise NotImplementedError
 
+    @abstractmethod
+    def validate_document(self, query: str) -> list[GraphQLError]:
+        raise NotImplementedError
+
     @staticmethod
     def remove_field_suggestion(error: GraphQLError) -> None:
         if (

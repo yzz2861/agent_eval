@@ -8,6 +8,10 @@ from cross_web import HTTPException
 
 from strawberry.http import GraphQLRequestData, GraphQLRequestProtocol
 from strawberry.http.ides import GraphQL_IDE, get_graphql_ide_html
+from strawberry.http.persisted_queries import (
+    PersistedQueryManager,
+    PersistedQueriesConfig,
+)
 from strawberry.http.types import HTTPMethod, QueryParams
 from strawberry.schema.base import BaseSchema
 from strawberry.subscriptions import (
@@ -33,12 +37,31 @@ class BaseRequestProtocol(Protocol):
 class BaseView(Generic[Request]):
     graphql_ide: GraphQL_IDE | None
     multipart_uploads_enabled: bool = False
+    persisted_queries: PersistedQueriesConfig | None = None
     protocols: Sequence[str] = ()
     schema: BaseSchema
     stream_transport_classes_by_protocol: Mapping[str, type[HTTPStreamTransport]] = {
         MULTIPART_SUBSCRIPTION_PROTOCOL: MultipartSubscriptionTransport,
         GRAPHQL_SSE_PROTOCOL: SSETransport,
     }
+
+    @cached_property
+    def persisted_query_manager(self) -> PersistedQueryManager | None:
+        if self.persisted_queries is None:
+            return None
+        return PersistedQueryManager(self.schema, self.persisted_queries)
+
+    def resolve_persisted_queries(
+        self, request_data: GraphQLRequestData | list[GraphQLRequestData]
+    ) -> None:
+        manager = self.persisted_query_manager
+        if manager is None:
+            return
+
+        if isinstance(request_data, list):
+            manager.resolve_all(request_data)
+        else:
+            manager.resolve(request_data)
 
     def should_render_graphql_ide(self, request: BaseRequestProtocol) -> bool:
         return (

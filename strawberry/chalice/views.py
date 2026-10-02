@@ -12,6 +12,7 @@ from strawberry.http.typevars import Context, RootValue
 if TYPE_CHECKING:
     from strawberry.http import GraphQLHTTPResponse
     from strawberry.http.ides import GraphQL_IDE
+    from strawberry.http.persisted_queries import PersistedQueriesConfig
     from strawberry.schema import BaseSchema
 
 
@@ -26,8 +27,10 @@ class GraphQLView(
         schema: BaseSchema,
         graphql_ide: GraphQL_IDE | None = "graphiql",
         allow_queries_via_get: bool = True,
+        persisted_queries: PersistedQueriesConfig | None = None,
     ) -> None:
         self.allow_queries_via_get = allow_queries_via_get
+        self.persisted_queries = persisted_queries
         self.schema = schema
         self.graphql_ide = graphql_ide
 

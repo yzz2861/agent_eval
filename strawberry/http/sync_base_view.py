@@ -184,7 +184,7 @@ class SyncBaseHTTPView(
         if isinstance(data, list):
             # Sync views never stream, so any batch is always plain HTTP.
             self._validate_batch_request(data, protocol="http")
-            return [
+            request_data = [
                 GraphQLRequestData(
                     query=item.get("query"),
                     variables=item.get("variables"),
@@ -193,6 +193,8 @@ class SyncBaseHTTPView(
                 )
                 for item in data
             ]
+            self.resolve_persisted_queries(request_data)
+            return request_data
 
         query = data.get("query")
         if not isinstance(query, (str, type(None))):
@@ -215,12 +217,14 @@ class SyncBaseHTTPView(
                 "The GraphQL operation's `extensions` must be an object or null, if provided.",
             )
 
-        return GraphQLRequestData(
+        request_data = GraphQLRequestData(
             query=query,
             variables=variables,
             operation_name=data.get("operationName"),
             extensions=extensions,
         )
+        self.resolve_persisted_queries(request_data)
+        return request_data
 
     def _handle_errors(
         self, errors: list[GraphQLError], response_data: GraphQLHTTPResponse

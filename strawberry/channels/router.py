@@ -20,6 +20,7 @@ from .handlers.ws_handler import GraphQLWSConsumer
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from strawberry.http.persisted_queries import PersistedQueriesConfig
     from strawberry.schema import BaseSchema
 
 
@@ -52,6 +53,7 @@ class GraphQLProtocolTypeRouter(ProtocolTypeRouter):
         schema: BaseSchema,
         django_application: str | None = None,
         url_pattern: str = "^graphql",
+        persisted_queries: PersistedQueriesConfig | None = None,
         subscription_protocols: Sequence[str] = (
             GRAPHQL_TRANSPORT_WS_PROTOCOL,
             GRAPHQL_WS_PROTOCOL,
@@ -62,6 +64,7 @@ class GraphQLProtocolTypeRouter(ProtocolTypeRouter):
                 url_pattern,
                 GraphQLHTTPConsumer.as_asgi(
                     schema=schema,
+                    persisted_queries=persisted_queries,
                     subscription_protocols=subscription_protocols,
                 ),
             )

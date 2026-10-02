@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from strawberry.fastapi.context import MergedContext
     from strawberry.http import GraphQLHTTPResponse
     from strawberry.http.ides import GraphQL_IDE
+    from strawberry.http.persisted_queries import PersistedQueriesConfig
     from strawberry.schema import BaseSchema
 
 
@@ -156,6 +157,7 @@ class GraphQLRouter(
             generate_unique_id
         ),
         multipart_uploads_enabled: bool = False,
+        persisted_queries: PersistedQueriesConfig | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -191,6 +193,7 @@ class GraphQLRouter(
         self.connection_init_wait_timeout = connection_init_wait_timeout
         self.max_subscriptions_per_connection = max_subscriptions_per_connection
         self.multipart_uploads_enabled = multipart_uploads_enabled
+        self.persisted_queries = persisted_queries
         self.graphql_ide = graphql_ide
 
         @self.get(

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from strawberry.http import GraphQLHTTPResponse
     from strawberry.http.ides import GraphQL_IDE
+    from strawberry.http.persisted_queries import PersistedQueriesConfig
     from strawberry.schema import BaseSchema
 
 
@@ -64,6 +65,7 @@ class GraphQLView(
         graphql_ide: GraphQL_IDE | None = "graphiql",
         allow_queries_via_get: bool = True,
         multipart_uploads_enabled: bool = False,
+        persisted_queries: PersistedQueriesConfig | None = None,
         subscription_protocols: Sequence[str] = (
             GRAPHQL_TRANSPORT_WS_PROTOCOL,
             GRAPHQL_WS_PROTOCOL,
@@ -72,6 +74,7 @@ class GraphQLView(
         self.schema = schema
         self.allow_queries_via_get = allow_queries_via_get
         self.multipart_uploads_enabled = multipart_uploads_enabled
+        self.persisted_queries = persisted_queries
         self.protocols = subscription_protocols
 
         self.graphql_ide = graphql_ide
