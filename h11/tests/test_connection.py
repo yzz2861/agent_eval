@@ -7,6 +7,7 @@ from .._events import (
     ConnectionClosed,
     Data,
     EndOfMessage,
+    Event,
     InformationalResponse,
     Request,
     Response,
@@ -16,6 +17,7 @@ from .._state import (
     CLOSED,
     DONE,
     ERROR,
+    IDLE,
     MIGHT_SWITCH_PROTOCOL,
     MUST_CLOSE,
     SEND_BODY,
@@ -899,6 +901,186 @@ def test_sendfile() -> None:
     c, data = setup(None, "1.0")  # type: ignore
     assert data == [placeholder]  # type: ignore
     assert c.our_state is SEND_BODY
+
+
+def test_prepare_send_commit_basic_flow() -> None:
+    c = Connection(CLIENT)
+    request = Request(
+        method="GET",
+        target="/",
+        headers=[("Host", "example.com"), ("Content-Length", "5")],
+    )
+    data, request_plan = c.prepare_send(request)
+    assert data == b"GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n"
+    assert c.our_state is IDLE
+    c.commit_send(request_plan)
+    assert c.our_state is SEND_BODY
+
+    class Placeholder:
+        def __len__(self) -> int:
+            return 5
+
+    placeholder = Placeholder()
+    fragments, data_plan = c.prepare_send_with_data_passthrough(Data(data=placeholder))
+    assert fragments == [placeholder]
+    assert c.our_state is SEND_BODY
+    assert c._writer._length == 5
+    c.commit_send(data_plan)
+    assert c._writer._length == 0
+
+    data, eom_plan = c.prepare_send(EndOfMessage())
+    assert data == b""
+    assert c.our_state is SEND_BODY
+    c.commit_send(eom_plan)
+    assert c.our_state is DONE
+
+    data, close_plan = c.prepare_send(ConnectionClosed())
+    assert data is None
+    c.commit_send(close_plan)
+    assert c.our_state is CLOSED
+    with pytest.raises(LocalProtocolError):
+        c.commit_send(close_plan)
+
+
+def test_prepare_send_chunked_keeps_body_object() -> None:
+    c = Connection(CLIENT)
+    _, request_plan = c.prepare_send(
+        Request(
+            method="POST",
+            target="/",
+            headers=[("Host", "example.com"), ("Transfer-Encoding", "chunked")],
+        )
+    )
+    c.commit_send(request_plan)
+
+    class Placeholder:
+        def __len__(self) -> int:
+            return 10
+
+    placeholder = Placeholder()
+    fragments, data_plan = c.prepare_send_with_data_passthrough(Data(data=placeholder))
+    assert fragments == [b"a\r\n", placeholder, b"\r\n"]
+    assert c.our_state is SEND_BODY
+    c.commit_send(data_plan)
+
+    data, eom_plan = c.prepare_send(EndOfMessage(headers=[("hello", "there")]))
+    assert data == b"0\r\nhello: there\r\n\r\n"
+    assert c.our_state is SEND_BODY
+    c.commit_send(eom_plan)
+    assert c.our_state is DONE
+
+
+def test_prepare_send_http10_keeps_body_object() -> None:
+    c = Connection(SERVER)
+    receive_and_get(c, b"GET / HTTP/1.0\r\n\r\n")
+    _, response_plan = c.prepare_send(Response(status_code=200, headers=[]))
+    c.commit(response_plan)
+
+    class Placeholder:
+        def __len__(self) -> int:
+            return 4
+
+    placeholder = Placeholder()
+    fragments, data_plan = c.prepare_send_with_data_passthrough(Data(data=placeholder))
+    assert fragments == [placeholder]
+    c.commit_send(data_plan)
+    assert c.our_state is SEND_BODY
+
+
+def test_prepare_send_failure_has_no_side_effects() -> None:
+    c = Connection(CLIENT)
+    with pytest.raises(LocalProtocolError):
+        c.prepare_send(EndOfMessage())
+    assert c.our_state is IDLE
+
+    _, request_plan = c.prepare_send(
+        Request(
+            method="POST",
+            target="/",
+            headers=[("Host", "example.com"), ("Content-Length", "5")],
+        )
+    )
+    c.commit_send(request_plan)
+
+    with pytest.raises(LocalProtocolError):
+        c.prepare_send(Data(data=b"123456"))
+    assert c.our_state is SEND_BODY
+    assert c.our_state is not ERROR
+    assert c._writer._length == 5
+
+    data, data_plan = c.prepare_send(Data(data=b"12345"))
+    assert data == b"12345"
+    c.commit_send(data_plan)
+    c.commit_send(c.prepare_send(EndOfMessage())[1])
+    assert c.our_state is DONE
+
+
+def test_prepare_send_plan_invalidation() -> None:
+    request = Request(method="GET", target="/", headers=[("Host", "example.com")])
+
+    c = Connection(CLIENT)
+    _, plan = c.prepare_send(request)
+    c.receive_data(b"")
+    with pytest.raises(LocalProtocolError):
+        c.commit_send(plan)
+
+    c = Connection(CLIENT)
+    _, plan = c.prepare_send(request)
+    assert c.next_event() is NEED_DATA
+    with pytest.raises(LocalProtocolError):
+        c.commit_send(plan)
+
+    c = Connection(CLIENT)
+    _, request_plan = c.prepare_send(request)
+    c.commit_send(request_plan)
+    _, stale_plan = c.prepare_send(EndOfMessage())
+    c.send(Data(data=b""))
+    with pytest.raises(LocalProtocolError):
+        c.commit_send(stale_plan)
+
+    c = Connection(CLIENT)
+    other = Connection(CLIENT)
+    _, plan = c.prepare_send(request)
+    with pytest.raises(LocalProtocolError):
+        other.commit_send(plan)
+    assert c.our_state is IDLE
+
+
+@pytest.mark.parametrize("upgrade_request", [False, True])
+def test_prepare_send_commit_protocol_switch(upgrade_request: bool) -> None:
+    p = ConnectionPair()
+    if upgrade_request:
+        request = Request(
+            method="GET",
+            target="/",
+            headers=[
+                ("Host", "foo"),
+                ("Content-Length", "1"),
+                ("Upgrade", "a"),
+            ],
+        )
+        accept: Event = InformationalResponse(
+            status_code=101, headers=[("Upgrade", "a")]
+        )
+    else:
+        request = Request(
+            method="CONNECT",
+            target="example.com:443",
+            headers=[("Host", "foo"), ("Content-Length", "1")],
+        )
+        accept = Response(status_code=200, headers=[("Transfer-Encoding", "chunked")])
+
+    p.send(CLIENT, request)
+    p.send(CLIENT, [Data(data=b"1"), EndOfMessage()])
+    server = p.conn[SERVER]
+    data, plan = server.prepare_send(accept)
+    assert server.our_state is SEND_RESPONSE
+    server.commit_send(plan)
+    assert server.states == {
+        CLIENT: SWITCHED_PROTOCOL,
+        SERVER: SWITCHED_PROTOCOL,
+    }
+    assert data is not None
 
 
 def test_errors() -> None:

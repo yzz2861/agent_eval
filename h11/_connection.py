@@ -1,5 +1,6 @@
 # This contains the main Connection class. Everything in h11 revolves around
 # this.
+import copy
 from typing import (
     Any,
     Callable,
@@ -54,6 +55,36 @@ class NEED_DATA(Sentinel, metaclass=Sentinel):
 
 class PAUSED(Sentinel, metaclass=Sentinel):
     pass
+
+
+class _SendPlan:
+    __slots__ = (
+        "_connection",
+        "_generation",
+        "_cstate",
+        "_writer",
+        "_reader",
+        "_request_method",
+        "_client_is_waiting_for_100_continue",
+    )
+
+    def __init__(
+        self,
+        connection: "Connection",
+        generation: int,
+        cstate: ConnectionState,
+        writer: Optional[Callable[..., Any]],
+        reader: Optional[Callable[..., Any]],
+        request_method: Optional[bytes],
+        client_is_waiting_for_100_continue: bool,
+    ) -> None:
+        self._connection = connection
+        self._generation = generation
+        self._cstate = cstate
+        self._writer = writer
+        self._reader = reader
+        self._request_method = request_method
+        self._client_is_waiting_for_100_continue = client_is_waiting_for_100_continue
 
 
 # If we ever have this much buffered without it making a complete parseable
@@ -203,6 +234,10 @@ class Connection:
         # transitions, so no need to bother ConnectionState with it:
         self.client_is_waiting_for_100_continue = False
 
+        # Send plans are only valid for the connection state that existed when
+        # they were prepared. This is bumped by operations that change state.
+        self._send_generation = 0
+
     @property
     def states(self) -> Dict[Type[Sentinel], Type[Sentinel]]:
         """A dictionary like::
@@ -251,11 +286,48 @@ class Connection:
         # beyond a single request/response cycle
         assert not self.client_is_waiting_for_100_continue
         self._respond_to_state_changes(old_states)
+        self._send_generation += 1
+
+    def _snapshot_send_state(
+        self,
+    ) -> Tuple[
+        ConnectionState,
+        Optional[Callable[..., Any]],
+        Optional[Callable[..., Any]],
+        Optional[bytes],
+        bool,
+    ]:
+        return (
+            copy.deepcopy(self._cstate),
+            copy.deepcopy(self._writer),
+            copy.deepcopy(self._reader),
+            self._request_method,
+            self.client_is_waiting_for_100_continue,
+        )
+
+    def _restore_send_state(
+        self,
+        state: Tuple[
+            ConnectionState,
+            Optional[Callable[..., Any]],
+            Optional[Callable[..., Any]],
+            Optional[bytes],
+            bool,
+        ],
+    ) -> None:
+        (
+            self._cstate,
+            self._writer,
+            self._reader,
+            self._request_method,
+            self.client_is_waiting_for_100_continue,
+        ) = state
 
     def _process_error(self, role: Type[Sentinel]) -> None:
         old_states = dict(self._cstate.states)
         self._cstate.process_error(role)
         self._respond_to_state_changes(old_states)
+        self._send_generation += 1
 
     def _server_switch_event(self, event: Event) -> Optional[Type[Sentinel]]:
         if type(event) is InformationalResponse and event.status_code == 101:
@@ -400,6 +472,7 @@ class Connection:
                 and equivalent to calling it once.)
 
         """
+        self._send_generation += 1
         if data:
             if self._receive_buffer_closed:
                 raise RuntimeError("received close, then received more data?")
@@ -475,6 +548,7 @@ class Connection:
 
         """
 
+        self._send_generation += 1
         if self.their_state is ERROR:
             raise RemoteProtocolError("Can't receive data when peer state is ERROR")
         try:
@@ -500,76 +574,121 @@ class Connection:
             else:
                 raise
 
-    @overload
-    def send(self, event: ConnectionClosed) -> None:
-        ...
-
-    @overload
-    def send(
-        self, event: Union[Request, InformationalResponse, Response, Data, EndOfMessage]
-    ) -> bytes:
-        ...
-
-    @overload
-    def send(self, event: Event) -> Optional[bytes]:
-        ...
-
-    def send(self, event: Event) -> Optional[bytes]:
-        """Convert a high-level event into bytes that can be sent to the peer,
-        while updating our internal state machine.
-
-        Args:
-            event: The :ref:`event <events>` to send.
-
-        Returns:
-            If ``type(event) is ConnectionClosed``, then returns
-            ``None``. Otherwise, returns a :term:`bytes-like object`.
-
-        Raises:
-            LocalProtocolError:
-                Sending this event at this time would violate our
-                understanding of the HTTP/1.1 protocol.
-
-        If this method raises any exception then it also sets
-        :attr:`Connection.our_state` to :data:`ERROR` -- see
-        :ref:`error-handling` for discussion.
-
-        """
-        data_list = self.send_with_data_passthrough(event)
-        if data_list is None:
-            return None
-        else:
-            return b"".join(data_list)
-
-    def send_with_data_passthrough(self, event: Event) -> Optional[List[bytes]]:
-        """Identical to :meth:`send`, except that in situations where
-        :meth:`send` returns a single :term:`bytes-like object`, this instead
-        returns a list of them -- and when sending a :class:`Data` event, this
-        list is guaranteed to contain the exact object you passed in as
-        :attr:`Data.data`. See :ref:`sendfile` for discussion.
-
-        """
+    def _make_send_plan(self, event: Event) -> Tuple[Optional[List[bytes]], _SendPlan]:
         if self.our_state is ERROR:
             raise LocalProtocolError("Can't send data when our state is ERROR")
+        original_state = self._snapshot_send_state()
+        simulated_state = copy.deepcopy(original_state)
+        self._restore_send_state(simulated_state)
         try:
             if type(event) is Response:
                 event = self._clean_up_response_headers_for_sending(event)
-            # We want to call _process_event before calling the writer,
-            # because if someone tries to do something invalid then this will
-            # give a sensible error message, while our writers all just assume
-            # they will only receive valid events. But, _process_event might
-            # change self._writer. So we have to do a little dance:
             writer = self._writer
             self._process_event(self.our_role, event)
             if type(event) is ConnectionClosed:
-                return None
+                data_list: Optional[List[bytes]] = None
             else:
-                # In any situation where writer is None, process_event should
-                # have raised ProtocolError
                 assert writer is not None
-                data_list: List[bytes] = []
+                data_list = []
                 writer(event, data_list.append)
-                return data_list
+            plan = _SendPlan(
+                connection=self,
+                generation=self._send_generation,
+                cstate=self._cstate,
+                writer=self._writer,
+                reader=self._reader,
+                request_method=self._request_method,
+                client_is_waiting_for_100_continue=self.client_is_waiting_for_100_continue,
+            )
+        except:
+            self._restore_send_state(original_state)
+            raise
+        else:
+            self._restore_send_state(original_state)
+        return data_list, plan
+
+    def _prepare_send_with_data_passthrough(
+        self, event: Event
+    ) -> Tuple[Optional[List[bytes]], _SendPlan]:
+        """Encode an event without changing the connection state."""
+        return self._make_send_plan(event)
+
+    def _prepare_send(self, event: Event) -> Tuple[Optional[bytes], _SendPlan]:
+        """Encode an event without changing the connection state."""
+        data_list, plan = self._make_send_plan(event)
+        if data_list is None:
+            return None, plan
+        return b"".join(data_list), plan
+
+    def commit_send(self, plan: _SendPlan) -> None:
+        """Commit a plan returned by prepare_send."""
+        if not isinstance(plan, _SendPlan):
+            raise LocalProtocolError("expected a plan from prepare_send")
+        if plan._connection is not self:
+            raise LocalProtocolError("can't commit a plan from another connection")
+        if plan._generation != self._send_generation:
+            raise LocalProtocolError("can't commit a stale send plan")
+        self._cstate = copy.deepcopy(plan._cstate)
+        self._writer = copy.deepcopy(plan._writer)
+        self._reader = copy.deepcopy(plan._reader)
+        self._request_method = plan._request_method
+        self.client_is_waiting_for_100_continue = (
+            plan._client_is_waiting_for_100_continue
+        )
+        self._send_generation += 1
+
+    commit = commit_send
+
+    @overload
+    def prepare_send_with_data_passthrough(
+        self, event: ConnectionClosed
+    ) -> Tuple[None, _SendPlan]: ...
+
+    @overload
+    def prepare_send_with_data_passthrough(
+        self,
+        event: Union[Request, InformationalResponse, Response, Data, EndOfMessage],
+    ) -> Tuple[List[bytes], _SendPlan]: ...
+
+    @overload
+    def prepare_send_with_data_passthrough(
+        self, event: Event
+    ) -> Tuple[Optional[List[bytes]], _SendPlan]: ...
+
+    def prepare_send_with_data_passthrough(
+        self, event: Event
+    ) -> Tuple[Optional[List[bytes]], _SendPlan]:
+        """Encode an event without changing the connection state."""
+        return self._prepare_send_with_data_passthrough(event)
+
+    @overload
+    def prepare_send(self, event: ConnectionClosed) -> Tuple[None, _SendPlan]: ...
+
+    @overload
+    def prepare_send(
+        self, event: Union[Request, InformationalResponse, Response, Data, EndOfMessage]
+    ) -> Tuple[bytes, _SendPlan]: ...
+
+    @overload
+    def prepare_send(self, event: Event) -> Tuple[Optional[bytes], _SendPlan]: ...
+
+    def prepare_send(self, event: Event) -> Tuple[Optional[bytes], _SendPlan]:
+        """Encode an event without changing the connection state."""
+        return self._prepare_send(event)
+
+    def send(self, event: Event) -> Optional[bytes]:
+        """Convert an event into bytes and immediately advance state."""
+        data_list = self.send_with_data_passthrough(event)
+        if data_list is None:
+            return None
+        return b"".join(data_list)
+
+    def send_with_data_passthrough(self, event: Event) -> Optional[List[bytes]]:
+        """Compatibility wrapper around prepare and commit."""
+        try:
+            data_list, plan = self.prepare_send_with_data_passthrough(event)
+            self.commit_send(plan)
+            return data_list
         except:
             self._process_error(self.our_role)
             raise
