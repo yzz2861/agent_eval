@@ -30,6 +30,18 @@ API Reference
 .. autoclass:: PyJWKSet
     :members:
 
+.. autoclass:: jwt.jwk_import_policy.JWKImportPolicy
+    :class-doc-from: class
+    :members:
+
+.. autoclass:: jwt.jwk_import_policy.JWKImportReport
+    :class-doc-from: class
+    :members:
+
+.. autoclass:: jwt.jwk_import_policy.JWKImportDecision
+    :class-doc-from: class
+    :members:
+
 .. autoclass:: PyJWKClient
     :class-doc-from: init
     :members:

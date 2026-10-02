@@ -25,6 +25,7 @@ from .exceptions import (
     PyJWKSetError,
     PyJWTError,
 )
+from .jwk_import_policy import JWKImportDecision, JWKImportPolicy, JWKImportReport
 from .jwks_client import PyJWKClient
 from .warnings import InsecureKeyLengthWarning
 
@@ -56,6 +57,10 @@ __all__ = [
     "register_algorithm",
     "unregister_algorithm",
     "get_algorithm_by_name",
+    # JWK import policy
+    "JWKImportDecision",
+    "JWKImportPolicy",
+    "JWKImportReport",
     # Warnings
     "InsecureKeyLengthWarning",
     # Exceptions

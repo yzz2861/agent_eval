@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from .api_jwk import PyJWK, PyJWKSet
 from .api_jwt import decode_complete as decode_token
 from .exceptions import PyJWKClientConnectionError, PyJWKClientError
+from .jwk_import_policy import JWKImportPolicy
 from .jwk_set_cache import JWKSetCache
 
 
@@ -43,6 +44,7 @@ class PyJWKClient:
         timeout: float = 30,
         ssl_context: SSLContext | None = None,
         cooldown_duration: float = 30,
+        import_policy: JWKImportPolicy | None = None,
     ):
         """A client for retrieving signing keys from a JWKS endpoint.
 
@@ -77,6 +79,14 @@ class PyJWKClient:
         - ``max_cached_keys``: Maximum number of signing keys to keep in
           the LRU cache. Defaults to ``16``.
 
+        **Import policy** (disabled by default):
+        When ``import_policy`` is given, every JWK Set is filtered through
+        it while being parsed -- including sets served from the JWK Set
+        cache, which only ever stores policy-filtered sets. As a result,
+        only keys that satisfy the policy can reach the signing key cache.
+        The per-key decisions are available as
+        :attr:`PyJWKSet.import_report`.
+
         :param uri: The URL of the JWKS endpoint.
         :type uri: str
         :param cache_keys: Enable the per-key LRU cache (Tier 2).
@@ -96,6 +106,9 @@ class PyJWKClient:
         :param cooldown_duration: Minimum time in seconds between forced
             refreshes after an unknown key ID. Defaults to ``30``.
         :type cooldown_duration: float
+        :param import_policy: Optional policy that imported keys must
+            satisfy. Defaults to ``None`` (legacy lenient loading).
+        :type import_policy: JWKImportPolicy or None
         """
         if headers is None:
             headers = {}
@@ -126,6 +139,7 @@ class PyJWKClient:
         self.cooldown_duration = cooldown_duration
         self._last_successful_fetch: float | None = None
         self._client_lock = threading.RLock()
+        self.import_policy = import_policy
 
         if cache_jwk_set:
             # Init jwt set cache with default or given lifespan.
@@ -134,7 +148,7 @@ class PyJWKClient:
                 raise PyJWKClientError(
                     f'Lifespan must be greater than 0, the input is "{lifespan}"'
                 )
-            self.jwk_set_cache = JWKSetCache(lifespan)
+            self.jwk_set_cache = JWKSetCache(lifespan, import_policy=import_policy)
         else:
             self.jwk_set_cache = None
 
@@ -213,7 +227,9 @@ class PyJWKClient:
         if isinstance(data, PyJWKSet):
             jwk_set = data
         else:
-            jwk_set = PyJWKSet.from_dict(self._as_jwk_set_payload(data))
+            jwk_set = PyJWKSet.from_dict(
+                self._as_jwk_set_payload(data), import_policy=self.import_policy
+            )
 
         # `fetch_data()` caches the payload it received from the endpoint,
         # but a subclass may filter or transform it before returning. Cache

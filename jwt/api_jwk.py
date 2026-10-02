@@ -13,6 +13,13 @@ from .exceptions import (
     PyJWKSetError,
     PyJWTError,
 )
+from .jwk_import_policy import (
+    KID_CONFLICT_REJECT,
+    JWKImportDecision,
+    JWKImportPolicy,
+    JWKImportReport,
+    public_key_material,
+)
 from .types import JWKDict
 
 
@@ -138,8 +145,13 @@ class PyJWK:
 
 
 class PyJWKSet:
-    def __init__(self, keys: list[JWKDict]) -> None:
+    def __init__(
+        self,
+        keys: list[JWKDict],
+        import_policy: JWKImportPolicy | None = None,
+    ) -> None:
         self.keys: list[PyJWK] = []
+        self.import_report: JWKImportReport | None = None
 
         if not keys:
             raise PyJWKSetError("The JWK Set did not contain any keys")
@@ -147,32 +159,148 @@ class PyJWKSet:
         if not isinstance(keys, list):
             raise PyJWKSetError("Invalid JWK Set value")
 
-        for key in keys:
+        if import_policy is None:
+            for key in keys:
+                if not isinstance(key, dict):
+                    # skip members that aren't JWK objects
+                    continue
+                try:
+                    self.keys.append(PyJWK(key))
+                except PyJWTError as error:
+                    if isinstance(error, MissingCryptographyError):
+                        raise error
+                    # skip unusable keys
+                    continue
+        else:
+            self._import_with_policy(keys, import_policy)
+
+        if len(self.keys) == 0:
+            if import_policy is None:
+                raise PyJWKSetError(
+                    "The JWK Set did not contain any usable keys. Perhaps 'cryptography' is not installed?"
+                )
+            raise PyJWKSetError(
+                "The JWK Set did not contain any keys that satisfy the import policy"
+            )
+
+    def _import_with_policy(
+        self, keys: list[JWKDict], import_policy: JWKImportPolicy
+    ) -> None:
+        decisions: list[JWKImportDecision] = []
+
+        for index, key in enumerate(keys):
             if not isinstance(key, dict):
-                # skip members that aren't JWK objects
+                decisions.append(
+                    JWKImportDecision(
+                        index, None, False, ("member is not a JWK object",)
+                    )
+                )
                 continue
+
+            kid = key.get("kid")
+            if not isinstance(kid, str):
+                kid = None
+
+            reasons = import_policy.evaluate(key)
+            if reasons:
+                decisions.append(JWKImportDecision(index, kid, False, reasons))
+                continue
+
             try:
-                self.keys.append(PyJWK(key))
+                pyjwk = PyJWK(key)
             except PyJWTError as error:
                 if isinstance(error, MissingCryptographyError):
                     raise error
-                # skip unusable keys
+                # Do not propagate the exception message: it may embed the
+                # raw JWK, which can contain private key material.
+                decisions.append(
+                    JWKImportDecision(
+                        index,
+                        kid,
+                        False,
+                        (f"key could not be constructed ({type(error).__name__})",),
+                    )
+                )
                 continue
 
-        if len(self.keys) == 0:
-            raise PyJWKSetError(
-                "The JWK Set did not contain any usable keys. Perhaps 'cryptography' is not installed?"
-            )
+            self.keys.append(pyjwk)
+            decisions.append(JWKImportDecision(index, kid, True))
+
+        self._resolve_duplicate_kids(decisions, import_policy)
+        self.import_report = JWKImportReport(decisions)
+
+    def _resolve_duplicate_kids(
+        self,
+        decisions: list[JWKImportDecision],
+        import_policy: JWKImportPolicy,
+    ) -> None:
+        # Group accepted keys by kid; keys without a kid cannot collide.
+        by_kid: dict[str, list[int]] = {}
+        for position, pyjwk in enumerate(self.keys):
+            if pyjwk.key_id is not None:
+                by_kid.setdefault(pyjwk.key_id, []).append(position)
+
+        drop: set[int] = set()
+        # Map each accepted key back to its decision so it can be annotated.
+        accepted_positions = [
+            i for i, decision in enumerate(decisions) if decision.accepted
+        ]
+
+        for kid, positions in by_kid.items():
+            if len(positions) < 2:
+                continue
+
+            materials = {
+                public_key_material(self.keys[position]._jwk_data)
+                for position in positions
+            }
+
+            if len(materials) == 1:
+                # Same key repeated: keep the first occurrence.
+                for position in positions[1:]:
+                    drop.add(position)
+                    decision_index = accepted_positions[position]
+                    decisions[decision_index] = JWKImportDecision(
+                        decisions[decision_index].index,
+                        kid,
+                        False,
+                        ("duplicate of an earlier key with the same kid",),
+                    )
+                continue
+
+            # Same kid, different key material: never silently pick one.
+            if import_policy.on_kid_conflict == KID_CONFLICT_REJECT:
+                raise PyJWKSetError(
+                    f"The JWK Set contains conflicting keys for kid {kid!r}"
+                )
+            for position in positions:
+                drop.add(position)
+                decision_index = accepted_positions[position]
+                decisions[decision_index] = JWKImportDecision(
+                    decisions[decision_index].index,
+                    kid,
+                    False,
+                    (f"conflicting key material for kid {kid!r}; key isolated",),
+                )
+
+        if drop:
+            self.keys = [
+                pyjwk
+                for position, pyjwk in enumerate(self.keys)
+                if position not in drop
+            ]
 
     @staticmethod
-    def from_dict(obj: dict[str, Any]) -> PyJWKSet:
+    def from_dict(
+        obj: dict[str, Any], import_policy: JWKImportPolicy | None = None
+    ) -> PyJWKSet:
         keys = obj.get("keys", [])
-        return PyJWKSet(keys)
+        return PyJWKSet(keys, import_policy=import_policy)
 
     @staticmethod
-    def from_json(data: str) -> PyJWKSet:
+    def from_json(data: str, import_policy: JWKImportPolicy | None = None) -> PyJWKSet:
         obj = json.loads(data)
-        return PyJWKSet.from_dict(obj)
+        return PyJWKSet.from_dict(obj, import_policy=import_policy)
 
     def __getitem__(self, kid: str) -> PyJWK:
         for key in self.keys:
