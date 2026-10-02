@@ -2221,6 +2221,61 @@ Serializer
     Both the application and the consumer must use the same ``secret`` and
     ``salt``.
 
+.. py:class:: JsonSerializer(allow_pickle=False, compression=False, compression_level=6, use_zlib=False)
+
+    :param bool allow_pickle: also accept legacy pickle messages when
+        deserializing (default ``False``).
+    :param bool compression: use gzip compression
+    :param int compression_level: 0 for least, 9 for most.
+    :param bool use_zlib: use zlib for compression instead of gzip.
+
+    An alternative to the default pickle-based serializer that writes
+    messages as versioned, human-inspectable JSON. Because messages are
+    never unpickled, consumers do not execute arbitrary objects, which
+    makes this serializer a good choice when several independently
+    deployed services share the same queue.
+
+    Only the following value types are supported (including inside nested
+    containers); anything else raises
+    :py:class:`huey.exceptions.SerializerError` when the message is
+    serialized:
+
+    * ``None``, ``bool``, ``int``, ``float`` and ``str``
+    * ``bytes`` (base64-encoded)
+    * ``datetime.datetime``, naive or timezone-aware (ISO-8601)
+    * ``tuple`` and namedtuples
+    * ``list`` and ``dict`` (keys may be any supported hashable type)
+
+    Every message carries a ``version`` field. Unknown versions, unknown
+    type tags and malformed payloads raise
+    :py:class:`huey.exceptions.SerializerError` before the task is
+    executed.
+
+    .. code-block:: python
+
+        from huey import RedisHuey
+        from huey.serializer import JsonSerializer
+
+        huey = RedisHuey('my-app', serializer=JsonSerializer())
+
+    .. note::
+        Legacy pickle messages are rejected by default. To migrate an
+        existing deployment, run consumers with
+        ``JsonSerializer(allow_pickle=True)`` until the old messages
+        have drained. Pickle is never attempted automatically when JSON
+        parsing fails.
+
+.. py:class:: SignedJsonSerializer(secret, salt='huey', **kwargs)
+
+    :param str secret: secret key used to generate HMAC signatures.
+    :param str salt: salt combined with the secret (default ``'huey'``).
+    :param kwargs: additional keyword arguments passed to
+        :py:class:`JsonSerializer` (e.g. ``allow_pickle``,
+        ``compression``, ``use_zlib``).
+
+    Combines the :py:class:`JsonSerializer` message format with the
+    HMAC-SHA1 signature verification of :py:class:`SignedSerializer`.
+
 .. _exceptions:
 
 Exceptions
@@ -2233,6 +2288,12 @@ Exceptions
 .. py:class:: ConfigurationError
 
     Raised when Huey encounters a configuration problem.
+
+.. py:class:: SerializerError
+
+    Raised when a message cannot be serialized or deserialized, e.g. an
+    unsupported value type, an unknown message version, or an unknown type
+    tag.
 
 .. py:class:: TaskLockedException
 
@@ -2485,4 +2546,3 @@ Huey comes with several built-in storage implementations:
 
 .. autoclass:: huey.storage.BaseStorage
    :members:
-
