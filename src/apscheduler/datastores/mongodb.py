@@ -203,6 +203,11 @@ class MongoDBDataStore(BaseExternalDataStore):
                 await self._initialize()
 
     async def add_task(self, task: Task) -> None:
+        if task.required_resources:
+            raise NotImplementedError(
+                "MongoDBDataStore does not support named resource limits yet"
+            )
+
         async for attempt in self._retry():
             with attempt:
                 previous = await self._tasks.find_one_and_update(
@@ -502,6 +507,11 @@ class MongoDBDataStore(BaseExternalDataStore):
             return None
 
     async def add_job(self, job: Job) -> None:
+        if job.required_resources:
+            raise NotImplementedError(
+                "MongoDBDataStore does not support named resource limits yet"
+            )
+
         document = job.marshal(self.serializer)
         marshal_document(document)
         async for attempt in self._retry():

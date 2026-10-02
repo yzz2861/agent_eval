@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right, insort_right
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import MAXYEAR, datetime, timedelta, timezone
 from functools import partial
 from uuid import UUID
@@ -24,6 +24,7 @@ from .._events import (
 )
 from .._exceptions import ConflictingIdError, TaskLookupError
 from .._structures import Job, JobResult, Schedule, ScheduleResult, Task
+from .._validators import validate_resource_limits
 from .._utils import create_repr
 from .base import BaseDataStore
 
@@ -36,7 +37,15 @@ class MemoryDataStore(BaseDataStore):
     Stores scheduler data in memory, without serializing it.
 
     Can be shared between multiple schedulers within the same event loop.
+
+    :param resource_limits: mapping of resource names to their available capacities
     """
+
+    supports_named_resources = True
+
+    resource_limits: Mapping[str, int] = attrs.field(
+        kw_only=True, factory=dict, converter=validate_resource_limits
+    )
 
     _tasks: dict[str, Task] = attrs.Factory(dict)
     _schedules: list[Schedule] = attrs.Factory(list)
@@ -51,6 +60,12 @@ class MemoryDataStore(BaseDataStore):
 
     def __repr__(self) -> str:
         return create_repr(self)
+
+    async def get_resource_limits(self) -> dict[str, int]:
+        return dict(self.resource_limits)
+
+    async def set_resource_limits(self, resource_limits: Mapping[str, int]) -> None:
+        self.resource_limits = validate_resource_limits(resource_limits)
 
     def _find_schedule_index(self, schedule: Schedule) -> int:
         left_index = bisect_left(self._schedules, schedule)
@@ -229,18 +244,32 @@ class MemoryDataStore(BaseDataStore):
         acquired_until = now + lease_duration
         jobs: list[Job] = []
         job_results: dict[Job, JobResult] = {}
+        resource_usage = {name: 0 for name in self.resource_limits}
+        for active_job in self._jobs_by_id.values():
+            if (
+                active_job.acquired_until is not None
+                and active_job.acquired_until >= now
+            ):
+                for name, amount in active_job.required_resources.items():
+                    resource_usage[name] = resource_usage.get(name, 0) + amount
+
         for job in self._jobs_by_id.values():
             task = self._tasks[job.task_id]
+            expired_lease = (
+                job.acquired_until is not None and job.acquired_until < now
+            )
 
             # Skip already acquired jobs (unless the acquisition lock has expired)
             if job.acquired_until is not None:
-                if job.acquired_until >= now:
+                if not expired_lease:
                     continue
-                else:
-                    task.running_jobs -= 1
 
             # Discard the job if its start deadline has passed
             if job.start_deadline and job.start_deadline < now:
+                if expired_lease:
+                    task.running_jobs -= 1
+                    job.acquired_by = None
+                    job.acquired_until = None
                 job_results[job] = JobResult(
                     job_id=job.id,
                     outcome=JobOutcome.missed_start_deadline,
@@ -252,8 +281,14 @@ class MemoryDataStore(BaseDataStore):
             # Skip the job if no more slots are available
             if (
                 task.max_running_jobs is not None
-                and task.running_jobs >= task.max_running_jobs
+                and task.running_jobs
+                + (0 if expired_lease else 1)
+                > task.max_running_jobs
             ):
+                if expired_lease:
+                    task.running_jobs -= 1
+                    job.acquired_by = None
+                    job.acquired_until = None
                 self._logger.debug(
                     "Skipping job %s because task %r has the maximum number of %d jobs "
                     "already running",
@@ -263,13 +298,33 @@ class MemoryDataStore(BaseDataStore):
                 )
                 continue
 
+            resources_available = all(
+                resource_usage.get(name, 0) + amount
+                <= self.resource_limits.get(name, 0)
+                for name, amount in job.required_resources.items()
+            )
+            if not resources_available:
+                if expired_lease:
+                    task.running_jobs -= 1
+                    job.acquired_by = None
+                    job.acquired_until = None
+                self._logger.debug(
+                    "Skipping job %s because required resources %s are not available",
+                    job.id,
+                    dict(job.required_resources),
+                )
+                continue
+
             # Mark the job as acquired by this worker
             jobs.append(job)
             job.acquired_by = scheduler_id
             job.acquired_until = acquired_until
 
-            # Increment the number of running jobs for this task
-            task.running_jobs += 1
+            if not expired_lease:
+                task.running_jobs += 1
+
+            for name, amount in job.required_resources.items():
+                resource_usage[name] = resource_usage.get(name, 0) + amount
 
             # Exit the loop if enough jobs have been acquired
             if len(jobs) == limit:
@@ -283,11 +338,28 @@ class MemoryDataStore(BaseDataStore):
 
         # Discard the jobs that could not start
         for job, result in job_results.items():
-            await self.release_job(scheduler_id, job, result)
+            await self._release_job(scheduler_id, job, result)
 
         return jobs
 
-    async def release_job(self, scheduler_id: str, job: Job, result: JobResult) -> None:
+    async def _release_job(
+        self,
+        scheduler_id: str,
+        job: Job,
+        result: JobResult,
+        *,
+        enforce_owner: bool = False,
+    ) -> None:
+        current_job = self._jobs_by_id.get(result.job_id)
+        if current_job is not None and (
+            enforce_owner
+            and (
+                current_job.acquired_by != scheduler_id
+                or current_job.acquired_until != job.acquired_until
+            )
+        ):
+            return
+
         # Record the job result
         if result.expires_at > result.finished_at:
             self._job_results[result.job_id] = result
@@ -324,6 +396,14 @@ class MemoryDataStore(BaseDataStore):
             )
         )
 
+    async def release_job(self, scheduler_id: str, job: Job, result: JobResult) -> None:
+        await self._release_job(
+            scheduler_id,
+            job,
+            result,
+            enforce_owner=True,
+        )
+
     async def get_job_result(self, job_id: UUID) -> JobResult | None:
         return self._job_results.pop(job_id, None)
 
@@ -350,7 +430,7 @@ class MemoryDataStore(BaseDataStore):
                 result = JobResult.from_job(
                     job=job, outcome=JobOutcome.abandoned, finished_at=now
                 )
-                await self.release_job(job.acquired_by, job, result)
+                await self._release_job(job.acquired_by, job, result)
 
     async def cleanup(self) -> None:
         # Clean up expired job results
@@ -374,7 +454,7 @@ class MemoryDataStore(BaseDataStore):
                 job=job, outcome=JobOutcome.abandoned, finished_at=now
             )
             assert job.acquired_by is not None
-            await self.release_job(job.acquired_by, job, result)
+            await self._release_job(job.acquired_by, job, result)
 
         # Release any schedules whose leases have expired
         for schedule in self._schedules:

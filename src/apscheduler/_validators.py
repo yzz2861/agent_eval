@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from attrs import Attribute
@@ -55,3 +55,46 @@ def valid_metadata(instance: Any, attribute: Attribute, value: Any) -> None:
 
     for key, val in value.items():
         check_value(key, val)
+
+
+def valid_resource_requirements(
+    instance: Any, attribute: Attribute, value: Any
+) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{attribute.name} must be a mapping, got: {value!r}")
+
+    for name, amount in value.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"resource names must be non-empty strings, got: {name!r}"
+            )
+
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+            raise ValueError(
+                f"resource {name!r} amounts must be positive integers, got: {amount!r}"
+            )
+
+
+def validate_resource_limits(value: Any) -> dict[str, int]:
+    if value is None:
+        return {}
+
+    if not isinstance(value, Mapping):
+        raise ValueError(f"resource limits must be a mapping, got: {value!r}")
+
+    limits: dict[str, int] = {}
+    for name, capacity in value.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"resource names must be non-empty strings, got: {name!r}"
+            )
+
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0:
+            raise ValueError(
+                f"resource {name!r} capacities must be non-negative integers, got: "
+                f"{capacity!r}"
+            )
+
+        limits[name] = capacity
+
+    return limits

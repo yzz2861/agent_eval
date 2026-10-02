@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta
 from logging import Logger
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
 if sys.version_info >= (3, 11):
@@ -164,6 +164,8 @@ class DataStore(metaclass=ABCMeta):
     data store publishes events to the associated event broker accordingly.
     """
 
+    supports_named_resources: ClassVar[bool] = False
+
     @abstractmethod
     async def start(
         self, exit_stack: AsyncExitStack, event_broker: EventBroker, logger: Logger
@@ -177,6 +179,18 @@ class DataStore(metaclass=ABCMeta):
             (if any) and this data store
         :param logger: the logger object the data store should use to log events
         """
+
+    async def get_resource_limits(self) -> dict[str, int]:
+        """Return the configured named resource capacities."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support named resource limits"
+        )
+
+    async def set_resource_limits(self, resource_limits: dict[str, int]) -> None:
+        """Set the configured named resource capacities."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support named resource limits"
+        )
 
     @abstractmethod
     async def add_task(self, task: Task) -> None:

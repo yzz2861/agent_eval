@@ -42,6 +42,7 @@ def task(
     job_executor: str | UnsetValue = unset,
     max_running_jobs: int | None | UnsetValue = unset,
     misfire_grace_time: int | timedelta | None | UnsetValue = unset,
+    required_resources: dict[str, int] | UnsetValue = unset,
     metadata: MetadataType | UnsetValue = unset,
 ) -> Callable[[T], T]:
     """
@@ -54,6 +55,7 @@ def task(
     :param ~datetime.timedelta | None misfire_grace_time: maximum number of seconds the
         run time of jobs created for the task are allowed to be late, compared to the
         scheduled run time
+    :param required_resources: named resources required by each job of the task
     :param metadata: key-value pairs for storing JSON compatible custom information
     """
 
@@ -74,6 +76,7 @@ def task(
                 job_executor=job_executor,
                 max_running_jobs=max_running_jobs,
                 misfire_grace_time=misfire_grace_time,
+                required_resources=required_resources,
                 metadata=metadata,
             ),
         )

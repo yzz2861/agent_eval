@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, TypeAlias
@@ -12,12 +13,19 @@ from attrs.validators import and_, gt, instance_of, matches_re, min_len, optiona
 from ._converters import as_aware_datetime, as_enum, as_timedelta
 from ._enums import CoalescePolicy, JobOutcome
 from ._utils import UnsetValue, unset
-from ._validators import if_not_unset, valid_metadata
+from ._validators import if_not_unset, valid_metadata, valid_resource_requirements
 from .abc import Serializer, Trigger
 
 MetadataType: TypeAlias = dict[
     str, str | int | bool | None | list["MetadataType"] | dict[str, "MetadataType"]
 ]
+ResourceRequirements: TypeAlias = Mapping[str, int]
+
+
+def _as_resource_requirements(
+    value: ResourceRequirements | UnsetValue,
+) -> ResourceRequirements | UnsetValue:
+    return unset if value is unset else dict(value)
 
 
 def serialize(inst: Any, field: attrs.Attribute, value: Any) -> Any:
@@ -42,6 +50,7 @@ class Task:
         run time of jobs created for this task are allowed to be late, compared to the
         scheduled run time
     :var metadata: key-value pairs for storing JSON compatible custom information
+    :var required_resources: named resources required by each job of this task
     """
 
     id: str = attrs.field(validator=[instance_of(str), min_len(1)], on_setattr=frozen)
@@ -62,6 +71,11 @@ class Task:
         on_setattr=frozen,
     )
     metadata: MetadataType = attrs.field(validator=valid_metadata, factory=dict)
+    required_resources: ResourceRequirements = attrs.field(
+        factory=dict,
+        converter=dict,
+        validator=valid_resource_requirements,
+    )
     running_jobs: int = attrs.field(default=0)
 
     def marshal(self, serializer: Serializer) -> dict[str, Any]:
@@ -100,6 +114,8 @@ class TaskDefaults:
         run time of jobs created for this task are allowed to be late, compared to the
         scheduled run time
     :var metadata: key-value pairs for storing JSON compatible custom information
+    :var required_resources: named resources required by each job of tasks that use
+        these defaults
     """
 
     job_executor: str | UnsetValue = attrs.field(
@@ -114,6 +130,11 @@ class TaskDefaults:
         default=None,
     )
     metadata: MetadataType = attrs.field(validator=valid_metadata, factory=dict)
+    required_resources: ResourceRequirements = attrs.field(
+        factory=dict,
+        converter=_as_resource_requirements,
+        validator=if_not_unset(valid_resource_requirements),
+    )
 
 
 @attrs.define(kw_only=True, order=False)
@@ -278,6 +299,8 @@ class Job:
     :var ~datetime.timedelta result_expiration_time: minimum amount of time to keep the
         result available for fetching in the data store
     :var metadata: key-value pairs for storing JSON compatible custom information
+    :var ~collections.abc.Mapping required_resources: named resources that must all be
+        available before the job is acquired
     :var ~datetime.datetime created_at: the time at which the job was created
     :var str | None acquired_by: the unique identifier of the scheduler that has
         acquired the job for execution
@@ -308,6 +331,9 @@ class Job:
         converter=as_timedelta, default=timedelta(), repr=False, on_setattr=frozen
     )
     metadata: MetadataType = attrs.field(validator=valid_metadata, factory=dict)
+    required_resources: ResourceRequirements = attrs.field(
+        factory=dict, converter=dict, validator=valid_resource_requirements
+    )
     created_at: datetime = attrs.field(
         converter=as_aware_datetime,
         factory=partial(datetime.now, timezone.utc),

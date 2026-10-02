@@ -317,6 +317,7 @@ class AsyncScheduler:
         job_executor: str | UnsetValue = unset,
         misfire_grace_time: float | timedelta | None | UnsetValue = unset,
         max_running_jobs: int | None | UnsetValue = unset,
+        required_resources: dict[str, int] | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
     ) -> Task:
         """
@@ -342,6 +343,7 @@ class AsyncScheduler:
             run time is allowed to be late, compared to the scheduled run time
         :param max_running_jobs: maximum number of instances of the task that are
             allowed to run concurrently
+        :param required_resources: named resources required by each job of the task
         :param metadata: key-value pairs for storing JSON compatible custom information
         :raises TypeError: if ``func_or_task_id`` is neither a task, task ID or a
             callable
@@ -363,6 +365,7 @@ class AsyncScheduler:
                 job_executor=func_or_task_id.job_executor,
                 max_running_jobs=func_or_task_id.max_running_jobs,
                 misfire_grace_time=func_or_task_id.misfire_grace_time,
+                required_resources=dict(func_or_task_id.required_resources),
                 metadata=func_or_task_id.metadata,
             )
         elif isinstance(func_or_task_id, str) and func_or_task_id:
@@ -373,6 +376,7 @@ class AsyncScheduler:
                     job_executor=task.job_executor,
                     max_running_jobs=task.max_running_jobs,
                     misfire_grace_time=task.misfire_grace_time,
+                    required_resources=dict(task.required_resources),
                     metadata=task.metadata,
                 )
             except TaskLookupError:
@@ -394,6 +398,8 @@ class AsyncScheduler:
             task_params.max_running_jobs = max_running_jobs
         if misfire_grace_time is not unset:
             task_params.misfire_grace_time = misfire_grace_time
+        if required_resources is not unset:
+            task_params.required_resources = required_resources
 
         # Fill in unset values with the defaults
         if task_params.job_executor is unset:
@@ -402,6 +408,8 @@ class AsyncScheduler:
             task_params.max_running_jobs = self.task_defaults.max_running_jobs
         if task_params.misfire_grace_time is unset:
             task_params.misfire_grace_time = self.task_defaults.misfire_grace_time
+        if task_params.required_resources is unset:
+            task_params.required_resources = self.task_defaults.required_resources
 
         # Merge the metadata from the defaults, task definition and explicitly passed
         # metadata
@@ -426,6 +434,7 @@ class AsyncScheduler:
                 job_executor=task_params.job_executor,
                 max_running_jobs=task_params.max_running_jobs,
                 misfire_grace_time=task_params.misfire_grace_time,
+                required_resources=task_params.required_resources,
                 metadata=task_params.metadata,
             )
             modified = True
@@ -442,6 +451,9 @@ class AsyncScheduler:
 
             if task_params.misfire_grace_time != task.misfire_grace_time:
                 changes["misfire_grace_time"] = task_params.misfire_grace_time
+
+            if task_params.required_resources != task.required_resources:
+                changes["required_resources"] = dict(task_params.required_resources)
 
             if task_params.metadata != task.metadata:
                 changes["metadata"] = task_params.metadata
@@ -657,6 +669,7 @@ class AsyncScheduler:
         args: Iterable[Any] | None = None,
         kwargs: Mapping[str, Any] | None = None,
         job_executor: str | UnsetValue = unset,
+        required_resources: dict[str, int] | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
         result_expiration_time: timedelta | float = 0,
     ) -> UUID:
@@ -671,6 +684,7 @@ class AsyncScheduler:
         :param kwargs: keyword arguments to call the target callable with
         :param job_executor: name of the job executor to run the task with
             (overrides the executor in the task definition, if any)
+        :param required_resources: named resources required to run this job
         :param metadata: key-value pairs for storing JSON compatible custom information
         :param result_expiration_time: the minimum time (as seconds, or timedelta) to
             keep the result of the job available for fetching (the result won't be
@@ -708,6 +722,9 @@ class AsyncScheduler:
             args=args or (),
             kwargs=kwargs or {},
             executor=task.job_executor if job_executor is unset else job_executor,
+            required_resources=task.required_resources
+            if required_resources is unset
+            else required_resources,
             result_expiration_time=result_expiration_time,
             metadata=merge_metadata(task.metadata, metadata),
         )
@@ -762,6 +779,7 @@ class AsyncScheduler:
         args: Iterable[Any] | None = None,
         kwargs: Mapping[str, Any] | None = None,
         job_executor: str | UnsetValue = unset,
+        required_resources: dict[str, int] | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
     ) -> Any:
         """
@@ -775,6 +793,7 @@ class AsyncScheduler:
         :param kwargs: keyword arguments to be passed to the task function
         :param job_executor: name of the job executor to run the task with
             (overrides the executor in the task definition, if any)
+        :param required_resources: named resources required to run this job
         :param metadata: key-value pairs for storing JSON compatible custom information
         :returns: the return value of the task function
 
@@ -793,6 +812,7 @@ class AsyncScheduler:
                 args=args,
                 kwargs=kwargs,
                 job_executor=job_executor,
+                required_resources=required_resources,
                 metadata=metadata,
                 result_expiration_time=timedelta(minutes=15),
             )
@@ -972,6 +992,7 @@ class AsyncScheduler:
                     now = datetime.now(timezone.utc)
                     results: list[ScheduleResult] = []
                     for schedule in schedules:
+                        task = await self.data_store.get_task(schedule.task_id)
                         # Calculate a next fire time for the schedule, if possible
                         fire_times = [schedule.next_fire_time]
                         calculate_next = schedule.trigger.next
@@ -1046,6 +1067,7 @@ class AsyncScheduler:
                                 jitter=jitter,
                                 start_deadline=start_deadline,
                                 executor=schedule.job_executor,
+                                required_resources=task.required_resources,
                                 result_expiration_time=schedule.job_result_expiration_time,
                                 metadata=schedule.metadata.copy(),
                             )

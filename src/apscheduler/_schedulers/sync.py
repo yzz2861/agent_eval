@@ -244,6 +244,7 @@ class Scheduler:
         job_executor: str | UnsetValue = unset,
         misfire_grace_time: float | timedelta | None | UnsetValue = unset,
         max_running_jobs: int | None | UnsetValue = unset,
+        required_resources: dict[str, int] | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
     ) -> Task:
         portal = self._ensure_services_ready()
@@ -255,6 +256,7 @@ class Scheduler:
                 job_executor=job_executor,
                 misfire_grace_time=misfire_grace_time,
                 max_running_jobs=max_running_jobs,
+                required_resources=required_resources,
                 metadata=metadata,
             )
         )
@@ -338,6 +340,7 @@ class Scheduler:
         args: Iterable[Any] | None = None,
         kwargs: Mapping[str, Any] | None = None,
         job_executor: str | UnsetValue = unset,
+        required_resources: dict[str, int] | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
         result_expiration_time: timedelta | float = 0,
     ) -> UUID:
@@ -349,6 +352,7 @@ class Scheduler:
                 args=args,
                 kwargs=kwargs,
                 job_executor=job_executor,
+                required_resources=required_resources,
                 metadata=metadata,
                 result_expiration_time=result_expiration_time,
             )
@@ -371,6 +375,7 @@ class Scheduler:
         args: Iterable[Any] | None = None,
         kwargs: Mapping[str, Any] | None = None,
         job_executor: str | UnsetValue = unset,
+        required_resources: dict[str, int] | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
     ) -> Any:
         portal = self._ensure_services_ready()
@@ -381,6 +386,7 @@ class Scheduler:
                 args=args,
                 kwargs=kwargs,
                 job_executor=job_executor,
+                required_resources=required_resources,
                 metadata=metadata,
             )
         )
