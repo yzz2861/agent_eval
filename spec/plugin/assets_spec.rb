@@ -304,6 +304,40 @@ if run_tests
       js.must_include('console.log')
     end
 
+    it 'should collect early hints (deduping across calls) when the :early_hints option is :collect' do
+      app.plugin :assets, :early_hints=>:collect
+      eh = []
+      app.route do |r|
+        r.is 'test' do
+          assets(:css)
+          assets(:css)
+          assets([:js, :head])
+          commit_early_hints
+          'OK'
+        end
+
+        r.is 'redirect' do
+          assets(:css)
+          r.redirect '/test'
+        end
+      end
+
+      links = [
+        "</assets/css/app.str>; rel=preload; as=style",
+        "</assets/css/raw.css>; rel=preload; as=style",
+        "</assets/js/head/app.js>; rel=preload; as=script",
+      ]
+      links_value = Rack.release < '3' ? links.join("\n") : links
+
+      status('/redirect', 'rack.early_hints'=>proc{|h| eh << h}).must_equal 302
+      body('/test', 'rack.early_hints'=>proc{|h| eh << h}).must_equal 'OK'
+      eh.must_equal [{Roda::RodaResponseHeaders::LINK=>links_value}]
+
+      eh.clear
+      body('/test').must_equal 'OK'
+      eh.must_equal []
+    end
+
     it 'should handle rendering assets, linking to them, and accepting requests for them when :add_script_name app option is used' do
       app.opts[:add_script_name] = true
       app.plugin :assets
