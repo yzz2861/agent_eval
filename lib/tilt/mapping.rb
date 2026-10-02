@@ -129,7 +129,22 @@ module Tilt
     #         to execute in order (defaults to the ext.split('.').reverse)
     # @option :extra_exts [Array<String>] Additional extensions to register
     # @option String [Hash] Options hash for individual template in the
-    #         pipeline (key is extension).
+    #         pipeline (key is extension).  In addition to engine specific
+    #         options, the following options are recognized:
+    #         * +:input_encoding+: Encoding of the bytes handed to the
+    #           stage.  Binary (ASCII-8BIT) bytes are labeled with this
+    #           encoding (and validated); bytes in another encoding are
+    #           transcoded.  When omitted, the bytes are passed through
+    #           unchanged.
+    #         * +:output_encoding+: Encoding the stage is expected to
+    #           produce.  Output labeled with another encoding is
+    #           transcoded, binary output is labeled and validated, and
+    #           output with the declared encoding is verified.  When
+    #           omitted, the output is passed through unchanged.
+    #         Invalid or untranscodable bytes raise
+    #         Tilt::Pipeline::EncodingError with the failing stage and
+    #         byte offset; they are never hidden with +force_encoding+ or
+    #         replacement characters.
     # @return [void]
     #
     # @example
@@ -139,7 +154,7 @@ module Tilt
     #                             :templates=>['erb', 'scss'])
     def register_pipeline(ext, options={})
       templates = options[:templates] || ext.split('.').reverse
-      templates = templates.map{|t| [self[t], options[t] || {}]}
+      templates = templates.map{|t| [t, self[t], options[t] || {}]}
 
       klass = Class.new(Pipeline)
       klass.send(:const_set, :TEMPLATES, templates)

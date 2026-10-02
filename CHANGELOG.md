@@ -1,5 +1,13 @@
-## 2.1.0 (2023-02-17)
+## Unreleased
 
+* Support optional `:input_encoding` and `:output_encoding` options per
+  pipeline stage (`Tilt::Pipeline`).  Stages can keep an encoding or
+  explicitly transcode; binary engine output is labeled (and validated),
+  and invalid/unconvertible bytes raise `Tilt::Pipeline::EncodingError`
+  with the failing stage and byte offset.  Engines without declarations
+  keep the previous pass-through behavior.
+
+## 2.1.0 (2023-02-17)
 * Use UnboundMethod#bind_call on Ruby 2.7+ for better performance (#380, jeremyevans)
 * Add Tilt::Template#freeze_string_literals? for freezing string literals in compiled templates (#301, jeremyevans)
 * Use Haml::Template for Tilt::HamlTemplate if available (Haml 6+) (#391, ntkme) 
