@@ -29,6 +29,7 @@ See the [Backing & Hacking blog post](https://www.kickstarter.com/backing-and-ha
     - [`blocklist(name, &block)`](#blocklistname-block)
     - [Fail2Ban](#fail2ban)
     - [Allow2Ban](#allow2ban)
+    - [EscalatingBan](#escalatingban)
   - [Throttling](#throttling)
     - [`throttle(name, options, &block)`](#throttlename-options-block)
   - [Tracks](#tracks)
@@ -236,6 +237,64 @@ Rack::Attack.blocklist('allow2ban login scrapers') do |req|
   end
 end
 ```
+
+#### EscalatingBan
+
+`EscalatingBan` extends Fail2Ban with a configurable ladder of ban levels: the
+first offense bans for a short time, repeat offenses ban for progressively
+longer times, and violations are forgotten after a quiet decay period so the
+discriminator can gradually return to lower levels.
+
+Each level defines the number of violations (`maxretry`) that activates it and
+the `bantime` it hands out. `decay` is the sliding window, in seconds, in which
+violations are counted. The ban state (`status`/`banned?`) reports the level
+that produced the current ban and when it ends.
+
+```ruby
+# First time the threshold is crossed: ban for 1 minute.
+# Re-offending crosses the next threshold: ban for 5 minutes.
+# Violations older than 15 minutes no longer count.
+login_ban = Rack::Attack::EscalatingBan.new(
+  levels: [
+    { maxretry: 3, bantime: 1.minute },
+    { maxretry: 6, bantime: 5.minutes }
+  ],
+  decay: 15.minutes
+)
+
+Rack::Attack.blocklist('escalating login bans') do |req|
+  # Pass an event id (e.g. request id) so retries that re-report the same
+  # violation never count twice.
+  login_ban.filter("login:#{req.ip}", req.env['HTTP_X_REQUEST_ID']) do
+    req.path == '/login' && req.post? && failed_login?(req)
+  end
+end
+```
+
+Levels may carry a `name`, which is then available on the status:
+
+```ruby
+ban = Rack::Attack::EscalatingBan.new(
+  levels: [
+    { name: 'warning', maxretry: 3, bantime: 60 },
+    { name: 'hard',    maxretry: 6, bantime: 300 }
+  ],
+  decay: 900
+)
+
+ban.report('1.2.3.4', event_id).banned?        # => true while banned
+ban.status('1.2.3.4').level.name               # => "warning"
+ban.status('1.2.3.4').banned_until             # => epoch seconds
+ban.reset('1.2.3.4')
+```
+
+Updates are atomic: concurrent violations for the same discriminator are
+merged one at a time, duplicate event ids never escalate twice, and a new
+computation never shortens a ban that is still running. The bundled
+`Rack::Attack::BanMemoryStore` is a thread-safe in-memory store with an
+injectable clock (ideal for tests and demos); production deployments can use
+any store whose `merge(key, expires_in:) { |value, now| new_value }` applies
+the block atomically (e.g. a Redis Lua script).
 
 ### Throttling
 

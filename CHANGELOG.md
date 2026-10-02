@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Add `Rack::Attack::EscalatingBan`: configurable ban levels with violation thresholds (`maxretry`), ban durations (`bantime`) and a sliding `decay` window. Violations are reported with an event id (duplicates never count twice), updates merge atomically, and a new ban never shortens one still in effect. `BanStatus#level` reports the level that produced the current ban.
+- Add `Rack::Attack::BanMemoryStore`, a thread-safe in-memory store with an injectable clock and atomic `#merge`, suitable for demos and tests of escalating bans.
+
 ## [6.8.0] - 2025-10-14
 
 ### Changed
