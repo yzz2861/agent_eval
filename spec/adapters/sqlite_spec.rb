@@ -378,6 +378,138 @@ describe "SQLite type conversion" do
   end
 end if DB.adapter_scheme == :sqlite
 
+describe "list_bind extension on SQLite" do
+  before do
+    Sequel.extension :list_bind
+    @db = DB
+    @db.extension(:list_bind)
+    @db.drop_table?(:list_bind_items)
+    @db.create_table(:list_bind_items) do
+      primary_key :id
+      Integer :grp
+      String :name
+    end
+    # Rows 1,2,3 with grp 1,2,3 and row 4 with grp NULL
+    [[1, 'a'], [2, 'b'], [3, 'c'], [nil, 'd']].each do |grp, name|
+      @db[:list_bind_items].insert(grp: grp, name: name)
+    end
+    @ds = @db[:list_bind_items]
+  end
+
+  after do
+    @db.drop_table?(:list_bind_items)
+  end
+
+  it "returns matching rows for IN lists using bound parameters" do
+    ps = @ds.where(id: Sequel.list_bind(:ids)).prepare(:select, :lb_in)
+    ps.call(ids: [1, 3]).map{|r| r[:id]}.must_equal [1, 3]
+    ps.call(ids: [2]).map{|r| r[:id]}.must_equal [2]
+  end
+
+  it "matches nothing for an empty IN list" do
+    ps = @ds.where(id: Sequel.list_bind(:ids)).prepare(:select, :lb_empty_in)
+    ps.call(ids: []).map{|r| r[:id]}.must_equal []
+  end
+
+  it "matches everything for an empty NOT IN list" do
+    ps = @ds.exclude(id: Sequel.list_bind(:ids)).prepare(:select, :lb_empty_notin)
+    ps.call(ids: []).map{|r| r[:id]}.sort.must_equal [1, 2, 3, 4]
+  end
+
+  it "follows three-valued logic for IN with NULL in the list" do
+    ps = @ds.where(grp: Sequel.list_bind(:grps)).prepare(:select, :lb_in_null)
+    # IN (1, NULL): non-NULL matches include 1; NULL grp row yields UNKNOWN
+    ps.call(grps: [1, nil]).map{|r| r[:id]}.must_equal [1]
+  end
+
+  it "follows three-valued logic for NOT IN with NULL in the list" do
+    ps = @ds.exclude(grp: Sequel.list_bind(:grps)).prepare(:select, :lb_notin_null)
+    # NOT IN (1, NULL) is UNKNOWN for every row, including non-members
+    ps.call(grps: [1, nil]).map{|r| r[:id]}.must_equal []
+    ps.call(grps: [nil]).map{|r| r[:id]}.must_equal []
+  end
+
+  it "returns non-matching non-NULL rows for NOT IN without NULL" do
+    ps = @ds.exclude(id: Sequel.list_bind(:ids)).prepare(:select, :lb_notin)
+    ps.call(ids: [1, 3]).map{|r| r[:id]}.sort.must_equal [2, 4]
+  end
+
+  it "supports composite key tuple IN lists" do
+    ps = @ds.where([:id, :grp] => Sequel.list_bind(:pairs)).prepare(:select, :lb_tuple)
+    ps.call(pairs: [[1, 1], [3, 3]]).map{|r| r[:id]}.sort.must_equal [1, 3]
+    # A tuple containing NULL never matches (3VL), even for the row 4
+    ps.call(pairs: [[4, nil]]).map{|r| r[:id]}.must_equal []
+    ps.call(pairs: []).map{|r| r[:id]}.must_equal []
+  end
+
+  it "supports composite key tuple NOT IN lists" do
+    ps = @ds.exclude([:id, :grp] => Sequel.list_bind(:pairs)).prepare(:select, :lb_ntuple)
+    ps.call(pairs: [[1, 1]]).map{|r| r[:id]}.sort.must_equal [2, 3, 4]
+    # A list containing a NULL tuple does not match rows whose columns are
+    # NULL (row 4 is excluded from the NOT IN result); rows 2,3 remain.
+    ps.call(pairs: [[1, 1], [4, nil]]).map{|r| r[:id]}.sort.must_equal [2, 3]
+  end
+
+  it "binds the same parameter for every repeated occurrence" do
+    ps = @ds.where(id: Sequel.list_bind(:ids)).
+      or(Sequel[:id] => Sequel.list_bind(:ids)).prepare(:select, :lb_repeat)
+    ps.call(ids: [1, 2]).map{|r| r[:id]}.sort.must_equal [1, 2]
+    ps.call(ids: [3]).map{|r| r[:id]}.must_equal [3]
+  end
+
+  it "works with one-shot bound variable calls" do
+    @ds.where(id: Sequel.list_bind(:ids)).call(:select, ids: [2, 4]).
+      map{|r| r[:id]}.sort.must_equal [2, 4]
+  end
+
+  it "keeps scalar and list binds aligned" do
+    ps = @ds.where(Sequel[:name] => :$name).
+      where(Sequel[:id] => Sequel.list_bind(:ids)).
+      prepare(:select, :lb_mix)
+    ps.call(name: 'b', ids: [1, 2, 3]).map{|r| r[:id]}.must_equal [2]
+  end
+
+  it "deletes and updates using list binds" do
+    @ds.where(id: Sequel.list_bind(:ids)).prepare(:delete, :lb_del).call(ids: [4])
+    @ds.map(:id).sort.must_equal [1, 2, 3]
+
+    @ds.where(id: Sequel.list_bind(:ids)).
+      prepare(:update, :lb_up, grp: Sequel.lit('9')).call(ids: [1])
+    @ds.where(id: 1).get(:grp).must_equal 9
+  end
+
+  it "raises for a missing or non-array list parameter" do
+    ps = @ds.where(id: Sequel.list_bind(:ids)).prepare(:select, :lb_bad)
+    proc{ps.call(ids: 5)}.must_raise Sequel::Error
+    proc{ps.call(other: [])}.must_raise Sequel::Error
+  end
+
+  it "uses a bounded cache of length-specific statements" do
+    ps = @ds.where(id: Sequel.list_bind(:ids)).prepare(:select, :lb_cache)
+    1.upto(20){|i| ps.call(ids: Array.new(i, &:succ))}
+    cache = @db.instance_variable_get(:@list_bind_caches)[:lb_cache]
+    cache.size.must_equal 8
+    cache.keys.must_equal((13..20).map{|i| [i]})
+  end
+
+  it "sends values as bound parameters rather than interpolating them" do
+    logged = []
+    logger = Object.new
+    logger.define_singleton_method(:method_missing){|*, **|}
+    logger.define_singleton_method(:info){|msg| logged << msg}
+    db = Sequel.sqlite(:loggers=>[logger])
+    db.extension(:list_bind)
+    db.create_table(:logged_items){primary_key :id; String :name}
+    db[:logged_items].insert(name: "a'b")
+    ps = db[:logged_items].where(name: Sequel.list_bind(:names)).prepare(:select, :lb_logged)
+    ps.call(names: ["a'b", "c"])
+    sql_line = logged.grep(/ IN /).first
+    sql_line.must_include "(`name` IN (:names_0, :names_1))"
+    sql_line.must_include '"names_0" => "a\'b"'
+    sql_line.wont_include "'a''b' IN"
+  end
+end if DB.adapter_scheme == :sqlite
+
 describe "An SQLite dataset" do
   before do
     @d = DB.dataset

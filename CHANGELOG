@@ -1,5 +1,7 @@
 === master
 
+* Add list_bind extension for explicit variable-length list bind parameters in prepared statements, supporting IN/NOT IN and composite key tuples, with bounded per-length statement caching
+
 * Make create_table with :temp and :as options create temporary table on Microsoft SQL Server and DB2 (jeremyevans) (#2393)
 
 * Revert support for PostgreSQL 19 property graphs (jeremyevans)
