@@ -197,3 +197,26 @@ environments for unittesting you might want to use the
 .. autoclass:: FormDataParser
 
 .. autofunction:: parse_form_data
+
+
+HTTP Message Signatures
+-----------------------
+
+.. module:: werkzeug.http_signatures
+
+Helpers to build the signature base for HTTP message signatures as
+described in :rfc:`9421`. Only the base string is built; selecting
+keys and performing cryptographic operations is up to the caller.
+
+.. autofunction:: build_signature_base
+
+.. autoclass:: Component
+    :members:
+
+.. autoclass:: RequestContext
+    :members:
+
+.. autoclass:: ResponseContext
+    :members:
+
+.. autoclass:: SignatureComponentError

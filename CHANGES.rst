@@ -3,6 +3,12 @@
 Version 3.2.0
 -------------
 
+-   Add ``werkzeug.http_signatures.build_signature_base`` to build RFC 9421
+    HTTP message signature base strings from an explicit request or response
+    context. Supports plain header fields and the ``@method``,
+    ``@target-uri``, ``@authority``, ``@path``, ``@query``,
+    ``@query-param``, and ``@status`` derived components, including the
+    ``req`` parameter for response signatures.
 -   Drop support for Python 3.9 and 3.10. :pr:`3098`
 -   Remove previous deprecated code: :pr:`3099`
 
