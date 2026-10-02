@@ -619,4 +619,189 @@ describe Rack::Session::Cookie do
     response.body.must_match /"counter"\s*=>\s*2/
     response.body.must_match(/\A{[^}]+}\z/)
   end
+
+  describe 'explicit commit mode' do
+    def json_coder
+      Rack::Session::Cookie::Base64::JSON.new
+    end
+
+    def explicit_app(handler, options = {})
+      coder = options.delete(:coder) || json_coder
+      middleware_options = { explicit_commit: true, coder: coder, let_coder_handle_secure_encoding: true }.merge(options)
+      app = Rack::Lint.new(handler)
+      Rack::Session::Cookie.new(app, middleware_options)
+    end
+
+    def request(app, path: '/', cookie: nil, errors: nil)
+      env = {}
+      env['HTTP_COOKIE'] = cookie if cookie
+      env['rack.errors'] = errors if errors
+      Rack::MockRequest.new(app).get(path, env)
+    end
+
+    def decode_cookie(coder, set_cookie)
+      value = Rack::Utils.unescape(set_cookie.split('=', 2).last.split(';', 2).first)
+      coder.decode(value)
+    end
+
+    it 'does not set a cookie when the session is never committed' do
+      app = explicit_app(lambda do |env|
+        env['rack.session']['v'] = 1
+        Rack::Response.new('ok').to_a
+      end)
+
+      response = request(app)
+      response['Set-Cookie'].must_be_nil
+    end
+
+    it 'persists exactly the committed snapshot even after later mutations' do
+      coder = json_coder
+      app = explicit_app(lambda do |env|
+        session = env['rack.session']
+        session['h'] = { 'a' => [1, 2] }
+        session.commit!
+        session['h']['a'] << 3
+        session['h']['b'] = 9
+        Rack::Response.new('ok').to_a
+      end)
+
+      response = request(app)
+      cookie = response['Set-Cookie'].split(';', 2).first
+      decoded = decode_cookie(coder, response['Set-Cookie'])
+      decoded['h'].must_equal('a' => [1, 2])
+
+      reader = explicit_app(lambda do |env|
+        Rack::Response.new(env['rack.session'].to_hash.inspect).to_a
+      end)
+      second = request(reader, cookie: cookie)
+      second.body.must_include('"h" => {"a" => [1, 2]}')
+      second.body.wont_include('"b"=>9')
+    end
+
+    it 'does not persist nested mutations of an existing session without a commit' do
+      writer = explicit_app(lambda do |env|
+        env['rack.session']['h'] = { 'z' => 1 }
+        env['rack.session'].commit!
+        Rack::Response.new('ok').to_a
+      end)
+      cookie = request(writer)['Set-Cookie'].split(';', 2).first
+
+      mutator = explicit_app(lambda do |env|
+        session = env['rack.session']
+        session['h']['z'] = 2
+        session['h']['y'] = 3
+        Rack::Response.new('ok').to_a
+      end)
+      request(mutator, cookie: cookie)
+
+      reader = explicit_app(lambda do |env|
+        Rack::Response.new(env['rack.session'].to_hash.inspect).to_a
+      end)
+      second = request(reader, cookie: cookie)
+      second.body.must_include('"h" => {"z" => 1}')
+      second.body.wont_include('"y"')
+    end
+
+    it 'keeps the original cookie unchanged when the request raises before a commit' do
+      writer = explicit_app(lambda do |env|
+        env['rack.session']['v'] = 'original'
+        env['rack.session'].commit!
+        Rack::Response.new('ok').to_a
+      end)
+      cookie = request(writer)['Set-Cookie'].split(';', 2).first
+
+      mutator = explicit_app(lambda do |env|
+        env['rack.session']['v'] = 'changed'
+        raise 'boom'
+      end)
+      lambda { request(mutator, cookie: cookie) }.must_raise RuntimeError
+
+      reader = explicit_app(lambda do |env|
+        Rack::Response.new(env['rack.session'].to_hash.inspect).to_a
+      end)
+      second = request(reader, cookie: cookie)
+      second.body.must_include('"v" => "original"')
+    end
+
+    it 'persists an explicitly committed empty session' do
+      coder = json_coder
+      app = explicit_app(lambda do |env|
+        env['rack.session'].commit!
+        Rack::Response.new('ok').to_a
+      end)
+      response = request(app)
+      response['Set-Cookie'].must_include('rack.session=')
+      decoded = decode_cookie(coder, response['Set-Cookie'])
+      decoded.keys.must_equal ['session_id']
+    end
+
+    it 'mints a new session id on commit after destroy' do
+      coder = json_coder
+      writer = explicit_app(lambda do |env|
+        env['rack.session']['v'] = 'original'
+        env['rack.session'].commit!
+        Rack::Response.new('ok').to_a
+      end)
+      first = request(writer)['Set-Cookie']
+      cookie = first.split(';', 2).first
+      old_decoded = decode_cookie(coder, first)
+
+      destroyer = explicit_app(lambda do |env|
+        session = env['rack.session']
+        session.destroy
+        session['fresh'] = true
+        session.commit!
+        Rack::Response.new('ok').to_a
+      end)
+      response = request(destroyer, cookie: cookie)
+      response['Set-Cookie'].wont_be_nil
+      new_decoded = decode_cookie(coder, response['Set-Cookie'])
+      new_decoded['session_id'].wont_equal old_decoded['session_id']
+      new_decoded['fresh'].must_equal true
+      new_decoded.wont_include 'v'
+    end
+
+    it 'does not destroy without a commit and keeps the original cookie valid' do
+      coder = json_coder
+      writer = explicit_app(lambda do |env|
+        env['rack.session']['v'] = 'original'
+        env['rack.session'].commit!
+        Rack::Response.new('ok').to_a
+      end)
+      cookie = request(writer)['Set-Cookie'].split(';', 2).first
+
+      destroyer = explicit_app(lambda do |env|
+        env['rack.session'].destroy
+        Rack::Response.new('ok').to_a
+      end)
+      response = request(destroyer, cookie: cookie)
+      response['Set-Cookie'].must_be_nil
+
+      reader = explicit_app(lambda do |env|
+        Rack::Response.new(env['rack.session'].to_hash.inspect).to_a
+      end)
+      second = request(reader, cookie: cookie)
+      second.body.must_include('"v" => "original"')
+    end
+
+    it 'warns and sets no cookie when a committed write is rejected before the response' do
+      failing_coder = Object.new
+      def failing_coder.encode(_)
+        'x' * 5000
+      end
+      def failing_coder.decode(_); end
+
+      errors = StringIO.new
+      app = explicit_app(lambda do |env|
+        $cookie_commit_result = env['rack.session'].commit!
+        Rack::Response.new('ok').to_a
+      end, coder: failing_coder)
+      response = request(app, errors: errors)
+
+      $cookie_commit_result.must_equal false
+      response['Set-Cookie'].must_be_nil
+      errors.rewind
+      errors.read.must_include('failed to save session')
+    end
+  end
 end

@@ -336,4 +336,355 @@ describe Rack::Session::Pool do
     response = Rack::MockRequest.new(app).get("/", "HTTP_COOKIE" => login_cookie)
     response.body.must_equal "{}"
   end
+
+  describe "explicit commit mode" do
+    def make_pool(app, options = {})
+      pool = Rack::Session::Pool.new(Rack::Lint.new(app), { explicit_commit: true }.merge(options))
+      [pool, Rack::MockRequest.new(pool)]
+    end
+
+    def session_id_of(pool, cookie)
+      Rack::Session::SessionId.new(cookie[/#{pool.key}=([^;]+)/, 1])
+    end
+
+    writer = lambda do |key, value, commit: false, nested: false|
+      lambda do |env|
+        session = env["rack.session"]
+        if nested
+          session[key] = { "value" => value }
+          session[key]["extra"] = :ignored unless commit
+        else
+          session[key] = value
+        end
+        session.commit! if commit
+        Rack::Response.new(session.to_hash.inspect).to_a
+      end
+    end
+
+    reader = lambda do
+      lambda do |env|
+        Rack::Response.new(env["rack.session"].to_hash.inspect).to_a
+      end
+    end
+
+    it "does not persist a session that is never committed" do
+      pool, req = make_pool(writer.call("counter", 1))
+      res = req.get("/")
+      res["Set-Cookie"].must_be_nil
+      pool.pool.size.must_equal 0
+    end
+
+    it "persists the session only when commit! is called" do
+      pool, req = make_pool(writer.call("counter", 1, commit: true))
+      res = req.get("/")
+      res["Set-Cookie"].must_match(session_match)
+      pool.pool.size.must_equal 1
+    end
+
+    it "keeps the original session unchanged when the request raises before a commit" do
+      seeder = Rack::Session::Pool.new(reader.call)
+      seeded = Rack::MockRequest.new(seeder).get("/", "rack.session" => { "v" => "original" })
+      cookie = seeded["Set-Cookie"]
+      sid = Rack::Session::SessionId.new(cookie[/#{seeder.key}=([^;]+)/, 1])
+
+      pool = Rack::Session::Pool.new(Rack::Lint.new(lambda do |env|
+        env["rack.session"]["v"] = "changed"
+        env["rack.session"]["new"] = "nope"
+        raise "boom"
+      end), explicit_commit: true)
+      pool.pool.merge!(seeder.pool)
+
+      lambda do
+        Rack::MockRequest.new(pool).get("/", "HTTP_COOKIE" => cookie)
+      end.must_raise RuntimeError
+
+      pool.pool[sid.private_id].must_equal({ "v" => "original" })
+    end
+
+    it "keeps a commit even when the request raises afterwards" do
+      pool, req = make_pool(lambda do |env|
+        session = env["rack.session"]
+        session["v"] = 1
+        session.commit!
+        raise "after commit"
+      end)
+
+      lambda { req.get("/") }.must_raise RuntimeError
+      pool.pool.size.must_equal 1
+      pool.pool.values.first.must_equal({ "v" => 1 })
+    end
+
+    it "persists a snapshot at commit time and ignores later top-level mutations" do
+      pool, req = make_pool(lambda do |env|
+        session = env["rack.session"]
+        session["v"] = 1
+        session.commit!
+        session["v"] = 2
+        session["later"] = true
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = req.get("/")["Set-Cookie"]
+      sid = session_id_of(pool, cookie)
+      pool.pool[sid.private_id].must_equal({ "v" => 1 })
+
+      verify, verify_req = make_pool(reader.call)
+      verify.pool.merge!(pool.pool)
+      verify_req.get("/", "HTTP_COOKIE" => cookie).body.must_equal({ "v" => 1 }.to_s)
+    end
+
+    it "does not let nested hash or array mutations escape the request boundary" do
+      pool, req = make_pool(lambda do |env|
+        session = env["rack.session"]
+        session["h"] = { "a" => [1, 2] }
+        session.commit!
+        session["h"]["a"] << 3
+        session["h"]["b"] = 9
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = req.get("/")["Set-Cookie"]
+      sid = session_id_of(pool, cookie)
+      pool.pool[sid.private_id].must_equal({ "h" => { "a" => [1, 2] } })
+
+      verify, verify_req = make_pool(reader.call)
+      verify.pool.merge!(pool.pool)
+      verify_req.get("/", "HTTP_COOKIE" => cookie).body.
+        must_equal({ "h" => { "a" => [1, 2] } }.to_s)
+    end
+
+    it "does not let nested mutations of an existing session leak without a commit" do
+      seeder = Rack::Session::Pool.new(lambda do |env|
+        env["rack.session"]["h"] = { "z" => 1 }
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = Rack::MockRequest.new(seeder).get("/")["Set-Cookie"]
+      sid = Rack::Session::SessionId.new(cookie[/#{seeder.key}=([^;]+)/, 1])
+
+      pool, req = make_pool(lambda do |env|
+        session = env["rack.session"]
+        session["h"]["z"] = 2
+        session["h"]["y"] = 3
+        Rack::Response.new("ok").to_a
+      end)
+      pool.pool.merge!(seeder.pool)
+      req.get("/", "HTTP_COOKIE" => cookie)
+
+      pool.pool[sid.private_id].must_equal({ "h" => { "z" => 1 } })
+    end
+
+    it "lets a later commit persist subsequent edits" do
+      pool, req = make_pool(lambda do |env|
+        session = env["rack.session"]
+        session["v"] = 1
+        session.commit!
+        session["v"] = 2
+        session.commit!
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = req.get("/")["Set-Cookie"]
+      sid = session_id_of(pool, cookie)
+      pool.pool[sid.private_id].must_equal({ "v" => 2 })
+    end
+
+    it "persists an explicitly committed empty session" do
+      pool, req = make_pool(lambda do |env|
+        env["rack.session"].commit!
+        Rack::Response.new("ok").to_a
+      end)
+      res = req.get("/")
+      res["Set-Cookie"].must_match(session_match)
+      pool.pool.size.must_equal 1
+      pool.pool.values.first.must_equal({})
+    end
+
+    it "rolls back a newly created session when nothing is committed" do
+      pool, req = make_pool(reader.call)
+      res = req.get("/")
+      res["Set-Cookie"].must_be_nil
+      pool.pool.size.must_equal 0
+    end
+
+    it "deletes an existing session with options[:drop] and commit!" do
+      seeder = Rack::Session::Pool.new(lambda do |env|
+        env["rack.session"]["v"] = 1
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = Rack::MockRequest.new(seeder).get("/")["Set-Cookie"]
+      sid = Rack::Session::SessionId.new(cookie[/#{seeder.key}=([^;]+)/, 1])
+
+      pool, req = make_pool(lambda do |env|
+        env["rack.session"]["v"] = 2
+        env["rack.session"].options[:drop] = true
+        env["rack.session"].commit!
+        Rack::Response.new("ok").to_a
+      end)
+      pool.pool.merge!(seeder.pool)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+
+      res["Set-Cookie"].must_be_nil
+      pool.pool[sid.private_id].must_be_nil
+    end
+
+    it "does not delete with options[:drop] unless committed" do
+      seeder = Rack::Session::Pool.new(lambda do |env|
+        env["rack.session"]["v"] = 1
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = Rack::MockRequest.new(seeder).get("/")["Set-Cookie"]
+      sid = Rack::Session::SessionId.new(cookie[/#{seeder.key}=([^;]+)/, 1])
+
+      pool, req = make_pool(lambda do |env|
+        env["rack.session"].options[:drop] = true
+        Rack::Response.new("ok").to_a
+      end)
+      pool.pool.merge!(seeder.pool)
+      req.get("/", "HTTP_COOKIE" => cookie)
+
+      pool.pool[sid.private_id].must_equal({ "v" => 1 })
+    end
+
+    it "migrates the session to a new id with options[:renew] and commit!" do
+      seeder = Rack::Session::Pool.new(lambda do |env|
+        env["rack.session"]["v"] = 1
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = Rack::MockRequest.new(seeder).get("/")["Set-Cookie"]
+      old_sid = Rack::Session::SessionId.new(cookie[/#{seeder.key}=([^;]+)/, 1])
+
+      pool, req = make_pool(lambda do |env|
+        session = env["rack.session"]
+        session["v"] = 2
+        session.options[:renew] = true
+        session.commit!
+        Rack::Response.new("ok").to_a
+      end)
+      pool.pool.merge!(seeder.pool)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+      new_cookie = res["Set-Cookie"]
+      new_sid = Rack::Session::SessionId.new(new_cookie[/#{pool.key}=([^;]+)/, 1])
+
+      new_cookie[session_match].wont_equal cookie[session_match]
+      pool.pool[old_sid.private_id].must_be_nil
+      pool.pool[new_sid.private_id].must_equal({ "v" => 2 })
+    end
+
+    it "does not renew without a commit and keeps the original session" do
+      seeder = Rack::Session::Pool.new(lambda do |env|
+        env["rack.session"]["v"] = 1
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = Rack::MockRequest.new(seeder).get("/")["Set-Cookie"]
+      old_sid = Rack::Session::SessionId.new(cookie[/#{seeder.key}=([^;]+)/, 1])
+
+      pool, req = make_pool(lambda do |env|
+        env["rack.session"]["v"] = 2
+        env["rack.session"].options[:renew] = true
+        Rack::Response.new("ok").to_a
+      end)
+      pool.pool.merge!(seeder.pool)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+
+      res["Set-Cookie"].must_be_nil
+      pool.pool[old_sid.private_id].must_equal({ "v" => 1 })
+    end
+
+    it "destroys the existing session and mints a new id only when committed" do
+      seeder = Rack::Session::Pool.new(lambda do |env|
+        env["rack.session"]["v"] = 1
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = Rack::MockRequest.new(seeder).get("/")["Set-Cookie"]
+      old_sid = Rack::Session::SessionId.new(cookie[/#{seeder.key}=([^;]+)/, 1])
+
+      pool, req = make_pool(lambda do |env|
+        session = env["rack.session"]
+        session.destroy
+        session["fresh"] = true
+        session.commit!
+        Rack::Response.new("ok").to_a
+      end)
+      pool.pool.merge!(seeder.pool)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+      new_sid = session_id_of(pool, res["Set-Cookie"])
+
+      pool.pool[old_sid.private_id].must_be_nil
+      new_sid.public_id.wont_equal old_sid.public_id
+      pool.pool[new_sid.private_id].must_equal({ "fresh" => true })
+    end
+
+    it "keeps the existing session when destroy is not followed by a commit" do
+      seeder = Rack::Session::Pool.new(lambda do |env|
+        env["rack.session"]["v"] = 1
+        Rack::Response.new("ok").to_a
+      end)
+      cookie = Rack::MockRequest.new(seeder).get("/")["Set-Cookie"]
+      old_sid = Rack::Session::SessionId.new(cookie[/#{seeder.key}=([^;]+)/, 1])
+
+      pool, req = make_pool(lambda do |env|
+        env["rack.session"].destroy
+        Rack::Response.new("ok").to_a
+      end)
+      pool.pool.merge!(seeder.pool)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+
+      res["Set-Cookie"].must_be_nil
+      pool.pool[old_sid.private_id].must_equal({ "v" => 1 })
+    end
+
+    it "returns false from commit! and leaves everything intact when the store rejects the write" do
+      failing_pool_class = Class.new(Rack::Session::Pool) do
+        def write_session(*)
+          false
+        end
+      end
+
+      pool = failing_pool_class.new(Rack::Lint.new(lambda do |env|
+        env["rack.session"]["v"] = "changed"
+        $commit_result = env["rack.session"].commit!
+        Rack::Response.new("ok").to_a
+      end), explicit_commit: true)
+      sid = pool.generate_sid
+      pool.pool[sid.private_id] = { "v" => "original" }
+      cookie = "#{pool.key}=#{sid.public_id}"
+
+      errors = StringIO.new
+      res = Rack::MockRequest.new(pool).get("/", "HTTP_COOKIE" => cookie, "rack.errors" => errors)
+
+      $commit_result.must_equal false
+      res["Set-Cookie"].must_be_nil
+      pool.pool[sid.private_id].must_equal({ "v" => "original" })
+      errors.rewind
+      errors.read.must_include "failed to save session"
+    end
+
+    it "does not write the cookie for a committed session with defer but no renew" do
+      pool, req = make_pool(lambda do |env|
+        session = env["rack.session"]
+        session["v"] = 1
+        session.options[:defer] = true
+        session.commit!
+        Rack::Response.new("ok").to_a
+      end)
+      res = req.get("/")
+      res["Set-Cookie"].must_be_nil
+      pool.pool.size.must_equal 1
+    end
+
+    it "survives two real requests with the committed value only" do
+      app = lambda do |env|
+        session = env["rack.session"]
+        case env["PATH_INFO"]
+        when "/write"
+          session["values"] = [1]
+          session["values"] << 2
+          session.commit!
+          session["values"] << 3
+        end
+        Rack::Response.new(session.to_hash.inspect).to_a
+      end
+      pool, req = make_pool(app)
+      cookie = req.get("/write")["Set-Cookie"]
+      stored = req.get("/read", "HTTP_COOKIE" => cookie)
+      stored.body.must_equal({ "values" => [1, 2] }.to_s)
+    end
+  end
 end

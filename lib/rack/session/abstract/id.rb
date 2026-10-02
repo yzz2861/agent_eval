@@ -69,6 +69,8 @@ module Rack
           @store = store
           @req = req
           @loaded = false
+          @destroyed = false
+          @committed = false
         end
 
         def id
@@ -124,7 +126,56 @@ module Rack
 
         def destroy
           clear
-          @id = @store.send(:delete_session, @req, id, options)
+          @destroyed = true
+          unless explicit?
+            @id = @store.send(:delete_session, @req, id, options)
+          end
+        end
+
+        # Whether this request is running in explicit commit mode.
+        def explicit?
+          !!@req && options[:explicit_commit] == true
+        end
+
+        # Whether the session has been committed at least once during this
+        # request. Only meaningful when #explicit? is true.
+        def committed?
+          @committed
+        end
+
+        # Whether #destroy was called during this request. Only meaningful
+        # when #explicit? is true; otherwise destruction happens eagerly.
+        def destroyed?
+          @destroyed
+        end
+
+        def reset_destroyed!
+          @destroyed = false
+        end
+
+        # In explicit commit mode, persist a snapshot of the current session
+        # to the store immediately. Mutations after a commit do not affect the
+        # persisted snapshot until another commit is made. Raises nothing when
+        # the store rejects the write; returns false in that case.
+        #
+        # In normal (autosave) mode this is a no-op returning nil: the session
+        # is always saved automatically at the end of the request.
+        def commit!
+          return nil unless explicit?
+          load_for_write!
+          @store.send(:commit_session_now, @req)
+        end
+
+        # Called by the store once the current snapshot has been persisted.
+        # +data+ is nil when the commit intentionally leaves no data behind
+        # (e.g. the session was dropped).
+        def committed!(data)
+          @committed = true
+          @committed_data = data
+        end
+
+        def committed_data
+          @committed_data
         end
 
         def to_hash
@@ -193,7 +244,8 @@ module Rack
 
         def load!
           @id, session = @store.send(:load_session, @req)
-          @data = stringify_keys(session)
+          session = stringify_keys(session)
+          @data = explicit? ? deep_dup(session) : session
           @loaded = true
         end
 
@@ -204,6 +256,20 @@ module Rack
             hash[key.to_s] = value
           end
           hash
+        end
+
+        # Recursively duplicate nested hashes and arrays so that mutations to
+        # the request-local session can never reach into the session store or
+        # a previously committed snapshot.
+        def deep_dup(value)
+          case value
+          when Hash
+            value.each_with_object({}) { |(key, val), copy| copy[key] = deep_dup(val) }
+          when Array
+            value.map { |entry| deep_dup(entry) }
+          else
+            value
+          end
         end
       end
 
@@ -223,6 +289,13 @@ module Rack
       # * :renew (implementation dependent) will prompt the generation of a new
       #   session id, and migration of data to be referenced at the new id. If
       #   :defer is set, it will be overridden and the cookie will be set.
+      # * :explicit_commit hands the application an editable, request-local
+      #   copy of the session. The session is only persisted when the
+      #   application calls #commit! on it; if the request ends (or raises)
+      #   without a commit, the stored session is left untouched. Each commit
+      #   persists an independent snapshot, so later mutations do not affect it
+      #   until the next commit. Defaults to false, which keeps the historical
+      #   autosave behavior.
       # * :sidbits sets the number of bits in length that a generated session
       #   id will be.
       #
@@ -247,6 +320,7 @@ module Rack
           partitioned: false,
           defer: false,
           renew: false,
+          explicit_commit: false,
           sidbits: 128,
           cookie_only: true,
           secure_random: ::SecureRandom
@@ -271,10 +345,14 @@ module Rack
         def context(env, app = @app)
           req = make_request env
           prepare_session(req)
-          status, headers, body = app.call(req.env)
-          res = Rack::Response::Raw.new status, headers
-          commit_session(req, res)
-          [status, headers, body]
+          begin
+            status, headers, body = app.call(req.env)
+            res = Rack::Response::Raw.new status, headers
+            commit_session(req, res)
+            [status, headers, body]
+          ensure
+            rollback_session(req)
+          end
         end
 
         private
@@ -380,6 +458,7 @@ module Rack
 
         def commit_session(req, res)
           session = req.get_header RACK_SESSION
+          return commit_explicit_session(req, res, session) if session.explicit?
           options = session.options
 
           if options[:drop] || options[:renew]
@@ -398,20 +477,92 @@ module Rack
           elsif options[:defer] and not options[:renew]
             req.get_header(RACK_ERRORS).puts("Deferring cookie for #{session_id}") if $VERBOSE
           else
-            cookie = Hash.new
-            cookie[:value] = cookie_value(data)
-            cookie[:expires] = Time.now + options[:expire_after] if options[:expire_after]
-            cookie[:expires] = Time.now + options[:max_age] if options[:max_age]
-
-            if @same_site.respond_to? :call
-              cookie[:same_site] = @same_site.call(req, res)
-            else
-              cookie[:same_site] = @same_site
-            end
-            set_cookie(req, res, cookie.merge!(options))
+            set_session_cookie(req, res, session_id, data, options)
           end
         end
         public :commit_session
+
+        # In explicit commit mode the session is only persisted when the
+        # application calls SessionHash#commit!; this method merely transfers
+        # the already persisted snapshot to the response cookie.
+
+        def commit_explicit_session(req, res, session)
+          return unless session.committed?
+          data = session.committed_data
+          return if data.nil?
+          return if session.options[:defer] && !session.options[:renew]
+
+          set_session_cookie(req, res, session.id, data, session.options)
+        end
+
+        # Performs the actual persistence eagerly when the application calls
+        # SessionHash#commit! in explicit mode.
+
+        def commit_session_now(req)
+          session = req.get_header RACK_SESSION
+          options = session.options
+
+          if options[:drop]
+            session_id = delete_session(req, session.id || generate_sid, options)
+            # A dropped session leaves no data behind and sends no cookie:
+            session.committed!(nil)
+            return session_id ? true : false
+          end
+
+          if options[:renew] || session.destroyed?
+            session_id = delete_session(req, session.id || generate_sid, options)
+            return false unless session_id
+            session.id = session_id
+            session.reset_destroyed!
+            # Renewal is a one time action tied to this commit:
+            options[:renew] = false
+          end
+
+          return false unless commit_session?(req, session, options)
+
+          session_id ||= session.id
+          session_data = session.to_hash.delete_if { |k, v| v.nil? }
+
+          if not data = write_session(req, session_id, session.send(:deep_dup, session_data), options)
+            req.get_header(RACK_ERRORS).puts("Warning! #{self.class.name} failed to save session. Content dropped.")
+            false
+          else
+            session.committed!(data)
+            data
+          end
+        end
+
+        # Restores the untouched store state for a request that never
+        # committed in explicit mode: eagerly created sessions are removed and
+        # mutated existing sessions are left alone (they only received a copy).
+
+        def rollback_session(req)
+          session = req.get_header RACK_SESSION
+          return unless session.respond_to?(:explicit?) && session.explicit?
+          return if session.committed?
+          discard_new_session(req, session) if req.get_header(RACK_SESSION_NEWLY_CREATED)
+        end
+
+        # Hook for stores that create the backing record eagerly (Pool):
+        # drop a record that was created during a request which never
+        # committed.
+
+        def discard_new_session(req, session)
+        end
+
+        def set_session_cookie(req, res, session_id, data, options)
+          cookie = Hash.new
+          cookie[:value] = cookie_value(data)
+          cookie[:expires] = Time.now + options[:expire_after] if options[:expire_after]
+          cookie[:expires] = Time.now + options[:max_age] if options[:max_age]
+
+          if @same_site.respond_to? :call
+            cookie[:same_site] = @same_site.call(req, res)
+          else
+            cookie[:same_site] = @same_site
+          end
+          set_cookie(req, res, cookie.merge!(options))
+        end
 
         def cookie_value(data)
           data

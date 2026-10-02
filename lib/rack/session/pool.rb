@@ -46,6 +46,7 @@ module Rack
           unless sid and session = get_session_with_fallback(sid)
             sid, session = generate_sid(use_mutex: false), {}
             @pool.store sid.private_id, session
+            req.set_header RACK_SESSION_NEWLY_CREATED, true
           end
           [sid, session]
         end
@@ -69,6 +70,18 @@ module Rack
             @pool.store(sid.private_id, {})
             sid
           end
+        end
+      end
+
+      # Removes the eagerly created empty session of an explicit-commit
+      # request that ended without ever committing, so the pool is left
+      # exactly as it was before the request.
+      def discard_new_session(req, session)
+        session_id = session.id
+        return unless session_id
+        @mutex.synchronize do
+          @pool.delete(session_id.public_id)
+          @pool.delete(session_id.private_id)
         end
       end
 
