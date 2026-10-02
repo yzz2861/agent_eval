@@ -108,6 +108,63 @@ Check points:
 .. _RFC8628: https://tools.ietf.org/html/rfc8628
 
 
+Device Flow for Clients
+-----------------------
+
+The client side of the device authorization grant is available on every
+OAuth 2 client, including :class:`authlib.oauth2.OAuth2Client`,
+:class:`authlib.integrations.requests_client.OAuth2Session` and
+:class:`authlib.integrations.httpx_client.AsyncOAuth2Client`.
+
+First, request a device code from the device authorization endpoint. The
+returned dict contains the ``verification_uri`` and ``user_code`` that
+your application MUST display to the end user; Authlib will not open a
+browser for you::
+
+    from authlib.integrations.requests_client import OAuth2Session
+
+    session = OAuth2Session(
+        client_id='your-client-id',
+        device_authorization_endpoint='https://example.com/device_authorization',
+        token_endpoint='https://example.com/oauth/token',
+    )
+    device_authorization = session.fetch_device_authorization()
+    print('Please visit', device_authorization['verification_uri'])
+    print('and enter code:', device_authorization['user_code'])
+
+Then poll the token endpoint until the user completes the authorization
+in their browser::
+
+    token = session.poll_device_token(device_authorization)
+
+``poll_device_token`` follows the polling rules of RFC 8628:
+
+1. it waits ``interval`` seconds between requests, and increases the
+   interval by 5 seconds on every ``slow_down`` response
+2. it keeps polling on ``authorization_pending``, and raises on
+   ``access_denied`` and ``expired_token``
+3. network timeouts are retried with an exponential backoff that is
+   tracked separately from the protocol interval
+4. polling stops with an ``expired_token`` error once the device code
+   lifetime (``expires_in``) is reached
+
+The polling loop runs in the caller's thread or task. When it returns,
+raises, or is cancelled, no further request for this device code is
+made. For testing, the ``clock`` and ``sleep`` functions can be
+injected::
+
+    session.poll_device_token(
+        device_authorization,
+        clock=time.monotonic,
+        sleep=time.sleep,
+    )
+
+The async client works the same way, with ``await``::
+
+    device_authorization = await client.fetch_device_authorization()
+    token = await client.poll_device_token(device_authorization)
+
+
 API Reference
 -------------
 

@@ -1,5 +1,9 @@
+import time
+
+from authlib.common.errors import AuthlibBaseError
 from authlib.common.security import generate_token
 from authlib.common.urls import url_decode
+from authlib.common.urls import url_encode
 
 from .auth import ClientAuth
 from .auth import TokenAuth
@@ -10,6 +14,10 @@ from .rfc6749.parameters import prepare_grant_uri
 from .rfc6749.parameters import prepare_token_request
 from .rfc7009 import prepare_revoke_token_request
 from .rfc7636 import create_s256_code_challenge
+from .rfc8628.client import DEFAULT_EXPIRES_IN
+from .rfc8628.client import DEFAULT_POLL_INTERVAL
+from .rfc8628.client import DEVICE_CODE_GRANT_TYPE
+from .rfc8628.client import DeviceTokenPollState
 
 DEFAULT_HEADERS = {
     "Accept": "application/json",
@@ -46,6 +54,11 @@ class OAuth2Client:
     client_auth_class = ClientAuth
     token_auth_class = TokenAuth
     oauth_error_class = OAuth2Error
+
+    #: Exceptions raised by the underlying HTTP session when a request
+    #: times out. ``poll_device_token`` retries these requests with an
+    #: exponential backoff instead of failing.
+    network_timeout_exceptions = ()
 
     EXTRA_AUTHORIZE_PARAMS = ("response_mode", "nonce", "prompt", "login_hint")
     SESSION_REQUEST_PARAMS = []
@@ -255,6 +268,98 @@ class OAuth2Client:
             )
         self.token = token
         return token
+
+    def fetch_device_authorization(self, url=None, **kwargs):
+        """Request a device code from the device authorization endpoint,
+        as defined in `RFC 8628`_ Section 3.1.
+
+        The returned dict contains the ``device_code`` used for polling,
+        together with the ``user_code`` and ``verification_uri`` that the
+        caller MUST display to the end user. Authlib does NOT open a
+        browser for the user.
+
+        :param url: Device authorization endpoint URL. If omitted, the
+            ``device_authorization_endpoint`` metadata value is used.
+        :param kwargs: Extra parameters for the request, e.g. ``scope``.
+        :return: A dict of the device authorization response.
+
+        .. _`RFC 8628`: https://www.rfc-editor.org/rfc/rfc8628
+        """
+        url, body, auth = self._prepare_device_authorization_request(url, kwargs)
+        resp = self._http_post(url, body, auth=auth, headers=DEFAULT_HEADERS)
+        return self._parse_device_authorization_response(resp)
+
+    def poll_device_token(
+        self,
+        device_authorization=None,
+        device_code=None,
+        url=None,
+        interval=None,
+        expires_in=None,
+        clock=None,
+        sleep=None,
+        **kwargs,
+    ):
+        """Poll the token endpoint until the user completes the device
+        authorization, as defined in `RFC 8628`_ Section 3.3 and 3.4.
+
+        Polling waits ``interval`` seconds between requests; a
+        ``slow_down`` error increases the interval by 5 seconds for all
+        subsequent requests, while ``authorization_pending`` leaves it
+        unchanged. ``access_denied`` and ``expired_token`` errors are
+        raised to the caller. Network timeouts (see
+        :attr:`network_timeout_exceptions`) are retried with an
+        exponential backoff that is tracked separately from the protocol
+        interval. Once the device code lifetime (``expires_in``) is
+        reached, polling stops and an ``expired_token`` error is raised.
+
+        The loop runs in the caller's thread: when this method returns or
+        raises, no further request for this device code is made, and
+        interrupting the caller (e.g. ``KeyboardInterrupt``) stops the
+        polling immediately.
+
+        :param device_authorization: The dict returned by
+            :meth:`fetch_device_authorization`, or a device code string.
+        :param device_code: The device code, if ``device_authorization``
+            is not given.
+        :param url: Token endpoint URL. If omitted, the ``token_endpoint``
+            metadata value is used.
+        :param interval: Initial polling interval in seconds. Defaults to
+            the ``interval`` of the device authorization response, or 5.
+        :param expires_in: Lifetime of the device code in seconds.
+            Defaults to the ``expires_in`` of the device authorization
+            response, or 900.
+        :param clock: A monotonic clock callable, defaults to
+            ``time.monotonic``.
+        :param sleep: A callable used to wait between requests, defaults
+            to ``time.sleep``.
+        :param kwargs: Extra parameters passed to the HTTP session.
+        :return: A :class:`OAuth2Token` object (a dict too).
+
+        .. _`RFC 8628`: https://www.rfc-editor.org/rfc/rfc8628
+        """
+        device_code, url, state = self._prepare_device_token_poll(
+            device_authorization, device_code, url, interval, expires_in, clock
+        )
+        if sleep is None:
+            sleep = time.sleep
+
+        while not state.expired:
+            sleep(state.next_delay())
+            if state.expired:
+                break
+            try:
+                return self._fetch_device_token(url, device_code, **kwargs)
+            except self.network_timeout_exceptions:
+                state.handle_network_timeout()
+            except AuthlibBaseError as error:
+                if not state.handle_error(error.error):
+                    raise
+
+        raise self.oauth_error_class(
+            error="expired_token",
+            description="The device code expired before the user completed authorization.",
+        )
 
     def refresh_token(
         self, url=None, refresh_token=None, body="", auth=None, headers=None, **kwargs
@@ -490,6 +595,59 @@ class OAuth2Client:
 
         session_kwargs = self._extract_session_request_params(kwargs)
         return self._http_post(url, body, auth=auth, headers=headers, **session_kwargs)
+
+    def _prepare_device_authorization_request(self, url, kwargs):
+        if url is None:
+            url = self.metadata.get("device_authorization_endpoint")
+        if not url:
+            raise ValueError("Missing device authorization endpoint URL")
+        if "scope" not in kwargs and self.scope:
+            kwargs["scope"] = self.scope
+        auth = self.client_auth(self.token_endpoint_auth_method)
+        return url, url_encode(kwargs.items()), auth
+
+    def _parse_device_authorization_response(self, resp):
+        if resp.status_code >= 500:
+            resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            raise self.oauth_error_class(
+                error=data["error"], description=data.get("error_description")
+            )
+        return data
+
+    def _prepare_device_token_poll(
+        self, device_authorization, device_code, url, interval, expires_in, clock
+    ):
+        if isinstance(device_authorization, str):
+            if device_code is None:
+                device_code = device_authorization
+            device_authorization = None
+        if device_authorization is None:
+            device_authorization = {}
+        if device_code is None:
+            device_code = device_authorization.get("device_code")
+        if not device_code:
+            raise ValueError("Missing 'device_code'")
+        if interval is None:
+            interval = device_authorization.get("interval", DEFAULT_POLL_INTERVAL)
+        if expires_in is None:
+            expires_in = device_authorization.get("expires_in", DEFAULT_EXPIRES_IN)
+        if clock is None:
+            clock = time.monotonic
+        if url is None:
+            url = self.metadata.get("token_endpoint")
+        state = DeviceTokenPollState(interval, expires_in, clock)
+        return device_code, url, state
+
+    def _fetch_device_token(self, url, device_code, **kwargs):
+        body = prepare_token_request(
+            DEVICE_CODE_GRANT_TYPE, "", device_code=device_code
+        )
+        auth = self.client_auth(self.token_endpoint_auth_method)
+        return self._fetch_token(
+            url, body=body, auth=auth, headers=DEFAULT_HEADERS, **kwargs
+        )
 
     def _prepare_token_endpoint_body(self, body, grant_type, **kwargs):
         if grant_type == "authorization_code":

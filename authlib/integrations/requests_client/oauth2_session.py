@@ -1,5 +1,6 @@
 from requests import Session
 from requests.auth import AuthBase
+from requests.exceptions import Timeout
 
 from authlib.oauth2.auth import ClientAuth
 from authlib.oauth2.auth import TokenAuth
@@ -75,6 +76,7 @@ class OAuth2Session(OAuth2Client, Session):
     client_auth_class = OAuth2ClientAuth
     token_auth_class = OAuth2Auth
     oauth_error_class = OAuthError
+    network_timeout_exceptions = (Timeout,)
     SESSION_REQUEST_PARAMS = (
         "allow_redirects",
         "timeout",
