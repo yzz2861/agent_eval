@@ -56,13 +56,25 @@ The standard Werkzeug parsing behavior handles three cases:
     :class:`~Request.form` will contain the regular `POST` / `PUT`
     data, :class:`~Request.files` will contain the uploaded
     files as :class:`FileStorage` objects.
+    :attr:`~Request.parts` contains every part in transmission order, which
+    preserves interleaved text fields and files, including parts with the
+    same name.
 -   input content type was `application/x-www-form-urlencoded`.  Then the
     :class:`~Request.stream` will be empty and
     :class:`~Request.form` will contain the regular `POST` / `PUT`
-    data and :class:`~Request.files` will be empty.
+    data, :class:`~Request.files` will be empty, and
+    :attr:`~Request.parts` will be empty.
 -   the input content type was neither of them, :class:`~Request.stream`
     points to a :class:`LimitedStream` with the input data for further
     processing.
+
+When the order of text fields and uploaded files matters, iterate
+:attr:`~Request.parts` instead of :attr:`~Request.form` and
+:attr:`~Request.files`. Each :class:`.FormPart` has the original ``name`` and
+``headers``, and either a decoded ``text`` value or a :class:`.FileStorage`
+as ``file``. Parts are never merged, and file parts are the same
+:class:`.FileStorage` objects found in :attr:`~Request.files`. All three views
+share one parse of the body.
 
 Special note on the :attr:`~Request.get_data` method: Calling this
 loads the full request data into memory.  This is only safe to do if the

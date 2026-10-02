@@ -341,7 +341,7 @@ def test_environ_builder_unicode_file_mix():
         with stream:
             assert isinstance(stream, BytesIO) != use_tempfile
 
-            _, form, files = parse_form_data(
+            _, form, files, _parts = parse_form_data(
                 {
                     "wsgi.input": stream,
                     "CONTENT_LENGTH": str(length),
@@ -364,7 +364,7 @@ def test_environ_builder_empty_file():
     stream, length, boundary = stream_encode_multipart(d)
 
     with stream:
-        _, form, files = parse_form_data(
+        _, form, files, _parts = parse_form_data(
             {
                 "wsgi.input": stream,
                 "CONTENT_LENGTH": str(length),

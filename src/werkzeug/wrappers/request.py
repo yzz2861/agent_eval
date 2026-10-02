@@ -18,6 +18,7 @@ from ..exceptions import BadRequest
 from ..exceptions import UnsupportedMediaType
 from ..formparser import _make_stream_factory
 from ..formparser import FormDataParser
+from ..formparser import FormPart
 from ..sansio.request import Request as _SansIORequest
 from ..utils import cached_property
 from ..wsgi import _get_server
@@ -363,11 +364,16 @@ class Request(_SansIORequest):
 
     def _parse_form_data(
         self, stream: t.IO[bytes]
-    ) -> tuple[MultiDict[str, str], MultiDict[str, FileStorage]] | None:
+    ) -> tuple[
+        MultiDict[str, str],
+        MultiDict[str, FileStorage],
+        tuple[FormPart, ...],
+    ] | None:
         """Parse the given stream as form data.
 
         :param stream: The stream to read the data from.
-        :return: ``(form, files)``, or ``None`` if the data could not be parsed.
+        :return: ``(form, files, parts)``, or ``None`` if the data could not
+            be parsed.
 
         .. versionadded:: 3.2
         """
@@ -385,13 +391,13 @@ class Request(_SansIORequest):
             # TODO inline after deprecation
             parser = self._private_make_form_data_parser()
 
-        _, form, files = parser.parse(
+        _, form, files, parts = parser.parse(
             stream=stream,
             mimetype=self.mimetype,
             content_length=self.content_length,
             options=self.mimetype_params,
         )
-        return form, files
+        return form, files, parts
 
     def _load_form_data(self) -> None:
         """Internal method to parse and cache form data.
@@ -427,9 +433,11 @@ class Request(_SansIORequest):
                     )
                     self.form = self.parameter_storage_class()
                     self.files = self.parameter_storage_class()
+                    self.parts = ()
                 else:
                     self.form = ImmutableMultiDict()
                     self.files = ImmutableMultiDict()
+                    self.parts = ()
         else:
             if (
                 type(self)._get_stream_for_parsing
@@ -453,8 +461,9 @@ class Request(_SansIORequest):
             if result is None:
                 self.form = ImmutableMultiDict()
                 self.files = ImmutableMultiDict()
+                self.parts = ()
             else:
-                self.form, self.files = result  # type: ignore[assignment]
+                self.form, self.files, self.parts = result  # type: ignore[assignment]
 
     def _get_stream_for_parsing(self) -> t.IO[bytes]:
         """Access :attr:`stream`. If :meth:`get_data` has already read and
@@ -686,6 +695,28 @@ class Request(_SansIORequest):
         """
         self._load_form_data()
         return self.files
+
+    @cached_property
+    def parts(self) -> tuple[FormPart, ...]:
+        """The parsed ``multipart/form-data`` parts as a tuple of
+        :class:`.FormPart` objects, in the order they were transmitted.
+
+        Each part has a :attr:`~.FormPart.name`, :attr:`~.FormPart.headers`,
+        and either a :attr:`~.FormPart.text` value or a
+        :attr:`~.FormPart.file` :class:`.FileStorage`. Parts with the same
+        name are not merged, including a text part and file part with the same
+        name. Use this instead of :attr:`form` and :attr:`files` when the
+        order of interleaved fields and files matters.
+
+        File parts are the same objects as those in :attr:`files`, they are
+        not copied. Parsing happens once and is shared with :attr:`form` and
+        :attr:`files`; accessing any of them first gives the same values. It
+        is empty for other content types.
+
+        .. versionadded:: 3.2
+        """
+        self._load_form_data()
+        return self.parts
 
     @property
     def script_root(self) -> str:

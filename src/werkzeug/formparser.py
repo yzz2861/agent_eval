@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections.abc as cabc
 import typing as t
+from dataclasses import dataclass
 from tempfile import SpooledTemporaryFile
 from types import TracebackType
 from urllib.parse import parse_qsl
@@ -27,7 +28,10 @@ if t.TYPE_CHECKING:
     from _typeshed.wsgi import WSGIEnvironment
 
     t_parse_result = tuple[
-        t.IO[bytes], MultiDict[str, str], MultiDict[str, FileStorage]
+        t.IO[bytes],
+        MultiDict[str, str],
+        MultiDict[str, FileStorage],
+        tuple["FormPart", ...],
     ]
 
     class TStreamFactory(te.Protocol):
@@ -41,6 +45,34 @@ if t.TYPE_CHECKING:
 
 
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
+
+
+@dataclass(frozen=True)
+class FormPart:
+    """One part of a ``multipart/form-data`` request body, in the order it was
+    transmitted.
+
+    Unlike the :attr:`~wrappers.Request.form` and
+    :attr:`~wrappers.Request.files` multi-dicts, parts with the same
+    ``name`` are kept as separate items. This is useful when parts of
+    different types or with the same name are interleaved, such as a text
+    description before each uploaded attachment, and the order has meaning.
+
+    Exactly one of :attr:`text` and :attr:`file` is set. :attr:`file` is the
+    same object found in :attr:`~wrappers.Request.files`; it is not copied.
+
+    :param name: The field name from the part's ``Content-Disposition`` header.
+    :param headers: The part's headers.
+    :param text: The decoded value of a non-file part.
+    :param file: The :class:`FileStorage` of a file part.
+
+    .. versionadded:: 3.2
+    """
+
+    name: str
+    headers: Headers
+    text: str | None = None
+    file: FileStorage | None = None
 
 
 def _make_stream_factory(max_size: int | None) -> TStreamFactory:
@@ -73,12 +105,14 @@ def parse_form_data(
     **kwargs: t.Any,
 ) -> t_parse_result:
     """Parse the form data from the request body and return it as a
-    tuple ``(stream, form, files)``.
+    tuple ``(stream, form, files, parts)``.
 
     If the mimetype of the data transmitted is `multipart/form-data` the
     files multidict will be filled with `FileStorage` objects.  If the
     mimetype is unknown the input stream is wrapped and returned as first
-    argument, else the stream is empty.
+    argument, else the stream is empty. ``parts`` is a tuple of
+    :class:`FormPart` objects in transmitted order, and is empty for other
+    mimetypes.
 
     This is a shortcut for the common usage of :class:`FormDataParser`.
 
@@ -102,7 +136,10 @@ def parse_form_data(
     :param cls: an optional dict class to use.  If this is not specified
                        or `None` the default :class:`MultiDict` is used.
     :param silent: If set to False parsing errors will not be caught.
-    :return: A tuple in the form ``(stream, form, files)``.
+    :return: A tuple in the form ``(stream, form, files, parts)``.
+
+    .. versionchanged:: 3.2
+        Added the ``parts`` item with the ordered, non-merged parts.
 
     .. versionchanged:: 3.2
         The ``cls`` parameter is deprecated and will be removed in Werkzeug 4.0. It will
@@ -223,7 +260,7 @@ class FormDataParser:
         """Parses the information from the environment as form data.
 
         :param environ: the WSGI environment to be used for parsing.
-        :return: A tuple in the form ``(stream, form, files)``.
+        :return: A tuple in the form ``(stream, form, files, parts)``.
         """
         stream = get_input_stream(environ, max_content_length=self.max_content_length)
         content_length = get_content_length(environ)
@@ -252,7 +289,7 @@ class FormDataParser:
         :param content_length: the content length of the incoming data
         :param options: optional mimetype parameters (used for
                         the multipart boundary for instance)
-        :return: A tuple in the form ``(stream, form, files)``.
+        :return: A tuple in the form ``(stream, form, files, parts)``.
 
         .. versionchanged:: 3.0
             The invalid ``application/x-url-encoded`` content type is not
@@ -264,9 +301,9 @@ class FormDataParser:
             parse_func = self._parse_urlencoded
         else:
             if self.cls is not None:
-                return stream, self.cls(), self.cls()
+                return stream, self.cls(), self.cls(), ()
 
-            return stream, ImmutableMultiDict(), ImmutableMultiDict()
+            return stream, ImmutableMultiDict(), ImmutableMultiDict(), ()
 
         if options is None:
             options = {}
@@ -278,9 +315,9 @@ class FormDataParser:
                 raise
 
         if self.cls is not None:
-            return stream, self.cls(), self.cls()
+            return stream, self.cls(), self.cls(), ()
 
-        return stream, ImmutableMultiDict(), ImmutableMultiDict()
+        return stream, ImmutableMultiDict(), ImmutableMultiDict(), ()
 
     def _parse_multipart(
         self,
@@ -304,9 +341,9 @@ class FormDataParser:
             kwargs["cls"] = self.cls
 
         with MultiPartParser(**kwargs) as parser:
-            form, files = parser.parse(stream, boundary, content_length)
+            form, files, parts = parser.parse(stream, boundary, content_length)
 
-        return stream, form, files
+        return stream, form, files, parts
 
     def _parse_urlencoded(
         self,
@@ -328,9 +365,9 @@ class FormDataParser:
         )
 
         if self.cls is not None:
-            return stream, self.cls(items), self.cls()
+            return stream, self.cls(items), self.cls(), ()
 
-        return stream, ImmutableMultiDict(items), ImmutableMultiDict()
+        return stream, ImmutableMultiDict(items), ImmutableMultiDict(), ()
 
 
 class MultiPartParser:
@@ -373,9 +410,14 @@ class MultiPartParser:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        if exc_val is not None:
-            for file in self._files:
-                file.close()
+        # Close anything still tracked. Parsing closes and removes each file
+        # itself as soon as it fails, but close any remainder if an outer
+        # context exits during parsing. Do not require the exception to
+        # propagate here; an inner context manager may have swallowed it.
+        for file in self._files:
+            file.close()
+
+        self._files.clear()
 
     def get_part_charset(self, headers: Headers) -> str:
         # Figure out input charset for current part
@@ -413,7 +455,11 @@ class MultiPartParser:
 
     def parse(
         self, stream: t.IO[bytes], boundary: bytes, content_length: int | None
-    ) -> tuple[MultiDict[str, str], MultiDict[str, FileStorage]]:
+    ) -> tuple[
+        MultiDict[str, str],
+        MultiDict[str, FileStorage],
+        tuple[FormPart, ...],
+    ]:
         current_part: Field | File
         field_size: int | None = None
         container: t.IO[bytes] | list[bytes]
@@ -427,58 +473,90 @@ class MultiPartParser:
 
         fields = []
         files = []
+        parts: list[FormPart] = []
 
-        for data in _chunk_iter(stream.read, self.buffer_size):
-            parser.receive_data(data)
-            event = parser.next_event()
-            while not isinstance(event, (Epilogue, NeedData)):
-                if isinstance(event, Field):
-                    current_part = event
-                    field_size = 0
-                    container = []
-                    _write = container.append
-                elif isinstance(event, File):
-                    current_part = event
-                    field_size = None
-                    container = self.start_file_streaming(event, content_length)
-                    _write = container.write
-                elif isinstance(event, Data):
-                    if self.max_form_memory_size is not None and field_size is not None:
-                        # Ensure that accumulated data events do not exceed limit.
-                        # Also checked within single event in MultipartDecoder.
-                        field_size += len(event.data)
-
-                        if field_size > self.max_form_memory_size:
-                            raise RequestEntityTooLarge()
-
-                    _write(event.data)
-                    if not event.more_data:
-                        if isinstance(current_part, Field):
-                            value = b"".join(container).decode(
-                                self.get_part_charset(current_part.headers), "replace"
-                            )
-                            fields.append((current_part.name, value))
-                        else:
-                            container = t.cast(t.IO[bytes], container)
-                            container.seek(0)
-                            files.append(
-                                (
-                                    current_part.name,
-                                    FileStorage(
-                                        container,
-                                        current_part.filename,
-                                        current_part.name,
-                                        headers=current_part.headers,
-                                    ),
-                                )
-                            )
-
+        try:
+            for data in _chunk_iter(stream.read, self.buffer_size):
+                parser.receive_data(data)
                 event = parser.next_event()
+                while not isinstance(event, (Epilogue, NeedData)):
+                    if isinstance(event, Field):
+                        current_part = event
+                        field_size = 0
+                        container = []
+                        _write = container.append
+                    elif isinstance(event, File):
+                        current_part = event
+                        field_size = None
+                        container = self.start_file_streaming(event, content_length)
+                        _write = container.write
+                    elif isinstance(event, Data):
+                        if (
+                            self.max_form_memory_size is not None
+                            and field_size is not None
+                        ):
+                            # Ensure that accumulated data events do not exceed
+                            # limit. Also checked within single event in
+                            # MultipartDecoder.
+                            field_size += len(event.data)
+
+                            if field_size > self.max_form_memory_size:
+                                raise RequestEntityTooLarge()
+
+                        _write(event.data)
+                        if not event.more_data:
+                            if isinstance(current_part, Field):
+                                value = b"".join(container).decode(
+                                    self.get_part_charset(current_part.headers),
+                                    "replace",
+                                )
+                                fields.append((current_part.name, value))
+                                parts.append(
+                                    FormPart(
+                                        current_part.name,
+                                        current_part.headers,
+                                        text=value,
+                                    )
+                                )
+                            else:
+                                container = t.cast(t.IO[bytes], container)
+                                container.seek(0)
+                                file_storage = FileStorage(
+                                    container,
+                                    current_part.filename,
+                                    current_part.name,
+                                    headers=current_part.headers,
+                                )
+                                files.append((current_part.name, file_storage))
+                                parts.append(
+                                    FormPart(
+                                        current_part.name,
+                                        current_part.headers,
+                                        file=file_storage,
+                                    )
+                                )
+
+                    event = parser.next_event()
+        except BaseException:
+            # Close any file streams that were created before the failure and
+            # are not owned by a returned FileStorage. This must not rely on
+            # the exception propagating to ``__exit__``; it may be swallowed by
+            # another context manager (such as the parser's ``silent`` mode).
+            for file in self._files:
+                file.close()
+
+            self._files.clear()
+            raise
+
+        # Parsing succeeded; ownership of each file stream is transferred to
+        # the returned ``FileStorage`` objects, so the context manager must not
+        # close them.
+        self._files.clear()
 
         if self.cls is not None:
-            return self.cls(fields), self.cls(files)
+            return self.cls(fields), self.cls(files), tuple(parts)
 
-        return ImmutableMultiDict(fields), ImmutableMultiDict(files)
+        return ImmutableMultiDict(fields), ImmutableMultiDict(files), tuple(parts)
 
 
 def _chunk_iter(read: t.Callable[[int], bytes], size: int) -> t.Iterator[bytes | None]:

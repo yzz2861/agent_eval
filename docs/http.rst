@@ -181,13 +181,19 @@ Usage example:
 ...     "CONTENT_TYPE": "multipart/form-data; boundary=foo",
 ...     "REQUEST_METHOD": "POST",
 ... }
->>> stream, form, files = parse_form_data(environ)
+>>> stream, form, files, parts = parse_form_data(environ)
 >>> stream.read()
 b''
 >>> form['test']
 'Hello World!'
 >>> not files
 True
+>>> not parts
+False
+>>> parts[0].name
+'test'
+>>> parts[0].text
+'Hello World!'
 
 Normally the WSGI environment is provided by the WSGI gateway with the
 incoming data as part of it.  If you want to generate such fake-WSGI
@@ -197,3 +203,5 @@ environments for unittesting you might want to use the
 .. autoclass:: FormDataParser
 
 .. autofunction:: parse_form_data
+
+.. autoclass:: FormPart

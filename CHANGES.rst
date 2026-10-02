@@ -46,6 +46,15 @@ Version 3.2.0
     false when empty, and will update the header when modified. Setting
     properties to ``str`` is deprecated; set ``headers`` directly in that case.
 -   All ``Request`` properties are cached so that parsing only happens once.
+-   Multipart form parsing returns an ordered ``parts`` view. ``Request.parts``
+    is a tuple of ``FormPart`` objects with each part's field name, headers,
+    and decoded text or ``FileStorage``, in transmission order. Parts with the
+    same name, including a text field and file, are not merged. It shares one
+    parse and the same file objects with ``Request.form`` and
+    ``Request.files``. ``parse_form_data`` and ``FormDataParser.parse`` return
+    it as an additional fourth tuple item. File streams created during a failed
+    parse are closed immediately, including when the error is swallowed by
+    ``silent`` parsing.
 -   Modifying ``Response.mimetype_params`` when ``mimetype`` is not set does
     nothing instead of setting an invalid header.
 -   ``WWWAuthenticate.type`` is empty by default instead of ``basic``.

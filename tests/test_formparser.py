@@ -1,4 +1,5 @@
 import io
+import os
 from os.path import dirname
 from os.path import join
 
@@ -164,7 +165,7 @@ class TestFormParser:
         # headers are omitted, parse_form_data should still work.
         env = create_environ("/foo", "http://example.org/", method="PUT")
 
-        stream, form, files = formparser.parse_form_data(env)
+        stream, form, files, parts = formparser.parse_form_data(env)
         assert stream.read() == b""
         assert len(form) == 0
         assert len(files) == 0
@@ -172,7 +173,7 @@ class TestFormParser:
     def test_parse_form_data_get_without_content(self):
         env = create_environ("/foo", "http://example.org/", method="GET")
 
-        stream, form, files = formparser.parse_form_data(env)
+        stream, form, files, parts = formparser.parse_form_data(env)
         assert stream.read() == b""
         assert len(form) == 0
         assert len(files) == 0
@@ -191,11 +192,12 @@ class TestFormParser:
             "",
             MultiDict([]),
             MultiDict([]),
+            (),
         )
 
     def test_parse_from_environ(self):
         parser = FormDataParser()
-        stream, _, _ = parser.parse_from_environ({"wsgi.input": ""})
+        stream, _, _, _ = parser.parse_from_environ({"wsgi.input": ""})
         assert stream is not None
 
 
@@ -400,11 +402,12 @@ class TestMultiPart:
         environ["CONTENT_TYPE"] = "multipart/form-data; boundary=boundary"
         environ["CONTENT_LENGTH"] = str(len(data))
         environ["wsgi.input"] = io.BytesIO(data)
-        stream, form, files = parse_form_data(environ, silent=False)
+        stream, form, files, parts = parse_form_data(environ, silent=False)
         rv = stream.read()
         assert rv == b""
         assert form == ImmutableMultiDict()
         assert files == ImmutableMultiDict()
+        assert parts == ()
 
 
 class TestMultiPartParser:
@@ -437,3 +440,351 @@ def test_multipart_max_form_memory_size() -> None:
 
     with pytest.raises(RequestEntityTooLarge):
         parser.parse(io.BytesIO(data), b"bound", None)
+
+
+def _interleaved_multipart() -> tuple[bytes, str]:
+    boundary = "b"
+    data = (
+        b"--b\r\n"
+        b'Content-Disposition: form-data; name="note"\r\n\r\n'
+        b"first description\r\n"
+        b"--b\r\n"
+        b'Content-Disposition: form-data; name="note"; filename="a.txt"\r\n'
+        b"Content-Type: text/plain\r\n\r\n"
+        b"first file\r\n"
+        b"--b\r\n"
+        b'Content-Disposition: form-data; name="note"\r\n\r\n'
+        b"second description\r\n"
+        b"--b\r\n"
+        b'Content-Disposition: form-data; name="note"; filename="b.txt"\r\n'
+        b"Content-Type: text/plain\r\n\r\n"
+        b"second file\r\n--b--"
+    )
+    return data, f"multipart/form-data; boundary={boundary}"
+
+
+class TestOrderedParts:
+    def test_parts_preserve_interleaved_order(self) -> None:
+        data, content_type = _interleaved_multipart()
+
+        with Request.from_values(
+            data=data, content_type=content_type, method="POST"
+        ) as request:
+            parts = request.parts
+
+            assert [part.name for part in parts] == ["note"] * 4
+            assert [part.text for part in parts[::2]] == [
+                "first description",
+                "second description",
+            ]
+            assert [part.file.filename for part in parts[1::2]] == [
+                "a.txt",
+                "b.txt",
+            ]
+            assert parts[0].headers["Content-Disposition"].startswith(
+                "form-data"
+            )
+            assert parts[1].headers["Content-Type"] == "text/plain"
+
+            # Same-named fields and files are not merged away.
+            assert request.form.getlist("note") == [
+                "first description",
+                "second description",
+            ]
+            assert [f.filename for f in request.files.getlist("note")] == [
+                "a.txt",
+                "b.txt",
+            ]
+
+    @pytest.mark.parametrize("first", ["parts", "form", "files"])
+    def test_parts_share_one_parse(self, first: str) -> None:
+        data, content_type = _interleaved_multipart()
+        reads = 0
+
+        class TrackingInput:
+            def read(self, size: int) -> bytes:
+                nonlocal reads
+                reads += 1
+                return input_stream.read(size)
+
+        input_stream = io.BytesIO(data)
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": content_type,
+            "CONTENT_LENGTH": str(len(data)),
+            "wsgi.input": TrackingInput(),
+        }
+        request = Request(environ)
+
+        getattr(request, first)
+        reads_after_first = reads
+
+        assert request.form.getlist("note") == [
+            "first description",
+            "second description",
+        ]
+        file_parts = [part.file for part in request.parts if part.file]
+        assert file_parts == request.files.getlist("note")
+        assert [file_part.read() for file_part in file_parts] == [
+            b"first file",
+            b"second file",
+        ]
+        # The streams are shared, not copied: reading through parts moved the
+        # cursor seen through files.
+        assert [f.read() for f in request.files.getlist("note")] == [b"", b""]
+        assert reads == reads_after_first
+        request.close()
+
+    def test_parts_share_file_objects_without_copy(self) -> None:
+        data, content_type = _interleaved_multipart()
+
+        with Request.from_values(
+            data=data, content_type=content_type, method="POST"
+        ) as request:
+            files = request.files.getlist("note")
+            file_parts = [part.file for part in request.parts if part.file]
+
+            assert file_parts == files
+            assert [part_file.stream for part_file in file_parts] == [
+                file.stream for file in files
+            ]
+            # Reading from the parts view does not consume a separate copy.
+            assert file_parts[0].read() == b"first file"
+            assert files[0].read() == b""
+            files[0].seek(0)
+            assert files[0].read() == b"first file"
+
+    def test_disk_file_is_shared_and_closed_once(self) -> None:
+        payload = b"x" * 1024
+        data = (
+            b"--b\r\n"
+            b'Content-Disposition: form-data; name="note"\r\n\r\n'
+            b"description\r\n"
+            b"--b\r\n"
+            b'Content-Disposition: form-data; name="note"; filename="big"\r\n'
+            b"Content-Type: application/octet-stream\r\n\r\n"
+            + payload
+            + b"\r\n--b--"
+        )
+
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": "multipart/form-data; boundary=b",
+            "CONTENT_LENGTH": str(len(data)),
+            "wsgi.input": io.BytesIO(data),
+        }
+        request = Request(environ)
+
+        # Files go through the parser stream factory, which spools to disk
+        # independently of the text-field memory limit.
+        from werkzeug.formparser import FormDataParser
+        from werkzeug.formparser import _make_stream_factory
+
+        parser = FormDataParser(stream_factory=_make_stream_factory(128))
+        request._parse_form_data = lambda stream, _parser=parser: _parser.parse(
+            stream,
+            mimetype=request.mimetype,
+            content_length=request.content_length,
+            options=request.mimetype_params,
+        )[1:]
+
+        with request:
+            file_part = next(part for part in request.parts if part.file)
+
+            assert file_part.file is request.files["note"]
+            assert file_part.file.read() == payload
+            assert file_part.file.stream._rolled
+            temp_name = file_part.file.stream.name
+
+        assert not os.path.exists(temp_name)
+
+    def test_limits_apply_to_parts(self) -> None:
+        data, content_type = _interleaved_multipart()
+
+        with Request.from_values(
+            data=data, content_type=content_type, method="POST"
+        ) as request:
+            request.max_form_parts = 2
+
+            with pytest.raises(RequestEntityTooLarge):
+                request.parts
+
+        oversized_field = (
+            b"--b\r\n"
+            b'Content-Disposition: form-data; name="note"\r\n\r\n'
+            + b"y" * 100
+            + b"\r\n--b--"
+        )
+
+        with Request.from_values(
+            data=oversized_field,
+            content_type="multipart/form-data; boundary=b",
+            method="POST",
+        ) as request:
+            request.max_form_memory_size = 10
+
+            with pytest.raises(RequestEntityTooLarge):
+                request.parts
+
+    def test_urlencoded_and_unknown_types_have_no_parts(self) -> None:
+        request = Request.from_values(
+            data=b"a=1",
+            content_type="application/x-www-form-urlencoded",
+            method="POST",
+        )
+        assert request.parts == ()
+        assert request.form["a"] == "1"
+
+        request = Request.from_values(
+            data=b"raw", content_type="text/plain", method="POST"
+        )
+        assert request.parts == ()
+
+    def test_parse_form_data_returns_parts(self) -> None:
+        data, content_type = _interleaved_multipart()
+        environ = create_environ(
+            method="POST", content_type=content_type, data=data
+        )
+
+        try:
+            _, form, files, parts = parse_form_data(environ)
+            assert form.getlist("note") == [
+                "first description",
+                "second description",
+            ]
+            assert len(files.getlist("note")) == 2
+            assert [type(part).__name__ for part in parts] == [
+                "FormPart"
+            ] * 4
+        finally:
+            for values in files.listvalues():
+                for file in values:
+                    file.close()
+
+
+class TestMultiPartCleanup:
+    def test_silent_parse_failure_closes_temp_files(self) -> None:
+        from tempfile import SpooledTemporaryFile
+
+        rolled_names: list[str] = []
+
+        class TrackingSpooledFile(SpooledTemporaryFile):
+            def write(self, data: bytes) -> int:
+                result = super().write(data)
+
+                if self._rolled and not rolled_names:
+                    rolled_names.append(self.name)
+
+                return result
+
+        def stream_factory(
+            total_content_length, content_type, filename, content_length=0
+        ):
+            return TrackingSpooledFile(max_size=16, mode="rb+")
+
+        data = (
+            b"--b\r\n"
+            b'Content-Disposition: form-data; name="f"; filename="big"\r\n\r\n'
+            + b"z" * 100
+            + b"\r\n--b\r\n"
+            b'Content-Disposition: form-data; name="t"\r\n\r\n'
+            b"truncated"
+        )
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": "multipart/form-data; boundary=b",
+            "CONTENT_LENGTH": str(len(data)),
+            "wsgi.input": io.BytesIO(data),
+        }
+        parser = FormDataParser(stream_factory=stream_factory, silent=True)
+        stream, form, files, parts = parser.parse_from_environ(environ)
+
+        assert not form
+        assert not files
+        assert parts == ()
+        assert len(rolled_names) == 1
+        assert not os.path.exists(rolled_names[0])
+
+    def test_size_limit_failure_closes_temp_files(self) -> None:
+        from tempfile import SpooledTemporaryFile
+
+        rolled_names: list[str] = []
+
+        class TrackingSpooledFile(SpooledTemporaryFile):
+            def write(self, data: bytes) -> int:
+                result = super().write(data)
+
+                if self._rolled and not rolled_names:
+                    rolled_names.append(self.name)
+
+                return result
+
+        data = (
+            b"--b\r\n"
+            b'Content-Disposition: form-data; name="f"; filename="big"\r\n\r\n'
+            + b"z" * 100
+            + b"\r\n--b\r\n"
+            b'Content-Disposition: form-data; name="t"\r\n\r\n'
+            + b"y" * 200
+            + b"\r\n--b--"
+        )
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": "multipart/form-data; boundary=b",
+            "CONTENT_LENGTH": str(len(data)),
+            "wsgi.input": io.BytesIO(data),
+        }
+        parser = formparser.MultiPartParser(
+            stream_factory=lambda *a, **k: TrackingSpooledFile(
+                max_size=16, mode="rb+"
+            ),
+            max_form_memory_size=120,
+            buffer_size=32,
+        )
+
+        with pytest.raises(RequestEntityTooLarge):
+            parser.parse(
+                environ["wsgi.input"], b"b", int(environ["CONTENT_LENGTH"])
+            )
+
+        assert len(rolled_names) == 1
+        assert not os.path.exists(rolled_names[0])
+
+    def test_temp_files_closed_on_corrupt_request(self) -> None:
+        from tempfile import SpooledTemporaryFile
+
+        rolled_names: list[str] = []
+
+        class TrackingSpooledFile(SpooledTemporaryFile):
+            def write(self, data: bytes) -> int:
+                result = super().write(data)
+
+                if self._rolled and not rolled_names:
+                    rolled_names.append(self.name)
+
+                return result
+
+        def stream_factory(
+            total_content_length, content_type, filename, content_length=0
+        ):
+            return TrackingSpooledFile(max_size=16, mode="rb+")
+
+        # First part is a file large enough to roll to disk. The body is then
+        # truncated before the closing boundary, which is a parse failure.
+        data = (
+            b"--b\r\n"
+            b'Content-Disposition: form-data; name="f"; filename="big"\r\n\r\n'
+            + b"z" * 100
+            + b"\r\n--b\r\n"
+            b'Content-Disposition: form-data; name="t"\r\n\r\n'
+            b"truncated without closing boundary"
+        )
+        parser = formparser.MultiPartParser(
+            stream_factory=stream_factory, buffer_size=32
+        )
+
+        with parser, pytest.raises(ValueError):
+            parser.parse(io.BytesIO(data), b"b", len(data))
+
+        assert len(rolled_names) == 1
+        assert not os.path.exists(rolled_names[0])
