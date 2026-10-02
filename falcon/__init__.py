@@ -41,6 +41,9 @@ __all__ = (
     'HTTPSeeOther',
     'HTTPTemporaryRedirect',
     'Forwarded',
+    'IdempotencyDecision',
+    'IdempotencyMiddleware',
+    'IdempotencyState',
     'Request',
     'RequestOptions',
     'Response',
@@ -66,6 +69,7 @@ __all__ = (
     'MEDIA_XML',
     'MEDIA_YAML',
     'SINGLETON_HEADERS',
+    'SQLiteIdempotencyStore',
     'WebSocketPayloadType',
     # Utilities
     'async_to_sync',
@@ -97,6 +101,8 @@ __all__ = (
     'sync_to_async',
     'time',
     'TimezoneGMT',
+    'StoredIdempotentResponse',
+    'StoredIdempotentResult',
     'to_query_str',
     'uri',
     'wrap_sync_to_async',
@@ -413,6 +419,12 @@ from falcon.hooks import after
 from falcon.hooks import before
 from falcon.http_error import HTTPError
 from falcon.http_status import HTTPStatus
+from falcon.idempotency import IdempotencyDecision
+from falcon.idempotency import IdempotencyMiddleware
+from falcon.idempotency import IdempotencyState
+from falcon.idempotency import SQLiteIdempotencyStore
+from falcon.idempotency import StoredIdempotentResponse
+from falcon.idempotency import StoredIdempotentResult
 from falcon.middleware import CORSMiddleware
 from falcon.redirects import HTTPFound
 from falcon.redirects import HTTPMovedPermanently
