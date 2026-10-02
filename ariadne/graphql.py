@@ -29,6 +29,7 @@ from graphql.validation.rules import ASTValidationRule
 from .extensions import ExtensionManager
 from .format_error import format_error
 from .logger import log_error
+from .transaction import begin_transaction, begin_transaction_sync
 from .types import (
     BaseProxyRootValue,
     ErrorFormatter,
@@ -188,22 +189,34 @@ async def graphql(
                 result_update = root_value
                 root_value = root_value.root_value
 
-            exec_result = execute(
-                schema,
-                document,
-                root_value=root_value,
-                context_value=context_value,
-                variable_values=variables,
-                operation_name=operation_name,
-                execution_context_class=execution_context_class,
-                middleware=extension_manager.as_middleware_manager(
-                    middleware, middleware_manager_class
-                ),
-                **kwargs,
+            transaction = await begin_transaction(
+                extension_manager, context_value, operation_name, document
             )
+            try:
+                exec_result = execute(
+                    schema,
+                    document,
+                    root_value=root_value,
+                    context_value=context_value,
+                    variable_values=variables,
+                    operation_name=operation_name,
+                    execution_context_class=execution_context_class,
+                    middleware=extension_manager.as_middleware_manager(
+                        middleware, middleware_manager_class
+                    ),
+                    **kwargs,
+                )
 
-            if isawaitable(exec_result):
-                exec_result = await exec_result
+                if isawaitable(exec_result):
+                    exec_result = await exec_result
+            except BaseException:
+                await transaction.rollback()
+                raise
+
+            if exec_result.errors:
+                await transaction.rollback()
+            else:
+                await transaction.commit()
         except GraphQLError as error:
             error_result = handle_graphql_errors(
                 [error],
@@ -380,25 +393,39 @@ def graphql_sync(
                 result_update = root_value
                 root_value = root_value.root_value
 
-            exec_result = execute_sync(
-                schema,
-                document,
-                root_value=root_value,
-                context_value=context_value,
-                variable_values=variables,
-                operation_name=operation_name,
-                execution_context_class=execution_context_class,
-                middleware=extension_manager.as_middleware_manager(
-                    middleware, middleware_manager_class
-                ),
-                **kwargs,
+            transaction = begin_transaction_sync(
+                extension_manager, context_value, operation_name, document
             )
-
-            if isawaitable(exec_result):
-                ensure_future(cast(Awaitable[ExecutionResult], exec_result)).cancel()
-                raise RuntimeError(
-                    "GraphQL execution failed to complete synchronously."
+            try:
+                exec_result = execute_sync(
+                    schema,
+                    document,
+                    root_value=root_value,
+                    context_value=context_value,
+                    variable_values=variables,
+                    operation_name=operation_name,
+                    execution_context_class=execution_context_class,
+                    middleware=extension_manager.as_middleware_manager(
+                        middleware, middleware_manager_class
+                    ),
+                    **kwargs,
                 )
+
+                if isawaitable(exec_result):
+                    ensure_future(
+                        cast(Awaitable[ExecutionResult], exec_result)
+                    ).cancel()
+                    raise RuntimeError(
+                        "GraphQL execution failed to complete synchronously."
+                    )
+            except BaseException:
+                transaction.rollback_sync()
+                raise
+
+            if exec_result.errors:
+                transaction.rollback_sync()
+            else:
+                transaction.commit_sync()
         except GraphQLError as error:
             error_result = handle_graphql_errors(
                 [error],

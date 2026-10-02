@@ -30,6 +30,7 @@ from .subscription_handlers import (
     SubscriptionHandler,
 )
 from .subscriptions import SubscriptionType
+from .transaction import TransactionExtension
 from .types import Extension, SchemaBindable
 from .unions import UnionType
 from .utils import (
@@ -56,6 +57,7 @@ __all__ = [
     "SubscriptionEventType",
     "SubscriptionHandler",
     "SubscriptionType",
+    "TransactionExtension",
     "UnionType",
     "combine_multipart_data",
     "convert_camel_case_to_snake",

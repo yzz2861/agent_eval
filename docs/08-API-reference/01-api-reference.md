@@ -2033,6 +2033,57 @@ using Apollo-Client subscriptions.
 - - - - -
 
 
+## `TransactionExtension`
+
+```python
+class TransactionExtension(Extension):
+    ...
+```
+
+Extension that runs mutations inside an application-provided transaction.
+
+The transaction is started after the operation was parsed and validated,
+and only for mutations. Queries and subscriptions are executed without
+a transaction.
+
+If the mutation result contains any errors (for example because one of
+the resolvers raised an exception), the transaction is rolled back
+instead of being committed, even though such response may still be
+returned to the client with a success HTTP status code.
+
+
+### Constructor
+
+```python
+def __init__(self, transaction_factory: TransactionFactory) -> None:
+    ...
+```
+
+Initializes the extension with a transaction factory.
+
+
+#### Required arguments
+
+`transaction_factory`: a callable called with the GraphQL context value
+at the start of mutation's execution. Should return a transaction object
+implementing `commit` and `rollback` methods (or an awaitable resolving
+to one).
+
+
+### Example
+
+```python
+from functools import partial
+
+from ariadne import TransactionExtension
+
+extensions = [partial(TransactionExtension, session.begin)]
+```
+
+
+- - - - -
+
+
 ## `UnionType`
 
 ```python

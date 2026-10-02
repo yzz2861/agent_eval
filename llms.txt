@@ -61,6 +61,7 @@ Key concepts:
 - [Middleware](docs/06-Extensions/02-middleware.md): Middleware implementation
 - [Query Validators](docs/06-Extensions/03-query-validators.md): Custom query validation rules
 - [Query Stack](docs/06-Extensions/04-query-stack.md): Query execution stack internals
+- [Transactions](docs/06-Extensions/05-transactions.md): Operation-level transactions for mutations
 
 ## Servers & Deployment
 
