@@ -19,8 +19,13 @@ module Rack
         end
       end
 
+      DEFAULT_STORAGE_FAILURE_RESPONDER = lambda do |_req|
+        [503, { 'content-type' => 'text/plain' }, ["Service unavailable\n"]]
+      end
+
       attr_reader :safelists, :blocklists, :throttles, :tracks, :anonymous_blocklists, :anonymous_safelists
-      attr_accessor :blocklisted_responder, :throttled_responder, :throttled_response_retry_after_header
+      attr_accessor :blocklisted_responder, :throttled_responder,
+        :storage_failure_responder, :throttled_response_retry_after_header
 
       attr_reader :blocklisted_response, :throttled_response # Keeping these for backwards compatibility
 
@@ -40,8 +45,8 @@ module Rack
         set_defaults
       end
 
-      def safelist(name = nil, &block)
-        safelist = Safelist.new(name, &block)
+      def safelist(name = nil, options = {}, &block)
+        safelist = Safelist.new(name, options, &block)
 
         if name
           @safelists[name] = safelist
@@ -50,8 +55,8 @@ module Rack
         end
       end
 
-      def blocklist(name = nil, &block)
-        blocklist = Blocklist.new(name, &block)
+      def blocklist(name = nil, options = {}, &block)
+        blocklist = Blocklist.new(name, options, &block)
 
         if name
           @blocklists[name] = blocklist
@@ -81,25 +86,24 @@ module Rack
       end
 
       def safelisted?(request)
-        @anonymous_safelists.any? { |safelist| safelist.matched_by?(request) } ||
-          @safelists.any? { |_name, safelist| safelist.matched_by?(request) }
+        verdict_of(@anonymous_safelists, request) ||
+          verdict_of(@safelists.values, request)
       end
 
       def blocklisted?(request)
-        @anonymous_blocklists.any? { |blocklist| blocklist.matched_by?(request) } ||
-          @blocklists.any? { |_name, blocklist| blocklist.matched_by?(request) }
+        verdict_of(@anonymous_blocklists, request) ||
+          verdict_of(@blocklists.values, request)
       end
 
       def throttled?(request)
-        @throttles.any? do |_name, throttle|
-          throttle.matched_by?(request)
-        end
+        verdict_of(@throttles.values, request)
       end
 
       def tracked?(request)
         @tracks.each_value do |track|
-          track.matched_by?(request)
+          return true if Rack::Attack::StoreFailure.denied?(track.matched_by?(request))
         end
+        false
       end
 
       def clear_configuration
@@ -119,10 +123,32 @@ module Rack
 
         @blocklisted_responder = DEFAULT_BLOCKLISTED_RESPONDER
         @throttled_responder = DEFAULT_THROTTLED_RESPONDER
+        @storage_failure_responder = DEFAULT_STORAGE_FAILURE_RESPONDER
 
         # Deprecated: Keeping these for backwards compatibility
         @blocklisted_response = nil
         @throttled_response = nil
+      end
+
+      # Evaluates every rule in definition order; a regular
+      # match never short-circuits remaining rules so a
+      # later :deny storage failure always joins the merge.
+      # A :deny verdict wins the phase, otherwise any
+      # regular match wins. Rule blocks raising non storage
+      # errors propagate untouched.
+      def verdict_of(rules, request)
+        matched = false
+        denied = false
+        rules.each do |rule|
+          verdict = rule.matched_by?(request)
+          if Rack::Attack::StoreFailure.denied?(verdict)
+            denied = true
+          elsif verdict
+            matched = true
+          end
+        end
+
+        denied ? Rack::Attack::StoreFailure::DENY : matched
       end
     end
   end

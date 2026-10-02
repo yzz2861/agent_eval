@@ -69,8 +69,16 @@ module Rack
 
         def rescuing
           yield
-        rescue Dalli::DalliError
-          nil
+        rescue Dalli::DalliError => e
+          connection_errors = [
+            defined?(Dalli::RingError) ? Dalli::RingError : nil,
+            defined?(Dalli::NetworkError) ? Dalli::NetworkError : nil,
+            defined?(Dalli::ServerUnavailableError) ? Dalli::ServerUnavailableError : nil,
+            defined?(Dalli::DownError) ? Dalli::DownError : nil
+          ].compact
+          raise unless connection_errors.include?(e.class)
+
+          raise Rack::Attack::StoreError, "dalli store unavailable"
         end
       end
     end

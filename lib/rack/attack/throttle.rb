@@ -5,7 +5,7 @@ module Rack
     class Throttle
       MANDATORY_OPTIONS = [:limit, :period].freeze
 
-      attr_reader :name, :limit, :period, :block, :type
+      attr_reader :name, :limit, :period, :block, :type, :storage_failure_policy
 
       def initialize(name, options, &block)
         @name = name
@@ -16,6 +16,7 @@ module Rack
         @limit = options[:limit]
         @period = options[:period].respond_to?(:call) ? options[:period] : options[:period].to_i
         @type   = options.fetch(:type, :throttle)
+        @storage_failure_policy = StoreFailure.policy_from(options)
       end
 
       def cache
@@ -28,7 +29,13 @@ module Rack
 
         current_period  = period_for(request)
         current_limit   = limit_for(request)
-        count           = cache.count("#{name}:#{discriminator}", current_period)
+        count = begin
+          cache.count("#{name}:#{discriminator}", current_period)
+        rescue StoreError => e
+          # The discriminator/block evaluation above is a user
+          # rule block: its errors must not be swallowed.
+          return StoreFailure.handle(request, self, e, discriminator)
+        end
 
         data = {
           discriminator: discriminator,

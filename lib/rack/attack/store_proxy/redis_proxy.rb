@@ -62,7 +62,7 @@ module Rack
         def rescuing
           yield
         rescue Redis::BaseConnectionError
-          nil
+          raise Rack::Attack::StoreError, "redis store unavailable"
         end
       end
     end

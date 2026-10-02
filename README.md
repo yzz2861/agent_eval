@@ -33,6 +33,7 @@ See the [Backing & Hacking blog post](https://www.kickstarter.com/backing-and-ha
     - [`throttle(name, options, &block)`](#throttlename-options-block)
   - [Tracks](#tracks)
   - [Cache store configuration](#cache-store-configuration)
+  - [Storage failure policies](#storage-failure-policies)
 - [Customizing responses](#customizing-responses)
   - [RateLimit headers for well-behaved clients](#ratelimit-headers-for-well-behaved-clients)
 - [Logging & Instrumentation](#logging--instrumentation)
@@ -313,6 +314,45 @@ Rack::Attack.cache.store = ActiveSupport::Cache::RedisCacheStore.new(url: "...")
 Most applications should use a new, separate database used only for `rack-attack`. During an actual attack or periods of heavy load, this database will come under heavy load. Keeping it on a separate database instance will give you additional resilience and make sure that other functions (like caching for your application) don't go down.
 
 Note that `Rack::Attack.cache` is only used for throttling, allow2ban and fail2ban filtering; not blocklisting and safelisting. Your cache store must implement `increment` and `write` like [ActiveSupport::Cache::Store](http://api.rubyonrails.org/classes/ActiveSupport/Cache/Store.html). This means that other cache stores which inherit from ActiveSupport::Cache::Store are also compatible. In-memory stores which are not backed by an external database, such as `ActiveSupport::Cache::MemoryStore.new`, will be mostly ineffective because each Ruby process in your deployment will have it's own state, effectively multiplying the number of requests each client can make by the number of Ruby processes you have deployed.
+
+### Storage failure policies
+
+When the cache backend is briefly unavailable, public queries may be allowed through while sensitive operations must be rejected. Every rule can therefore declare what should happen when *its own storage calls* fail, with the `storage_failure` option:
+
+* `:allow` (default) — fail open, the request proceeds as if the rule did not match.
+* `:deny` — fail closed, the request is answered by the storage failure responder.
+
+```ruby
+# Public search: let requests through if Redis is down.
+Rack::Attack.throttle('searches/ip', limit: 30, period: 60,
+                      storage_failure: :allow) { |req| req.path == '/search' && req.ip }
+
+# Login attempts: never let a cache outage through.
+Rack::Attack.throttle('logins/email', limit: 5, period: 60,
+                      storage_failure: :deny) { |req| req.path == '/login' && req.params['email'] }
+
+# Blocklist/safelist/track rules accept the same option.
+Rack::Attack.blocklist('sensitive', storage_failure: :deny) do |req|
+  Rack::Attack.cache.read("ban:#{req.ip}")
+end
+```
+
+The default for rules that omit the option is the global setting `Rack::Attack.storage_failure_policy`, which itself defaults to `:allow`.
+
+Only failures of the cache store itself are handled; exceptions raised inside your rule blocks still propagate as normal program errors.
+
+If several rules of one request meet different outcomes, they are merged with a stable precedence: an explicit safelist wins, then any `:deny` storage failure ("backend unavailable"), then a blocklist match, and then a throttle match ("quota exhausted"). Rules are always evaluated in definition order, so a later `:deny` rule is not masked by an earlier match. Once the backend recovers, the next request uses the real counters again; no failure state is cached.
+
+A storage failure is served by `Rack::Attack.storage_failure_responder`, which returns `503 Service unavailable` by default, so it is never confused with the `429` "quota exhausted" response:
+
+```ruby
+Rack::Attack.storage_failure_responder = lambda do |request|
+  failure = request.env['rack.attack.storage_failure'] # {rule:, type:, policy:, error:, discriminator_fingerprint:}
+  [503, { 'content-type' => 'text/plain' }, ["Temporarily unavailable\n"]]
+end
+```
+
+Each failure also emits a `storage_failure.rack_attack` notification. Its payload never contains the full discriminator; instead it carries a short non-reversible `discriminator_fingerprint` for correlation.
 
 ## Customizing responses
 

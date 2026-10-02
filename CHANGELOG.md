@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Per-rule `storage_failure: :allow|:deny` policy for when the cache store is unavailable, with `Rack::Attack.storage_failure_policy` global default, a `storage_failure_responder` (`503` by default, distinct from the `429` throttled response), a `storage_failure.rack_attack` notification carrying a discriminator fingerprint instead of the full discriminator, and stable multi-rule merge order (safelist match, then `:deny` storage failure, blocklist, throttle).
+
 ## [6.8.0] - 2025-10-14
 
 ### Changed

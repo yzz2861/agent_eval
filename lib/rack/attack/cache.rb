@@ -32,29 +32,37 @@ module Rack
       end
 
       def count(unprefixed_key, period)
+        raise Rack::Attack::MissingStoreError if store.nil?
+
         key, expires_in = key_and_expiry(unprefixed_key, period)
-        do_count(key, expires_in)
+        with_storage_failure { do_count(key, expires_in) }
       end
 
       def read(unprefixed_key)
         raise Rack::Attack::MissingStoreError if store.nil?
 
-        store.read("#{prefix}:#{unprefixed_key}")
+        with_storage_failure { store.read("#{prefix}:#{unprefixed_key}") }
       end
 
       def write(unprefixed_key, value, expires_in)
         raise Rack::Attack::MissingStoreError if store.nil?
 
-        store.write("#{prefix}:#{unprefixed_key}", value, expires_in: expires_in)
+        with_storage_failure do
+          store.write("#{prefix}:#{unprefixed_key}", value, expires_in: expires_in)
+        end
       end
 
       def reset_count(unprefixed_key, period)
+        raise Rack::Attack::MissingStoreError if store.nil?
+
         key, _ = key_and_expiry(unprefixed_key, period)
-        store.delete(key)
+        with_storage_failure { store.delete(key) }
       end
 
       def delete(unprefixed_key)
-        store.delete("#{prefix}:#{unprefixed_key}")
+        raise Rack::Attack::MissingStoreError if store.nil?
+
+        with_storage_failure { store.delete("#{prefix}:#{unprefixed_key}") }
       end
 
       def reset!
@@ -69,6 +77,17 @@ module Rack
       end
 
       private
+
+      # Translates faults of storage calls only into StoreError so
+      # rule blocks can distinguish a backend outage from any
+      # other error. Configuration errors are left untouched.
+      def with_storage_failure
+        yield
+      rescue Rack::Attack::StoreError
+        raise
+      rescue StandardError => e
+        raise Rack::Attack::StoreError.new("cache store failed with #{e.class}: storage unavailable")
+      end
 
       def key_and_expiry(unprefixed_key, period)
         @last_epoch_time = Time.now.to_i

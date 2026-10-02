@@ -3,8 +3,8 @@
 module Rack
   class Attack
     class Blocklist < Check
-      def initialize(name = nil, &block)
-        super
+      def initialize(name = nil, options = {}, &block)
+        super(name, options, &block)
         @type = :blocklist
       end
     end
