@@ -280,4 +280,194 @@ describe Mustermann::Router do
       expect(matched).to eq :static
     end
   end
+
+  context 'method negotiation' do
+    class CountingBody
+      attr_reader :close_count, :each_count
+
+      def initialize(chunks)
+        @chunks      = chunks
+        @close_count = 0
+        @each_count  = 0
+      end
+
+      def each
+        @each_count += 1
+        @chunks.each { |chunk| yield chunk }
+      end
+
+      def close
+        @close_count += 1
+      end
+    end
+
+    it 'keeps the original behavior disabled by default' do
+      router = described_class.new do
+        get('/users') { |_env| [200, {}, ['users']] }
+      end
+
+      status, headers, = router.call(env(method: 'POST', path: '/users'))
+      expect(status).to eq 404
+      expect(headers).not_to have_key('allow')
+    end
+
+    it 'does not register HEAD shorthand routes unless negotiation is enabled' do
+      router = described_class.new
+      expect(router).not_to respond_to(:head)
+      expect { router.route('HEAD', '/users') { } }.to raise_error(ArgumentError, /unknown verb: HEAD/)
+    end
+
+    it 'returns 405 with the supported methods for a known path' do
+      calls = Hash.new(0)
+      router = described_class.new(method_negotiation: true) do
+        get('/users') { |_env| calls[:get] += 1; [200, {}, ['users']] }
+        post('/users') { |_env| calls[:post] += 1; [201, {}, []] }
+      end
+
+      status, headers, body = router.call(env(method: 'PUT', path: '/users'))
+      expect(status).to eq 405
+      expect(headers['allow']).to eq 'GET, HEAD, POST, OPTIONS'
+      expect(body).to eq ['Method not allowed']
+      expect(calls).to be_empty
+    end
+
+    it 'keeps unknown paths on the fallback' do
+      fallback_calls = 0
+      fallback = ->(_env) { fallback_calls += 1; [404, {}, ['missing']] }
+      router = described_class.new(fallback, method_negotiation: true) do
+        get('/users') { |_env| [200, {}, ['users']] }
+      end
+
+      status, _, body = router.call(env(method: 'PUT', path: '/unknown'))
+      expect(status).to eq 404
+      expect(body).to eq ['missing']
+      expect(fallback_calls).to eq 1
+    end
+
+    it 'does not use fallback when a path exists but the method does not' do
+      fallback_calls = 0
+      fallback = ->(_env) { fallback_calls += 1; [404, {}, []] }
+      router = described_class.new(fallback, method_negotiation: true) do
+        post('/users') { |_env| [201, {}, []] }
+      end
+
+      status, = router.call(env(method: 'DELETE', path: '/users'))
+      expect(status).to eq 405
+      expect(fallback_calls).to eq 0
+    end
+
+    it 'answers OPTIONS automatically from the matching candidate rules' do
+      calls = Hash.new(0)
+      router = described_class.new(method_negotiation: true) do
+        get('/users(.:format)') { |_env| calls[:get] += 1; [200, {}, ['users']] }
+        post('/users.json') { |_env| calls[:post] += 1; [201, {}, []] }
+      end
+
+      status, headers, body = router.call(env(method: 'OPTIONS', path: '/users.json'))
+      expect(status).to eq 200
+      expect(headers['allow']).to eq 'GET, HEAD, POST, OPTIONS'
+      expect(body).to eq []
+      expect(calls).to be_empty
+    end
+
+    it 'keeps unknown OPTIONS paths on the fallback' do
+      router = described_class.new(method_negotiation: true) do
+        get('/users') { |_env| [200, {}, []] }
+      end
+
+      status, headers, = router.call(env(method: 'OPTIONS', path: '/unknown'))
+      expect(status).to eq 404
+      expect(headers['x-cascade']).to eq 'pass'
+    end
+
+    it 'prefers an explicit OPTIONS route' do
+      router = described_class.new(method_negotiation: true) do
+        get('/users') { |_env| [200, {}, []] }
+        options('/users') { |_env| [200, { 'x-custom' => 'yes' }, []] }
+      end
+
+      status, headers, = router.call(env(method: 'OPTIONS', path: '/users'))
+      expect(status).to eq 200
+      expect(headers['x-custom']).to eq 'yes'
+      expect(headers['allow']).to be_nil
+    end
+
+    it 'prefers an explicit HEAD route and calls its application once' do
+      head_body = CountingBody.new(['head'])
+      get_body  = CountingBody.new(['get'])
+      head_calls = 0
+      get_calls  = 0
+      router = described_class.new(method_negotiation: true) do
+        head('/users') { |_env| head_calls += 1; [200, {}, head_body] }
+        get('/users') { |_env| get_calls += 1; [200, {}, get_body] }
+      end
+
+      status, headers, body = router.call(env(method: 'HEAD', path: '/users'))
+      chunks = []
+      body.each { |chunk| chunks << chunk }
+      body.close
+
+      expect(status).to eq 200
+      expect(headers).to eq({})
+      expect(chunks).to eq []
+      expect(head_calls).to eq 1
+      expect(get_calls).to eq 0
+      expect(head_body.close_count).to eq 1
+      expect(get_body.close_count).to eq 0
+    end
+
+    it 'falls back to GET for HEAD and calls the application once without a body' do
+      body = CountingBody.new(['users'])
+      calls = 0
+      app = ->(_env) do
+        calls += 1
+        [200, { 'content-length' => '5', 'x-test' => 'yes' }, body]
+      end
+      router = described_class.new(method_negotiation: true) do
+        get('/users', app)
+        post('/users') { |_env| [201, {}, []] }
+      end
+
+      status, headers, response_body = router.call(env(method: 'HEAD', path: '/users'))
+      chunks = []
+      response_body.each { |chunk| chunks << chunk }
+      response_body.close
+      response_body.close
+
+      expect(status).to eq 200
+      expect(headers['content-length']).to eq '5'
+      expect(headers['x-test']).to eq 'yes'
+      expect(chunks).to eq []
+      expect(calls).to eq 1
+      expect(body.each_count).to eq 0
+      expect(body.close_count).to eq 1
+    end
+
+    it 'returns 405 for HEAD when the path only supports other methods' do
+      router = described_class.new(method_negotiation: true) do
+        post('/users') { |_env| [201, {}, []] }
+      end
+
+      status, headers, = router.call(env(method: 'HEAD', path: '/users'))
+      expect(status).to eq 405
+      expect(headers['allow']).to eq 'POST, OPTIONS'
+    end
+
+    it 'works after manual optimization' do
+      router = described_class.new(method_negotiation: true)
+      router.get('/users(.:format)') { |_env| [200, {}, ['users']] }
+      router.post('/users.json') { |_env| [201, {}, []] }
+      router.instance_variable_get(:@sets).each_value(&:optimize!)
+
+      options_status, options_headers, = router.call(env(method: 'OPTIONS', path: '/users.json'))
+      wrong_status, wrong_headers, = router.call(env(method: 'PUT', path: '/users.json'))
+      unknown_status, = router.call(env(method: 'PUT', path: '/nope'))
+
+      expect(options_status).to eq 200
+      expect(options_headers['allow']).to eq 'GET, HEAD, POST, OPTIONS'
+      expect(wrong_status).to eq 405
+      expect(wrong_headers['allow']).to eq 'GET, HEAD, POST, OPTIONS'
+      expect(unknown_status).to eq 404
+    end
+  end
 end
