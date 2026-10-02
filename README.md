@@ -29,6 +29,7 @@ See the [Backing & Hacking blog post](https://www.kickstarter.com/backing-and-ha
     - [`blocklist(name, &block)`](#blocklistname-block)
     - [Fail2Ban](#fail2ban)
     - [Allow2Ban](#allow2ban)
+    - [EscalatingBan](#escalatingban)
   - [Throttling](#throttling)
     - [`throttle(name, options, &block)`](#throttlename-options-block)
   - [Tracks](#tracks)
@@ -236,6 +237,47 @@ Rack::Attack.blocklist('allow2ban login scrapers') do |req|
   end
 end
 ```
+
+#### EscalatingBan
+
+`EscalatingBan` bans misbehaving clients for a duration that grows with each
+violation: the first offense is banned for the first configured level (e.g. 1
+minute), a repeat offense escalates to the next level (e.g. 5 minutes), and so
+on up to a cap. After `decay_period` seconds without violations the level
+decays one step at a time, so clients that behave well again gradually
+recover. A new computation never shortens a ban that is still in effect.
+
+```ruby
+Rack::Attack::EscalatingBan.levels = [1.minute, 5.minutes, 1.hour] # durations per level; its length is the cap
+Rack::Attack::EscalatingBan.decay_period = 1.hour # quiet time before the level decays one step
+
+Rack::Attack.blocklist('escalating pentesters') do |req|
+  # `filter` returns truthy if the request fails, or if it's from a currently banned IP
+  Rack::Attack::EscalatingBan.filter("pentesters-#{req.ip}", event_id: req.env['HTTP_X_EVENT_ID']) do
+    CGI.unescape(req.query_string) =~ %r{/etc/passwd}
+  end
+end
+```
+
+Violations are reported with an `event_id`; reporting the same event id again
+never escalates twice, and concurrent violations are merged atomically. The
+current state (including which level produced the active ban term) can be
+inspected and reset:
+
+```ruby
+Rack::Attack::EscalatingBan.violation!("pentesters-1.2.3.4", event_id: '01J...')
+Rack::Attack::EscalatingBan.banned?("pentesters-1.2.3.4") # => true
+state = Rack::Attack::EscalatingBan.ban_state("pentesters-1.2.3.4")
+state.ban_level # => 1 (the level that produced the current ban term)
+state.banned_until # => 2026-10-03 01:00:00 +0800
+Rack::Attack::EscalatingBan.reset("pentesters-1.2.3.4")
+```
+
+By default state is kept in a process-local `EscalatingBan::MemoryStore`.
+Another store can be injected via `Rack::Attack::EscalatingBan.store=` as long
+as it responds to `#read`, `#delete`, and `#update(key)` (yielding the current
+value and expecting `[value, expires_in]` back, atomically). The clock can be
+injected via `Rack::Attack::EscalatingBan.clock=` for testing.
 
 ### Throttling
 

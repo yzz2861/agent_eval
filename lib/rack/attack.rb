@@ -31,6 +31,7 @@ module Rack
     autoload :Track,                'rack/attack/track'
     autoload :Fail2Ban,             'rack/attack/fail2ban'
     autoload :Allow2Ban,            'rack/attack/allow2ban'
+    autoload :EscalatingBan,        'rack/attack/escalating_ban'
 
     class << self
       attr_accessor :enabled, :notifier, :throttle_discriminator_normalizer
