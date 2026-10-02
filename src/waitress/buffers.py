@@ -137,6 +137,7 @@ def _is_seekable(fp):
 
 class ReadOnlyFileBasedBuffer(FileBasedBuffer):
     # used as wsgi.file_wrapper
+    sendfile_supported = True
 
     def __init__(self, file, block_size=32768):
         self.file = file

@@ -1,3 +1,4 @@
+import errno
 import io
 import unittest
 
@@ -456,6 +457,257 @@ class TestHTTPChannel(unittest.TestCase):
         # we are testing that _flush_some doesn't raise an OverflowError
         # when one of its outbufs has a __len__ that returns gt sys.maxint
         self.assertFalse(result)
+
+    def test__flush_some_filewrapper_sendfile_bounds_and_short_writes(self):
+        from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
+
+        inst, sock, map = self._makeOneWithMap()
+        file = DummySendFile(b"0123456789", position=2)
+        wrapper = ReadOnlyFileBasedBuffer(file)
+        wrapper.prepare(5)
+        inst.outbufs = [wrapper, OverflowableBuffer(inst.adj.outbuf_overflow)]
+        inst.total_outbufs_len = len(wrapper)
+        inst.sendbuf_len = 2
+
+        calls = []
+
+        def sendfile(in_fd, out_fd, offset, count, do_close=True):
+            calls.append((in_fd, out_fd, offset, count, do_close))
+            return 1
+
+        inst.sendfile = sendfile
+        inst.send = lambda *args, **kwargs: self.fail("regular send was used")
+
+        self.assertTrue(inst._flush_some())
+        self.assertEqual(
+            calls,
+            [
+                (101, 100, 2, 2, True),
+                (101, 100, 3, 2, True),
+                (101, 100, 4, 2, True),
+                (101, 100, 5, 2, True),
+                (101, 100, 6, 1, True),
+            ],
+        )
+        self.assertEqual(file.tell(), 7)
+        self.assertEqual(file.close_count, 1)
+        self.assertEqual(inst.total_outbufs_len, 0)
+        self.assertEqual(len(inst.outbufs), 1)
+
+    def test__flush_some_filewrapper_sendfile_eagain_resumes(self):
+        from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
+
+        inst, sock, map = self._makeOneWithMap()
+        file = DummySendFile(b"0123456789", position=2)
+        wrapper = ReadOnlyFileBasedBuffer(file)
+        wrapper.prepare(5)
+        inst.outbufs = [wrapper, OverflowableBuffer(inst.adj.outbuf_overflow)]
+        inst.total_outbufs_len = len(wrapper)
+        inst.sendbuf_len = 2
+
+        calls = []
+
+        def sendfile(in_fd, out_fd, offset, count, do_close=True):
+            calls.append((offset, count))
+            if len(calls) == 2:
+                return 0
+            return count
+
+        inst.sendfile = sendfile
+        inst.send = lambda *args, **kwargs: self.fail("regular send was used")
+
+        self.assertTrue(inst._flush_some())
+        self.assertEqual(calls, [(2, 2), (4, 2)])
+        self.assertEqual(file.tell(), 4)
+        self.assertEqual(len(wrapper), 3)
+        self.assertEqual(inst.total_outbufs_len, 3)
+        self.assertEqual(file.close_count, 0)
+
+        self.assertTrue(inst._flush_some())
+        self.assertEqual(calls, [(2, 2), (4, 2), (4, 2), (6, 1)])
+        self.assertEqual(file.tell(), 7)
+        self.assertEqual(inst.total_outbufs_len, 0)
+        self.assertEqual(file.close_count, 1)
+
+    def test__flush_some_filewrapper_sendfile_unsupported_falls_back(self):
+        from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
+
+        inst, sock, map = self._makeOneWithMap()
+        file = DummySendFile(b"abcdef")
+        wrapper = ReadOnlyFileBasedBuffer(file)
+        wrapper.prepare()
+        inst.outbufs = [wrapper, OverflowableBuffer(inst.adj.outbuf_overflow)]
+        inst.total_outbufs_len = len(wrapper)
+        inst.sendbuf_len = 2
+
+        calls = []
+        sent_parts = []
+
+        def sendfile(in_fd, out_fd, offset, count, do_close=True):
+            calls.append((offset, count))
+            if len(calls) > 1:
+                raise OSError(errno.EINVAL, "unsupported")
+            sent_parts.append(b"a")
+            return 1
+
+        def send(data, do_close=True):
+            sent_parts.append(data)
+            return len(data)
+
+        inst.sendfile = sendfile
+        inst.send = send
+
+        self.assertTrue(inst._flush_some())
+        self.assertEqual(calls, [(0, 2), (1, 2)])
+        self.assertEqual(sent_parts, [b"a", b"bc", b"de", b"f"])
+        self.assertEqual(b"".join(sent_parts), b"abcdef")
+        self.assertFalse(wrapper.sendfile_supported)
+        self.assertTrue(inst.sendfile_supported)
+        self.assertEqual(file.tell(), 6)
+        self.assertEqual(file.close_count, 1)
+        self.assertEqual(inst.total_outbufs_len, 0)
+
+    def test__flush_some_filewrapper_sendfile_enosys_disables_channel(self):
+        from waitress.channel import HTTPChannel
+        from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
+
+        inst, sock, map = self._makeOneWithMap()
+        original_sendfile_supported = HTTPChannel.sendfile_supported
+        self.addCleanup(
+            setattr, HTTPChannel, "sendfile_supported", original_sendfile_supported
+        )
+
+        file = DummySendFile(b"abcdef")
+        wrapper = ReadOnlyFileBasedBuffer(file)
+        wrapper.prepare()
+        inst.outbufs = [wrapper, OverflowableBuffer(inst.adj.outbuf_overflow)]
+        inst.total_outbufs_len = len(wrapper)
+        inst.sendbuf_len = 2
+
+        sent_parts = []
+
+        def sendfile(in_fd, out_fd, offset, count, do_close=True):
+            if offset:
+                raise OSError(errno.ENOSYS, "unsupported")
+            sent_parts.append(b"a")
+            return 1
+
+        def send(data, do_close=True):
+            sent_parts.append(data)
+            return len(data)
+
+        inst.sendfile = sendfile
+        inst.send = send
+
+        self.assertTrue(inst._flush_some())
+        self.assertFalse(HTTPChannel.sendfile_supported)
+        self.assertEqual(b"".join(sent_parts), b"abcdef")
+        self.assertEqual(file.close_count, 1)
+
+    def test__flush_some_filewrapper_sendfile_unavailable_uses_buffers(self):
+        from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
+
+        inst, sock, map = self._makeOneWithMap()
+        file = DummySendFile(b"abcdef")
+        wrapper = ReadOnlyFileBasedBuffer(file)
+        wrapper.prepare()
+        inst.outbufs = [wrapper, OverflowableBuffer(inst.adj.outbuf_overflow)]
+        inst.total_outbufs_len = len(wrapper)
+        inst.sendbuf_len = 2
+        inst.sendfile_supported = False
+
+        sent_parts = []
+
+        def send(data, do_close=True):
+            sent_parts.append(data)
+            return len(data)
+
+        inst.sendfile = lambda *args, **kwargs: self.fail("sendfile was used")
+        inst.send = send
+
+        self.assertTrue(inst._flush_some())
+        self.assertEqual(sent_parts, [b"ab", b"cd", b"ef"])
+        self.assertTrue(wrapper.sendfile_supported)
+        self.assertEqual(file.close_count, 1)
+
+    def test__flush_some_filewrapper_without_fileno_uses_buffers(self):
+        from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
+
+        inst, sock, map = self._makeOneWithMap()
+        file = io.BytesIO(b"abcdef")
+        wrapper = ReadOnlyFileBasedBuffer(file)
+        wrapper.prepare()
+        inst.outbufs = [wrapper, OverflowableBuffer(inst.adj.outbuf_overflow)]
+        inst.total_outbufs_len = len(wrapper)
+        inst.sendbuf_len = 2
+
+        sent_parts = []
+
+        def send(data, do_close=True):
+            sent_parts.append(data)
+            return len(data)
+
+        inst.sendfile = lambda *args, **kwargs: self.fail("sendfile was used")
+        inst.send = send
+
+        self.assertTrue(inst._flush_some())
+        self.assertEqual(sent_parts, [b"ab", b"cd", b"ef"])
+        self.assertFalse(wrapper.sendfile_supported)
+
+    def test__flush_some_filewrapper_sendfile_invalid_result_uses_buffers(self):
+        from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
+
+        inst, sock, map = self._makeOneWithMap()
+        file = DummySendFile(b"abcdef")
+        wrapper = ReadOnlyFileBasedBuffer(file)
+        wrapper.prepare()
+        inst.outbufs = [wrapper, OverflowableBuffer(inst.adj.outbuf_overflow)]
+        inst.total_outbufs_len = len(wrapper)
+        inst.sendbuf_len = 2
+
+        sent_parts = []
+        inst.sendfile = lambda *args, **kwargs: False
+
+        def send(data, do_close=True):
+            sent_parts.append(data)
+            return len(data)
+
+        inst.send = send
+
+        self.assertTrue(inst._flush_some())
+        self.assertEqual(sent_parts, [b"ab", b"cd", b"ef"])
+        self.assertFalse(wrapper.sendfile_supported)
+        self.assertEqual(file.tell(), 6)
+
+    def test__flush_some_filewrapper_sendfile_disconnects_after_partial(self):
+        from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
+
+        inst, sock, map = self._makeOneWithMap()
+        file = DummySendFile(b"abcdef")
+        wrapper = ReadOnlyFileBasedBuffer(file)
+        wrapper.prepare()
+        inst.outbufs = [wrapper, OverflowableBuffer(inst.adj.outbuf_overflow)]
+        inst.total_outbufs_len = len(wrapper)
+        inst.sendbuf_len = 2
+
+        sent_parts = []
+
+        def sendfile(in_fd, out_fd, offset, count, do_close=True):
+            if offset:
+                inst.handle_close()
+                return 0
+            sent_parts.append(b"a")
+            return 1
+
+        inst.sendfile = sendfile
+        inst.send = lambda *args, **kwargs: self.fail("regular send was used")
+
+        self.assertTrue(inst._flush_some())
+        self.assertEqual(sent_parts, [b"a"])
+        self.assertFalse(inst.connected)
+        self.assertTrue(sock.closed)
+        self.assertEqual(file.tell(), 1)
+        self.assertEqual(file.close_count, 1)
 
     def test_handle_close(self):
         inst, sock, map = self._makeOneWithMap()
@@ -1065,6 +1317,37 @@ class DummyBuffer:
 
     def close(self):
         self.closed = True
+
+
+class DummySendFile:
+    def __init__(self, data, position=0):
+        self.data = data
+        self.position = position
+        self.close_count = 0
+
+    def fileno(self):
+        return 101
+
+    def tell(self):
+        return self.position
+
+    def seek(self, offset, whence=0):
+        if whence == 0:
+            self.position = offset
+        elif whence == 1:
+            self.position += offset
+        else:
+            self.position = len(self.data) + offset
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = len(self.data) - self.position
+        result = self.data[self.position : self.position + size]
+        self.position += len(result)
+        return result
+
+    def close(self):
+        self.close_count += 1
 
 
 class DummyAdjustments:

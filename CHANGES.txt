@@ -42,6 +42,11 @@ Backward Incompatibilities
 Bugfix
 ~~~~~~
 
+- Use ``os.sendfile()`` for ``wsgi.file_wrapper`` responses when it is available
+  for the response socket and file, while preserving the buffered send path for
+  short writes, retryable errors, client disconnections and unsupported file
+  types.
+
 - Ignore ``EBADF`` from ``select``/``poll`` when a socket is closed while
   the server is waiting for I/O, instead of crashing the worker loop.
   See https://github.com/Pylons/waitress/issues/468

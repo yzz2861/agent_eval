@@ -73,6 +73,7 @@ import warnings
 from . import utilities
 
 _DISCONNECTED = frozenset({ECONNRESET, ENOTCONN, ESHUTDOWN, ECONNABORTED, EPIPE, EBADF})
+_sendfile_available = hasattr(os, "sendfile")
 
 try:
     socket_map
@@ -393,6 +394,19 @@ class dispatcher:
             return result
         except OSError as why:
             if why.args[0] == EWOULDBLOCK:
+                return 0
+            elif why.args[0] in _DISCONNECTED:
+                if do_close:
+                    self.handle_close()
+                return 0
+            else:
+                raise
+
+    def sendfile(self, in_fd, out_fd, offset, count, do_close=True):
+        try:
+            return os.sendfile(out_fd, in_fd, offset, count)
+        except OSError as why:
+            if why.args[0] in (EAGAIN, EWOULDBLOCK, EINTR):
                 return 0
             elif why.args[0] in _DISCONNECTED:
                 if do_close:

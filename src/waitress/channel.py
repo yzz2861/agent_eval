@@ -11,6 +11,7 @@
 # FOR A PARTICULAR PURPOSE.
 #
 ##############################################################################
+from errno import EINVAL, ENOSYS, ENOTSOCK, EOPNOTSUPP, ESPIPE
 import socket
 import threading
 import time
@@ -26,6 +27,9 @@ from . import wasyncore
 
 class ClientDisconnected(Exception):
     """Raised when attempting to write to a closed socket."""
+
+
+_SENDFILE_UNSUPPORTED_ERRNOS = frozenset({EINVAL, ENOSYS, ENOTSOCK, EOPNOTSUPP, ESPIPE})
 
 
 class HTTPChannel(wasyncore.dispatcher):
@@ -48,6 +52,7 @@ class HTTPChannel(wasyncore.dispatcher):
     sent_continue = False  # used as a latch after sending 100 continue
     total_outbufs_len = 0  # total bytes ready to send
     current_outbuf_count = 0  # total bytes written to current outbuf
+    sendfile_supported = wasyncore._sendfile_available
 
     #
     # ASYNCHRONOUS METHODS (including __init__)
@@ -270,8 +275,11 @@ class HTTPChannel(wasyncore.dispatcher):
             outbuflen = outbuf.__len__()
 
             while outbuflen > 0:
-                chunk = outbuf.get(self.sendbuf_len)
-                num_sent = self.send(chunk, do_close=do_close)
+                num_sent = self._sendfile_from_outbuf(outbuf, outbuflen, do_close)
+
+                if num_sent is None:
+                    chunk = outbuf.get(self.sendbuf_len)
+                    num_sent = self.send(chunk, do_close=do_close)
 
                 if num_sent:
                     outbuf.skip(num_sent, True)
@@ -305,6 +313,65 @@ class HTTPChannel(wasyncore.dispatcher):
             return True
 
         return False
+
+    def _sendfile_from_outbuf(self, outbuf, outbuflen, do_close):
+        if not self.sendfile_supported or not getattr(
+            outbuf, "sendfile_supported", False
+        ):
+            return None
+
+        file = outbuf.getfile()
+        out_fd = self._fileno
+
+        if not hasattr(file, "fileno") or not isinstance(out_fd, int):
+            outbuf.sendfile_supported = False
+            return None
+
+        try:
+            in_fd = file.fileno()
+            offset = file.tell()
+        except (OSError, ValueError):
+            outbuf.sendfile_supported = False
+            return None
+
+        if (
+            not isinstance(in_fd, int)
+            or isinstance(in_fd, bool)
+            or not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or in_fd < 0
+            or out_fd < 0
+        ):
+            outbuf.sendfile_supported = False
+            return None
+
+        count = min(self.sendbuf_len, outbuflen)
+
+        try:
+            num_sent = self.sendfile(in_fd, out_fd, offset, count, do_close=do_close)
+        except OSError as exc:
+            if exc.errno not in _SENDFILE_UNSUPPORTED_ERRNOS:
+                raise
+
+            if exc.errno == ENOSYS:
+                type(self).sendfile_supported = False
+            outbuf.sendfile_supported = False
+
+            chunk = outbuf.get(self.sendbuf_len)
+            if not chunk:
+                return 0
+            return self.send(chunk, do_close=do_close)
+
+        if (
+            not isinstance(num_sent, int)
+            or isinstance(num_sent, bool)
+            or num_sent < 0
+            or num_sent > count
+        ):
+            outbuf.sendfile_supported = False
+            return None
+
+        return num_sent
 
     def handle_close(self):
         with self.outbuf_lock:

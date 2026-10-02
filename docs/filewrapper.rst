@@ -44,9 +44,11 @@ Waitress will set a ``Content-Length`` header on behalf of an application
 when a file wrapper with a sufficiently file-like object is used if the
 application hasn't already set one.
 
-The machinery which handles a file wrapper currently doesn't do anything
-particularly special using fancy system calls (it doesn't use ``sendfile``
-for example); using it currently just prevents the system from needing to
-copy data to a temporary buffer in order to send it to the client.  No
-copying of data is done when a WSGI app returns a file wrapper that wraps a
-sufficiently file-like object.  It may do something fancier in the future.
+When both the response socket and wrapped file support ``os.sendfile()``,
+Waitress uses it to transfer the response without copying the file contents
+through Python. The requested range is limited to the current file position
+and response length established by ``Content-Length`` (or the remaining file
+size when the application does not set one). Short writes resume from the
+same offset, and retryable errors or an unsupported file/socket combination
+fall back to the buffered read-and-send path without repeating or omitting
+bytes. A client disconnection is handled by the normal connection close path.

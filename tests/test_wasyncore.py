@@ -1527,6 +1527,84 @@ class Test_dispatcher(unittest.TestCase):
         inst = self._makeOne(sock=sock, map=map)
         self.assertRaises(socket.error, inst.send, "a")
 
+    @unittest.skipUnless(hasattr(os, "sendfile"), "os.sendfile required")
+    def test_sendfile_success(self):
+        sock = dummysocket()
+        map = {}
+        inst = self._makeOne(sock=sock, map=map)
+        calls = []
+        original_sendfile = os.sendfile
+
+        def sendfile(in_fd, out_fd, offset, count):
+            calls.append((in_fd, out_fd, offset, count))
+            return 3
+
+        os.sendfile = sendfile
+        try:
+            result = inst.sendfile(1, 2, 4, 8)
+        finally:
+            os.sendfile = original_sendfile
+
+        self.assertEqual(result, 3)
+        self.assertEqual(calls, [(2, 1, 4, 8)])
+
+    @unittest.skipUnless(hasattr(os, "sendfile"), "os.sendfile required")
+    def test_sendfile_eagain(self):
+        sock = dummysocket()
+        map = {}
+        inst = self._makeOne(sock=sock, map=map)
+        original_sendfile = os.sendfile
+
+        def sendfile(in_fd, out_fd, offset, count):
+            raise BlockingIOError(errno.EAGAIN, "try again")
+
+        os.sendfile = sendfile
+        try:
+            result = inst.sendfile(1, 2, 0, 8)
+        finally:
+            os.sendfile = original_sendfile
+
+        self.assertEqual(result, 0)
+
+    @unittest.skipUnless(hasattr(os, "sendfile"), "os.sendfile required")
+    def test_sendfile_disconnect(self):
+        sock = dummysocket()
+        map = {}
+        inst = self._makeOne(sock=sock, map=map)
+        calls = []
+        original_sendfile = os.sendfile
+        inst.handle_close = lambda: calls.append("closed")
+
+        def sendfile(in_fd, out_fd, offset, count):
+            raise OSError(errno.EPIPE, "broken pipe")
+
+        os.sendfile = sendfile
+        try:
+            no_close_result = inst.sendfile(1, 2, 0, 8, do_close=False)
+            close_result = inst.sendfile(1, 2, 0, 8)
+        finally:
+            os.sendfile = original_sendfile
+
+        self.assertEqual(no_close_result, 0)
+        self.assertEqual(close_result, 0)
+        self.assertEqual(calls, ["closed"])
+
+    @unittest.skipUnless(hasattr(os, "sendfile"), "os.sendfile required")
+    def test_sendfile_unsupported(self):
+        sock = dummysocket()
+        map = {}
+        inst = self._makeOne(sock=sock, map=map)
+        original_sendfile = os.sendfile
+
+        def sendfile(in_fd, out_fd, offset, count):
+            raise OSError(errno.ENOSYS, "unsupported")
+
+        os.sendfile = sendfile
+        try:
+            self.assertRaises(OSError, inst.sendfile, 1, 2, 0, 8)
+        finally:
+            os.sendfile = original_sendfile
+
     def test_recv_raises_disconnect(self):
         sock = dummysocket()
         map = {}
