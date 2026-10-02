@@ -6,6 +6,7 @@ require 'rack/attack/cache'
 require 'rack/attack/configuration'
 require 'rack/attack/path_normalizer'
 require 'rack/attack/request'
+require 'rack/attack/store/memory'
 require 'rack/attack/store_proxy/dalli_proxy'
 require 'rack/attack/store_proxy/mem_cache_store_proxy'
 require 'rack/attack/store_proxy/redis_proxy'
@@ -24,8 +25,11 @@ module Rack
 
     class IncompatibleStoreError < Error; end
 
+    class AtomicStoreUnsupportedError < Error; end
+
     autoload :Check,                'rack/attack/check'
     autoload :Throttle,             'rack/attack/throttle'
+    autoload :SmoothThrottle,       'rack/attack/smooth_throttle'
     autoload :Safelist,             'rack/attack/safelist'
     autoload :Blocklist,            'rack/attack/blocklist'
     autoload :Track,                'rack/attack/track'
@@ -35,6 +39,7 @@ module Rack
     class << self
       attr_accessor :enabled, :notifier, :throttle_discriminator_normalizer
       attr_reader :configuration
+      attr_writer :smooth_throttle_clock
 
       def instrument(request)
         if notifier
@@ -67,6 +72,7 @@ module Rack
         :blocklist_ip,
         :safelist_ip,
         :throttle,
+        :smooth_throttle,
         :track,
         :throttled_responder,
         :throttled_responder=,
@@ -82,8 +88,13 @@ module Rack
         :safelists,
         :blocklists,
         :throttles,
+        :smooth_throttles,
         :tracks
       )
+
+      def smooth_throttle_clock
+        @smooth_throttle_clock ||= ->(_request) { Time.now.to_f }
+      end
     end
 
     # Set defaults

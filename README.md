@@ -276,6 +276,80 @@ Rack::Attack.throttle('request per ip', limit: limit_proc, period: period_proc) 
 end
 ```
 
+### Smooth & weighted throttling
+
+Fixed-window counters reset abruptly every period and count every request the
+same. For endpoints like exports, where one request can be far more expensive
+than another, use `smooth_throttle`. It implements
+[GCRA](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm): a budget of
+cost units refills continuously at `rate` units per second, capped by a
+`burst` allowance. The block returns a discriminator and the request cost
+(default cost is `1`):
+
+```ruby
+# Sustain 1 cost unit per second, allow bursts up to 10 units.
+Rack::Attack.smooth_throttle('exports by user', rate: 1, burst: 10) do |request|
+  rows = request.params['rows'].to_i
+  cost = rows.positive? ? rows : 1
+  [request.env['REMOTE_USER'], cost]
+end
+
+# Cost can also be supplied via a dedicated callable.
+Rack::Attack.smooth_throttle('exports by user', rate: 1, burst: 10,
+  cost: ->(request) { request.params['rows'].to_i }) do |request|
+  request.env['REMOTE_USER']
+end
+```
+
+On rejection, `match_data` exposes the exact waiting time (in seconds) until the
+request would fit, plus the budget state:
+
+```ruby
+request.env['rack.attack.match_data']
+# {
+#   discriminator: "alice",
+#   cost: 3.0,
+#   rate: 1.0,
+#   burst: 10.0,
+#   epoch_time: 1234.5,
+#   theoretical_arrival_time: 1251.0,
+#   retry_after: 6.5
+# }
+```
+
+Enabling `throttled_response_retry_after_header` makes smooth throttles emit a
+`Retry-After` header, rounded up to whole seconds. A request whose cost alone
+exceeds `burst` can never be accepted: it is rejected, leaves state untouched
+(no debt is incurred), and `retry_after` is `nil`. Cost `0` requests are always
+allowed and never consume budget.
+
+Admitting a request is an atomic read-compute-write, so the cache store must
+implement the atomic `update(key, expires_in:) { |current| [new_value, result] }
+primitive. Rack::Attack ships a thread-safe in-memory implementation:
+
+```ruby
+Rack::Attack.cache.store = Rack::Attack::Store::Memory.new
+```
+
+Stores without that primitive (including `ActiveSupport::Cache::MemoryStore`)
+raise `Rack::Attack::AtomicStoreUnsupportedError` on the first matching
+request rather than faking atomicity with separate read/write calls.
+
+The time source can be injected, e.g. in tests or to use a monotonic clock:
+
+```ruby
+# Global, called per request with the request as its argument.
+Rack::Attack.smooth_throttle_clock = ->(_request) { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+
+# Or per throttle.
+Rack::Attack.smooth_throttle('exports', rate: 1, burst: 10, clock: ->(_) { MyClock.now }) do |request|
+  [request.ip, 1]
+end
+```
+
+Backwards clock adjustments are handled fail-closed: time moved backwards never
+grants extra budget, and refilling resumes from elapsed time after the jump.
+
 ### Tracks
 
 ```ruby
@@ -313,6 +387,8 @@ Rack::Attack.cache.store = ActiveSupport::Cache::RedisCacheStore.new(url: "...")
 Most applications should use a new, separate database used only for `rack-attack`. During an actual attack or periods of heavy load, this database will come under heavy load. Keeping it on a separate database instance will give you additional resilience and make sure that other functions (like caching for your application) don't go down.
 
 Note that `Rack::Attack.cache` is only used for throttling, allow2ban and fail2ban filtering; not blocklisting and safelisting. Your cache store must implement `increment` and `write` like [ActiveSupport::Cache::Store](http://api.rubyonrails.org/classes/ActiveSupport/Cache/Store.html). This means that other cache stores which inherit from ActiveSupport::Cache::Store are also compatible. In-memory stores which are not backed by an external database, such as `ActiveSupport::Cache::MemoryStore.new`, will be mostly ineffective because each Ruby process in your deployment will have it's own state, effectively multiplying the number of requests each client can make by the number of Ruby processes you have deployed.
+
+`smooth_throttle` has a stricter requirement: its store must implement the atomic `update` primitive (see [Smooth & weighted throttling](#smooth--weighted-throttling)). For single-process use, bundle `Rack::Attack::Store::Memory`; regular cache stores raise `Rack::Attack::AtomicStoreUnsupportedError` until they provide that primitive.
 
 ## Customizing responses
 

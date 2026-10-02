@@ -36,6 +36,28 @@ module Rack
         do_count(key, expires_in)
       end
 
+      # Run a read-compute-write block atomically against the configured store.
+      #
+      # The store must implement its own +update(key, expires_in:)+ primitive
+      # (see Rack::Attack::Store::Memory). Falling back to separate read/write
+      # calls would silently lose updates under concurrency, so stores without
+      # that primitive raise rather than pretending to be atomic.
+      def atomic_update(unprefixed_key, expires_in)
+        raise Rack::Attack::MissingStoreError if store.nil?
+        unless store.respond_to?(:update)
+          raise(
+            Rack::Attack::AtomicStoreUnsupportedError,
+            "Configured store #{store.class.name} doesn't respond to #update; " \
+            "weighted smooth throttles require an atomic read-compute-write store " \
+            "(e.g. Rack::Attack::Store::Memory)"
+          )
+        end
+
+        store.update("#{prefix}:#{unprefixed_key}", expires_in: expires_in) do |raw_value|
+          yield(raw_value)
+        end
+      end
+
       def read(unprefixed_key)
         raise Rack::Attack::MissingStoreError if store.nil?
 

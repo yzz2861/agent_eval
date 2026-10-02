@@ -10,16 +10,25 @@ module Rack
       DEFAULT_THROTTLED_RESPONDER = lambda do |req|
         if Rack::Attack.configuration.throttled_response_retry_after_header
           match_data = req.env['rack.attack.match_data']
-          now = match_data[:epoch_time]
-          retry_after = match_data[:period] - (now % match_data[:period])
+          # Smooth throttles already expose the fractional wait; ceil because
+          # the Retry-After header is expressed in whole seconds.
+          retry_after = if match_data.key?(:retry_after)
+                          match_data[:retry_after]&.ceil
+                        else
+                          now = match_data[:epoch_time]
+                          match_data[:period] - (now % match_data[:period])
+                        end
 
-          [429, { 'content-type' => 'text/plain', 'retry-after' => retry_after.to_s }, ["Retry later\n"]]
+          headers = { 'content-type' => 'text/plain' }
+          headers['retry-after'] = retry_after.to_s unless retry_after.nil?
+          [429, headers, ["Retry later\n"]]
         else
           [429, { 'content-type' => 'text/plain' }, ["Retry later\n"]]
         end
       end
 
-      attr_reader :safelists, :blocklists, :throttles, :tracks, :anonymous_blocklists, :anonymous_safelists
+      attr_reader :safelists, :blocklists, :throttles, :smooth_throttles, :tracks,
+                  :anonymous_blocklists, :anonymous_safelists
       attr_accessor :blocklisted_responder, :throttled_responder, :throttled_response_retry_after_header
 
       attr_reader :blocklisted_response, :throttled_response # Keeping these for backwards compatibility
@@ -76,6 +85,10 @@ module Rack
         @throttles[name] = Throttle.new(name, options, &block)
       end
 
+      def smooth_throttle(name, options, &block)
+        @smooth_throttles[name] = SmoothThrottle.new(name, options, &block)
+      end
+
       def track(name, options = {}, &block)
         @tracks[name] = Track.new(name, options, &block)
       end
@@ -91,9 +104,8 @@ module Rack
       end
 
       def throttled?(request)
-        @throttles.any? do |_name, throttle|
-          throttle.matched_by?(request)
-        end
+        @throttles.any? { |_name, throttle| throttle.matched_by?(request) } ||
+          @smooth_throttles.any? { |_name, throttle| throttle.matched_by?(request) }
       end
 
       def tracked?(request)
@@ -112,6 +124,7 @@ module Rack
         @safelists = {}
         @blocklists = {}
         @throttles = {}
+        @smooth_throttles = {}
         @tracks = {}
         @anonymous_blocklists = []
         @anonymous_safelists = []
