@@ -43,7 +43,7 @@ module Rack
         (count > current_limit).tap do |throttled|
           if throttled
             annotate_request_with_matched_data(request, data)
-            Rack::Attack.instrument(request)
+            instrument_match(request, data)
           end
         end
       end
@@ -75,6 +75,10 @@ module Rack
         request.env['rack.attack.match_discriminator'] = data[:discriminator]
         request.env['rack.attack.match_type']          = type
         request.env['rack.attack.match_data']          = data
+      end
+
+      def instrument_match(request, _data)
+        Rack::Attack.instrument(request)
       end
     end
   end

@@ -26,6 +26,7 @@ module Rack
 
     autoload :Check,                'rack/attack/check'
     autoload :Throttle,             'rack/attack/throttle'
+    autoload :ShadowThrottle,       'rack/attack/shadow_throttle'
     autoload :Safelist,             'rack/attack/safelist'
     autoload :Blocklist,            'rack/attack/blocklist'
     autoload :Track,                'rack/attack/track'
@@ -44,6 +45,39 @@ module Rack
           # Deprecated: Keeping just for backwards compatibility
           notifier.instrument("rack.attack", request: request)
         end
+      end
+
+      # Instruments a hypothetical ("shadow") throttle hit. The payload only
+      # carries a limited view of the request, so shadow events never expose
+      # the full env, and stays clearly separated from real hits.
+      def instrument_shadow(request, name, data)
+        if notifier
+          notifier.instrument(
+            "shadow_throttle.rack_attack",
+            request: shadow_event_request_payload(request),
+            matched: name,
+            match_data: data
+          )
+        end
+      end
+
+      def instrument_shadow_error(request, name, error)
+        if notifier
+          notifier.instrument(
+            "shadow_throttle_error.rack_attack",
+            request: shadow_event_request_payload(request),
+            matched: name,
+            error: { class: error.class.name, message: error.message }
+          )
+        end
+      end
+
+      def shadow_event_request_payload(request)
+        {
+          ip: request.ip,
+          method: request.request_method,
+          path: request.path
+        }
       end
 
       def cache
@@ -68,6 +102,9 @@ module Rack
         :safelist_ip,
         :throttle,
         :track,
+        :shadow_throttle,
+        :shadow_throttle_on_reject,
+        :shadow_throttle_on_reject=,
         :throttled_responder,
         :throttled_responder=,
         :blocklisted_responder,
@@ -82,7 +119,8 @@ module Rack
         :safelists,
         :blocklists,
         :throttles,
-        :tracks
+        :tracks,
+        :shadow_throttles
       )
     end
 
@@ -111,6 +149,8 @@ module Rack
       if configuration.safelisted?(request)
         @app.call(env)
       elsif configuration.blocklisted?(request)
+        configuration.shadow_throttled?(request) if configuration.shadow_throttle_on_reject
+
         # Deprecated: Keeping blocklisted_response for backwards compatibility
         if configuration.blocklisted_response
           configuration.blocklisted_response.call(env)
@@ -118,6 +158,8 @@ module Rack
           configuration.blocklisted_responder.call(request)
         end
       elsif configuration.throttled?(request)
+        configuration.shadow_throttled?(request) if configuration.shadow_throttle_on_reject
+
         # Deprecated: Keeping throttled_response for backwards compatibility
         if configuration.throttled_response
           configuration.throttled_response.call(env)
@@ -126,6 +168,7 @@ module Rack
         end
       else
         configuration.tracked?(request)
+        configuration.shadow_throttled?(request)
         @app.call(env)
       end
     end

@@ -31,6 +31,7 @@ See the [Backing & Hacking blog post](https://www.kickstarter.com/backing-and-ha
     - [Allow2Ban](#allow2ban)
   - [Throttling](#throttling)
     - [`throttle(name, options, &block)`](#throttlename-options-block)
+    - [`shadow_throttle(name, options, &block)`](#shadow_throttlename-options-block)
   - [Tracks](#tracks)
   - [Cache store configuration](#cache-store-configuration)
 - [Customizing responses](#customizing-responses)
@@ -275,6 +276,48 @@ Rack::Attack.throttle('request per ip', limit: limit_proc, period: period_proc) 
   request.ip
 end
 ```
+
+#### `shadow_throttle(name, options, &block)`
+
+A shadow throttle observes traffic exactly like a regular `throttle` — same
+`limit`/`period` options, same discriminator block — but it never changes
+the response. Use it to rehearse a new rate limit in production before
+enforcing it:
+
+```ruby
+# Enforced rule
+Rack::Attack.throttle("requests by ip", limit: 100, period: 60) do |request|
+  request.ip
+end
+
+# Candidate rule under observation: counts and matches, but never blocks
+Rack::Attack.shadow_throttle("requests by ip (next)", limit: 60, period: 60) do |request|
+  request.ip
+end
+```
+
+Shadow throttles are evaluated after the real rules, so they can't change the
+order or outcome of your enforced configuration. Their counters live in an
+isolated cache namespace and never consume the real rules' counts, and a
+shadow rule that raises an error is reported and skipped without affecting
+the request.
+
+By default shadow throttles only see requests that the real rules allowed.
+To also record what the shadow rules *would* have done on requests that were
+already blocked or throttled, enable:
+
+```ruby
+Rack::Attack.shadow_throttle_on_reject = true
+```
+
+Hypothetical hits are published on a separate notification,
+`shadow_throttle.rack_attack`, whose payload carries only a limited view of
+the request (`ip`, `method`, `path`) plus the rule name and match data —
+distinct from real hits on `throttle.rack_attack`, which receive the full
+request object. Shadow rule failures are published on
+`shadow_throttle_error.rack_attack`. Shadow data is also annotated on the
+env under `rack.attack.shadow_throttle_data` and
+`rack.attack.shadow_matches`, separate from the real rules' annotations.
 
 ### Tracks
 

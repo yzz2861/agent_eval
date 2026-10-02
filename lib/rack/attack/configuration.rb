@@ -19,8 +19,10 @@ module Rack
         end
       end
 
-      attr_reader :safelists, :blocklists, :throttles, :tracks, :anonymous_blocklists, :anonymous_safelists
-      attr_accessor :blocklisted_responder, :throttled_responder, :throttled_response_retry_after_header
+      attr_reader :safelists, :blocklists, :throttles, :tracks, :shadow_throttles,
+                  :anonymous_blocklists, :anonymous_safelists
+      attr_accessor :blocklisted_responder, :throttled_responder,
+                    :throttled_response_retry_after_header, :shadow_throttle_on_reject
 
       attr_reader :blocklisted_response, :throttled_response # Keeping these for backwards compatibility
 
@@ -76,6 +78,10 @@ module Rack
         @throttles[name] = Throttle.new(name, options, &block)
       end
 
+      def shadow_throttle(name, options, &block)
+        @shadow_throttles[name] = ShadowThrottle.new(name, options, &block)
+      end
+
       def track(name, options = {}, &block)
         @tracks[name] = Track.new(name, options, &block)
       end
@@ -102,6 +108,22 @@ module Rack
         end
       end
 
+      # Evaluates shadow throttles for observation only. The return value is
+      # meaningless by design: shadow rules must never influence the response.
+      # A failing shadow rule is reported and skipped so it can neither break
+      # the request nor rewrite the real rules' verdict.
+      def shadow_throttled?(request)
+        @shadow_throttles.each_value do |throttle|
+          begin
+            throttle.matched_by?(request)
+          rescue StandardError => e
+            Rack::Attack.instrument_shadow_error(request, throttle.shadow_name, e)
+          end
+        end
+
+        false
+      end
+
       def clear_configuration
         set_defaults
       end
@@ -113,9 +135,11 @@ module Rack
         @blocklists = {}
         @throttles = {}
         @tracks = {}
+        @shadow_throttles = {}
         @anonymous_blocklists = []
         @anonymous_safelists = []
         @throttled_response_retry_after_header = false
+        @shadow_throttle_on_reject = false
 
         @blocklisted_responder = DEFAULT_BLOCKLISTED_RESPONDER
         @throttled_responder = DEFAULT_THROTTLED_RESPONDER
