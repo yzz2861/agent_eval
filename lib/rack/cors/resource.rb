@@ -7,7 +7,11 @@ module Rack
       # {https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Headers}
       CORS_SIMPLE_HEADERS = %w[accept accept-language content-language content-type].freeze
 
-      attr_accessor :path, :methods, :headers, :expose, :max_age, :credentials, :pattern, :if_proc, :vary_headers
+      # CORS protocol headers are never exposed dynamically; they are not
+      # application business headers.
+      CORS_PROTOCOL_HEADER_PATTERN = /\Aaccess-control-/i
+
+      attr_accessor :path, :methods, :headers, :expose, :expose_except, :max_age, :credentials, :pattern, :if_proc, :vary_headers
 
       def initialize(public_resource, path, opts = {})
         raise CorsMisconfigurationError if public_resource && opts[:credentials] == true
@@ -33,7 +37,14 @@ module Rack
                          ensure_enum(opts[:methods]) || [:get]
                        end.map(&:to_s)
 
-        self.expose = opts[:expose] ? [opts[:expose]].flatten : nil
+        self.expose = case opts[:expose]
+                      when nil, :any then opts[:expose]
+                      when Regexp then [opts[:expose]]
+                      else
+                        [opts[:expose]].flatten
+                      end
+
+        self.expose_except = [opts[:expose_except]].flatten.compact.collect { |h| h.to_s.downcase }.freeze
       end
 
       def matches_path?(path)
@@ -62,11 +73,49 @@ module Rack
         h = {
           'access-control-allow-origin' => origin_for_response_header(env[Rack::Cors::HTTP_ORIGIN]),
           'access-control-allow-methods' => methods.collect { |m| m.to_s.upcase }.join(', '),
-          'access-control-expose-headers' => expose.nil? ? '' : expose.join(', '),
+          'access-control-expose-headers' => static_expose_value,
           'access-control-max-age' => max_age.to_s
         }
         h['access-control-allow-credentials'] = 'true' if credentials
         header_proc.call(h)
+      end
+
+      # Whether the expose configuration can only be fully resolved once the
+      # actual response headers are known (dynamic pattern, wildcard, or
+      # exclusions that must be enforced on the final value).
+      def dynamic_expose?
+        expose == :any || expose_patterns.any? || expose_except.any?
+      end
+
+      # Computes the final Access-Control-Expose-Headers value for an actual
+      # (non-preflight) response by merging, in order:
+      #
+      #   1. the value already set by the application (if any)
+      #   2. the statically configured expose entries
+      #   3. the response header names matching the configured pattern(s)
+      #
+      # Names are de-duplicated case-insensitively (first occurrence wins) and
+      # names listed in expose_except are always removed. A wildcard
+      # (expose: :any) is emitted as '*' only for non-credentialed resources
+      # without exclusions; otherwise it is expanded to the explicit list of
+      # response header names, since '*' is treated as a literal header name
+      # on credentialed requests and cannot express exclusions.
+      def expose_headers_for(response_headers)
+        existing = response_headers['access-control-expose-headers']
+        entries = existing && !existing.empty? ? existing.split(/,\s*/) : []
+        entries += static_expose_entries
+        entries += dynamic_expose_matches(response_headers)
+
+        return '*' if expose == :any && !credentials && expose_except.empty?
+
+        seen = {}
+        entries.each_with_object([]) do |entry, result|
+          key = entry.to_s.downcase
+          next if seen[key] || expose_except.include?(key)
+
+          seen[key] = true
+          result << entry.to_s
+        end.join(', ')
       end
 
       protected
@@ -135,6 +184,33 @@ module Rack
           else
             ->(h) { Rack::Utils::HeaderHash.new(h) }
           end
+        end
+      end
+
+      # The expose value that does not depend on the actual response. Used
+      # for preflight responses, where no application response exists yet and
+      # business headers must not be exposed speculatively.
+      def static_expose_value
+        return '' if expose.nil?
+        return expose_except.empty? && !credentials ? '*' : '' if expose == :any
+
+        static_expose_entries.reject { |entry| expose_except.include?(entry.to_s.downcase) }.join(', ')
+      end
+
+      def static_expose_entries
+        expose.is_a?(Array) ? expose.grep(String) : []
+      end
+
+      def expose_patterns
+        expose.is_a?(Array) ? expose.grep(Regexp) : []
+      end
+
+      def dynamic_expose_matches(response_headers)
+        names = response_headers.keys.reject { |name| name =~ CORS_PROTOCOL_HEADER_PATTERN }
+        return names if expose == :any
+
+        names.select do |name|
+          expose_patterns.any? { |pattern| pattern =~ name }
         end
       end
     end

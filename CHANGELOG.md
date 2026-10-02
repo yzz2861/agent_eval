@@ -1,6 +1,11 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+### Added
+- Dynamic `Access-Control-Expose-Headers` generation: `expose` now accepts a regexp (matched against the headers actually present on each response) and `:any` (wildcard). Wildcards are emitted as `*` for non-credentialed resources and expanded to an explicit header list for credentialed ones. Dynamically matched headers are merged with statically configured entries and any application-set `Access-Control-Expose-Headers` value, de-duplicated case-insensitively, without mutating the application response headers.
+- New `expose_except` resource option: a list of sensitive header names that are always removed from the generated `Access-Control-Expose-Headers` value.
+
 ## 3.0.0 - 2025-05-16
 ### Changed
 - Update Rack dependency to >= 3.0.14

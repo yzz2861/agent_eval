@@ -88,7 +88,7 @@ module Rack
           end
           return [200, headers, []]
         else
-          add_headers = process_cors(env, path)
+          add_headers, matched_resource = process_cors(env, path)
         end
       else
         Result.miss(env, Result::MISS_NO_ORIGIN)
@@ -102,7 +102,12 @@ module Rack
       status, headers, body = @app.call env
 
       if add_headers
+        # Resolve dynamic expose rules against the actual response headers
+        # before merging, so the application response is only read (it may
+        # be frozen) and the merged result is a fresh, mutable hash.
+        expose_headers = matched_resource.expose_headers_for(headers) if matched_resource&.dynamic_expose?
         headers = add_headers.merge(headers)
+        headers['access-control-expose-headers'] = expose_headers if expose_headers
         debug(env) do
           add_headers.each_pair do |key, value|
             headers["x-rack-cors-original-#{key}"] = value if headers.key?(key)
@@ -184,8 +189,7 @@ module Rack
       resource, error = match_resource(path, env)
       if resource
         Result.hit(env)
-        cors = resource.to_headers(env)
-        cors
+        [resource.to_headers(env), resource]
 
       else
         Result.miss(env, error)

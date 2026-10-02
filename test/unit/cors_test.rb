@@ -521,6 +521,155 @@ describe Rack::Cors do
     end
   end
 
+  describe 'with dynamic expose headers' do
+    let(:response_headers) { { 'content-type' => 'text/html', 'x-report-one' => '1', 'x-report-two' => '2' } }
+    let(:response_status) { 200 }
+    let(:resource_options) { { expose: [%r{\Ax-report-}i] } }
+    let(:app) do
+      resp = [response_status, response_headers, ['OK']]
+      opts = { methods: :get }.merge(resource_options)
+      Rack::Builder.new do
+        use Rack::Lint
+        use Rack::Cors do
+          allow do
+            origins 'example.com'
+            resource '/', opts
+          end
+        end
+        map('/') do
+          run ->(_env) { resp }
+        end
+      end
+    end
+
+    def expose_headers
+      last_response.headers['Access-Control-Expose-Headers']
+    end
+
+    it 'exposes response headers matching the pattern' do
+      successful_cors_request '/', origin: 'http://example.com'
+      _(expose_headers).must_equal 'x-report-one, x-report-two'
+    end
+
+    it 'does not expose response headers not matching the pattern' do
+      successful_cors_request '/', origin: 'http://example.com'
+      _(expose_headers).wont_include 'content-type'
+    end
+
+    describe 'without matching response headers' do
+      let(:response_headers) { { 'content-type' => 'text/html' } }
+
+      it 'exposes nothing' do
+        successful_cors_request '/', origin: 'http://example.com'
+        _(expose_headers).must_equal ''
+      end
+    end
+
+    describe 'with excluded sensitive headers' do
+      let(:response_headers) { { 'content-type' => 'text/html', 'x-report-one' => '1', 'x-report-two' => '2' }.merge('x-report-secret' => 's3cr3t') }
+      let(:resource_options) { { expose: [%r{\Ax-report-}i], expose_except: %w[x-report-secret] } }
+
+      it 'never exposes the excluded headers' do
+        successful_cors_request '/', origin: 'http://example.com'
+        _(expose_headers).must_equal 'x-report-one, x-report-two'
+      end
+    end
+
+    describe 'with mixed static entries and pattern' do
+      let(:resource_options) { { expose: ['X-Report-One', %r{\Ax-report-}i] } }
+
+      it 'merges static and dynamic entries, de-duplicated case-insensitively' do
+        successful_cors_request '/', origin: 'http://example.com'
+        _(expose_headers).must_equal 'X-Report-One, x-report-two'
+      end
+    end
+
+    describe 'with app-set Expose-Headers' do
+      let(:response_headers) { { 'content-type' => 'text/html', 'x-report-one' => '1', 'x-report-two' => '2' }.merge('access-control-expose-headers' => 'X-Custom, x-report-one') }
+
+      it 'merges the app value with dynamic matches, de-duplicated case-insensitively' do
+        successful_cors_request '/', origin: 'http://example.com'
+        _(expose_headers).must_equal 'X-Custom, x-report-one, x-report-two'
+      end
+    end
+
+    describe 'with wildcard expose' do
+      let(:resource_options) { { expose: :any } }
+
+      it 'emits * for non-credentialed resources' do
+        successful_cors_request '/', origin: 'http://example.com'
+        _(expose_headers).must_equal '*'
+      end
+
+      describe 'with credentials' do
+        let(:resource_options) { { expose: :any, credentials: true } }
+
+        it 'expands to the explicit response header names' do
+          successful_cors_request '/', origin: 'http://example.com'
+          _(expose_headers).must_equal 'content-type, x-report-one, x-report-two'
+          _(last_response.headers['Access-Control-Allow-Credentials']).must_equal 'true'
+        end
+      end
+
+      describe 'with exclusions' do
+        let(:response_headers) { { 'content-type' => 'text/html', 'x-report-one' => '1', 'x-report-two' => '2' }.merge('x-report-secret' => 's3cr3t') }
+        let(:resource_options) { { expose: :any, expose_except: %w[x-report-secret] } }
+
+        it 'expands instead of emitting * so exclusions can be honored' do
+          successful_cors_request '/', origin: 'http://example.com'
+          _(expose_headers).must_equal 'content-type, x-report-one, x-report-two'
+        end
+      end
+    end
+
+    describe 'with frozen response headers' do
+      let(:response_headers) { { 'content-type' => 'text/html', 'x-report-one' => '1', 'x-report-two' => '2' }.freeze }
+
+      it 'does not mutate the response headers in place' do
+        successful_cors_request '/', origin: 'http://example.com'
+        _(expose_headers).must_equal 'x-report-one, x-report-two'
+        _(response_headers).must_be :frozen?
+        _(response_headers.keys).wont_include 'access-control-expose-headers'
+      end
+    end
+
+    describe 'with an error response' do
+      let(:response_status) { 500 }
+
+      it 'still exposes matching headers' do
+        successful_cors_request '/', origin: 'http://example.com'
+        _(last_response.status).must_equal 500
+        _(expose_headers).must_equal 'x-report-one, x-report-two'
+      end
+    end
+
+    describe 'preflight requests' do
+      it 'does not expose business headers that do not exist yet' do
+        preflight_request('http://example.com', '/')
+        _(last_response).must_render_cors_success
+        _(expose_headers).must_equal ''
+      end
+
+      describe 'with mixed static entries and pattern' do
+        let(:resource_options) { { expose: ['X-Static-Token', %r{\Ax-report-}i] } }
+
+        it 'exposes only the static entries' do
+          preflight_request('http://example.com', '/')
+          _(expose_headers).must_equal 'X-Static-Token'
+        end
+      end
+
+      describe 'with wildcard expose and credentials' do
+        let(:resource_options) { { expose: :any, credentials: true } }
+
+        it 'does not emit a speculative wildcard' do
+          preflight_request('http://example.com', '/')
+          _(expose_headers).must_equal ''
+        end
+      end
+    end
+  end
+
   protected
 
   def cors_request(*args)
