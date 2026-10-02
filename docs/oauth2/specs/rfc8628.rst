@@ -104,6 +104,61 @@ Check points:
 1. route should match ``get_verification_uri`` in Device Authorization Endpoint
 2. user grant should match ``query_user_grant`` in Device Code Grant
 
+Device Flow Client
+------------------
+
+The client side of the device authorization grant is implemented by
+:class:`OAuth2Client <authlib.oauth2.client.OAuth2Client>`, available for
+both the synchronous clients (requests and httpx based) and the async
+httpx based client.
+
+The client first requests a device code from the device authorization
+endpoint, then polls the token endpoint until the end user completes the
+authorization::
+
+    from authlib.integrations.requests_client import OAuth2Session
+
+    client = OAuth2Session(
+        client_id,
+        device_authorization_endpoint="https://provider.example/device",
+        token_endpoint="https://provider.example/token",
+    )
+
+    info = client.fetch_device_authorization()
+    # the library does not open a browser; present the verification
+    # URI and user code to the end user yourself
+    print("Visit", info["verification_uri"], "and enter", info["user_code"])
+
+    token = client.poll_device_token(info)
+
+``fetch_device_authorization`` returns the device authorization response,
+including the ``verification_uri`` and ``user_code`` values that the
+end user needs. ``poll_device_token`` handles the RFC 8628 polling
+rules:
+
+- ``authorization_pending`` responses keep the polling going.
+- ``slow_down`` responses increase the polling interval by 5 seconds
+  for all subsequent requests.
+- ``access_denied``, ``expired_token`` and other errors are raised.
+- Network timeouts trigger a separate exponential backoff that does not
+  change the protocol polling interval.
+- Polling stops with
+  :class:`ExpiredTokenError <authlib.oauth2.rfc8628.ExpiredTokenError>`
+  once the device code lifetime (``expires_in``) is reached.
+
+Polling runs in the calling thread (or task); once
+``poll_device_token`` returns, the device code is not polled anymore in
+the background. Polling can be customized and aborted:
+
+- ``clock`` and ``sleep`` callables can be injected, e.g. for testing.
+- A ``cancel_event`` (e.g. ``threading.Event`` or ``asyncio.Event``)
+  stops the polling without sending further requests; the method then
+  returns ``None``.
+
+The async client works the same way::
+
+    info = await client.fetch_device_authorization()
+    token = await client.poll_device_token(info)
 
 .. _RFC8628: https://tools.ietf.org/html/rfc8628
 

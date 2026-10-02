@@ -1,4 +1,7 @@
+import time
+
 from authlib.common.security import generate_token
+from authlib.common.urls import add_params_to_qs
 from authlib.common.urls import url_decode
 
 from .auth import ClientAuth
@@ -8,13 +11,24 @@ from .rfc6749.parameters import parse_authorization_code_response
 from .rfc6749.parameters import parse_implicit_response
 from .rfc6749.parameters import prepare_grant_uri
 from .rfc6749.parameters import prepare_token_request
+from .rfc6749.util import list_to_scope
 from .rfc7009 import prepare_revoke_token_request
 from .rfc7636 import create_s256_code_challenge
+from .rfc8628 import DEVICE_CODE_GRANT_TYPE
+from .rfc8628 import ExpiredTokenError
 
 DEFAULT_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
 }
+
+#: Default delay in seconds between device token polling requests, used
+#: when the device authorization response contains no "interval" value.
+DEFAULT_DEVICE_POLL_INTERVAL = 5
+
+#: Maximum delay in seconds between device token polling requests after
+#: network timeouts. The backoff grows exponentially up to this value.
+DEVICE_POLL_MAX_TIMEOUT_BACKOFF = 30
 
 
 class OAuth2Client:
@@ -46,6 +60,12 @@ class OAuth2Client:
     client_auth_class = ClientAuth
     token_auth_class = TokenAuth
     oauth_error_class = OAuth2Error
+
+    #: Exception classes raised by the HTTP transport on network timeouts.
+    #: Device token polling backs off when one of these is raised, instead
+    #: of aborting. Integrations extend this tuple with the timeout errors
+    #: of their HTTP library.
+    network_timeout_errors = (TimeoutError,)
 
     EXTRA_AUTHORIZE_PARAMS = ("response_mode", "nonce", "prompt", "login_hint")
     SESSION_REQUEST_PARAMS = []
@@ -315,6 +335,136 @@ class OAuth2Client:
                 self.update_token(new_token, access_token=access_token)
             return True
 
+    def fetch_device_authorization(self, url=None, **kwargs):
+        """Fetch a device authorization response, defined in RFC8628
+        Section 3.1 and 3.2.
+
+        :param url: Device authorization endpoint URL. If not given, the
+            ``device_authorization_endpoint`` metadata value is used.
+        :param kwargs: Extra parameters for the request body, e.g. ``scope``.
+        :return: A dict containing the ``device_code`` to poll with, and
+            the ``user_code`` and ``verification_uri`` values to display.
+
+        The library does not open a browser; it is the caller's
+        responsibility to present ``verification_uri`` and ``user_code``
+        to the end user.
+        """
+        session_kwargs = self._extract_session_request_params(kwargs)
+
+        if url is None:
+            url = self.metadata.get("device_authorization_endpoint")
+
+        if "scope" not in kwargs and self.scope:
+            kwargs["scope"] = self.scope
+
+        params = [("client_id", self.client_id)]
+        for k, value in kwargs.items():
+            if value is not None:
+                if k == "scope":
+                    value = list_to_scope(value)
+                params.append((k, value))
+        body = add_params_to_qs("", params)
+
+        auth = self.client_auth(self.token_endpoint_auth_method)
+        return self._fetch_device_authorization(
+            url, body=body, auth=auth, headers=DEFAULT_HEADERS, **session_kwargs
+        )
+
+    def poll_device_token(
+        self,
+        device_info,
+        url=None,
+        *,
+        clock=None,
+        sleep=None,
+        cancel_event=None,
+        **kwargs,
+    ):
+        """Poll the token endpoint until the user completes the device
+        authorization, defined in RFC8628 Section 3.3 and 3.5.
+
+        :param device_info: The device authorization response returned by
+            :meth:`fetch_device_authorization`, or a ``device_code`` string.
+        :param url: Token endpoint URL. If not given, the ``token_endpoint``
+            metadata value is used.
+        :param clock: A callable returning the current time in seconds, used
+            to enforce the device code lifetime. Defaults to
+            ``time.monotonic``.
+        :param sleep: A callable used to wait between polling requests.
+            Defaults to ``time.sleep``.
+        :param cancel_event: An optional event-like object with an
+            ``is_set()`` method (e.g. ``threading.Event``). Once set,
+            polling stops and no further request is sent.
+        :param kwargs: Extra parameters for the token request.
+        :return: A :class:`OAuth2Token` object, or ``None`` if
+            ``cancel_event`` was set.
+
+        ``authorization_pending`` and ``slow_down`` errors keep polling
+        (``slow_down`` permanently increases the interval by 5 seconds),
+        while ``access_denied``, ``expired_token`` and other errors are
+        raised. Network timeouts trigger a separate exponential backoff
+        that does not affect the protocol interval. Polling stops with
+        ``ExpiredTokenError`` once the device code lifetime
+        (``expires_in``) is reached.
+
+        Polling happens in the calling thread: when this method returns,
+        the device code is not polled anymore in the background.
+        """
+        if isinstance(device_info, str):
+            device_info = {"device_code": device_info}
+
+        device_code = device_info["device_code"]
+        interval = device_info.get("interval") or DEFAULT_DEVICE_POLL_INTERVAL
+
+        if clock is None:
+            clock = time.monotonic
+        if sleep is None:
+            sleep = time.sleep
+        if url is None:
+            url = self.metadata.get("token_endpoint")
+
+        expires_in = device_info.get("expires_in")
+        deadline = None
+        if expires_in is not None:
+            deadline = clock() + expires_in
+
+        timeout_backoff = None
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
+            if deadline is not None and clock() >= deadline:
+                raise ExpiredTokenError()
+
+            try:
+                return self.fetch_token(
+                    url,
+                    grant_type=DEVICE_CODE_GRANT_TYPE,
+                    device_code=device_code,
+                    **kwargs,
+                )
+            except self.network_timeout_errors:
+                # network timeout: back off independently of the
+                # protocol polling interval
+                if timeout_backoff is None:
+                    timeout_backoff = 1
+                else:
+                    timeout_backoff = min(
+                        timeout_backoff * 2, DEVICE_POLL_MAX_TIMEOUT_BACKOFF
+                    )
+                wait = timeout_backoff
+            except self.oauth_error_class as error:
+                # the server answered: reset the network timeout backoff
+                timeout_backoff = None
+                if error.error == "authorization_pending":
+                    wait = interval
+                elif error.error == "slow_down":
+                    interval += 5
+                    wait = interval
+                else:
+                    raise
+
+            sleep(wait)
+
     def revoke_token(
         self,
         url,
@@ -443,6 +593,21 @@ class OAuth2Client:
             resp = hook(resp)
 
         return self.parse_response_token(resp)
+
+    def _fetch_device_authorization(self, url, body, auth, headers, **kwargs):
+        resp = self._http_post(url, body=body, auth=auth, headers=headers, **kwargs)
+        return self._parse_device_authorization_response(resp)
+
+    def _parse_device_authorization_response(self, resp):
+        if resp.status_code >= 500:
+            resp.raise_for_status()
+
+        data = resp.json()
+        if "error" in data:
+            raise self.oauth_error_class(
+                error=data["error"], description=data.get("error_description")
+            )
+        return data
 
     def _refresh_token(
         self, url, refresh_token=None, body="", headers=None, auth=None, **kwargs

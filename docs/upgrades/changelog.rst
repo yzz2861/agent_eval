@@ -15,6 +15,10 @@ Version 1.x.x
   a draft extension to :rfc:`7523` for cross-application access using identity
   assertions issued by an external enterprise IdP.
   See :ref:`specs/rfc7523-id-jag` for details. :pr:`898`
+- Add client-side support for the OAuth 2.0 Device Authorization Grant
+  (:rfc:`8628`): ``OAuth2Client.fetch_device_authorization()`` and
+  ``OAuth2Client.poll_device_token()`` on the sync and async OAuth2
+  clients. See :ref:`specs/rfc8628` for details.
 
 Version 1.8.0
 -------------
