@@ -89,3 +89,86 @@ information to all requests to the app. An example,
     @blueprint.app_context_processor
     async def app_wide():
         return {'context': 'value'}
+
+Rendering one block
+-------------------
+
+:func:`~quart.templating.render_template_block` renders a single Jinja
+block without rendering the rest of the page. Its streaming equivalent is
+:func:`~quart.templating.stream_template_block`. Both build the normal Jinja
+inheritance chain, so an overriding child block can call ``super()`` and
+nested blocks retain their usual scopes. Quart context processors, the
+``request`` and ``g`` proxies, asynchronous filters and template signals
+still apply.
+
+Given these templates,
+
+.. code-block:: html
+
+    {# templates/base.html #}
+    {{ page_counter('outside') }}
+    <!doctype html>
+    <html>
+      <body>
+        <main>{% block content %}Parent {{ value }}{% endblock %}</main>
+      </body>
+    </html>
+
+.. code-block:: html
+
+    {# templates/partial.html #}
+    {% extends "base.html" %}
+    {% block content %}Child {{ super() }}{% endblock %}
+
+this app returns the complete document on first load and only the block on
+later requests. ``page_counter`` is called by the full page but not by block
+rendering. A request to ``/outside-renders`` therefore reports ``1`` after
+loading ``/`` and then ``/partial``.
+
+.. code-block:: python
+
+    from quart import (
+        Quart,
+        g,
+        render_template,
+        render_template_block,
+        stream_template_block,
+    )
+
+
+    app = Quart(__name__)
+    outside_renders = 0
+
+
+    def page_counter(location: str) -> int:
+        global outside_renders
+        outside_renders += 1
+        g.last_location = location
+        return outside_renders
+
+
+    app.add_template_global(page_counter)
+
+
+    @app.get("/")
+    async def index():
+        return await render_template("partial.html", value="initial")
+
+
+    @app.get("/partial")
+    async def partial():
+        return await render_template_block(
+            "partial.html", "content", value="updated"
+        )
+
+
+    @app.get("/partial-stream")
+    async def partial_stream():
+        return await stream_template_block(
+            "partial.html", "content", value="streamed"
+        )
+
+
+    @app.get("/outside-renders")
+    async def outside_render_count():
+        return {"count": outside_renders}

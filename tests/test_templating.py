@@ -3,15 +3,23 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from jinja2 import DictLoader
+from jinja2 import TemplateRuntimeError
 
+from quart import before_render_template
 from quart import Blueprint
 from quart import g
 from quart import Quart
+from quart import render_template
+from quart import render_template_block
 from quart import render_template_string
+from quart import request
 from quart import Response
 from quart import ResponseReturnValue
 from quart import session
+from quart import stream_template_block
 from quart import stream_template_string
+from quart import template_rendered
 
 
 @pytest.fixture(scope="function")
@@ -157,3 +165,252 @@ async def test_simple_stream(app: Quart) -> None:
     test_client = app.test_client()
     response = await test_client.get("/2")
     assert (await response.data) == b"43"
+
+
+async def test_render_template_block_inheritance_super_and_scope(app: Quart) -> None:
+    output_calls = 0
+
+    def page_output() -> str:
+        nonlocal output_calls
+        output_calls += 1
+        return "outside"
+
+    app.jinja_env.loader = DictLoader(
+        {
+            "base.html": (
+                "{{ page_output() }}\n"
+                "{% set outside_value = 'outside' %}\n"
+                "{% block content %}base {{ value }} {{ outside_value }}{% endblock %}"
+            ),
+            "child.html": (
+                '{% extends "base.html" %}'
+                "{% block content %}child {{ super() }}{% endblock %}"
+            ),
+        }
+    )
+    app.jinja_env.globals["page_output"] = page_output
+
+    async with app.app_context():
+        rendered = await render_template_block("child.html", "content", value="value")
+        assert output_calls == 0
+        full = await render_template("child.html", value="full")
+
+    assert rendered == "child base value outside"
+    assert full == "outside\n\nchild base full outside"
+
+
+async def test_render_template_block_nested_block_super(app: Quart) -> None:
+    app.jinja_env.loader = DictLoader(
+        {
+            "base.html": (
+                "{% block outer %}outer "
+                "{% block inner %}base{% endblock %}"
+                "{% endblock %}"
+            ),
+            "child.html": (
+                '{% extends "base.html" %}'
+                "{% block outer %}child-outer {{ super() }}{% endblock %}"
+                "{% block inner %}child-inner {{ super() }}{% endblock %}"
+            ),
+        }
+    )
+
+    async with app.app_context():
+        rendered = await render_template_block("child.html", "inner")
+
+    assert rendered == "child-inner base"
+
+
+async def test_render_template_block_parent_only_block(app: Quart) -> None:
+    app.jinja_env.loader = DictLoader(
+        {
+            "base.html": (
+                "{% block content %}base{% endblock %}"
+                "{% block other %}other{% endblock %}"
+            ),
+            "child.html": '{% extends "base.html" %}',
+        }
+    )
+
+    async with app.app_context():
+        rendered = await render_template_block("child.html", "other")
+
+    assert rendered == "other"
+
+
+async def test_render_template_block_with_scoped_setup(app: Quart) -> None:
+    app.jinja_env.loader = DictLoader(
+        {
+            "base.html": "{% block content %}base{% endblock %}",
+            "page.html": (
+                "{% for value in values() %}{{ value }}{% endfor %}"
+                "{% block content %}main{% endblock %}"
+            ),
+        }
+    )
+
+    iterations = 0
+
+    def values():
+        nonlocal iterations
+        iterations += 1
+        yield "unselected"
+
+    async with app.app_context():
+        rendered = await render_template_block("page.html", "content")
+
+    assert rendered == "main"
+    assert iterations == 0
+
+
+async def test_render_template_block_include_setup_without_include_output(
+    app: Quart,
+) -> None:
+    included_outputs = 0
+    included_setup = 0
+
+    def include_output() -> str:
+        nonlocal included_outputs
+        included_outputs += 1
+        return "included"
+
+    def include_setup() -> None:
+        nonlocal included_setup
+        included_setup += 1
+
+    app.jinja_env.loader = DictLoader(
+        {
+            "include.html": (
+                "{{ include_output() }}{% set ignored = include_setup() %}"
+            ),
+            "page.html": (
+                "{% include 'include.html' %}{% block content %}main{% endblock %}"
+            ),
+        }
+    )
+    app.jinja_env.globals["include_output"] = include_output
+    app.jinja_env.globals["include_setup"] = include_setup
+
+    async with app.app_context():
+        rendered = await render_template_block("page.html", "content")
+
+    assert rendered == "main"
+    assert included_setup == 1
+    assert included_outputs == 0
+
+
+async def test_render_template_block_uses_processors_and_async_filter(
+    app: Quart,
+) -> None:
+    calls = []
+
+    @app.context_processor
+    async def add_context() -> dict[str, str]:
+        return {"processor_value": "processor"}
+
+    @app.template_filter("record")
+    async def record(value: str, label: str) -> str:
+        calls.append(label)
+        return value.upper()
+
+    app.jinja_env.loader = DictLoader(
+        {
+            "index.html": (
+                "{% block content %}"
+                "{{ value|record('block') }} {{ processor_value }}"
+                "{% endblock %}"
+            )
+        }
+    )
+
+    before_signals = []
+
+    @before_render_template.connect_via(app)
+    def before(sender: Quart, template: object, context: dict) -> None:
+        before_signals.append(
+            (template.name, context["value"], context["g"].signal_value)
+        )
+
+    async with app.test_request_context("/path"):
+        g.signal_value = "signal"
+        rendered = await render_template_block(
+            "index.html", "content", value=request.path
+        )
+
+    assert rendered == "/PATH processor"
+    assert calls == ["block"]
+    assert before_signals == [("index.html", "/path", "signal")]
+
+
+async def test_render_template_block_missing_block_error(app: Quart) -> None:
+    app.jinja_env.loader = DictLoader(
+        {"index.html": "{% block content %}content{% endblock %}"}
+    )
+
+    async with app.app_context():
+        with pytest.raises(TemplateRuntimeError, match="Block 'missing'"):
+            await render_template_block("index.html", "missing")
+        with pytest.raises(TemplateRuntimeError, match="Block 'missing'"):
+            await stream_template_block("index.html", "missing")
+
+    app.jinja_env.loader = DictLoader(
+        {
+            "base.html": "{% block content %}content{% endblock %}",
+            "child.html": '{% extends "base.html" %}',
+        }
+    )
+
+    async with app.app_context():
+        with pytest.raises(TemplateRuntimeError, match="Available blocks: content"):
+            await render_template_block("child.html", "missing")
+
+
+async def test_stream_template_block_signals_and_early_cleanup(app: Quart) -> None:
+    closed = False
+    consumed = []
+    before_templates = []
+    rendered_templates = []
+
+    async def sections():
+        nonlocal closed
+        try:
+            consumed.append("started")
+            yield "b"
+            yield "c"
+        finally:
+            closed = True
+
+    app.jinja_env.loader = DictLoader(
+        {
+            "index.html": (
+                "{% block content %}"
+                "a"
+                "{% for item in sections() %}{{ item }}{% endfor %}"
+                "{% endblock %}"
+            )
+        }
+    )
+
+    @template_rendered.connect_via(app)
+    def rendered(sender: Quart, template: object, context: dict) -> None:
+        rendered_templates.append((template.name, context["block_value"]))
+
+    @before_render_template.connect_via(app)
+    def before(sender: Quart, template: object, context: dict) -> None:
+        before_templates.append((template.name, context["block_value"]))
+
+    async with app.app_context():
+        stream = await stream_template_block(
+            "index.html",
+            "content",
+            block_value="value",
+            sections=sections,
+        )
+        assert await stream.__anext__() == "a"
+        assert await stream.__anext__() == "b"
+        await stream.aclose()
+
+    assert consumed == ["started"]
+    assert closed is True
+    assert before_templates == [("index.html", "value")]
+    assert rendered_templates == [("index.html", "value")]
