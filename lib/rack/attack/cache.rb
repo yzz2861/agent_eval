@@ -3,6 +3,12 @@
 module Rack
   class Attack
     class Cache
+      Reservation = Struct.new(:token, :count, :epoch_time) do
+        def accepted?
+          !token.nil?
+        end
+      end
+
       attr_accessor :prefix
       attr_reader :last_epoch_time
 
@@ -32,8 +38,39 @@ module Rack
       end
 
       def count(unprefixed_key, period)
-        key, expires_in = key_and_expiry(unprefixed_key, period)
+        key, expires_in, _epoch_time = key_and_expiry(unprefixed_key, period)
         do_count(key, expires_in)
+      end
+
+      def reserve(unprefixed_key, period, limit, amount = 1)
+        raise Rack::Attack::MissingStoreError if store.nil?
+        unless store.respond_to?(:reserve) && store.respond_to?(:settle)
+          raise Rack::Attack::IncompatibleStoreError,
+                "Configured store #{store.class.name} does not support reservations"
+        end
+
+        key, expires_in, epoch_time = key_and_expiry(unprefixed_key, period)
+        token = SecureRandom.uuid
+        accepted, count, reservation_epoch_time = store.reserve(
+          key,
+          amount,
+          limit,
+          expires_in,
+          token,
+          epoch_time
+        )
+        Reservation.new(accepted ? token : nil, count, reservation_epoch_time)
+      end
+
+      def settle(reservation, keep)
+        raise Rack::Attack::MissingStoreError if store.nil?
+        return false unless reservation&.token
+
+        store.settle(reservation.token, keep)
+      end
+
+      def release(reservation)
+        settle(reservation, false)
       end
 
       def read(unprefixed_key)
@@ -49,7 +86,7 @@ module Rack
       end
 
       def reset_count(unprefixed_key, period)
-        key, _ = key_and_expiry(unprefixed_key, period)
+        key, _, _ = key_and_expiry(unprefixed_key, period)
         store.delete(key)
       end
 
@@ -74,7 +111,11 @@ module Rack
         @last_epoch_time = Time.now.to_i
         # Add 1 to expires_in to avoid timing error: https://github.com/rack/rack-attack/pull/85
         expires_in = (period - (@last_epoch_time % period) + 1).to_i
-        ["#{prefix}:#{(@last_epoch_time / period).to_i}:#{unprefixed_key}", expires_in]
+        [
+          "#{prefix}:#{(@last_epoch_time / period).to_i}:#{unprefixed_key}",
+          expires_in,
+          @last_epoch_time
+        ]
       end
 
       def do_count(key, expires_in)

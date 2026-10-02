@@ -2,10 +2,13 @@
 
 require 'rack'
 require 'forwardable'
+require 'securerandom'
 require 'rack/attack/cache'
 require 'rack/attack/configuration'
 require 'rack/attack/path_normalizer'
 require 'rack/attack/request'
+require 'rack/attack/store/memory_store'
+require 'rack/attack/reservation_body'
 require 'rack/attack/store_proxy/dalli_proxy'
 require 'rack/attack/store_proxy/mem_cache_store_proxy'
 require 'rack/attack/store_proxy/redis_proxy'
@@ -23,6 +26,14 @@ module Rack
     class MissingStoreError < Error; end
 
     class IncompatibleStoreError < Error; end
+
+    CLIENT_DISCONNECT_ERRORS = [
+      EOFError,
+      IOError,
+      Errno::ECONNABORTED,
+      Errno::ECONNRESET,
+      Errno::EPIPE
+    ].freeze
 
     autoload :Check,                'rack/attack/check'
     autoload :Throttle,             'rack/attack/throttle'
@@ -118,6 +129,7 @@ module Rack
           configuration.blocklisted_responder.call(request)
         end
       elsif configuration.throttled?(request)
+        release_reservations(request)
         # Deprecated: Keeping throttled_response for backwards compatibility
         if configuration.throttled_response
           configuration.throttled_response.call(env)
@@ -126,8 +138,59 @@ module Rack
         end
       else
         configuration.tracked?(request)
-        @app.call(env)
+        call_with_reservations(env, request)
       end
+    end
+
+    private
+
+    def call_with_reservations(env, request)
+      reservations = request.env[Throttle::PENDING_RESERVATIONS_KEY]
+      return @app.call(env) if reservations.nil? || reservations.empty?
+
+      begin
+        status, headers, body = @app.call(env)
+      rescue => error
+        settle_reservations(request, nil, error)
+        raise
+      end
+
+      pending = reservations.select do |throttle, reservation|
+        if throttle.charge?(status, nil)
+          Rack::Attack.cache.settle(reservation, true)
+          false
+        else
+          true
+        end
+      end
+      request.env[Throttle::PENDING_RESERVATIONS_KEY] = pending
+      return [status, headers, body] if pending.empty?
+
+      settlement = ->(error) do
+        finalize_reservations(request, pending, status, error)
+      end
+      [status, headers, ReservationBody.new(body, settlement)]
+    end
+
+    def finalize_reservations(request, reservations, status, error)
+      remaining = request.env[Throttle::PENDING_RESERVATIONS_KEY] || []
+      reservations.each do |throttle, reservation|
+        keep = throttle.charge?(status, error)
+        Rack::Attack.cache.settle(reservation, keep)
+        remaining.delete([throttle, reservation])
+      end
+      request.env.delete(Throttle::PENDING_RESERVATIONS_KEY) if remaining.empty?
+    end
+
+    def settle_reservations(request, status, error)
+      reservations = request.env.delete(Throttle::PENDING_RESERVATIONS_KEY) || []
+      reservations.each do |throttle, reservation|
+        Rack::Attack.cache.settle(reservation, throttle.charge?(status, error))
+      end
+    end
+
+    def release_reservations(request)
+      settle_reservations(request, nil, nil)
     end
   end
 end

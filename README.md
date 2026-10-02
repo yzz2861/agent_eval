@@ -276,6 +276,52 @@ Rack::Attack.throttle('request per ip', limit: limit_proc, period: period_proc) 
 end
 ```
 
+##### Reservation / settlement mode
+
+Regular throttling increments the counter before calling the application. For login
+limits that should count only failed attempts, use `reserve: true`. Each admitted
+request atomically reserves capacity before the application runs; a request over the
+limit gets a `429` and never reaches the application. The reservation is settled after
+the response is known:
+
+- Response status `>= 400` is retained when the response returns.
+- An exception raised by the application is retained.
+- An exception raised while streaming the response body is retained.
+- A successful response body close returns the reservation.
+- Client disconnect errors such as `Errno::ECONNRESET` or `Errno::EPIPE` return
+  the reservation.
+- Every reservation has an independent credential and settlement is idempotent.
+- A late return after the original fixed window expires does not decrement the new window.
+
+Reservation mode requires a store that supports atomic reservation and settlement.
+The bundled in-memory store is intended for tests and single-process use:
+
+```ruby
+Rack::Attack.cache.store = Rack::Attack::MemoryStore.new
+
+Rack::Attack.throttle('failed logins/email', limit: 6, period: 60, reserve: true) do |request|
+  next unless request.path == '/login' && request.post?
+
+  request.params['email']
+end
+```
+
+Provide `failed_if` to customize the decision. It receives the response status (`nil`
+for an application exception) and the exception (`nil` for a response status). Return
+`true` to retain the reservation or `false` to return it:
+
+```ruby
+Rack::Attack.throttle(
+  'failed logins/email',
+  limit: 6,
+  period: 60,
+  reserve: true,
+  failed_if: ->(status, error) { status == 422 || !error.nil? }
+) do |request|
+  request.params['email']
+end
+```
+
 ### Tracks
 
 ```ruby
