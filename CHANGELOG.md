@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file. For info on
 
 ### Added
 
+- Add strict mapping mode to `Rack::Sendfile` (`strict: true` with `on_miss: :fallback`/`:reject`): application-declared directory-to-URI-prefix mappings become an allowlist that request headers cannot widen, files are resolved with `File.realpath` before mapping (defeating symlink escapes and directory-prefix collisions), and generated headers are percent-encoded exactly once without control characters.
 - Add `Rack::Files#assign_headers` to allow overriding how the configured file headers are set. ([#2377](https://github.com/rack/rack/pull/2377), [@codergeek121](https://github.com/codergeek121))
 - Add support for `rack.response_finished` to `Rack::TempfileReaper`. ([#2363](https://github.com/rack/rack/pull/2363), [@skipkayhil](https://github.com/skipkayhil))
 - Add support for streaming bodies when using `Rack::Events`. ([#2375](github.com/rack/rack/pull/2375), [@unflxw](https://github.com/unflxw))

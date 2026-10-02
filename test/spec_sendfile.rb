@@ -334,4 +334,257 @@ describe Rack::Sendfile do
       headers['content-length'].must_equal '0'
     end
   end
+
+  describe "strict mapping mode" do
+    # realpath(3) must be able to resolve these paths, so keep them inside
+    # the repository instead of the system temp dir.
+    def strict_mktmpdir
+      root = File.expand_path('../tmp', __dir__)
+      FileUtils.mkdir_p root
+      Dir.mktmpdir('sendfile', root)
+    end
+
+    def strict_app(body, mappings, variation = 'X-Accel-Redirect', on_miss: :fallback)
+      Rack::Lint.new Rack::Sendfile.new(simple_app(body), variation, mappings, strict: true, on_miss: on_miss)
+    end
+
+    def strict_request(body, mappings, headers = {}, variation = 'X-Accel-Redirect', on_miss: :fallback)
+      yield Rack::MockRequest.new(strict_app(body, mappings, variation, on_miss: on_miss)).get('/', headers)
+    end
+
+    it "maps files under a declared root to the internal URI prefix" do
+      begin
+        dir = strict_mktmpdir
+        body = open_file(File.join(dir, 'rack_sendfile'))
+        body.puts 'hello world'
+
+        strict_request(body, [[dir, '/files/']]) do |response|
+          response.must_be :ok?
+          response.body.must_be :empty?
+          response.headers['content-length'].must_equal '0'
+          response.headers['x-accel-redirect'].must_equal '/files/rack_sendfile'
+        end
+      ensure
+        FileUtils.remove_entry_secure dir
+      end
+    end
+
+    it "resolves symlinks in the declared root itself" do
+      begin
+        real_dir = strict_mktmpdir
+        link_dir = File.join(strict_mktmpdir, 'link')
+        File.symlink real_dir, link_dir
+        body = open_file(File.join(real_dir, 'rack_sendfile'))
+        body.puts 'hello world'
+
+        strict_request(body, [[link_dir, '/files/']]) do |response|
+          response.must_be :ok?
+          response.headers['x-accel-redirect'].must_equal '/files/rack_sendfile'
+        end
+      ensure
+        FileUtils.remove_entry_secure real_dir
+        FileUtils.remove_entry_secure File.dirname(link_dir)
+      end
+    end
+
+    it "refuses symlinks that escape the declared root" do
+      begin
+        root = strict_mktmpdir
+        outside = strict_mktmpdir
+        secret = File.join(outside, 'secret')
+        FileUtils.touch secret
+        File.symlink secret, File.join(root, 'leaked')
+
+        body = open_file(File.join(root, 'leaked'))
+        closed = false
+        body.define_singleton_method(:close) { closed = true }
+
+        strict_request(body, [[root, '/files/']], on_miss: :reject) do |response|
+          response.status.must_equal 403
+          response.headers.wont_include 'x-accel-redirect'
+        end
+        closed.must_equal true
+      ensure
+        FileUtils.remove_entry_secure root
+        FileUtils.remove_entry_secure outside
+      end
+    end
+
+    it "does not match sibling directories sharing a name prefix" do
+      begin
+        parent = strict_mktmpdir
+        root = File.join(parent, 'files')
+        evil = File.join(parent, 'files-evil')
+        FileUtils.mkdir root
+        FileUtils.mkdir evil
+        body = open_file(File.join(evil, 'rack_sendfile'))
+        body.puts 'sneaky'
+        body.rewind
+
+        strict_request(body, [[root, '/files/']]) do |response|
+          response.must_be :ok?
+          response.body.must_equal "sneaky\n"
+          response.headers.wont_include 'x-accel-redirect'
+        end
+      ensure
+        FileUtils.remove_entry_secure parent
+      end
+    end
+
+    it "percent-encodes non-ASCII, spaces and percent signs exactly once" do
+      begin
+        dir = strict_mktmpdir
+        # Literal '%20' in the name must become '%2520', proving the path is
+        # never decoded before being encoded.
+        name = "报告 final%20.txt"
+        body = open_file(File.join(dir, name))
+        body.puts 'hello world'
+
+        strict_request(body, [[dir, '/files/']]) do |response|
+          response.must_be :ok?
+          response.headers['x-accel-redirect'].must_equal '/files/%E6%8A%A5%E5%91%8A%20final%2520.txt'
+        end
+      ensure
+        FileUtils.remove_entry_secure dir
+      end
+    end
+
+    it "never emits a header containing control characters" do
+      begin
+        dir = strict_mktmpdir
+        body = open_file(File.join(dir, "rack\nsendfile"))
+        body.puts 'hello world'
+
+        strict_request(body, [[dir, '/files/']], on_miss: :reject) do |response|
+          response.status.must_equal 403
+          response.headers.each_value { |v| v.wont_match(/[\r\n]/) }
+        end
+      ensure
+        FileUtils.remove_entry_secure dir
+      end
+    end
+
+    it "ignores the x-accel-mapping request header" do
+      begin
+        dir = strict_mktmpdir
+        body = open_file(File.join(dir, 'rack_sendfile'))
+        body.puts 'hello world'
+
+        headers = { 'HTTP_X_ACCEL_MAPPING' => "#{dir}/=/attacker/".b }
+        strict_request(body, [[dir, '/files/']], headers) do |response|
+          response.must_be :ok?
+          response.headers['x-accel-redirect'].must_equal '/files/rack_sendfile'
+        end
+      ensure
+        FileUtils.remove_entry_secure dir
+      end
+    end
+
+    it "falls back to serving the body on miss when on_miss is :fallback" do
+      begin
+        root = strict_mktmpdir
+        outside = strict_mktmpdir
+        body = open_file(File.join(outside, 'rack_sendfile'))
+        body.puts 'hello world'
+        body.rewind
+
+        io = StringIO.new
+        strict_request(body, [[root, '/files/']], { 'rack.errors' => io }) do |response|
+          response.must_be :ok?
+          response.body.must_equal "hello world\n"
+          response.headers.wont_include 'x-accel-redirect'
+        end
+        io.rewind
+        io.read.must_include 'not under any declared root'
+      ensure
+        FileUtils.remove_entry_secure root
+        FileUtils.remove_entry_secure outside
+      end
+    end
+
+    it "rejects with 403 and closes the body on miss when on_miss is :reject" do
+      begin
+        root = strict_mktmpdir
+        outside = strict_mktmpdir
+        body = open_file(File.join(outside, 'rack_sendfile'))
+        body.puts 'hello world'
+        closed = false
+        body.define_singleton_method(:close) { closed = true }
+
+        strict_request(body, [[root, '/files/']], on_miss: :reject) do |response|
+          response.status.must_equal 403
+          response.body.must_equal "Forbidden\n"
+          response.headers.wont_include 'x-accel-redirect'
+        end
+        closed.must_equal true
+      ensure
+        FileUtils.remove_entry_secure root
+        FileUtils.remove_entry_secure outside
+      end
+    end
+
+    it "raises ArgumentError for an unknown on_miss action" do
+      lambda do
+        Rack::Sendfile.new(simple_app, 'X-Accel-Redirect', [], strict: true, on_miss: :explode)
+      end.must_raise ArgumentError
+    end
+
+    it "restricts x-sendfile to declared roots in strict mode" do
+      begin
+        root = strict_mktmpdir
+        outside = strict_mktmpdir
+
+        allowed = open_file(File.join(root, 'rack_sendfile'))
+        allowed.puts 'hello world'
+        strict_request(allowed, [[root, '/files/']], {}, 'X-Sendfile') do |response|
+          response.must_be :ok?
+          response.headers['x-sendfile'].must_equal File.realpath(File.join(root, 'rack_sendfile')).b
+        end
+
+        denied = open_file(File.join(outside, 'rack_sendfile'))
+        denied.puts 'hello world'
+        strict_request(denied, [[root, '/files/']], {}, 'X-Sendfile', on_miss: :reject) do |response|
+          response.status.must_equal 403
+          response.headers.wont_include 'x-sendfile'
+        end
+      ensure
+        FileUtils.remove_entry_secure root
+        FileUtils.remove_entry_secure outside
+      end
+    end
+
+    it "closes the original body once the mapped response is closed" do
+      begin
+        dir = strict_mktmpdir
+        body = open_file(File.join(dir, 'rack_sendfile'))
+        body.puts 'hello world'
+        closed = false
+        body.define_singleton_method(:close) { closed = true }
+
+        strict_request(body, [[dir, '/files/']]) do |response|
+          response.must_be :ok?
+          response.headers['x-accel-redirect'].must_equal '/files/rack_sendfile'
+        end
+        closed.must_equal true
+      ensure
+        FileUtils.remove_entry_secure dir
+      end
+    end
+
+    it "handles bodies whose path encoding differs from the configured root" do
+      begin
+        dir = strict_mktmpdir
+        body = open_file(File.join(dir, 'rack_sendfile'))
+        body.puts 'hello world'
+        body.define_singleton_method(:to_path) { File.join(dir, 'rack_sendfile').b }
+
+        strict_request(body, [[dir, '/files/']]) do |response|
+          response.must_be :ok?
+          response.headers['x-accel-redirect'].must_equal '/files/rack_sendfile'
+        end
+      ensure
+        FileUtils.remove_entry_secure dir
+      end
+    end
+  end
 end
