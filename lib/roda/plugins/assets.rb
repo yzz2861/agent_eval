@@ -312,7 +312,12 @@ class Roda
     # :dependencies :: A hash of dependencies for your asset files.  Keys should be paths to asset files,
     #                  values should be arrays of paths your asset files depends on.  This is used to
     #                  detect changes in your asset files.
-    # :early_hints :: Automatically send early hints for all assets.  Requires the early_hints plugin.
+    # :early_hints :: Buffer early hints for all assets.  Requires the early_hints plugin.
+    #                 When enabled, #assets adds a Link early hint for each asset to the
+    #                 early_hints plugin buffer instead of sending immediately.  Call
+    #                 commit_early_hints in the route to send the deduplicated hints (for
+    #                 example, after all assets have been referenced and before the route
+    #                 is done), so branches that redirect do not send hints.
     # :group_subdirs :: Whether a hash used in :css and :js options requires the assets for the
     #                   related group are contained in a subdirectory with the same name (default: true)
     # :gzip :: Store gzipped compiled assets files, and serve those to clients who accept gzip encoding.
@@ -777,9 +782,7 @@ class Roda
           paths = assets_paths(type)
           if o[:early_hints]
             early_hint_as = ltype == :js ? 'script' : 'style'
-            early_hints = paths.map{|p| "<#{p}>; rel=preload; as=#{early_hint_as}"}
-            early_hints = early_hints.join("\n") if Rack.release < '3'
-            send_early_hints(RodaResponseHeaders::LINK=>early_hints)
+            early_hint(paths.map{|p| "<#{p}>; rel=preload; as=#{early_hint_as}"})
           end
           paths.map{|p| "#{tag_start}#{h(p)}#{tag_end}"}.join("\n")
         end

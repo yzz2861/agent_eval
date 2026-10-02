@@ -277,20 +277,11 @@ if run_tests
       status($1, 'REQUEST_METHOD'=>'POST').must_equal 404
     end
 
-    it 'should handle early hints if the :early_hints option is used' do
+    it 'should not send buffered asset early hints without an explicit commit' do
       app.plugin :assets, :early_hints=>true
       eh = []
       html = body('/test', 'rack.early_hints'=>proc{|h| eh << h})
-      css_eh = ["</assets/css/app.str>; rel=preload; as=style", "</assets/css/raw.css>; rel=preload; as=style"]
-      js_eh = ["</assets/js/head/app.js>; rel=preload; as=script"]
-      if Rack.release < '3'
-        css_eh = css_eh.join("\n")
-        js_eh = js_eh.join("\n")
-      end
-      eh.must_equal [
-        {Roda::RodaResponseHeaders::LINK=>css_eh},
-        {Roda::RodaResponseHeaders::LINK=>js_eh}
-      ]
+      eh.must_equal []
       html.scan(/<link/).length.must_equal 2
       html =~ %r{href="(/assets/css/app\.str)"}
       css = body($1)
@@ -302,6 +293,51 @@ if run_tests
       css.must_match(/color: red;/)
       css2.must_match(/color: blue;/)
       js.must_include('console.log')
+    end
+
+    it 'should send buffered early hints for all assets when committed' do
+      app.plugin :assets, :early_hints=>true
+      app.route do |r|
+        r.assets
+        r.is 'test' do
+          assets(:css)
+          assets([:js, :head])
+          commit_early_hints
+          'committed'
+        end
+      end
+
+      eh = []
+      html = body('/test', 'rack.early_hints'=>proc{|h| eh << h})
+      eh.must_equal [
+        {Roda::RodaResponseHeaders::LINK=>[
+          "</assets/css/app.str>; rel=preload; as=style",
+          "</assets/css/raw.css>; rel=preload; as=style",
+          "</assets/js/head/app.js>; rel=preload; as=script"
+        ]}
+      ]
+      html.must_equal 'committed'
+    end
+
+    it 'should deduplicate asset early hints collected by multiple calls' do
+      app.plugin :assets, :early_hints=>true
+      app.route do |r|
+        r.assets
+        r.is 'test' do
+          assets(:css)
+          assets(:css)
+          commit_early_hints
+          'committed'
+        end
+      end
+
+      eh = []
+      body('/test', 'rack.early_hints'=>proc{|h| eh << h})
+      eh.length.must_equal 1
+      eh.first[Roda::RodaResponseHeaders::LINK].must_equal [
+        "</assets/css/app.str>; rel=preload; as=style",
+        "</assets/css/raw.css>; rel=preload; as=style"
+      ]
     end
 
     it 'should handle rendering assets, linking to them, and accepting requests for them when :add_script_name app option is used' do
