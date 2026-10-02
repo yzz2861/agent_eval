@@ -35,7 +35,7 @@ module Rack
         end
 
         def fail!(discriminator, bantime, findtime, maxretry)
-          count = cache.count("#{key_prefix}:count:#{discriminator}", findtime)
+          count, _epoch_time = cache.count("#{key_prefix}:count:#{discriminator}", findtime)
           if count >= maxretry
             ban!(discriminator, bantime)
           end

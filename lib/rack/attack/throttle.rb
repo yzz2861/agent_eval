@@ -28,14 +28,15 @@ module Rack
 
         current_period  = period_for(request)
         current_limit   = limit_for(request)
-        count           = cache.count("#{name}:#{discriminator}", current_period)
+        count, epoch_time =
+          cache.count("#{name}:#{discriminator}", current_period)
 
         data = {
           discriminator: discriminator,
           count: count,
           period: current_period,
           limit: current_limit,
-          epoch_time: cache.last_epoch_time
+          epoch_time: epoch_time
         }
 
         annotate_request_with_throttle_data(request, data)

@@ -25,13 +25,17 @@ describe 'Rack::Attack.throttle' do
     end
 
     it 'should populate throttle data' do
-      get '/', {}, 'REMOTE_ADDR' => '1.2.3.4'
+      epoch_time = nil
+      within_same_period do
+        epoch_time = Time.now.to_i
+        get '/', {}, 'REMOTE_ADDR' => '1.2.3.4'
+      end
 
       data = {
         count: 1,
         limit: 1,
         period: @period,
-        epoch_time: Rack::Attack.cache.last_epoch_time.to_i,
+        epoch_time: epoch_time,
         discriminator: "1.2.3.4"
       }
 
@@ -42,6 +46,7 @@ describe 'Rack::Attack.throttle' do
   describe "with 2 requests" do
     before do
       within_same_period do
+        @epoch_time = Time.now.to_i
         2.times { get '/', {}, 'REMOTE_ADDR' => '1.2.3.4' }
       end
     end
@@ -58,7 +63,7 @@ describe 'Rack::Attack.throttle' do
         count: 2,
         limit: 1,
         period: @period,
-        epoch_time: Rack::Attack.cache.last_epoch_time.to_i,
+        epoch_time: @epoch_time,
         discriminator: "1.2.3.4"
       )
 
@@ -87,12 +92,16 @@ describe 'Rack::Attack.throttle with limit as proc' do
     end
 
     it 'should populate throttle data' do
-      get '/', {}, 'REMOTE_ADDR' => '1.2.3.4'
+      epoch_time = nil
+      within_same_period do
+        epoch_time = Time.now.to_i
+        get '/', {}, 'REMOTE_ADDR' => '1.2.3.4'
+      end
       data = {
         count: 1,
         limit: 1,
         period: @period,
-        epoch_time: Rack::Attack.cache.last_epoch_time.to_i,
+        epoch_time: epoch_time,
         discriminator: "1.2.3.4"
       }
 
@@ -121,13 +130,17 @@ describe 'Rack::Attack.throttle with period as proc' do
     end
 
     it 'should populate throttle data' do
-      get '/', {}, 'REMOTE_ADDR' => '1.2.3.4'
+      epoch_time = nil
+      within_same_period do
+        epoch_time = Time.now.to_i
+        get '/', {}, 'REMOTE_ADDR' => '1.2.3.4'
+      end
 
       data = {
         count: 1,
         limit: 1,
         period: @period,
-        epoch_time: Rack::Attack.cache.last_epoch_time.to_i,
+        epoch_time: epoch_time,
         discriminator: "1.2.3.4"
       }
 

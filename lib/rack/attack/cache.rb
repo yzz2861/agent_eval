@@ -4,7 +4,6 @@ module Rack
   class Attack
     class Cache
       attr_accessor :prefix
-      attr_reader :last_epoch_time
 
       def self.default_store
         if Object.const_defined?(:Rails) && Rails.respond_to?(:cache)
@@ -31,9 +30,14 @@ module Rack
         end
       end
 
+      # Increments the counter for the current time window and returns both
+      # the count and the epoch time of the window that produced it. The
+      # epoch is returned instead of being kept in shared state so that
+      # concurrent requests can never observe each other's window.
       def count(unprefixed_key, period)
-        key, expires_in = key_and_expiry(unprefixed_key, period)
-        do_count(key, expires_in)
+        key, expires_in, epoch_time = key_and_expiry(unprefixed_key, period)
+        count = do_count(key, expires_in)
+        [count, epoch_time]
       end
 
       def read(unprefixed_key)
@@ -49,7 +53,7 @@ module Rack
       end
 
       def reset_count(unprefixed_key, period)
-        key, _ = key_and_expiry(unprefixed_key, period)
+        key, _expires_in, _epoch_time = key_and_expiry(unprefixed_key, period)
         store.delete(key)
       end
 
@@ -71,10 +75,10 @@ module Rack
       private
 
       def key_and_expiry(unprefixed_key, period)
-        @last_epoch_time = Time.now.to_i
+        epoch_time = Time.now.to_i
         # Add 1 to expires_in to avoid timing error: https://github.com/rack/rack-attack/pull/85
-        expires_in = (period - (@last_epoch_time % period) + 1).to_i
-        ["#{prefix}:#{(@last_epoch_time / period).to_i}:#{unprefixed_key}", expires_in]
+        expires_in = (period - (epoch_time % period) + 1).to_i
+        ["#{prefix}:#{(epoch_time / period).to_i}:#{unprefixed_key}", expires_in, epoch_time]
       end
 
       def do_count(key, expires_in)
