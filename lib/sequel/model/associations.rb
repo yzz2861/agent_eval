@@ -2174,11 +2174,213 @@ module Sequel
           associate(:one_to_one, name, opts, &block)
         end
 
-        Plugins.model_instance_variables(self, :@associations, :@set_associated_object_if_same)
+        # Eagerly load aggregates for the given associations for all of the given
+        # objects, storing the results in each object's association aggregate cache.
+        # This issues a single aggregate query per association (per distinct filter),
+        # instead of loading the associated objects themselves.
+        #
+        # +aggregates+ is a hash with association name keys and values being hashes
+        # mapping the aggregate type (:count or :sum) to the aggregate options.
+        # The aggregate options can be +true+ (or nil) for no options, a column
+        # symbol (for :sum), or a hash with the following keys:
+        #
+        # :column :: The column to aggregate (required for :sum, can be an array
+        #            of columns to compute multiple sums).
+        # :filter :: A filter applied to the aggregate query only.  Can be anything
+        #            Dataset#where accepts, or a callable that is called with the
+        #            aggregate dataset and should return a modified dataset.
+        #
+        # After calling this, the aggregates can be retrieved from each object
+        # using #association_aggregate or #association_aggregates:
+        #
+        #   artists = Artist.all
+        #   Artist.eager_load_association_aggregates(artists,
+        #     :albums=>{:count=>true, :sum=>{:column=>:copies_sold, :filter=>{:year=>2020}}})
+        #   artists.first.association_aggregate(:albums, :count) # => 3
+        #   artists.first.association_aggregate(:albums, :sum, :copies_sold) # => 42
+        #
+        # Supported for one_to_many, one_to_one, many_to_many, and one_through_one
+        # associations.  many_to_many and one_through_one aggregates use a DISTINCT
+        # subquery on the join table, so duplicate join table rows do not affect
+        # the results.
+        def eager_load_association_aggregates(objects, aggregates)
+          return if objects.empty?
+
+          aggregates.each do |assoc, agg_specs|
+            reflection = association_reflection(assoc) || (raise Sequel::UndefinedAssociation, "Model: #{self}, Association: #{assoc}")
+            eager_load_association_aggregate(objects, reflection, agg_specs)
+          end
+
+          nil
+        end
+
+        Plugins.model_instance_variables(self, :@associations, :@association_aggregates, :@set_associated_object_if_same)
         Plugins.inherited_instance_variables(self, :@association_reflections=>:dup, :@autoreloading_associations=>:hash_dup, :@default_association_options=>:dup, :@default_association_type_options=>:hash_dup, :@cache_associations=>nil, :@default_eager_limit_strategy=>nil)
-        Plugins.def_dataset_methods(self, [:eager, :eager_graph, :eager_graph_with_options, :association_join, :association_full_join, :association_inner_join, :association_left_join, :association_right_join])
+        Plugins.def_dataset_methods(self, [:eager, :eager_graph, :eager_graph_with_options, :eager_association_aggregates, :association_join, :association_full_join, :association_inner_join, :association_left_join, :association_right_join])
         
         private
+
+        # Eagerly load the aggregates for a single association for all of the
+        # given objects.
+        def eager_load_association_aggregate(objects, reflection, agg_specs)
+          specs = association_aggregate_specs(reflection, agg_specs)
+          key_columns = association_aggregate_parent_key_columns(reflection)
+          name = reflection[:name]
+
+          id_map = {}
+          objects.each do |object|
+            values = key_columns.map{|k| object.get_column_value(k)}
+            next if values.any?{|v| v.nil?}
+            key = key_columns.length == 1 ? values.first : values
+            (id_map[key] ||= []) << object
+          end
+
+          objects.each do |object|
+            cache = object.association_aggregates[name] ||= {}
+            specs.each{|spec| cache[spec[:key]] = spec[:default]}
+          end
+
+          return if id_map.empty?
+
+          specs.group_by{|spec| spec[:filter]}.each do |filter, filtered_specs|
+            ds = association_aggregate_dataset(reflection, filtered_specs, filter, id_map.keys)
+            ds.all.each do |row|
+              key = if key_columns.length == 1
+                row[:x_key_0_x]
+              else
+                (0...key_columns.length).map{|i| row[:"x_key_#{i}_x"]}
+              end
+              next unless objects_for_key = id_map[key]
+              filtered_specs.each_with_index do |spec, i|
+                value = row[:"x_agg_#{i}_x"]
+                objects_for_key.each{|object| object.association_aggregates[name][spec[:key]] = value}
+              end
+            end
+          end
+
+          nil
+        end
+
+        # Normalize the aggregate specifications for an association into an
+        # array of aggregate specification hashes.
+        def association_aggregate_specs(reflection, agg_specs)
+          specs = []
+          agg_specs.each do |agg, opts|
+            case agg
+            when :count
+              unless opts.nil? || opts == true || opts.is_a?(Hash)
+                raise Error, "invalid options for count aggregate on association #{reflection[:name]}: #{opts.inspect}"
+              end
+              specs << {
+                :key=>:count,
+                :default=>0,
+                :filter=>opts.is_a?(Hash) ? opts[:filter] : nil,
+                :select=>Sequel.function(:count).*
+              }
+            when :sum
+              columns, filter = if opts.is_a?(Hash)
+                [opts[:column], opts[:filter]]
+              else
+                [opts, nil]
+              end
+              unless columns.is_a?(Symbol) || (columns.is_a?(Array) && columns.all?{|c| c.is_a?(Symbol)})
+                raise Error, "sum aggregate on association #{reflection[:name]} requires a column"
+              end
+              Array(columns).each do |column|
+                specs << {
+                  :key=>[:sum, column].freeze,
+                  :default=>nil,
+                  :filter=>filter,
+                  :select=>Sequel.function(:sum, column)
+                }
+              end
+            else
+              raise Error, "unsupported association aggregate #{agg.inspect} for association #{reflection[:name]}"
+            end
+          end
+          specs
+        end
+
+        # The columns in the current model's table whose values are used to match
+        # aggregate results back to the given objects.
+        def association_aggregate_parent_key_columns(reflection)
+          case reflection[:type]
+          when :one_to_many, :one_to_one
+            reflection[:primary_keys]
+          when :many_to_many, :one_through_one
+            reflection[:left_primary_keys]
+          else
+            raise Error, "association aggregates are not supported for #{reflection[:type]} associations"
+          end
+        end
+
+        # Build the aggregate query for the given association reflection, returning
+        # a dataset that uses a single query to retrieve one row per parent key,
+        # with parent key values aliased as x_key_N_x and aggregate values aliased
+        # as x_agg_N_x.
+        def association_aggregate_dataset(reflection, specs, filter, key_values)
+          ds, key_columns = association_aggregate_base_dataset(reflection)
+          ds = ds.where(reflection[:conditions]) if reflection[:conditions]
+          ds = association_aggregate_apply_filter(ds, filter)
+          ds = ds.where(association_aggregate_predicate(key_columns, key_values))
+          ds = ds.group(*key_columns)
+          selects = []
+          key_columns.each_with_index{|c, i| selects << Sequel.as(c, :"x_key_#{i}_x")}
+          specs.each_with_index{|spec, i| selects << spec[:select].as(:"x_agg_#{i}_x")}
+          ds.select(*selects).naked
+        end
+
+        # Return the base dataset for the association aggregate query, as well as
+        # the columns in that dataset to group and filter by.
+        def association_aggregate_base_dataset(reflection)
+          case reflection[:type]
+          when :one_to_many, :one_to_one
+            [reflection.associated_class.dataset, reflection[:keys]]
+          when :many_to_many, :one_through_one
+            if reflection.separate_query_per_table?
+              raise Error, "association aggregates are not supported for #{reflection[:type]} associations using :join_table_db"
+            end
+
+            left_keys = reflection[:left_keys]
+            right_keys = reflection[:right_keys]
+            join_table = db.from(reflection.join_table_source).select(*left_keys, *right_keys)
+            join_table = reflection[:join_table_block].call(join_table) if reflection[:join_table_block]
+            # Use a DISTINCT subquery on the join table, so that duplicate join
+            # table rows do not affect the resulting aggregates.
+            join_table = join_table.distinct
+
+            klass = reflection.associated_class
+            jt_alias = :x_sequel_association_aggregate_join_table_x
+            join_conditions = right_keys.zip(reflection.right_primary_keys).map do |right_key, right_primary_key|
+              [Sequel[jt_alias][right_key], Sequel[klass.table_name][right_primary_key]]
+            end
+            ds = klass.dataset.join(join_table.as(jt_alias), join_conditions)
+            [ds, left_keys.map{|k| Sequel[jt_alias][k]}]
+          else
+            raise Error, "association aggregates are not supported for #{reflection[:type]} associations"
+          end
+        end
+
+        # The predicate condition matching the aggregate group columns to the
+        # key values of the given parent objects.
+        def association_aggregate_predicate(key_columns, key_values)
+          if key_columns.length == 1
+            {key_columns.first=>key_values}
+          else
+            {key_columns=>key_values}
+          end
+        end
+
+        # Apply the aggregate filter to the aggregate dataset.
+        def association_aggregate_apply_filter(ds, filter)
+          if filter.nil?
+            ds
+          elsif filter.respond_to?(:call)
+            filter.call(ds)
+          else
+            ds.where(filter)
+          end
+        end
 
         # The default value for the instance_specific option, if the association
         # could be instance specific and the :instance_specific option is not specified.
@@ -2698,13 +2900,42 @@ module Sequel
           @associations ||= {}
         end
 
+        # The currently cached association aggregates.  A hash with the keys
+        # being the association name symbols and the values being hashes
+        # mapping aggregate keys to aggregate values.  The aggregate keys are
+        # :count for count aggregates, and [:sum, column] for sum aggregates.
+        # This cache is separate from the association cache, and is only
+        # populated by eager_load_association_aggregates.
+        def association_aggregates
+          @association_aggregates ||= {}
+        end
+
+        # Return a preloaded aggregate value for the given association.
+        # +aggregate+ is the aggregate type (:count or :sum), and +column+
+        # is the aggregated column (only used for :sum).  Returns nil if the
+        # aggregate was not eagerly loaded for the association.  Note that
+        # this does not issue any queries itself, it only reads values
+        # previously cached by eager_load_association_aggregates.
+        #
+        #   Artist.eager_load_association_aggregates(artists, :albums=>{:count=>true, :sum=>:copies_sold})
+        #   artists.first.association_aggregate(:albums, :count) # => 3
+        #   artists.first.association_aggregate(:albums, :sum, :copies_sold) # => 42
+        def association_aggregate(name, aggregate, column=nil)
+          key = column ? [aggregate, column] : aggregate
+          if (h = @association_aggregates) && (h = h[name])
+            h[key]
+          end
+        end
+
         # Freeze the associations cache when freezing the object.  Note that
         # retrieving associations after freezing will still work in most cases,
         # but the associations will not be cached in the association cache.
         def freeze
           associations
+          association_aggregates
           super
           associations.freeze
+          association_aggregates.freeze
           self
         end
       
@@ -2798,9 +3029,10 @@ module Sequel
           end
         end
 
-        # Clear the associations cache when refreshing
+        # Clear the associations and association aggregates caches when refreshing
         def _refresh_set_values(hash)
           @associations.clear if @associations
+          @association_aggregates.clear if @association_aggregates
           super
         end
 
@@ -2886,10 +3118,12 @@ module Sequel
           end
         end
 
-        # Duplicate the associations hash when duplicating the object.
+        # Duplicate the associations and association aggregates hashes when
+        # duplicating the object.
         def initialize_copy(other)
           super
           @associations = Hash[@associations] if @associations
+          @association_aggregates = Hash[@association_aggregates.map{|k, v| [k, Hash[v]]}] if @association_aggregates
           self
         end
 
@@ -3358,6 +3592,26 @@ module Sequel
           association_opts = eager_options_for_associations(associations)
           opts = opts ? opts.merge(association_opts) : association_opts
           clone(:eager=>opts.freeze)
+        end
+
+        # Eagerly load aggregates for the given associations when loading the
+        # current dataset, without loading the associated objects themselves.
+        # Uses a single aggregate query per association (per distinct filter).
+        # See Model.eager_load_association_aggregates for the format of the
+        # +aggregates+ hash.
+        #
+        # After loading the dataset, the aggregates can be retrieved from each
+        # object using #association_aggregate or #association_aggregates:
+        #
+        #   artists = Artist.eager_association_aggregates(:albums=>{:count=>true, :sum=>:copies_sold}).all
+        #   # SELECT * FROM artists
+        #   # SELECT artist_id, count(*), sum(copies_sold) FROM albums WHERE (artist_id IN (...)) GROUP BY artist_id
+        #   artists.first.association_aggregate(:albums, :count) # => 3
+        def eager_association_aggregates(aggregates)
+          if opts = @opts[:eager_association_aggregates]
+            aggregates = opts.merge(aggregates)
+          end
+          clone(:eager_association_aggregates=>aggregates.freeze)
         end
 
         # The secondary eager loading method.  Loads all associations in a single query. This
@@ -3906,7 +4160,7 @@ module Sequel
         alias one_to_one_association_filter_expression one_to_many_association_filter_expression
 
         def non_sql_option?(key)
-          super || key == :eager || key == :eager_graph
+          super || key == :eager || key == :eager_graph || key == :eager_association_aggregates
         end
 
         # Build associations from the graph if #eager_graph was used, 
@@ -3914,6 +4168,7 @@ module Sequel
         def post_load(all_records)
           eager_graph_build_associations(all_records) if @opts[:eager_graph]
           eager_load(all_records) if @opts[:eager] && (row_proc || @opts[:eager_graph])
+          model.eager_load_association_aggregates(all_records, @opts[:eager_association_aggregates]) if @opts[:eager_association_aggregates] && (row_proc || @opts[:eager_graph])
           super
         end
       end

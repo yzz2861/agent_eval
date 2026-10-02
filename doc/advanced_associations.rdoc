@@ -127,6 +127,64 @@ Or with 2 separate +eager_graph+ queries:
   # LEFT OUTER JOIN lyrics AS lyric ON (lyric.id = tracks.lyric_id)
   # WHERE (tracks.album_id IN (...));
 
+== Eager Loading Association Aggregates
+
+In some cases, you don't need the associated objects themselves, only
+aggregates of the associated objects, such as the number of associated
+objects, or the sum of a column in the associated table.  For example,
+a list page may only need to display the member count and total hours
+for each project.  Loading all associated objects to compute these
+aggregates in Ruby is wasteful, and computing them with a separate
+aggregate query per object results in N+1 queries.
+
++eager_association_aggregates+ handles this by using a single aggregate
+query per association, storing the results in each object's association
+aggregate cache, without instantiating any associated objects:
+
+  artists = Artist.eager_association_aggregates(albums: {count: true, sum: :copies_sold}).all
+  # 2 Queries:
+  # SELECT * FROM artists;
+  # SELECT artist_id, count(*), sum(copies_sold) FROM albums
+  # WHERE (artist_id IN (...)) GROUP BY artist_id;
+
+  artists.first.association_aggregate(:albums, :count) # => 3
+  artists.first.association_aggregate(:albums, :sum, :copies_sold) # => 42
+
+The argument to +eager_association_aggregates+ is a hash with association
+name keys, and values being hashes mapping the aggregate type (:count or
+:sum) to the aggregate options.  The aggregate options can be +true+ for
+no options, a column symbol (for :sum), or a hash with the following keys:
+
+:column :: The column to aggregate (required for :sum, can be an array
+           of columns to compute multiple sums).
+:filter :: A filter applied to the aggregate query only.  Can be anything
+           Dataset#where accepts, or a callable that is called with the
+           aggregate dataset and should return a modified dataset.
+
+  Artist.eager_association_aggregates(albums: {
+    count: {filter: {year: 2020}},
+    sum: {column: :copies_sold, filter: proc{|ds| ds.where{year > 2000}}}
+  })
+
+Aggregates that share the same filter are computed in the same query.
+
+If you already have the objects loaded, you can use
+Model.eager_load_association_aggregates to load the aggregates for them:
+
+  Artist.eager_load_association_aggregates(artists, albums: {count: true})
+
+For objects without associated records, the count aggregate is 0 and the
+sum aggregate is nil.  Association aggregates are supported for
+one_to_many, one_to_one, many_to_many, and one_through_one associations.
+For many_to_many and one_through_one associations, a DISTINCT subquery on
+the join table is used, so duplicate join table rows do not affect the
+aggregates.
+
+The association aggregate cache is separate from the association cache.
+You can access it directly via the association_aggregates instance
+method.  It is cleared when the object is refreshed, just like the
+association cache.
+
 == Sequel::Model Association Loading Options
 
 There are a bunch of advanced association options that are available to
