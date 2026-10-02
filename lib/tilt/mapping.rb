@@ -130,6 +130,13 @@ module Tilt
     # @option :extra_exts [Array<String>] Additional extensions to register
     # @option String [Hash] Options hash for individual template in the
     #         pipeline (key is extension).
+    # @option options [String] :input_encoding Encoding the stage accepts.
+    #         Binary output from the previous stage is labeled and validated,
+    #         and text is transcoded when needed.
+    # @option options [String] :output_encoding Encoding the stage produces.
+    #         Binary output is labeled and validated, and encoded output is
+    #         transcoded when needed. Invalid input raises without replacing
+    #         bytes.
     # @return [void]
     #
     # @example
@@ -137,12 +144,31 @@ module Tilt
     #   mapping.register_pipeline('scss.erb', 'erb'=>{:outvar=>'@foo'})
     #   mapping.register_pipeline('scsserb', :extra_exts => 'scss.erb',
     #                             :templates=>['erb', 'scss'])
+    #   mapping.register_pipeline('scss.engine', 'engine'=>{
+    #     :input_encoding => 'UTF-8', :output_encoding => 'ISO-8859-1'})
     def register_pipeline(ext, options={})
-      templates = options[:templates] || ext.split('.').reverse
-      templates = templates.map{|t| [self[t], options[t] || {}]}
+      template_names = options[:templates] || ext.split('.').reverse
+      templates = []
+      input_encodings = []
+      output_encodings = []
+      template_extensions = []
+
+      template_names.each do |name|
+        klass = self[name]
+        next unless klass
+
+        template_options = options[name].nil? ? {} : options[name].dup
+        input_encodings << resolve_encoding(template_options.delete(:input_encoding))
+        output_encodings << resolve_encoding(template_options.delete(:output_encoding))
+        template_extensions << name
+        templates << [klass, template_options]
+      end
 
       klass = Class.new(Pipeline)
       klass.send(:const_set, :TEMPLATES, templates)
+      klass.send(:const_set, :TEMPLATE_EXTENSIONS, template_extensions)
+      klass.send(:const_set, :INPUT_ENCODINGS, input_encodings)
+      klass.send(:const_set, :OUTPUT_ENCODINGS, output_encodings)
 
       register(klass, ext, *Array(options[:extra_exts]))
       klass
@@ -249,6 +275,10 @@ module Tilt
     end
 
     private
+
+    def resolve_encoding(encoding)
+      encoding ? Encoding.find(encoding) : nil
+    end
 
     def lazy?(ext)
       ext = ext.downcase
