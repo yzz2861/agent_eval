@@ -1,0 +1,11 @@
+<!doctype html>
+<html>
+  <head>
+    <title>{% block title %}Block rendering{% endblock %}</title>
+  </head>
+  <body>
+    <header>Header - counter: {{ counter() }}</header>
+    <main>{% block content %}Default content from the layout{% endblock %}</main>
+    <footer>Footer - counter: {{ counter() }}</footer>
+  </body>
+</html>

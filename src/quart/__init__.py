@@ -46,9 +46,12 @@ from .signals import websocket_finished as websocket_finished
 from .signals import websocket_started as websocket_started
 from .signals import websocket_tearing_down as websocket_tearing_down
 from .templating import render_template as render_template
+from .templating import render_template_block as render_template_block
 from .templating import render_template_string as render_template_string
 from .templating import stream_template as stream_template
+from .templating import stream_template_block as stream_template_block
 from .templating import stream_template_string as stream_template_string
+from .templating import TemplateBlockNotFoundError as TemplateBlockNotFoundError
 from .typing import ResponseReturnValue as ResponseReturnValue
 from .wrappers import ClientDisconnectedError as ClientDisconnectedError
 from .wrappers import Request as Request

@@ -24,6 +24,30 @@ pass to the template as context, for example,
     async def index():
         return await render_template('index.html', hello='world')
 
+Rendering a single block
+------------------------
+
+For partial refreshes (for example htmx style updates) a single
+block of a template can be rendered without executing the rest of
+the template, using
+:func:`~quart.templating.render_template_block` or
+:func:`~quart.templating.stream_template_block`. Template
+inheritance, ``super()``, nested blocks and async filters work as
+they do in a full render, but output expressions outside the named
+block are not executed,
+
+.. code-block:: python
+
+    @app.route('/content')
+    async def content():
+        return await render_template_block('index.html', 'content', hello='world')
+
+A :class:`~quart.templating.TemplateBlockNotFoundError` is raised if
+the template (including the templates it extends) does not define
+the block. Note that ``{% set %}`` assignments outside the block are
+not executed either, pass any required values via the context
+instead.
+
 Quart standard extras
 ---------------------
 

@@ -1,3 +1,13 @@
+## Version 0.24.0
+
+Unreleased
+
+- Add ``render_template_block`` and ``stream_template_block`` to
+  render (or stream) a single Jinja block from a template, without
+  executing the rest of the template. Template inheritance,
+  ``super()``, nested blocks and async filters work as in a full
+  render.
+
 ## Version 0.23.1
 
 Released 2026-08-29
