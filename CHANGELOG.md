@@ -1,3 +1,7 @@
+## Unreleased
+
+* Add optional Tilt::RenderBudget (activated via Tilt.with_render_budget) to limit template nesting depth and cumulative render count across pipeline stages and nested renders, per Fiber by default with explicit sharing support, raising Tilt::RenderBudgetExceeded with a bounded call chain when exhausted
+
 ## 2.1.0 (2023-02-17)
 
 * Use UnboundMethod#bind_call on Ruby 2.7+ for better performance (#380, jeremyevans)

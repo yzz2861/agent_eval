@@ -106,8 +106,18 @@ module Tilt
       scope ||= Object.new
       current_template = Thread.current[:tilt_current_template]
       Thread.current[:tilt_current_template] = self
+
+      budget = Thread.current[Tilt::RENDER_BUDGET_KEY]
+      entered = false
+
+      if budget
+        budget.enter!(self)
+        entered = true
+      end
+
       evaluate(scope, locals || {}, &block)
     ensure
+      budget.leave! if entered
       Thread.current[:tilt_current_template] = current_template
     end
 

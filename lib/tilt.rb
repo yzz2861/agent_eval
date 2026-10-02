@@ -1,5 +1,6 @@
 require_relative 'tilt/mapping'
 require_relative 'tilt/template'
+require_relative 'tilt/render_budget'
 
 # Namespace for Tilt. This module is not intended to be included anywhere.
 module Tilt
@@ -73,6 +74,50 @@ module Tilt
   #   in the future.
   def self.current_template
     Thread.current[:tilt_current_template]
+  end
+
+  # The {RenderBudget} currently active in this Fiber, if any.
+  #
+  # @return [Tilt::RenderBudget, nil]
+  def self.render_budget
+    Thread.current[RENDER_BUDGET_KEY]
+  end
+
+  # Activate a render budget for the duration of the block. While the block
+  # runs, every template render (including pipeline stages and templates
+  # rendered from within another template) counts against the budget.
+  #
+  # Each Fiber gets its own budget context, so concurrent Fibers render
+  # independently. Pass the same RenderBudget instance to several Fibers to
+  # share the cumulative render count explicitly.
+  #
+  # @param budget [Tilt::RenderBudget] the budget to enforce
+  # @yield the rendering performed inside the block is budgeted
+  # @return the return value of the block
+  #
+  # @example
+  #   budget = Tilt::RenderBudget.new(max_depth: 10, max_renders: 100)
+  #   Tilt.with_render_budget(budget) { template.render }
+  def self.with_render_budget(budget)
+    raise ArgumentError, 'budget is required' unless budget
+
+    previous_budget = Thread.current[RENDER_BUDGET_KEY]
+    previous_chain = Thread.current[RENDER_BUDGET_CHAIN_KEY]
+
+    # Re-entering with the same budget keeps the existing chain intact.
+    if previous_budget.equal?(budget)
+      return yield
+    end
+
+    Thread.current[RENDER_BUDGET_KEY] = budget
+    Thread.current[RENDER_BUDGET_CHAIN_KEY] = []
+
+    begin
+      yield
+    ensure
+      Thread.current[RENDER_BUDGET_KEY] = previous_budget
+      Thread.current[RENDER_BUDGET_CHAIN_KEY] = previous_chain
+    end
   end
 
   # Extremely simple template cache implementation. Calling applications
