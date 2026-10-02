@@ -26,7 +26,9 @@ from tenacity import (
     DoAttempt,
     DoSleep,
     RetryCallState,
+    RetryCheckpoint,
     RetryError,
+    _load_resume_checkpoint,
     _RetryDecorated,
     _utils,
     after_nothing,
@@ -108,6 +110,47 @@ class AsyncRetrying(BaseRetrying):
             name=name,
             enabled=enabled,
         )
+
+    async def resume(
+        self,
+        checkpoint: RetryCheckpoint | bytes | str,
+        fn: WrappedFn,
+        /,
+        *args: t.Any,
+        secret: str | bytes | None = None,
+        **kwargs: t.Any,
+    ) -> WrappedFnReturnT:
+        """Resume a retry from an authenticated checkpoint."""
+        restored_checkpoint = _load_resume_checkpoint(checkpoint, secret)
+        is_async = _utils.is_coroutine_callable(fn)
+        if not self.enabled:
+            if is_async:
+                return await fn(*args, **kwargs)  # type: ignore[no-any-return]
+            return fn(*args, **kwargs)  # type: ignore[return-value]
+
+        retry_state, remaining_sleep = self._prepare_resume_state(
+            restored_checkpoint, fn, args, kwargs
+        )
+        if remaining_sleep:
+            await self.sleep(remaining_sleep)  # type: ignore[misc]
+
+        while True:
+            do = await self.iter(retry_state=retry_state)
+            if isinstance(do, DoAttempt):
+                try:
+                    if is_async:
+                        result = await fn(*args, **kwargs)
+                    else:
+                        result = fn(*args, **kwargs)
+                except BaseException:
+                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                else:
+                    retry_state.set_result(result)
+            elif isinstance(do, DoSleep):
+                retry_state.prepare_for_next_attempt()
+                await self.sleep(do)  # type: ignore[misc]
+            else:
+                return do  # type: ignore[no-any-return]
 
     @override
     async def __call__(  # type: ignore[override]

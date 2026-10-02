@@ -20,6 +20,21 @@ Retry Main API
 .. autoclass:: tenacity.RetryCallState
    :members:
 
+Retry Checkpoints
+-----------------
+
+.. autoclass:: tenacity.RetryCheckpoint
+   :members:
+
+.. autoclass:: tenacity.RetryCheckpointError
+   :members:
+
+.. autofunction:: tenacity.register_wait_strategy
+   :noindex:
+
+.. autofunction:: tenacity.unregister_wait_strategy
+   :noindex:
+
 After Functions
 ---------------
 

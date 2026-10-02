@@ -556,6 +556,42 @@ other setup that needs to happen before the next attempt.
    ...
 
 
+Persisting Retries Across Restarts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A retry checkpoint can be created from ``before_sleep``, after the wait has
+been decided and before the process sleeps. It contains only portable retry
+state: the next attempt number, elapsed budget, absolute next execution time,
+and a JSON-serializable wait strategy. The callable, its result or exception,
+and running coroutines are never stored.
+
+Checkpoints are authenticated with an application-managed secret. Plain
+callables and strategies containing functions are not serializable. Built-in
+stateless wait strategies are supported directly; custom strategies can opt
+in with :func:`tenacity.register_wait_strategy`.
+
+.. code-block:: python
+
+    from tenacity import RetryCheckpoint, Retrying, wait_exponential
+
+    secret = application_config.checkpoint_secret
+
+    def before_sleep(retry_state):
+        data = RetryCheckpoint.from_retry_state(retry_state).to_bytes(secret)
+        durable_store.save(data)
+
+    retrying = Retrying(wait=wait_exponential(), before_sleep=before_sleep)
+
+    # After a restart, the application supplies the callable and its arguments
+    # again. Elapsed wall time while the process was down counts toward the
+    # retry budget.
+    result = retrying.resume(
+        durable_store.load(),
+        call_remote_service,
+        secret=secret,
+    )
+
+
 Changing Arguments at Run Time
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

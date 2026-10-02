@@ -1,0 +1,9 @@
+---
+features:
+  - |
+    Add authenticated RetryCheckpoint serialization and
+    Retrying.resume / AsyncRetrying.resume for continuing retries
+    across process restarts. Checkpoints are created only in the safe
+    before_sleep phase, omit callables and exceptions, use explicit
+    JSON wait-strategy registries, and count restart downtime against
+    the retry budget.

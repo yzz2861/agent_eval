@@ -36,6 +36,7 @@ from .before import before_log, before_nothing
 
 # Import all built-in before sleep strategies for easier usage.
 from .before_sleep import before_sleep_log, before_sleep_nothing
+from .checkpoint import RetryCheckpoint, RetryCheckpointError
 
 # Import all nap strategies for easier usage.
 from .nap import sleep, sleep_using_event
@@ -71,6 +72,10 @@ from .stop import (
 
 # Import all built-in wait strategies for easier usage.
 from .wait import (
+    deserialize_wait_strategy,
+    register_wait_strategy,
+    serialize_wait_strategy,
+    unregister_wait_strategy,
     wait_chain,
     wait_combine,
     wait_exception,
@@ -185,6 +190,16 @@ _unset = object()
 
 def _first_set(first: t.Any | object, second: t.Any) -> t.Any:
     return second if first is _unset else first
+
+
+def _load_resume_checkpoint(
+    checkpoint: RetryCheckpoint | bytes | str, secret: str | bytes | None
+) -> RetryCheckpoint:
+    if isinstance(checkpoint, RetryCheckpoint):
+        return checkpoint
+    if secret is None:
+        raise ValueError("secret is required to load a serialized checkpoint")
+    return RetryCheckpoint.from_bytes(checkpoint, secret)
 
 
 class RetryError(Exception):
@@ -411,6 +426,33 @@ class BaseRetrying(ABC):
         self.statistics["idle_for"] = 0
         self.statistics["delay_since_first_attempt"] = 0
 
+    def _prepare_resume_state(
+        self,
+        checkpoint: RetryCheckpoint,
+        fn: t.Callable[..., t.Any],
+        args: tuple[t.Any, ...],
+        kwargs: dict[str, t.Any],
+    ) -> tuple["RetryCallState", float]:
+        now = time.time()
+        downtime = now - checkpoint.saved_at
+        if downtime < -1e-9:
+            raise RetryCheckpointError("checkpoint was created in the future")
+
+        self.wait = checkpoint.wait_strategy
+        self.begin()
+        retry_state = RetryCallState(self, fn=fn, args=args, kwargs=kwargs)
+        retry_state.attempt_number = checkpoint.attempt_number
+
+        monotonic_now = time.monotonic()
+        budget_at_first_attempt = checkpoint.elapsed_budget + max(0.0, downtime)
+        retry_state.start_time = monotonic_now - budget_at_first_attempt
+        self.statistics["attempt_number"] = checkpoint.attempt_number
+        self.statistics["start_time"] = retry_state.start_time
+        self.statistics["delay_since_first_attempt"] = budget_at_first_attempt
+
+        remaining_sleep = max(0.0, checkpoint.next_allowed_at - now)
+        return retry_state, remaining_sleep
+
     def _add_action_func(self, fn: t.Callable[..., t.Any]) -> None:
         self.iter_state.actions.append(fn)
 
@@ -530,6 +572,41 @@ class BaseRetrying(ABC):
 
 class Retrying(BaseRetrying):
     """Retrying controller."""
+
+    def resume(
+        self,
+        checkpoint: RetryCheckpoint | bytes | str,
+        fn: t.Callable[..., WrappedFnReturnT],
+        /,
+        *args: t.Any,
+        secret: str | bytes | None = None,
+        **kwargs: t.Any,
+    ) -> WrappedFnReturnT:
+        """Resume a retry from an authenticated checkpoint."""
+        restored_checkpoint = _load_resume_checkpoint(checkpoint, secret)
+        if not self.enabled:
+            return fn(*args, **kwargs)
+
+        retry_state, remaining_sleep = self._prepare_resume_state(
+            restored_checkpoint, fn, args, kwargs
+        )
+        if remaining_sleep:
+            self.sleep(remaining_sleep)
+
+        while True:
+            do = self.iter(retry_state=retry_state)
+            if isinstance(do, DoAttempt):
+                try:
+                    result = fn(*args, **kwargs)
+                except BaseException:
+                    retry_state.set_exception(sys.exc_info())  # type: ignore[arg-type]
+                else:
+                    retry_state.set_result(result)
+            elif isinstance(do, DoSleep):
+                retry_state.prepare_for_next_attempt()
+                self.sleep(do)
+            else:
+                return do  # type: ignore[no-any-return]
 
     @override
     def __call__(
@@ -822,6 +899,8 @@ __all__ = [
     "Future",
     "RetryAction",
     "RetryCallState",
+    "RetryCheckpoint",
+    "RetryCheckpointError",
     "RetryError",
     "Retrying",
     "TryAgain",
@@ -832,6 +911,8 @@ __all__ = [
     "before_nothing",
     "before_sleep_log",
     "before_sleep_nothing",
+    "deserialize_wait_strategy",
+    "register_wait_strategy",
     "retry",
     "retry_all",
     "retry_always",
@@ -847,6 +928,7 @@ __all__ = [
     "retry_if_result",
     "retry_never",
     "retry_unless_exception_type",
+    "serialize_wait_strategy",
     "sleep",
     "sleep_using_event",
     "stop_after_attempt",
@@ -856,6 +938,7 @@ __all__ = [
     "stop_before_delay",
     "stop_never",
     "stop_when_event_set",
+    "unregister_wait_strategy",
     "wait_chain",
     "wait_combine",
     "wait_exception",
