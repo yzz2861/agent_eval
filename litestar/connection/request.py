@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from litestar.handlers.http_handlers import HTTPRouteHandler  # noqa: F401
+    from litestar.middleware.request_decompression import RequestDecompressionState
     from litestar.types.asgi_types import HTTPScope, Method, Receive, Scope, Send
     from litestar.types.empty import EmptyType
 
@@ -176,6 +177,25 @@ class Request(Generic[UserT, AuthT, StateT], ASGIConnection["HTTPRouteHandler", 
         except ValueError:
             raise ClientException(f"Invalid content-length: {content_length_header!r}") from None
         return content_length
+
+    @property
+    def decompression_state(self) -> RequestDecompressionState | None:
+        """Return the decompression state for this request.
+
+        Returns the state tracked by the
+        :class:`~litestar.middleware.request_decompression.RequestDecompressionMiddleware`
+        if it handled the request body, otherwise `None`.
+
+        The state exposes the original ``Content-Encoding`` header value, the original
+        (compressed) ``Content-Length`` header value, and the number of compressed and
+        decompressed body bytes seen so far.
+
+        Returns:
+            A :class:`~litestar.middleware.request_decompression.RequestDecompressionState`
+            instance, or `None` if the request body was not decompressed.
+        """
+        state = self._connection_state.request_decompression
+        return state if state is not Empty else None
 
     async def stream(self) -> AsyncGenerator[bytes, None]:
         """Return an async generator that streams chunks of bytes.

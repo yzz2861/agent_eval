@@ -253,6 +253,56 @@ You can configure the following additional zstd-specific values:
        compression_config=CompressionConfig(backend="zstd", zstd_gzip_fallback=True),
    )
 
+Request Decompression
+---------------------
+
+Some clients compress the request body, e.g. with gzip, and announce this via the
+``Content-Encoding`` header. The optional
+:class:`~litestar.middleware.request_decompression.RequestDecompressionMiddleware`
+transparently decompresses such request bodies, so route handlers can read the body,
+form data or stream as usual and receive the decompressed bytes. The ``gzip`` and
+``identity`` content encodings are supported; requests carrying any other content
+encoding are rejected with a ``415 Unsupported Media Type`` response.
+
+.. code-block:: python
+
+   from litestar import Litestar
+   from litestar.middleware.request_decompression import RequestDecompressionMiddleware
+
+   app = Litestar(
+       route_handlers=[...],
+       middleware=[RequestDecompressionMiddleware()],
+   )
+
+Body size limits are enforced on the *decompressed* size: both the route handler's
+``request_max_body_size`` and the middleware's optional ``max_decompressed_size``
+are applied to the decompressed byte stream, so a small compressed payload cannot be
+used to bypass request size limits. If both limits are set, the lower one applies.
+
+Decompression happens lazily as the application consumes the body, and malformed
+payloads - truncated gzip streams, checksum mismatches or trailing garbage after the
+gzip stream - are rejected with a ``400 Bad Request`` response.
+
+Since the original ``Content-Encoding`` and ``Content-Length`` headers describe the
+compressed representation, they are removed from the scope and are not visible to
+downstream consumers. Information about the compressed and decompressed
+representations is available via
+:attr:`Request.decompression_state <litestar.connection.Request.decompression_state>`:
+
+.. code-block:: python
+
+   from litestar import Request, post
+
+
+   @post("/")
+   async def handler(request: Request) -> dict:
+       body = await request.body()
+       state = request.decompression_state
+       return {
+           "compressed_bytes": state.compressed_bytes_received if state else None,
+           "decompressed_bytes": state.decompressed_bytes_emitted if state else None,
+       }
+
 Rate-Limit Middleware
 ---------------------
 

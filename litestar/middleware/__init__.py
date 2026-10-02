@@ -8,6 +8,10 @@ from litestar.middleware.base import (
     DefineMiddleware,
     MiddlewareProtocol,
 )
+from litestar.middleware.request_decompression import (
+    RequestDecompressionMiddleware,
+    RequestDecompressionState,
+)
 
 __all__ = (
     "ASGIMiddleware",
@@ -16,4 +20,6 @@ __all__ = (
     "AuthenticationResult",
     "DefineMiddleware",
     "MiddlewareProtocol",
+    "RequestDecompressionMiddleware",
+    "RequestDecompressionState",
 )

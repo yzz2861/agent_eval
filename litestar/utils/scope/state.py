@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from typing import Self
 
     from litestar.datastructures import URL, Accept, Headers, UploadFile
+    from litestar.middleware.request_decompression import RequestDecompressionState
     from litestar.types.asgi_types import Scope
     from litestar.types.composite_types import ExceptionHandlersMap
 
@@ -43,6 +44,7 @@ class ScopeState:
         "log_context",
         "msgpack",
         "parsed_query",
+        "request_decompression",
         "response_compressed",
         "response_started",
         "session_id",
@@ -67,6 +69,7 @@ class ScopeState:
         self.log_context: dict[str, Any] = {}
         self.msgpack = Empty
         self.parsed_query = Empty
+        self.request_decompression = Empty
         self.response_compressed = Empty
         self.response_started = False
         self.session_id = Empty
@@ -89,6 +92,7 @@ class ScopeState:
     log_context: dict[str, Any]
     msgpack: Any | EmptyType
     parsed_query: tuple[tuple[str, str], ...] | EmptyType
+    request_decompression: RequestDecompressionState | EmptyType
     response_compressed: bool | EmptyType
     response_started: bool
     session_id: str | None | EmptyType

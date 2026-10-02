@@ -13,5 +13,6 @@ middleware
     csrf
     logging
     rate_limit
+    request_decompression
     session/index
     constraints
