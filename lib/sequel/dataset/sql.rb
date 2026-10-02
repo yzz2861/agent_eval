@@ -673,6 +673,26 @@ module Sequel
       sql << ')' if pls.parens
     end
 
+    # Append literalization of strict placeholder literal string to SQL string.
+    def strict_placeholder_literal_string_sql_append(sql, pls)
+      args = pls.args
+      sql << '(' if pls.parens
+
+      pls.fragments.each_with_index do |fragment, index|
+        sql = sql << fragment
+        if (placeholder = pls.placeholders[index])
+          value = if args.is_a?(Hash)
+            args.fetch(placeholder[:name].to_sym)
+          else
+            args[placeholder[:index]]
+          end
+          literal_append(sql, value)
+        end
+      end
+
+      sql << ')' if pls.parens
+    end
+
     # Append literalization of qualified identifier to SQL string.
     # If 3 arguments are given, the 2nd should be the table/qualifier and the third should be
     # column/qualified.  If 2 arguments are given, the 2nd should be an SQL::QualifiedIdentifier.

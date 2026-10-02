@@ -71,7 +71,11 @@ module Sequel
         else
           v(o.args)
         end
-        SQL::PlaceholderLiteralString.new(o.str, args, o.parens)
+        if o.is_a?(SQL::StrictPlaceholderLiteralString)
+          SQL::StrictPlaceholderLiteralString.new(o.str, args, o.parens)
+        else
+          SQL::PlaceholderLiteralString.new(o.str, args, o.parens)
+        end
       when SQL::JoinOnClause
         SQL::JoinOnClause.new(v(o.on), o.join_type, v(o.table_expr))
       when SQL::JoinUsingClause

@@ -280,6 +280,17 @@ providing them as additional arguments:
   posts.where(Sequel.lit('(stamp < ?) AND (author != ?)', Date.today - 3, author_name))
   # WHERE ((stamp < '2010-07-11') AND (author != 'JKR'))
 
+Use +Sequel.lit_strict+ for old SQL templates where colons or question marks
+appear in strings, quoted identifiers, PostgreSQL dollar quotes, or comments.
+It recognizes placeholders only in SQL code, supports repeated named
+placeholders, and validates missing or extra arguments and unterminated
+literals before the query is executed:
+
+  posts.where(Sequel.lit_strict(
+    "author = :name /* :not_a_param */ AND body = $$O'Reilly$$",
+    name: author_name
+  ))
+
 Datasets can also be used as subqueries:
 
   DB[:items].where(Sequel[:price] > DB[:items].select{avg(price) + 100})

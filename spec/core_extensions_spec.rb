@@ -309,6 +309,12 @@ describe "String#lit" do
     @ds.with_quote_identifiers(true).literal(a).must_equal 'DISTINCT "a"'
   end
 
+  it "should return a strict placeholder literal string when lit_strict is used" do
+    a = "name = :b /* :ignored */ AND ':ignored'".lit_strict(:b=>"O'Brien")
+    a.must_be_kind_of(Sequel::SQL::StrictPlaceholderLiteralString)
+    @ds.literal(a).must_equal "name = 'O''Brien' /* :ignored */ AND ':ignored'"
+  end
+
   it "should treat placeholder literal strings as generic expressions" do
     a = ':b'.lit(:b=>:a)
     @ds.literal(a + 1).must_equal "(a + 1)"
@@ -782,4 +788,3 @@ describe Sequel::SQL::VirtualRow do
     proc{Sequel.mock.dataset.filter{count(:over, :* =>true, :partition=>a, :order=>b, :window=>:win, :frame=>:rows){}}.sql}.must_raise(Sequel::Error)
   end
 end
-

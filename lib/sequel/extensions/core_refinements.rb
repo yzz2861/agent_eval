@@ -183,7 +183,17 @@ module Sequel::CoreRefinements
     def lit(*args)
       args.empty? ? Sequel::LiteralString.new(self) : Sequel::SQL::PlaceholderLiteralString.new(self, args)
     end
-    
+
+    # Return a strict <tt>Sequel::SQL::StrictPlaceholderLiteralString</tt>.
+    def lit_strict(*args)
+      args = [args[0]] if args.length == 1 && args[0].is_a?(Hash)
+      Sequel::SQL::StrictPlaceholderLiteralString.new(self, args)
+    end
+    alias strict_lit lit_strict
+    alias sql_fragment lit_strict
+    alias safe_lit lit_strict
+    alias_method :lit!, :lit_strict
+
     # Returns a <tt>Sequel::SQL::Blob</tt> that holds the same data as this string. Blobs provide proper
     # escaping of binary data.
     def to_sequel_blob

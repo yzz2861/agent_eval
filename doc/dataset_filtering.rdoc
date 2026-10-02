@@ -113,6 +113,30 @@ You can also use placeholders with :placeholder and a hash of placeholder values
   items.where(Sequel.lit('category = :category', category: "ruby")).sql
   # "SELECT * FROM items WHERE category = 'ruby'"
 
+For old templates that contain colons or question marks inside strings,
+quoted identifiers, dollar-quoted strings, or comments, use the strict SQL
+fragment entry instead. It recognizes named and positional placeholders only in
+SQL code, supports repeated named placeholders, and raises before execution for
+missing, extra, or unmatched arguments and unterminated literals:
+
+  items.where(Sequel.lit_strict("category = :category /* :not_a_param */", category: "ruby")).sql
+  # "SELECT * FROM items WHERE category = 'ruby' /* :not_a_param */"
+
+  Sequel.lit_strict(
+    "SELECT * FROM posts WHERE body = $$:literal$$ AND id = :id",
+    id: 1
+  )
+
+Sequel.strict_lit, Sequel.safe_lit, Sequel.sql_fragment, and Sequel.lit! are
+aliases for Sequel.lit_strict. When core extensions are enabled, String also
+supports the same methods, e.g. <tt>sql.lit_strict(id: 1)</tt>.
+
+Strict placeholders also work with bound/prepared statements. Repeated named
+placeholders are repeated in the binding order, while +Sequel.lit+ keeps its
+existing permissive behavior for historical templates:
+
+  items.where(Sequel.lit_strict("name = :name OR parent = :name", name: :$name))
+
 In order to combine AND and OR together, you have a few options:
 
   items.where(category: nil).or(category: "ruby")

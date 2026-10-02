@@ -612,6 +612,21 @@ module Sequel
         end
       end
 
+      # Create a <tt>SQL::StrictPlaceholderLiteralString</tt>. Unlike
+      # +Sequel.lit+, this only recognizes placeholders in SQL code, ignoring
+      # them in strings, quoted identifiers, dollar-quoted strings, and comments.
+      #
+      #   DB.literal(Sequel.lit_strict("name = :name", :name=>"O'Brien")) #=>
+      #     "name = 'O''Brien'"
+      def lit_strict(s, *args)
+        args = [args[0]] if args.length == 1 && args[0].is_a?(Hash)
+        SQL::StrictPlaceholderLiteralString.new(s, args)
+      end
+      alias strict_lit lit_strict
+      alias sql_fragment lit_strict
+      alias safe_lit lit_strict
+      alias_method :lit!, :lit_strict
+
       # Return a <tt>Sequel::SQL::BooleanExpression</tt> created from the condition
       # specifier, matching none of the conditions.
       #
@@ -1647,6 +1662,406 @@ module Sequel
       end
 
       to_s_method :placeholder_literal_string_sql
+    end
+
+    # A placeholder literal string that only recognizes placeholders in SQL
+    # code. Placeholders in strings, quoted identifiers, dollar-quoted
+    # strings, and comments are treated as literal text.
+    class StrictPlaceholderLiteralString < PlaceholderLiteralString
+      # The static SQL fragments surrounding each placeholder.
+      attr_reader :fragments
+
+      # The placeholders found in the SQL, in the order they appear.
+      attr_reader :placeholders
+
+      # Create an object with the given string, placeholder arguments, and parens flag.
+      def initialize(str, args, parens=false)
+        raise Error, "strict placeholder literal string requires a String" unless str.is_a?(::String)
+
+        args = args.is_a?(Array) && args.length == 1 && args[0].is_a?(Hash) ? args[0] : args
+        if args.is_a?(Hash) && args.keys.any?{|key| !key.is_a?(Symbol)}
+          args = args.each_with_object({}){|(key, value), normalized_args| normalized_args[key.to_sym] = value}
+        end
+        unless args.is_a?(Array) || args.is_a?(Hash)
+          raise Error, "strict placeholder literal string arguments must be an Array or Hash"
+        end
+
+        @fragments, @placeholders = scan(str)
+        validate_placeholder_arguments(args)
+        super(str, args, parens)
+      end
+
+      # Return a copy of the that will be surrounded by parentheses.
+      def with_parens
+        @parens ? self : self.class.new(@str, @args, true)
+      end
+
+      to_s_method :strict_placeholder_literal_string_sql
+
+      private
+
+      # Use only the public constructor arguments for eval-friendly inspection.
+      def inspect_args
+        [:str, :args, :parens]
+      end
+
+      # Scan the SQL, returning the static fragments and placeholders found.
+      def scan(str)
+        fragments = [String.new]
+        placeholders = []
+        positional_index = 0
+        index = 0
+
+        while index < str.length
+          character = str[index]
+
+          if str[index, 2] == '--'
+            index = skip_line_comment(str, index, fragments)
+          elsif str[index, 2] == '/*'
+            index = skip_block_comment(str, index, fragments)
+          elsif (tag = dollar_quote_tag(str, index))
+            index = skip_dollar_quote(str, index, tag, fragments)
+          elsif character == "'"
+            index = skip_quoted_string(str, index, fragments)
+          elsif character == '"'
+            index = skip_quoted_identifier(str, index, '"', '"', fragments)
+          elsif character == '`'
+            index = skip_quoted_identifier(str, index, '`', '`', fragments)
+          elsif character == '[' && bracket_identifier_start?(str, index)
+            index = skip_bracket_identifier(str, index, fragments)
+          elsif character == '['
+            fragments.last << character
+            index = skip_array_subscript(str, index, fragments)
+          elsif character == ':' && (placeholder = named_placeholder(str, index))
+            name, position = placeholder
+            placeholders << {:type=>:named, :name=>name, :line=>position[0], :column=>position[1]}
+            index += name.length + 1
+            fragments << String.new
+          elsif character == ':' && str[index, 2] == '::'
+            index = skip_type_cast(str, index, fragments, placeholders)
+          elsif character == '?'
+            if ['?', '|', '&', '#'].include?(str[index + 1])
+              fragments.last << str[index, 2]
+              index += 2
+            else
+              placeholders << {
+                :type=>:positional,
+                :index=>positional_index,
+                :line=>line_number(str, index),
+                :column=>column_number(str, index)
+              }
+              positional_index += 1
+              index += 1
+              fragments << String.new
+            end
+          else
+            fragments.last << character
+            index += 1
+          end
+        end
+
+        [fragments.each(&:freeze), placeholders]
+      end
+
+      # Skip a SQL line comment, including its terminating newline.
+      def skip_line_comment(str, index, fragments)
+        newline = str.index("\n", index + 2)
+        if newline
+          fragments.last << str[index..newline]
+          newline + 1
+        else
+          fragments.last << str[index..-1]
+          str.length
+        end
+      end
+
+      # Skip a SQL block comment. Block comments are treated as non-nested,
+      # matching the syntax accepted by SQLite and most other SQL databases.
+      def skip_block_comment(str, index, fragments)
+        closing = str.index('*/', index + 2)
+        unless closing
+          raise_unterminated(str, index, 'block comment')
+        end
+
+        end_index = closing + 2
+        fragments.last << str[index...end_index]
+        end_index
+      end
+
+      # Return the dollar quote tag at the position, or nil if it is not one.
+      def dollar_quote_tag(str, index)
+        return unless str[index] == '$'
+        return '' if str[index + 1] == '$'
+        return if index + 1 >= str.length || !letter_or_underscore?(str[index + 1])
+
+        position = index + 1
+        while position + 1 < str.length &&
+              (word_character?(str[position + 1]) || str[position + 1] == '_')
+          position += 1
+        end
+        str[(index + 1)..position] if str[position + 1] == '$'
+      end
+
+      # Skip a PostgreSQL dollar-quoted string.
+      def skip_dollar_quote(str, index, tag, fragments)
+        opening = "$#{tag}$"
+        closing = str.index(opening, index + opening.length)
+        unless closing
+          raise_unterminated(str, index, 'dollar-quoted string')
+        end
+
+        end_index = closing + opening.length
+        fragments.last << str[index...end_index]
+        end_index
+      end
+
+      # Skip a single-quoted string, including PostgreSQL and SQLite string prefixes.
+      def skip_quoted_string(str, quote_index, fragments)
+        start = string_prefix_start(str, quote_index)
+        escaped = ['e', 'E'].include?(str[start]) if start != quote_index
+        position = quote_index + 1
+
+        while position < str.length
+          character = str[position]
+          if escaped && character == '\\'
+            position += 2
+          elsif character == "'"
+            if str[position + 1] == "'"
+              position += 2
+            else
+              position += 1
+              fragments.last << str[start...position]
+              return position
+            end
+          else
+            position += 1
+          end
+        end
+
+        raise_unterminated(str, start, 'string')
+      end
+
+      # Return the beginning of a supported single-quoted string prefix.
+      def string_prefix_start(str, quote_index)
+        if quote_index >= 2 && str[quote_index - 1] == '&' &&
+           (str[quote_index - 2] == 'u' || str[quote_index - 2] == 'U') &&
+           token_boundary?(str, quote_index - 2)
+          return quote_index - 2
+        end
+
+        if quote_index >= 1 && ['b', 'B', 'e', 'E', 'n', 'N', 'x', 'X'].include?(str[quote_index - 1]) &&
+           token_boundary?(str, quote_index - 1)
+          return quote_index - 1
+        end
+
+        quote_index
+      end
+
+      # Skip a quoted identifier using the given quote character.
+      def skip_quoted_identifier(str, index, quote, _closing, fragments)
+        position = index + 1
+
+        while position < str.length
+          if str[position] == quote
+            if str[position + 1] == quote
+              position += 2
+            else
+              position += 1
+              fragments.last << str[index...position]
+              return position
+            end
+          else
+            position += 1
+          end
+        end
+
+        raise_unterminated(str, index, 'quoted identifier')
+      end
+
+      # Return whether the bracket starts a SQL Server quoted identifier.
+      def bracket_identifier_start?(str, index)
+        index.zero? || !['_', ']', ')', '"', '`', "'"].include?(str[index - 1]) && !word_character?(str[index - 1])
+      end
+
+      # Skip a SQL Server bracket-quoted identifier.
+      def skip_bracket_identifier(str, index, fragments)
+        position = index + 1
+
+        while position < str.length
+          if str[position] == ']'
+            if str[position + 1] == ']'
+              position += 2
+            else
+              position += 1
+              fragments.last << str[index...position]
+              return position
+            end
+          else
+            position += 1
+          end
+        end
+
+        raise_unterminated(str, index, 'bracket-quoted identifier')
+      end
+
+      # Skip a PostgreSQL-style type cast, including a casted positional placeholder.
+      def skip_type_cast(str, index, fragments, placeholders)
+        if str[index - 1] == '?'
+          placeholder = placeholders.last
+          if placeholder && placeholder[:type] == :positional &&
+             placeholder[:column] == column_number(str, index - 1)
+            position = index + 2
+            position += 1 while position < str.length && (word_character?(str[position]) || str[position] == '_')
+            fragments.last << str[index...position]
+            return position
+          end
+        end
+
+        position = index + 2
+        position += 1 while position < str.length && (word_character?(str[position]) || str[position] == '_')
+        fragments.last << str[index...position]
+        position
+      end
+
+      # Skip a bracket used as an array/json subscript.
+      def skip_array_subscript(str, index, fragments)
+        depth = 1
+        position = index + 1
+
+        while position < str.length
+          case str[position]
+          when '?'
+            if str[position + 1] == ':'
+              fragments.last << str[position, 2]
+              position += 2
+            else
+              fragments.last << str[position]
+              position += 1
+            end
+          when '['
+            depth += 1
+            fragments.last << str[position]
+            position += 1
+          when ']'
+            depth -= 1
+            if depth.zero?
+              fragments.last << str[position]
+              return position + 1
+            end
+            fragments.last << str[position]
+            position += 1
+          when "'", '"', '`'
+            quote_start = position
+            quote_end = case str[position]
+              when "'"
+                skip_quoted_string(str, position, [String.new])
+              when '"', '`'
+                skip_quoted_identifier(str, position, str[position], str[position], [String.new])
+            end
+            fragments.last << str[quote_start...quote_end]
+            position = quote_end
+          else
+            fragments.last << str[position]
+            position += 1
+          end
+        end
+
+        raise_unterminated(str, index, 'array subscript')
+      end
+
+      # Return the placeholder name and position if the colon starts one.
+      def named_placeholder(str, index)
+        return if index + 1 >= str.length ||
+                  (index > 0 && str[index - 1] == ':') ||
+                  !letter_or_underscore?(str[index + 1])
+
+        position = index + 2
+        position += 1 while position < str.length && (word_character?(str[position]) || str[position] == '_')
+        [str[(index + 1)...position], [line_number(str, index), column_number(str, index)]]
+      end
+
+      # Validate that every placeholder has an argument and vice versa.
+      def validate_placeholder_arguments(args)
+        positional = @placeholders.select{|placeholder| placeholder[:type] == :positional}
+        named = @placeholders.select{|placeholder| placeholder[:type] == :named}
+
+        if args.is_a?(Hash)
+          unless positional.empty?
+            placeholder = positional.first
+            raise Error,
+              "unexpected positional placeholder at line #{placeholder[:line]}, "\
+              "column #{placeholder[:column]} when using named placeholder arguments"
+          end
+
+          names = named.map{|placeholder| placeholder[:name].to_sym}.uniq
+          extra = args.keys.map(&:to_sym) - names
+          unless extra.empty?
+            raise Error, "extra value for named placeholder :#{extra.first}"
+          end
+
+          unused = names - args.keys.map(&:to_sym)
+          unless unused.empty?
+            placeholder = named.find{|item| item[:name].to_sym == unused.first}
+            raise Error,
+              "missing value for named placeholder :#{placeholder[:name]} at line "\
+              "#{placeholder[:line]}, column #{placeholder[:column]}"
+          end
+        else
+          unless named.empty?
+            placeholder = named.first
+            raise Error,
+              "unexpected named placeholder :#{placeholder[:name]} at line "\
+              "#{placeholder[:line]}, column #{placeholder[:column]} when using "\
+              "positional placeholder arguments"
+          end
+
+          unless positional.length == args.length
+            if positional.length > args.length
+              placeholder = positional[args.length]
+              raise Error,
+                "missing value for positional placeholder ##{args.length + 1} at "\
+                "line #{placeholder[:line]}, column #{placeholder[:column]}"
+            end
+
+            raise Error,
+              "#{args.length} positional placeholder arguments provided but "\
+              "#{positional.length} placeholders found"
+          end
+        end
+      end
+
+      # Raise an error for an unterminated SQL token.
+      def raise_unterminated(str, index, type)
+        raise Error,
+          "unterminated #{type} starting at line #{line_number(str, index)}, "\
+          "column #{column_number(str, index)}"
+      end
+
+      # Return the 1-based line number for the position.
+      def line_number(str, index)
+        str[0...index].count("\n") + 1
+      end
+
+      # Return the 1-based column number for the position.
+      def column_number(str, index)
+        line_start = str.rindex("\n", index - 1)
+        index - (line_start || -1)
+      end
+
+      # Return whether the character may be in an unquoted SQL name.
+      def word_character?(character)
+        ('0'..'9').cover?(character) || ('a'..'z').cover?(character) || ('A'..'Z').cover?(character)
+      end
+
+      # Return whether the character may start an unquoted SQL name.
+      def letter_or_underscore?(character)
+        character == '_' || ('a'..'z').cover?(character) || ('A'..'Z').cover?(character)
+      end
+
+      # Return whether the position is not in the middle of an unquoted name.
+      def token_boundary?(str, index)
+        index.zero? || !(word_character?(str[index - 1]) || str[index - 1] == '_')
+      end
     end
 
     # Subclass of +ComplexExpression+ where the expression results
