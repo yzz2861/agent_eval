@@ -5,6 +5,11 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add ``RecordStreamWriter`` and ``RecordStreamReader`` for signed
+    record streams. Each record is authenticated together with its
+    sequence number and the previous frame's signature, and an end frame
+    authenticates the total record count, so reordering, truncation, and
+    splicing of streams is detected.
 
 
 Version 2.2.0

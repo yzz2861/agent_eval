@@ -11,6 +11,12 @@ from .serializer import Serializer as Serializer
 from .signer import HMACAlgorithm as HMACAlgorithm
 from .signer import NoneAlgorithm as NoneAlgorithm
 from .signer import Signer as Signer
+from .stream import BadStream as BadStream
+from .stream import BadStreamSignature as BadStreamSignature
+from .stream import RecordStreamReader as RecordStreamReader
+from .stream import RecordStreamWriter as RecordStreamWriter
+from .stream import StreamStateError as StreamStateError
+from .stream import TruncatedStream as TruncatedStream
 from .timed import TimedSerializer as TimedSerializer
 from .timed import TimestampSigner as TimestampSigner
 from .url_safe import URLSafeSerializer as URLSafeSerializer
