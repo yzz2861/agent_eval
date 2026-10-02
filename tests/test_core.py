@@ -3,6 +3,7 @@
 import errno
 import hashlib
 import io
+import multiprocessing as mp
 import os
 import os.path as op
 import pathlib
@@ -312,6 +313,176 @@ def test_get(cache):
     assert cache.get(0, expire_time=True) == (0, None)
     assert cache.get(0, tag=True) == (0, 'number')
     assert cache.get(0, expire_time=True, tag=True) == (0, None, 'number')
+
+
+def test_get_version_missing_present_and_expired(cache):
+    missing = cache.get_version(0)
+    assert missing == dc.MISSING_VERSION
+    assert missing.state == dc.VERSION_MISSING
+
+    assert cache.set(0, 0, expire=0.01, tag='tag')
+    present = cache.get_version(0)
+    assert present.state == dc.VERSION_PRESENT
+    assert present.number is not None
+
+    time.sleep(0.02)
+    expired = cache.get_version(0)
+    assert expired.state == dc.VERSION_EXPIRED
+    assert expired != present
+    assert expired != dc.MISSING_VERSION
+
+
+def test_compare_and_swap_batch_atomic(cache):
+    large_one = b'one' * 2**20
+    large_two = b'two' * 2**20
+    assert cache.set('old', b'old' * 2**20, tag='old')
+    old_version = cache.get_version('old')
+    missing_version = cache.get_version('new')
+
+    result = cache.compare_and_swap(
+        {
+            'old': dc.SetItem(large_one, expire=60, tag='one'),
+            'new': {'value': large_two, 'tag': 'two'},
+        },
+        deletes=['gone'],
+        expected={'old': old_version, 'new': missing_version},
+    )
+
+    assert result.success
+    assert result.conflicts == ()
+    success, conflicts = result
+    assert success
+    assert conflicts == ()
+    assert cache['old'] == large_one
+    assert cache['new'] == large_two
+    assert cache.get('old', expire_time=True, tag=True)[1:] == (
+        pytest.approx(time.time() + 60, abs=5), 'one'
+    )
+    assert cache.get('new', tag=True) == (large_two, 'two')
+    assert len(cache.check()) == 0
+
+    assert cache.compare_and_swap(
+        {('tuple',): ('plain', 'tuple')},
+        expected={('tuple',): dc.MISSING_VERSION},
+    ).success
+    assert cache[('tuple',)] == ('plain', 'tuple')
+    tuple_version = cache.get_version(('tuple',))
+    assert tuple_version.state == 'present'
+    assert tuple_version != dc.MISSING_VERSION
+
+    stale = dict(result.versions)
+    stale['new'] = missing_version
+    stale.pop('gone', None)
+    failed = cache.compare_and_swap(
+        {'old': b'changed'}, deletes=['new'], expected=stale
+    )
+
+    assert not failed.success
+    assert cache['old'] == large_one
+    assert cache['new'] == large_two
+    assert len(cache.check()) == 0
+
+
+def test_compare_and_swap_delete_reinsert_aba(cache):
+    assert cache.set(0, 'value')
+    version = cache.get_version(0)
+
+    assert cache.compare_and_swap(
+        deletes=[0], expected={0: version}
+    ).success
+    assert cache.get_version(0) == dc.MISSING_VERSION
+    assert cache.compare_and_swap(
+        {0: 'value'}, expected={0: dc.MISSING_VERSION}
+    ).success
+    reinserted = cache.get_version(0)
+    assert reinserted != version
+
+    failed = cache.compare_and_swap(
+        {0: 'stale'}, expected={0: version}
+    )
+    assert not failed.success
+    assert failed.conflicts == (0,)
+    assert cache[0] == 'value'
+
+
+def test_compare_and_swap_conflict_removes_staged_files(cache):
+    assert cache.set(0, b'value' * 2**20)
+    version = cache.get_version(0)
+    cache.set(0, b'changed' * 2**20)
+
+    pattern = '**/*.val'
+    files_before = {
+        str(path)
+        for path in pathlib.Path(cache.directory).glob(pattern)
+    }
+    result = cache.compare_and_swap(
+        {
+            0: b'stale-one' * 2**20,
+            1: b'stale-two' * 2**20,
+        },
+        expected={0: version, 1: dc.MISSING_VERSION},
+    )
+
+    assert result.conflicts == (0,)
+    files_after = {
+        str(path)
+        for path in pathlib.Path(cache.directory).glob(pattern)
+    }
+    assert files_after == files_before
+    assert cache[0] == b'changed' * 2**20
+    assert 1 not in cache
+
+
+def _cas_worker(directory, barrier, queue, value):
+    cache = dc.Cache(directory, timeout=5)
+    version = cache.get_version('key')
+    barrier.wait()
+    result = cache.compare_and_swap(
+        {'key': value}, expected={'key': version}
+    )
+    queue.put((result.success, tuple(result.conflicts)))
+    cache.close()
+
+
+def test_compare_and_swap_multiprocess_conflict(tmp_path):
+    directory = str(tmp_path)
+    cache = dc.Cache(directory)
+    cache.set('key', b'old' * 2**20)
+    cache.close()
+
+    ctx = mp.get_context('fork')
+    barrier = ctx.Barrier(2)
+    queue = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_cas_worker,
+            args=(directory, barrier, queue, b'first' * 2**20),
+        ),
+        ctx.Process(
+            target=_cas_worker,
+            args=(directory, barrier, queue, b'second' * 2**20),
+        ),
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(10)
+        assert process.exitcode == 0
+
+    results = [queue.get() for _ in processes]
+    assert sorted(results) == sorted([
+        (False, ('key',)),
+        (True, ()),
+    ])
+
+    cache = dc.Cache(directory)
+    assert cache['key'] in (
+        b'first' * 2**20,
+        b'second' * 2**20,
+    )
+    assert len(cache.check()) == 0
+    cache.close()
 
 
 def test_get_expired_fast_path(cache):

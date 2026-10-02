@@ -6,9 +6,12 @@ The :doc:`tutorial` provides a helpful walkthrough of most methods.
 """
 
 from .core import (
+    CasResult,
     DEFAULT_SETTINGS,
     ENOVAL,
     EVICTION_POLICY,
+    MISSING_VERSION,
+    SetItem,
     UNKNOWN,
     Cache,
     Disk,
@@ -16,6 +19,10 @@ from .core import (
     JSONDisk,
     Timeout,
     UnknownFileWarning,
+    VERSION_EXPIRED,
+    VERSION_MISSING,
+    VERSION_PRESENT,
+    Version,
 )
 from .fanout import FanoutCache
 from .persistent import Deque, Index
@@ -33,6 +40,7 @@ __all__ = [
     'Averager',
     'BoundedSemaphore',
     'Cache',
+    'CasResult',
     'DEFAULT_SETTINGS',
     'Deque',
     'Disk',
@@ -43,10 +51,16 @@ __all__ = [
     'Index',
     'JSONDisk',
     'Lock',
+    'MISSING_VERSION',
     'RLock',
+    'SetItem',
     'Timeout',
     'UNKNOWN',
     'UnknownFileWarning',
+    'VERSION_EXPIRED',
+    'VERSION_MISSING',
+    'VERSION_PRESENT',
+    'Version',
     'barrier',
     'memoize_stampede',
     'throttle',
