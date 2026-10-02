@@ -6,6 +6,8 @@
 
 * Drop support for Ruby 1.9 (jeremyevans)
 
+* Add flash_notifications plugin for session notifications that remain available until explicit acknowledgment or expiration (jeremyevans)
+
 === 3.108.0 (2026-09-14)
 
 * Make invalid_request_body r.POST exception handling reraise RodaErrors (jeremyevans)
