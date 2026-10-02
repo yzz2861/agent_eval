@@ -286,6 +286,35 @@ To set these attributes you should override the `CursorPagination` class, and th
 
 ---
 
+### KeysetCursorPagination
+
+The `KeysetCursorPagination` class provides an alternative cursor implementation that positions against the complete tuple of ordering columns (a "keyset"), rather than a single position plus an offset.
+
+This style supports multi-column orderings with mixed directions, such as `('-created_at', 'category', 'id')`, including columns that may contain `NULL` values. Because every cursor records the full ordering position of the page boundary, large groups of rows sharing the same value in the leading ordering column do not degrade into an ever-increasing offset, and both forward and reverse pagination remain stable.
+
+Cursors issued by this class are bound to the current ordering and to the filter query parameters of the request, so a cursor obtained from one query cannot be replayed against a different one.
+
+The ordering must determine a total order. If it does not include a unique column or cover a unique constraint, the primary key is appended to the ordering automatically. Set `require_unique_ordering = True` on the class to raise an error instead.
+
+#### Setup
+
+To enable the `KeysetCursorPagination` style globally, use the following configuration, modifying the `PAGE_SIZE` as desired:
+
+    REST_FRAMEWORK = {
+        'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.KeysetCursorPagination',
+        'PAGE_SIZE': 100
+    }
+
+On `GenericAPIView` subclasses you may also set the `pagination_class` attribute to select `KeysetCursorPagination` on a per-view basis.
+
+#### Configuration
+
+The `KeysetCursorPagination` class supports the same `page_size`, `cursor_query_param`, `page_size_query_param`, `max_page_size`, `ordering` and `template` attributes as `CursorPagination`, plus:
+
+* `require_unique_ordering` = If `True`, raise `ImproperlyConfigured` when the ordering does not guarantee a total order, instead of appending the primary key. Defaults to `False`.
+
+---
+
 ## Custom pagination styles
 
 To create a custom pagination serializer class, you should inherit the subclass `pagination.BasePagination`, override the `paginate_queryset(self, queryset, request, view=None)`, and `get_paginated_response(self, data)` methods:

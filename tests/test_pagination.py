@@ -1,4 +1,8 @@
+import datetime
+from base64 import urlsafe_b64encode
+
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 from django.core.paginator import Paginator as DjangoPaginator
 from django.db import models
 from django.test import TestCase
@@ -1153,3 +1157,209 @@ def test_get_displayed_page_numbers():
     assert displayed_page_numbers(7, 9) == [1, None, 6, 7, 8, 9]
     assert displayed_page_numbers(8, 9) == [1, None, 7, 8, 9]
     assert displayed_page_numbers(9, 9) == [1, None, 7, 8, 9]
+
+
+class KeysetPaginationModel(models.Model):
+    created_at = models.DateTimeField()
+    category = models.IntegerField(null=True)
+
+
+@pytest.mark.usefixtures("reset_sequences")
+class TestKeysetCursorPagination(TestCase):
+    """
+    Unit tests for pagination.KeysetCursorPagination.
+
+    Exercises multi-column orderings with mixed directions, NULL values
+    and duplicate timestamps on SQLite, where a position-plus-offset
+    cursor would degrade into an ever-increasing offset.
+    """
+
+    def setUp(self):
+        class ExamplePagination(pagination.KeysetCursorPagination):
+            page_size = 3
+            page_size_query_param = 'page_size'
+            max_page_size = 10
+            ordering = ('-created_at', 'category')
+
+        self.pagination = ExamplePagination()
+        self.base = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+        data = [
+            (self.base, None),                             # id 1
+            (self.base, 2),                                # id 2
+            (self.base, 1),                                # id 3
+            (self.base, None),                             # id 4
+            (self.base + datetime.timedelta(hours=1), 5),  # id 5
+            (self.base + datetime.timedelta(hours=1), None),  # id 6
+            (self.base + datetime.timedelta(hours=2), 3),  # id 7
+        ]
+        for created_at, category in data:
+            KeysetPaginationModel.objects.create(
+                created_at=created_at, category=category
+            )
+        self.queryset = KeysetPaginationModel.objects.all()
+        # Expected order: -created_at, category ASC (NULLs first), id ASC.
+        self.expected_ids = [7, 6, 5, 1, 4, 3, 2]
+
+    def get_page(self, url, paginator=None):
+        paginator = paginator or self.pagination
+        request = Request(factory.get(url))
+        page = paginator.paginate_queryset(self.queryset, request)
+        return [item.id for item in page]
+
+    def walk_forward(self, paginator=None, url='/'):
+        paginator = paginator or self.pagination
+        pages = []
+        while True:
+            pages.append(self.get_page(url, paginator))
+            url = paginator.get_next_link()
+            if url is None:
+                return pages
+
+    def test_forward_pagination(self):
+        # Duplicate timestamps and NULL categories must not degrade into
+        # offset-based paging or produce paging artifacts.
+        assert self.walk_forward() == [[7, 6, 5], [1, 4, 3], [2]]
+
+    def test_forward_pagination_with_null_cursor_position(self):
+        # A page size of four leaves the page boundary on a row with a
+        # NULL category, so the next cursor carries a NULL position.
+        assert self.walk_forward(url='/?page_size=4') == [[7, 6, 5, 1], [4, 3, 2]]
+
+    def test_backward_pagination(self):
+        # Walk to the last page, then page back to the start.
+        pages = self.walk_forward()
+        previous_pages = []
+        while True:
+            url = self.pagination.get_previous_link()
+            if url is None:
+                break
+            previous_pages.append(self.get_page(url))
+        assert previous_pages == pages[-2::-1]
+
+    def test_middle_page_links_round_trip(self):
+        self.get_page('/')
+        page_two_url = self.pagination.get_next_link()
+        assert self.get_page(page_two_url) == [1, 4, 3]
+        next_url = self.pagination.get_next_link()
+        previous_url = self.pagination.get_previous_link()
+        assert self.get_page(next_url) == [2]
+        assert self.get_page(previous_url) == [7, 6, 5]
+
+    def test_descending_nullable_column(self):
+        # NULLs sort last for descending columns, and no row may follow
+        # a NULL position on the descending column.
+        class DescendingPagination(pagination.KeysetCursorPagination):
+            page_size = 3
+            ordering = ('-category', 'id')
+
+        paginator = DescendingPagination()
+        assert self.walk_forward(paginator) == [[5, 7, 2], [3, 1, 4], [6]]
+
+    def test_insert_between_pages(self):
+        self.get_page('/')
+        next_url = self.pagination.get_next_link()
+
+        # Sorts into the already-consumed region: must not shift the
+        # following pages or cause rows to be skipped or repeated.
+        KeysetPaginationModel.objects.create(
+            created_at=self.base + datetime.timedelta(hours=2), category=9
+        )
+        # Sorts just after the cursor position: picked up by the next page.
+        KeysetPaginationModel.objects.create(
+            created_at=self.base + datetime.timedelta(hours=1), category=7
+        )
+
+        assert self.get_page(next_url) == [9, 1, 4]
+        assert self.get_page(self.pagination.get_next_link()) == [3, 2]
+        assert self.pagination.get_next_link() is None
+
+    def test_cursor_is_bound_to_query_params(self):
+        self.get_page('/?category=1')
+        next_url = self.pagination.get_next_link()
+
+        # The same query parameters accept the cursor.
+        assert self.get_page(next_url) == [1, 4, 3]
+
+        # A cursor issued for a different filter is rejected.
+        with pytest.raises(exceptions.NotFound):
+            self.get_page(next_url.replace('category=1', 'category=2'))
+        with pytest.raises(exceptions.NotFound):
+            self.get_page(next_url.replace('category=1&', ''))
+
+    def test_cursor_is_bound_to_ordering(self):
+        class OtherOrderingPagination(pagination.KeysetCursorPagination):
+            page_size = 3
+            ordering = ('created_at', 'category')
+
+        self.get_page('/')
+        next_url = self.pagination.get_next_link()
+
+        with pytest.raises(exceptions.NotFound):
+            self.get_page(next_url, OtherOrderingPagination())
+
+    def test_invalid_cursor(self):
+        with pytest.raises(exceptions.NotFound):
+            self.get_page('/?cursor=123')
+
+        incomplete = urlsafe_b64encode(b'{"p": [1, 2]}').decode('ascii')
+        with pytest.raises(exceptions.NotFound):
+            self.get_page('/?cursor=' + incomplete)
+
+    def test_cursor_beyond_end_of_dataset(self):
+        self.get_page('/')
+        # The leading column sorts descending, so a position in the
+        # distant past lies beyond the end of the dataset.
+        past = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+        cursor = pagination.KeysetCursor(position=[past, 0, 999], reverse=False)
+        url = self.pagination.encode_cursor(cursor)
+
+        assert self.get_page(url) == []
+        previous_url = self.pagination.get_previous_link()
+        assert previous_url is not None
+        assert self.get_page(previous_url) == [4, 3, 2]
+
+    def test_primary_key_appended_to_non_unique_ordering(self):
+        request = Request(factory.get('/'))
+        ordering = self.pagination.get_ordering(request, self.queryset, None)
+        assert ordering == ('-created_at', 'category', 'id')
+
+    def test_unique_ordering_is_kept_as_is(self):
+        class UniquePagination(pagination.KeysetCursorPagination):
+            ordering = ('-created_at', 'id')
+
+        request = Request(factory.get('/'))
+        ordering = UniquePagination().get_ordering(request, self.queryset, None)
+        assert ordering == ('-created_at', 'id')
+
+    def test_require_unique_ordering(self):
+        class StrictPagination(pagination.KeysetCursorPagination):
+            page_size = 3
+            ordering = '-created_at'
+            require_unique_ordering = True
+
+        with pytest.raises(ImproperlyConfigured):
+            self.get_page('/', StrictPagination())
+
+    def test_values_queryset(self):
+        queryset = KeysetPaginationModel.objects.values(
+            'id', 'created_at', 'category'
+        )
+        request = Request(factory.get('/'))
+        page = self.pagination.paginate_queryset(queryset, request)
+        assert [item['id'] for item in page] == [7, 6, 5]
+
+        request = Request(factory.get(self.pagination.get_next_link()))
+        page = self.pagination.paginate_queryset(queryset, request)
+        assert [item['id'] for item in page] == [1, 4, 3]
+
+    def test_paginated_response_structure(self):
+        self.get_page('/')
+        response = self.pagination.get_paginated_response([1, 2, 3])
+        assert set(response.data) == {'next', 'previous', 'results'}
+        assert response.data['results'] == [1, 2, 3]
+        assert response.data['previous'] is None
+        assert response.data['next'] is not None
+
+    def test_to_html(self):
+        self.get_page('/')
+        assert isinstance(self.pagination.to_html(), str)
