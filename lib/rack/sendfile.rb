@@ -22,6 +22,21 @@ module Rack
   # header is typically set in your web servers configuration. The following
   # sections attempt to document
   #
+  # === Version-pinned file bodies
+  #
+  # Rack::Files can serve a version-pinned body (see Rack::Files#pinned and
+  # Rack::Files#serving_pinned_file): the body holds an already opened file
+  # descriptor so an atomic replacement (temp file + rename) of the served
+  # path cannot change what is transmitted. Such a body intentionally does not
+  # respond to +to_path+, because the sendfile shortcuts hand a path to the web
+  # server, which would have to re-open that path and could then send the
+  # replacement file, silently dropping the version guarantee. This middleware
+  # therefore leaves pinned bodies untouched and they are streamed by the Rack
+  # backend from the pinned descriptor. Do not add a +to_path+ implementation
+  # (for example via /dev/fd) that ends up re-opening the original path: that
+  # would defeat the pin. Sendfile offloading and strict file-version pinning
+  # are mutually exclusive.
+  #
   # === Nginx
   #
   # Nginx supports the `x-accel-redirect` header. This is similar to `x-sendfile`

@@ -334,4 +334,54 @@ describe Rack::Sendfile do
       headers['content-length'].must_equal '0'
     end
   end
+
+  describe "version-pinned Rack::Files bodies" do
+    def replace(path, contents)
+      tmp = "#{path}.tmp"
+      File.write(tmp, contents)
+      File.rename(tmp, path)
+    end
+
+    it "does not take the to_path shortcut for a pinned body, so the pinned contents are streamed" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "rack_sendfile")
+        File.write(path, "old contents")
+
+        files = Rack::Files.new(dir, {}, 'text/plain', true)
+        app = Rack::Sendfile.new(files, 'X-Sendfile')
+
+        status, headers, body = app.call(Rack::MockRequest.env_for("/rack_sendfile"))
+        replace(path, "brand new, much longer contents")
+
+        sent = +""
+        body.each { |chunk| sent << chunk }
+        body.close
+
+        status.must_equal 200
+        # No sendfile header must be emitted from the replaced path:
+        headers.wont_include 'x-sendfile'
+        # The original pinned version is streamed through the descriptor:
+        sent.must_equal "old contents"
+        headers['content-length'].must_equal "12"
+        body.must_be :closed?
+      end
+    end
+
+    it "still takes the to_path shortcut for a non-pinned Rack::Files body" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "rack_sendfile")
+        File.write(path, "old contents")
+
+        files = Rack::Files.new(dir)
+        app = Rack::Lint.new(Rack::Sendfile.new(files, 'X-Sendfile'))
+
+        response = Rack::MockRequest.new(app).get("/rack_sendfile")
+
+        response.must_be :ok?
+        response.body.must_be :empty?
+        response.headers['x-sendfile'].must_equal path
+        response.headers['content-length'].must_equal '0'
+      end
+    end
+  end
 end

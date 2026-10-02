@@ -392,4 +392,269 @@ content-range: bytes 60-80/209\r
       assert Ractor.shareable?(files)
     end
   end
+
+  describe "version-pinned file serving" do
+    def atomically_replace(path, contents)
+      tmp = "#{path}.#{Process.pid}.#{Thread.current.object_id}.tmp"
+      File.write(tmp, contents)
+      File.rename(tmp, path)
+    end
+
+    def open_file_paths
+      # Snapshot of currently open File descriptors, used to assert that a
+      # request does not leave any newly opened file handle behind.
+      GC.start
+      ObjectSpace.each_object(File).filter_map do |file|
+        file.path unless file.closed?
+      rescue StandardError
+        nil
+      end
+    end
+
+    it "returns a pinned flag from the constructor" do
+      files = Rack::Files.new(DOCROOT, {}, 'text/plain', true)
+      assert files.pinned
+
+      files = Rack::Files.new(DOCROOT)
+      refute files.pinned
+    end
+
+    it "streams the original file contents when the path is atomically replaced after the response is built" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        app = Rack::Lint.new(Rack::Files.new(dir, {}, 'text/plain', true))
+
+        status, headers, body = app.call(Rack::MockRequest.env_for("/asset.txt"))
+
+        # Replace the file (temp file + rename) before the body is iterated:
+        atomically_replace(path, "brand new, much longer contents")
+
+        sent = +""
+        body.each { |chunk| sent << chunk }
+        body.close
+
+        assert_equal 200, status
+        assert_equal "old contents", sent
+        # Headers describe the original version, not the replacement:
+        assert_equal "12", headers[Rack::CONTENT_LENGTH]
+        refute body.respond_to?(:to_path)
+      end
+    end
+
+    it "does not expose #to_path so Sendfile cannot re-open the replaced path" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        files = Rack::Files.new(dir, {}, 'text/plain', true)
+
+        _, _, body = files.call(Rack::MockRequest.env_for("/asset.txt"))
+        refute body.respond_to?(:to_path)
+        body.close
+      end
+    end
+
+    it "sends a single byte range of the pinned version after replacement" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        app = Rack::Lint.new(Rack::Files.new(dir, {}, 'text/plain', true))
+
+        env = Rack::MockRequest.env_for("/asset.txt", "HTTP_RANGE" => "bytes=4-11")
+        status, headers, body = app.call(env)
+        atomically_replace(path, "xxxxxxxxxxxxxxxxxxxxxxxx")
+
+        sent = +""
+        body.each { |chunk| sent << chunk }
+        body.close
+
+        assert_equal 206, status
+        assert_equal "contents", sent
+        assert_equal "bytes 4-11/12", headers["content-range"]
+        assert_equal "8", headers[Rack::CONTENT_LENGTH]
+      end
+    end
+
+    it "sends multipart ranges of the pinned version after replacement" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        app = Rack::Lint.new(Rack::Files.new(dir, {}, 'text/plain', true))
+
+        env = Rack::MockRequest.env_for("/asset.txt", "HTTP_RANGE" => "bytes=0-2,4-7")
+        status, headers, body = app.call(env)
+        atomically_replace(path, "xxxxxxxxxxxxxxxxxxxxxxxx")
+
+        sent = +""
+        body.each { |chunk| sent << chunk }
+        body.close
+
+        assert_equal 206, status
+        assert_includes sent, "old"
+        assert_includes sent, "cont"
+        assert_equal "multipart/byteranges; boundary=#{Rack::Files::MULTIPART_BOUNDARY}",
+          headers[Rack::CONTENT_TYPE]
+      end
+    end
+
+    it "uses pinned file info for HEAD requests" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        app = Rack::Lint.new(Rack::Files.new(dir, {}, 'text/plain', true))
+
+        before = open_file_paths
+        status, headers, body = app.call(
+          Rack::MockRequest.env_for("/asset.txt", "REQUEST_METHOD" => "HEAD")
+        )
+        atomically_replace(path, "brand new, much longer contents")
+
+        assert_equal 200, status
+        assert_equal "12", headers[Rack::CONTENT_LENGTH]
+        body.close
+        assert_equal before, open_file_paths
+      end
+    end
+
+    it "closes the pinned file for 304 responses without leaking a descriptor" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        app = Rack::Lint.new(Rack::Files.new(dir, {}, 'text/plain', true))
+
+        before = open_file_paths
+        env = Rack::MockRequest.env_for("/asset.txt",
+          "HTTP_IF_MODIFIED_SINCE" => File.mtime(path).httpdate)
+        status, _headers, body = app.call(env)
+
+        assert_equal 304, status
+        body.close
+        assert_equal before, open_file_paths
+      end
+    end
+
+    it "closes the pinned file when iteration stops early" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        files = Rack::Files.new(dir, {}, 'text/plain', true)
+
+        _status, _headers, body = files.call(Rack::MockRequest.env_for("/asset.txt"))
+
+        body.each do |_chunk|
+          break
+        end
+
+        assert body.closed?
+        assert_raises(IOError) { body.each {} }
+      end
+    end
+
+    it "closes the pinned file when iteration raises" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        files = Rack::Files.new(dir, {}, 'text/plain', true)
+
+        _status, _headers, body = files.call(Rack::MockRequest.env_for("/asset.txt"))
+
+        raised = assert_raises(RuntimeError) do
+          body.each do |_chunk|
+            raise "boom"
+          end
+        end
+        assert_equal "boom", raised.message
+        assert body.closed?
+      end
+    end
+
+    it "sends available bytes and closes the file when the file is truncated" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        files = Rack::Files.new(dir, {}, 'text/plain', true)
+
+        env = Rack::MockRequest.env_for("/asset.txt", "HTTP_RANGE" => "bytes=0-100")
+        status, headers, body = files.call(env)
+        File.truncate(path, 3)
+
+        sent = +""
+        body.each { |chunk| sent << chunk }
+
+        assert_equal 206, status
+        assert_equal "old", sent
+        assert body.closed?
+        assert_equal "bytes 0-11/12", headers["content-range"]
+      end
+    end
+
+    it "streams the pinned version returned by #serving_pinned_file after replacement" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        files = Rack::Files.new(dir)
+
+        file = File.open(path, "rb")
+        request = Rack::Request.new(Rack::MockRequest.env_for("/asset.txt"))
+        status, headers, body = files.serving_pinned_file(request, file)
+        atomically_replace(path, "brand new, much longer contents")
+
+        sent = +""
+        body.each { |chunk| sent << chunk }
+
+        assert_equal 200, status
+        assert_equal "old contents", sent
+        assert_equal "12", headers[Rack::CONTENT_LENGTH]
+        assert body.closed?
+      end
+    end
+
+    it "closes the provided file from #serving_pinned_file for a 304 response" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        files = Rack::Files.new(dir)
+
+        file = File.open(path, "rb")
+        env = Rack::MockRequest.env_for("/asset.txt",
+          "HTTP_IF_MODIFIED_SINCE" => File.mtime(path).httpdate)
+        request = Rack::Request.new(env)
+        status, _headers, body = files.serving_pinned_file(request, file)
+
+        assert_equal 304, status
+        assert_equal [], body
+        assert file.closed?
+      end
+    end
+
+    it "returns 404 and releases the descriptor for a missing pinned file" do
+      Dir.mktmpdir do |dir|
+        app = Rack::Lint.new(Rack::Files.new(dir, {}, 'text/plain', true))
+        before = open_file_paths
+        status, _headers, body = app.call(Rack::MockRequest.env_for("/missing"))
+
+        assert_equal 404, status
+        body.close
+        assert_equal before, open_file_paths
+      end
+    end
+
+    it "closes the provided file for a 416 unsatisfiable range response" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "asset.txt")
+        File.write(path, "old contents")
+        files = Rack::Files.new(dir, {}, 'text/plain', true)
+
+        file = File.open(path, "rb")
+        request = Rack::Request.new(
+          Rack::MockRequest.env_for("/asset.txt", "HTTP_RANGE" => "bytes=100-200")
+        )
+        status, headers, _body = files.serving_pinned_file(request, file)
+
+        assert_equal 416, status
+        assert_equal "bytes */12", headers["content-range"]
+        assert file.closed?
+      end
+    end
+  end
 end
