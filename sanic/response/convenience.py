@@ -283,9 +283,11 @@ async def file(
         if _range:
             await f.seek(_range.start)
             out_stream = await f.read(_range.size)
-            headers["Content-Range"] = (
-                f"bytes {_range.start}-{_range.end}/{_range.total}"
+            headers.setdefault(
+                "Content-Range",
+                f"bytes {_range.start}-{_range.end}/{_range.total}",
             )
+            headers.setdefault("Content-Length", str(_range.size))
             status = 206
         else:
             out_stream = await f.read()
@@ -366,20 +368,45 @@ async def file_stream(
     filename = filename or path.split(location)[-1]
     mime_type = mime_type or guess_type(filename)[0] or "text/plain"
     if _range:
-        start = _range.start
-        end = _range.end
         total = _range.total
-
-        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        multipart = getattr(_range, "multipart", False)
         status = 206
+
+        if not multipart:
+            headers.setdefault(
+                "Content-Range",
+                f"bytes {_range.start}-{_range.end}/{total}",
+            )
+            headers.setdefault("Content-Length", str(_range.size))
 
     async def _streaming_fn(response):
         async with await open_async(location, mode="rb") as f:
-            if _range:
+            if _range and getattr(_range, "multipart", False):
+                for start, end in _range.ranges:
+                    await response.write(
+                        _range.part_header(
+                            start,
+                            end,
+                            getattr(_range, "media_type", None) or mime_type,
+                        )
+                    )
+
+                    await f.seek(start)
+                    to_send = end - start + 1
+                    while to_send > 0:
+                        content = await f.read(min(to_send, chunk_size))
+                        if len(content) < 1:
+                            break
+                        to_send -= len(content)
+                        await response.write(content)
+                    await response.write(b"\r\n")
+
+                await response.write(f"--{_range.boundary}--\r\n".encode())
+            elif _range:
                 await f.seek(_range.start)
                 to_send = _range.size
                 while to_send > 0:
-                    content = await f.read(min((_range.size, chunk_size)))
+                    content = await f.read(min(to_send, chunk_size))
                     if len(content) < 1:
                         break
                     to_send -= len(content)

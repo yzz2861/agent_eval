@@ -20,6 +20,10 @@ class Range(Protocol):
     end: int | None
     size: int | None
     total: int | None
+    ranges: list[tuple[int, int]]
+    boundary: str | None
+    multipart: bool
+    media_type: str | None
     __slots__ = ()
 
 

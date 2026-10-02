@@ -1,15 +1,22 @@
 import logging
 import os
 import sys
+
 from collections import Counter
 from pathlib import Path
 from time import gmtime, strftime
 from urllib.parse import unquote
 
 import pytest
+
 from sanic import Sanic, text
-from sanic.exceptions import FileNotFound, ServerError
+from sanic.exceptions import BadRequest, FileNotFound, ServerError
+from sanic.handlers.content_range import MAX_RANGES
+from sanic.mixins import static as static_mixin
 from sanic.response import file
+from sanic.response import file_stream as original_file_stream
+from sanic.response.types import ResponseStream
+
 
 pytestmark = pytest.mark.xdist_group(name="static_files")
 
@@ -38,6 +45,36 @@ def get_file_content(static_file_directory, file_name):
     """The content of the static file to check"""
     with open(get_file_path(static_file_directory, file_name), "rb") as file:
         return file.read()
+
+
+def parse_multipart_byteranges(body, boundary):
+    delimiter = boundary.encode("ascii")
+    expected_start = b"--" + delimiter + b"\r\n"
+    expected_end = b"\r\n--" + delimiter + b"--\r\n"
+    assert body.startswith(expected_start)
+    assert body.endswith(expected_end)
+
+    sections = body[len(expected_start) : -len(expected_end)].split(
+        b"\r\n--" + delimiter + b"\r\n"
+    )
+    parts = []
+    for section in sections:
+        header_block, payload = section.split(b"\r\n\r\n", 1)
+        headers = {}
+        for line in header_block.split(b"\r\n"):
+            name, value = line.split(b":", 1)
+            headers[name.decode().lower()] = value.strip().decode()
+        parts.append((headers, payload))
+    return parts
+
+
+def static_app(app, static_file_directory, file_name, **kwargs):
+    app.static(
+        "/testing.file",
+        get_file_path(static_file_directory, file_name),
+        use_content_range=True,
+        **kwargs,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -307,6 +344,281 @@ def test_static_content_range_back(app, file_name, static_file_directory):
     ]
     assert int(response.headers["Content-Length"]) == len(static_content)
     assert response.body == static_content
+
+
+@pytest.mark.asyncio
+async def test_static_content_range_full_get_and_head(
+    app, static_file_directory
+):
+    static_app(app, static_file_directory, "test.file")
+    source = get_file_content(static_file_directory, "test.file")
+
+    _, get_response = await app.asgi_client.get("/testing.file")
+    _, head_response = await app.asgi_client.head("/testing.file")
+
+    assert get_response.status == 200
+    assert get_response.body == source
+    assert get_response.headers["Content-Length"] == str(len(source))
+    assert get_response.headers["Content-Type"] == "application/octet-stream"
+    assert head_response.status == 200
+    assert head_response.body == b""
+    assert head_response.headers["Content-Length"] == str(len(source))
+    assert head_response.headers["Content-Type"] == "application/octet-stream"
+
+
+@pytest.mark.asyncio
+async def test_static_content_multipart_ranges(app, static_file_directory):
+    static_app(app, static_file_directory, "test.file")
+    _, response = await app.asgi_client.get(
+        "/testing.file",
+        headers={"Range": "bytes=0-4,20-24"},
+    )
+
+    source = get_file_content(static_file_directory, "test.file")
+    content_type, boundary = response.headers["Content-Type"].split(
+        "boundary=", 1
+    )
+    assert response.status == 206
+    assert content_type.strip() == "multipart/byteranges;"
+    assert int(response.headers["Content-Length"]) == len(response.body)
+    assert "Content-Range" not in response.headers
+
+    parts = parse_multipart_byteranges(response.body, boundary)
+    assert [part[1] for part in parts] == [
+        source[0:5],
+        source[20:25],
+    ]
+    assert [part[0]["content-range"] for part in parts] == [
+        "bytes 0-4/32",
+        "bytes 20-24/32",
+    ]
+    assert all(
+        part[0]["content-type"] == "application/octet-stream" for part in parts
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "range_header,expected_ranges,expected_slices",
+    [
+        (
+            "bytes=10-19,0-14,21-24",
+            ["bytes 0-19/32", "bytes 21-24/32"],
+            [(0, 20), (21, 25)],
+        ),
+        (
+            "bytes=10-14,15-19,21-23",
+            ["bytes 10-19/32", "bytes 21-23/32"],
+            [(10, 20), (21, 24)],
+        ),
+        (
+            "bytes=100-200,20-,21-100,-5,0-4",
+            ["bytes 0-4/32", "bytes 20-31/32"],
+            [(0, 5), (20, 32)],
+        ),
+    ],
+)
+async def test_static_content_multipart_normalization(
+    app,
+    static_file_directory,
+    range_header,
+    expected_ranges,
+    expected_slices,
+):
+    static_app(app, static_file_directory, "test.file")
+    _, response = await app.asgi_client.get(
+        "/testing.file", headers={"Range": range_header}
+    )
+
+    boundary = response.headers["Content-Type"].split("boundary=", 1)[1]
+    parts = parse_multipart_byteranges(response.body, boundary)
+    source = get_file_content(static_file_directory, "test.file")
+
+    assert response.status == 206
+    assert [part[0]["content-range"] for part in parts] == expected_ranges
+    assert [part[1] for part in parts] == [
+        source[start:end] for start, end in expected_slices
+    ]
+    assert int(response.headers["Content-Length"]) == len(response.body)
+
+
+@pytest.mark.asyncio
+async def test_static_content_single_merged_range(app, static_file_directory):
+    static_app(app, static_file_directory, "test.file")
+    _, response = await app.asgi_client.get(
+        "/testing.file", headers={"Range": "bytes=0-9,5-15"}
+    )
+
+    assert response.status == 206
+    assert response.headers["Content-Type"] == "application/octet-stream"
+    assert response.headers["Content-Range"] == "bytes 0-15/32"
+    assert response.headers["Content-Length"] == "16"
+    assert (
+        response.body
+        == get_file_content(static_file_directory, "test.file")[0:16]
+    )
+
+
+@pytest.mark.asyncio
+async def test_static_content_range_head_multipart(app, static_file_directory):
+    static_app(app, static_file_directory, "test.file")
+    _, response = await app.asgi_client.head(
+        "/testing.file", headers={"Range": "bytes=0-4,20-24"}
+    )
+
+    assert response.status == 206
+    assert response.headers["Content-Type"].startswith("multipart/byteranges;")
+    assert response.headers["Content-Length"] == "286"
+    assert response.body == b""
+
+
+@pytest.mark.asyncio
+async def test_static_content_range_all_unsatisfiable(
+    app, static_file_directory
+):
+    static_app(app, static_file_directory, "test.file")
+    _, response = await app.asgi_client.get(
+        "/testing.file",
+        headers={"Range": "bytes=32-40,100-200,5-3"},
+    )
+
+    assert response.status == 416
+    assert response.headers["Content-Range"] == "bytes */32"
+
+
+@pytest.mark.asyncio
+async def test_static_content_range_count_limit(app, static_file_directory):
+    static_app(app, static_file_directory, "test.file")
+    header_value = "bytes=" + ",".join(
+        str(index) + "-" + str(index) for index in range(MAX_RANGES + 1)
+    )
+    _, response = await app.asgi_client.get(
+        "/testing.file", headers={"Range": header_value}
+    )
+
+    assert response.status == BadRequest.status_code
+
+
+@pytest.mark.asyncio
+async def test_static_content_range_overhead_limit(app, static_file_directory):
+    static_app(
+        app,
+        static_file_directory,
+        "decode me.txt",
+        content_type="application/x-sanic-test-range-output",
+    )
+    header_value = "bytes=" + ",".join(
+        f"{index}-{index}" for index in range(0, 68, 2)
+    )
+    _, response = await app.asgi_client.get(
+        "/testing.file", headers={"Range": header_value}
+    )
+
+    assert response.status == BadRequest.status_code
+
+
+@pytest.mark.asyncio
+async def test_static_content_range_if_range(app, static_file_directory):
+    file_path = get_file_path(static_file_directory, "test.file")
+    file_stat = os.stat(file_path)
+    last_modified = strftime(
+        "%a, %d %b %Y %H:%M:%S GMT", gmtime(file_stat.st_mtime)
+    )
+    stale = strftime(
+        "%a, %d %b %Y %H:%M:%S GMT",
+        gmtime(file_stat.st_mtime - 10),
+    )
+    static_app(app, static_file_directory, "test.file")
+
+    _, partial = await app.asgi_client.get(
+        "/testing.file",
+        headers={"Range": "bytes=0-4", "If-Range": last_modified},
+    )
+    _, full = await app.asgi_client.get(
+        "/testing.file",
+        headers={"Range": "bytes=0-4", "If-Range": stale},
+    )
+
+    assert partial.status == 206
+    assert partial.headers["Content-Range"] == "bytes 0-4/32"
+    assert full.status == 200
+    assert full.headers["Content-Length"] == "32"
+    assert full.body == get_file_content(static_file_directory, "test.file")
+
+
+@pytest.mark.asyncio
+async def test_static_content_range_empty_file(app, static_file_directory):
+    empty_file = Path(static_file_directory) / "empty-range.file"
+    empty_file.write_bytes(b"")
+    try:
+        app.static(
+            "/testing.file",
+            empty_file,
+            use_content_range=True,
+        )
+        _, full = await app.asgi_client.get("/testing.file")
+        _, partial = await app.asgi_client.get(
+            "/testing.file", headers={"Range": "bytes=0-9"}
+        )
+    finally:
+        empty_file.unlink()
+
+    assert full.status == 200
+    assert full.headers["Content-Length"] == "0"
+    assert full.body == b""
+    assert partial.status == 416
+    assert partial.headers["Content-Range"] == "bytes */0"
+
+
+@pytest.mark.asyncio
+async def test_static_multipart_streamed_in_chunks(
+    app, static_file_directory, monkeypatch
+):
+    chunks = []
+    original_write = ResponseStream.write
+
+    async def recording_write(self, message):
+        chunks.append(bytes(message))
+        return await original_write(self, message)
+
+    async def small_chunk_stream(*args, **kwargs):
+        kwargs.setdefault("chunk_size", 3)
+        return await original_file_stream(*args, **kwargs)
+
+    monkeypatch.setattr(ResponseStream, "write", recording_write)
+    monkeypatch.setattr(static_mixin, "file_stream", small_chunk_stream)
+
+    static_app(app, static_file_directory, "test.file")
+    _, response = await app.asgi_client.get(
+        "/testing.file",
+        headers={"Range": "bytes=0-4,10-19"},
+    )
+
+    body = b"".join(chunks)
+    assert body == response.body
+    assert len(response.body) == int(response.headers["Content-Length"])
+    assert len(chunks) == 11
+    assert chunks[0].startswith(b"--sanic-")
+    assert b"Content-Range: bytes 0-4/32" in chunks[0]
+    assert chunks[3] == bytes((13, 10))
+    assert b"Content-Range: bytes 10-19/32" in chunks[4]
+    assert chunks[9] == bytes((13, 10))
+    assert chunks[-1].startswith(b"--sanic-")
+    assert chunks[-1].endswith(b"--" + bytes((13, 10)))
+    payload_chunks = [
+        chunk
+        for chunk in chunks
+        if not chunk.startswith((b"--", b"Content-Type", b"Content-Range"))
+        and chunk != b"\r\n"
+    ]
+    assert payload_chunks == [
+        b"I a",
+        b"m ",
+        b"a r",
+        b"egu",
+        b"lar",
+        b" ",
+    ]
 
 
 @pytest.mark.parametrize("use_modified_since", [True, False])

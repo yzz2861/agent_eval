@@ -13,6 +13,7 @@ from sanic.base.meta import SanicMeta
 from sanic.compat import clear_function_annotate, stat_async
 from sanic.exceptions import FileNotFound, HeaderNotFound, RangeNotSatisfiable
 from sanic.handlers import ContentRangeHandler
+from sanic.handlers.content_range import if_range_matches
 from sanic.handlers.directory import DirectoryHandler
 from sanic.log import error_logger
 from sanic.mixins.base import BaseMixin
@@ -311,16 +312,32 @@ class StaticHandleMixin(metaclass=SanicMeta):
                     stats = await stat_async(file_path)
                 headers["Accept-Ranges"] = "bytes"
                 headers["Content-Length"] = str(stats.st_size)
-                if request.method != "HEAD":
+                static_content_type = content_type or guess_content_type(
+                    file_path
+                )
+                if "charset=" not in static_content_type and (
+                    static_content_type.startswith("text/")
+                    or static_content_type == "application/javascript"
+                ):
+                    static_content_type += "; charset=utf-8"
+                headers["Content-Type"] = static_content_type
+
+                has_range = request.headers.getone("range", None) is not None
+                if has_range and if_range_matches(request, stats):
                     try:
-                        _range = ContentRangeHandler(request, stats)
+                        _range = ContentRangeHandler(
+                            request,
+                            stats,
+                            static_content_type,
+                        )
                     except HeaderNotFound:
                         pass
                     else:
-                        del headers["Content-Length"]
+                        for key in _range.headers:
+                            headers.pop(key, None)
                         headers.update(_range.headers)
 
-            if "content-type" not in headers:
+            if "Content-Type" not in headers:
                 content_type = content_type or guess_content_type(file_path)
 
                 if "charset=" not in content_type and (
@@ -332,8 +349,18 @@ class StaticHandleMixin(metaclass=SanicMeta):
                 headers["Content-Type"] = content_type
 
             if request.method == "HEAD":
-                return HTTPResponse(headers=headers)
+                return HTTPResponse(
+                    status=206 if _range else 200, headers=headers
+                )
             else:
+                if _range:
+                    return await file_stream(
+                        file_path,
+                        headers=headers,
+                        _range=_range,
+                        mime_type=static_content_type,
+                    )
+
                 if stream_large_files:
                     if isinstance(stream_large_files, bool):
                         threshold = 1024 * 1024
