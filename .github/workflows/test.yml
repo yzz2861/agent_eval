@@ -1,0 +1,139 @@
+name: Test
+
+on:
+  - push
+  - pull_request
+
+jobs:
+  ruby-versions:
+    uses: ruby/actions/.github/workflows/ruby_versions.yml@master
+    with:
+      engine: cruby
+      min_version: 2.5
+      versions: '["debug"]'
+
+  in-place:
+    needs: ruby-versions
+    name: "In-place test: Ruby ${{ matrix.ruby-version }}: ${{ matrix.runs-on }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby-version: ${{ fromJson(needs.ruby-versions.outputs.versions) }}
+        runs-on:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+        exclude:
+          - { runs-on: macos-latest, ruby-version: "2.5" }
+          # Can't mix newer Psych and old RubyGems/Bundler
+          - { runs-on: ubuntu-latest, ruby-version: "2.5" }
+          - { runs-on: windows-latest, ruby-version: "3.1" }
+          - { runs-on: windows-latest, ruby-version: debug }
+        include:
+          - { runs-on: windows-latest, ruby-version: mingw }
+          - { runs-on: windows-latest, ruby-version: mswin }
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+      - name: Test
+        run: |
+          bundle exec rake
+
+  scanner:
+    needs: ruby-versions
+    name: "Scanner test: Ruby ${{ matrix.ruby-version }}: ${{ matrix.runs-on }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby-version: ${{ fromJson(needs.ruby-versions.outputs.versions) }}
+        runs-on:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+        exclude:
+          - { runs-on: macos-latest, ruby-version: "2.5" }
+          # Can't mix newer Psych and old RubyGems/Bundler
+          - { runs-on: ubuntu-latest, ruby-version: "2.5" }
+          - { runs-on: windows-latest, ruby-version: "3.1" }
+          - { runs-on: windows-latest, ruby-version: debug }
+        include:
+          - { runs-on: windows-latest, ruby-version: mingw }
+          - { runs-on: windows-latest, ruby-version: mswin }
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 10
+    env:
+      CSV_PARSER_SCANNER_TEST: "yes"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+      - name: Test
+        run: |
+          bundle exec rake
+
+  gem:
+    name: "Gem test"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ruby
+      - name: Install
+        run: |
+          rake install
+          gem install test-unit
+      - name: Test
+        run: |
+          mkdir -p tmp
+          cd tmp
+          cp -a ../test/ ./
+          ../run-test.rb
+
+  document:
+    name: "Document test"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ruby
+          bundler-cache: true
+      - name: Build document
+        run: |
+          bundle exec rake warning:error rdoc
+      - uses: actions/checkout@v7
+        if: |
+          github.event_name == 'push'
+        with:
+          ref: gh-pages
+          path: gh-pages
+      - name: Deploy
+        if: |
+          github.event_name == 'push'
+        run: |
+          rm html/created.rid
+          touch html/.nojekyll
+          cd gh-pages
+          rsync \
+            -a \
+            --delete \
+            --exclude "/.git/" \
+            ../html/ \
+            ./
+          if [ "$(git status --porcelain)" != "" ]; then
+            git add --all
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "Generate (${GITHUB_SHA})"
+            git push
+          fi

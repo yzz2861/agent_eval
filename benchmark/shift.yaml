@@ -1,0 +1,22 @@
+loop_count: 100
+contexts:
+  - gems:
+      csv: 3.0.1
+  - gems:
+      csv: 3.0.2
+  - gems:
+      csv: 3.3.0
+  - name: "master"
+    prelude: |
+      $LOAD_PATH.unshift(File.expand_path("lib"))
+      require "csv"
+prelude: |-
+  n_columns = Integer(ENV.fetch("N_COLUMNS", "50"), 10)
+  n_rows = Integer(ENV.fetch("N_ROWS", "1000"), 10)
+  alphas = ["AAAAA"] * n_columns
+  data = (alphas.join(",") + "\r\n") * n_rows
+benchmark:
+  shift: |-
+    csv = CSV.new(data)
+    while csv.shift do
+    end

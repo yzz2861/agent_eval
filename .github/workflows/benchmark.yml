@@ -1,0 +1,32 @@
+name: Benchmark
+
+on:
+  - push
+  - pull_request
+
+jobs:
+  benchmark:
+    name: "Benchmark: ${{ matrix.runs-on }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        runs-on:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ruby
+      - name: Install dependencies
+        run: |
+          bundle install
+      - name: Install old versions
+        run: |
+          rake benchmark:old_versions:install
+      - name: Benchmark
+        run: |
+          rake benchmark
