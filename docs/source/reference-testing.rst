@@ -137,6 +137,12 @@ Trio also provides some specialized functions for testing completely
 exhibit an extreme kind of behavior that's good at catching out edge
 cases in protocol implementations.
 
+For deterministic tests of finite-bandwidth, delayed, or buffered links,
+:func:`slow_stream_pair` accepts independent :class:`SlowStreamSettings`
+for each direction. It uses Trio's current clock, so it works with
+:class:`MockClock` and autojumping, while preserving ordered byte delivery
+without packet loss or reordering.
+
 
 API details
 ~~~~~~~~~~~
@@ -145,7 +151,16 @@ API details
    :members:
 
 .. autoclass:: MemoryReceiveStream
-   :members:
+  :members:
+
+.. autoclass:: SlowStreamSettings
+  :members:
+
+.. autoclass:: SlowStreamSendStream
+  :members:
+
+.. autoclass:: SlowStreamReceiveStream
+  :members:
 
 .. autofunction:: memory_stream_pump
 
@@ -156,6 +171,10 @@ API details
 .. autofunction:: lockstep_stream_one_way_pair
 
 .. autofunction:: lockstep_stream_pair
+
+.. autofunction:: slow_stream_one_way_pair
+
+.. autofunction:: slow_stream_pair
 
 
 .. _testing-custom-streams:

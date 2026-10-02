@@ -31,6 +31,11 @@ from ._memory_streams import (
 from ._network import open_stream_to_socket_listener as open_stream_to_socket_listener
 from ._raises_group import Matcher as _Matcher, RaisesGroup as _RaisesGroup
 from ._sequencer import Sequencer as Sequencer
+from ._slow_streams import SlowStreamSettings as SlowStreamSettings
+from ._slow_streams import SlowStreamReceiveStream as SlowStreamReceiveStream
+from ._slow_streams import SlowStreamSendStream as SlowStreamSendStream
+from ._slow_streams import slow_stream_one_way_pair as slow_stream_one_way_pair
+from ._slow_streams import slow_stream_pair as slow_stream_pair
 from ._trio_test import trio_test as trio_test
 
 ################################################################

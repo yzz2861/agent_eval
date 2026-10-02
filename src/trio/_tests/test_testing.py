@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from .. import _core, sleep, socket as tsocket
+from .. import _core, open_memory_channel, sleep, socket as tsocket
+from .._sync import Event
 from .._core._tests.tutil import can_bind_ipv6
 from .._highlevel_generic import StapledStream, aclose_forcefully
 from .._highlevel_socket import SocketListener
@@ -609,6 +610,188 @@ async def test_memory_streams_with_generic_tests() -> None:
         return memory_stream_pair()
 
     await check_half_closeable_stream(half_closeable_stream_maker, None)
+
+
+async def test_slow_streams_with_generic_tests(autojump_clock: MockClock) -> None:
+    settings = SlowStreamSettings(
+        bandwidth=float("inf"),
+        delay=0,
+        buffer_capacity=4096,
+    )
+    unbuffered_settings = SlowStreamSettings(
+        bandwidth=float("inf"),
+        delay=0,
+        buffer_capacity=0,
+    )
+
+    async def stream_maker() -> tuple[
+        StapledStream[SlowStreamSendStream, SlowStreamReceiveStream],
+        StapledStream[SlowStreamSendStream, SlowStreamReceiveStream],
+    ]:
+        return slow_stream_pair(settings, settings)
+
+    async def clogged_stream_maker() -> tuple[
+        StapledStream[SlowStreamSendStream, SlowStreamReceiveStream],
+        StapledStream[SlowStreamSendStream, SlowStreamReceiveStream],
+    ]:
+        return slow_stream_pair(unbuffered_settings, unbuffered_settings)
+
+    await check_half_closeable_stream(stream_maker, clogged_stream_maker)
+
+
+async def test_slow_stream_protocol_timing_and_throughput(
+    autojump_clock: MockClock,
+) -> None:
+    request = SlowStreamSettings(bandwidth=4, delay=0.5, buffer_capacity=16)
+    response = SlowStreamSettings(bandwidth=8, delay=0.25, buffer_capacity=16)
+    client, server = slow_stream_pair(request, response)
+    result_send, result_recv = open_memory_channel[float](1)
+
+    async def run_server() -> None:
+        first_request = await server.receive_some(1)
+        assert first_request == b"Q"
+        remaining = bytearray(first_request)
+        while len(remaining) < 10:
+            chunk = await server.receive_some(10 - len(remaining))
+            assert chunk
+            remaining += chunk
+        assert bytes(remaining) == b"Q" + b"R" * 9
+        request_finish = _core.current_time()
+        await server.send_all(b"A" * 5)
+        await result_send.send(request_finish)
+
+    async with _core.open_nursery() as nursery:
+        nursery.start_soon(run_server)
+        await wait_all_tasks_blocked()
+
+        start = _core.current_time()
+        await client.send_all(b"Q" + b"R" * 9)
+        first_response_at = None
+        response_data = bytearray()
+        while len(response_data) < 5:
+            chunk = await client.receive_some(5)
+            assert chunk
+            if first_response_at is None:
+                first_response_at = _core.current_time()
+            response_data += chunk
+        finish = _core.current_time()
+        request_finish = await result_recv.receive()
+    assert first_response_at == start + 3.0
+    assert bytes(response_data) == b"A" * 5
+    assert request_finish - start == 2.75
+    assert finish - start == 3.0 + 4 / 8
+    assert 10 / (request_finish - start - 0.5) == 10 / 2.25
+    assert 4 / (finish - first_response_at) == 8
+    assert client.send_stream._link.buffered_bytes <= request.buffer_capacity
+    assert server.send_stream._link.buffered_bytes <= response.buffer_capacity
+
+
+async def test_slow_stream_half_close_delivers_remaining_data_and_eof(
+    autojump_clock: MockClock,
+) -> None:
+    settings = SlowStreamSettings(bandwidth=2, delay=0.5, buffer_capacity=16)
+    client, server = slow_stream_pair(settings, settings)
+    maximum_buffered = 0
+    finished = Event()
+    result_send, result_recv = open_memory_channel[bytes](1)
+
+    async def sample_buffer_bound() -> None:
+        nonlocal maximum_buffered
+        while not finished.is_set():
+            maximum_buffered = max(
+                maximum_buffered,
+                server.receive_stream._link.buffered_bytes,
+            )
+            await sleep(0.05)
+
+    async def drain_after_half_close() -> None:
+        received = bytearray()
+        while True:
+            chunk = await server.receive_some(3)
+            if not chunk:
+                await result_send.send(bytes(received))
+                return
+            received += chunk
+
+    async with _core.open_nursery() as nursery:
+        nursery.start_soon(sample_buffer_bound)
+        nursery.start_soon(drain_after_half_close)
+        await wait_all_tasks_blocked()
+        await client.send_all(b"x" * 8)
+        await client.send_eof()
+        assert await result_recv.receive() == b"x" * 8
+        finished.set()
+
+    assert maximum_buffered <= settings.buffer_capacity
+
+
+async def test_slow_stream_directions_make_progress_independently(
+    autojump_clock: MockClock,
+) -> None:
+    client, server = slow_stream_pair(
+        SlowStreamSettings(bandwidth=1, delay=0, buffer_capacity=1),
+        SlowStreamSettings(bandwidth=float("inf"), delay=0, buffer_capacity=16),
+    )
+
+    async with _core.open_nursery() as nursery:
+        nursery.start_soon(client.send_all, b"blocked")
+        await sleep(0)
+        await server.send_all(b"reply")
+        assert await client.receive_some(5) == b"reply"
+        nursery.cancel_scope.cancel()
+
+
+async def test_slow_stream_disconnect_after_bytes(autojump_clock: MockClock) -> None:
+    client, server = slow_stream_pair(
+        SlowStreamSettings(
+            bandwidth=10,
+            delay=0,
+            buffer_capacity=10,
+            disconnect_after_bytes=3,
+        ),
+        SlowStreamSettings(
+            bandwidth=10,
+            delay=0,
+            buffer_capacity=10,
+            disconnect_after_bytes=5,
+        ),
+    )
+    result_send, result_recv = open_memory_channel[bytes](1)
+
+    async def receive_until_broken() -> bytearray:
+        received = bytearray()
+        with pytest.raises(_core.BrokenResourceError):
+            while True:
+                received += await server.receive_some(2)
+        await result_send.send(bytes(received))
+
+    async with _core.open_nursery() as nursery:
+        nursery.start_soon(receive_until_broken)
+        await client.send_all(b"abc")
+        assert await result_recv.receive() == b"abc"
+        with pytest.raises(_core.BrokenResourceError):
+            await client.send_all(b"d")
+
+        await server.send_all(b"12345")
+        received = bytearray()
+        with pytest.raises(_core.BrokenResourceError):
+            while True:
+                received += await client.receive_some(4)
+        assert received == b"12345"
+
+
+async def test_slow_stream_precancelled_send_accepts_nothing(
+    autojump_clock: MockClock,
+) -> None:
+    client, server = slow_stream_pair(
+        SlowStreamSettings(buffer_capacity=1),
+        SlowStreamSettings(buffer_capacity=1),
+    )
+
+    with _core.CancelScope() as scope:
+        scope.cancel()
+        with pytest.raises(_core.Cancelled):
+            await client.send_all(b"x")
 
 
 async def test_lockstep_streams_with_generic_tests() -> None:
