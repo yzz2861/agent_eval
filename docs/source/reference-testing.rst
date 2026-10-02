@@ -137,6 +137,15 @@ Trio also provides some specialized functions for testing completely
 exhibit an extreme kind of behavior that's good at catching out edge
 cases in protocol implementations.
 
+If you want to test how your protocol behaves on a slow or constrained
+network link, use :func:`simulated_stream_pair`: it gives you a pair of
+bidirectional streams where each direction independently simulates a
+finite-bandwidth, non-zero-latency, finitely-buffered link (see
+:class:`LinkConfig`), including optional mid-stream disconnects. All
+timing is driven by Trio's clock, so combining it with
+:class:`MockClock` lets you exercise slow-link behavior without
+slowing down your test suite.
+
 
 API details
 ~~~~~~~~~~~
@@ -156,6 +165,14 @@ API details
 .. autofunction:: lockstep_stream_one_way_pair
 
 .. autofunction:: lockstep_stream_pair
+
+.. autofunction:: simulated_stream_pair
+
+.. autoclass:: SimulatedStream
+   :members:
+
+.. autoclass:: LinkConfig
+   :members:
 
 
 .. _testing-custom-streams:

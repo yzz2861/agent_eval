@@ -1,0 +1,6 @@
+Added :func:`trio.testing.simulated_stream_pair`, which creates a pair of
+bidirectional test streams that simulate a network link with configurable
+bandwidth, propagation latency, send-buffer capacity (with backpressure),
+and optional mid-stream disconnects -- independently in each direction, and
+fully driven by Trio's clock so it works with
+:class:`trio.testing.MockClock`.

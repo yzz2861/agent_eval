@@ -31,6 +31,11 @@ from ._memory_streams import (
 from ._network import open_stream_to_socket_listener as open_stream_to_socket_listener
 from ._raises_group import Matcher as _Matcher, RaisesGroup as _RaisesGroup
 from ._sequencer import Sequencer as Sequencer
+from ._simulated_streams import (
+    LinkConfig as LinkConfig,
+    SimulatedStream as SimulatedStream,
+    simulated_stream_pair as simulated_stream_pair,
+)
 from ._trio_test import trio_test as trio_test
 
 ################################################################
