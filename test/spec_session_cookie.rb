@@ -404,6 +404,208 @@ describe Rack::Session::Cookie do
     response.body.must_equal ({"counter"=>1}.to_s)
   end
 
+  it 'binds encrypted cookies to an explicit audience and rejects cross-app replay' do
+    # Two mounted applications sharing the same secret and cookie name, but
+    # mounted at different paths.
+    app_one = [incrementor, { secrets: @secret, audience: '/app-one' }]
+    app_two = [incrementor, { secrets: @secret, audience: '/app-two' }]
+
+    response = response_for(app: app_one, request: { 'SCRIPT_NAME' => '/app-one' })
+    response.body.must_equal ({"counter"=>1}.to_s)
+    cookie = response["Set-Cookie"].split(';', 2).first
+
+    # Same app accepts its own cookie.
+    response = response_for(
+      app: app_one,
+      cookie: cookie,
+      request: { 'SCRIPT_NAME' => '/app-one' }
+    )
+    response.body.must_equal ({"counter"=>2}.to_s)
+
+    # The other mounted app must not accept the replayed cookie, despite the
+    # shared secret and identical cookie name.
+    response = response_for(
+      app: app_two,
+      cookie: cookie,
+      request: { 'SCRIPT_NAME' => '/app-two' }
+    )
+    response.body.must_equal ({"counter"=>1}.to_s)
+  end
+
+  it 'rejects cookies from an audience-less application when audience is configured' do
+    legacy_app = [incrementor, { secrets: @secret }]
+    audience_app = [incrementor, { secrets: @secret, audience: '/app-one' }]
+
+    response = response_for(app: legacy_app)
+    cookie = response["Set-Cookie"].split(';', 2).first
+
+    # Without an explicit migration window, old cookies cannot be accepted.
+    response = response_for(app: audience_app, cookie: cookie)
+    response.body.must_equal ({"counter"=>1}.to_s)
+  end
+
+  it 'requires :audience to be a String' do
+    lambda do
+      Rack::Session::Cookie.new(incrementor, secrets: @secret, audience: :app_one)
+    end.must_raise ArgumentError
+  end
+
+  it 'requires :legacy_cookies_until to be a Time' do
+    lambda do
+      Rack::Session::Cookie.new(
+        incrementor,
+        secrets: @secret,
+        audience: '/app-one',
+        legacy_cookies_until: 3600
+      )
+    end.must_raise ArgumentError
+  end
+
+  it 'accepts legacy audience-less cookies only within the migration window and re-issues them' do
+    legacy_app = [incrementor, { secrets: @secret }]
+
+    # Issue an old format cookie (no audience in the authenticated purpose).
+    response = response_for(app: legacy_app)
+    response.body.must_equal ({"counter"=>1}.to_s)
+    legacy_cookie = response["Set-Cookie"].split(';', 2).first
+
+    migrating_app = [incrementor, {
+      secrets: @secret,
+      audience: '/app-one',
+      legacy_cookies_until: Time.now + 3600
+    }]
+
+    # Within the window the legacy cookie is accepted...
+    response = response_for(app: migrating_app, cookie: legacy_cookie)
+    response.body.must_equal ({"counter"=>2}.to_s)
+
+    # ...and a new format, audience-bound cookie is sent back.
+    new_cookie = response["Set-Cookie"].split(';', 2).first
+    new_cookie.wont_equal legacy_cookie
+
+    # The migrated cookie is a proper audience-bound cookie.
+    response = response_for(app: migrating_app, cookie: new_cookie)
+    response.body.must_equal ({"counter"=>3}.to_s)
+
+    other_app = [incrementor, {
+      secrets: @secret,
+      audience: '/app-two',
+      legacy_cookies_until: Time.now + 3600
+    }]
+
+    # The audience-less legacy cookie carries no audience in its payload, so
+    # while the explicit migration window is open it can be read by either
+    # application; this is the transitional trade-off of the opt-in window.
+    response = response_for(app: other_app, cookie: legacy_cookie)
+    response.body.must_equal ({"counter"=>2}.to_s)
+
+    # Acceptance immediately re-binds it to the receiving audience.
+    other_new_cookie = response["Set-Cookie"].split(';', 2).first
+    other_new_cookie.wont_equal legacy_cookie
+    other_new_cookie.wont_equal new_cookie
+
+    # The migrated cookie still cannot be replayed on the other audience.
+    response = response_for(app: other_app, cookie: new_cookie)
+    response.body.must_equal ({"counter"=>1}.to_s)
+
+    # The re-bound cookie cannot cross back to the original audience.
+    response = response_for(app: migrating_app, cookie: other_new_cookie)
+    response.body.must_equal ({"counter"=>1}.to_s)
+
+    # But it is accepted by its own audience.
+    response = response_for(app: other_app, cookie: other_new_cookie)
+    response.body.must_equal ({"counter"=>3}.to_s)
+  end
+
+  it 'rejects legacy audience-less cookies after the migration window expires' do
+    legacy_app = [incrementor, { secrets: @secret }]
+    response = response_for(app: legacy_app)
+    legacy_cookie = response["Set-Cookie"].split(';', 2).first
+
+    expired_app = [incrementor, {
+      secrets: @secret,
+      audience: '/app-one',
+      legacy_cookies_until: Time.now - 1
+    }]
+
+    response = response_for(app: expired_app, cookie: legacy_cookie)
+    response.body.must_equal ({"counter"=>1}.to_s)
+  end
+
+  it 'deterministically selects a unique valid cookie among duplicate names' do
+    app = [incrementor, { secrets: @secret, audience: '/app-one' }]
+
+    response = response_for(app: app)
+    valid_cookie = response["Set-Cookie"].split('=', 2).last.split(';').first
+
+    garbage_cookie = 'garbage-not-a-session'
+
+    # The valid value can come in any position; order must not matter.
+    response = response_for(
+      app: app,
+      cookie: "rack.session=#{garbage_cookie}; rack.session=#{valid_cookie}"
+    )
+    response.body.must_equal ({"counter"=>2}.to_s)
+
+    response = response_for(
+      app: app,
+      cookie: "rack.session=#{valid_cookie}; rack.session=#{garbage_cookie}"
+    )
+    response.body.must_equal ({"counter"=>2}.to_s)
+
+    # The same valid value duplicated is not ambiguous.
+    response = response_for(
+      app: app,
+      cookie: "rack.session=#{valid_cookie}; rack.session=#{valid_cookie}"
+    )
+    response.body.must_equal ({"counter"=>2}.to_s)
+  end
+
+  it 'rejects the request when multiple distinct valid cookies share the name' do
+    app = [incrementor, { secrets: @secret, audience: '/app-one' }]
+
+    first = response_for(app: app)
+    first_cookie = first["Set-Cookie"].split('=', 2).last.split(';').first
+
+    second = response_for(app: app, cookie: first)
+    second_cookie = second["Set-Cookie"].split('=', 2).last.split(';').first
+
+    # Two distinct cookies both authenticate for this audience. The app must
+    # not pick one based on ordering; it must start a fresh session.
+    response = response_for(
+      app: app,
+      cookie: "rack.session=#{first_cookie}; rack.session=#{second_cookie}"
+    )
+    response.body.must_equal ({"counter"=>1}.to_s)
+
+    response = response_for(
+      app: app,
+      cookie: "rack.session=#{second_cookie}; rack.session=#{first_cookie}"
+    )
+    response.body.must_equal ({"counter"=>1}.to_s)
+  end
+
+  it 'treats a valid legacy and a valid new cookie sent together as ambiguous' do
+    legacy_app = [incrementor, { secrets: @secret }]
+    legacy_response = response_for(app: legacy_app)
+    legacy_cookie = legacy_response["Set-Cookie"].split('=', 2).last.split(';').first
+
+    migrating_app = [incrementor, {
+      secrets: @secret,
+      audience: '/app-one',
+      legacy_cookies_until: Time.now + 3600
+    }]
+
+    migrated_response = response_for(app: migrating_app, cookie: legacy_response)
+    new_cookie = migrated_response["Set-Cookie"].split('=', 2).last.split(';').first
+
+    response = response_for(
+      app: migrating_app,
+      cookie: "rack.session=#{legacy_cookie}; rack.session=#{new_cookie}"
+    )
+    response.body.must_equal ({"counter"=>1}.to_s)
+  end
+
   it 'adds to RACK_ERRORS on encryptor errors' do
     echo_rack_errors = lambda do |env|
       env["rack.session"]["counter"] ||= 0

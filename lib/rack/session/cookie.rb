@@ -39,8 +39,22 @@ module Rack
     # * :gzip_over
     #     For message data over this many bytes, compress it with the deflate
     #     algorithm.
+    # * :audience
+    #     An explicit identifier of the application this session cookie belongs
+    #     to, such as its mount path (e.g. "/admin"). The audience participates
+    #     in the authenticated encryption of the cookie, so a cookie issued for
+    #     one audience can never be replayed against another audience, even when
+    #     the same :secrets are shared. It is recommended to set this whenever
+    #     multiple applications share a secret or issue cookies under the same
+    #     cookie name.
+    # * :legacy_cookies_until
+    #     Optional Time. Cookies issued before the :audience option was
+    #     introduced are not bound to an audience. Supplying a future Time here
+    #     explicitly and temporarily allows such legacy cookies to be accepted
+    #     and immediately re-issued in the new, audience-bound format. After
+    #     the given Time, legacy cookies are rejected unconditionally.
     #
-    # Refer to Rack::Session::Encryptor for more details on these options.
+# Refer to Rack::Session::Encryptor for more details on these options.
     #
     # Prior to version TODO, the session hash was stored as base64 encoded
     # marshalled data. When a :secret option was supplied, the integrity of the
@@ -154,20 +168,59 @@ module Rack
         end
       end
 
-      attr_reader :coder, :encryptors
+      # The separator is a US (unit separator) control character that cannot
+      # appear in a cookie name and is extremely unlikely to appear in an
+      # audience identifier, which avoids ambiguity between the two parts.
+      AUDIENCE_SEPARATOR = "\x1f".freeze
+
+      attr_reader :coder, :encryptors, :audience, :legacy_cookies_until
 
       def initialize(app, options = {})
         # support both :secrets and :secret for backwards compatibility
         secrets = [*(options[:secrets] || options[:secret])]
 
+        @audience = options[:audience]
+
+        if @audience && !@audience.is_a?(String)
+          raise ArgumentError, ":audience must be a String, got #{@audience.class}"
+        end
+
+        @legacy_cookies_until = options[:legacy_cookies_until]
+
+        if @legacy_cookies_until && !@legacy_cookies_until.is_a?(Time)
+          raise ArgumentError, ":legacy_cookies_until must be a Time"
+        end
+
+        # The default cookie name is applied by Persisted#initialize (called
+        # below), so resolve it here for purpose construction.
+        cookie_key = options[:key] || RACK_SESSION
+
         encryptor_opts = {
-          purpose: options[:key], serialize_json: options[:serialize_json]
+          purpose: cookie_purpose(cookie_key),
+          serialize_json: options[:serialize_json]
         }
 
-        # For each secret, create an Encryptor. We have iterate this Array at
+        # For each secret, create an Encryptor. We iterate this Array at
         # decryption time to achieve key rotation.
         @encryptors = secrets.map do |secret|
           Rack::Session::Encryptor.new secret, encryptor_opts
+        end
+
+        # During the explicit, time-limited migration window, keep a separate
+        # set of encryptors that verify audience-less legacy cookies. These
+        # cookies were signed/encrypted with only the cookie name as their
+        # purpose, and therefore can only be accepted while the window is open.
+        if @audience && accept_legacy_cookies?
+          legacy_encryptor_opts = {
+            purpose: cookie_key,
+            serialize_json: options[:serialize_json]
+          }
+
+          @legacy_encryptors = secrets.map do |secret|
+            Rack::Session::Encryptor.new secret, legacy_encryptor_opts
+          end
+        else
+          @legacy_encryptors = []
         end
 
         # If a legacy HMAC secret is present, initialize those features.
@@ -212,41 +265,129 @@ module Rack
 
       def unpacked_cookie_data(request)
         request.fetch_header(RACK_SESSION_UNPACKED_COOKIE_DATA) do |k|
-          if cookie_data = request.cookies[@key]
-            session_data = nil
+          cookies = cookie_values(request)
 
-            # Try to decrypt the session data with our encryptors
-            encryptors.each do |encryptor|
-              begin
-                session_data = encryptor.decrypt(cookie_data)
-                break
-              rescue Rack::Session::Encryptor::Error => error
-                request.env[Rack::RACK_ERRORS].puts "Session cookie encryptor error: #{error.message}"
+          valid_data = nil
 
-                next
-              end
+          # A browser may send more than one cookie with the same name (e.g.
+          # cookies scoped to different paths or domains). We must never choose
+          # one based on its position in the header, since an attacker could
+          # put an arbitrary value first. Instead, authenticate every value
+          # and apply a deterministic rule: if exactly one distinct value is
+          # valid, use it; if more than one distinct value is valid, the input
+          # is ambiguous and must be rejected.
+          cookies.uniq.each do |cookie_data|
+            session_data = unpack_cookie(request, cookie_data)
+            next unless session_data
+
+            if valid_data
+              # Multiple distinct values authenticate successfully. Refuse to
+              # guess which one belongs to this application.
+              request.get_header(Rack::RACK_ERRORS).puts(
+                "Session cookie error: multiple valid cookies with the same name (#{@key.inspect}) were sent; ignoring all of them"
+              )
+              valid_data = nil
+              break
             end
 
-            # If session decryption fails but there is @legacy_hmac_secret
-            # defined, attempt legacy HMAC verification
-            if !session_data && @legacy_hmac_secret
-              # Parse and verify legacy HMAC session cookie
-              session_data, _, digest = cookie_data.rpartition('--')
-              session_data = nil unless legacy_digest_match?(session_data, digest)
-
-              # Decode using legacy HMAC decoder
-              session_data = @legacy_hmac_coder.decode(session_data)
-
-            elsif !session_data && encryptors.empty? && coder
-              # Use the coder option, which has the potential to be very unsafe.
-              # This path is only reached when no encryptors (secrets:) are configured;
-              # if encryptors are present but decryption failed, the cookie is rejected.
-              session_data = coder.decode(cookie_data)
-            end
+            valid_data = session_data
           end
 
-          request.set_header(k, session_data || {})
+          request.set_header(k, valid_data || {})
         end
+      end
+
+      # Extract every cookie value sent for the configured cookie name. Unlike
+      # Request#cookies, this keeps duplicate names instead of keeping only the
+      # first one. Parsing matches Rack::Utils.parse_cookies_header.
+      def cookie_values(request)
+        header = request.get_header(Rack::HTTP_COOKIE)
+
+        return [] unless header
+
+        values = []
+
+        header.split(/; */n).each do |cookie|
+          next if cookie.empty?
+
+          name, value = cookie.split('=', 2)
+          next unless name == @key
+
+          values << begin
+            Rack::Utils.unescape(value)
+          rescue ArgumentError
+            value
+          end
+        end
+
+        values
+      end
+
+      # Authenticate and decode a single cookie value. Returns the session
+      # Hash on success or nil when the value does not authenticate for this
+      # application.
+      def unpack_cookie(request, cookie_data)
+        session_data = decrypt_with(request, cookie_data, encryptors)
+
+        # During the migration window, also accept audience-less legacy cookies.
+        if !session_data && accept_legacy_cookies?
+          session_data = decrypt_with(request, cookie_data, @legacy_encryptors)
+        end
+
+        # If session decryption fails but there is a legacy HMAC secret
+        # defined, attempt legacy HMAC verification.
+        if !session_data && @legacy_hmac_secret
+          # Parse and verify legacy HMAC session cookie
+          session_data, _, digest = cookie_data.rpartition('--')
+          session_data = nil unless legacy_digest_match?(session_data, digest)
+
+          # Decode using legacy HMAC decoder
+          session_data = @legacy_hmac_coder.decode(session_data)
+
+        elsif !session_data && encryptors.empty? && coder
+          # Use the coder option, which has the potential to be very unsafe.
+          # This path is only reached when no encryptors (secrets:) are configured;
+          # if encryptors are present but decryption failed, the cookie is rejected.
+          session_data = coder.decode(cookie_data)
+        end
+
+        session_data
+      end
+
+      def decrypt_with(request, cookie_data, cookie_encryptors)
+        session_data = nil
+        logged_errors = {}
+
+        cookie_encryptors.each do |encryptor|
+          begin
+            session_data = encryptor.decrypt(cookie_data)
+            break
+          rescue Rack::Session::Encryptor::Error => error
+            # Avoid logging the same failure once per key-rotation encryptor.
+            unless logged_errors[error.message]
+              request.env[Rack::RACK_ERRORS].puts "Session cookie encryptor error: #{error.message}"
+              logged_errors[error.message] = true
+            end
+
+            next
+          end
+        end
+
+        session_data
+      end
+
+      def accept_legacy_cookies?
+        legacy_cookies_until && Time.now < legacy_cookies_until
+      end
+
+      # The purpose binds the authenticated cookie to the cookie name and,
+      # when configured, to the explicit application audience. A cookie issued
+      # by another application under the same name but a different audience
+      # fails verification and is rejected even when secrets are shared.
+      def cookie_purpose(key)
+        return key unless audience
+
+        "#{key}#{AUDIENCE_SEPARATOR}#{audience}"
       end
 
       def persistent_session_id!(data, sid = nil)
