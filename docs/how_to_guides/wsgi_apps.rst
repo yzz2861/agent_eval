@@ -39,3 +39,30 @@ When using middleware the ``AsyncioWSGIMiddleware`` and
 .. code-block:: python
 
     app = AsyncioWSGIMiddleware(wsgi_app, max_body_size=20)  # Bytes
+
+Limiting the WSGI capacity
+--------------------------
+
+As WSGI applications run in worker threads a few slow requests can
+exhaust the executor and starve everything else. The
+``AsyncioWSGIMiddleware`` and ``TrioWSGIMiddleware`` can bound how many
+requests execute concurrently and how many may queue waiting for a
+slot,
+
+.. code-block:: python
+
+    app = AsyncioWSGIMiddleware(
+        wsgi_app,
+        max_concurrency=4,  # requests executing at once
+        max_queue_size=8,  # requests waiting for a slot
+        queue_timeout=5.0,  # seconds a request may wait, None waits forever
+    )
+
+Requests that arrive when the queue is full, or that wait longer than
+``queue_timeout``, are rejected with a ``503`` response. A queued
+request cancelled by the client leaves the queue immediately, whereas a
+request already executing keeps its slot until the WSGI callable —
+including response iteration and ``close()`` — has actually
+finished. These limits only apply to requests served by the WSGI
+middleware; ASGI requests are unaffected. By default all three limits
+are ``None`` i.e. unlimited.

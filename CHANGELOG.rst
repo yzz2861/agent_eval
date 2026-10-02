@@ -1,3 +1,10 @@
+Unreleased
+----------
+
+* Add max_concurrency, max_queue_size, and queue_timeout capacity limits
+  to the WSGI middleware, with queued requests cancelled by the client
+  removed immediately and overloads answered with a 503 response.
+
 0.18.0 2025-11-08
 -----------------
 
