@@ -1,0 +1,9 @@
+Gemfile.lock
+/.yardoc
+/doc
+/coverage
+/spec/examples.txt
+/pkg
+tmp/
+/.rubocop-*
+.bundle
