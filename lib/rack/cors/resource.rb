@@ -7,7 +7,12 @@ module Rack
       # {https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Headers}
       CORS_SIMPLE_HEADERS = %w[accept accept-language content-language content-type].freeze
 
-      attr_accessor :path, :methods, :headers, :expose, :max_age, :credentials, :pattern, :if_proc, :vary_headers
+      # Vary header sent with preflight responses when Private Network Access
+      # is enabled, since the response then depends on this request header.
+      PRIVATE_NETWORK_VARY_HEADER = 'Access-Control-Request-Private-Network'
+
+      attr_accessor :path, :methods, :headers, :expose, :max_age, :credentials, :pattern, :if_proc, :vary_headers,
+                    :allow_private_network
 
       def initialize(public_resource, path, opts = {})
         raise CorsMisconfigurationError if public_resource && opts[:credentials] == true
@@ -18,6 +23,7 @@ module Rack
         self.pattern      = compile(path)
         self.if_proc      = opts[:if]
         self.vary_headers = opts[:vary] && [opts[:vary]].flatten
+        self.allow_private_network = opts[:allow_private_network] == true
         @public_resource  = public_resource
 
         self.headers = case opts[:headers]
@@ -54,6 +60,10 @@ module Rack
         request_headers = env[Rack::Cors::HTTP_ACCESS_CONTROL_REQUEST_HEADERS]
         result.miss(Result::MISS_DENY_HEADER) && (return headers) if request_headers && !allow_headers?(request_headers)
 
+        if private_network_request?(env) && !allow_private_network
+          result.miss(Result::MISS_DENY_PRIVATE_NETWORK) && (return headers)
+        end
+
         result.hit = true
         headers.merge(to_preflight_headers(env))
       end
@@ -84,7 +94,15 @@ module Rack
       def to_preflight_headers(env)
         h = to_headers(env)
         h.merge!('access-control-allow-headers' => env[Rack::Cors::HTTP_ACCESS_CONTROL_REQUEST_HEADERS]) if env[Rack::Cors::HTTP_ACCESS_CONTROL_REQUEST_HEADERS]
+        if allow_private_network
+          h['access-control-allow-private-network'] = 'true' if private_network_request?(env)
+          h['vary'] = (Array(vary_headers) + [PRIVATE_NETWORK_VARY_HEADER]).uniq.join(', ')
+        end
         h
+      end
+
+      def private_network_request?(env)
+        env[Rack::Cors::HTTP_ACCESS_CONTROL_REQUEST_PRIVATE_NETWORK] == 'true'
       end
 
       def allow_headers?(request_headers)

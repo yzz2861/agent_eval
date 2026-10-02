@@ -13,6 +13,7 @@ module Rack
 
     HTTP_ACCESS_CONTROL_REQUEST_METHOD  = 'HTTP_ACCESS_CONTROL_REQUEST_METHOD'
     HTTP_ACCESS_CONTROL_REQUEST_HEADERS = 'HTTP_ACCESS_CONTROL_REQUEST_HEADERS'
+    HTTP_ACCESS_CONTROL_REQUEST_PRIVATE_NETWORK = 'HTTP_ACCESS_CONTROL_REQUEST_PRIVATE_NETWORK'
 
     PATH_INFO      = 'PATH_INFO'
     REQUEST_METHOD = 'REQUEST_METHOD'
@@ -75,7 +76,8 @@ module Rack
            "  Origin: #{env[HTTP_ORIGIN]}",
            "  Path-Info: #{path}",
            "  Access-Control-Request-Method: #{env[HTTP_ACCESS_CONTROL_REQUEST_METHOD]}",
-           "  Access-Control-Request-Headers: #{env[HTTP_ACCESS_CONTROL_REQUEST_HEADERS]}"].join("\n")
+           "  Access-Control-Request-Headers: #{env[HTTP_ACCESS_CONTROL_REQUEST_HEADERS]}",
+           "  Access-Control-Request-Private-Network: #{env[HTTP_ACCESS_CONTROL_REQUEST_PRIVATE_NETWORK]}"].join("\n")
         end
 
         if env[REQUEST_METHOD] == OPTIONS && env[HTTP_ACCESS_CONTROL_REQUEST_METHOD]

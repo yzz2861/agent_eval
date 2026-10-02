@@ -101,6 +101,7 @@ A Resource path can be specified as exact string match (`/path/to/file.txt`) or 
 * **max_age** (number): Sets the `Access-Control-Max-Age` response header.
 * **if** (Proc): If the result of the proc is true, will process the request as a valid CORS request.
 * **vary** (string or array): A list of HTTP headers to add to the 'Vary' header.
+* **allow_private_network** (boolean, default: `false`): Enables [Private Network Access](https://wicg.github.io/private-network-access/) for the resource. When enabled, a preflight request that includes `Access-Control-Request-Private-Network: true` (and passes the origin, method and header checks) receives `Access-Control-Allow-Private-Network: true`, and preflight responses vary on `Access-Control-Request-Private-Network`. When disabled (the default), such preflight requests are denied.
 
 
 ## Common Gotchas

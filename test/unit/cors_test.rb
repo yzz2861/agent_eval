@@ -424,6 +424,105 @@ describe Rack::Cors do
     end
   end
 
+  describe 'with private network access' do
+    it 'should return Access-Control-Allow-Private-Network when enabled and requested' do
+      private_network_preflight('http://localhost:3000', '/private_network')
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_equal 'true'
+      _(cors_result).must_be :hit
+    end
+
+    it 'should merge Access-Control-Request-Private-Network into Vary' do
+      private_network_preflight('http://localhost:3000', '/private_network')
+      _(last_response.headers['Vary']).must_equal 'Access-Control-Request-Private-Network'
+    end
+
+    it 'should vary on Access-Control-Request-Private-Network even when not requested' do
+      preflight_request('http://localhost:3000', '/private_network')
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_be_nil
+      _(last_response.headers['Vary']).must_equal 'Access-Control-Request-Private-Network'
+    end
+
+    it 'should deny private network preflight when resource does not opt in' do
+      private_network_preflight('http://localhost:3000', '/')
+      _(last_response).wont_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_be_nil
+      _(last_response.headers['Access-Control-Allow-Methods']).must_be_nil
+      _(cors_result).wont_be :hit
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_DENY_PRIVATE_NETWORK
+    end
+
+    it 'should deny private network preflight when origin is not allowed' do
+      private_network_preflight('http://bad.guy', '/private_network')
+      _(last_response).wont_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_be_nil
+    end
+
+    it 'should deny private network preflight when method is not allowed' do
+      private_network_preflight('http://localhost:3000', '/private_network', method: :delete)
+      _(last_response).wont_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_be_nil
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_DENY_METHOD
+    end
+
+    it 'should deny private network preflight when request headers are not allowed' do
+      private_network_preflight('http://localhost:3000', '/private_network', headers: 'x-not-allowed')
+      _(last_response).wont_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_be_nil
+      _(cors_result.miss_reason).must_equal Rack::Cors::Result::MISS_DENY_HEADER
+    end
+
+    it 'should allow private network preflight when method and headers pass' do
+      private_network_preflight('http://localhost:3000', '/private_network_any', method: :put, headers: 'x-whatever')
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_equal 'true'
+    end
+
+    it 'should ignore Access-Control-Request-Private-Network with an invalid value' do
+      private_network_preflight('http://localhost:3000', '/private_network', private_network: 'false')
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_be_nil
+
+      private_network_preflight('http://localhost:3000', '/private_network', private_network: 'yes')
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_be_nil
+    end
+
+    it 'should not return Access-Control-Allow-Private-Network on actual requests' do
+      header 'Origin', 'http://localhost:3000'
+      header 'Access-Control-Request-Private-Network', 'true'
+      get '/private_network'
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_be_nil
+    end
+
+    it 'should not return Access-Control-Allow-Private-Network on plain OPTIONS requests' do
+      header 'Origin', 'http://localhost:3000'
+      header 'Access-Control-Request-Private-Network', 'true'
+      options '/private_network'
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_be_nil
+    end
+
+    it 'should support private network access on wildcard origins without credentials' do
+      private_network_preflight('http://192.168.1.3:8080', '/public_private_network')
+      _(last_response).must_render_cors_success
+      _(last_response.headers['Access-Control-Allow-Origin']).must_equal '*'
+      _(last_response.headers['Access-Control-Allow-Private-Network']).must_equal 'true'
+    end
+
+    it 'should not allow credentials with wildcard origin even with allow_private_network' do
+      _(proc do
+        Rack::Cors.new(proc {}) do
+          allow do
+            origins '*'
+            resource '/', credentials: true, allow_private_network: true
+          end
+        end
+      end).must_raise Rack::Cors::Resource::CorsMisconfigurationError
+    end
+  end
+
   describe 'with non HTTP config' do
     let(:app) { load_app('non_http') }
 
@@ -545,5 +644,10 @@ describe Rack::Cors do
     end
     header 'Access-Control-Request-Headers', opts[:headers] if opts[:headers]
     options path
+  end
+
+  def private_network_preflight(origin, path, opts = {})
+    header 'Access-Control-Request-Private-Network', opts.fetch(:private_network, 'true')
+    preflight_request(origin, path, opts)
   end
 end
