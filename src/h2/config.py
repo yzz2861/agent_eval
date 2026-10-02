@@ -7,7 +7,7 @@ Objects for controlling the configuration of the HTTP/2 stack.
 from __future__ import annotations
 
 import sys
-from typing import Any
+from typing import Any, cast
 
 
 class _BooleanConfigOption:
@@ -142,6 +142,14 @@ class H2Configuration:
 
     :type normalize_inbound_headers: ``bool``
 
+    :param max_inbound_header_list_size: The maximum uncompressed size, in
+        octets, of an inbound header list that will be delivered to the
+        application. Header lists larger than this limit are rejected with a
+        stream error after HPACK decoding has completed. ``None`` disables the
+        application-level limit. The decoder's connection-level protection is
+        configured separately by ``SETTINGS_MAX_HEADER_LIST_SIZE``.
+    :type max_inbound_header_list_size: ``int`` or ``None``
+
     :param logger: A logger that conforms to the requirements for this module,
         those being no I/O and no context switches, which is needed in order
         to run in asynchronous operation.
@@ -176,7 +184,8 @@ class H2Configuration:
                  split_outbound_cookies: bool = False,
                  validate_inbound_headers: bool = True,
                  normalize_inbound_headers: bool = True,
-                 logger: DummyLogger | OutputLogger | None = None) -> None:
+                 logger: DummyLogger | OutputLogger | None = None,
+                 max_inbound_header_list_size: int | None = None) -> None:
         self.client_side = client_side
         self.header_encoding = header_encoding
         self.validate_outbound_headers = validate_outbound_headers
@@ -184,6 +193,7 @@ class H2Configuration:
         self.split_outbound_cookies = split_outbound_cookies
         self.validate_inbound_headers = validate_inbound_headers
         self.normalize_inbound_headers = normalize_inbound_headers
+        self.max_inbound_header_list_size = max_inbound_header_list_size
         self.logger = logger or DummyLogger(__name__)
 
     @property
@@ -210,3 +220,17 @@ class H2Configuration:
             msg = "header_encoding cannot be True"
             raise ValueError(msg)
         self._header_encoding = value
+
+    @property
+    def max_inbound_header_list_size(self) -> int | None:
+        """Maximum uncompressed inbound header list size accepted by the application."""
+        return cast("int | None", self._max_inbound_header_list_size)
+
+    @max_inbound_header_list_size.setter
+    def max_inbound_header_list_size(self, value: int | None) -> None:
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+        ):
+            msg = "max_inbound_header_list_size must be a non-negative integer or None"
+            raise ValueError(msg)
+        self._max_inbound_header_list_size = value

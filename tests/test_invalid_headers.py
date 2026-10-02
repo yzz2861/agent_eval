@@ -948,3 +948,170 @@ class TestOversizedHeaders:
             last_stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
+
+
+class TestSoftHeaderListLimit:
+    """
+    Application-level header list limits reject one stream without losing
+    HPACK state or affecting other streams.
+    """
+
+    base_request_headers = [
+        (b":method", b"GET"),
+        (b":authority", b"example.com"),
+        (b":scheme", b"https"),
+        (b":path", b"/"),
+    ]
+    dynamic_header = (b"x-dynamic", b"x" * 100)
+    server_config = h2.config.H2Configuration(
+        client_side=False,
+        max_inbound_header_list_size=320,
+    )
+
+    def _make_server(self, frame_factory) -> h2.connection.H2Connection:
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.receive_data(frame_factory.preamble())
+        c.clear_outbound_data_buffer()
+        return c
+
+    def _split_headers(
+        self,
+        frame_factory,
+        headers: list[tuple[bytes, bytes]],
+        stream_id: int,
+        block_size: int = 5,
+    ) -> bytes:
+        f = frame_factory.build_headers_frame(headers, stream_id=stream_id)
+        header_data = f.data
+        chunks = [
+            header_data[start:start + block_size]
+            for start in range(0, len(header_data), block_size)
+        ]
+        f.data = chunks.pop(0)
+        frames = [
+            frame_factory.build_continuation_frame(chunk, stream_id=stream_id)
+            for chunk in chunks
+        ]
+        f.flags = set()
+        frames[-1].flags.add("END_HEADERS")
+        frames.insert(0, f)
+        return b"".join(frame.serialize() for frame in frames)
+
+    def test_initial_headers_reset_keeps_dynamic_table(self, frame_factory) -> None:
+        """
+        An oversized initial header block updates HPACK state and resets only
+        that stream.
+        """
+        c = self._make_server(frame_factory)
+
+        oversized_frame = frame_factory.build_headers_frame(
+            [
+                *self.base_request_headers,
+                self.dynamic_header,
+                (b"x-extra", b"y" * 100),
+            ],
+            stream_id=1,
+        )
+        events = c.receive_data(oversized_frame.serialize())
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.StreamReset)
+        assert events[0].stream_id == 1
+        assert events[0].error_code == h2.errors.ErrorCodes.ENHANCE_YOUR_CALM
+        assert not events[0].remote_reset
+        expected_reset = frame_factory.build_rst_stream_frame(
+            stream_id=1,
+            error_code=h2.errors.ErrorCodes.ENHANCE_YOUR_CALM,
+        )
+        assert c.data_to_send() == expected_reset.serialize()
+
+        valid_frame = frame_factory.build_headers_frame(
+            [*self.base_request_headers, self.dynamic_header],
+            stream_id=3,
+        )
+        events = c.receive_data(valid_frame.serialize())
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.RequestReceived)
+        assert events[0].stream_id == 3
+        assert events[0].headers == [
+            *self.base_request_headers,
+            self.dynamic_header,
+        ]
+
+    def test_oversized_trailers_reset_keeps_dynamic_table(self, frame_factory) -> None:
+        """
+        Oversized trailers obey the same limit and preserve dynamic table
+        state for later streams.
+        """
+        c = self._make_server(frame_factory)
+
+        initial_frame = frame_factory.build_headers_frame(
+            self.base_request_headers,
+            stream_id=1,
+        )
+        initial_events = c.receive_data(initial_frame.serialize())
+        assert len(initial_events) == 1
+        assert isinstance(initial_events[0], h2.events.RequestReceived)
+        c.clear_outbound_data_buffer()
+
+        trailers_frame = frame_factory.build_headers_frame(
+            [self.dynamic_header, (b"x-trailer", b"z" * 140)],
+            stream_id=1,
+            flags=["END_STREAM"],
+        )
+        events = c.receive_data(trailers_frame.serialize())
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.StreamReset)
+        assert events[0].stream_id == 1
+        assert events[0].error_code == h2.errors.ErrorCodes.ENHANCE_YOUR_CALM
+        assert not events[0].remote_reset
+
+        valid_frame = frame_factory.build_headers_frame(
+            [*self.base_request_headers, self.dynamic_header],
+            stream_id=3,
+        )
+        events = c.receive_data(valid_frame.serialize())
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.RequestReceived)
+        assert events[0].headers == [
+            *self.base_request_headers,
+            self.dynamic_header,
+        ]
+
+    def test_continuation_headers_reset_keeps_dynamic_table(self, frame_factory) -> None:
+        """
+        The soft limit applies after a complete header block split across
+        CONTINUATION frames.
+        """
+        c = self._make_server(frame_factory)
+
+        oversized_data = self._split_headers(
+            frame_factory,
+            [
+                *self.base_request_headers,
+                self.dynamic_header,
+                (b"x-extra", b"y" * 100),
+            ],
+            stream_id=1,
+        )
+        events = c.receive_data(oversized_data)
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.StreamReset)
+        assert events[0].stream_id == 1
+
+        valid_frame = frame_factory.build_headers_frame(
+            [*self.base_request_headers, self.dynamic_header],
+            stream_id=3,
+        )
+        events = c.receive_data(valid_frame.serialize())
+
+        assert len(events) == 1
+        assert isinstance(events[0], h2.events.RequestReceived)
+        assert events[0].headers == [
+            *self.base_request_headers,
+            self.dynamic_header,
+        ]

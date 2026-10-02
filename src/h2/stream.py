@@ -1220,6 +1220,25 @@ class H2Stream:
         rsf.error_code = error_code
         return [rsf]
 
+    def reject_headers(
+        self,
+        error_code: ErrorCodes | int = ErrorCodes.ENHANCE_YOUR_CALM,
+    ) -> tuple[list[Frame], list[Event]]:
+        """Reject a completely decoded header block as a stream error."""
+        self.config.logger.debug(
+            "Reject headers on %r with error code: %d", self, error_code,
+        )
+        self.state_machine.process_input(StreamInputs.RECV_HEADERS)
+        events = [
+            StreamReset(
+                stream_id=self.stream_id,
+                error_code=error_code,
+                remote_reset=False,
+            ),
+        ]
+        frames = self.reset_stream(error_code)
+        return frames, events
+
     def stream_reset(self, frame: RstStreamFrame) -> tuple[list[Frame], list[Event]]:
         """
         Handle a stream being reset remotely.

@@ -11,7 +11,7 @@ from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Any
 
 from hpack.exceptions import HPACKError, OversizedHeaderListError
-from hpack.hpack import Decoder, Encoder
+from hpack.hpack import Decoder, Encoder, table_entry_size
 from hyperframe.exceptions import InvalidPaddingError
 from hyperframe.frame import (
     AltSvcFrame,
@@ -1616,6 +1616,13 @@ class H2Connection:
         stream = self._get_or_create_stream(
             frame.stream_id, AllowedStreamIDs(not self.config.client_side),
         )
+        max_header_list_size = self.config.max_inbound_header_list_size
+        if (
+            max_header_list_size is not None
+            and _header_list_size(headers) > max_header_list_size
+        ):
+            return stream.reject_headers(ErrorCodes.ENHANCE_YOUR_CALM)
+
         frames, stream_events = stream.receive_headers(
             headers,
             "END_STREAM" in frame.flags,
@@ -2115,3 +2122,8 @@ def _decode_headers(decoder: Decoder, encoded_header_block: bytes) -> Iterable[H
         # compatibility, catch all of them.
         msg = f"Error decoding header block: {e}"
         raise ProtocolError(msg) from e
+
+
+def _header_list_size(headers: Iterable[Header]) -> int:
+    """Return the uncompressed HTTP/2 size of a header list."""
+    return sum(table_entry_size(header[0], header[1]) for header in headers)

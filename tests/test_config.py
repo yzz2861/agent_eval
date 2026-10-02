@@ -22,6 +22,7 @@ class TestH2Config:
         config = h2.config.H2Configuration()
         assert config.client_side
         assert config.header_encoding is None
+        assert config.max_inbound_header_list_size is None
         assert isinstance(config.logger, h2.config.DummyLogger)
 
     boolean_config_options = [
@@ -128,6 +129,42 @@ class TestH2Config:
         config = h2.config.H2Configuration()
         config.logger = logger
         assert config.logger is logger
+
+    @pytest.mark.parametrize("value", [False, -1, "1", 1.5])
+    def test_max_inbound_header_list_size_rejects_invalid_values_init(
+        self, value,
+    ) -> None:
+        """The soft header list limit accepts only non-negative integers."""
+        with pytest.raises(
+            ValueError,
+            match="max_inbound_header_list_size must be a non-negative integer or None",
+        ):
+            h2.config.H2Configuration(max_inbound_header_list_size=value)
+
+    @pytest.mark.parametrize("value", [False, -1, "1", 1.5])
+    def test_max_inbound_header_list_size_rejects_invalid_values_attr(
+        self, value,
+    ) -> None:
+        """The soft header list limit validates attribute assignments."""
+        config = h2.config.H2Configuration()
+        with pytest.raises(
+            ValueError,
+            match="max_inbound_header_list_size must be a non-negative integer or None",
+        ):
+            config.max_inbound_header_list_size = value
+
+    @pytest.mark.parametrize("value", [None, 0, 1024])
+    def test_max_inbound_header_list_size_is_reflected_init(self, value) -> None:
+        """Valid soft header list limits are reflected via the initializer."""
+        config = h2.config.H2Configuration(max_inbound_header_list_size=value)
+        assert config.max_inbound_header_list_size == value
+
+    @pytest.mark.parametrize("value", [None, 0, 1024])
+    def test_max_inbound_header_list_size_is_reflected_attr(self, value) -> None:
+        """Valid soft header list limits are reflected after assignment."""
+        config = h2.config.H2Configuration()
+        config.max_inbound_header_list_size = value
+        assert config.max_inbound_header_list_size == value
 
     @pytest.mark.parametrize("trace_level", [False, True])
     def test_output_logger(self, capsys, trace_level) -> None:
