@@ -1,0 +1,260 @@
+require "bundler/gem_tasks"
+
+require 'rbconfig'
+include RbConfig
+
+require 'rake/testtask'
+class UndocumentedTestTask < Rake::TestTask
+  def desc(*) end
+
+  if RUBY_ENGINE != "jruby"
+    def ruby(...)
+      env_was = ENV["JSON_COVERAGE"]
+      ENV["JSON_COVERAGE"] = "1"
+      ret = super
+      ENV["JSON_COVERAGE"] = env_was
+      ret
+    end
+  end
+end
+
+PKG_VERSION       = File.foreach(File.join(__dir__, "lib/json/version.rb")) do |line|
+  /^\s*VERSION\s*=\s*'(.*)'/ =~ line and break $1
+end rescue nil
+
+module CI
+  extend self
+
+  def gem_published?(name, version)
+    require 'net/https'
+    require 'uri'
+    uri = URI.parse("https://rubygems.org/api/v2/rubygems/#{name}/versions/#{version}.json")
+    Net::HTTP.get_response(uri).is_a?(Net::HTTPSuccess)
+  end
+
+  def changelog(version)
+    changelog_lines = File.readlines(File.expand_path("CHANGES.md", __dir__))
+    changelog_lines = changelog_lines.drop_while { |line| !(line.start_with?("### ") && line.include?("(#{version})")) }
+    if changelog_lines.empty?
+      return false
+    end
+    changelog_lines.shift
+    changelog_lines = changelog_lines.take_while { |line| !(line.start_with?("### ") ) }
+    changelog_lines.join
+  end
+
+  def prerelease?(version)
+    !version.match?(/\A[\d.]+\z/)
+  end
+end
+
+namespace :ci do
+  task :check_release do
+    unless PKG_VERSION
+      abort("Gem version couldn't be read")
+    end
+
+    if CI.gem_published?("json", PKG_VERSION)
+      $stderr.puts "Version #{PKG_VERSION} was already released. Nothing to do."
+      exit 0
+    end
+
+    if changelog = CI.changelog(PKG_VERSION)
+      puts "Changelog:"
+      puts changelog
+    else
+      abort("Could not find version #{PKG_VERSION} in CHANGES.md")
+    end
+
+    if ENV["GITHUB_OUTPUT"]
+      $stderr.puts "Triggering release"
+      File.open(ENV["GITHUB_OUTPUT"], "a+") do |f|
+        f.puts "run_publish=true"
+      end
+    end
+  end
+
+  task :create_release do
+    tag = "v#{PKG_VERSION}"
+    args = [
+      "--title", tag,
+      "--notes", changelog,
+    ]
+    args << "--prerelease" << "--latest=false" if CI.prerelease?(PKG_VERSION)
+    system("gh", "release", "create", tag, "--draft", *args)
+  end
+end
+
+JAVA_DIR            = "java/src/json/ext"
+JAVA_SOURCES        = FileList["#{JAVA_DIR}/*.java"].exclude("#{JAVA_DIR}/Vectorized*.java")
+JAVA_VEC_SOURCES    = FileList["#{JAVA_DIR}/Vectorized*.java"]
+JAVA_CLASSES        = []
+JRUBY_PARSER_JAR    = File.expand_path("lib/json/ext/parser.jar")
+JRUBY_GENERATOR_JAR = File.expand_path("lib/json/ext/generator.jar")
+
+CLEAN.concat FileList["java/src/**/*.class"]
+CLEAN << JRUBY_PARSER_JAR
+CLEAN << JRUBY_GENERATOR_JAR
+
+if defined?(RUBY_ENGINE) and RUBY_ENGINE == 'jruby'
+  path_separator = File::PATH_SEPARATOR
+  ENV['JAVA_HOME'] ||= [
+    '/usr/local/java/jdk',
+    '/usr/lib/jvm/java-6-openjdk',
+    '/Library/Java/Home',
+  ].find { |c| File.directory?(c) }
+  if ENV['JAVA_HOME']
+    warn " *** JAVA_HOME is set to #{ENV['JAVA_HOME'].inspect}"
+    ENV['PATH'] = ENV['PATH'].split(path_separator).unshift(java_path = "#{ENV['JAVA_HOME']}/bin") * path_separator
+    warn " *** java binaries are assumed to be in #{java_path.inspect}"
+  else
+    warn " *** JAVA_HOME was not set or could not be guessed!"
+    exit 1
+  end
+
+  JRUBY_JAR = File.join(CONFIG["libdir"], "jruby.jar")
+  if File.exist?(JRUBY_JAR)
+    classpath = (Dir['java/lib/*.jar'] << 'java/src' << JRUBY_JAR) * path_separator
+    JAVA_SOURCES.each do |src|
+      obj = src.sub(/\.java\Z/, '.class')
+      file obj => src do
+        if File.exist?(File.join(ENV['JAVA_HOME'], "lib", "modules"))
+          sh 'javac', '-classpath', classpath, '--release', '8', src
+        else
+          sh 'javac', '-classpath', classpath, '-source', '1.8', '-target', '1.8', src
+        end
+      end
+      JAVA_CLASSES << obj
+    end
+
+    JAVA_VEC_SOURCES.each do |src|
+      obj = src.sub(/\.java\Z/, '.class')
+      file obj => src do
+        sh 'javac', '--add-modules', 'jdk.incubator.vector', '-classpath', classpath, '--release', '16', src do |success, status|
+          if success
+            puts "*** 'jdk.incubator.vector' support enabled ***"
+          else
+            puts "*** 'jdk.incubator.vector' support disabled ***"
+          end
+        end
+      end
+      JAVA_CLASSES << obj
+    end
+  else
+    warn "WARNING: Cannot find jruby in path => Cannot build jruby extension!"
+  end
+
+  desc "Compiling jruby extension"
+  task compile: JAVA_CLASSES
+
+  desc "Package the jruby gem"
+  task jruby_gem: :create_jar do
+    mkdir_p 'pkg'
+    sh "gem build -o pkg/json-#{PKG_VERSION}-java.gem json.gemspec"
+  end
+
+  UndocumentedTestTask.new do |t|
+    t.name = :test
+    t.test_files = FileList['test/json/*_test.rb']
+    t.verbose = true
+    t.options = '-v'
+  end
+  desc "Testing library (jruby)"
+  task test: [:create_jar ]
+
+  file JRUBY_PARSER_JAR => :compile do
+    cd 'java/src' do
+      parser_classes = FileList[
+        "json/ext/ByteList*.class",
+        "json/ext/OptionsReader*.class",
+        "json/ext/Parser*.class",
+        "json/ext/Ryu*.class",
+        "json/ext/RuntimeInfo*.class",
+        "json/ext/StringDecoder*.class",
+        "json/ext/*StringScanner*.class",
+        "json/ext/Utils*.class"
+      ]
+      sh 'jar', 'cf', File.basename(JRUBY_PARSER_JAR), *parser_classes
+      mv File.basename(JRUBY_PARSER_JAR), File.dirname(JRUBY_PARSER_JAR)
+    end
+  end
+
+  desc "Create parser jar"
+  task create_parser_jar: JRUBY_PARSER_JAR
+
+  file JRUBY_GENERATOR_JAR => :compile do
+    cd 'java/src' do
+      generator_classes = FileList[
+        "json/ext/*ByteList*.class",
+        "json/ext/OptionsReader*.class",
+        "json/ext/EscapeScanner*.class",
+        "json/ext/Generator*.class",
+        "json/ext/RuntimeInfo*.class",
+        "json/ext/*StringEncoder*.class",
+        "json/ext/Utils*.class"
+      ]
+      puts "Creating generator jar with classes: #{generator_classes.join(', ')}"
+      sh 'jar', 'cf', File.basename(JRUBY_GENERATOR_JAR), *generator_classes
+      mv File.basename(JRUBY_GENERATOR_JAR), File.dirname(JRUBY_GENERATOR_JAR)
+    end
+  end
+
+  desc "Create generator jar"
+  task create_generator_jar: JRUBY_GENERATOR_JAR
+
+  desc "Create parser and generator jars"
+  task create_jar: [ :create_parser_jar, :create_generator_jar ]
+
+  desc "Build all gems and archives for a new release of the jruby extension."
+  task build: [ :clean, :jruby_gem ]
+
+  task release: :build
+else
+  require 'rake/extensiontask'
+
+  unless RUBY_ENGINE == 'truffleruby'
+    Rake::ExtensionTask.new("json/ext/generator")
+  end
+
+  Rake::ExtensionTask.new("json/ext/parser")
+
+  UndocumentedTestTask.new do |t|
+    t.name = :test
+    t.test_files = FileList['test/json/*_test.rb']
+    t.verbose = true
+    t.options = '-v'
+  end
+
+  desc "Testing library (extension)"
+  task test: [ :compile ]
+
+  begin
+    require "ruby_memcheck"
+    RubyMemcheck::TestTask.new(valgrind: [ :compile, :test ]) do |t|
+      t.test_files = FileList['test/json/*_test.rb']
+      t.verbose = true
+      t.options = '-v'
+    end
+  rescue LoadError
+  end
+
+  desc "Update the tags file"
+  task :tags do
+    system 'ctags', *Dir['**/*.{rb,c,h,java}']
+  end
+
+  desc "Create the gem packages"
+  task :package do
+    sh "gem build json.gemspec"
+    mkdir_p 'pkg'
+    mv "json-#{PKG_VERSION}.gem", 'pkg'
+  end
+
+  desc "Build all gems and archives for a new release of json"
+  task build: [ :clean, :package ]
+
+  task release: :build
+end
+
+desc "Compile in the the source directory"
+task default: [ :clean, :test ]
