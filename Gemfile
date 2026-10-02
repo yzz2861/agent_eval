@@ -1,0 +1,17 @@
+source "https://rubygems.org"
+
+gemspec
+
+group :development do
+  gem "irb"
+  gem "bundler"
+  gem "rake"
+  if RUBY_ENGINE == 'jruby'
+    # RDoc 8 pulls in RBS 4, which attempts to build a native extension on JRuby.
+    gem 'rdoc', '< 8'
+  else
+    gem 'rdoc'
+  end
+  gem "test-unit"
+  gem "test-unit-ruby-core", ">= 1.0.7"
+end
