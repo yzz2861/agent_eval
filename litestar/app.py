@@ -45,6 +45,9 @@ from litestar.plugins import (
     PluginProtocol,
     PluginRegistry,
 )
+from litestar.route_conflicts import RouteConflictCheckMode, RouteConflictReport
+from litestar.route_conflicts import check_route_conflicts as _check_route_conflicts
+from litestar.route_conflicts import logger as _route_conflict_logger
 from litestar.router import Router
 from litestar.routes import ASGIRoute, HTTPRoute, WebSocketRoute
 from litestar.stores.registry import StoreRegistry
@@ -158,6 +161,8 @@ class Litestar(Router):
         "pdb_on_exception",
         "plugins",
         "response_cache_config",
+        "route_conflict_check",
+        "route_conflict_report",
         "route_handler_method_map",
         "route_map",
         "routes",
@@ -206,6 +211,7 @@ class Litestar(Router):
         response_cookies: ResponseCookies | None = None,
         response_headers: ResponseHeaders | None = None,
         return_dto: type[AbstractDTO] | EmptyType | None = Empty,
+        route_conflict_check: RouteConflictCheckMode = "off",
         security: Sequence[SecurityRequirement] | None = None,
         signature_namespace: Mapping[str, Any] | None = None,
         signature_types: Sequence[Any] | None = None,
@@ -295,6 +301,10 @@ class Litestar(Router):
             response_cache_config: Configures caching behavior of the application.
             return_dto: :class:`AbstractDTO <.dto.base_dto.AbstractDTO>` to use for serializing
                 outbound response data.
+            route_conflict_check: Controls the startup route conflict check. If ``"warn"``, conflicting route
+                declarations are logged during startup; if ``"strict"``, confirmed conflicts raise an
+                :class:`ImproperlyConfiguredException <.exceptions.ImproperlyConfiguredException>` and prevent
+                startup. Defaults to ``"off"``. See :mod:`litestar.route_conflicts` for details.
             route_handlers: A sequence of route handlers, which can include instances of
                 :class:`Router <.router.Router>`, subclasses of :class:`Controller <.controller.Controller>` or any
                 callable decorated by the route handler decorators.
@@ -365,6 +375,7 @@ class Litestar(Router):
             response_cookies=response_cookies or [],
             response_headers=response_headers or [],
             return_dto=return_dto,
+            route_conflict_check=route_conflict_check,
             route_handlers=list(route_handlers) if route_handlers is not None else [],
             security=list(security or []),
             signature_namespace=dict(signature_namespace or {}),
@@ -423,6 +434,7 @@ class Litestar(Router):
         self.openapi_config = config.openapi_config
         self.request_class: type[Request] = config.request_class or Request
         self.response_cache_config = config.response_cache_config
+        self.route_conflict_check = config.route_conflict_check
         self.state = config.state
         self.template_engine = config.template_config.engine_instance if config.template_config else None
         self.websocket_class: type[WebSocket] = config.websocket_class or WebSocket
@@ -487,6 +499,8 @@ class Litestar(Router):
         self.asgi_router.construct_routing_trie()
 
         self.asgi_handler = self._create_asgi_handler()
+
+        self.route_conflict_report = self._run_route_conflict_check()
 
     @staticmethod
     def _patch_opentelemetry_middleware(config: AppConfig) -> AppConfig:
@@ -802,6 +816,37 @@ class Litestar(Router):
             "make sure to decorate it first with one of the routing decorators"
         )
 
+    def _run_route_conflict_check(self) -> RouteConflictReport | None:
+        """Run the configured startup route conflict check, if enabled.
+
+        Returns:
+            The generated report, or None if the check is disabled.
+        """
+        if self.route_conflict_check == "off":
+            return None
+        report = _check_route_conflicts(self)
+        for conflict in (*report.conflicts, *report.unknowns):
+            _route_conflict_logger.warning("route conflict detected:\n%s", conflict.render())
+        if self.route_conflict_check == "strict" and report.conflicts:
+            raise ImproperlyConfiguredException(report.render())
+        return report
+
+    def check_route_conflicts(self, *, strict: bool = False) -> RouteConflictReport:
+        """Analyze the application's route declarations for routing conflicts.
+
+        The analysis is purely static: handlers are never invoked. See
+        :mod:`litestar.route_conflicts` for details.
+
+        Args:
+            strict: If True, raise an
+                :class:`ImproperlyConfiguredException <.exceptions.ImproperlyConfiguredException>` when
+                confirmed conflicts are found.
+
+        Returns:
+            A report containing all confirmed conflicts and undecidable pairs.
+        """
+        return _check_route_conflicts(self, strict=strict)
+
     def register(self, value: ControllerRouterHandler) -> None:
         warnings.warn(
             "Registering routes after the application instance has been "
@@ -821,6 +866,8 @@ class Litestar(Router):
         self.route_handler_method_map = self._create_route_handler_method_map(self.routes)
 
         self.asgi_router.construct_routing_trie()
+
+        self.route_conflict_report = self._run_route_conflict_check()
 
     def get_handler_index_by_name(self, name: str) -> HandlerIndex | None:
         """Receives a route handler name and returns an optional dictionary containing the route handler instance and

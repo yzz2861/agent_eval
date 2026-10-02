@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from litestar.openapi.config import OpenAPIConfig
     from litestar.openapi.spec import SecurityRequirement
     from litestar.plugins import PluginProtocol
+    from litestar.route_conflicts import RouteConflictCheckMode
     from litestar.stores.base import Store
     from litestar.stores.registry import StoreRegistry
     from litestar.types import (
@@ -179,6 +180,15 @@ class AppConfig:
     return_dto: type[AbstractDTO] | None | EmptyType = field(default=Empty)
     """:class:`AbstractDTO <.dto.base_dto.AbstractDTO>` to use for serializing outbound response
     data.
+    """
+    route_conflict_check: RouteConflictCheckMode = "off"
+    """Controls the startup route conflict check.
+
+    If ``"warn"``, route declarations that compete for the same requests are logged during application
+    startup. If ``"strict"``, confirmed conflicts raise an
+    :class:`ImproperlyConfiguredException <litestar.exceptions.ImproperlyConfiguredException>` and prevent
+    startup. If ``"off"`` (the default), no check is performed. See
+    :mod:`litestar.route_conflicts` for details.
     """
     route_handlers: list[ControllerRouterHandler] = field(default_factory=list)
     """A required list of route handlers, which can include instances of :class:`Router <.router.Router>`,

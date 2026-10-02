@@ -30,6 +30,7 @@ API reference
     plugins/index
     repository/index
     response/index
+    route_conflicts
     router
     routes
     security/index
