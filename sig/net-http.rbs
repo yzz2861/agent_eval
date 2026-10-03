@@ -3977,6 +3977,16 @@ module Net
   # There is also the Net::HTTPBadResponse exception which is raised when there is
   # a protocol error.
   #
+  interface _HTTPByteRangePart
+    def range: () -> (Range[Integer] | nil)
+    def begin_pos: () -> Integer
+    def end_pos: () -> Integer
+    def complete_length: () -> (Integer | nil)
+    def read: (?Integer? length, ?String? buffer) -> (String | nil)
+    def read_all: () -> String
+    def each: () { (String) -> void } -> nil
+  end
+
   class HTTPResponse
     # <!--
     #   rdoc-file=lib/net/http/response.rb
@@ -4113,6 +4123,9 @@ module Net
     # Sets the body of the response to the given value.
     #
     def body=: (untyped value) -> void
+
+    def each_byte_range: () -> Enumerator[untyped, untyped]
+                         | () { (_HTTPByteRangePart) -> void } -> nil
 
     # <!--
     #   rdoc-file=lib/net/http/response.rb

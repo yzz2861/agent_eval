@@ -928,12 +928,289 @@ EOS
     assert_equal '#<Net::HTTPUnknownResponse ??? test response readbody=true>', res.inspect
   end
 
+  def test_each_byte_range_multipart
+    boundary = 'ruby-range-boundary'
+    first_body = "foo\r\n--#{boundary}\nbar".b
+    second_body = 'range-data'.b
+    body = multipart_byte_range_body(boundary, [
+      [0, first_body.bytesize - 1, 42, first_body],
+      [30, 30 + second_body.bytesize - 1, 42, second_body],
+    ])
+    io = byte_range_io(<<-HEAD, body, one_byte: true)
+HTTP/1.1 206 Partial Content
+Content-Type: multipart/byteranges; boundary=#{boundary}
+Connection: keep-alive
+HEAD
+    res = Net::HTTPResponse.read_new(io)
+    parts = nil
+
+    res.reading_body io, true do
+      parts = []
+      res.each_byte_range do |part|
+        chunks = []
+        while chunk = part.read(2)
+          chunks << chunk
+        end
+        parts << [part.range, part.complete_length, chunks.join]
+      end
+    end
+
+    assert_equal [
+      [0..first_body.bytesize - 1, 42, first_body],
+      [30..30 + second_body.bytesize - 1, 42, second_body],
+    ], parts
+    assert_not_predicate io, :closed?
+  end
+
+  def test_each_byte_range_single_206
+    io = byte_range_io(<<-HEAD, 'hello'.b)
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 10-14/42
+Content-Length: 5
+Connection: keep-alive
+HEAD
+    res = Net::HTTPResponse.read_new(io)
+    result = nil
+
+    res.reading_body io, true do
+      res.each_byte_range do |yielded_part|
+        result = [
+          yielded_part.range,
+          yielded_part.begin_pos,
+          yielded_part.end_pos,
+          yielded_part.complete_length,
+          yielded_part.read_all,
+        ]
+      end
+    end
+
+    assert_equal [10..14, 10, 14, 42, 'hello'], result
+  end
+
+  def test_each_byte_range_chunked_multipart
+    body = multipart_byte_range_body('b', [
+      [0, 4, 12, 'hello'],
+      [8, 11, 12, 'worl'],
+    ])
+    io = chunked_byte_range_io(<<-HEAD, body, chunk_size: 3)
+HTTP/1.1 206 Partial Content
+Content-Type: multipart/byteranges; boundary=b
+Transfer-Encoding: chunked
+Connection: keep-alive
+HEAD
+    res = Net::HTTPResponse.read_new(io)
+    parts = []
+
+    res.reading_body io, true do
+      res.each_byte_range do |part|
+        parts << [part.range, part.read_all]
+      end
+    end
+
+    assert_equal [[0..4, 'hello'], [8..11, 'worl']], parts
+    assert_not_predicate io, :closed?
+  end
+
+  def test_each_byte_range_allows_adjacent_parts
+    body = multipart_byte_range_body('b', [
+      [0, 4, 10, 'hello'],
+      [5, 9, 10, 'world'],
+    ])
+    io = byte_range_io("HTTP/1.1 206 Partial Content\r\nContent-Type: multipart/byteranges; boundary=b\r\nConnection: close\r\n", body)
+    res = Net::HTTPResponse.read_new(io)
+    parts = []
+
+    res.reading_body io, true do
+      res.each_byte_range do |part|
+        parts << [part.range, part.read_all]
+      end
+    end
+
+    assert_equal [[0..4, 'hello'], [5..9, 'world']], parts
+  end
+
+  def test_each_byte_range_200_returns_complete_object
+    io = byte_range_io(<<-HEAD, 'complete object'.b)
+HTTP/1.1 200 OK
+Content-Length: 15
+Connection: keep-alive
+HEAD
+    res = Net::HTTPResponse.read_new(io)
+    result = nil
+
+    res.reading_body io, true do
+      res.each_byte_range do |part|
+        result = [part.range, part.complete_length, part.read_all]
+      end
+    end
+
+    assert_equal [0..14, 15, 'complete object'], result
+    assert_not_predicate io, :closed?
+  end
+
+  def test_each_byte_range_200_empty_object
+    io = byte_range_io("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n", ''.b)
+    res = Net::HTTPResponse.read_new(io)
+    result = nil
+
+    res.reading_body io, true do
+      res.each_byte_range do |part|
+        result = [part.range, part.begin_pos, part.complete_length, part.read_all]
+      end
+    end
+
+    assert_equal [nil, 0, 0, ''.b], result
+  end
+
+  def test_each_byte_range_200_chunked_without_content_length
+    body = 'complete object'.b
+    io = chunked_byte_range_io(<<-HEAD, body, chunk_size: 4)
+HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Connection: keep-alive
+HEAD
+    res = Net::HTTPResponse.read_new(io)
+    result = nil
+
+    res.reading_body io, true do
+      res.each_byte_range do |part|
+        result = [part.range, part.complete_length, part.read_all]
+      end
+    end
+
+    assert_equal [nil, nil, 'complete object'], result
+    assert_not_predicate io, :closed?
+  end
+
+  def test_each_byte_range_200_without_content_length_until_eof
+    io = byte_range_io("HTTP/1.1 200 OK\r\nConnection: close\r\n", 'stream'.b)
+    res = Net::HTTPResponse.read_new(io)
+    result = nil
+
+    res.reading_body io, true do
+      res.each_byte_range do |part|
+        result = [part.range, part.complete_length, part.read_all]
+      end
+    end
+
+    assert_equal [nil, nil, 'stream'], result
+  end
+
+  def test_each_byte_range_rejects_short_part_body
+    body = multipart_byte_range_body('b', [[0, 4, 10, 'abc']])
+    io = byte_range_io("HTTP/1.1 206 Partial Content\r\nContent-Type: multipart/byteranges; boundary=b\r\nConnection: close\r\n", body)
+    res = Net::HTTPResponse.read_new(io)
+
+    assert_raise(Net::HTTPBadResponse) do
+      res.reading_body io, true do
+        res.each_byte_range do |part|
+          part.read_all
+        end
+      end
+    end
+  end
+
+  def test_each_byte_range_rejects_long_part_body
+    body = multipart_byte_range_body('b', [[0, 4, 10, 'abcdef']])
+    io = byte_range_io("HTTP/1.1 206 Partial Content\r\nContent-Type: multipart/byteranges; boundary=b\r\nConnection: close\r\n", body)
+    res = Net::HTTPResponse.read_new(io)
+
+    assert_raise(Net::HTTPBadResponse) do
+      res.reading_body io, true do
+        res.each_byte_range do |part|
+          part.read_all
+        end
+      end
+    end
+  end
+
+  def test_each_byte_range_rejects_overlapping_parts
+    body = multipart_byte_range_body('b', [
+      [0, 4, 10, 'aaaaa'],
+      [4, 8, 10, 'bbbbb'],
+    ])
+    io = byte_range_io("HTTP/1.1 206 Partial Content\r\nContent-Type: multipart/byteranges; boundary=b\r\nConnection: close\r\n", body)
+    res = Net::HTTPResponse.read_new(io)
+
+    assert_raise(Net::HTTPBadResponse) do
+      res.reading_body io, true do
+        res.each_byte_range do |part|
+          part.read_all
+        end
+      end
+    end
+  end
+
+  def test_each_byte_range_rejects_duplicate_parts
+    body = multipart_byte_range_body('b', [
+      [0, 4, 10, 'hello'],
+      [0, 4, 10, 'hello'],
+    ])
+    io = byte_range_io("HTTP/1.1 206 Partial Content\r\nContent-Type: multipart/byteranges; boundary=b\r\nConnection: close\r\n", body)
+    res = Net::HTTPResponse.read_new(io)
+
+    assert_raise(Net::HTTPBadResponse) do
+      res.reading_body io, true do
+        res.each_byte_range do |part|
+          part.read_all
+        end
+      end
+    end
+  end
+
 private
 
   def dummy_io(str)
     str = str.gsub(/\n/, "\r\n")
 
     Net::BufferedIO.new(StringIO.new(str))
+  end
+
+  def byte_range_io(headers, body, one_byte: false)
+    packet = headers.gsub(/\n/, "\r\n").b + "\r\n" + body
+    source = StringIO.new(packet)
+    Net::BufferedIO.new(one_byte ? OneByteIO.new(source) : source)
+  end
+
+  def chunked_byte_range_io(headers, body, chunk_size:)
+    packet = headers.gsub(/\n/, "\r\n").b + "\r\n"
+    body.b.bytesize.times.each_slice(chunk_size) do |indices|
+      chunk = body.b.byteslice(indices.first, indices.length)
+      packet << "#{chunk.bytesize.to_s(16)}\r\n#{chunk}\r\n"
+    end
+    packet << "0\r\n\r\n"
+    Net::BufferedIO.new(StringIO.new(packet))
+  end
+
+  def multipart_byte_range_body(boundary, ranges)
+    body = +''.b
+    ranges.each do |first, last, complete_length, data|
+      body << "--#{boundary}\r\n"
+      body << "Content-Range: bytes #{first}-#{last}/#{complete_length}\r\n"
+      body << "\r\n"
+      body << data.b
+      body << "\r\n"
+    end
+    body << "--#{boundary}--\r\n"
+  end
+
+  class OneByteIO
+    def initialize(io)
+      @io = io
+    end
+
+    def read_nonblock(length, buffer = nil, exception: false)
+      chunk = @io.read_nonblock(1, +'', exception: false)
+      if buffer
+        buffer.replace(chunk || '')
+      else
+        chunk
+      end
+    end
+
+    def closed?
+      @io.closed?
+    end
   end
 
   # Yields the given prefix, then streams 'a' without EOF. Stops with an

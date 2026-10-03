@@ -419,6 +419,43 @@ class Net::HTTPResponse
     read_body()
   end
 
+  # Enumerates the byte ranges in the response body.
+  #
+  # A multipart/byteranges response yields one RangePart for each part.
+  # A 206 response containing one part yields that part. A 200 response
+  # (which indicates that the server ignored Range) yields the complete
+  # object as one part.
+  #
+  # Each yielded part exposes its inclusive byte positions, the complete
+  # object length when it is known, and an IO-like object for reading its
+  # content on demand. The caller must finish reading one part before
+  # requesting the next part.
+  def each_byte_range
+    return enum_for(__method__) unless block_given?
+
+    stream_check
+    if @read
+      raise IOError, "#{self.class}\#each_byte_range called after body was read"
+    end
+    @read = true
+
+    case code
+    when '206'
+      if multipart_byteranges?
+        read_multipart_byte_ranges { |part| yield part }
+      else
+        read_single_byte_range { |part| yield part }
+      end
+    when '200'
+      read_complete_object_as_byte_range { |part| yield part }
+    else
+      raise Net::HTTPBadResponse,
+            "unexpected response status #{code} for byte range response"
+    end
+
+    nil
+  end
+
   # Sets the body of the response to the given value.
   def body=(value)
     @body = value
@@ -427,6 +464,192 @@ class Net::HTTPResponse
   alias entity body   #:nodoc: obsolete
 
   private
+
+  def multipart_byteranges?
+    content_type&.downcase == 'multipart/byteranges'
+  end
+
+  def byte_range_body_io
+    if chunked?
+      ChunkedBodyIO.new(@socket)
+    else
+      @socket
+    end
+  end
+
+  def close_byte_range_body_io(io)
+    io.close if chunked?
+  end
+
+  def read_single_byte_range
+    range = parsed_content_range or
+      raise Net::HTTPBadResponse, 'missing Content-Range in 206 response'
+    io = byte_range_body_io
+    part = ByteRangePart.new(range.begin, range.end, range.total_length, io)
+    begin
+      yield part
+      part.discard unless part.finished?
+      io.finish if io.respond_to?(:finish)
+    ensure
+      close_byte_range_body_io(io)
+    end
+  end
+
+  def read_complete_object_as_byte_range
+    io = byte_range_body_io
+    total_length = content_length
+    last_position = total_length && total_length.nonzero? && total_length - 1
+    part = ByteRangePart.new(0, last_position, total_length, io, length: total_length)
+    begin
+      yield part
+      part.discard unless part.finished?
+      io.finish if io.respond_to?(:finish)
+    ensure
+      close_byte_range_body_io(io)
+    end
+  end
+
+  def read_multipart_byte_ranges
+    boundary = multipart_boundary or
+      raise Net::HTTPBadResponse, 'missing boundary in multipart/byteranges response'
+    io = byte_range_body_io
+    part_count = 0
+    total_length = nil
+
+    begin
+      delimiter = read_multipart_line(io)
+      unless delimiter == "--#{boundary}"
+        raise Net::HTTPBadResponse, 'wrong multipart boundary'
+      end
+
+      loop do
+        headers = read_multipart_part_headers(io)
+        range = parse_content_range_value(headers['content-range']) or
+          raise Net::HTTPBadResponse, 'missing Content-Range in multipart/byteranges part'
+        if range.end < range.begin
+          raise Net::HTTPBadResponse, 'invalid Content-Range in multipart/byteranges part'
+        end
+        if total_length
+          if range.total_length.nil? || range.total_length != total_length
+            raise Net::HTTPBadResponse, 'inconsistent complete object length'
+          end
+        elsif range.total_length.nil?
+          raise Net::HTTPBadResponse, 'unknown complete object length in multipart/byteranges part'
+        else
+          total_length = range.total_length
+        end
+        if range.end >= total_length
+          raise Net::HTTPBadResponse, 'byte range exceeds complete object length'
+        end
+        if ranges_overlap?(part_ranges, range)
+          raise Net::HTTPBadResponse, 'overlapping or repeated byte range'
+        end
+
+        part_ranges << range
+        part_count += 1
+        part = ByteRangePart.new(range.begin, range.end, total_length, io)
+        begin
+          yield part
+          part.finish
+        ensure
+          part.discard unless part.finished?
+        end
+        unless read_multipart_boundary_separator(io)
+          raise Net::HTTPBadResponse, 'missing multipart boundary separator'
+        end
+        delimiter = read_multipart_line(io)
+        case delimiter
+        when "--#{boundary}--"
+          break
+        when "--#{boundary}"
+          next
+        else
+          raise Net::HTTPBadResponse, 'wrong multipart boundary'
+        end
+      end
+      io.finish if io.respond_to?(:finish)
+    ensure
+      close_byte_range_body_io(io)
+    end
+
+    raise Net::HTTPBadResponse, 'empty multipart/byteranges response' if part_count.zero?
+  end
+
+  def part_ranges
+    @part_ranges ||= []
+  end
+
+  def ranges_overlap?(ranges, candidate)
+    ranges.any? do |range|
+      candidate.begin <= range.end && range.begin <= candidate.end
+    end
+  end
+
+  def multipart_boundary
+    content_type = self['content-type'] or return nil
+    match = /(?:\A|;)\s*boundary\s*=\s*("(?:[^"\\]|\\.)*"|[^;\s]+)/i.match(content_type)
+    return nil unless match
+
+    value = match[1].b
+    value = value[1..-2].gsub(/\\(.)/n, '\\1') if value.start_with?('"')
+    return nil if value.empty? || value.bytesize > 70 || /["\r\n]/.match?(value)
+    value
+  end
+
+  def read_multipart_line(io)
+    if chunked?
+      line = io.readline.b
+      terminator = "\r\n"
+    else
+      line = self.class.read_line(io, MAX_RESPONSE_HEADER_LENGTH).b
+      terminator = "\n"
+    end
+    unless line.end_with?(terminator)
+      raise Net::HTTPBadResponse, 'unterminated multipart line'
+    end
+    line.delete_suffix!(terminator)
+    line.delete_suffix!("\r") unless chunked?
+    line
+  end
+
+  def read_transport_crlf(io)
+    io.read(1) == "\r" && io.read(1) == "\n"
+  end
+
+  def read_multipart_boundary_separator(io)
+    if chunked?
+      io.read_boundary_crlf == "\r\n"
+    else
+      read_transport_crlf(io)
+    end
+  end
+
+  def read_multipart_part_headers(io)
+    headers = {}
+    until (line = read_multipart_line(io)).empty?
+      name, value = line.split(/\s*:\s*/, 2)
+      raise Net::HTTPBadResponse, 'wrong multipart header line' if value.nil?
+      headers[name.downcase] = value
+    end
+    headers
+  end
+
+  def parsed_content_range
+    parse_content_range_value(self['content-range'])
+  end
+
+  def parse_content_range_value(value)
+    return nil unless value
+    match = %r{\A\s*bytes\s+(\d+)-(\d+)/(?:(\d+|\*))\z}i.match(value) or
+      raise Net::HTTPBadResponse, 'wrong Content-Range format'
+    first = match[1].to_i
+    last = match[2].to_i
+    total_length = match[3]&.to_i
+    raise Net::HTTPBadResponse, 'invalid Content-Range' if first > last
+    raise Net::HTTPBadResponse, 'Content-Range exceeds complete object length' if
+      total_length && last >= total_length
+    ByteRange.new(first, last, total_length)
+  end
 
   # :nodoc:
   def detect_encoding(str, encoding=nil)
@@ -759,3 +982,209 @@ class Net::HTTPResponse
 
 end
 
+class Net::HTTPResponse
+  ByteRange = Struct.new(:begin, :end, :total_length)
+
+
+
+  class ChunkedBodyIO
+    def initialize(socket)
+      @socket = socket
+      @started = false
+      @remaining = 0
+      @finished = false
+      @part_remaining = nil
+      @part_active = false
+    end
+
+    def read(length = nil, buffer = nil, limit = nil, part_length = nil)
+      return +''.b if length == 0
+
+      length ||= 16 * 1024
+      if part_length && !@part_active
+        @part_remaining = part_length
+        @part_active = true
+      end
+      result = +''.b
+
+      while result.bytesize < length
+        break if @part_remaining&.zero?
+        prepare_chunk if @remaining.zero? && (@part_remaining.nil? || @part_remaining.positive?)
+        break if @finished
+        wanted = length - result.bytesize
+        wanted = [wanted, @part_remaining].min unless @part_remaining.nil?
+        chunk = @socket.read([wanted, @remaining].min, +''.b)
+        raise EOFError, "end of file reached" if chunk.nil? || chunk.empty?
+        result << chunk
+        @remaining -= chunk.bytesize
+        @part_remaining -= chunk.bytesize unless @part_remaining.nil?
+      end
+
+      return nil if result.empty?
+      buffer ? buffer.replace(result) : result
+    end
+
+    def readline
+      line = +''.b
+      until line.end_with?("\r\n")
+        byte = read(1)
+        raise EOFError, "end of file reached" if byte.nil?
+        line << byte
+      end
+      line
+    end
+
+    def read_boundary_crlf
+      @part_remaining = nil
+      @part_active = false
+      first = read_boundary_byte(true)
+      return nil unless first == "\r\n"[0]
+      second = read_boundary_byte(true)
+      return nil unless second == "\r\n"[1]
+      "\r\n"
+    end
+
+    def finish
+      until @finished
+        prepare_chunk
+        break if @finished
+        @socket.read(@remaining, +''.b)
+        @remaining = 0
+      end
+    end
+
+    def close
+    end
+
+    private
+
+    def read_boundary_byte(allow_transition)
+      prepare_chunk if allow_transition || !@remaining.zero?
+      return nil if @finished
+      return nil if @remaining.zero?
+      byte = @socket.read(1, +''.b)
+      raise EOFError, "end of file reached" if byte.nil? || byte.empty?
+      @remaining -= 1
+      byte
+    end
+
+    def prepare_chunk
+      return if @finished || !@remaining.zero?
+      if @started
+        crlf = @socket.read(2)
+        raise Net::HTTPBadResponse, "missing chunk terminator" unless crlf == "\r\n"
+      end
+      line = @socket.readuntil("\r\n").chop
+      size = line.slice(/[0-9a-fA-F]+/) or
+        raise Net::HTTPBadResponse, "wrong chunk size line: #{line}"
+      @remaining = size.hex
+      @started = true
+      return unless @remaining.zero?
+      until @socket.readuntil("\r\n").chop.empty?
+      end
+      @finished = true
+    end
+  end
+
+  class ByteRangePart
+    attr_reader :begin_pos, :end_pos, :complete_length
+    alias start_pos begin_pos
+    alias first_byte_pos begin_pos
+    alias last_byte_pos end_pos
+    alias length complete_length
+
+    def initialize(begin_pos, end_pos, complete_length, io,
+                   length: end_pos ? end_pos - begin_pos + 1 : nil)
+      @begin_pos = begin_pos
+      @end_pos = end_pos
+      @complete_length = complete_length
+      @io = io
+      @remaining = length
+      @finished = length == 0
+      @part_length = length
+    end
+
+    def range
+      @end_pos ? @begin_pos..@end_pos : nil
+    end
+
+    def finished?
+      @finished
+    end
+
+    def read(length = nil, buffer = nil)
+      return +''.b if length == 0
+
+      return nil if @remaining && @finished
+
+      if @remaining
+        length = @remaining if length.nil? || length > @remaining
+      end
+
+      chunk = read_range_io(length)
+      if chunk.nil? || chunk.empty?
+        raise Net::HTTPBadResponse, 'short byte range body' if @remaining && @remaining.positive?
+        return nil
+      end
+      chunk.force_encoding(Encoding::ASCII_8BIT)
+      if @remaining
+        @remaining -= chunk.bytesize
+        raise Net::HTTPBadResponse, 'too many bytes in byte range body' if @remaining < 0
+        if @remaining.zero?
+          @finished = true
+        end
+      end
+
+      if buffer
+        buffer.replace(chunk)
+      else
+        chunk
+      end
+    end
+
+    def read_range_io(length)
+      if @io.respond_to?(:read_boundary_crlf)
+        if @remaining
+          @io.read(length, +''.b, @remaining, @part_length)
+        else
+          @io.read(length, +''.b, nil, nil)
+        end
+      else
+        read_plain_io(length)
+      end
+    end
+
+    def read_plain_io(length)
+      return @io.read(length, +''.b) if length
+
+      @io.read(16 * 1024, +''.b, true)
+    end
+
+    def read_all
+      chunks = +''.b
+      while chunk = read
+        chunks << chunk
+      end
+      chunks
+    end
+
+    def each(&block)
+      return enum_for(__method__) unless block
+      while chunk = read
+        block.call(chunk)
+      end
+      nil
+    end
+
+    def discard
+      read_all
+      nil
+    end
+
+    def finish
+      nil
+    end
+  end
+
+  private_constant :ByteRange, :ByteRangePart, :ChunkedBodyIO
+end
