@@ -325,6 +325,104 @@ encoded_token.verify_signature!(algorithm: 'HS256', key: "secret")
 encoded_token.payload # => {"pay"=>"load"}
 ```
 
+## Selective Disclosure
+
+`JWT::SelectiveDisclosure` lets an issuer hide chosen object fields or array
+elements behind salted SHA-256 digests inside an otherwise normal signed JWT.
+The holder later presents only a subset of the matching disclosures, and the
+verifier reconstructs just the claims that are anchored by digests in the signed
+payload. Undisclosed values never appear in the token and stay invisible to the
+verifier.
+
+The wire format is intentionally fixed:
+
+* Hash algorithm: SHA-256 only (announced as `"_sd_alg": "sha-256"`).
+* Object field disclosure: Base64url of compact JSON `[salt, key, value]`;
+  hidden fields are collected in a `"_sd"` array of digests in the object.
+* Array element disclosure: Base64url of compact JSON `[salt, value]`;
+  hidden elements become `{ "...": "<digest>" }` markers.
+* The combined token is `<jwt>~<disclosure>~...~<disclosure>~`. The JWT header
+  carries `"typ": "sd+jwt"`.
+
+The new format is never accepted by ordinary `JWT.decode` (the `~` container is
+not a compact JWS), and `JWT::SelectiveDisclosure.verify` does not accept plain
+JWTs.
+
+### Issuing
+
+Pass the paths that should be disclosable rather than visible. Salts come from
+an injectable source; omit it to use 128 bits of OpenSSL secure randomness per
+disclosure.
+
+```ruby
+payload = {
+  'iss' => 'https://issuer.example',
+  'given_name' => 'Ada',
+  'address' => { 'locality' => 'London', 'country' => 'GB' },
+  'nationalities' => ['GB', 'FR']
+}
+
+issued = JWT::SelectiveDisclosure.issue(
+  payload,
+  'secret',
+  'HS256',
+  disclosable_paths: [
+    ['given_name'],
+    ['address', 'locality'],
+    ['nationalities', 0],
+    ['nationalities', 1]
+  ]
+  # salt_source: my_random_source # optional, must respond to #call
+)
+
+issued.jwt            # the signed JWT; hidden values are only digests
+issued.disclosures    # => [#<JWT::SelectiveDisclosure::Disclosure ...>, ...]
+issued.to_s           # issuer-side serialization with every disclosure attached
+```
+
+### Presenting a subset (holder)
+
+The holder attaches only the disclosures it wants to reveal. Presenting no
+disclosures at all yields a zero-disclosure presentation.
+
+```ruby
+given_name = issued.disclosures.find { |d| d.key == 'given_name' }
+french     = issued.disclosures.find { |d| d.array_element? && d.value == 'FR' }
+
+presentation = issued.present(given_name, french)
+```
+
+### Verifying and reconstructing
+
+Verification checks the JWT signature first, then matches every presented
+disclosure against a digest in the signed payload. Reconstructed claims are
+therefore covered by the signature.
+
+```ruby
+result = JWT::SelectiveDisclosure.verify(presentation, 'secret', 'HS256')
+
+result.claims
+# => {
+#      "iss" => "https://issuer.example",
+#      "address" => {"country" => "GB"},
+#      "nationalities" => ["FR"],
+#      "given_name" => "Ada"
+#    }
+result.disclosed_keys # => ["given_name"]
+result.header         # => {"typ" => "sd+jwt", "alg" => "HS256"}
+```
+
+Invalid input raises a `JWT::SelectiveDisclosureError` subclass:
+
+* `JWT::MalformedSDToken` for bad containers, markers or algorithm markers.
+* `JWT::InvalidDisclosure` for malformed disclosures or digest-kind mismatches.
+* `JWT::OrphanDisclosure` when a disclosure matches no digest in the payload.
+* `JWT::DuplicateDigest` for repeated digests in the payload or presentation.
+* `JWT::DisclosureCollision` when a disclosed key already exists visibly.
+* `JWT::InvalidDisclosurePath` when an issuer-selected path does not exist.
+
+See `examples/selective_disclosure.rb` for a runnable offline end-to-end demo.
+
 ## Claims
 
 JSON Web Token defines some reserved claim names and defines how they should be

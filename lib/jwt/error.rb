@@ -78,4 +78,27 @@ module JWT
 
   # Raised when a JWK uses a key type (kty) that this library does not support.
   class UnsupportedKeyType < JWKError; end
+
+  # Base class for errors raised while processing selectively disclosable tokens.
+  # These occur while decoding/verifying a presented token, so it descends from
+  # DecodeError to preserve the historical error-grouping behaviour.
+  class SelectiveDisclosureError < DecodeError; end
+
+  # Raised when the selective disclosure container or a disclosure is malformed.
+  class MalformedSDToken < SelectiveDisclosureError; end
+
+  # Raised when a selected disclosure path cannot be resolved against the payload.
+  class InvalidDisclosurePath < SelectiveDisclosureError; end
+
+  # Raised when a disclosure cannot be decoded or has an invalid shape.
+  class InvalidDisclosure < SelectiveDisclosureError; end
+
+  # Raised when a presented disclosure does not match any digest in the signed payload.
+  class OrphanDisclosure < SelectiveDisclosureError; end
+
+  # Raised when the same disclosure digest occurs more than once in the signed payload.
+  class DuplicateDigest < SelectiveDisclosureError; end
+
+  # Raised when a disclosed key collides with a visible claim in the same object.
+  class DisclosureCollision < SelectiveDisclosureError; end
 end
