@@ -1,3 +1,17 @@
+## Unreleased
+
+- Make public suffix rules pluggable per cookie jar.  A jar accepts an
+  injected rule provider via the `:suffix_rules` option, and
+  `HTTP::CookieJar#replace_suffix_rules` swaps the provider and
+  re-adjudicates the cookies already in the jar (not just new writes),
+  returning a report with a queryable keep/remove reason per cookie.
+  Host-only cookies are handled separately from domain cookies, rule
+  provider failures fail closed, and rule replacement is atomic with
+  respect to reads.  Includes
+  `HTTP::Cookie::SuffixRules::List` (in-memory rules) and
+  `HTTP::Cookie::SuffixRules::DomainNameAdapter` (the default).
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

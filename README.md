@@ -121,6 +121,38 @@ Or install it yourself as:
     header['Set-Cookie'] = cookie2.set_cookie_value
 
 
+### Pluggable public suffix rules
+
+A cookie jar adjudicates domain cookies against a public suffix rule
+provider (RFC 6265 5.3).  The default provider uses the Public Suffix
+List bundled with the domain_name gem, but any object responding to
+`#public_suffix?(hostname)` can be injected instead — useful when the
+list is updated, or when a test environment needs to declare internal
+domains as effective public suffixes:
+
+    # Two tiny in-memory rule sets; under v2, example.com has become
+    # a public suffix.
+    rules_v1 = HTTP::Cookie::SuffixRules::List.new(%w[com])
+    rules_v2 = HTTP::Cookie::SuffixRules::List.new(%w[com example.com])
+
+    jar = HTTP::CookieJar.new(suffix_rules: rules_v1)
+    jar.parse('id=1; Domain=example.com; Path=/', 'http://www.example.com/')
+    jar.parse('sess=2; Path=/', 'http://www.example.com/')
+
+    # Swap the rules and re-adjudicate the cookies already in the jar,
+    # not just new writes.
+    report = jar.replace_suffix_rules(rules_v2)
+    report.removed  # => [id=1]   (reason: :public_suffix)
+    report.kept     # => [sess=2] (reason: :host_only)
+
+Host-only cookies are handled separately from domain cookies and are
+never affected by suffix rules.  If a rule provider raises an error,
+the jar fails closed instead of defaulting to allowing a public
+suffix.  Rule replacement is atomic with respect to reads, which
+always observe a single consistent rule version
+(`jar.suffix_rules_version`).
+
+
 ## Incompatibilities with Mechanize::Cookie/CookieJar
 
 There are several incompatibilities between
