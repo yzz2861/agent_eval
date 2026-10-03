@@ -84,6 +84,14 @@ module Dry
 
     MapError = ::Class.new(CoercionError)
 
+    # Raised when a fully consumed stream result is iterated again
+    #
+    class StreamConsumedError < ::StandardError; end
+
+    # Raised when a closed stream result is iterated
+    #
+    class StreamClosedError < ::StandardError; end
+
     SchemaKeyError = ::Class.new(CoercionError)
     private_constant(:SchemaKeyError)
 

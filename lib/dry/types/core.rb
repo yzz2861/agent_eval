@@ -98,6 +98,10 @@ module Dry
     register("any", Any)
     register("nominal.any", Any)
     register("strict.any", Any)
+
+    # Register the lazy single-pass collection type
+    register("nominal.stream", Stream.new(::Enumerator))
+    register("stream", self["nominal.stream"])
   end
 end
 

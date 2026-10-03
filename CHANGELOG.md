@@ -9,6 +9,14 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- `Dry::Types::Stream`, a lazy collection type for single-pass enumerables (e.g. enumerators
+  from bulk imports). `Types["stream"].of(member)` converts members one by one as the
+  returned `Stream::Result` is iterated, without materializing the input. The result
+  distinguishes `:pending`/`:success`/`:failure` statuses (with `failure_index`/`error`),
+  can be explicitly `#close`d when stopping early, and supports `on_error: :halt` (raise on
+  the first failing member, the default) or `on_error: :collect` (yield indexed
+  `Stream::Item` results). `valid?`/`inspect` never consume the stream
+
 ### Changed
 
 ### Deprecated
