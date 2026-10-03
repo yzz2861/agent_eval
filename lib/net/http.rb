@@ -1677,12 +1677,15 @@ module Net   #:nodoc:
       end
 
       debug "opening connection to #{conn_addr}:#{conn_port}..."
+      @transport_tracker = TransportTracker.new(address: conn_addr, port: conn_port,
+                                                use_ssl: use_ssl?)
       begin
         s = timeouted_connect(conn_addr, conn_port)
       rescue => e
         if (defined?(IO::TimeoutError) && e.is_a?(IO::TimeoutError)) || e.is_a?(Errno::ETIMEDOUT)  # for compatibility with previous versions
           e = Net::OpenTimeout.new(e)
         end
+        annotate_transport_failure(e, @transport_tracker)
         raise e, "Failed to open TCP connection to " +
           "#{conn_addr}:#{conn_port} (#{e.message})"
       end
@@ -1707,6 +1710,7 @@ module Net   #:nodoc:
             buf << "Proxy-Authorization: Basic #{credential}\r\n"
           end
           buf << "\r\n"
+          @transport_tracker.phase = :proxy_connect
           proxy_sock.write(buf)
           HTTPResponse.read_new(proxy_sock).value
           # assuming nothing left in buffers after successful CONNECT response
@@ -1757,16 +1761,19 @@ module Net   #:nodoc:
            Process.clock_gettime(Process::CLOCK_REALTIME) < @ssl_session.time.to_f + @ssl_session.timeout
           s.session = @ssl_session
         end
+        @transport_tracker.phase = :tls_handshake
+        @transport_tracker.use_ssl!
         ssl_socket_connect(s, @open_timeout)
         if (@ssl_context.verify_mode != OpenSSL::SSL::VERIFY_NONE) && verify_hostname
           s.post_connection_check(@address)
         end
         debug "SSL established, protocol: #{s.ssl_version}, cipher: #{s.cipher[0]}"
       end
-      @socket = BufferedIO.new(s, read_timeout: @read_timeout,
-                               write_timeout: @write_timeout,
-                               continue_timeout: @continue_timeout,
-                               debug_output: @debug_output)
+      @socket = TrackingBufferedIO.new(s, tracker: @transport_tracker,
+                                       read_timeout: @read_timeout,
+                                       write_timeout: @write_timeout,
+                                       continue_timeout: @continue_timeout,
+                                       debug_output: @debug_output)
       @last_communicated = nil
       on_connect
     rescue => exception
@@ -1774,6 +1781,7 @@ module Net   #:nodoc:
         debug "Conn close because of connect error #{exception}"
         s.close
       end
+      annotate_transport_failure(exception, @transport_tracker)
       raise
     end
     private :connect
@@ -2489,6 +2497,7 @@ module Net   #:nodoc:
       count = 0
       begin
         begin_transport req
+        @transport_tracker.begin_request(req.method)
         res = catch(:response) {
           begin
             req.exec @socket, @curr_http_version, edit_path(req.path)
@@ -2496,6 +2505,12 @@ module Net   #:nodoc:
             # Failure when writing full request, but we can probably
             # still read the received response.
           end
+
+          # If the last write failed we may still be able to read the
+          # server's response; otherwise the request was fully sent and we
+          # are now waiting for the final response status.
+          @transport_tracker.phase = :response_header unless
+            @transport_tracker.write_failed?
 
           informational_count = 0
           begin
@@ -2510,23 +2525,26 @@ module Net   #:nodoc:
             end
           end while res.kind_of?(HTTPInformation)
 
+          @transport_tracker.final_response!(res.code.to_i)
           res.uri = req.uri
 
           res
         }
+        @transport_tracker.phase = :response_body
         res.reading_body(@socket, req.response_body_permitted?) {
           if block_given?
             count = max_retries # Don't restart in the middle of a download
             yield res
           end
         }
-      rescue Net::OpenTimeout
+      rescue Net::OpenTimeout => exception
+        annotate_transport_failure(exception, @transport_tracker)
         raise
       rescue Net::ReadTimeout, IOError, EOFError,
              Errno::ECONNRESET, Errno::ECONNABORTED, Errno::EPIPE, Errno::ETIMEDOUT,
              # avoid a dependency on OpenSSL
              defined?(OpenSSL::SSL) ? OpenSSL::SSL::SSLError : IOError,
-             Timeout::Error => exception
+             Net::WriteTimeout, Net::HTTPBadResponse, Timeout::Error => exception
         if count < max_retries && IDEMPOTENT_METHODS_.include?(req.method)
           count += 1
           @socket.close if @socket
@@ -2535,6 +2553,7 @@ module Net   #:nodoc:
         end
         debug "Conn close because of error #{exception}"
         @socket.close if @socket
+        annotate_transport_failure(exception, @transport_tracker)
         raise
       end
 
@@ -2543,6 +2562,7 @@ module Net   #:nodoc:
     rescue => exception
       debug "Conn close because of error #{exception}"
       @socket.close if @socket
+      annotate_transport_failure(exception, @transport_tracker)
       raise exception
     end
 
@@ -2568,6 +2588,31 @@ module Net   #:nodoc:
       req.update_uri address, port, use_ssl?
       req['host'] ||= addr_port()
     end
+
+    TRANSPORT_FAILURE_EXCEPTIONS = [ # :nodoc: internal use only
+      IOError, EOFError,
+      Errno::ECONNREFUSED, Errno::EACCES, Errno::EPERM,
+      Errno::EHOSTUNREACH, Errno::ENETUNREACH,
+      Errno::ECONNRESET, Errno::ECONNABORTED, Errno::EPIPE, Errno::ETIMEDOUT,
+      Net::ReadTimeout, Net::WriteTimeout, Net::OpenTimeout,
+      Net::HTTPBadResponse,
+      Timeout::Error,
+    ].tap { |list| list << OpenSSL::SSL::SSLError if defined?(OpenSSL::SSL) }
+      .freeze
+
+    # Attaches structured, redacted transport diagnostics to +exception+
+    # without changing its class or cause chain. Idempotent and safe against
+    # frozen exceptions.
+    def annotate_transport_failure(exception, tracker)
+      return unless tracker
+      return unless TRANSPORT_FAILURE_EXCEPTIONS.any? { |klass| exception.is_a?(klass) }
+      return if exception.frozen?
+      exception.extend(Net::HTTP::TransportFailure::Diagnostics) unless
+        exception.is_a?(Net::HTTP::TransportFailure::Diagnostics)
+      return if exception.transport_failure_context
+      exception.transport_failure_context = tracker.context
+    end
+    private :annotate_transport_failure
 
     def end_transport(req, res)
       @curr_http_version = res.http_version
@@ -2654,6 +2699,9 @@ module Net   #:nodoc:
 end
 
 require_relative 'http/exceptions'
+
+require_relative 'http/transport_failure'
+require_relative 'http/transport_tracker'
 
 require_relative 'http/header'
 

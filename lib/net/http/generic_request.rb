@@ -263,16 +263,22 @@ class Net::HTTPGenericRequest
 
   # :stopdoc:
 
+  def transport_tracker(sock)
+    sock.transport_tracker if sock.respond_to?(:transport_tracker)
+  end
+
   class Chunker #:nodoc:
-    def initialize(sock)
+    def initialize(sock, tracker = nil)
       @sock = sock
       @prev = nil
+      @tracker = tracker
     end
 
     def write(buf)
       # avoid memcpy() of buf, buf can huge and eat memory bandwidth
       rv = buf.bytesize
       @sock.write("#{rv.to_s(16)}\r\n", buf, "\r\n")
+      @tracker.body_bytes_written!(rv) if @tracker
       rv
     end
 
@@ -286,6 +292,11 @@ class Net::HTTPGenericRequest
     delete 'Transfer-Encoding'
     write_header sock, ver, path
     wait_for_continue sock, ver if sock.continue_timeout
+    tracker = transport_tracker(sock)
+    if tracker
+      tracker.phase = :request_body
+      tracker.body_mode = :raw
+    end
     sock.write body
   end
 
@@ -296,8 +307,13 @@ class Net::HTTPGenericRequest
     end
     write_header sock, ver, path
     wait_for_continue sock, ver if sock.continue_timeout
+    tracker = transport_tracker(sock)
+    if tracker
+      tracker.phase = :request_body
+      tracker.body_mode = chunked? ? :chunked : :raw
+    end
     if chunked?
-      chunker = Chunker.new(sock)
+      chunker = Chunker.new(sock, tracker)
       IO.copy_stream(f, chunker)
       chunker.finish
     else
@@ -316,7 +332,14 @@ class Net::HTTPGenericRequest
     opt[:boundary] ||= SecureRandom.urlsafe_base64(40)
     self.set_content_type(self.content_type, boundary: opt[:boundary])
     if chunked?
+      tracker = transport_tracker(sock)
       write_header sock, ver, path
+      if tracker
+        tracker.phase = :request_body
+        # framing bytes are interleaved, so exact body accounting is
+        # unavailable on interruption
+        tracker.body_mode = :opaque
+      end
       encode_multipart_form_data(sock, params, opt)
     else
       require 'tempfile'
@@ -326,6 +349,11 @@ class Net::HTTPGenericRequest
       file.rewind
       self.content_length = file.size
       write_header sock, ver, path
+      tracker = transport_tracker(sock)
+      if tracker
+        tracker.phase = :request_body
+        tracker.body_mode = :raw
+      end
       IO.copy_stream(file, sock)
       file.close(true)
     end
@@ -412,10 +440,18 @@ class Net::HTTPGenericRequest
     if ver >= '1.1' and @header['expect'] and
         @header['expect'].include?('100-continue')
       if sock.io.to_io.wait_readable(sock.continue_timeout)
+        # Headers are fully sent; we are waiting on the server now.
+        transport_tracker(sock)&.tap do |tracker|
+          tracker.phase = :response_header unless tracker.write_failed?
+        end
         res = Net::HTTPResponse.read_new(sock)
         unless res.kind_of?(Net::HTTPContinue)
           res.decode_content = @decode_content
           throw :response, res
+        end
+        # 100 Continue received; the body is about to be written.
+        transport_tracker(sock)&.tap do |tracker|
+          tracker.phase = :request_body
         end
       end
     end
@@ -432,6 +468,7 @@ class Net::HTTPGenericRequest
       buf << "#{k}: #{v}\r\n"
     end
     buf << "\r\n"
+    transport_tracker(sock)&.request_headers_started!
     sock.write buf
   end
 

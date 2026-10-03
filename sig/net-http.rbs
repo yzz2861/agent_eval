@@ -725,6 +725,39 @@ module Net
     # :stopdoc:
     VERSION: String
 
+    module TransportFailure
+      module Diagnostics
+        attr_accessor transport_failure_context: TransportFailure::Context?
+      end
+
+      class Context
+        attr_reader phase: Symbol
+        attr_reader request_method: String?
+        attr_reader request_headers_started: bool
+        attr_reader request_body_bytes_written: Integer?
+        attr_reader response_received: bool
+        attr_reader response_status: Integer?
+        attr_reader use_ssl: bool
+        attr_reader address: String
+        attr_reader port: Integer
+        def initialize: (phase: Symbol,
+                         request_method: String?,
+                         request_headers_started: bool,
+                         request_body_bytes_written: Integer?,
+                         response_received: bool,
+                         response_status: Integer?,
+                         use_ssl: bool,
+                         address: String,
+                         port: Integer) -> void
+        def response_received?: () -> bool
+        def request_headers_started?: () -> bool
+        def safe_to_retry?: () -> bool
+        def should_query_result?: () -> bool
+        def to_h: () -> Hash[Symbol, untyped]
+        def inspect: () -> String
+      end
+    end
+
     Revision: untyped
 
     HTTPVersion: String
