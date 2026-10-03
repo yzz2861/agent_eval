@@ -22,6 +22,11 @@ module TZInfo
       @linked_timezone.period_for(time)
     end
 
+    # (see DataTimezone#utc_to_local_all)
+    def utc_to_local_all(utc_times, &block)
+      @linked_timezone.utc_to_local_all(utc_times, &block)
+    end
+
     # (see Timezone#periods_for_local)
     def periods_for_local(local_time)
       @linked_timezone.periods_for_local(local_time)

@@ -1,5 +1,18 @@
 # Changes
 
+## Unreleased
+
+* Added `Timezone#utc_to_local_all` for lazily converting an ordered sequence
+  of UTC times to local times. Instead of performing an independent period
+  lookup (a binary search) for each element, a single cursor is advanced
+  forwards through the time zone's transitions, so the transitions are
+  examined at most once. Equal consecutive timestamps are allowed. The input
+  is not sorted or buffered: it is processed lazily as results are pulled and
+  an out-of-order timestamp raises
+  `TZInfo::DataSources::OutOfOrderTimestampError` with the zero-based index of
+  the offending element. Each result preserves the input type (`Time`,
+  `DateTime` or `Timestamp`) and its sub-second precision.
+
 ## Version 2.0.6 - 28-Jan-2023
 
 * Eliminate `Object#untaint` deprecation warnings on JRuby 9.4.0.0. #145.

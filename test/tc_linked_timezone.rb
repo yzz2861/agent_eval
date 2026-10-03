@@ -48,6 +48,16 @@ class TCLinkedTimezone < Minitest::Test
       @transitions_up_to_result
     end
 
+    def utc_to_local_all(utc_times, &block)
+      @utc_to_local_all_times = utc_times
+      @all_results = [:local_time_1, :local_time_2]
+      return @all_results.each unless block
+      @all_results.each(&block)
+      nil
+    end
+
+    attr_reader :utc_to_local_all_times
+
     def canonical_zone
       self
     end
@@ -93,6 +103,21 @@ class TCLinkedTimezone < Minitest::Test
 
       error = assert_raises(ArgumentError) { tz.period_for(nil) }
       assert_equal('linked zone exception: nil', error.message)
+    end
+  end
+
+  def test_utc_to_local_all
+    stub_timezone_get do |linked_tz|
+      tz = LinkedTimezone.new(DataSources::LinkedTimezoneInfo.new('Test/Zone', 'Test/Linked'))
+      times = [Time.utc(2006,6,1), Time.utc(2006,7,1)]
+
+      assert_equal([:local_time_1, :local_time_2], tz.utc_to_local_all(times).to_a)
+      assert_same(times, linked_tz.utc_to_local_all_times)
+
+      collected = []
+      result = tz.utc_to_local_all(times) {|local| collected << local }
+      assert_nil(result)
+      assert_equal([:local_time_1, :local_time_2], collected)
     end
   end
 

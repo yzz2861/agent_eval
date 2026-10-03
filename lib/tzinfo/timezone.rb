@@ -577,6 +577,31 @@ module TZInfo
       end
     end
 
+    # Converts a sequence of times in UTC to the local time for the time zone,
+    # expecting the input to be in non-decreasing chronological order.
+    #
+    # This is a batch equivalent of {#utc_to_local} that advances through the
+    # time zone's transitions in order rather than performing an independent
+    # period lookup for each time. See {DataTimezone#utc_to_local_all} for the
+    # supported input and result types, the ordering requirement and details
+    # of the lazy enumeration.
+    #
+    # @param utc_times [Enumerable] an `Enumerable` of `Time`, `DateTime` or
+    #   {Timestamp} instances in non-decreasing chronological order.
+    # @yield [local_time] if a block is provided, each local time is yielded
+    #   to the block in the same order as the input.
+    # @yieldparam local_time [Object] the local equivalent as a
+    #   {TimeWithOffset}, {DateTimeWithOffset} or {TimestampWithOffset}.
+    # @return [Enumerator] if no block is provided, an `Enumerator` of the
+    #   local equivalents of each input time.
+    # @return [nil] if a block is provided.
+    # @raise [DataSources::OutOfOrderTimestampError] if an element is earlier
+    #   than the preceding element.
+    def utc_to_local_all(utc_times)
+      raise ArgumentError, 'utc_times must be specified' unless utc_times
+      raise_unknown_timezone
+    end
+
     # Converts a local time for the time zone to UTC.
     #
     # The result will either be a `Time`, `DateTime` or {Timestamp} according to
