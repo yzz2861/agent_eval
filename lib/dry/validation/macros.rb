@@ -97,5 +97,37 @@ module Dry
     Macros.register(:acceptance) do
       key.failure(:acceptance, key: key_name) unless values[key_name].equal?(true)
     end
+
+    # Nested contract macro
+    #
+    # @api public
+    Macros.register(:contract) do |macro:|
+      contract, context_keys = macro.args
+
+      unless contract.is_a?(Contract)
+        raise ::ArgumentError, "+contract+ must be a Dry::Validation::Contract instance"
+      end
+
+      next unless key? && !value.nil?
+
+      nested_context = context_keys.then { |keys|
+        case keys
+        when ::Symbol
+          {keys => _context[keys]} if _context.key?(keys)
+        when ::Array
+          keys.each_with_object({}) { |key, context|
+            context[key] = _context[key] if _context.key?(key)
+          }
+        when ::Hash
+          keys.each_with_object({}) { |(child_key, parent_key), context|
+            context[child_key] = _context[parent_key] if _context.key?(parent_key)
+          }
+        else
+          EMPTY_HASH
+        end
+      }
+
+      result.add_contract_result(path.to_a, contract.call(value, nested_context || EMPTY_HASH))
+    end
   end
 end

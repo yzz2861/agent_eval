@@ -117,8 +117,14 @@ module Dry
       def parse_macros(*args)
         args.each_with_object([]) do |spec, macros|
           case spec
+          when Contract
+            macros << [:contract, [spec, EMPTY_ARRAY]]
           when Hash
-            add_macro_from_hash(macros, spec)
+            if spec.key?(:contract)
+              macros << [:contract, [spec[:contract], spec.fetch(:context, EMPTY_ARRAY)]]
+            else
+              add_macro_from_hash(macros, spec)
+            end
           else
             macros << Array(spec)
           end

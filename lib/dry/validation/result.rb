@@ -51,6 +51,7 @@ module Dry
         @schema_result = schema_result
         @context = context
         @options = options
+        @nested_contract_results = options.fetch(:nested_contract_results, EMPTY_ARRAY).dup
         @errors = initialize_errors
       end
 
@@ -107,7 +108,7 @@ module Dry
       #
       # @api private
       def schema_error?(key)
-        schema_result.error?(key)
+        schema_result.error?(key) || nested_schema_error?(Schema::Path[key].to_a)
       end
 
       # Check if the rules includes an error for the provided key
@@ -145,6 +146,41 @@ module Dry
       # @api private
       def add_error(error)
         @errors.add(error)
+        self
+      end
+
+      # Add errors, transformed values, and context from a nested contract result
+      #
+      # @api private
+      def add_contract_result(path, contract_result)
+        prefix = Schema::Path[path].to_a
+
+        schema_result.at(prefix) { |nested_result|
+          nested_result.replace(contract_result.to_h)
+        }
+
+        contract_result.context.each_pair do |key, value|
+          context[key] = value unless context.key?(key)
+        end
+
+        register_contract_results(prefix, contract_result)
+
+        add_nested_schema_messages(prefix, contract_result).each do |message|
+          @errors.add(message)
+        end
+
+        contract_result.errors.source_messages.each do |message|
+          next unless message.is_a?(Message)
+
+          @errors.add(
+            Message[
+              message.text,
+              [*prefix, *message.path],
+              message.meta
+            ]
+          )
+        end
+
         self
       end
 
@@ -214,13 +250,99 @@ module Dry
       private
 
       # @api private
-      def initialize_errors(options = self.options)
-        MessageSet.new(schema_errors(options), options)
+      def schema_errors(options)
+        return schema_result.message_set(options).to_a if @nested_contract_results.empty?
+
+        schema_messages(options, EMPTY_ARRAY)
       end
 
       # @api private
-      def schema_errors(options)
-        schema_result.message_set(options).to_a
+      def schema_messages(options, prefix)
+        local_schema_messages(options, prefix) +
+          @nested_contract_results.flat_map { |nested_prefix, result|
+            result.send(:schema_messages, options, [*prefix, *nested_prefix])
+          }
+      end
+
+      # @api private
+      def local_schema_messages(options, prefix)
+        schema_result.message_compiler
+          .with(options)
+          .(prefix_ast(schema_result.result_ast, prefix))
+          .to_a
+      end
+
+      # @api private
+      def schema_hints(options, prefix)
+        compiled_messages = local_schema_hints(options, prefix).to_a
+
+        all_messages = compiled_messages + @nested_contract_results.flat_map { |nested_prefix, result|
+          result.send(:schema_hints, options, [*prefix, *nested_prefix]).to_a
+        }
+
+        Schema::MessageSet.new(all_messages, failures: false)
+      end
+
+      # @api private
+      def local_schema_hints(options, prefix)
+        Schema::MessageSet.new(
+          schema_result.message_compiler
+            .with(options.merge(failures: false))
+            .(prefix_ast(schema_result.result_ast, prefix))
+            .to_a,
+          failures: false
+        )
+      end
+
+      # @api private
+      def prefix_ast(ast, prefix)
+        prefix.reverse.reduce(ast) { |nodes, key| [[:key, [key, [:set, nodes]]]] }
+      end
+
+      # @api private
+      def add_nested_schema_messages(prefix, result)
+        result.send(:local_schema_messages, EMPTY_HASH, prefix) +
+          result.send(:nested_contract_results).flat_map { |nested_prefix, nested_result|
+            add_nested_schema_messages([*prefix, *nested_prefix], nested_result)
+          }
+      end
+
+      # @api private
+      def register_contract_results(prefix, contract_result)
+        @nested_contract_results << [prefix, contract_result]
+
+        contract_result.send(:nested_contract_results).each do |nested_prefix, nested_result|
+          @nested_contract_results << [[*prefix, *nested_prefix], nested_result]
+        end
+      end
+
+      # @api private
+      def nested_schema_error?(key_path, results = @nested_contract_results)
+        results.any? do |prefix, result|
+          next false unless key_path.empty? || key_path[0, prefix.length] == prefix
+
+          relative_path = key_path[prefix.length..]
+
+          if relative_path.nil? || relative_path.empty?
+            result.send(:schema_failure?)
+          else
+            result.schema_error?(relative_path)
+          end
+        end
+      end
+
+      # @api private
+      def schema_failure?
+        schema_result.failure? ||
+          @nested_contract_results.any? { |_, result| result.send(:schema_failure?) }
+      end
+
+      # @api private
+      attr_reader :nested_contract_results
+
+      # @api private
+      def initialize_errors(options = self.options)
+        MessageSet.new(schema_errors(options), options)
       end
     end
   end

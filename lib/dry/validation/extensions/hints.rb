@@ -55,7 +55,7 @@ module Dry
         #
         # @api public
         def hints(new_options = EMPTY_HASH)
-          schema_result.hints(new_options)
+          schema_hints(new_options, EMPTY_ARRAY)
         end
       end
 

@@ -8,6 +8,11 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 ## [Unreleased]
 
 
+### Added
+
+- Added support for reusing contracts as nested rules with prefixed errors and transformed output
+
+
 ## [1.11.1] - 2025-01-21
 
 
