@@ -26,7 +26,11 @@ module Dry
                      adapter.method(:call)
                    end
 
-        @operation = Callable[operation]
+        @operation = if operation.is_a?(Branch)
+                       operation
+                     else
+                       Callable[operation]
+                     end
 
         @options = options
 

@@ -6,6 +6,8 @@ module Dry
       def initialize(container)
         module_exec(container) do |ops_container|
           define_method :initialize do |**kwargs|
+            @container = ops_container
+
             operation_kwargs = self.class.steps.select(&:operation_name).to_h { |step|
               operation = kwargs.fetch(step.name) {
                 if ops_container&.key?(step.operation_name)
@@ -18,7 +20,7 @@ module Dry
               [step.name, operation]
             }
 
-            super(**kwargs, **operation_kwargs)
+            super(container: ops_container, **kwargs, **operation_kwargs)
           end
         end
       end

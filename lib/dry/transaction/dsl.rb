@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "dry/transaction/branch"
+
 module Dry
   module Transaction
     class DSL < Module
@@ -27,18 +29,35 @@ module Dry
 
       def define_dsl
         module_exec(@step_adapters) do |step_adapters|
-          step_adapters.each do |adapter_name, adapter|
-            define_method(adapter_name) do |step_name, with: nil, **options|
-              operation_name = with
+          define_method(:branch) do |step_name, &block|
+            definitions = Branch::DSL.call(step_adapters, &block)
+            branch_options = {branches: definitions}
+            steps << Step.new(
+              adapter: step_adapters[:branch],
+              name: step_name,
+              operation_name: nil,
+              operation: nil,
+              options: branch_options
+            )
+          end
 
+          step_adapters.each do |adapter_name, adapter|
+            next if adapter_name.to_sym == :branch
+
+            original_verbosity = $VERBOSE
+            $VERBOSE = nil
+
+            define_method(adapter_name) do |step_name, with: nil, **options|
               steps << Step.new(
                 adapter: adapter,
                 name: step_name,
-                operation_name: operation_name,
-                operation: nil, # operations are resolved only when transactions are instantiated
+                operation_name: with,
+                operation: nil,
                 options: options
               )
             end
+          ensure
+            $VERBOSE = original_verbosity
           end
         end
       end

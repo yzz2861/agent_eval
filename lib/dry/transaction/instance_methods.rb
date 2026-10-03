@@ -13,9 +13,11 @@ module Dry
       attr_reader :listeners
       attr_reader :stack
 
-      def initialize(steps: self.class.steps, listeners: nil, **operations)
+      def initialize(steps: self.class.steps, listeners: nil, container: nil, **operations)
+        @container = container
+        @operations = operations
         @steps = steps.map { |step|
-          operation = resolve_operation(step, **operations)
+          operation = step.branch? ? build_branch(step, **operations) : resolve_operation(step, **operations)
           step.with(operation: operation)
         }
         @operations = operations
@@ -43,10 +45,16 @@ module Dry
 
         if listeners.is_a?(Hash)
           listeners.each do |step_name, listener|
-            steps.detect { |step| step.name == step_name }.subscribe(listener)
+            step = steps.detect { |candidate| candidate.name == step_name }
+            if step&.branch? && listener.is_a?(Hash)
+              subscribe_branch(step.branch_runner, listener)
+            else
+              step&.subscribe(listener)
+            end
           end
         else
           steps.each do |step|
+            step.branch_runner.listeners = listeners if step.branch?
             step.subscribe(listeners)
           end
         end
@@ -56,7 +64,12 @@ module Dry
         assert_valid_step_args(step_args)
 
         new_steps = steps.map { |step|
-          if step_args[step.name]
+          if step.branch?
+            operation = step.branch_runner.dup
+            operation.step_args = step_args[step.name] || {}
+            operation.listeners = listeners
+            step.with(operation: operation)
+          elsif step_args[step.name]
             step.with(call_args: step_args[step.name])
           else
             step
@@ -99,10 +112,105 @@ module Dry
         end
       end
 
+      def build_branch(step, **operations)
+        return duplicate_branch_runner(step) if step.branch_runner.is_a?(Branch)
+
+        definitions = step.adapter.options.fetch(:branches)
+
+        Branch.new(
+          definitions: definitions,
+          step_args: step_args_for_branch(step),
+          resolve_step: method(:resolve_nested_step),
+          resolve_condition: method(:resolve_branch_condition),
+          validate_steps: method(:assert_nested_step_arity)
+        )
+      end
+
+      def duplicate_branch_runner(step)
+        operation = step.branch_runner.dup
+        operation.listeners = nil
+        operation
+      end
+
+      def resolve_nested_step(step, **_operations)
+        return step.with(operation: build_branch(step)) if step.branch?
+
+        if step.external?
+          resolve_nested_external_step(step)
+        else
+          step.with(operation: resolve_operation(step, **@operations))
+        end
+      end
+
+      def resolve_nested_external_step(step)
+        operation_name = step.operation_name
+
+        if @operations[step.name]&.respond_to?(:call)
+          step.with(operation: @operations[step.name])
+        elsif @operations.key?(step.name)
+          raise InvalidStepError, step.name
+        elsif container_key?(operation_name)
+          operation = @container[operation_name]
+          raise InvalidStepError, step.name unless operation.respond_to?(:call)
+
+          step.with(operation: operation)
+        else
+          raise MissingStepError, step.name
+        end
+      end
+
+      def resolve_branch_condition(condition)
+        callable = if condition.respond_to?(:call)
+                     condition
+                   elsif container_key?(condition)
+                     @container[condition]
+                   else
+                     method(condition)
+                   end
+
+        raise InvalidStepError, condition unless callable.respond_to?(:call)
+
+        Callable[callable]
+      end
+
+      def step_args_for_branch(_step)
+        {}
+      end
+
+      def assert_nested_step_arity(steps)
+        steps.each do |step|
+          required = step.arity >= 0 ? step.arity : ~step.arity
+          supplied = step.call_args.length + 1
+
+          raise ArgumentError, "not enough arguments supplied for step +#{step.name}+" if required > supplied
+        end
+      end
+
+      def container_key?(name)
+        return false if @container.nil?
+        if @container.respond_to?(:key?)
+          @container.key?(name)
+        elsif @container.is_a?(Hash)
+          @container.key?(name)
+        else
+          true
+        end
+      end
+
+      def subscribe_branch(branch, listeners)
+        branch.listeners = listeners
+      end
+
       def assert_valid_step_args(step_args)
         step_args.each_key do |step_name|
-          unless steps.any? { |step| step.name == step_name }
+          known_step = steps.detect { |step| step.name == step_name }
+
+          unless known_step
             raise ArgumentError, "+#{step_name}+ is not a valid step name"
+          end
+
+          if known_step.branch? && !step_args[step_name].is_a?(Hash)
+            raise ArgumentError, "+#{step_name}+ is a branch step and accepts nested step arguments as a Hash"
           end
         end
       end
