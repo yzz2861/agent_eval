@@ -35,7 +35,7 @@ module Net
       def continue(arg)
         res = smtp.get_response arg
         raise res.exception_class.new(res) unless res.continue?
-        res.string.split[1]
+        response_payload(res)
       end
 
       # @param arg [String] message to server
@@ -46,11 +46,27 @@ module Net
         res
       end
 
+      def response_payload(res, base64: false)
+        parts = res.string.lines.first.split
+        parts.shift
+        parts.shift if parts.first&.match?(/\A\d(?:\.\d+){2}\z/)
+        payload = parts.first
+        if base64 && !valid_base64_payload?(payload)
+          return nil
+        end
+        payload
+      end
+
       # @param str [String]
       # @return [String] Base64 encoded string
       def base64_encode(str)
         # expects "str" may not become too long
         [str].pack('m0')
+      end
+
+      def valid_base64_payload?(payload)
+        payload.is_a?(String) &&
+          payload.match?(/\A(?:[A-Za-z0-9+\/]{4})*(?:[A-Za-z0-9+\/]{2}==|[A-Za-z0-9+\/]{3}=)?\z/)
       end
     end
   end

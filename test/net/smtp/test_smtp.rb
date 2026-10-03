@@ -1,10 +1,22 @@
 # coding: utf-8
 
 require 'net/smtp'
+require 'stringio'
 require 'test/unit'
 
 module Net
+  module SCRAMTestBase64
+    def base64_encode(string)
+      [string].pack('m0')
+    end
+
+    def base64_decode(string)
+      string.unpack1('m0')
+    end
+  end
+
   class TestSMTP < Test::Unit::TestCase
+    include SCRAMTestBase64
     def setup
       # Avoid hanging at fake_server_start's IO.select on --jit-wait CI like http://ci.rvm.jp/results/trunk-mjit-wait@phosphorus-docker/3302796
       # Unfortunately there's no way to configure read_timeout for Net::SMTP.start.
@@ -160,6 +172,199 @@ module Net
       err = assert_raise(Net::SMTPAuthenticationError) { smtp.authenticate("account", "password", :xoauth2) }
       assert_equal "535 5.7.8 Error: authentication failed: authentication failure\n", err.message
       assert_equal "535", err.response.status
+    end
+
+    def test_auth_scram_sha_256_standard_vector
+      client_nonce = 'rOprNxUSkkmHsrUwK9JXXobTEfybSEa17hK6Oofj-n_qe3Ks'
+      server_nonce = client_nonce + 'DAHW56dYu3tcpZBb88mpwg=='
+      server_first = "r=#{server_nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+      server_final = 'v=d+NiBrWjCIQcb5Eg6ne8eRrh+FCtoebuxdQ3vt7JplQ='
+      commands = []
+      smtp = Object.new
+      smtp.define_singleton_method(:get_response) do |command|
+        commands << command
+        if commands.size == 1
+          Net::SMTP::Response.parse("334 #{[server_first].pack('m0')}")
+        else
+          Net::SMTP::Response.parse("235 2.7.0 #{[server_final].pack('m0')}")
+        end
+      end
+
+      authenticator = Net::SMTP::AuthScramSHA256.new(smtp)
+      response = authenticator.auth('user', 'pencil', cnonce: client_nonce)
+
+      assert_predicate(response, :success?)
+      assert_equal(
+        'AUTH SCRAM-SHA-256 ' + ["n,,n=user,r=#{client_nonce}"].pack('m0'),
+        commands.first
+      )
+      assert_equal(
+        [
+          'c=biws,' \
+          "r=#{server_nonce}," \
+          'p=DVM084G1PRc2jYH1Ofsw1LQSYP/FXDl/KPqWGTIE6zE='
+        ].pack('m0'), commands.last
+      )
+    end
+
+    def test_scram_sha_256_auth_type_matches_sasl_mechanism
+      assert_same(
+        Net::SMTP::AuthScramSHA256,
+        Net::SMTP::Authenticator.auth_class(:scram_sha_256)
+      )
+      assert_same(
+        Net::SMTP::AuthScramSHA256,
+        Net::SMTP::Authenticator.auth_class('scram-sha-256')
+      )
+    end
+
+    def test_auth_scram_sha_256_rejects_invalid_server_first_messages
+      client_nonce = 'client-nonce'
+      valid_nonce = client_nonce + 'server-nonce'
+      messages = [
+        "r=#{valid_nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,s=W22ZaJ0SNY7soEsUEjb6gQ==",
+        "r=#{valid_nonce},s=***,i=4096",
+        "r=#{valid_nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4095",
+        "r=#{valid_nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1000001",
+        "r=#{valid_nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=2147483648",
+        "r=#{valid_nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=04096",
+        'r=client-nonce,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096',
+        "r=wrong-nonce,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096",
+      ]
+
+      messages.each do |server_first|
+        commands = []
+        smtp = Object.new
+        smtp.define_singleton_method(:get_response) do |command|
+          commands << command
+          if command == '*'
+            Net::SMTP::Response.parse('501 5.7.0 Authentication cancelled')
+          else
+            Net::SMTP::Response.parse("334 #{[server_first].pack('m0')}")
+          end
+        end
+        authenticator = Net::SMTP::AuthScramSHA256.new(smtp)
+
+        assert_raise(Net::SMTPAuthenticationError) do
+          authenticator.auth('user', 'pencil', cnonce: client_nonce)
+        end
+        assert_equal('*', commands.last)
+      end
+    end
+
+    def test_auth_scram_sha_256_verifies_server_signature_after_success
+      client_nonce = 'rOprNxUSkkmHsrUwK9JXXobTEfybSEa17hK6Oofj-n_qe3Ks'
+      server_nonce = client_nonce + 'DAHW56dYu3tcpZBb88mpwg=='
+      server_first = "r=#{server_nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+      commands = []
+      smtp = Object.new
+      smtp.define_singleton_method(:get_response) do |command|
+        commands << command
+        if commands.size == 1
+          Net::SMTP::Response.parse("334 #{[server_first].pack('m0')}")
+        else
+          Net::SMTP::Response.parse("235 2.7.0 #{['v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='].pack('m0')}")
+        end
+      end
+      authenticator = Net::SMTP::AuthScramSHA256.new(smtp)
+
+      error = assert_raise(Net::SMTPAuthenticationError) do
+        authenticator.auth('user', 'pencil', cnonce: client_nonce)
+      end
+      assert_equal('SCRAM-SHA-256 authentication failed: server signature verification failed', error.message)
+      assert_equal(2, commands.size)
+      assert_not_equal('*', commands.last)
+    end
+
+    def test_auth_scram_sha_256_rejects_non_continue_initial_response
+      client_nonce = 'client-nonce'
+      smtp = Object.new
+      smtp.define_singleton_method(:get_response) do |_command|
+        Net::SMTP::Response.parse('535 5.7.8 Authentication failed')
+      end
+      authenticator = Net::SMTP::AuthScramSHA256.new(smtp)
+
+      assert_raise(Net::SMTPAuthenticationError) do
+        authenticator.auth('user', 'password', cnonce: client_nonce)
+      end
+    end
+
+    def test_auth_scram_sha_256_requires_server_final_payload_after_success
+      client_nonce = 'rOprNxUSkkmHsrUwK9JXXobTEfybSEa17hK6Oofj-n_qe3Ks'
+      server_nonce = client_nonce + 'DAHW56dYu3tcpZBb88mpwg=='
+      server_first = "r=#{server_nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+      commands = []
+      smtp = Object.new
+      smtp.define_singleton_method(:get_response) do |command|
+        commands << command
+        if commands.size == 1
+          Net::SMTP::Response.parse("334 #{[server_first].pack('m0')}")
+        else
+          Net::SMTP::Response.parse('235 2.7.0 Authentication successful')
+        end
+      end
+      authenticator = Net::SMTP::AuthScramSHA256.new(smtp)
+
+      error = assert_raise(Net::SMTPAuthenticationError) do
+        authenticator.auth('user', 'pencil', cnonce: client_nonce)
+      end
+      assert_equal('SCRAM-SHA-256 authentication failed: missing server final message', error.message)
+      assert_equal(2, commands.size)
+    end
+
+    def test_auth_scram_sha_256_client_nonce_has_client_contribution
+      authenticator = Net::SMTP::AuthScramSHA256.new(Object.new)
+      first_nonce = authenticator.send(:generate_client_nonce)
+      second_nonce = authenticator.send(:generate_client_nonce)
+
+      assert_equal(43, first_nonce.length)
+      assert_equal(43, second_nonce.length)
+      assert_not_equal(first_nonce, second_nonce)
+      assert_match(/\A[A-Za-z0-9_-]+\z/, first_nonce)
+    end
+
+    def test_auth_scram_sha_256_debug_output_does_not_contain_secrets
+      salt = FakeServer::SCRAM_SALT
+      iterations = FakeServer::SCRAM_ITERATIONS
+      debug_output = StringIO.new
+      smtp = Net::SMTP.new('localhost')
+      socket = Object.new
+      socket.instance_variable_set(:@debug_output, debug_output)
+      socket.define_singleton_method(:debug_output) { @debug_output }
+      socket.define_singleton_method(:debug_output=) { |value| @debug_output = value }
+      socket.define_singleton_method(:writeline) { |line| @commands ||= []; @commands << line }
+      socket.define_singleton_method(:readline) do
+        if @commands.size == 1
+          client_first = @commands.first.split.last.unpack1('m0')
+          @client_nonce = client_first[/(?<=,r=)[^,]+\z/]
+          @server_nonce = "#{@client_nonce}server-contribution"
+          server_first = "r=#{@server_nonce},s=#{[salt].pack('m0')},i=#{iterations}"
+          "334 #{[server_first].pack('m0')}\n"
+        else
+          client_final = @commands.last.unpack1('m0')
+          client_first = @commands.first.split.last.unpack1('m0')
+          client_first_bare = client_first.sub(/\An,,/, '')
+          server_first = "r=#{@server_nonce},s=#{[salt].pack('m0')},i=#{iterations}"
+          client_final_without_proof = client_final.sub(/,p=.*\z/, '')
+          auth_message = [client_first_bare, server_first, client_final_without_proof].join(',')
+          salted_password = OpenSSL::PKCS5.pbkdf2_hmac(
+            'password', salt, iterations, 32, OpenSSL::Digest.new('SHA256')
+          )
+          server_key = OpenSSL::HMAC.digest('SHA256', salted_password, 'Server Key')
+          server_signature = OpenSSL::HMAC.digest('SHA256', server_key, auth_message)
+          server_final = "v=#{[server_signature].pack('m0')}"
+          "235 2.7.0 #{[server_final].pack('m0')}\n"
+        end
+      end
+      smtp.instance_variable_set(:@socket, socket)
+
+      smtp.authenticate('account', 'password', :scram_sha_256)
+      log = debug_output.string
+
+      assert_not_include(log, 'password')
+      assert_not_include(log, ['n,,n=account,r='].pack('m0'))
+      assert_not_include(log, 'p=')
+      assert_same(debug_output, socket.debug_output)
     end
 
     def test_send_message
@@ -628,9 +833,13 @@ module Net
   end
 
   class FakeServer
+    include SCRAMTestBase64
+
     CA_FILE = File.expand_path("../fixtures/cacert.pem", __dir__)
     SERVER_KEY = File.expand_path("../fixtures/server.key", __dir__)
     SERVER_CERT = File.expand_path("../fixtures/server.crt", __dir__)
+    SCRAM_SALT = "1234567890abcdefghijklmnopqrstuv"
+    SCRAM_ITERATIONS = 4096
 
     @servers = []
 
@@ -753,6 +962,9 @@ module Net
                  @sock.puts "334 PDEyMzQ1Njc4OTAuMTIzNDVAc2VydmVybmFtZT4=\r\n"
                  r = @sock.gets&.chomp
                  r == 'YWNjb3VudCAyYzBjMTgxZjkxOGU2ZGM5Mjg3Zjk3N2E1ODhiMzg1YQ=='
+               when 'SCRAM-SHA-256'
+                 auth_scram_sha_256(arg)
+                 return
                when 'XOAUTH2'
                  arg == 'dXNlcj1hY2NvdW50AWF1dGg9QmVhcmVyIHRva2VuAQE='
                end
@@ -761,6 +973,42 @@ module Net
       else
         @sock.puts "535 5.7.8 Error: authentication failed: authentication failure\r\n"
       end
+    end
+
+    def auth_scram_sha_256(arg)
+      client_first = base64_decode(arg)
+      client_nonce = client_first[/(?<=,r=)[^,]+\z/]
+      server_nonce = "#{client_nonce}server-contribution"
+      server_first = "r=#{server_nonce},s=#{base64_encode(SCRAM_SALT)},i=#{SCRAM_ITERATIONS}"
+      @sock.puts "334 #{base64_encode(server_first)}\r\n"
+
+      client_final = base64_decode(@sock.gets.chomp)
+      client_proof = base64_decode(client_final[/(?<=,p=)[^,]+\z/])
+
+      salted_password = OpenSSL::PKCS5.pbkdf2_hmac(
+        'password', SCRAM_SALT, SCRAM_ITERATIONS, 32, OpenSSL::Digest.new('SHA256')
+      )
+      client_key = OpenSSL::HMAC.digest('SHA256', salted_password, 'Client Key')
+      server_key = OpenSSL::HMAC.digest('SHA256', salted_password, 'Server Key')
+      stored_key = OpenSSL::Digest.digest('SHA256', client_key)
+      client_first_bare = client_first.sub(/\An,,/, '')
+      client_final_without_proof = client_final.sub(/,p=.*\z/, '')
+      auth_message = [client_first_bare, server_first, client_final_without_proof].join(',')
+      client_signature = OpenSSL::HMAC.digest('SHA256', stored_key, auth_message)
+      expected_client_proof = client_key.bytes.zip(client_signature.bytes).map { |a, b| a ^ b }.pack('C*')
+      valid_client_proof = client_proof.bytesize == 32 &&
+        OpenSSL.fixed_length_secure_compare(expected_client_proof, client_proof)
+
+      unless valid_client_proof
+        @sock.puts "535 5.7.8 Error: authentication failed: authentication failure\r\n"
+        return
+      end
+
+      server_signature = OpenSSL::HMAC.digest('SHA256', server_key, auth_message)
+      server_final = "v=#{base64_encode(server_signature)}"
+      @sock.puts "235 2.7.0 #{base64_encode(server_final)}\r\n"
+    rescue ArgumentError
+      @sock.puts "535 5.7.8 Error: authentication failed: malformed SCRAM message\r\n"
     end
 
     def mail(_)
