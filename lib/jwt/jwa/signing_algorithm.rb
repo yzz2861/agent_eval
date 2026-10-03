@@ -34,6 +34,14 @@ module JWT
         raise_verify_error!('Algorithm implementation is missing the verify method')
       end
 
+      def sign_stream(*)
+        raise_sign_error!('Algorithm does not support incremental signing')
+      end
+
+      def verify_stream(*)
+        raise_verify_error!('Algorithm does not support incremental verification')
+      end
+
       def raise_verify_error!(message)
         raise(VerificationKeyError.new(message).tap { |e| e.set_backtrace(caller(1)) })
       end

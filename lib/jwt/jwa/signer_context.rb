@@ -14,6 +14,10 @@ module JWT
       def sign(*args, **kwargs)
         @jwa.sign(*args, **kwargs, signing_key: @key)
       end
+
+      def sign_stream(*args, **kwargs)
+        @jwa.sign_stream(*args, **kwargs, signing_key: @key)
+      end
     end
   end
 end

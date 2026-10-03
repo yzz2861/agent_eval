@@ -325,6 +325,37 @@ encoded_token.verify_signature!(algorithm: 'HS256', key: "secret")
 encoded_token.payload # => {"pay"=>"load"}
 ```
 
+### Streaming detached payloads
+
+For large payloads, `JWT::StreamingJWS` signs and verifies without reading the
+entire body into memory. It currently supports `HS256` and `RS256` and returns
+read statistics, including the largest single `read` length.
+
+```ruby
+File.open('large-file.bin', 'rb') do |input|
+  File.open('large-file.bin.b64', 'wb') do |encoded_payload|
+    result = JWT::StreamingJWS.sign(
+      input,
+      key: hmac_secret,
+      algorithm: 'HS256',
+      chunk_size: 64 * 1024,
+      payload_output: encoded_payload
+    )
+
+    result.jws   # detached compact JWS: header..signature
+    result.stats # bytes_read, read_count, max_read_length
+  end
+end
+
+File.open('large-file.bin', 'rb') do |input|
+  JWT::StreamingJWS.verify!(jws, input, key: hmac_secret, algorithm: 'HS256')
+end
+```
+
+Pass `base64_payload: false` for an RFC 7797 JWS with `b64: false`. The
+library then signs the raw body bytes, adds `b64` to the `crit` header when
+needed, and does not base64 encode or buffer the body.
+
 ## Claims
 
 JSON Web Token defines some reserved claim names and defines how they should be

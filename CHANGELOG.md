@@ -6,7 +6,7 @@
 
 **Features:**
 
-- Your contribution here
+- Add streaming detached JWS signing and verification for `HS256` and `RS256` with `JWT::StreamingJWS`
 
 **Fixes and enhancements:**
 

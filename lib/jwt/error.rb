@@ -14,6 +14,9 @@ module JWT
   # @deprecated Use {JWT::Error}, {JWT::TokenError} or a more specific error class instead.
   class DecodeError < Error; end
 
+  # Raised when a streaming payload cannot be read or written.
+  class StreamingPayloadError < DecodeError; end
+
   # The TokenError class is the base class for all errors related to token processing.
   class TokenError < DecodeError; end
 

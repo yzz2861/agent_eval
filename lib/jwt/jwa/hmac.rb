@@ -32,6 +32,22 @@ module JWT
         SecurityUtils.secure_compare(signature, OpenSSL::HMAC.digest(digest.new, verification_key, data))
       end
 
+      def sign_stream(encoded_header:, payload_stream:, signing_key:)
+        validate_key!(signing_key) { |message| raise_sign_error!(message) }
+
+        hmac = OpenSSL::HMAC.new(signing_key, digest.new)
+        payload_stream.each_signing_chunk(encoded_header) { |chunk| hmac.update(chunk) }
+        hmac.digest
+      end
+
+      def verify_stream(encoded_header:, payload_stream:, signature:, verification_key:)
+        validate_key!(verification_key) { |message| raise_verify_error!(message) }
+
+        hmac = OpenSSL::HMAC.new(verification_key, digest.new)
+        payload_stream.each_signing_chunk(encoded_header) { |chunk| hmac.update(chunk) }
+        SecurityUtils.secure_compare(signature, hmac.digest)
+      end
+
       register_algorithm(new('HS256', OpenSSL::Digest::SHA256))
       register_algorithm(new('HS384', OpenSSL::Digest::SHA384))
       register_algorithm(new('HS512', OpenSSL::Digest::SHA512))

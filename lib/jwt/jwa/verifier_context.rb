@@ -16,6 +16,12 @@ module JWT
           @jwa.verify(*args, **kwargs, verification_key: key)
         end
       end
+
+      def verify_stream(*args, **kwargs)
+        @keys.any? do |key|
+          @jwa.verify_stream(*args, **kwargs, verification_key: key)
+        end
+      end
     end
   end
 end
