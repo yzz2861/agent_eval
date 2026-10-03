@@ -251,6 +251,7 @@ module Net
       @open_timeout = 30
       @read_timeout = 60
       @error_occurred = false
+      @in_data = false
       @debug_output = nil
       @tls = tls
       @starttls = starttls
@@ -665,6 +666,7 @@ module Net
         check_auth_args authtype, user, secret
       end
       @error_occurred = false
+      @in_data = false
       s = Timeout.timeout(@open_timeout, Net::OpenTimeout) do
         tcp_socket(@address, @port)
       end
@@ -730,8 +732,58 @@ module Net
     ensure
       @started = false
       @error_occurred = false
+      @in_data = false
       @socket.close if @socket
       @socket = nil
+    end
+
+    # Runs a mail transaction (MAIL FROM .. end of DATA) as an explicit
+    # scope.  If the block raises, the session is brought back to a
+    # well-defined state before the exception is re-raised: while still in
+    # the envelope stage the transaction is aborted with RSET and the
+    # connection is reused only when RSET succeeds; once DATA has been
+    # entered but not properly terminated, RSET would be written into the
+    # message body, so the connection is closed instead.  A failure of the
+    # cleanup itself is attached to the original exception as its cause.
+    def mail_transaction
+      if @error_occurred or @in_data
+        @socket.close if @socket and not @socket.closed?
+        @error_occurred = true
+        @in_data = false
+        raise IOError, 'SMTP session is not clean; start a new session to send mail'
+      end
+      error = nil
+      result = begin
+        yield
+      rescue Exception => exc
+        error = exc
+        nil
+      end
+      return result unless error
+      # Run the cleanup outside of the rescue handler so that a cleanup
+      # failure can be attached to the original exception as its cause
+      # without creating a circular exception chain.
+      begin
+        recover_session
+      rescue Exception => cleanup_error
+        raise error, cause: (error.cause || cleanup_error)
+      end
+      raise error
+    end
+
+    def recover_session
+      if @in_data
+        @socket.close if @socket and not @socket.closed?
+        @error_occurred = true
+        @in_data = false
+      elsif not @error_occurred
+        begin
+          rset
+        rescue Exception
+          @error_occurred = true
+          raise
+        end
+      end
     end
 
     def requires_smtputf8(address)
@@ -792,8 +844,10 @@ module Net
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      mail_transaction do
+        mailfrom from_addr
+        rcptto_list(to_addrs) {data msgstr}
+      end
     end
 
     alias send_mail send_message
@@ -847,8 +901,10 @@ module Net
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data(&block)}
+      mail_transaction do
+        mailfrom from_addr
+        rcptto_list(to_addrs) {data(&block)}
+      end
     end
 
     alias ready open_message_stream   # obsolete
@@ -961,6 +1017,7 @@ module Net
       end
       res = critical {
         check_continue get_response('DATA')
+        @in_data = true
         socket_sync_bak = @socket.io.sync
         begin
           @socket.io.sync = false
@@ -973,7 +1030,9 @@ module Net
           @socket.io.flush
           @socket.io.sync = socket_sync_bak
         end
-        recv_response()
+        response = recv_response()
+        @in_data = false
+        response
       }
       check_response res
       res

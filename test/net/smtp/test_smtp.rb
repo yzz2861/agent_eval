@@ -253,6 +253,81 @@ module Net
       assert_equal "250", err.response.status
     end
 
+    def test_send_message_recovers_with_rset_on_envelope_error
+      server = FakeServer.new
+      def server.rcpt(arg)
+        if arg.include? 'bad@example.com'
+          @sock.puts "550 5.1.1 No such recipient\r\n"
+        else
+          @sock.puts "250 2.1.0 Ok\r\n"
+        end
+      end
+      server.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_raise(Net::SMTPFatalError) do
+        smtp.send_message('message', 'from@example.com', 'bad@example.com')
+      end
+      # RSET succeeded, so the next mail starts on the same clean session
+      assert_include server.commands, "RSET\r\n"
+      assert_nothing_raised do
+        smtp.send_message('message', 'from@example.com', 'good@example.com')
+      end
+      assert_equal 2, server.commands.count {|comm| comm.start_with? 'MAIL FROM:' }
+      smtp.finish
+    end
+
+    def test_open_message_stream_disconnects_when_data_aborted
+      server = FakeServer.new
+      def server.data
+        @sock.puts "354 End data with <CR><LF>.<CR><LF>\r\n"
+        while (line = @sock.gets)
+          break if line.chomp == '.'
+          @body.concat line.sub(/^\./, '')
+        end
+        @sock.puts "250 2.0.0 Ok: queued as ABCDEFG\r\n" if line
+      rescue Errno::EPIPE, Errno::ECONNRESET, IOError
+        nil
+      end
+      server.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_raise(RuntimeError) do
+        smtp.open_message_stream('from@example.com', 'to@example.com') do |f|
+          f.puts 'partial body'
+          raise 'boom'
+        end
+      end
+      server_thread = server.instance_variable_get(:@server_thread)
+      server_thread.join(5)
+      # the connection was dropped; RSET was not written into the DATA body
+      assert_include server.body, 'partial body'
+      assert_not_include server.body, 'RSET'
+      # the next mail must not start on the unclean session
+      assert_raise(IOError) do
+        smtp.send_message('message', 'from@example.com', 'to@example.com')
+      end
+    end
+
+    def test_send_message_keeps_cleanup_error_as_cause
+      server = FakeServer.new
+      def server.rcpt(_)
+        @sock.puts "550 5.1.1 No such recipient\r\n"
+      end
+      def server.rset
+        @sock.puts "500 5.5.2 RSET not accepted\r\n"
+      end
+      server.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message('message', 'from@example.com', 'bad@example.com')
+      end
+      # the failed RSET is preserved as an additional cause
+      assert_kind_of Net::SMTPSyntaxError, err.cause
+      # RSET was not confirmed, so the session must not be reused
+      assert_raise(IOError) do
+        smtp.send_message('message', 'from@example.com', 'to@example.com')
+      end
+    end
+
     def test_crlf_injection
       server = FakeServer.new
       smtp = Net::SMTP.new 'localhost', server.port
