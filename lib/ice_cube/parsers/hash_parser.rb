@@ -15,6 +15,7 @@ module IceCube
       apply_exrules schedule, data
       apply_rtimes schedule, data
       apply_extimes schedule, data
+      apply_future_adjustments schedule, data
       yield schedule if block_given?
       schedule
     end
@@ -79,6 +80,16 @@ module IceCube
       data[:extimes].each do |t|
         schedule.add_exception_time TimeUtil.deserialize_time(t)
       end
+    end
+
+    def apply_future_adjustments(schedule, data)
+      return unless data[:future_adjustments]
+      adjustments = data[:future_adjustments].map do |adjustment|
+        next adjustment if adjustment.is_a?(IceCube::FutureAdjustment)
+
+        IceCube::FutureAdjustment.from_hash(adjustment)
+      end
+      schedule.load_future_adjustments(adjustments)
     end
 
     def parse_time(time)
