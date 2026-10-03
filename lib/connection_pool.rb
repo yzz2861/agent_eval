@@ -37,6 +37,10 @@ end
 # - :size - number of connections to pool, defaults to 5
 # - :timeout - amount of time to wait for a connection if none currently available, defaults to 5 seconds
 # - :auto_reload_after_fork - automatically drop all connections after fork, defaults to true
+# - :max_lifetime - maximum number of seconds a connection can be used, defaults to never
+# - :max_lifetime_jitter - maximum random number of seconds added to each connection's lifetime
+# - :clock - callable that returns the current monotonic time, useful for testing
+# - :close - callable or method name used to close retired connections
 #
 class ConnectionPool
   def self.wrap(**kwargs, &block)
@@ -45,18 +49,31 @@ class ConnectionPool
 
   attr_reader :size
 
-  def initialize(timeout: 5, size: 5, auto_reload_after_fork: true, name: nil, &block)
+  def initialize(timeout: 5, size: 5, auto_reload_after_fork: true, name: nil,
+    max_lifetime: nil, max_age: nil,
+    max_lifetime_jitter: nil, lifetime_jitter: nil, max_age_jitter: nil, jitter: nil,
+    clock: nil, close: nil, &block)
     raise ArgumentError, "Connection pool requires a block" unless block_given?
 
     @size = Integer(size)
     raise ArgumentError, "Connection pool size cannot be negative" if @size.negative?
 
     @timeout = Float(timeout)
-    @available = TimedStack.new(size: @size, &block)
+    max_lifetime ||= max_age
+    max_lifetime_jitter ||= lifetime_jitter || max_age_jitter || jitter
+    @available = TimedStack.new(
+      size: @size,
+      max_lifetime: max_lifetime,
+      max_lifetime_jitter: max_lifetime_jitter,
+      clock: clock,
+      close: close,
+      &block
+    )
     @key = :"pool-#{@available.object_id}"
     @key_count = :"pool-#{@available.object_id}-count"
     @key_kwargs = :"pool-#{@available.object_id}-kwargs"
     @discard_key = :"pool-#{@available.object_id}-discard"
+    @retired_key = :"pool-#{@available.object_id}-retired"
     INSTANCES[self] = self if auto_reload_after_fork && INSTANCES
   end
 
@@ -114,12 +131,14 @@ class ConnectionPool
   def checkout(timeout: @timeout, **kwargs)
     if ::Thread.current[@key]
       ::Thread.current[@key_count] += 1
+      ::Thread.current[@retired_key] = true if @available.expired?(::Thread.current[@key])
       ::Thread.current[@key]
     else
       conn = @available.pop(timeout:, **kwargs)
       ::Thread.current[@key] = conn
       ::Thread.current[@key_count] = 1
       ::Thread.current[@key_kwargs] = kwargs
+      ::Thread.current[@retired_key] = @available.expired?(conn)
       conn
     end
   end
@@ -130,13 +149,15 @@ class ConnectionPool
         begin
           if ::Thread.current[@discard_key]
             begin
-              @available.decrement_created
+              @available.decrement_created(::Thread.current[@key])
               ::Thread.current[@discard_key].call(::Thread.current[@key])
             rescue
               nil
             ensure
               ::Thread.current[@discard_key] = nil
             end
+          elsif ::Thread.current[@retired_key] || @available.expired?(::Thread.current[@key])
+            @available.retire(::Thread.current[@key])
           else
             @available.push(::Thread.current[@key], **::Thread.current[@key_kwargs])
           end
@@ -144,6 +165,7 @@ class ConnectionPool
           ::Thread.current[@key] = nil
           ::Thread.current[@key_count] = nil
           ::Thread.current[@key_kwargs] = nil
+          ::Thread.current[@retired_key] = nil
         end
       else
         ::Thread.current[@key_count] -= 1

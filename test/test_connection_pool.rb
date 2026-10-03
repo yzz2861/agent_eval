@@ -56,6 +56,37 @@ class TestConnectionPool < Minitest::Test
     end
   end
 
+  class FakeClock
+    def initialize(time = 1)
+      @time = time
+    end
+
+    attr_accessor :time
+
+    def call
+      @time
+    end
+
+    def advance(seconds)
+      @time += seconds
+    end
+  end
+
+  class ExpiringConnection
+    attr_reader :closed_count
+
+    def initialize(connections)
+      @connections = connections
+      @closed_count = 0
+      @connections << self
+    end
+
+    def close
+      @closed_count += 1
+      @connections.delete(self)
+    end
+  end
+
   def use_pool(pool, size)
     Array.new(size) {
       Thread.new do
@@ -510,6 +541,89 @@ class TestConnectionPool < Minitest::Test
 
     assert_equal ["inner", "outer", "other"], recorder.calls
     refute_same @inner, pool.checkout
+  end
+
+  def test_continually_busy_connection_is_retired_after_checkin
+    clock = FakeClock.new
+    connections = []
+    pool = ConnectionPool.new(
+      size: 1,
+      max_lifetime: 10,
+      max_lifetime_jitter: 0,
+      clock: clock.method(:call)
+    ) { ExpiringConnection.new(connections) }
+
+    original = nil
+    pool.with do |connection|
+      original = connection
+      clock.advance(5)
+      pool.with { |nested| assert_same original, nested }
+      refute original.closed_count.positive?
+      clock.advance(6)
+      pool.with { |nested| assert_same original, nested }
+      refute original.closed_count.positive?
+    end
+
+    assert_equal 1, original.closed_count
+    assert_equal 1, pool.available
+    refute_same original, pool.checkout
+  end
+
+  def test_with_does_not_interrupt_expiring_call
+    clock = FakeClock.new
+    connections = []
+    pool = ConnectionPool.new(
+      size: 1,
+      max_lifetime: 10,
+      max_lifetime_jitter: 0,
+      clock: clock.method(:call)
+    ) { ExpiringConnection.new(connections) }
+
+    original = nil
+    result = pool.with do |connection|
+      original = connection
+      clock.advance(11)
+      refute connection.closed_count.positive?
+      :finished
+    end
+
+    assert_equal :finished, result
+    assert_equal 1, original.closed_count
+    assert_equal 1, pool.available
+  end
+
+  def test_expired_idle_connection_is_closed_before_delivery
+    clock = FakeClock.new
+    connections = []
+    pool = ConnectionPool.new(
+      size: 1,
+      max_lifetime: 10,
+      max_lifetime_jitter: 0,
+      clock: clock.method(:call)
+    ) { ExpiringConnection.new(connections) }
+
+    original = pool.checkout
+    pool.checkin
+    clock.advance(11)
+
+    replacement = pool.checkout
+
+    refute_same original, replacement
+    assert_equal 1, original.closed_count
+    assert_same replacement, connections.first
+  end
+
+  def test_creation_failure_does_not_fill_the_pool
+    attempts = 0
+    pool = ConnectionPool.new(size: 1) do
+      attempts += 1
+      raise "failure" if attempts == 1
+      :connected
+    end
+
+    assert_raises(RuntimeError) { pool.checkout }
+    assert_equal 1, pool.available
+    assert_equal :connected, pool.checkout
   end
 
   def test_shutdown_is_executed_for_all_connections

@@ -1,5 +1,37 @@
 require_relative "helper"
 
+class FakeClock
+  attr_accessor :time
+
+  def initialize(time = 1)
+    @time = time
+  end
+
+  def call
+    @time
+  end
+
+  def advance(seconds)
+    @time += seconds
+  end
+end
+
+class CloseableObject
+  attr_reader :closed_count
+
+  def initialize
+    @closed_count = 0
+  end
+
+  def close
+    @closed_count += 1
+  end
+
+  def closed?
+    @closed_count.positive?
+  end
+end
+
 class TestConnectionPoolTimedStack < Minitest::Test
   def setup
     @stack = ConnectionPool::TimedStack.new { Object.new }
@@ -85,6 +117,59 @@ class TestConnectionPoolTimedStack < Minitest::Test
 
     refute_empty stack
     assert_equal 2, stack.length
+  end
+
+  def test_max_lifetime_starts_after_creation_completes
+    clock = FakeClock.new(1)
+    stack = ConnectionPool::TimedStack.new(
+      size: 1,
+      max_lifetime: 10,
+      max_lifetime_jitter: 0,
+      clock: clock.method(:call)
+    ) do
+      clock.advance(5)
+      CloseableObject.new
+    end
+
+    connection = stack.pop
+
+    clock.advance(9)
+    stack.push(connection)
+    assert_same connection, stack.pop
+
+    stack.push(connection)
+    clock.advance(1)
+
+    replacement = stack.pop
+    refute_same connection, replacement
+    assert_equal 1, connection.closed_count
+  end
+
+  def test_max_lifetime_jitter_is_injected
+    clock = FakeClock.new
+    jitter_calls = 0
+    jitter = proc do
+      jitter_calls += 1
+      jitter_calls == 1 ? 5 : 0
+    end
+    stack = ConnectionPool::TimedStack.new(
+      size: 2,
+      max_lifetime: 10,
+      jitter: jitter,
+      clock: clock.method(:call)
+    ) { CloseableObject.new }
+
+    first = stack.pop
+    second = stack.pop
+    stack.push(first)
+    stack.push(second)
+
+    clock.advance(10)
+
+    delivered = stack.pop
+
+    assert_same first, delivered
+    assert_equal 1, second.closed_count
   end
 
   def test_pop

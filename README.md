@@ -119,6 +119,31 @@ Thread.new do
 end
 ```
 
+## Maximum Lifetime
+
+Some servers require connections to be rebuilt periodically.
+Use `max_lifetime` to limit how long a connection may be reused, measured from successful creation.
+The age is checked when a connection is checked out.
+A connection already in use is never forcibly closed; if it is too old at checkout or return time, it is retired and closed only after the current call finishes.
+
+```ruby
+pool = ConnectionPool.new(max_lifetime: 3600) { Redis.new }
+```
+
+Add `max_lifetime_jitter` to spread out reconnects.
+It may be a number of seconds or a callable that returns the number of seconds to add for each new connection.
+A monotonic clock and closing callable can also be injected, which is useful for deterministic tests.
+Retired connections are closed with `#close` when that method is available, or with the configured `close` callback.
+
+```ruby
+pool = ConnectionPool.new(
+  max_lifetime: 3600,
+  max_lifetime_jitter: 300,
+  clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+  close: :close
+) { Redis.new }
+```
+
 ## Discarding Connections
 
 You can discard connections in the ConnectionPool instance to remove connections that are broken and can't be repaired. 

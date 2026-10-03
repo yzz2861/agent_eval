@@ -3,6 +3,8 @@
 3.0.2
 ------
 
+- Add optional `max_lifetime` and `max_lifetime_jitter` options for periodic connection rebuilding.
+- Support injectable clocks and close callbacks for deterministic lifetime tests and cleanup.
 - Support :name keyword for backwards compatibility [#210]
 
 3.0.1

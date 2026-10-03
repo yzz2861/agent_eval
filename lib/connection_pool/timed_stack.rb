@@ -22,7 +22,9 @@ class ConnectionPool::TimedStack
   ##
   # Creates a new pool with +size+ connections that are created from the given
   # +block+.
-  def initialize(size: 0, &block)
+  def initialize(size: 0, max_lifetime: nil, max_age: nil,
+    max_lifetime_jitter: nil, lifetime_jitter: nil, max_age_jitter: nil, jitter: nil,
+    clock: nil, close: nil, &block)
     @create_block = block
     @created = 0
     @que = []
@@ -30,6 +32,26 @@ class ConnectionPool::TimedStack
     @mutex = Thread::Mutex.new
     @resource = Thread::ConditionVariable.new
     @shutdown_block = nil
+    @metadata = {}.compare_by_identity
+    @max_lifetime = max_lifetime || max_age
+    @max_lifetime_jitter = max_lifetime_jitter || lifetime_jitter || max_age_jitter || jitter
+    @clock = clock
+    @close = close
+
+    if @max_lifetime
+      @max_lifetime = Float(@max_lifetime)
+      raise ArgumentError, "max_lifetime cannot be negative" if @max_lifetime.negative?
+    end
+
+    unless @max_lifetime_jitter.nil? || @max_lifetime_jitter.respond_to?(:call)
+      @max_lifetime_jitter = Float(@max_lifetime_jitter)
+      raise ArgumentError, "max_lifetime_jitter cannot be negative" if @max_lifetime_jitter.negative?
+    end
+
+    raise ArgumentError, "clock must respond to #call" if @clock && !@clock.respond_to?(:call)
+    unless @close.nil? || @close == false || @close.respond_to?(:call) || @close.is_a?(Symbol)
+      raise ArgumentError, "close must respond to #call, be a Symbol, or be false"
+    end
   end
 
   ##
@@ -39,6 +61,7 @@ class ConnectionPool::TimedStack
     @mutex.synchronize do
       if @shutdown_block
         @created -= 1 unless @created == 0
+        @metadata.delete(obj)
         @shutdown_block.call(obj)
       else
         store_connection obj, **kwargs
@@ -65,7 +88,11 @@ class ConnectionPool::TimedStack
       loop do
         raise ConnectionPool::PoolShuttingDownError if @shutdown_block
         if (conn = try_fetch_connection(**kwargs))
-          return conn
+          if expired_locked?(conn)
+            retire_locked(conn)
+          else
+            return conn
+          end
         end
 
         connection = try_create(**kwargs)
@@ -140,9 +167,32 @@ class ConnectionPool::TimedStack
 
   ##
   # Reduce the created count
-  def decrement_created
+  def decrement_created(connection = nil)
     @mutex.synchronize do
       @created -= 1 unless @created == 0
+      @metadata.delete(connection) if connection
+      @resource.broadcast
+    end
+  end
+
+  def expired?(connection)
+    @mutex.synchronize do
+      expires_at = @metadata[connection]&.last
+      !expires_at.nil? && current_time >= expires_at
+    end
+  end
+
+  def retire(connection)
+    @mutex.synchronize do
+      return unless @metadata.key?(connection)
+
+      @created -= 1 unless @created == 0
+      @metadata.delete(connection)
+      if @shutdown_block
+        @shutdown_block.call(connection)
+      else
+        close_connection(connection)
+      end
       @resource.broadcast
     end
   end
@@ -150,7 +200,11 @@ class ConnectionPool::TimedStack
   private
 
   def current_time
-    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    if @clock
+      @clock.call
+    else
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
   end
 
   ##
@@ -161,6 +215,11 @@ class ConnectionPool::TimedStack
   # their stack.
   def try_fetch_connection(**kwargs)
     connection_stored?(**kwargs) && fetch_connection(**kwargs)
+  end
+
+  def expired_locked?(connection)
+    expires_at = @metadata[connection]&.last
+    !expires_at.nil? && current_time >= expires_at
   end
 
   ##
@@ -186,6 +245,7 @@ class ConnectionPool::TimedStack
   def shutdown_connections(**kwargs)
     while (conn = try_fetch_connection(**kwargs))
       @created -= 1 unless @created == 0
+      @metadata.delete(conn)
       @shutdown_block.call(conn)
     end
   end
@@ -199,6 +259,7 @@ class ConnectionPool::TimedStack
     return unless idle_connections?(idle_seconds)
 
     @created -= 1 unless @created == 0
+    @metadata.delete(@que.first.first)
 
     # Most active elements are at the tail of the array.
     # Most idle will be at the head so `shift` rather than `pop`.
@@ -221,6 +282,7 @@ class ConnectionPool::TimedStack
   #
   # This method must return +obj+ to the stack.
   def store_connection(obj, **_kwargs)
+    register_connection(obj) unless @metadata.key?(obj)
     @que.push [obj, current_time]
   end
 
@@ -232,8 +294,56 @@ class ConnectionPool::TimedStack
   def try_create(**_kwargs)
     unless @created == @max
       object = @create_block.call
+      register_connection(object)
       @created += 1
       object
     end
+  end
+
+  def register_connection(connection)
+    created_at = current_time
+    expires_at = created_at + @max_lifetime + jitter_amount if @max_lifetime
+    @metadata[connection] = [created_at, expires_at]
+  end
+
+  def jitter_amount
+    return 0 unless @max_lifetime_jitter
+
+    if @max_lifetime_jitter.respond_to?(:call)
+      amount = Float(@max_lifetime_jitter.call)
+      raise ArgumentError, "max_lifetime_jitter cannot be negative" if amount.negative?
+      amount
+    else
+      rand(@max_lifetime_jitter)
+    end
+  end
+
+  def retire_locked(connection)
+    @created -= 1 unless @created == 0
+    @metadata.delete(connection)
+    if @shutdown_block
+      @shutdown_block.call(connection)
+    else
+      close_connection(connection)
+    end
+    @resource.broadcast
+  end
+
+  def close_connection(connection)
+    return if @close == false
+
+    if @close.respond_to?(:call)
+      @close.call(connection)
+    elsif @close.is_a?(Symbol)
+      connection.public_send(@close)
+    elsif automatically_closes?(connection)
+      connection.close
+    end
+  end
+
+  def automatically_closes?(connection)
+    connection.respond_to?(:close)
+  rescue StandardError
+    false
   end
 end
