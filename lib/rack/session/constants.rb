@@ -9,5 +9,7 @@ module Rack
     RACK_SESSION                        = 'rack.session'
     RACK_SESSION_OPTIONS                = 'rack.session.options'
     RACK_SESSION_UNPACKED_COOKIE_DATA   = 'rack.session.unpacked_cookie_data'
+    RACK_SESSION_VERIFIED_COOKIE_DATA   = 'rack.session.verified_cookie_data'
+    RACK_SESSION_SKIP_IDLE_RENEWAL      = 'rack.session.skip_idle_renewal'
   end
 end

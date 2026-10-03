@@ -89,6 +89,9 @@ module Rack
     #
 
     class Cookie < Abstract::PersistedSecure
+      CREATED_AT_KEY = "__rack_session.created_at"
+      LAST_ACCESSED_AT_KEY = "__rack_session.last_accessed_at"
+
       # Encode session cookies as Base64
       class Base64
         def encode(str)
@@ -196,14 +199,21 @@ module Rack
         @coder = options[:coder] ||= Base64::Marshal.new
 
         super(app, options.merge!(cookie_only: true))
+        @clock_high_water = Hash.new
       end
 
       private
 
       def find_session(req, sid)
         data = unpacked_cookie_data(req)
+        unless data.is_a?(::Hash) && fresh_session?(req, data)
+          forget_cookie_clock(req, data["session_id"]) if data.is_a?(::Hash)
+          data = {}
+          req.set_header(RACK_SESSION_UNPACKED_COOKIE_DATA, data)
+        end
+        remember_cookie_clock(req, data["session_id"], now) if data.is_a?(::Hash) && data["session_id"]
         data = persistent_session_id!(data)
-        [data["session_id"], data]
+        [data["session_id"], application_session_data(data)]
       end
 
       def extract_session_id(request)
@@ -219,6 +229,7 @@ module Rack
             encryptors.each do |encryptor|
               begin
                 session_data = encryptor.decrypt(cookie_data)
+                request.set_header(RACK_SESSION_VERIFIED_COOKIE_DATA, true) if session_data
                 break
               rescue Rack::Session::Encryptor::Error => error
                 request.env[Rack::RACK_ERRORS].puts "Session cookie encryptor error: #{error.message}"
@@ -236,6 +247,7 @@ module Rack
 
               # Decode using legacy HMAC decoder
               session_data = @legacy_hmac_coder.decode(session_data)
+              request.set_header(RACK_SESSION_VERIFIED_COOKIE_DATA, true) if session_data
 
             elsif !session_data && encryptors.empty? && coder
               # Use the coder option, which has the potential to be very unsafe.
@@ -265,19 +277,32 @@ module Rack
       end
 
       def write_session(req, session_id, session, options)
+        previous_data = unpacked_cookie_data(req)
+        timestamps = refreshed_cookie_timestamps(req, session_id, previous_data, options)
         session = session.merge("session_id" => session_id)
+
+        if manages_session_time?(options)
+          session = session.merge(
+            CREATED_AT_KEY => timestamps[0],
+            LAST_ACCESSED_AT_KEY => timestamps[1]
+          )
+        end
+
         session_data = encode_session_data(session)
 
         if session_data.size > (4096 - @key.size)
           req.get_header(RACK_ERRORS).puts("Warning! Rack::Session::Cookie data size exceeds 4K.")
           nil
+        elsif reusable_cookie?(req, session_id, session, previous_data, timestamps, options)
+          Cookie::SessionId.new(session_id, req.cookies[@key])
         else
-          SessionId.new(session_id, session_data)
+          Cookie::SessionId.new(session_id, session_data)
         end
       end
 
       def delete_session(req, session_id, options)
         # Nothing to do here, data is in the client
+        @clock_high_water.delete(cookie_session_id(session_id)) if session_id
         generate_sid unless options[:drop]
       end
 
@@ -297,6 +322,113 @@ module Rack
         else
           encryptors.first.encrypt(session)
         end
+      end
+
+      def timestamps_for(req, sid, data, current_time)
+        [data[CREATED_AT_KEY], data[LAST_ACCESSED_AT_KEY]]
+      end
+
+      def session_expired?(req, sid, session, options, current_time = now)
+        return false unless manages_session_time?(options)
+
+        created_at, last_accessed_at = timestamps_for(req, sid, session, current_time)
+        return true unless recorded_time_valid?(created_at, current_time, req)
+        return true unless recorded_time_valid?(last_accessed_at, current_time, req)
+        return true if created_at > last_accessed_at
+
+        if sid && req.get_header(RACK_SESSION_VERIFIED_COOKIE_DATA)
+          sid_key = cookie_session_id(sid)
+          observed_time = @clock_high_water[sid_key] || current_time
+        else
+          observed_time = current_time
+        end
+
+        if (idle_timeout = options[:idle_timeout])
+          return true if current_time >= last_accessed_at + idle_timeout
+          return true if observed_time > last_accessed_at + idle_timeout
+        end
+
+        if (absolute_timeout = options[:absolute_timeout])
+          return true if current_time - created_at >= absolute_timeout
+        end
+
+        false
+      end
+
+      def future_recorded_time_allowed?(req, value, current_time)
+        !!req.get_header(RACK_SESSION_VERIFIED_COOKIE_DATA)
+      end
+
+      def fresh_session?(req, data)
+        sid = data["session_id"]
+        return true unless sid
+        !session_expired?(req, sid, data, @default_options)
+      end
+
+      def application_session_data(data)
+        data.reject do |key, _|
+          key == CREATED_AT_KEY || key == LAST_ACCESSED_AT_KEY
+        end
+      end
+
+      def refreshed_cookie_timestamps(req, sid, data, options)
+        current_time = now
+        timestamps = timestamps_for(req, sid, data, current_time)
+
+        if skip_idle_renewal?(req, options)
+          unless valid_session_time?(timestamps[0]) && valid_session_time?(timestamps[1])
+            timestamps = [current_time, current_time]
+          end
+          timestamps
+        else
+          unless valid_session_time?(timestamps[0]) && valid_session_time?(timestamps[1])
+            timestamps = [current_time, current_time]
+          else
+            timestamps = [timestamps[0], current_time]
+          end
+          remember_cookie_clock(req, sid, current_time)
+          timestamps
+        end
+      end
+
+      def reusable_cookie?(req, session_id, session, previous_data, timestamps, options)
+        raw_cookie = req.cookies[@key]
+        return false unless raw_cookie
+        return false unless cookie_session_id(previous_data["session_id"]) == cookie_session_id(session_id)
+        return true if skip_idle_renewal?(req, options)
+        return false unless manages_session_time?(options)
+
+        previous_timestamps = timestamps_for(req, session_id, previous_data, now)
+        return false unless application_session_data(previous_data) == application_session_data(session)
+        return false unless valid_session_time?(previous_timestamps[0])
+        return false unless previous_timestamps[0] == timestamps[0]
+
+        if timestamps[1] == previous_timestamps[1]
+          true
+        elsif (throttle = options[:renew_cookie_after])
+          now - previous_timestamps[1] <= throttle
+        else
+          false
+        end
+      end
+
+      def manages_session_time?(options)
+        !!options[:idle_timeout] || !!options[:absolute_timeout]
+      end
+
+      def cookie_session_id(session_id)
+        session_id.respond_to?(:public_id) ? session_id.public_id : session_id.to_s
+      end
+
+      def remember_cookie_clock(req, sid, current_time)
+        return unless req.get_header(RACK_SESSION_VERIFIED_COOKIE_DATA)
+        key = cookie_session_id(sid)
+        previous_seen = @clock_high_water[key]
+        @clock_high_water[key] = previous_seen ? [current_time, previous_seen].max : current_time
+      end
+
+      def forget_cookie_clock(req, sid)
+        @clock_high_water.delete(cookie_session_id(sid)) if sid
       end
 
       # Were consider "secure" if:

@@ -217,6 +217,18 @@ module Rack
       #   'rack.session'
       # * :path, :domain, :expire_after, :secure, :httponly, :partitioned and :same_site set
       #   the related cookie options as by Rack::Response#set_cookie
+      # * :idle_timeout is the maximum number of seconds between requests.
+      #   Server-maintained session metadata is checked on every request.
+      # * :absolute_timeout is the maximum number of seconds after initial
+      #   authentication, regardless of activity. Set env
+      #   'rack.session.skip_idle_renewal' to true for read-only requests such
+      #   as polling endpoints that must not extend the idle deadline.
+      # * :renew_cookie_after limits how often an unchanged cookie is rewritten
+      #   with a refreshed idle deadline. Expiry decisions still use the latest
+      #   server-written metadata, so throttling can only make expiry stricter.
+      # * :clock is called to obtain the current server time and may be replaced
+      #   with a fake clock in tests. Client-supplied timestamps are never used
+      #   as the current time.
       # * :skip will not a set a cookie in the response nor update the session state
       # * :defer will not set a cookie in the response but still update the session
       #   state if it is used with a backend
@@ -242,6 +254,9 @@ module Rack
           path: '/',
           domain: nil,
           expire_after: nil,
+          idle_timeout: nil,
+          absolute_timeout: nil,
+          renew_cookie_after: nil,
           secure: false,
           httponly: true,
           partitioned: false,
@@ -261,6 +276,7 @@ module Rack
           @assume_ssl = @default_options.delete(:assume_ssl)
           @cookie_only = @default_options.delete(:cookie_only)
           @same_site = @default_options.delete(:same_site)
+          @clock = @default_options.delete(:clock) || method(:default_clock)
           initialize_sid
         end
 
@@ -365,7 +381,7 @@ module Rack
         end
 
         def force_options?(options)
-          options.values_at(:max_age, :renew, :drop, :defer, :expire_after).any?
+          options.values_at(:max_age, :renew, :drop, :defer, :expire_after, :idle_timeout, :absolute_timeout).any?
         end
 
         def security_matches?(request, options)
@@ -415,6 +431,69 @@ module Rack
 
         def cookie_value(data)
           data
+        end
+
+        # Return [created_at, last_accessed_at] times as numeric epoch values.
+        # Times are maintained by the server; returned client data is validated.
+        def session_timestamps(req, sid, session)
+          timestamps_for(req, sid, session, now)
+        end
+
+        # Backends override this to read timestamp metadata from their storage.
+        def timestamps_for(req, sid, session, current_time)
+          [current_time, current_time]
+        end
+
+        def session_expired?(req, sid, session, options, current_time = now)
+          return false unless manages_session_time?(options)
+
+          created_at, last_accessed_at = timestamps_for(req, sid, session, current_time)
+          return true unless recorded_time_valid?(created_at, current_time, req)
+          return true unless recorded_time_valid?(last_accessed_at, current_time, req)
+          return true if created_at > last_accessed_at
+
+          if (idle_timeout = options[:idle_timeout])
+            return true if current_time - last_accessed_at >= idle_timeout
+          end
+
+          if (absolute_timeout = options[:absolute_timeout])
+            return true if current_time - created_at >= absolute_timeout
+          end
+
+          false
+        end
+
+        def skip_idle_renewal?(req, options = req.get_header(RACK_SESSION_OPTIONS))
+          !!req.get_header(RACK_SESSION_SKIP_IDLE_RENEWAL) || !!options[:skip_idle_renewal]
+        end
+
+        def now
+          time_to_epoch(@clock.call)
+        end
+
+        def default_clock
+          Time.now
+        end
+
+        def time_to_epoch(time)
+          time.to_f
+        end
+
+        def valid_session_time?(value)
+          value.is_a?(Numeric) && value.finite? && value >= 0
+        end
+
+        def recorded_time_valid?(value, current_time, req)
+          valid_session_time?(value) &&
+            (value <= current_time || future_recorded_time_allowed?(req, value, current_time))
+        end
+
+        def future_recorded_time_allowed?(req, value, current_time)
+          false
+        end
+
+        def manages_session_time?(options)
+          !!options[:idle_timeout] || !!options[:absolute_timeout]
         end
 
         # Sets the cookie back to the client with session id. We skip the cookie
