@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- New optional `ErrorTree` error carrier for `Validated`. It keeps errors keyed by paths that distinguish object keys from array indices, allows several errors on the same path, and prefixes a whole subtree with `#prepend`. Trees merge with `+` in a stable order without mutating the inputs. `List<Validated>#traverse` now prefixes `ErrorTree` errors with the element index while plain array errors keep working as before.
+
 ### Changed
 
 ### Deprecated

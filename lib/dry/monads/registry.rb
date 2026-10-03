@@ -15,6 +15,7 @@ module Dry
       task: "Task",
       try: "Try",
       validated: "Validated",
+      error_tree: "ErrorTree",
       result: [
         "Result",
         "Result::Fixed"

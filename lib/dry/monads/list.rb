@@ -268,10 +268,10 @@ module Dry
         cons = type.pure { |list, i| list + List.pure(i) }
         with = proc || block || Traverse[type]
 
-        foldl(type.pure(EMPTY)) do |acc, el|
+        value.each_with_index.reduce(type.pure(EMPTY)) do |acc, (el, index)|
           cons
             .apply(acc)
-            .apply { with.(el) }
+            .apply { Traverse.call(with, el, index) }
         end
       end
 

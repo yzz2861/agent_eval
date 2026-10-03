@@ -338,6 +338,69 @@ RSpec.describe(Dry::Monads::List) do
       end
     end
 
+    context "list of validated values" do
+      validated = Dry::Monads::Validated
+      valid = validated::Valid.method(:new)
+      invalid = validated::Invalid.method(:new)
+      error_tree = Dry::Monads::ErrorTree
+      index = error_tree::Index
+
+      it "keeps wrapping plain errors with a list" do
+        traversed = list::Validated[
+          invalid.(:no_email), invalid.(:no_name), valid.(1)
+        ].traverse
+
+        expect(traversed).to eql(invalid.(list[:no_email, :no_name]))
+      end
+
+      it "prefixes error trees with the element index" do
+        first = error_tree.new({ [:street] => :blank })
+        second = error_tree.new({ [:city] => [:blank], [:zip] => :short })
+
+        traversed = list::Validated[
+          invalid.(first), valid.("fine"), invalid.(second)
+        ].traverse
+
+        expect(traversed).to eql(
+          invalid.(
+            error_tree.new(
+              {
+                [index[0], :street] => :blank,
+                [index[2], :city] => :blank,
+                [index[2], :zip] => :short
+              }
+            )
+          )
+        )
+      end
+
+      it "keeps several errors of the same element together" do
+        tree = error_tree.new({ [:street] => [:blank, :short] })
+
+        traversed = list::Validated[invalid.(tree)].traverse
+
+        expect(traversed).to eql(
+          invalid.(error_tree.new({ [index[0], :street] => [:blank, :short] }))
+        )
+      end
+
+      it "passes the index to a user block that accepts it" do
+        traversed = list[1, 2].typed(result).traverse do |value, idx|
+          success.([value, idx])
+        end
+
+        expect(traversed).to eql(success.(list[[1, 0], [2, 1]]))
+      end
+
+      it "still calls a single-argument lambda with the element only" do
+        traversed = list[1, 2].typed(result).traverse(
+          -> value { success.(value + 1) }
+        )
+
+        expect(traversed).to eql(success.(list[2, 3]))
+      end
+    end
+
     it "raises an error for untyped list" do
       expect { subject.traverse }.to raise_error(StandardError, /Cannot traverse/)
     end
