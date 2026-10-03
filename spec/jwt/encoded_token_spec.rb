@@ -126,6 +126,13 @@ RSpec.describe JWT::EncodedToken do
 
         expect { token.verify!(signature: { algorithm: 'HS256', key: 'secret' }) }.to raise_error(JWT::VerificationError, 'Signature verification failed')
       end
+
+      it 'fails signature verification after replacement' do
+        token.encoded_payload = other_encoded_payload
+
+        expect(token.valid_signature?(algorithm: 'HS256', key: 'secret')).to be(false)
+        expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token signature before accessing the payload')
+      end
     end
 
     context 'when the payload is reassigned to a matching payload' do
@@ -148,6 +155,100 @@ RSpec.describe JWT::EncodedToken do
 
         expect(token.payload).to eq(payload)
       end
+    end
+
+    context 'when the detached payload is reset after verification' do
+      let(:encoded_token) { detached_payload_token.jwt }
+
+      before do
+        token.encoded_payload = detached_payload_token.encoded_payload
+        token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+        token.encoded_payload = ''
+      end
+
+      it 'invalidates the token until the detached payload is restored' do
+        expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token signature before accessing the payload')
+        expect(token.valid_signature?(algorithm: 'HS256', key: 'secret')).to be(false)
+        expect { token.unverified_payload }.to raise_error(JWT::MalformedTokenError, 'Encoded payload is empty')
+
+        token.encoded_payload = detached_payload_token.encoded_payload
+
+        expect(token.valid_signature?(algorithm: 'HS256', key: 'secret')).to be(true)
+        expect(token.valid_claims?).to be(true)
+        expect(token.payload).to eq(payload)
+      end
+    end
+
+    context 'when the caller mutates the assigned string' do
+      let(:encoded_token) { detached_payload_token.jwt }
+
+      it 'keeps the token payload independent of the caller-owned string' do
+        replacement = detached_payload_token.encoded_payload.dup
+        token.encoded_payload = replacement
+
+        replacement.replace('changed before verification')
+
+        expect { token.verify!(signature: { algorithm: 'HS256', key: 'secret' }) }.not_to raise_error
+
+        replacement.replace('changed after verification')
+
+        expect(token.encoded_payload).to eq(detached_payload_token.encoded_payload)
+        expect(token.payload).to eq(payload)
+      end
+    end
+  end
+
+  describe 'decoded state immutability' do
+    let(:payload) do
+      {
+        'pay' => 'load',
+        'roles' => ['admin', { 'id' => 1 }],
+        'meta' => { 'tags' => ['ruby'] }
+      }
+    end
+    let(:header) do
+      {
+        'list' => ['header-value'],
+        'custom' => { 'nested' => ['value'] }
+      }
+    end
+
+    before { token.verify!(signature: { algorithm: 'HS256', key: 'secret' }) }
+
+    it 'freezes the payload and nested arrays' do
+      expect(token.payload).to be_frozen
+      expect(token.payload['roles']).to be_frozen
+      expect(token.payload.dig('roles', 1)).to be_frozen
+      expect(token.payload.dig('meta', 'tags')).to be_frozen
+
+      expect { token.payload['roles'] << 'superuser' }.to raise_error(FrozenError)
+      expect { token.unverified_payload['meta']['tags'] << 'jwt' }.to raise_error(FrozenError)
+      expect(token.payload).to eq(payload)
+    end
+
+    it 'freezes the header and nested arrays' do
+      expect(token.header).to be_frozen
+      expect(token.header['list']).to be_frozen
+      expect(token.header.dig('custom', 'nested')).to be_frozen
+
+      expect { token.header['custom']['nested'] << 'changed' }.to raise_error(FrozenError)
+      expect(token.header.dig('custom', 'nested')).to eq(['value'])
+      expect(token.payload).to eq(payload)
+    end
+  end
+
+  describe 'caller-owned input strings' do
+    it 'does not allow mutating the original JWT string to affect the token' do
+      jwt_string = encoded_token.dup
+      token = described_class.new(jwt_string)
+      token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+
+      jwt_string.replace('malformed')
+
+      expect(token.jwt).to eq(encoded_token)
+      expect(token.jwt).to be_frozen
+      expect(token.payload).to eq(payload)
+      expect(token.valid_signature?(algorithm: 'HS256', key: 'secret')).to be(true)
     end
   end
 
