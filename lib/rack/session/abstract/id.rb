@@ -225,6 +225,22 @@ module Rack
       #   :defer is set, it will be overridden and the cookie will be set.
       # * :sidbits sets the number of bits in length that a generated session
       #   id will be.
+      # * :idle_timeout expires the session after this many seconds of
+      #   inactivity, regardless of the cookie lifetime.
+      # * :absolute_timeout expires the session this many seconds after it
+      #   was created, regardless of activity, forcing re-authentication.
+      # * :touch_throttle throttles how often (in seconds) the idle
+      #   timestamp is persisted again. Throttling only ever makes the idle
+      #   check stricter, never wider. Defaults to 60 seconds.
+      # * :clock is a callable returning the current time, used for the
+      #   timeout checks. Defaults to <tt>-> { Time.now }</tt>.
+      #
+      # Timestamps are generated and validated by the server; timestamps
+      # loaded from the store are rejected when they are malformed or dated
+      # suspiciously far into the future. A request may read the session
+      # without extending the idle timeout by setting
+      # <tt>env['rack.session.options'][:skip_touch] = true</tt> (e.g. for
+      # polling endpoints).
       #
       # These options can be set on a per request basis, at the location of
       # <tt>env['rack.session.options']</tt>. Additionally the id of the
@@ -249,8 +265,18 @@ module Rack
           renew: false,
           sidbits: 128,
           cookie_only: true,
-          secure_random: ::SecureRandom
+          secure_random: ::SecureRandom,
+          idle_timeout: nil,
+          absolute_timeout: nil,
+          touch_throttle: 60,
+          clock: nil
         }.freeze
+
+        # Timestamps loaded from the session store that are dated further
+        # than this many seconds into the future are not trusted; the
+        # session is treated as expired. This absorbs small clock
+        # adjustments while rejecting forged or corrupt timestamps.
+        MAX_CLOCK_SKEW = 60
 
         attr_reader :key, :default_options, :sid_secure, :same_site
 
@@ -261,6 +287,10 @@ module Rack
           @assume_ssl = @default_options.delete(:assume_ssl)
           @cookie_only = @default_options.delete(:cookie_only)
           @same_site = @default_options.delete(:same_site)
+          @idle_timeout = @default_options.delete(:idle_timeout)
+          @absolute_timeout = @default_options.delete(:absolute_timeout)
+          @touch_throttle = @default_options.delete(:touch_throttle) || 60
+          @clock = @default_options.delete(:clock) || -> { ::Time.now }
           initialize_sid
         end
 
@@ -320,7 +350,26 @@ module Rack
         def load_session(req)
           sid = current_session_id(req)
           sid, session = find_session(req, sid)
-          [sid, session || {}]
+          session ||= {}
+
+          if session_timeouts_enabled?
+            session = session.dup
+            meta = session.delete(RACK_SESSION_META)
+            now = session_now
+
+            if meta && session_meta_expired?(meta, now)
+              # The session has expired: drop the stale data and start over
+              # with a fresh, empty session, so expired data is never
+              # exposed to the application as a valid session.
+              sid = delete_session(req, sid, {}) || generate_sid
+              session = {}
+              meta = nil
+            end
+
+            req.set_header(RACK_SESSION_META, meta || new_session_meta(now))
+          end
+
+          [sid, session]
         end
 
         # Extract session id from request object.
@@ -373,6 +422,65 @@ module Rack
           request.ssl? || @assume_ssl == true
         end
 
+        def session_timeouts_enabled?
+          @idle_timeout || @absolute_timeout
+        end
+
+        def session_now
+          @clock.call.to_f
+        end
+
+        def new_session_meta(now)
+          {"created_at" => now, "touched_at" => now}
+        end
+
+        # Whether the persisted session timestamps prove the session is
+        # expired. Timestamps are only trusted when they are numeric and
+        # not dated suspiciously far into the future; anything else is
+        # treated as expired rather than handed to the application.
+
+        def session_meta_expired?(meta, now)
+          return true unless meta.is_a?(Hash)
+
+          created_at = meta["created_at"]
+          touched_at = meta["touched_at"]
+
+          return true unless created_at.is_a?(Numeric) && touched_at.is_a?(Numeric)
+          return true if created_at > now + MAX_CLOCK_SKEW
+          return true if touched_at > now + MAX_CLOCK_SKEW
+
+          return true if @absolute_timeout && now - created_at >= @absolute_timeout
+          return true if @idle_timeout && now - touched_at >= @idle_timeout
+
+          false
+        end
+
+        # Computes the timestamps to persist when the session is committed.
+        # The created timestamp is preserved unless the session is renewed
+        # (e.g. after authentication), which starts a fresh absolute
+        # window. The touched timestamp only advances when the request did
+        # not opt out via :skip_touch and the throttle interval has
+        # elapsed; it never moves backwards.
+
+        def finalize_session_meta(req, meta)
+          now = session_now
+          options = req.session_options
+
+          if options[:renew]
+            return new_session_meta(now)
+          end
+
+          touched_at = meta["touched_at"]
+
+          unless options[:skip_touch]
+            if now - touched_at >= @touch_throttle
+              touched_at = now
+            end
+          end
+
+          {"created_at" => meta["created_at"], "touched_at" => touched_at}
+        end
+
         # Acquires the session from the environment and the session id from
         # the session options and passes them to #write_session. If successful
         # and the :defer option is not true, a cookie will be added to the
@@ -392,6 +500,10 @@ module Rack
           session.send(:load!) unless loaded_session?(session)
           session_id ||= session.id
           session_data = session.to_hash.delete_if { |k, v| v.nil? }
+
+          if session_timeouts_enabled? && (meta = req.get_header(RACK_SESSION_META))
+            session_data[RACK_SESSION_META] = finalize_session_meta(req, meta)
+          end
 
           if not data = write_session(req, session_id, session_data, options)
             req.get_header(RACK_ERRORS).puts("Warning! #{self.class.name} failed to save session. Content dropped.")
