@@ -14,6 +14,8 @@ class TCLinkedTimezone < Minitest::Test
     attr_reader :local_time
     attr_reader :to
     attr_reader :from
+    attr_reader :local_start
+    attr_reader :local_end
 
     def initialize(identifier, no_local_periods = false)
       super()
@@ -40,6 +42,12 @@ class TCLinkedTimezone < Minitest::Test
       raise ArgumentError, 'linked zone exception: nil' unless local_time
       @local_time = local_time
       @periods_for_local_result
+    end
+
+    def local_to_utc_ranges(local_start, local_end = nil)
+      @local_start = local_start
+      @local_end = local_end
+      ['linked result']
     end
 
     def transitions_up_to(to, from = nil)
@@ -135,6 +143,20 @@ class TCLinkedTimezone < Minitest::Test
         assert_same(linked_tz.transitions_up_to_result, tz.transitions_up_to(to, from))
         assert_same(to, linked_tz.to)
         assert_same(from, linked_tz.from)
+      end
+    end
+  end
+
+  def test_local_to_utc_ranges
+    stub_timezone_get do |linked_tz|
+      time_types_test do |h|
+        tz = LinkedTimezone.new(DataSources::LinkedTimezoneInfo.new('Test/Zone', 'Test/Linked'))
+        start_time = h.time(2013, 1, 1, 0, 0, 0, Rational(1, 10), 0)
+        end_time = h.time(2013, 1, 2, 0, 0, 0, Rational(1, 10), 0)
+
+        assert_equal(linked_tz.local_to_utc_ranges(start_time, end_time), tz.local_to_utc_ranges(start_time, end_time))
+        assert_same(start_time, linked_tz.local_start)
+        assert_same(end_time, linked_tz.local_end)
       end
     end
   end

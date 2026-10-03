@@ -122,6 +122,17 @@ tz.local_to_utc(Time.new(2018, 2, 1, 7, 30, 0, '+01:00'))
 # => 2018-02-01 12:30:00 UTC
 ```
 
+A half-open range of local times can be converted with `local_to_utc_ranges`.
+Skipped local times are omitted and repeated local times are retained. For example,
+when clocks move back in New York on 2018-11-04, the local range
+`01:15...03:30` maps to two UTC ranges:
+
+```ruby
+tz.local_to_utc_ranges(Time.utc(2018, 11, 4, 1, 15)...Time.utc(2018, 11, 4, 3, 30))
+# => [2018-11-04 05:15:00 UTC...2018-11-04 06:00:00 UTC,
+#     2018-11-04 06:15:00 UTC...2018-11-04 08:30:00 UTC]
+```
+
 Information about the time zone can be obtained from returned local times:
 
 ```ruby

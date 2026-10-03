@@ -656,6 +656,74 @@ module TZInfo
       end
     end
 
+    # Converts a half-open range of local times to the equivalent UTC ranges.
+    #
+    # The UTC offsets of the local times are ignored. The result is an `Array`
+    # of half-open (`...`) `Range` objects sorted by their start times. Local
+    # times skipped when clocks move forward are omitted. When clocks move back,
+    # the parts of the range that occur twice are each included in the result.
+    #
+    # The method accepts either a half-open `Range` or separate start and end
+    # times:
+    #
+    #     tz.local_to_utc_ranges(local_start...local_end)
+    #     tz.local_to_utc_ranges(local_start, local_end)
+    #
+    # Result ranges use the same time representation (`Time`, `DateTime` or
+    # {Timestamp}) as the supplied local start time.
+    #
+    # @param local_start [Object] a half-open local `Range`, or the inclusive
+    #   start `Time`, `DateTime` or {Timestamp} when `local_end` is supplied.
+    # @param local_end [Object] the exclusive local end `Time`, `DateTime` or
+    #   {Timestamp}, or `nil` when `local_start` is a `Range`.
+    # @return [Array<Range>] the equivalent sorted, non-overlapping, half-open
+    #   UTC ranges. An empty `Array` is returned for an empty local range or a
+    #   range consisting entirely of skipped local time.
+    # @raise [ArgumentError] if the range or either endpoint is `nil`.
+    # @raise [ArgumentError] if a `Range` with an inclusive end is supplied.
+    # @raise [ArgumentError] unless the end time is greater than the start time.
+    def local_to_utc_ranges(local_start, local_end = nil)
+      raise ArgumentError, 'local_start must be specified' unless local_start
+
+      if local_start.kind_of?(Range)
+        raise ArgumentError, 'local range must be half-open (use ... rather than ..)' unless local_start.exclude_end?
+        local_end = local_start.end
+        local_start = local_start.begin
+      else
+        raise ArgumentError, 'local_end must be specified' unless local_end
+      end
+
+      raise ArgumentError, 'local_end must be specified' unless local_end
+
+      start_timestamp = Timestamp.for(local_start, :ignore)
+      end_timestamp = Timestamp.for(local_end, :ignore)
+      start_reference = local_start
+
+      comparison = start_timestamp <=> end_timestamp
+      raise ArgumentError, 'local_end must be greater than local_start' if comparison.nil? || comparison > 0
+      return [] if comparison == 0
+
+      query_start = start_timestamp.add_and_set_utc_offset(-86400, :utc)
+      query_end = end_timestamp.add_and_set_utc_offset(86400, :utc)
+      period = period_for_utc(query_start)
+      result = []
+
+      transitions_up_to(query_end, query_start).each do |transition|
+        transition_at = transition.at
+        next if transition_at <= query_start
+
+        add_local_to_utc_range(result, period, start_timestamp, end_timestamp, start_reference)
+        period = period_for_utc(transition_at)
+      end
+
+      add_local_to_utc_range(result, period, start_timestamp, end_timestamp, start_reference)
+      result.sort_by! {|utc_start, _utc_end| utc_start }
+      result.uniq!
+      result.collect do |utc_start, utc_end, start_reference|
+        utc_timestamp_to_reference(utc_start, start_reference)...utc_timestamp_to_reference(utc_end, start_reference)
+      end
+    end
+
     # Creates a `Time` object based on the given (Gregorian calendar) date and
     # time parameters. The parameters are interpreted as a local time in the
     # time zone. The result has the appropriate `utc_offset`, `zone` and
@@ -1155,6 +1223,51 @@ module TZInfo
     # @raise [UnknownTimezone] always.
     def raise_unknown_timezone
       raise UnknownTimezone, 'TZInfo::Timezone should not be constructed directly (use TZInfo::Timezone.get instead)'
+    end
+
+    # Adds the intersection of a period with a local half-open range to the
+    # list of UTC ranges.
+    #
+    # @param result [Array<Range>] the accumulated UTC ranges.
+    # @param period [TimezonePeriod] the period to intersect.
+    # @param local_start [Timestamp] the inclusive local start, with an
+    #   unspecified UTC offset.
+    # @param local_end [Timestamp] the exclusive local end, with an unspecified
+    #   UTC offset.
+    # @param start_reference [Object] the original local start value.
+    def add_local_to_utc_range(result, period, local_start, local_end, start_reference)
+      offset = period.observed_utc_offset
+      period_start = period.starts_at
+      period_end = period.ends_at
+
+      intersection_start = local_start
+      if period_start
+        period_local_start = period_start.add_and_set_utc_offset(offset, nil)
+        intersection_start = period_local_start if period_local_start > intersection_start
+      end
+
+      intersection_end = local_end
+      if period_end
+        period_local_end = period_end.add_and_set_utc_offset(offset, nil)
+        intersection_end = period_local_end if period_local_end < intersection_end
+      end
+
+      return if intersection_start >= intersection_end
+
+      utc_start = intersection_start.add_and_set_utc_offset(-offset, :utc)
+      utc_end = intersection_end.add_and_set_utc_offset(-offset, :utc)
+      result << [utc_start, utc_end, start_reference]
+    end
+
+    # Converts a UTC {Timestamp} back to the time representation used for the
+    # supplied local value.
+    #
+    # @param utc_timestamp [Timestamp] the UTC timestamp to convert.
+    # @param local_reference [Object] the original local value.
+    # @return [Object] the UTC timestamp in the representation of
+    #   `local_reference`.
+    def utc_timestamp_to_reference(utc_timestamp, local_reference)
+      Timestamp.for(local_reference, :ignore) { utc_timestamp }
     end
   end
 end

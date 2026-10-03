@@ -56,6 +56,7 @@ class TCTimezoneProxy < Minitest::Test
       assert_equal(real.friendly_identifier, proxy.friendly_identifier)
       assert_equal(real.identifier, proxy.identifier)
       assert_equal_with_offset(real.local_to_utc(t1), proxy.local_to_utc(t1))
+      assert_equal(real.local_to_utc_ranges(t1...t1), proxy.local_to_utc_ranges(t1...t1))
       assert_equal(real.name, proxy.name)
       assert_nothing_raised { proxy.now }
       assert_equal(real.offsets_up_to(t1), proxy.offsets_up_to(t1))

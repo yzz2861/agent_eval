@@ -41,6 +41,11 @@ module TZInfo
       real_timezone.periods_for_local(local_time)
     end
 
+    # (see Timezone#local_to_utc_ranges)
+    def local_to_utc_ranges(local_start, local_end = nil)
+      real_timezone.local_to_utc_ranges(local_start, local_end)
+    end
+
     # (see Timezone#transitions_up_to)
     def transitions_up_to(to, from = nil)
       real_timezone.transitions_up_to(to, from)
