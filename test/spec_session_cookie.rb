@@ -141,6 +141,47 @@ describe Rack::Session::Cookie do
         coder = Rack::Session::Cookie::Base64::JSON.new
         coder.decode('lulz').must_be_nil
       end
+
+      it 'enforces a decode budget' do
+        coder = Rack::Session::Cookie::Base64::JSON.new
+        budget_class = Rack::Session::Cookie::DecodeBudget
+
+        error = -> {
+          coder.decode([JSON.dump('value' => 'a' * 11)].pack('m0'),
+            budget_class.new(bytes: 10, depth: 10, nodes: 10))
+        }.must_raise budget_class::Exceeded
+        error.reason.must_equal budget_class::BYTE_LIMIT_EXCEEDED
+
+        deep_array = '[' * 4 + ']' * 4
+        error = -> {
+          coder.decode([deep_array].pack('m0'),
+            budget_class.new(bytes: 1000, depth: 3, nodes: 100))
+        }.must_raise budget_class::Exceeded
+        error.reason.must_equal budget_class::DEPTH_LIMIT_EXCEEDED
+
+        accepted = '[' * 3 + ']' * 3
+        coder.decode([accepted].pack('m0'),
+          budget_class.new(bytes: 1000, depth: 3, nodes: 100)).must_equal [[[]]]
+
+        error = -> {
+          coder.decode([JSON.dump(Array.new(11, 1))].pack('m0'),
+            budget_class.new(bytes: 1000, depth: 10, nodes: 10))
+        }.must_raise budget_class::Exceeded
+        error.reason.must_equal budget_class::NODE_LIMIT_EXCEEDED
+      end
+
+      it 'accepts JSON exactly at decode budget limits' do
+        coder = Rack::Session::Cookie::Base64::JSON.new
+        value = { 'a' => 'b' }
+        json = JSON.dump(value)
+        budget = Rack::Session::Cookie::DecodeBudget.new(
+          bytes: json.bytesize,
+          depth: 2,
+          nodes: 2
+        )
+
+        coder.decode([json].pack('m0'), budget).must_equal value
+      end
     end
 
     describe 'ZipJSON' do
@@ -163,6 +204,170 @@ describe Rack::Session::Cookie do
         coder = Rack::Session::Cookie::Base64::ZipJSON.new
         coder.decode('lulz').must_be_nil
       end
+
+      it 'limits inflated JSON while decompressing' do
+        coder = Rack::Session::Cookie::Base64::ZipJSON.new
+        encoded = coder.encode('value' => 'abc' * 10_000)
+        budget = Rack::Session::Cookie::DecodeBudget.new(
+          bytes: 1024,
+          depth: 3,
+          nodes: 10
+        )
+
+        error = -> { coder.decode(encoded, budget) }.must_raise(
+          Rack::Session::Cookie::DecodeBudget::Exceeded
+        )
+        error.reason.must_equal(
+          Rack::Session::Cookie::DecodeBudget::BYTE_LIMIT_EXCEEDED
+        )
+      end
+
+      it 'accepts inflated JSON exactly at decode budget limits' do
+        coder = Rack::Session::Cookie::Base64::ZipJSON.new
+        value = { 'value' => 'x' }
+        encoded = coder.encode(value)
+        budget = Rack::Session::Cookie::DecodeBudget.new(
+          bytes: JSON.dump(value).bytesize,
+          depth: 2,
+          nodes: 3
+        )
+
+        coder.decode(encoded, budget).must_equal value
+      end
+    end
+  end
+
+  describe 'decode budgets' do
+    it 'rejects coders which cannot enforce the budget' do
+      error = -> {
+        Rack::Session::Cookie.new(
+          incrementor,
+          coder: Rack::Session::Cookie::Base64::Marshal.new,
+          let_coder_handle_secure_encoding: true,
+          decode_budget: { bytes: 4096, depth: 100, nodes: 1000 }
+        )
+      }.must_raise ArgumentError
+      error.message.must_include ':coder does not support decode budgets'
+    end
+
+    it 'requires JSON serialization for encrypted sessions' do
+      error = -> {
+        Rack::Session::Cookie.new(
+          incrementor,
+          secrets: @secret,
+          decode_budget: { bytes: 4096, depth: 100, nodes: 1000 }
+        )
+      }.must_raise ArgumentError
+      error.message.must_include 'require JSON serialization'
+    end
+
+    it 'rejects legacy HMAC coders which cannot enforce the budget' do
+      error = -> {
+        Rack::Session::Cookie.new(
+          incrementor,
+          legacy_hmac_secret: 'legacy secret',
+          decode_budget: { bytes: 4096, depth: 100, nodes: 1000 }
+        )
+      }.must_raise ArgumentError
+      error.message.must_include ':legacy_hmac_coder does not support decode budgets'
+    end
+
+    it 'limits a valid legacy HMAC JSON cookie' do
+      coder = Rack::Session::Cookie::Base64::ZipJSON.new
+      legacy_secret = 'legacy secret'
+      encoded = coder.encode('value' => 'abc' * 10_000)
+      digest = OpenSSL::HMAC.hexdigest(OpenSSL::Digest::SHA1.new, legacy_secret, encoded)
+      cookie = "rack.session=#{encoded}--#{digest}"
+      errors = StringIO.new
+      app = [
+        session_id,
+        {
+          coder: coder,
+          let_coder_handle_secure_encoding: true,
+          legacy_hmac_secret: legacy_secret,
+          legacy_hmac_coder: coder,
+          decode_budget: { bytes: 1024, depth: 100, nodes: 1000 }
+        }
+      ]
+
+      response = response_for(app: app, cookie: cookie,
+        request: { Rack::RACK_ERRORS => errors })
+
+      response.body.must_equal({}.inspect)
+      errors.rewind
+      errors.read.must_include 'byte_limit_exceeded'
+    end
+
+    it 'treats a budget-exceeding cookie as an invalid session' do
+      coder = Rack::Session::Cookie::Base64::ZipJSON.new
+      cookie = "rack.session=#{coder.encode('value' => 'abc' * 10_000)}"
+      errors = StringIO.new
+      app = [
+        session_id,
+        {
+          coder: coder,
+          let_coder_handle_secure_encoding: true,
+          decode_budget: { bytes: 1024, depth: 100, nodes: 1000 }
+        }
+      ]
+
+      response = response_for(app: app, cookie: cookie,
+        request: { Rack::RACK_ERRORS => errors })
+
+      response.body.must_equal({}.inspect)
+      errors.rewind
+      errors.read.must_include 'byte_limit_exceeded'
+    end
+
+    it 'stores only the budget reason code for the invalid session' do
+      coder = Rack::Session::Cookie::Base64::JSON.new
+      deep_cookie = "rack.session=#{['[' * 101 + ']' * 101].pack('m0')}"
+      errors = StringIO.new
+      captured_env = nil
+      app = lambda do |env|
+        captured_env = env
+        session_id.call(env)
+      end
+
+      response = response_for(
+        app: [app, {
+          coder: coder,
+          let_coder_handle_secure_encoding: true,
+          decode_budget: { bytes: 4096, depth: 100, nodes: 4096 }
+        }],
+        cookie: deep_cookie,
+        request: { Rack::RACK_ERRORS => errors }
+      )
+
+      response.body.must_equal({}.inspect)
+      captured_env[Rack::Session::RACK_SESSION_DECODE_ERROR].must_equal(
+        Rack::Session::Cookie::DecodeBudget::DEPTH_LIMIT_EXCEEDED
+      )
+      errors.rewind
+      errors.read.wont_include deep_cookie
+    end
+
+    it 'accepts a session exactly at decode budget limits' do
+      value = { 'session_id' => 'a' * 64, 'counter' => 1 }
+      coder = Rack::Session::Cookie::Base64::JSON.new
+      budget = Rack::Session::Cookie::DecodeBudget.new(
+        bytes: JSON.dump(value).bytesize,
+        depth: 1,
+        nodes: 3
+      )
+      cookie = "rack.session=#{coder.encode(value)}"
+      app = [
+        incrementor,
+        {
+          coder: coder,
+          let_coder_handle_secure_encoding: true,
+          decode_budget: budget
+        }
+      ]
+
+      response = response_for(app: app, cookie: cookie)
+
+      response.body.must_equal({ 'counter' => 2 }.inspect)
     end
   end
 

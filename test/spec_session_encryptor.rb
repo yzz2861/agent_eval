@@ -40,6 +40,36 @@ def all_versions_tests(opts = {})
           encryptor.decrypt(message).must_equal({ 'foo' => 'bar' })
         end
 
+        it 'enforces a JSON decode budget' do
+          next unless default_opts[:serialize_json]
+
+          budget_class = Rack::Session::Cookie::DecodeBudget
+          encryptor = new_encryptor(@secret, decode_budget: budget_class.new(
+            bytes: 1024,
+            depth: 1,
+            nodes: 10
+          ))
+          message = encryptor.encrypt({ 'foo' => { 'bar' => 'baz' } })
+
+          error = -> { encryptor.decrypt(message) }.must_raise budget_class::Exceeded
+          error.reason.must_equal budget_class::DEPTH_LIMIT_EXCEEDED
+        end
+
+        it 'accepts an encrypted JSON message at the decode budget limit' do
+          next unless default_opts[:serialize_json]
+
+          message_data = { 'foo' => 'bar' }
+          serialized = JSON.dump(message_data)
+          budget_class = Rack::Session::Cookie::DecodeBudget
+          encryptor = new_encryptor(@secret, decode_budget: budget_class.new(
+            bytes: serialized.bytesize,
+            depth: 1,
+            nodes: 3
+          ))
+
+          encryptor.decrypt(encryptor.encrypt(message_data)).must_equal(message_data)
+        end
+
         it 'decrypt raises InvalidSignature for tampered messages' do
           encryptor = new_encryptor(@secret)
 

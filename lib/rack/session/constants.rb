@@ -8,6 +8,7 @@ module Rack
   module Session
     RACK_SESSION                        = 'rack.session'
     RACK_SESSION_OPTIONS                = 'rack.session.options'
+    RACK_SESSION_DECODE_ERROR           = 'rack.session.decode_error'
     RACK_SESSION_UNPACKED_COOKIE_DATA   = 'rack.session.unpacked_cookie_data'
   end
 end

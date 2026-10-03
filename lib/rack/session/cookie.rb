@@ -17,6 +17,7 @@ require 'rack/utils'
 require_relative 'abstract/id'
 require_relative 'encryptor'
 require_relative 'constants'
+require_relative 'decode_budget'
 
 module Rack
 
@@ -39,6 +40,10 @@ module Rack
     # * :gzip_over
     #     For message data over this many bytes, compress it with the deflate
     #     algorithm.
+    # * :decode_budget
+    #     Limit signed session decoding to the configured decoded bytes,
+    #     container depth, and JSON value nodes. JSON and compressed JSON
+    #     coders are required when this option is enabled.
     #
     # Refer to Rack::Session::Encryptor for more details on these options.
     #
@@ -114,24 +119,51 @@ module Rack
         # N.B. Unlike other encoding methods, the contained objects must be a
         # valid JSON composite type, either a Hash or an Array.
         class JSON < Base64
+          def supports_decode_budget?
+            true
+          end
+
           def encode(obj)
             super(::JSON.dump(obj))
           end
 
-          def decode(str)
+          def decode(str, decode_budget = nil)
             return unless str
-            ::JSON.parse(super(str)) rescue nil
+            decode_budget&.check_base64_byte_limit!(str)
+            json = super(str)
+
+            if decode_budget
+              decode_budget.parse_json(json)
+            else
+              ::JSON.parse(json)
+            end
+          rescue DecodeBudget::Exceeded
+            raise
+          rescue
+            nil
           end
         end
 
         class ZipJSON < Base64
+          def supports_decode_budget?
+            true
+          end
+
           def encode(obj)
             super(Zlib::Deflate.deflate(::JSON.dump(obj)))
           end
 
-          def decode(str)
+          def decode(str, decode_budget = nil)
             return unless str
-            ::JSON.parse(Zlib::Inflate.inflate(super(str)))
+            json = super(str)
+
+            if decode_budget
+              decode_budget.parse_json(decode_budget.inflate(json))
+            else
+              ::JSON.parse(::Zlib::Inflate.inflate(json))
+            end
+          rescue DecodeBudget::Exceeded
+            raise
           rescue
             nil
           end
@@ -157,11 +189,19 @@ module Rack
       attr_reader :coder, :encryptors
 
       def initialize(app, options = {})
+        @decode_budget = build_decode_budget(options[:decode_budget])
+
         # support both :secrets and :secret for backwards compatibility
         secrets = [*(options[:secrets] || options[:secret])]
 
+        if @decode_budget && !secrets.empty? && !options[:serialize_json]
+          raise ArgumentError, 'decode budgets require JSON serialization when secrets are configured'
+        end
+
         encryptor_opts = {
-          purpose: options[:key], serialize_json: options[:serialize_json]
+          purpose: options[:key],
+          serialize_json: options[:serialize_json],
+          decode_budget: @decode_budget
         }
 
         # For each secret, create an Encryptor. We have iterate this Array at
@@ -177,6 +217,7 @@ module Rack
 
           @legacy_hmac_secret = options[:legacy_hmac_secret] || options[:secret]
           @legacy_hmac_coder  = options.fetch(:legacy_hmac_coder, Base64::Marshal.new)
+          assert_decode_budget_support!(@legacy_hmac_coder, ':legacy_hmac_coder')
         else
           @legacy_hmac = false
         end
@@ -194,11 +235,40 @@ module Rack
         # Potential danger ahead! Marshal without verification and/or
         # encryption could present a major security issue.
         @coder = options[:coder] ||= Base64::Marshal.new
+        assert_decode_budget_support!(@coder, ':coder')
 
         super(app, options.merge!(cookie_only: true))
       end
 
       private
+
+      def build_decode_budget(options)
+        return unless options
+        return options if options.is_a?(DecodeBudget)
+
+        options = {
+          bytes: options[:bytes],
+          depth: options[:depth],
+          nodes: options[:nodes]
+        }
+
+        DecodeBudget.new(**options)
+      end
+
+      def assert_decode_budget_support!(coder, option_name)
+        return unless @decode_budget
+        return if coder.respond_to?(:supports_decode_budget?) && coder.supports_decode_budget?
+
+        raise ArgumentError, "#{option_name} does not support decode budgets; use JSON or compressed JSON"
+      end
+
+      def decode_cookie(coder, data)
+        if @decode_budget
+          coder.decode(data, @decode_budget)
+        else
+          coder.decode(data)
+        end
+      end
 
       def find_session(req, sid)
         data = unpacked_cookie_data(req)
@@ -213,38 +283,43 @@ module Rack
       def unpacked_cookie_data(request)
         request.fetch_header(RACK_SESSION_UNPACKED_COOKIE_DATA) do |k|
           if cookie_data = request.cookies[@key]
-            session_data = nil
+            begin
+              session_data = nil
 
-            # Try to decrypt the session data with our encryptors
-            encryptors.each do |encryptor|
-              begin
-                session_data = encryptor.decrypt(cookie_data)
-                break
-              rescue Rack::Session::Encryptor::Error => error
-                request.env[Rack::RACK_ERRORS].puts "Session cookie encryptor error: #{error.message}"
+              # Try to decrypt the session data with our encryptors
+              encryptors.each do |encryptor|
+                begin
+                  session_data = encryptor.decrypt(cookie_data)
+                  break
+                rescue Rack::Session::Encryptor::Error => error
+                  request.env[Rack::RACK_ERRORS].puts "Session cookie encryptor error: #{error.message}"
 
-                next
+                  next
+                end
               end
-            end
 
-            # If session decryption fails but there is @legacy_hmac_secret
-            # defined, attempt legacy HMAC verification
-            if !session_data && @legacy_hmac_secret
-              # Parse and verify legacy HMAC session cookie
-              session_data, _, digest = cookie_data.rpartition('--')
-              session_data = nil unless legacy_digest_match?(session_data, digest)
+              # If session decryption fails but there is @legacy_hmac_secret
+              # defined, attempt legacy HMAC verification
+              if !session_data && @legacy_hmac_secret
+                # Parse and verify legacy HMAC session cookie
+                session_data, _, digest = cookie_data.rpartition('--')
+                session_data = nil unless legacy_digest_match?(session_data, digest)
 
-              # Decode using legacy HMAC decoder
-              session_data = @legacy_hmac_coder.decode(session_data)
+                # Decode using legacy HMAC decoder
+                session_data = decode_cookie(@legacy_hmac_coder, session_data)
 
-            elsif !session_data && encryptors.empty? && coder
-              # Use the coder option, which has the potential to be very unsafe.
-              # This path is only reached when no encryptors (secrets:) are configured;
-              # if encryptors are present but decryption failed, the cookie is rejected.
-              session_data = coder.decode(cookie_data)
+              elsif !session_data && encryptors.empty? && coder
+                # Use the coder option, which has the potential to be very unsafe.
+                # This path is only reached when no encryptors (secrets:) are configured;
+                # if encryptors are present but decryption failed, the cookie is rejected.
+                session_data = decode_cookie(coder, cookie_data)
+              end
+            rescue DecodeBudget::Exceeded => error
+              request.set_header(RACK_SESSION_DECODE_ERROR, error.reason)
+              request.env[Rack::RACK_ERRORS].puts "Session cookie rejected: #{error.reason}"
+              session_data = nil
             end
           end
-
           request.set_header(k, session_data || {})
         end
       end

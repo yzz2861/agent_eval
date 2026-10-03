@@ -48,11 +48,22 @@ module Rack
 
           # Slice out the serialized_data and deserialize it
           serialized_data = data.slice(2 + padding_bytes, data.bytesize)
-          serializer.load serialized_data
+
+          if decode_budget = @options[:decode_budget]
+            decode_budget.parse_json(serialized_data)
+          else
+            serializer.load serialized_data
+          end
         end
 
         def serializer
           @serializer ||= @options[:serialize_json] ? JSON : Marshal
+        end
+
+        def validate_decode_budget!
+          if @options[:decode_budget] && !@options[:serialize_json]
+            raise ArgumentError, 'decode budgets require JSON serialization'
+          end
         end
       end
 
@@ -102,6 +113,7 @@ module Rack
           @options = {
             serialize_json: false, pad_size: 32, purpose: nil
           }.update(opts)
+          validate_decode_budget!
 
           @hmac_secret = secret.dup.force_encoding(Encoding::BINARY)
           @cipher_secret = @hmac_secret.slice!(0, 32)
@@ -247,6 +259,7 @@ module Rack
           @options = {
             serialize_json: false, pad_size: 32, purpose: nil
           }.update(opts)
+          validate_decode_budget!
 
           @cipher_secret = secret.dup.force_encoding(Encoding::BINARY).slice!(0, 32)
           @cipher_secret.freeze
