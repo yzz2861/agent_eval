@@ -57,6 +57,7 @@ module Mustermann
         options[:capture].nil?  &&
           options[:except].nil? &&
           options.fetch(:greedy, true) != false &&
+          unicode_normalize.nil? &&
           uri_decode &&
           @string.match?(SIMPLE)
       end

@@ -4,6 +4,10 @@ Mustermann follows [Semantic Versioning 2.0](http://semver.org/). Anything docum
 
 ## Unreleased changes
 
+### New features
+
+* Added the `unicode_normalize` option (currently supporting `:nfc`), configurable per pattern instance. When enabled, the pattern and matched strings are normalized to NFC before matching, so routes match regardless of whether clients send precomposed or decomposed accented characters. Regular expression syntax is never normalized and character case is left unchanged. `Mustermann::Match` preserves the original string and capture ranges (`#string`, `#params`) and additionally exposes `#normalized_string` and `#normalized_params`. Percent-encoded multibyte characters match in both NFC and NFD percent-encoded forms, and strings with invalid encoding raise a `Mustermann::Error`.
+
 ### Mustermann 4.0.1
 
 #### Performance improvements

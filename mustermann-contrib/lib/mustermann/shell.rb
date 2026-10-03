@@ -39,15 +39,15 @@ module Mustermann
     # @return (see Mustermann::Pattern#===)
     # @see (see Mustermann::Pattern#===)
     def ===(string)
-      File.fnmatch? @string, unescape(string), @flags
+      File.fnmatch? normalized_string, normalize_string(unescape(string)), @flags
     end
 
     # @param (see Mustermann::Pattern#peek_size)
     # @return (see Mustermann::Pattern#peek_size)
     # @see (see Mustermann::Pattern#peek_size)
     def peek_size(string)
-      @peek_string ||= @string + "{**,/**,/**/*}"
-      super if File.fnmatch? @peek_string, unescape(string), @flags
+      @peek_string ||= normalized_string + "{**,/**,/**/*}"
+      super if File.fnmatch? @peek_string, normalize_string(unescape(string)), @flags
     end
 
     # Used by {Mustermann::FileUtils} to not use a generic glob pattern.

@@ -19,13 +19,14 @@ module Mustermann
     # @return (see Mustermann::Pattern#===)
     # @see (see Mustermann::Pattern#===)
     def ===(string)
-      unescape(string) == @string
+      normalize_string(unescape(string)) == normalized_string
     end
 
     # @param (see Mustermann::Pattern#peek_size)
     # @return (see Mustermann::Pattern#peek_size)
     # @see (see Mustermann::Pattern#peek_size)
     def peek_size(string)
+      return super if unicode_normalize
       return unless unescape(string).start_with? @string
       return @string.size if string.start_with? @string # optimization
       @string.each_char.with_index.inject(0) do |count, (char, index)|
@@ -50,8 +51,9 @@ module Mustermann
     # Not used internally by {Mustermann::Identity}.
     # @!visibility private
     def to_ast
-      payload = @string.each_char.with_index.map { |c, i| AST::Node[c == ?/ ? :separator : :char].new(c, start: i, stop: i+1) }
-      AST::Node[:root].new(payload, pattern: @string, start: 0, stop: @string.length)
+      string  = normalized_string
+      payload = string.each_char.with_index.map { |c, i| AST::Node[c == ?/ ? :separator : :char].new(c, start: i, stop: i+1) }
+      AST::Node[:root].new(payload, pattern: string, start: 0, stop: string.length)
     end
 
     # Identity patterns support expanding.

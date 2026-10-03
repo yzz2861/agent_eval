@@ -82,7 +82,7 @@ module Mustermann
 
       # @!visibility private
       def compile(**options)
-        options[:except] &&= parse options[:except]
+        options[:except] &&= parse normalize_string(options[:except])
         compiler.compile(to_ast, **options)
       rescue CompileError => error
         raise error.class, "#{error.message}: #{@string.inspect}", error.backtrace
@@ -96,7 +96,7 @@ module Mustermann
       def except_regexp
         return unless except_str = options[:except]
         @except_regexp ||= begin
-          source = compiler.new.translate(parse(except_str), no_captures: true, **options.except(:except))
+          source = compiler.new.translate(parse(normalize_string(except_str)), no_captures: true, **options.except(:except))
           Mustermann.dedup(Regexp.new("\\A#{source}\\z"))
         end
       end
@@ -105,9 +105,10 @@ module Mustermann
       # @!visibility private
       def to_ast
         ast = self.class.ast_cache.fetch([@string, options]) do
-          ast   = parse(@string, pattern: self)
+          string = normalized_string
+          ast   = parse(string, pattern: self)
           ast &&= transform(ast)
-          ast &&= set_boundaries(ast, string: @string)
+          ast &&= set_boundaries(ast, string: string)
           validate(ast)
         end
         @param_converters ||= Mustermann.dedup(scan_params(ast, options)) if ast

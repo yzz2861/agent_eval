@@ -224,10 +224,18 @@ module Mustermann
 
       # @return [String] Regular expression for matching the given character in all representations
       # @!visibility private
-      def encoded(char, uri_decode: true, space_matches_plus: true, **options)
+      def encoded(char, uri_decode: true, space_matches_plus: true, unicode_normalize: nil, **options)
         return Regexp.escape(char) unless uri_decode
 
-        '(?:%s)' % self.class.char_representations(char, uri_decode:, space_matches_plus:).map { |c|
+        representations = self.class.char_representations(char, uri_decode:, space_matches_plus:)
+        if unicode_normalize
+          # Also match the percent-encoded form of the decomposed (NFD) variant,
+          # so canonically equivalent percent-encoded input matches as well.
+          decomposed = char.unicode_normalize(:nfd)
+          representations += self.class.char_representations(decomposed, uri_decode:, space_matches_plus:) unless decomposed == char
+        end
+
+        '(?:%s)' % representations.uniq.map { |c|
           Regexp.escape(c)
         }.join('|')
       end

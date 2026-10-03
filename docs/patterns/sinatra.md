@@ -8,6 +8,7 @@ The `sinatra` pattern type is implemented by Mustermann itself. Moreover, it is 
 [`greedy`](#-available-options--greedy),
 [`space_matches_plus`](#-available-options--space_matches_plus),
 [`uri_decode`](#-available-options--uri_decode),
+[`unicode_normalize`](#-available-options--unicode_normalize),
 [`ignore_unknown_options`](#-available-options--ignore_unknown_options).
 
 # Overview

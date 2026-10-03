@@ -15,6 +15,7 @@ pattern.params('/2024/01') # => { "year" => "2024", "month" => "01" }
 
 **Supported options:**
 [`uri_decode`](#-available-options--uri_decode),
+[`unicode_normalize`](#-available-options--unicode_normalize),
 [`ignore_unknown_options`](#-available-options--ignore_unknown_options), `check_anchors`.
 
 The pattern string (or actual Regexp instance) should not contain anchors (`^` outside of square brackets, `$`, `\A`, `\z`, or `\Z`).

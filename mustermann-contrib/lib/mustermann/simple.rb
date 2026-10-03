@@ -28,7 +28,7 @@ module Mustermann
     end
 
     def compile(greedy: true, uri_decode: true, space_matches_plus: true, **options)
-      pattern = @string.gsub(/[^\?\%\\\/\:\*\w]/) { |c| encoded(c, uri_decode, space_matches_plus) }
+      pattern = normalize_string(@string).gsub(/[^\?\%\\\/\:\*\w]/) { |c| encoded(c, uri_decode, space_matches_plus) }
       pattern.gsub!(/((:\w+)|\*)/) do |match|
         match == "*" ? "(?<splat>.*?)" : "(?<#{$2[1..-1]}>[^/?#]+#{?? unless greedy})"
       end
@@ -42,6 +42,10 @@ module Mustermann
       return Regexp.escape(char) unless uri_decode
       parser  = URI::RFC2396_Parser.new
       encoded = Regexp.union(parser.escape(char), parser.escape(char, /./).downcase, parser.escape(char, /./).upcase)
+      if unicode_normalize && (decomposed = char.unicode_normalize(:nfd)) != char
+        escaped = parser.escape(decomposed, /./)
+        encoded = Regexp.union(encoded, escaped.downcase, escaped.upcase)
+      end
       encoded = Regexp.union(encoded, encoded('+', true, true)) if space_matches_plus and char == " "
       encoded
     end

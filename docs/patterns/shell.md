@@ -4,7 +4,7 @@ The `shell` pattern type is implemented by the `mustermann-contrib` gem. It is c
 
 ## Overview
 
-**Supported options:** `uri_decode` and `ignore_unknown_options`.
+**Supported options:** `uri_decode`, `unicode_normalize` and `ignore_unknown_options`.
 
 **External documentation:** [Ruby's fnmatch](http://www.ruby-doc.org/core-2.1.4/File.html#method-c-fnmatch), [Wikipedia: Glob (programming)](http://en.wikipedia.org/wiki/Glob_(programming))
 

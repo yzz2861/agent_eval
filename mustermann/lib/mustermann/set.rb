@@ -426,6 +426,14 @@ module Mustermann
     private
 
     def add_pattern(pattern)
+      if pattern.unicode_normalize && !@force_linear
+        # The trie matches against the raw string and cannot apply per-pattern
+        # unicode normalization, so sets containing normalized patterns fall
+        # back to the linear matcher, which delegates to Pattern#match.
+        @force_linear = true
+        @matcher      = nil
+      end
+
       if @use_trie.is_a? Integer and @mapping.size >= @use_trie
         @use_trie = true
         @matcher = build_matcher
@@ -437,7 +445,7 @@ module Mustermann
     end
 
     def build_matcher
-      factory = use_trie? ? Trie : Linear
+      factory = use_trie? && !@force_linear ? Trie : Linear
       matcher = factory.new(self, @mapping.keys)
       matcher = StrictOrder.new(matcher) if strict_order?
       matcher = Cache.new(matcher) if use_cache?

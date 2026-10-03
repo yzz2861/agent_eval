@@ -7,7 +7,7 @@ It is based on the original Sinatra (1.x) pattern implementation. It isn't AST b
 ## Overview
 
 **Supported options:**
-`greedy`, `space_matches_plus`, `uri_decode` and `ignore_unknown_options`.
+`greedy`, `space_matches_plus`, `uri_decode`, `unicode_normalize` and `ignore_unknown_options`.
 
 This is useful for porting an application that relies on this behavior to a later Sinatra version and to make sure Sinatra 2.0 patterns do not decrease performance. Simple patterns internally use the same code older Sinatra versions used for compiling the pattern. Error messages for broken patterns will therefore not be as informative as for other pattern implementations.
 

@@ -775,6 +775,34 @@ Mustermann.new('a b', uri_decode: false) === 'a b'   # => true
 Mustermann.new('a b', uri_decode: false) === 'a%20b' # => false
 ```
 
+<a name="-available-options--unicode_normalize"></a>
+### `unicode_normalize`
+
+Supported by all pattern types.
+Default value: `nil` (disabled)
+
+Some clients send accented characters in decomposed form (NFD), others in precomposed form (NFC), so the same route may fail to match depending on the encoding used. Setting `unicode_normalize` to `:nfc` normalizes the pattern and the matched strings to NFC before matching:
+
+``` ruby
+# "caf\u00e9" is NFC, "cafe\u0301" is NFD - both look like "caf\u00e9"
+pattern = Mustermann.new("/cafe\u0301/:name", unicode_normalize: :nfc)
+pattern === "/caf\u00e9/x"   # => true
+pattern === "/cafe\u0301/x"  # => true
+```
+
+Normalization applies to the pattern's literal text and the matched strings, never to regular expression syntax, and it never changes the case of any characters. Percent-encoded multibyte characters are matched in both their NFC and NFD percent-encoded forms (when `uri_decode` is enabled). Strings with an invalid or unsupported encoding raise a `Mustermann::Error`.
+
+The original string and capture ranges are preserved: `Mustermann::Match#string` and `#params` reflect the input as sent, while `#normalized_string` and `#normalized_params` expose the normalized values:
+
+``` ruby
+match = pattern.match("/cafe\u0301/x")
+match.string            # => "/cafe\u0301/x"
+match.params            # => { "name" => "x" }
+match.normalized_string # => "/caf\u00e9/x"
+```
+
+Expansion produces the normalized form (percent-encoded, as usual), so expanded strings match patterns created from either encoding.
+
 <a name="-available-options--ignore_unknown_options"></a>
 ### `ignore_unknown_options`
 

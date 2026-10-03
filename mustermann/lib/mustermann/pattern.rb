@@ -2,6 +2,7 @@
 require 'mustermann/error'
 require 'mustermann/match'
 require 'mustermann/equality_map'
+require 'mustermann/normalizer'
 require 'uri'
 
 module Mustermann
@@ -59,8 +60,11 @@ module Mustermann
       @map.fetch([string, options]) { super(string, **options) { options } }
     end
 
-    supported_options :uri_decode, :ignore_unknown_options
+    supported_options :uri_decode, :ignore_unknown_options, :unicode_normalize
     attr_reader :uri_decode
+
+    # @return [Symbol, nil] the unicode normalization form used for matching, if any
+    attr_reader :unicode_normalize
 
     # options hash passed to new (with unsupported options removed)
     # @!visibility private
@@ -69,13 +73,39 @@ module Mustermann
     # @overload initialize(string, **options)
     # @param [String] string the string representation of the pattern
     # @param [Hash] options options for fine-tuning the pattern behavior
+    # @option options [true, Symbol] :unicode_normalize normalize the pattern and the
+    #   matched strings to the given Unicode normalization form before matching (only
+    #   +:nfc+ is currently supported). Regular expression syntax itself is never
+    #   normalized, and normalization never changes the case of any characters. The
+    #   original string and capture ranges are preserved, see
+    #   {Mustermann::Match#normalized_string} and {Mustermann::Match#normalized_params}.
     # @raise [Mustermann::Error] if the pattern can't be generated from the string
     # @see file:README.md#Types_and_Options "Types and Options" in the README
     # @see Mustermann.new
-    def initialize(string, uri_decode: true, **options)
-      @uri_decode = uri_decode
-      @string     = Mustermann.dedup(string)
-      @options    = Mustermann.dedup(yield) if block_given?
+    def initialize(string, uri_decode: true, unicode_normalize: nil, **options)
+      @uri_decode        = uri_decode
+      @unicode_normalize = Normalizer.form(unicode_normalize)
+      @string            = Mustermann.dedup(string)
+      normalized_string if @unicode_normalize # fail early on invalid encoding
+      @options           = Mustermann.dedup(yield) if block_given?
+    end
+
+    # @return [String] the normalized string representation used for parsing and
+    #   matching. Identical to {#to_s} unless the +unicode_normalize+ option is set.
+    # @!visibility private
+    def normalized_string
+      @normalized_string ||= unicode_normalize ? Normalizer.normalize(@string, unicode_normalize) : @string
+    end
+
+    # Normalizes the given string if the +unicode_normalize+ option is set,
+    # otherwise returns it unchanged.
+    #
+    # @param [String] string the string to normalize
+    # @return [String] the normalized string
+    # @raise [Mustermann::Error] if the string has an invalid or unsupported encoding
+    # @!visibility private
+    def normalize_string(string)
+      unicode_normalize ? Normalizer.normalize(string, unicode_normalize) : string
     end
 
     # @return [String] the string representation of the pattern

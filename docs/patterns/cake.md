@@ -5,7 +5,7 @@ The `cake` pattern type is implemented by the `mustermann-contrib` gem. It is co
 ## Overview
 
 **Supported options:**
-`capture`, `except`, `greedy`, `space_matches_plus`, `uri_decode`, and `ignore_unknown_options`.
+`capture`, `except`, `greedy`, `space_matches_plus`, `uri_decode`, `unicode_normalize`, and `ignore_unknown_options`.
 
 **External documentation:**
 [CakePHP 2.0 Routing](http://book.cakephp.org/2.0/en/development/routing.html),

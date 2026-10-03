@@ -5,7 +5,7 @@ The `flask` pattern type is implemented by the `mustermann-contrib` gem. It is c
 ## Overview
 
 **Supported options:**
-`capture`, `except`, `greedy`, `space_matches_plus`, `uri_decode`, `converters` and `ignore_unknown_options`
+`capture`, `except`, `greedy`, `space_matches_plus`, `uri_decode`, `unicode_normalize`, `converters` and `ignore_unknown_options`
 
 **External documentation:**
 [Werkzeug: URL Routing](http://werkzeug.pocoo.org/docs/0.9/routing/)

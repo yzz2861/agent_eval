@@ -28,6 +28,16 @@ module Mustermann
     # @return [Regexp, nil] the regular expression that produced the match, if available
     attr_reader :regexp
 
+    # @return [String, nil] the normalized string that was matched against, if the
+    #   pattern's +unicode_normalize+ option is enabled, nil otherwise
+    attr_reader :normalized_string
+
+    # @return [Hash, nil] the params hash extracted from the normalized string, if the
+    #   pattern's +unicode_normalize+ option is enabled, nil otherwise. Unlike {#params},
+    #   which preserves the original (unnormalized) capture values, these values are
+    #   unicode normalized.
+    attr_reader :normalized_params
+
     # @overload initialize(pattern, string, **options)
     #   @param pattern [Mustermann::Pattern] the pattern that produced the match
     #   @param string [String] the string that was matched
@@ -45,7 +55,9 @@ module Mustermann
     # @option options [Regexp] :regexp the regular expression that produced the match
     # @option options [String] :post_match the post match string
     # @option options [String] :pre_match the pre match string
-    def initialize(pattern_or_match, string_or_match = nil, matched: nil, params: nil, post_match: nil, pre_match: nil, captures: nil, named_captures: nil, regexp: nil)
+    # @option options [String] :normalized_string the normalized string that was matched against
+    # @option options [Hash]   :normalized_params the params hash extracted from the normalized string
+    def initialize(pattern_or_match, string_or_match = nil, matched: nil, params: nil, post_match: nil, pre_match: nil, captures: nil, named_captures: nil, regexp: nil, normalized_string: nil, normalized_params: nil)
       case pattern_or_match
       when Mustermann::Match, MatchData then match = pattern_or_match
       when Mustermann::Pattern          then pattern = pattern_or_match
@@ -64,9 +76,11 @@ module Mustermann
       @params         = params         || match&.params         || EMPTY_HASH
       @post_match     = post_match     || match&.post_match     || EMPTY_STRING
       @pre_match      = pre_match      || match&.pre_match      || EMPTY_STRING
-      @captures       = captures       || match&.captures       || @params.values
-      @named_captures = named_captures || match&.named_captures || @params
-      @matched        = matched        || match&.to_s           || @string
+      @captures          = captures          || match&.captures          || @params.values
+      @named_captures    = named_captures    || match&.named_captures    || @params
+      @matched           = matched           || match&.to_s              || @string
+      @normalized_string = normalized_string || (match.normalized_string if match.respond_to? :normalized_string)
+      @normalized_params = normalized_params || (match.normalized_params if match.respond_to? :normalized_params)
 
       unless @regexp = regexp
         @regexp = match.regexp if match.respond_to?(:regexp)

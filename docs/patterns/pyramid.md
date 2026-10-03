@@ -5,7 +5,7 @@ The `pyramid` pattern type is implemented by the `mustermann-contrib` gem. It is
 ## Overview
 
 **Supported options:**
-`capture`, `except`, `greedy`, `space_matches_plus`, `uri_decode` and `ignore_unknown_options`
+`capture`, `except`, `greedy`, `space_matches_plus`, `uri_decode`, `unicode_normalize` and `ignore_unknown_options`
 
 **External Documentation:** [Pylons Framework: URL Configuration](http://docs.pylonsproject.org/projects/pylons-webframework/en/latest/configuration.html#url-config), [Pylons Book: Routes in Detail](http://pylonsbook.com/en/1.0/urls-routing-and-dispatch.html#routes-in-detail), [Pyramid: Route Pattern Syntax](http://docs.pylonsproject.org/projects/pyramid/en/1.5-branch/narr/urldispatch.html#route-pattern-syntax)
 
