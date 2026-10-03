@@ -40,13 +40,20 @@ module Dry
   # If your operations don't already return `Success` or `Failure`, then they can be
   # added to the transaction with the following steps:
   #
-  # * `check` --- wrap original input in `Success` or `Failure` according to operation
-  #   return value, and pass it as output.
-  # * `map`   --- wrap the output of the operation in a `Success`
-  # * `try`   --- wrap the output of the operation in a `Success`, unless a certain
-  #   exception is raised, which will be caught and returned as a `Failure`.
-  # * `tee`   --- ignore the output of the operation and pass through its original
-  #   input as a `Success`
+# * `check` --- wrap original input in `Success` or `Failure` according to operation
+#   return value, and pass it as output.
+# * `map`   --- wrap the output of the operation in a `Success`
+# * `parallel` --- run the named branches returned by the operation concurrently
+#   (capped by a required `max_concurrency:` option) and pass a Hash of
+#   `branch_name => branch_value` to the next step. The step input is passed
+#   to every branch as is (never copied), so branches must treat it as
+#   read-only. If a branch fails, unstarted branches are skipped, branches in
+#   flight are awaited, and the step fails with a Hash of
+#   `branch_name => branch_failure`.
+# * `try`   --- wrap the output of the operation in a `Success`, unless a certain
+#   exception is raised, which will be caught and returned as a `Failure`.
+# * `tee`   --- ignore the output of the operation and pass through its original
+#   input as a `Success`
   #
   # [dry-monads]: https://rubygems.org/gems/dry-monads
   #

@@ -25,5 +25,17 @@ module Dry
         super("step +#{step_name}+ requires one or more exception classes provided via +catch:+")
       end
     end
+
+    class MissingConcurrencyLimitError < ArgumentError
+      def initialize(step_name)
+        super("step +#{step_name}+ requires a positive integer +max_concurrency:+ option")
+      end
+    end
+
+    class InvalidBranchesError < ArgumentError
+      def initialize(step_name)
+        super("step +#{step_name}+ must return a Hash of branch name => callable")
+      end
+    end
   end
 end
