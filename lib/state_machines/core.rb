@@ -41,3 +41,6 @@ require 'state_machines/machine'
 require 'state_machines/machine_collection'
 
 require 'state_machines/macro_methods'
+
+# Pure replay / audit tooling (no runtime evaluation of actions or guards)
+require 'state_machines/audit'

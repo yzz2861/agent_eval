@@ -317,6 +317,87 @@ class StarshipBridge
 end
 ```
 
+## Auditing & Pure Replay
+
+An audit service often receives a serialized list of transitions and must decide, without the
+original runtime context, whether they form a legal state history.  `StateMachines::Audit`
+provides structured records plus a *pure* replay validator: it never runs the machine action,
+callbacks, or guards, and it never instantiates the audited object.
+
+### Structured transition records
+
+Each `StateMachines::Audit::TransitionRecord` carries the machine identity, a definition
+fingerprint, the event, the before/after states, and a per-machine sequence number:
+
+```ruby
+record = StateMachines::Audit::TransitionRecord.new(
+  machine_identity: 'Vehicle#state',
+  definition_fingerprint: '582865a69bf0fc1e',
+  event: :ignite, from: :parked, to: :idling, sequence: 1
+)
+
+StateMachines::Audit::TransitionRecord.coerce(hash)       # from a JSON-decoded Hash
+StateMachines::Audit::TransitionRecord.from_transition(t) # from a live Transition
+```
+
+### Definition snapshots and fingerprints
+
+A `MachineDefinition` is a plain-data snapshot of a machine's initial state, known states, and
+declared transition edges.  It has a stable SHA-256 content fingerprint so an auditor can tell
+which revision of a machine authorized a record:
+
+```ruby
+snapshot = StateMachines::Audit::MachineDefinition.from_machine(Vehicle.state_machine)
+snapshot.fingerprint   # => "582865a69bf0fc1e"
+snapshot.authorize(:ignite, :parked, :idling)   # => :allowed
+snapshot.authorize(:ignite, :parked, :flying)   # => :unknown_state
+```
+
+### Replaying a history
+
+`ReplayValidator#validate` checks only (1) record well-formedness, (2) the declared
+transition relation against a registered definition, and (3) chain continuity (matching
+machine identity, consecutive sequence, and each record starting where the previous one
+ended).  Invalid records are never skipped to emit a false "passed": replay stops at the first
+invalid record, while every independently-detectable structural error is still reported.  The
+structurally legal prefix and its projected state are returned for troubleshooting:
+
+```ruby
+validator = StateMachines::Audit::ReplayValidator.new(
+  definitions: { snapshot.fingerprint => snapshot }
+)
+result = validator.validate(records)
+
+result.valid?            # => false
+result.statuses          # => [:verified, :unverified, :invalid, :unreached]
+result.errors.first      # => #<ReplayError position=2 code=:broken_chain ...>
+result.valid_prefix      # records admitted before the first invalid one
+result.projected_state   # state reached by the legal prefix
+result.state_path        # => [:parked, :idling, ...]
+
+validator.validate!(records) # raises StateMachines::Audit::ReplayViolation on failure
+```
+
+Options: `check_sequence:` (`:strict` start-at-1/gapless (default), `:present` strictly
+increasing, or `false`), `initial_state:` (expected state before the first record), and
+`require_definition:` (unknown fingerprint is an error instead of an unverified condition).
+
+### Conditions that cannot be re-verified
+
+Pure replay only inspects declared edges, so these are marked **unverified** (not passed, not
+failed) with a position-specific reason:
+
+* Dynamic `:if` / `:unless` guards evaluated against the live object.
+* Cross-machine state guards (`if_state`, `if_all_states`, `if_any_state`, and their `unless_*`
+  counterparts).
+* The persistence action and callbacks - they are never executed during replay.
+* Authorization when no definition is registered for a record's fingerprint (unless
+  `require_definition: true`).
+* A dynamic initial state for a history with no records.
+
+A history with only unverified records is still structurally `valid?`, but it is not
+`fully_verified?`; callers can surface `unverified_reasons` to a human reviewer.
+
 ## Error Handling
 
 A state guard must be a non-empty Hash of state machine name => state name; anything else raises
