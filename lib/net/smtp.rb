@@ -293,6 +293,12 @@ module Net
       capable?('STARTTLS')
     end
 
+    # true if server advertises PIPELINING.
+    # You cannot get valid value before opening SMTP session.
+    def capable_pipelining?
+      capable?('PIPELINING')
+    end
+
     # true if the EHLO response contains +key+.
     def capable?(key)
       return nil unless @capabilities
@@ -763,6 +769,17 @@ module Net
     # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
     # the destination mail address or addresses.
     #
+    # If +pipelining+ is true and the server advertises the PIPELINING
+    # extension (see #capable_pipelining?), the MAIL FROM and RCPT TO
+    # commands are sent back to back without waiting for each reply,
+    # and the replies are collected afterwards in the order the commands
+    # were sent (see #pipelined_envelope).  When the server does not
+    # advertise PIPELINING, the commands are sent one by one as usual.
+    #
+    # +rcpt_error_policy+ is used only in pipelining mode and decides
+    # whether the message data is sent when some recipients were
+    # rejected; see #pipelined_envelope for the available policies.
+    #
     # === Example
     #
     #     Net::SMTP.start('smtp.example.com') do |smtp|
@@ -788,12 +805,17 @@ module Net
     # * Net::ReadTimeout
     # * IOError
     #
-    def send_message(msgstr, from_addr, *to_addrs)
+    def send_message(msgstr, from_addr, *to_addrs, pipelining: false, rcpt_error_policy: :strict)
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      if pipelining && capable_pipelining?
+        pipelined_envelope(from_addr, to_addrs, rcpt_error_policy: rcpt_error_policy)
+        data msgstr
+      else
+        mailfrom from_addr
+        rcptto_list(to_addrs) {data msgstr}
+      end
     end
 
     alias send_mail send_message
@@ -820,6 +842,17 @@ module Net
     # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
     # the destination mail address or addresses.
     #
+    # If +pipelining+ is true and the server advertises the PIPELINING
+    # extension (see #capable_pipelining?), the MAIL FROM and RCPT TO
+    # commands are sent back to back without waiting for each reply,
+    # and the replies are collected afterwards in the order the commands
+    # were sent (see #pipelined_envelope).  When the server does not
+    # advertise PIPELINING, the commands are sent one by one as usual.
+    #
+    # +rcpt_error_policy+ is used only in pipelining mode and decides
+    # whether the message data is sent when some recipients were
+    # rejected; see #pipelined_envelope for the available policies.
+    #
     # === Example
     #
     #     Net::SMTP.start('smtp.example.com', 25) do |smtp|
@@ -843,12 +876,17 @@ module Net
     # * Net::ReadTimeout
     # * IOError
     #
-    def open_message_stream(from_addr, *to_addrs, &block)   # :yield: stream
+    def open_message_stream(from_addr, *to_addrs, pipelining: false, rcpt_error_policy: :strict, &block)   # :yield: stream
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data(&block)}
+      if pipelining && capable_pipelining?
+        pipelined_envelope(from_addr, to_addrs, rcpt_error_policy: rcpt_error_policy)
+        data(&block)
+      else
+        mailfrom from_addr
+        rcptto_list(to_addrs) {data(&block)}
+      end
     end
 
     alias ready open_message_stream   # obsolete
@@ -907,12 +945,7 @@ module Net
 
     # +from_addr+ is +String+ or +Net::SMTP::Address+
     def mailfrom(from_addr)
-      addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
-               Address.new(from_addr, "SMTPUTF8")
-             else
-               Address.new(from_addr)
-             end
-      getok((["MAIL FROM:<#{addr.address}>"] + addr.parameters).join(' '))
+      getok(mailfrom_command(from_addr))
     end
 
     def rcptto_list(to_addrs)
@@ -925,8 +958,98 @@ module Net
 
     # +to_addr+ is +String+ or +Net::SMTP::Address+
     def rcptto(to_addr)
-      addr = Address.new(to_addr)
-      getok((["RCPT TO:<#{addr.address}>"] + addr.parameters).join(' '))
+      getok(rcptto_command(to_addr))
+    end
+
+    #
+    # Sends the message envelope (MAIL FROM and RCPT TO commands) back to
+    # back without waiting for each reply, then collects the replies in
+    # the order the commands were sent.  This uses the PIPELINING
+    # extension
+    # [RFC2920[https://www.rfc-editor.org/rfc/rfc2920.txt]] and must only
+    # be used when the server advertises it (see #capable_pipelining?).
+    #
+    # Because every reply is read in command order before any of them is
+    # checked, a rejected RCPT TO cannot shift the remaining replies out
+    # of place, and the replies of the commands already sent are always
+    # consumed, even when MAIL FROM itself fails.
+    #
+    # +from_addr+ is a String or Net::SMTP::Address representing the
+    # source mail address.  +to_addrs+ is an Array of String or
+    # Net::SMTP::Address representing the destination mail addresses.
+    #
+    # +rcpt_error_policy+ decides whether the message data may be sent
+    # (with #data) when some recipients were rejected:
+    #
+    # [:strict]   Raises the first recipient error; every recipient must
+    #             be accepted.  This is the default and matches the
+    #             behavior of #rcptto_list.
+    # [:continue] Allows the message data to be sent as long as at least
+    #             one recipient was accepted.  Raises the first
+    #             recipient error if all recipients were rejected.
+    # [callable]  Any object responding to +call+.  It is called with
+    #             the per-recipient results and must return a truthy
+    #             value to allow the message data to be sent.
+    #
+    # Returns the per-recipient results as an Array of
+    # <tt>[to_addr, Net::SMTP::Response]</tt> pairs, in the order the
+    # RCPT TO commands were sent.
+    #
+    # === Errors
+    #
+    # This method may raise:
+    #
+    # * Net::SMTPServerBusy
+    # * Net::SMTPSyntaxError
+    # * Net::SMTPFatalError
+    # * Net::SMTPUnknownError
+    # * Net::ReadTimeout
+    # * IOError
+    #
+    def pipelined_envelope(from_addr, to_addrs, rcpt_error_policy: :strict)
+      to_addrs = to_addrs.flatten
+      raise ArgumentError, 'mail destination not given' if to_addrs.empty?
+      commands = [mailfrom_command(from_addr)]
+      to_addrs.each do |to_addr|
+        commands << rcptto_command(to_addr)
+      end
+      commands.each {|c| validate_line c }
+      responses = critical {
+        commands.each {|c| @socket.writeline c }
+        commands.map { recv_response }
+      }
+      unless responses.is_a?(Array)
+        # A previous error broke the session; mirror the dummy response
+        # behavior of getok.
+        check_response responses
+        return to_addrs.map {|to_addr| [to_addr, responses] }
+      end
+      # All pipelined replies have been consumed at this point, so the
+      # session stays in sync even when MAIL FROM was rejected.
+      check_response responses.first
+      results = to_addrs.zip(responses[1..])
+      continue = case rcpt_error_policy
+                 when :strict
+                   results.each {|_, res| check_response res }
+                   true
+                 when :continue
+                   results.any? {|_, res| res.success? }
+                 else
+                   if rcpt_error_policy.respond_to?(:call)
+                     !!rcpt_error_policy.call(results)
+                   else
+                     raise ArgumentError, "unknown rcpt_error_policy: #{rcpt_error_policy.inspect}"
+                   end
+                 end
+      unless continue
+        rejected = results.find {|_, res| !res.success? }
+        if rejected
+          check_response rejected[1]
+        else
+          raise SMTPUnknownError, 'rcpt_error_policy did not allow the message data to be sent'
+        end
+      end
+      results
     end
 
     # This method sends a message.
@@ -996,6 +1119,20 @@ module Net
       if /[\r\n]/ =~ line
         raise ArgumentError, "A line must not contain CR or LF"
       end
+    end
+
+    def mailfrom_command(from_addr)
+      addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
+               Address.new(from_addr, "SMTPUTF8")
+             else
+               Address.new(from_addr)
+             end
+      (["MAIL FROM:<#{addr.address}>"] + addr.parameters).join(' ')
+    end
+
+    def rcptto_command(to_addr)
+      addr = Address.new(to_addr)
+      (["RCPT TO:<#{addr.address}>"] + addr.parameters).join(' ')
     end
 
     def getok(reqline)

@@ -20,6 +20,7 @@ module Net
 
     def teardown
       FakeServer.stop_all
+      PipeliningServer.stop_all
     end
 
     def test_critical
@@ -184,6 +185,166 @@ module Net
       assert_nothing_raised do
         smtp.send_message("message", "sender@example.com", ["rcpt1@example.com", "rcpt2@example.com"])
       end
+    end
+
+    def test_send_message_pipelining
+      server = PipeliningServer.start(rcpt_count: 2)
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_equal true, smtp.capable_pipelining?
+      smtp.send_message("message", "sender@example.com", ["rcpt1@example.com", "rcpt2@example.com"], pipelining: true)
+      assert_equal [
+        "MAIL FROM:<sender@example.com>\r\n",
+        "RCPT TO:<rcpt1@example.com>\r\n",
+        "RCPT TO:<rcpt2@example.com>\r\n",
+        "DATA\r\n",
+      ], server.commands[1..]
+      assert_equal "message\r\n", server.body
+      smtp.finish
+    end
+
+    def test_open_message_stream_pipelining
+      server = PipeliningServer.start(rcpt_count: 1)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.open_message_stream("sender@example.com", ["rcpt1@example.com"], pipelining: true) do |f|
+        f.puts 'message'
+      end
+      assert_equal "message\r\n", server.body
+      smtp.finish
+    end
+
+    def test_pipelined_envelope_returns_results_in_order
+      server = PipeliningServer.start(rcpt_count: 3, reject_rcpt: [1])
+      smtp = Net::SMTP.start 'localhost', server.port
+      results = smtp.pipelined_envelope("sender@example.com",
+                                        ["rcpt1@example.com", "rcpt2@example.com", "rcpt3@example.com"],
+                                        rcpt_error_policy: :continue)
+      assert_equal 3, results.size
+      assert_equal "rcpt1@example.com", results[0][0]
+      assert results[0][1].success?
+      assert_equal "rcpt2@example.com", results[1][0]
+      refute results[1][1].success?
+      assert_equal "550", results[1][1].status
+      assert_equal "rcpt3@example.com", results[2][0]
+      assert results[2][1].success?
+      smtp.rset
+      smtp.finish
+    end
+
+    def test_pipelined_envelope_requires_recipients
+      smtp = Net::SMTP.new 'localhost', 25
+      assert_raise(ArgumentError) do
+        smtp.pipelined_envelope("sender@example.com", [])
+      end
+    end
+
+    def test_pipelined_envelope_unknown_rcpt_error_policy
+      server = PipeliningServer.start(rcpt_count: 1)
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_raise(ArgumentError) do
+        smtp.pipelined_envelope("sender@example.com", ["rcpt1@example.com"], rcpt_error_policy: :bogus)
+      end
+      smtp.finish
+    end
+
+    def test_send_message_pipelining_strict_raises_on_rejected_rcpt
+      server = PipeliningServer.start(rcpt_count: 3, reject_rcpt: [1])
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com",
+                          ["rcpt1@example.com", "rcpt2@example.com", "rcpt3@example.com"],
+                          pipelining: true)
+      end
+      assert_equal "550", err.response.status
+      assert_match(/User unknown/, err.message)
+      assert_equal "", server.body
+      smtp.finish
+    end
+
+    def test_send_message_pipelining_continue_policy
+      server = PipeliningServer.start(rcpt_count: 3, reject_rcpt: [1])
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.send_message("message", "sender@example.com",
+                        ["rcpt1@example.com", "rcpt2@example.com", "rcpt3@example.com"],
+                        pipelining: true, rcpt_error_policy: :continue)
+      assert_equal "message\r\n", server.body
+      smtp.finish
+    end
+
+    def test_send_message_pipelining_continue_raises_when_all_rcpt_rejected
+      server = PipeliningServer.start(rcpt_count: 2, reject_rcpt: [0, 1])
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com",
+                          ["rcpt1@example.com", "rcpt2@example.com"],
+                          pipelining: true, rcpt_error_policy: :continue)
+      end
+      assert_equal "550", err.response.status
+      assert_equal "", server.body
+      smtp.finish
+    end
+
+    def test_send_message_pipelining_callable_policy
+      server = PipeliningServer.start(rcpt_count: 2, reject_rcpt: [1])
+      smtp = Net::SMTP.start 'localhost', server.port
+      yielded = nil
+      smtp.send_message("message", "sender@example.com",
+                        ["rcpt1@example.com", "rcpt2@example.com"],
+                        pipelining: true,
+                        rcpt_error_policy: ->(results) { yielded = results; true })
+      assert_equal 2, yielded.size
+      assert_equal "rcpt2@example.com", yielded[1][0]
+      refute yielded[1][1].success?
+      assert_equal "message\r\n", server.body
+      smtp.finish
+    end
+
+    def test_send_message_pipelining_callable_policy_abort
+      server = PipeliningServer.start(rcpt_count: 2, reject_rcpt: [1])
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com",
+                          ["rcpt1@example.com", "rcpt2@example.com"],
+                          pipelining: true,
+                          rcpt_error_policy: ->(results) { false })
+      end
+      assert_equal "550", err.response.status
+      assert_equal "", server.body
+      smtp.finish
+    end
+
+    def test_send_message_pipelining_mailfrom_rejected
+      server = PipeliningServer.start(rcpt_count: 2, reject_mail: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com",
+                          ["rcpt1@example.com", "rcpt2@example.com"],
+                          pipelining: true)
+      end
+      assert_equal "550", err.response.status
+      assert_match(/Sender rejected/, err.message)
+      # The pipelined RCPT TO replies must have been consumed, so the
+      # session is still in sync and the RSET reply is not a stale one.
+      res = smtp.rset
+      assert_equal "250", res.status
+      assert_match(/2\.0\.0 Ok/, res.string)
+      smtp.finish
+    end
+
+    def test_send_message_pipelining_falls_back_to_serial_without_capability
+      server = PipeliningServer.start(pipelining_capability: false, batch: false)
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_equal false, smtp.capable_pipelining?
+      smtp.send_message("message", "sender@example.com",
+                        ["rcpt1@example.com", "rcpt2@example.com"],
+                        pipelining: true)
+      assert_equal [
+        "MAIL FROM:<sender@example.com>\r\n",
+        "RCPT TO:<rcpt1@example.com>\r\n",
+        "RCPT TO:<rcpt2@example.com>\r\n",
+        "DATA\r\n",
+      ], server.commands[1..]
+      assert_equal "message\r\n", server.body
+      smtp.finish
     end
 
     def test_unsuccessful_send_message_server_busy
@@ -804,6 +965,128 @@ module Net
           mail($')
         when /\ARCPT TO:/
           rcpt($')
+        when "DATA"
+          data
+        when "RSET"
+          rset
+        when "QUIT"
+          quit
+          break
+        else
+          @sock.puts "502 5.5.2 Error: command not recognized\r\n"
+        end
+      end
+    rescue Errno::ECONNRESET, Errno::ECONNABORTED
+      nil
+    end
+  end
+
+  # A fake SMTP server for PIPELINING (RFC 2920) tests.  Upon MAIL FROM
+  # it reads the expected number of pipelined RCPT TO commands and then
+  # deliberately writes every envelope response back in a single write,
+  # like real pipelining servers may do.
+  class PipeliningServer
+    @servers = []
+
+    def self.start(**kw)
+      server = self.new
+      @servers.push server
+      server.start(**kw)
+      server
+    end
+
+    def self.stop_all
+      while (s = @servers.shift)
+        s.stop
+      end
+    end
+
+    attr_reader :port
+    attr_reader :commands
+    attr_reader :body
+
+    def start(rcpt_count: 1, reject_rcpt: [], reject_mail: false,
+              batch: true, pipelining_capability: true)
+      @commands = []
+      @body = +''
+      @rcpt_count = rcpt_count
+      @reject_rcpt = reject_rcpt
+      @reject_mail = reject_mail
+      @batch = batch
+      @pipelining_capability = pipelining_capability
+      @servers = Socket.tcp_server_sockets('localhost', 0)
+      @port = @servers[0].local_address.ip_port
+      @server_thread = Thread.start do
+        Thread.current.abort_on_exception = true
+        @sock = Socket.accept_loop(@servers) { |s, _| break s }
+        @sock.puts "220 ready\r\n"
+        loop
+      end
+    end
+
+    def stop
+      @server_thread&.kill
+      @server_thread&.join
+      @servers&.each(&:close)
+    end
+
+    def ehlo
+      if @pipelining_capability
+        @sock.puts "250-servername\r\n250 PIPELINING\r\n"
+      else
+        @sock.puts "250 servername\r\n"
+      end
+    end
+
+    # Reads the RCPT TO commands pipelined after MAIL FROM and writes
+    # every envelope response back in a single write.
+    def batched_envelope
+      rcpts = Array.new(@rcpt_count) { @sock.gets }
+      rcpts.each {|c| @commands.push c }
+      responses = [@reject_mail ? "550 5.1.0 Sender rejected\r\n" : "250 2.1.0 Ok\r\n"]
+      @rcpt_count.times do |i|
+        responses << (@reject_rcpt.include?(i) ? "550 5.1.1 User unknown\r\n" : "250 2.1.5 Ok\r\n")
+      end
+      @sock.write responses.join
+    end
+
+    def mail
+      @sock.puts(@reject_mail ? "550 5.1.0 Sender rejected\r\n" : "250 2.1.0 Ok\r\n")
+    end
+
+    def rcpt
+      @sock.puts "250 2.1.5 Ok\r\n"
+    end
+
+    def data
+      @sock.puts "354 End data with <CR><LF>.<CR><LF>\r\n"
+      while (l = @sock.gets)
+        break if l.chomp == '.'
+        @body.concat l.sub(/^\./, '')
+      end
+      @sock.puts "250 2.0.0 Ok: queued as ABCDEFG\r\n"
+    end
+
+    def rset
+      @sock.puts "250 2.0.0 Ok\r\n"
+    end
+
+    def quit
+      @sock.puts "221 2.0.0 Bye\r\n"
+      @sock.close
+      @servers.each(&:close)
+    end
+
+    def loop
+      while (comm = @sock.gets)
+        @commands.push comm.encode('utf-8', 'utf-8')
+        case comm.chomp
+        when /\AEHLO /
+          ehlo
+        when /\AMAIL FROM:/
+          @batch ? batched_envelope : mail
+        when /\ARCPT TO:/
+          rcpt
         when "DATA"
           data
         when "RSET"
