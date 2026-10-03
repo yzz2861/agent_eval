@@ -13,6 +13,8 @@ Concurrent::Promises::FactoryMethods.instance_methods(false).sort
 #     :any_event_on,
 #     :any_fulfilled_future,
 #     :any_fulfilled_future_on,
+#     :any_fulfilled_futures,
+#     :any_fulfilled_futures_on,
 #     :any_resolved_future,
 #     :any_resolved_future_on,
 #     :delay,
@@ -1137,4 +1139,3 @@ result.result
 #     nil,
 #     #<Concurrent::CancelledOperationError: Concurrent::CancelledOperationError>]
 ```
-

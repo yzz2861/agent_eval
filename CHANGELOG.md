@@ -1,5 +1,12 @@
 ## Current
 
+concurrent-ruby:
+
+* Add `Promises.any_fulfilled_futures` (`any_fulfilled_futures_on`) combinator: fulfills once k of
+  the given futures are fulfilled, yielding [position, value] pairs in acceptance order; rejects
+  early when k successes become unreachable. Duplicate futures are counted once and the supplied
+  futures are never cancelled.
+
 ## Release v1.3.8 (19 July 2026)
 
 concurrent-ruby:

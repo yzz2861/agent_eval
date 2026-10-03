@@ -315,6 +315,49 @@ module Concurrent
       end
 
       # @!macro promises.shortcut.on
+      # @return [Future]
+      def any_fulfilled_futures(k, *futures_and_or_events)
+        any_fulfilled_futures_on default_executor, k, *futures_and_or_events
+      end
+
+      # Creates a new future which is fulfilled after k of the futures_and_or_events are fulfilled.
+      # Its value is an array of \[position, value] pairs of the first k fulfilled futures, in the
+      # order they were accepted, where position is the index of the future in the argument list.
+      # If the same future is supplied multiple times it's counted only once, the position of its
+      # first occurrence is used.
+      # If the remaining futures can no longer provide k fulfilled results, because too many of
+      # them were rejected, it rejects without waiting for the rest. Its reason is then an array
+      # of the rejection reasons in the order the futures were rejected (it is empty when k
+      # exceeds the number of unique futures from the start).
+      # It never resolves, rejects, or otherwise cancels the supplied futures, they remain
+      # usable elsewhere.
+      # @!macro promises.any-touch
+      # @!macro promises.event-conversion
+      #
+      # @!macro promises.param.default_executor
+      # @param [Integer] k how many fulfilled futures are required to fulfill the result,
+      #   has to be >= 0. When 0 the result is immediately fulfilled with an empty array.
+      # @param [AbstractEventFuture] futures_and_or_events
+      # @return [Future]
+      def any_fulfilled_futures_on(default_executor, k, *futures_and_or_events)
+        unless k.is_a?(Integer) && k >= 0
+          raise ArgumentError, 'k has to be a non-negative Integer'
+        end
+
+        seen            = {}
+        unique_futures  = []
+        first_positions = []
+        futures_and_or_events.each_with_index do |future, position|
+          next if seen[future.object_id]
+          seen[future.object_id] = true
+          unique_futures.push future
+          first_positions.push position
+        end
+
+        AnyFulfilledFuturesPromise.new_blocked_by(unique_futures, default_executor, k, first_positions).future
+      end
+
+      # @!macro promises.shortcut.on
       # @return [Event]
       def any_event(*futures_and_or_events)
         any_event_on default_executor, *futures_and_or_events
@@ -330,7 +373,6 @@ module Concurrent
         AnyResolvedEventPromise.new_blocked_by(futures_and_or_events, default_executor).event
       end
 
-      # TODO consider adding first(count, *futures)
       # TODO consider adding zip_by(slice, *futures) processing futures in slices
       # TODO or rather a generic aggregator taking a function
     end
@@ -2098,6 +2140,52 @@ module Concurrent
       end
     end
 
+    class AnyFulfilledFuturesPromise < BlockedPromise
+
+      private
+
+      def initialize(delayed, blockers_count, default_executor, k, first_positions)
+        super delayed, blockers_count, Future.new(self, default_executor)
+        @K              = k
+        @Positions      = first_positions
+        @Accepted       = [] # [position, value] pairs in the order the successes were accepted
+        @Reasons        = [] # reasons of rejected blockers in the order they were rejected
+        @Remaining      = blockers_count
+        @Lock           = ::Mutex.new
+
+        # the outcome may be decided before any blocker resolves
+        on_resolvable nil, nil if k == 0 || k > blockers_count
+      end
+
+      def process_on_blocker_resolution(future, index)
+        internal_state = future.internal_state
+        @Lock.synchronize do
+          @Remaining -= 1
+          if internal_state.fulfilled?
+            # successes arriving after the result was fulfilled are ignored
+            @Accepted.push [@Positions[index], internal_state.value] if @Accepted.size < @K
+          else
+            @Reasons.push internal_state.reason
+          end
+        end
+        # super has to be called after the above to keep the countdown in sync with @Remaining
+        super future, index
+      end
+
+      def resolvable?(countdown, future, index)
+        @Lock.synchronize { @Accepted.size >= @K || @Accepted.size + @Remaining < @K }
+      end
+
+      def on_resolvable(resolved_future, index)
+        fulfilled, accepted, reasons = @Lock.synchronize { [@Accepted.size >= @K, @Accepted.dup, @Reasons.dup] }
+        if fulfilled
+          resolve_with Fulfilled.new(accepted), false
+        else
+          resolve_with Rejected.new(reasons), false
+        end
+      end
+    end
+
     class DelayPromise < InnerPromise
 
       def initialize(default_executor)
@@ -2175,6 +2263,7 @@ module Concurrent
                      :AbstractAnyPromise,
                      :AnyResolvedFuturePromise,
                      :AnyFulfilledFuturePromise,
+                     :AnyFulfilledFuturesPromise,
                      :AnyResolvedEventPromise,
                      :DelayPromise,
                      :ScheduledPromise

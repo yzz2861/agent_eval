@@ -177,6 +177,112 @@ RSpec.describe 'Concurrent::Promises' do
     end
   end
 
+  describe '.any_fulfilled_futures' do
+    it 'fulfills with the first k fulfilled values in acceptance order, keeping original positions' do
+      f1 = resolvable_future
+      f2 = resolvable_future
+      f3 = resolvable_future
+
+      any = any_fulfilled_futures(2, f1, f2, f3)
+
+      f2.fulfill :b
+      f1.fulfill :a
+
+      expect(any.value!).to eq [[1, :b], [0, :a]]
+
+      # a late success does not change the result
+      f3.fulfill :c
+      expect(any.value).to eq [[1, :b], [0, :a]]
+    end
+
+    it 'does not count rejections towards k and rejects as soon as k becomes unreachable' do
+      f1     = resolvable_future
+      f2     = resolvable_future
+      f3     = resolvable_future
+      error1 = StandardError.new('e1')
+      error2 = StandardError.new('e2')
+
+      any = any_fulfilled_futures(2, f1, f2, f3)
+
+      f1.reject error1
+      expect(any).to be_pending
+
+      f2.reject error2
+      # it does not wait for f3 once k is unreachable
+      expect(any).to be_rejected
+      expect(any.reason).to eq [error1, error2]
+      expect(f3).to be_pending
+    end
+
+    it 'counts a duplicated future only once and reports the first position' do
+      f  = resolvable_future
+      any = any_fulfilled_futures(2, f, f)
+      expect(any).to be_rejected
+      expect(any.reason).to eq []
+
+      f1   = resolvable_future
+      f2   = resolvable_future
+      any2 = any_fulfilled_futures(2, f1, f1, f2)
+      f2.fulfill :b
+      f1.fulfill :a
+      expect(any2.value!).to eq [[2, :b], [0, :a]]
+    end
+
+    it 'fulfills immediately with an empty array when k is zero' do
+      expect(any_fulfilled_futures(0).value!).to eq []
+      expect(any_fulfilled_futures(0, resolvable_future).value!).to eq []
+    end
+
+    it 'rejects immediately when k exceeds the number of unique futures' do
+      any = any_fulfilled_futures(3, fulfilled_future(1), fulfilled_future(2))
+      expect(any).to be_rejected
+      expect(any.reason).to eq []
+
+      expect(any_fulfilled_futures(1)).to be_rejected
+    end
+
+    it 'works with already resolved futures' do
+      any = any_fulfilled_futures(2,
+                                  fulfilled_future(:a),
+                                  rejected_future(StandardError.new),
+                                  fulfilled_future(:b))
+      expect(any.value!).to eq [[0, :a], [2, :b]]
+    end
+
+    it 'treats a resolved Event as a Future fulfilled with nil' do
+      expect(any_fulfilled_futures(1, resolved_event).value!).to eq [[0, nil]]
+    end
+
+    it 'resolves only once when futures complete simultaneously' do
+      futures = 10.times.map { resolvable_future }
+      any     = any_fulfilled_futures(4, *futures)
+
+      futures.each_with_index.map { |f, i| Thread.new { f.fulfill i } }.each(&:join)
+
+      result = any.value!
+      expect(result.size).to eq 4
+      expect(result.map(&:first).uniq.size).to eq 4
+    end
+
+    it 'raises ArgumentError for invalid k' do
+      expect { any_fulfilled_futures(-1, resolvable_future) }.to raise_error ArgumentError
+      expect { any_fulfilled_futures(1.5, resolvable_future) }.to raise_error ArgumentError
+    end
+
+    it 'does not resolve or cancel the supplied futures' do
+      f1  = resolvable_future
+      f2  = resolvable_future
+      any = any_fulfilled_futures(1, f1, f2)
+
+      f1.fulfill :a
+      expect(any.value!).to eq [[0, :a]]
+      expect(f2).to be_pending
+
+      f2.fulfill :b
+      expect(f2.value).to eq :b
+    end
+  end
+
   describe '.zip' do
     it 'waits for all results' do
       a = future { 1 }
