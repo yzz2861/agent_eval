@@ -248,6 +248,10 @@ be obeyed though. Features developed in `concurrent-ruby-edge` are expected to m
     *   check cancellation every cycle of a loop which does significant work,
     *   do all blocking actions in a loop with a timeout then on timeout check cancellation
         and if ok block again with the timeout 
+*   `TaskGroup`
+    Starts concurrently running futures, stops accepting new tasks after the first failure,
+    provides cooperative cancellation to accepted tasks, and waits for all of them before its
+    block scope exits. Failures from every task are preserved and raised together.
 *   [Throttle](http://ruby-concurrency.github.io/concurrent-ruby/master/Concurrent/Throttle.html)
     A tool managing concurrency level of tasks.
 *   [ErlangActor](http://ruby-concurrency.github.io/concurrent-ruby/master/Concurrent/ErlangActor.html)
