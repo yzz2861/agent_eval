@@ -16,6 +16,7 @@ module Concurrent
     def initialize(value)
       @value = value
       @lock = Mutex.new
+      @waiters = []
     end
 
     # Get the value of a `TVar`.
@@ -45,6 +46,23 @@ module Concurrent
     # @!visibility private
     def unsafe_lock # :nodoc:
       @lock
+    end
+
+    # Register a queue to be signalled when this `TVar` is next modified.
+    # The caller must hold this `TVar`'s lock.
+    #
+    # @!visibility private
+    def unsafe_add_waiter(queue) # :nodoc:
+      @waiters << queue
+    end
+
+    # Signal and remove all registered waiters. The caller must hold this
+    # `TVar`'s lock.
+    #
+    # @!visibility private
+    def unsafe_notify_waiters # :nodoc:
+      waiters, @waiters = @waiters, []
+      waiters.each { |queue| queue.push(true) }
     end
 
   end
@@ -108,6 +126,14 @@ module Concurrent
           rescue Transaction::AbortError
             transaction.abort
             result = Transaction::ABORTED
+          rescue Transaction::RetryError
+            if transaction.empty?
+              transaction.abort
+              raise Transaction::RetryError.new(
+                'Concurrent::retry_transaction cannot block: the transaction has not read any TVars')
+            end
+            transaction.retry_wait
+            result = Transaction::ABORTED
           rescue Transaction::LeaveError
             transaction.abort
             break result
@@ -145,7 +171,22 @@ module Concurrent
     raise Transaction::LeaveError.new
   end
 
-  module_function :atomically, :abort_transaction, :leave_transaction
+  # Abort the current transaction, block until any of the `TVar`s it has
+  # read so far are modified by another transaction, and then re-run the
+  # whole transaction from the start - see `Concurrent::atomically`.
+  #
+  # All writes made by the current attempt are discarded. While blocked the
+  # thread does not consume any CPU, and writes to `TVar`s the transaction
+  # has not read will not wake it up. As transactions are flattened, calling
+  # this from a nested `atomically` retries the outermost transaction.
+  #
+  # Raises `Transaction::RetryError` if the transaction has not read any
+  # `TVar` yet, as it could never be woken up.
+  def retry_transaction
+    raise Transaction::RetryError.new
+  end
+
+  module_function :atomically, :abort_transaction, :leave_transaction, :retry_transaction
 
   private
 
@@ -158,6 +199,7 @@ module Concurrent
 
     AbortError = Class.new(StandardError)
     LeaveError = Class.new(StandardError)
+    RetryError = Class.new(StandardError)
 
     def initialize
       @open_tvars = {}
@@ -193,10 +235,30 @@ module Concurrent
       unlock
     end
 
+    def empty?
+      @open_tvars.empty?
+    end
+
+    # Block until another transaction modifies any of the `TVar`s opened so
+    # far. The waiters are registered while this transaction still holds the
+    # locks of those `TVar`s, so a commit that happens after they were read
+    # cannot be missed: it either happens before the registration (impossible,
+    # as committing requires the locks we hold) or observes the waiter and
+    # signals it.
+    def retry_wait
+      waiter = Queue.new
+      @open_tvars.each_key do |tvar|
+        tvar.unsafe_add_waiter(waiter)
+      end
+      unlock
+      waiter.pop
+    end
+
     def commit
       @open_tvars.each do |tvar, entry|
         if entry.modified
           tvar.unsafe_value = entry.value
+          tvar.unsafe_notify_waiters
         end
       end
 

@@ -21,6 +21,34 @@ the transaction. Creating a thread counts as a side-effect.
 
 We implement nested transactions by flattening.
 
+A transaction can also block waiting for data to become available. Calling
+`Concurrent::retry_transaction` inside `atomically` discards the writes of
+the current attempt and puts the thread to sleep - without consuming any CPU -
+until another transaction modifies any of the `TVar` objects read so far.
+The whole transaction then runs again from the start. Only `TVar`s actually
+read by the transaction wake it up, and commits that happen between those
+reads and entering the wait are not missed. Retrying before anything has been
+read raises `Concurrent::Transaction::RetryError`, as such a transaction
+could never be woken up.
+
+```ruby
+require 'concurrent'
+
+stock = Concurrent::TVar.new(0)
+
+consumer = Thread.new do
+  Concurrent::atomically do
+    available = stock.value
+    Concurrent::retry_transaction if available < 1
+    stock.value = available - 1
+  end
+end
+
+sleep 0.1 # the consumer is now blocked, not busy-waiting
+Concurrent::atomically { stock.value += 1 }
+consumer.join
+```
+
 We only support strong isolation if you use the API correctly. In order words,
 we do not support strong isolation.
 
