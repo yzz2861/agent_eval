@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'options_validator'
+require_relative 'transition_result'
 
 module StateMachines
   # An event defines an action that transitions an attribute from one state to
@@ -166,13 +167,20 @@ module StateMachines
     # Any additional arguments are passed to the StateMachines::Transition#perform
     # instance method.
     def fire(object, *event_args)
+      fire_with_result(object, *event_args).success?
+    end
+
+    # Fires the event and returns a result that explains why the transition
+    # completed.  The return value remains backward-compatible for callers that
+    # only need a boolean.
+    def fire_with_result(object, *event_args)
       machine.reset(object)
 
       if (transition = transition_for(object, {}, *event_args))
-        transition.perform(*event_args)
+        TransitionResult.from_perform(transition, transition.perform(*event_args))
       else
         on_failure(object, *event_args)
-        false
+        TransitionResult.guard_rejected
       end
     end
 

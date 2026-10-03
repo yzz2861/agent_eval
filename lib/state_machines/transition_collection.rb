@@ -17,6 +17,10 @@ module StateMachines
     # Options passed to the collection
     attr_reader :options
 
+    # The reason that a non-successful transition stopped, or +nil+ while it
+    # is still running or after a successful run
+    attr_reader :failure_reason
+
     # Creates a new collection of transitions that can be run in parallel.  Each
     # transition *must* be for a different attribute.
     #
@@ -129,6 +133,7 @@ module StateMachines
     def reset
       @results = {}
       @success = false
+      @failure_reason = nil
     end
 
     # Runs each transition's callbacks recursively.  Once all before callbacks
@@ -145,6 +150,11 @@ module StateMachines
         callback_result = transition.run_callbacks(callback_options) do
           run_callbacks(index + 1, &)
           { result: results[transition.action], success: success? }
+        end
+
+        if !callback_result && failure_reason.nil?
+          @failure_reason = :guard_rejected
+          transition.last_failure_reason = :guard_rejected if transition.respond_to?(:last_failure_reason=)
         end
 
         # If we're skipping after callbacks and the transition is paused,
@@ -178,6 +188,12 @@ module StateMachines
                      actions.compact.each { |action| !skip_actions && (results[action] = object.send(action)) }
                      results.values.all?
                    end
+        unless @success
+          @failure_reason ||= :action_failed
+          each do |transition|
+            transition.last_failure_reason ||= :action_failed if transition.respond_to?(:last_failure_reason=)
+          end
+        end
       end
     end
 

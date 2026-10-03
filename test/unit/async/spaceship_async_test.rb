@@ -65,13 +65,13 @@ class SpaceShipAsyncModeTest < Minitest::Test
     Async do
       # Test async launch sequence
       assert_equal 'docked', @spaceship.status
-      result = @spaceship.fire_event_async(:launch)
+      result = @spaceship.fire_event_async(:launch).wait.result
 
       assert result
       assert_equal 'flying', @spaceship.status
 
       # Test async shield raising
-      result = @spaceship.fire_event_async(:raise_shields)
+      result = @spaceship.fire_event_async(:raise_shields).wait.result
 
       assert result
       assert_equal 'up', @spaceship.shields
@@ -97,7 +97,7 @@ class SpaceShipAsyncModeTest < Minitest::Test
       end
 
       # Wait for all launches to complete
-      results = launch_tasks.map(&:wait)
+      results = launch_tasks.map { |task| task.wait.result }
 
       assert_equal [true, true, true], results
 
@@ -111,7 +111,7 @@ class SpaceShipAsyncModeTest < Minitest::Test
         ship.async_fire_event(:raise_shields)
       end
 
-      shield_results = shield_tasks.map(&:wait)
+      shield_results = shield_tasks.map { |task| task.wait.result }
 
       assert_equal [true, true, true], shield_results
 
@@ -131,7 +131,7 @@ class SpaceShipAsyncModeTest < Minitest::Test
     # Multiple threads trying to launch the same spaceship
     5.times do |i|
       threads << Thread.new do
-        result = @spaceship.fire_event_async(:launch)
+        result = @spaceship.fire_event_async(:launch).wait.result
         results_mutex.synchronize do
           results << { thread: i, result: result, status: @spaceship.status }
         end
@@ -155,9 +155,9 @@ class SpaceShipAsyncModeTest < Minitest::Test
     assert_empty @spaceship.callback_log
 
     # Test that callbacks work with async operations
-    result = @spaceship.fire_event_async(:launch)
+    result = @spaceship.fire_event_async(:launch).wait
 
-    assert result
+    assert result.succeeded?
     assert_equal 'flying', @spaceship.status
 
     # Check that callbacks were executed
@@ -167,7 +167,7 @@ class SpaceShipAsyncModeTest < Minitest::Test
 
   def test_mixed_sync_and_async_operations
     # Launch (async-enabled machine)
-    launch_result = @spaceship.fire_event_async(:launch)
+    launch_result = @spaceship.fire_event_async(:launch).wait.result
 
     assert launch_result
     assert_equal 'flying', @spaceship.status
@@ -179,7 +179,7 @@ class SpaceShipAsyncModeTest < Minitest::Test
     assert_equal 'armed', @spaceship.weapons
 
     # Raise shields (async-enabled machine)
-    shields_result = @spaceship.fire_event_async(:raise_shields)
+    shields_result = @spaceship.fire_event_async(:raise_shields).wait.result
 
     assert shields_result
     assert_equal 'up', @spaceship.shields
@@ -249,7 +249,7 @@ class SpaceShipAsyncModeTest < Minitest::Test
       end
       # Test that fire_event_async! also raises exceptions
       begin
-        @spaceship.fire_event_async!(:launch)
+        @spaceship.fire_event_async!(:launch).wait
 
         flunk 'Expected StateMachines::InvalidTransition to be raised'
       rescue StateMachines::InvalidTransition => e
@@ -265,12 +265,12 @@ class SpaceShipAsyncModeTest < Minitest::Test
     Async do
       # Valid transition should work fine
       task = @spaceship.launch_async!
-      result = task.wait
+      result = task.wait.result
 
       assert result
       assert_equal 'flying', @spaceship.status
       # Test fire_event_async! with valid transition
-      result = @spaceship.fire_event_async!(:enter_warp)
+      result = @spaceship.fire_event_async!(:enter_warp).wait.result
 
       assert result
       assert_equal 'warping', @spaceship.status
@@ -286,6 +286,104 @@ class SpaceShipAsyncModeTest < Minitest::Test
     # Weapons machine is sync-only, so should NOT have async versions
     refute_respond_to @spaceship, :arm_weapons_async, 'Should NOT have arm_weapons_async method (weapons is sync-only)'
     refute_respond_to @spaceship, :arm_weapons_async!, 'Should NOT have arm_weapons_async! method (weapons is sync-only)'
+  end
+
+  def test_transition_handle_reports_success_for_thread_and_async
+    assert_transition_outcome(:thread, :succeeded, :launch) { AutonomousDrone.new }
+
+    require 'async'
+    Async do
+      drone = AutonomousDrone.new
+      handle = drone.launch_async
+      assert_equal :async, handle.mode
+      assert_equal :succeeded, handle.wait.status
+      assert_equal 'flying', drone.status
+    end
+  end
+
+  def test_transition_handle_reports_guard_rejection
+    assert_transition_outcome(:thread, :guard_rejected, :launch) do
+      AutonomousDrone.new.tap(&:launch!)
+    end
+
+    require 'async'
+    Async do
+      drone = AutonomousDrone.new
+      drone.launch!
+      handle = drone.launch_async
+      assert_equal :guard_rejected, handle.wait.status
+      assert_equal 'flying', drone.status
+    end
+  end
+
+  def test_transition_handle_reports_action_failure
+    klass = cancellation_model
+    drone = klass.new
+    drone.fail_action = true
+
+    handle = drone.async_fire_event(:run)
+    assert_equal :action_failed, handle.wait.status
+    assert_equal 'idle', drone.state
+    assert_equal %w[guard before action], drone.events
+
+    require 'async'
+    Async do
+      failing_drone = klass.new
+      failing_drone.fail_action = true
+      handle = failing_drone.async_fire_event(:run)
+      assert_equal :action_failed, handle.wait.status
+      assert_equal 'idle', failing_drone.state
+    end
+  end
+
+  def test_cancel_before_start_skips_guard_action_and_callbacks
+    %i[thread async].each do |mode|
+      klass = cancellation_model
+      drone = klass.new
+      handle = if mode == :thread
+                 drone.async_fire_event(:run)
+               else
+                 require 'async'
+                 result = nil
+                 Async do
+                   result = drone.async_fire_event(:run)
+                 end.wait
+                 result
+               end
+
+      assert_equal mode, handle.mode
+      assert handle.pending?
+      assert handle.cancel
+      assert_equal :cancelled, handle.wait.status
+      assert_equal 'idle', drone.state
+      assert_empty drone.events
+    end
+  end
+
+  def test_cancel_after_claim_returns_false_and_lets_transition_finish
+    require 'async'
+
+    %i[thread async].each do |mode|
+      interaction = lambda do |*|
+        klass = cancellation_model
+        drone = klass.new
+        drone.hold_transition = true
+        drone.use_async_queues = mode == :async
+        handle = drone.async_fire_event(:run)
+
+        handle.start
+        drone.claimed_queue.pop
+        assert_equal :running, handle.status
+        refute handle.cancel
+        drone.continue_queue.push(:continue)
+        handle.wait
+        assert_equal :succeeded, handle.status
+        assert_equal 'done', drone.state
+        assert_equal %w[guard before action after], drone.events
+      end
+
+      mode == :async ? Async(&interaction) : interaction.call
+    end
   end
 
   def test_async_mode_enables_per_machine_not_globally
@@ -315,5 +413,74 @@ class SpaceShipAsyncModeTest < Minitest::Test
 
     # But regular sync methods should work
     assert_sm_sync_execution(sync_ship, :launch, :flying, :status)
+  end
+
+  private
+
+  def assert_transition_outcome(mode, expected_status, event_name)
+    drone = yield
+    handle = if mode == :async
+               require 'async'
+               captured = nil
+               Async { captured = drone.async_fire_event(event_name) }.wait
+               captured
+             else
+               drone.async_fire_event(event_name)
+             end
+
+    assert_equal mode, handle.mode
+    assert_equal expected_status, handle.wait.status
+  end
+
+  def cancellation_model
+    Class.new do
+      attr_accessor :state, :events, :fail_action, :hold_transition, :use_async_queues
+
+      def initialize
+        @state = 'idle'
+        @events = []
+        @fail_action = false
+        @allow_transition = true
+        @hold_transition = false
+        @use_async_queues = false
+        @claimed_queue = Thread::Queue.new
+        @continue_queue = Thread::Queue.new
+      end
+
+      state_machine initial: :idle, async: true, action: :save do
+        before_transition { |object| object.events << 'before' }
+        before_transition do |object|
+          next unless object.hold_transition
+
+          object.claimed_queue.push(:claimed)
+          object.continue_queue.pop
+        end
+        after_transition { |object| object.events << 'after' }
+
+        event :run do
+          transition idle: :done, if: :transition_allowed?
+        end
+      end
+
+      def transition_allowed?
+        events << 'guard'
+        @allow_transition
+      end
+
+      def save
+        events << 'action'
+        !fail_action
+      end
+
+      def claimed_queue
+        @fiber_claimed_queue ||= ::Async::Queue.new if @use_async_queues
+        @fiber_claimed_queue || @claimed_queue
+      end
+
+      def continue_queue
+        @fiber_continue_queue ||= ::Async::Queue.new if @use_async_queues
+        @fiber_continue_queue || @continue_queue
+      end
+    end
   end
 end

@@ -23,15 +23,11 @@ module StateMachines
       end
 
       # Fires an event asynchronously on the given object
-      # Returns an Async::Task for concurrent execution
-      def async_fire_event(object, event_name, *)
-        unless defined?(::Async::Task) && ::Async::Task.current?
-          raise RuntimeError, "async_fire_event must be called within an Async context"
-        end
+      # Returns a queryable and waitable TransitionHandle
+      def async_fire_event(object, event_name, *args)
+        return TransitionHandle.start(object, event_name, *args) if async_mode_enabled?
 
-        Async do
-          events[event_name].fire(object, *)
-        end
+        raise RuntimeError, "event #{event_name.inspect} is not configured for async execution"
       end
 
       # Creates an async-aware transition collection

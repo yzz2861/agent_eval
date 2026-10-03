@@ -396,27 +396,49 @@ end
 
 ## Async Event Methods
 
-Async-enabled machines automatically generate async versions of event methods:
+Async-enabled machines return a `StateMachines::AsyncMode::TransitionHandle`.
+The handle works both from a plain thread and inside an `Async` context:
 
 ```ruby
 drone = AutonomousDrone.new
 
-# Within an Async context
+# Plain Ruby thread execution
+handle = drone.launch_async
+handle.status        # => :pending
+outcome = handle.wait
+outcome.status       # => :succeeded
+
+# Async fiber execution
 Async do
-  # Async event firing - returns Async::Task
-  task = drone.launch_async
-  result = task.wait  # => true
-
-  # Bang methods for strict error handling
-  drone.power_up_async!  # => Async::Task (raises on failure)
-
-  # Generic async event firing
-  drone.fire_event_async(:teleport)  # => Async::Task
+  handle = drone.launch_async
+  outcome = handle.wait
+  outcome.succeeded?  # => true
 end
-
-# Outside Async context - raises error
-drone.launch_async  # => RuntimeError: launch_async must be called within an Async context
 ```
+
+Each handle supports `status`, `pending?`, `claimed?`, `start`, `wait`, and
+`cancel`. Completed outcomes have one of these statuses:
+
+* `:cancelled` - the executor had not claimed the transition
+* `:guard_rejected` - no branch/guard permitted the event
+* `:action_failed` - guards and transition callbacks began, but the action failed
+* `:succeeded` - the transition completed normally
+
+```ruby
+handle = drone.launch_async
+
+if handle.cancel
+  handle.wait.status # => :cancelled
+else
+  handle.wait        # The executor already claimed it; let it finish
+end
+```
+
+Cancellation is cooperative. It only succeeds before the executor claims the
+transition. It never terminates a thread or fiber and never reverses external
+side effects already performed by a guard, action, or callback. Bang methods,
+such as `launch_async!`, raise `StateMachines::InvalidTransition` from `wait`
+for non-cancelled failures.
 
 ## Thread Safety
 

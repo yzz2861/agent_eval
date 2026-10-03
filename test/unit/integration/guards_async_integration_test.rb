@@ -103,17 +103,17 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       # Open docking bay (should work - life support active)
       result = @station.open_bay_async.wait
 
-      assert result, 'Should be able to open bay when life support is active'
+      assert result.succeeded?, 'Should be able to open bay when life support is active'
 
       # Start loading (should work - bay open, life support active)
       result = @station.start_loading_async.wait
 
-      assert result, 'Should be able to start loading when conditions are met'
+      assert result.succeeded?, 'Should be able to start loading when conditions are met'
 
       # Raise alert (should work - bay is open)
       result = @station.raise_alert_async.wait
 
-      assert result, 'Should raise alert when bay is open'
+      assert result.succeeded?, 'Should raise alert when bay is open'
     end
   end
 
@@ -134,18 +134,18 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       @station.complete_loading_async.wait # Complete current loading first
       result = @station.start_loading_async.wait
 
-      refute result, 'Should not be able to start loading when life support is offline'
+      assert result.guard_rejected?, 'Should not be able to start loading when life support is offline'
 
       # Emergency stop should NOT work (life support is offline, so guard prevents it)
       # The guard says "unless life_support is offline", so when it IS offline, emergency_stop is blocked
       result = @station.emergency_stop_async.wait
 
-      refute result, 'Emergency stop should not work when life support is offline (guard protection)'
+      assert result.guard_rejected?, 'Emergency stop should not work when life support is offline (guard protection)'
 
       # Critical alert should trigger
       result = @station.critical_alert_async.wait
 
-      assert result, 'Critical alert should trigger when life support is offline'
+      assert result.succeeded?, 'Critical alert should trigger when life support is offline'
     end
   end
 
@@ -164,7 +164,7 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       # Start unloading (should fail - bay is closed)
       result = @station.start_unloading_async.wait
 
-      refute result, 'Should not be able to unload when bay is closed'
+      assert result.guard_rejected?, 'Should not be able to unload when bay is closed'
 
       # Open bay again
       @station.open_bay_async.wait
@@ -172,7 +172,7 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       # Now unloading should work
       result = @station.start_unloading_async.wait
 
-      assert result, 'Should be able to unload when bay is open and life support active'
+      assert result.succeeded?, 'Should be able to unload when bay is open and life support active'
 
       # Complete unloading and close bay
       @station.complete_unloading_async.wait
@@ -193,7 +193,7 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       if @station.alert_status == 'green'
         assert true, 'Alert status is already green, which is the desired state'
       else
-        assert result, "All clear should work when all systems are safe (alert_status: #{@station.alert_status})"
+        assert result.succeeded?, "All clear should work when all systems are safe (alert_status: #{@station.alert_status})"
       end
     end
   end
@@ -208,7 +208,7 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       # Async operation should respect sync machine state
       result = @station.open_bay_async.wait
 
-      refute result, 'Async machine should respect sync machine guard'
+      assert result.guard_rejected?, 'Async machine should respect sync machine guard'
 
       # Restore life support (sync)
       @station.restore!
@@ -216,7 +216,7 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       # Now async operation should work
       result = @station.open_bay_async.wait
 
-      assert result, 'Async machine should work when sync machine state allows it'
+      assert result.succeeded?, 'Async machine should work when sync machine state allows it'
     end
   end
 

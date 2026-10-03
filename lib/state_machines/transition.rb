@@ -32,6 +32,11 @@ module StateMachines
     # The result of invoking the action associated with the machine
     attr_reader :result
 
+    # The reason the most recent execution did not succeed
+    attr_reader :last_failure_reason
+
+    attr_writer :last_failure_reason
+
     # Whether the transition is only existing temporarily for the object
     attr_writer :transient
 
@@ -174,7 +179,11 @@ module StateMachines
       self.args = args
 
       # Run the transition
-      !!TransitionCollection.new([self], { use_transactions: machine.use_transactions, actions: run_action }).perform
+      @last_failure_reason = nil
+      collection = TransitionCollection.new([self], { use_transactions: machine.use_transactions, actions: run_action })
+      result = collection.perform
+      @last_failure_reason ||= collection.failure_reason unless result
+      !!result
     end
 
     # Runs a block within a transaction for the object being transitioned.
@@ -287,6 +296,7 @@ module StateMachines
     # the state has already been persisted
     def reset
       @before_run = @persisted = @after_run = false
+      @last_failure_reason = nil
       # Kill so ensure blocks in paused callbacks still run (CRuby only:
       # TruffleRuby lacks Fiber#kill, JRuby's doesn't wait for ensure)
       @paused_fiber.kill if RUBY_ENGINE == 'ruby' && @paused_fiber&.alive? && !@paused_fiber.equal?(Fiber.current)
