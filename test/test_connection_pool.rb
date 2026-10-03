@@ -575,6 +575,75 @@ class TestConnectionPool < Minitest::Test
     assert_equal [["shutdown"], ["shutdown"], ["shutdown"]], recorders.map { |r| r.calls }
   end
 
+  def test_checkin_and_shutdown_progress_while_constructor_is_blocked
+    started = Thread::Queue.new
+    release = Thread::Queue.new
+    fast_started = Thread::Queue.new
+    closed = []
+    constructing = true
+    built = []
+    pool = ConnectionPool.new(size: 2) {
+      conn = Object.new
+      if constructing
+        built << conn
+        started << true
+        release.pop
+      else
+        fast_started << true
+      end
+      conn
+    }
+
+    # One slot is reserved by a constructor blocked outside of the pool lock.
+    created = nil
+    creator = Thread.new do
+      created = pool.checkout
+    end
+    creator.report_on_exception = false
+    started.pop
+
+    # The other slot still allows a normal checkout/checkin cycle to make
+    # progress instead of piling up behind the slow constructor.
+    constructing = false
+    user = Thread.new do
+      conn = pool.checkout
+      pool.checkin
+      conn
+    end
+    fast_started.pop # ensure the user thread reserved the fast slot
+    checked_in = user.value
+    refute_nil checked_in
+    assert_equal 1, pool.idle
+
+    # shutdown drains the idle connection immediately without waiting for the
+    # blocked constructor.
+    shutdown_entered = Thread::Queue.new
+    shutdown = Thread.new do
+      shutdown_entered << true
+      pool.shutdown { |conn| closed << conn }
+    end
+    shutdown_entered.pop
+    Thread.pass until shutdown.status == false
+    assert_equal [checked_in], closed
+
+    # The blocked checkout now observes shutdown and fails rather than handing
+    # out a ghost connection; its reservation is returned.
+    release << true
+    assert_raises(ConnectionPool::PoolShuttingDownError) { creator.join }
+
+    # The late-finished resource is destroyed (never handed out) together with
+    # the connection that was checked in before shutdown; nothing leaks.
+    assert_nil created
+    assert_same checked_in, closed.first
+    assert_equal built, closed[1..]
+    assert_equal 0, pool.idle
+    assert_equal 2, pool.available
+
+    assert_raises ConnectionPool::PoolShuttingDownError do
+      pool.checkout
+    end
+  end
+
   def test_raises_an_error_if_shutdown_is_called_without_a_block
     pool = ConnectionPool.new(size: 1) {}
 

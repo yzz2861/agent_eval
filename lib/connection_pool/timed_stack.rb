@@ -61,15 +61,26 @@ class ConnectionPool::TimedStack
   # Other options may be used by subclasses that extend TimedStack.
   def pop(timeout: 0.5, exception: ConnectionPool::TimeoutError, **kwargs)
     deadline = current_time + timeout
-    @mutex.synchronize do
+
+    # Subclasses that override the legacy +try_create+ extension point expect
+    # it to be invoked while holding the mutex. Keep that contract intact and
+    # fall back to the old behavior for them.
+    return legacy_pop(deadline, timeout, exception, **kwargs) if create_override?
+
+    action = @mutex.synchronize do
       loop do
         raise ConnectionPool::PoolShuttingDownError if @shutdown_block
         if (conn = try_fetch_connection(**kwargs))
           return conn
         end
 
-        connection = try_create(**kwargs)
-        return connection if connection
+        if @created < @max
+          # Reserve capacity under the lock but perform the (potentially slow)
+          # construction outside of it so checkins, shutdown and other threads
+          # are not blocked by a slow constructor.
+          @created += 1
+          break :create
+        end
 
         to_wait = deadline - current_time
         if to_wait <= 0
@@ -82,6 +93,8 @@ class ConnectionPool::TimedStack
         @resource.wait(@mutex, to_wait)
       end
     end
+
+    create_connection(**kwargs) if action == :create
   end
 
   ##
@@ -148,6 +161,77 @@ class ConnectionPool::TimedStack
   end
 
   private
+
+  ##
+  # Legacy +pop+ implementation retained for subclasses that override the
+  # +try_create+ extension point, which is documented to be called with the
+  # mutex held.
+  def legacy_pop(deadline, timeout, exception, **kwargs)
+    @mutex.synchronize do
+      loop do
+        raise ConnectionPool::PoolShuttingDownError if @shutdown_block
+        if (conn = try_fetch_connection(**kwargs))
+          return conn
+        end
+
+        connection = try_create(**kwargs)
+        return connection if connection
+
+        to_wait = deadline - current_time
+        if to_wait <= 0
+          if exception
+            raise exception, "Waited #{timeout} sec, #{length}/#{@max} available"
+          else
+            return nil
+          end
+        end
+        @resource.wait(@mutex, to_wait)
+      end
+    end
+  end
+
+  ##
+  # Constructs a connection outside of the mutex and then safely delivers it.
+  #
+  # Capacity was already reserved by +pop+, so every exit path must release it
+  # again if the connection is not handed out: a constructor failure, a pool
+  # shutdown while construction was in flight, or an asynchronous interrupt
+  # must all give the reservation back to avoid ghost capacity.
+  def create_connection(**kwargs)
+    conn = @create_block.call
+  rescue Exception
+    release_reserved_connection
+    raise
+  else
+    @mutex.synchronize do
+      if @shutdown_block
+        undo_reservation
+        begin
+          @shutdown_block.call(conn)
+        ensure
+          @resource.broadcast
+        end
+        raise ConnectionPool::PoolShuttingDownError
+      end
+
+      conn
+    end
+  end
+
+  def release_reserved_connection
+    @mutex.synchronize do
+      undo_reservation
+    end
+  end
+
+  def undo_reservation
+    @created -= 1 unless @created == 0
+    @resource.broadcast
+  end
+
+  def create_override?
+    method(:try_create).owner != ConnectionPool::TimedStack
+  end
 
   def current_time
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -229,6 +313,11 @@ class ConnectionPool::TimedStack
   #
   # This method must create a connection if and only if the total number of
   # connections allowed has not been met.
+  #
+  # This hook predates out-of-lock construction. Subclasses that override it
+  # keep the original behavior where it is invoked under the stack mutex; the
+  # default implementation reserves capacity in +pop+ and runs the constructor
+  # without holding the mutex instead.
   def try_create(**_kwargs)
     unless @created == @max
       object = @create_block.call

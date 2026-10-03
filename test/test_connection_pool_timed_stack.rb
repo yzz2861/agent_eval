@@ -87,6 +87,176 @@ class TestConnectionPoolTimedStack < Minitest::Test
     assert_equal 2, stack.length
   end
 
+  def test_object_creation_failure_does_not_leak_capacity
+    created = 0
+    should_fail = true
+    entered = Thread::Queue.new
+    stack = ConnectionPool::TimedStack.new(size: 1) do
+      created += 1
+      entered << true
+      raise "failure" if should_fail
+      Object.new
+    end
+
+    assert_raises(RuntimeError) { stack.pop }
+    entered.pop # ensure the constructor invocation has finished
+    # Capacity reserved by the failed attempt is returned, so a later pop works.
+    should_fail = false
+    conn = stack.pop
+    assert_equal 2, created
+    assert_empty stack
+    stack.push conn
+    assert_equal 1, stack.length
+  end
+
+  def test_checkin_proceeds_while_constructor_is_blocked
+    started = Thread::Queue.new
+    release = Thread::Queue.new
+    stack = ConnectionPool::TimedStack.new(size: 2) do
+      started << true
+      release.pop
+      Object.new
+    end
+
+    creator = Thread.new { stack.pop }
+    started.pop # block until the slow constructor is running outside the lock
+
+    # An existing connection can be checked in even while construction blocks.
+    spare = Object.new
+    checkin = Thread.new { stack.push(spare); :done }
+    assert_equal :done, checkin.join(5).value
+
+    assert_equal 1, stack.idle
+
+    release << true
+    conn = creator.value
+    refute_nil conn
+    assert_equal 2, stack.length
+  end
+
+  def test_shutdown_during_construction_destroys_connection_and_returns_capacity
+    started = Thread::Queue.new
+    release = Thread::Queue.new
+    shutdown_entered = Thread::Queue.new
+    built = []
+    closed = []
+    stack = ConnectionPool::TimedStack.new(size: 1) do
+      conn = Object.new
+      built << conn
+      started << true
+      release.pop
+      conn
+    end
+
+    creator = Thread.new { stack.pop }
+    creator.report_on_exception = false
+    started.pop
+
+    # shutdown must not wait for the blocked constructor to finish. It returns
+    # once the (empty) idle stack has been drained.
+    shutdown = Thread.new do
+      shutdown_entered << true
+      stack.shutdown { |conn| closed << conn }
+    end
+    shutdown_entered.pop # ensure shutdown has begun
+    Thread.pass until shutdown.status == false
+
+    assert_empty closed
+
+    release << true
+    assert_raises(ConnectionPool::PoolShuttingDownError) { creator.value }
+
+    # Every constructed resource was destroyed exactly once; no new checkout
+    # can sneak through the permanently shut down stack.
+    assert_equal built, closed
+    assert_equal 0, stack.idle
+    assert_raises(ConnectionPool::PoolShuttingDownError) { stack.pop }
+    assert_equal built.length, closed.length
+  end
+
+  def test_checkin_and_shutdown_proceed_concurrently_with_blocked_constructor
+    started = Thread::Queue.new
+    release = Thread::Queue.new
+    built = []
+    closed = []
+    # size 2: one slot is reserved by the blocked constructor, the other holds
+    # a connection that gets checked in while construction is still in flight.
+    stack = ConnectionPool::TimedStack.new(size: 2) do
+      conn = Object.new
+      built << conn
+      started << true
+      release.pop
+      conn
+    end
+
+    existing = Object.new
+    creator = Thread.new { stack.pop }
+    creator.report_on_exception = false
+    started.pop
+
+    checkin = Thread.new { stack.push(existing); :done }
+    assert_equal :done, checkin.join(5).value
+
+    shutdown_entered = Thread::Queue.new
+    shutdown = Thread.new do
+      shutdown_entered << true
+      stack.shutdown { |conn| closed << conn }
+    end
+    shutdown_entered.pop
+    Thread.pass until shutdown.status == false
+    assert_equal [existing], closed
+
+    release << true
+    assert_raises(ConnectionPool::PoolShuttingDownError) { creator.value }
+
+    # Every constructed resource was destroyed exactly once; no new checkout
+    # can sneak through the permanently shut down stack.
+    assert_same existing, closed.first
+    assert_equal built, closed[1..]
+    assert_equal 0, stack.idle
+    assert_raises(ConnectionPool::PoolShuttingDownError) { stack.pop }
+  end
+
+  def test_timed_out_waiter_does_not_leave_ghost_capacity
+    # size 1 with a slow constructor: the waiter times out waiting for the
+    # reserved slot, then construction finishes and serves a fresh pop without
+    # creating more objects than the pool allows.
+    started = Thread::Queue.new
+    release = Thread::Queue.new
+    created_count = 0
+    stack = ConnectionPool::TimedStack.new(size: 1) do
+      created_count += 1
+      started << true
+      release.pop
+      Object.new
+    end
+
+    creator = Thread.new { stack.pop }
+    started.pop
+
+    waiter_error = nil
+    waiter = Thread.new do
+      stack.pop(timeout: 0.02)
+    rescue ConnectionPool::TimeoutError => e
+      waiter_error = e
+    end
+    waiter.join
+    refute_nil waiter_error
+
+    # Timed-out waiter reserved nothing; the blocked constructor owns the slot.
+    assert_equal 1, created_count
+    assert_equal 0, stack.length
+
+    release << true
+    conn = creator.value
+    refute_nil conn
+    assert_equal 1, created_count
+    assert_empty stack
+
+    stack.push conn
+    assert_equal 1, stack.length
+  end
+
   def test_pop
     object = Object.new
     @stack.push object

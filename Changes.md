@@ -1,5 +1,15 @@
 # connection_pool Changelog
 
+Unreleased
+---------
+
+- Build new connections outside of the pool mutex. Capacity is reserved under
+  the lock and construction now happens without blocking checkins or
+  shutdown. Failed construction, shutdown during construction and interrupts
+  always return the reserved capacity so no ghost capacity is leaked.
+  Subclasses overriding the legacy `TimedStack#try_create` extension point keep
+  the previous behavior where it is called under the mutex.
+
 3.0.2
 ------
 
