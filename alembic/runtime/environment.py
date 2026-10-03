@@ -423,6 +423,7 @@ class EnvironmentContext(util.ModuleClsProxy):
         template_args: dict[str, Any] | None = None,
         render_as_batch: bool = False,
         target_metadata: MetaData | Sequence[MetaData] | None = None,
+        target_views: Any | None = None,
         include_name: IncludeNameFn | None = None,
         include_object: IncludeObjectFn | None = None,
         include_schemas: bool = False,
@@ -565,7 +566,15 @@ class EnvironmentContext(util.ModuleClsProxy):
          will be compared against
          what is locally available on the target
          :class:`~sqlalchemy.engine.Connection`
-         to produce candidate upgrade/downgrade operations.
+        to produce candidate upgrade/downgrade operations.
+        :param target_views: an optional
+         :class:`~alembic.operations.views.ViewRegistry` (or iterable of
+         :class:`~alembic.operations.views.View` objects) describing the
+         database views that autogenerate should compare. Views may also be
+         supplied per-metadata via ``metadata.info["views"]``. View
+         dependencies are analyzed to order create/drop operations and to
+         emit a drop-then-rebuild plan when a view depended on by other
+         views is modified.
         :param compare_type: Indicates type comparison behavior during
          an autogenerate
          operation.  Defaults to ``True`` turning on type comparison, which
@@ -911,6 +920,7 @@ class EnvironmentContext(util.ModuleClsProxy):
             opts["template_args"].update(template_args)
         opts["transaction_per_migration"] = transaction_per_migration
         opts["target_metadata"] = target_metadata
+        opts["target_views"] = target_views
         opts["include_name"] = include_name
         opts["include_object"] = include_object
         opts["include_schemas"] = include_schemas

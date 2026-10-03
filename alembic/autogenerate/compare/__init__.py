@@ -12,6 +12,7 @@ from . import types
 from ... import util
 from ...ext import checkconstraint_byname
 from ...runtime.plugins import Plugin
+from . import views
 
 if TYPE_CHECKING:
     from ..api import AutogenContext
@@ -61,6 +62,7 @@ Plugin.setup_plugin_from_module(
     server_defaults, "alembic.autogenerate.defaults"
 )
 Plugin.setup_plugin_from_module(comments, "alembic.autogenerate.comments")
+Plugin.setup_plugin_from_module(views, "alembic.autogenerate.views")
 # this plugin is opt-in.  It lives in the "alembic.ext" namespace rather
 # than "alembic.autogenerate", so that it is not matched by the default
 # "alembic.autogenerate.*" wildcard and must be named explicitly.

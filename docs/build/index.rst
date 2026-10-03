@@ -14,6 +14,7 @@ with the `SQLAlchemy <https://www.sqlalchemy.org>`_ Database Toolkit for Python.
    offline
    naming
    batch
+   views
    branches
    ops
    cookbook
@@ -26,4 +27,3 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
-

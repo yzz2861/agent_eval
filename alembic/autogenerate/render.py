@@ -1211,4 +1211,7 @@ def _execute_sql(autogen_context: AutogenContext, op: ops.ExecuteSQLOp) -> str:
     )
 
 
+# register view operation renderers; imported for its dispatch decorators
+from . import render_views  # noqa: E402,F401
+
 renderers = default_renderers.branch()

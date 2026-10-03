@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.elements import conv
     from sqlalchemy.sql.elements import TextClause
     from sqlalchemy.sql.expression import TableClause
+    from sqlalchemy.sql.selectable import SelectBase
     from sqlalchemy.sql.schema import Column
     from sqlalchemy.sql.schema import SchemaItem
     from sqlalchemy.sql.schema import Table
@@ -1119,6 +1120,56 @@ def drop_table_comment(
         :meth:`.Operations.create_table_comment`
 
         :paramref:`.Operations.alter_column.comment`
+
+    """
+
+def create_view(
+    view_name: str,
+    definition: str | SelectBase,
+    *,
+    schema: str | None = None,
+    or_replace: bool = False,
+    materialized: bool = False,
+) -> None:
+    """Issue a ``CREATE VIEW`` instruction.
+
+    :param view_name: name of the view; may be a
+     :class:`~sqlalchemy.sql.elements.quoted_name` to force quoting.
+    :param definition: SELECT body as a SQL string (a bare SELECT or a
+     full CREATE VIEW statement) or a SQLAlchemy :class:`.SelectBase`.
+    :param schema: optional schema name, also :class:`.quoted_name`.
+    :param or_replace: emit CREATE OR REPLACE where supported.
+    :param materialized: create a MATERIALIZED VIEW.
+
+    """
+
+def drop_view(
+    view_name: str,
+    *,
+    schema: str | None = None,
+    if_exists: bool = False,
+    cascade: bool = False,
+    materialized: bool = False,
+    definition: str | SelectBase | None = None,
+) -> None:
+    """Issue a ``DROP VIEW`` instruction.
+
+    Pass ``definition`` to make the operation reversible; the downgrade
+    recreates the view with the given SELECT body.
+
+    """
+
+def replace_view(
+    view_name: str,
+    new_definition: str | SelectBase,
+    *,
+    old_definition: str | SelectBase | None = None,
+    schema: str | None = None,
+    materialized: bool = False,
+) -> None:
+    """Replace a view definition portably (DROP then CREATE).
+
+    Pass ``old_definition`` to make the operation reversible.
 
     """
 
