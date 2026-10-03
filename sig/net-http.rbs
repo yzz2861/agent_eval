@@ -4120,6 +4120,67 @@ module Net
     # -->
     #
     alias entity body
+
+    # <!--
+    #   rdoc-file=lib/net/http/response.rb
+    #   - each_range_part()
+    # -->
+    # Yields each byte-range part of the response body as a
+    # Net::HTTPResponse::RangePart, parsing the body incrementally as it arrives
+    # from the server; the whole body is never buffered at once.
+    #
+    def each_range_part: () { (Net::HTTPResponse::RangePart) -> void } -> self
+                       | () -> Enumerator[Net::HTTPResponse::RangePart, self]
+
+    # <!-- rdoc-file=lib/net/http/response.rb -->
+    # Represents a single byte-range part of a response body, yielded by
+    # Net::HTTPResponse#each_range_part.
+    #
+    class RangePart
+      # <!-- rdoc-file=lib/net/http/response.rb -->
+      # The position of the first byte of this part within the complete object.
+      #
+      attr_reader first: Integer
+
+      # <!-- rdoc-file=lib/net/http/response.rb -->
+      # The position of the last byte of this part within the complete object, or
+      # +nil+ if it is unknown.
+      #
+      attr_reader last: Integer?
+
+      # <!-- rdoc-file=lib/net/http/response.rb -->
+      # The complete length of the object in bytes, or +nil+ if the server did
+      # not report it.
+      #
+      attr_reader total: Integer?
+
+      # <!--
+      #   rdoc-file=lib/net/http/response.rb
+      #   - size()
+      # -->
+      # The number of content bytes in this part, or +nil+ if unknown.
+      #
+      def size: () -> Integer?
+
+      # <!--
+      #   rdoc-file=lib/net/http/response.rb
+      #   - body()
+      # -->
+      # Returns the content of this part as a string, reading any of it that has
+      # not been consumed yet; repeated calls return the cached string.
+      #
+      def body: () -> String?
+
+      # <!--
+      #   rdoc-file=lib/net/http/response.rb
+      #   - read_body(dest = nil, &block)
+      # -->
+      # Reads the remaining content of this part.
+      #
+      def read_body: () -> String
+                   | (_Dest dest) -> untyped
+                   | () { (String) -> void } -> untyped
+    end
   end
 
   # <!-- rdoc-file=lib/net/http/responses.rb -->

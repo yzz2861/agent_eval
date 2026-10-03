@@ -426,6 +426,82 @@ class Net::HTTPResponse
 
   alias entity body   #:nodoc: obsolete
 
+  # call-seq:
+  #   each_range_part { |part| ... }  -> self
+  #   each_range_part                 -> Enumerator
+  #
+  # Yields each byte-range part of the response body as a
+  # Net::HTTPResponse::RangePart, parsing the body incrementally as it
+  # arrives from the server; the whole body is never buffered at once.
+  #
+  # Like #read_body, this method must be called from within the block
+  # passed to Net::HTTP#request (or a similar method):
+  #
+  #   req = Net::HTTP::Get.new(uri)
+  #   req['Range'] = 'bytes=0-99, 200-299'
+  #   Net::HTTP.start(hostname) do |http|
+  #     http.request(req) do |res|
+  #       res.each_range_part do |part|
+  #         puts "#{part.first}-#{part.last}/#{part.total}"
+  #         part.read_body {|chunk| ... }
+  #       end
+  #     end
+  #   end
+  #
+  # The yielded parts depend on the response the server returned:
+  #
+  # - <tt>206 Partial Content</tt> with a +multipart/byteranges+ body:
+  #   one part per byte range, delimited by the MIME boundary.  The
+  #   boundary may be split across network chunks, and byte sequences
+  #   that look like the boundary are safe inside part content, because
+  #   each part body is read by the length its +Content-Range+ declares.
+  # - <tt>206 Partial Content</tt> with a +Content-Range+ header:
+  #   a single part covering that range.
+  # - <tt>200 OK</tt> (the server ignored the +Range+ request):
+  #   a single part covering the entire object.
+  #
+  # A part's content is read on demand; see Net::HTTPResponse::RangePart.
+  # Any part left unread is discarded before the next part is yielded.
+  #
+  # Raises Net::HTTPBadResponse if a part's +Content-Range+ does not
+  # match its actual body bytes, if parts repeat or overlap a byte
+  # range, or if the response cannot be interpreted as byte ranges.
+  #
+  def each_range_part
+    return enum_for(__method__) unless block_given?
+    raise IOError, "#{self.class}\#each_range_part called after body was read" if @read
+    stream_check
+    raise Net::HTTPBadResponse, 'response has no body to read' unless @body_exist
+
+    source = RangeBodySource.new(self, @socket)
+    if content_type&.downcase == 'multipart/byteranges'
+      boundary = type_params['boundary']
+      boundary = boundary.sub(/\A"(.*)"\z/, '\1') if boundary
+      unless boundary && !boundary.empty? && !boundary.match?(/[\r\n]/)
+        raise Net::HTTPBadResponse, 'multipart/byteranges response without valid boundary'
+      end
+      each_multipart_range_part(source, "--#{boundary}") {|part| yield part }
+    elsif @code == '206'
+      value = self['content-range'] or
+        raise Net::HTTPBadResponse, '206 response without Content-Range'
+      first, last, total = parse_content_range(value)
+      if (clen = content_length) && clen != last - first + 1
+        raise Net::HTTPBadResponse,
+              "Content-Range bytes #{first}-#{last} does not match Content-Length #{clen}"
+      end
+      yield_range_part(source, first, last, total) {|part| yield part }
+    elsif @code == '200'
+      # The server ignored the Range request and sent the entire object.
+      clen = content_length
+      yield_range_part(source, 0, clen ? clen - 1 : nil, clen) {|part| yield part }
+    else
+      raise Net::HTTPBadResponse, "cannot read byte ranges from #{@code} response"
+    end
+    source.drain
+    @read = true
+    self
+  end
+
   private
 
   # :nodoc:
@@ -676,6 +752,306 @@ class Net::HTTPResponse
     end
   end
 
+  # Yields a single Net::HTTPResponse::RangePart, discarding any of its
+  # content the block did not read.
+  def yield_range_part(source, first, last, total) # :nodoc:
+    part = RangePart.new(first, last, total, source)
+    yield part
+    part.send(:drain_remaining)
+  end
+
+  # Incrementally parses a +multipart/byteranges+ body from +source+,
+  # yielding one Net::HTTPResponse::RangePart per byte range.
+  def each_multipart_range_part(source, delimiter) # :nodoc:
+    # Skip the preamble up to the first boundary delimiter line.
+    found = false
+    while (line = source.read_line)
+      break if (found = delimiter_line?(line, delimiter))
+      return if close_delimiter_line?(line, delimiter)
+    end
+    found or
+      raise Net::HTTPBadResponse, "multipart/byteranges boundary #{delimiter.inspect} not found"
+
+    seen = []
+    total = nil
+    loop do
+      headers = {}
+      while (line = source.read_line)
+        line = line.chomp
+        break if line.empty?
+        key, value = line.split(/\s*:\s*/, 2)
+        unless value
+          raise Net::HTTPBadResponse, "wrong header line in multipart/byteranges part: #{line.inspect}"
+        end
+        (headers[key.downcase] ||= []) << value
+      end
+      line or
+        raise Net::HTTPBadResponse, 'unexpected end of multipart/byteranges body'
+
+      values = headers['content-range']
+      unless values && values.size == 1
+        raise Net::HTTPBadResponse, 'multipart/byteranges part without Content-Range'
+      end
+      first, last, part_total = parse_content_range(values.first)
+      if total && part_total && part_total != total
+        raise Net::HTTPBadResponse, 'inconsistent complete length in multipart/byteranges Content-Range'
+      end
+      total ||= part_total
+      range = first..last
+      if seen.include?(range)
+        raise Net::HTTPBadResponse, "duplicate byte range #{first}-#{last} in multipart/byteranges body"
+      end
+      if seen.any? {|r| r.begin <= last && first <= r.end }
+        raise Net::HTTPBadResponse, "overlapping byte range #{first}-#{last} in multipart/byteranges body"
+      end
+      seen << range
+
+      yield_range_part(source, first, last, total) {|part| yield part }
+
+      # Exactly the bytes declared by Content-Range have been consumed,
+      # so the boundary delimiter must follow immediately; anything else
+      # means the declared range does not match the actual part body.
+      unless source.read_exact(2) == "\r\n"
+        raise Net::HTTPBadResponse, "Content-Range bytes #{first}-#{last} does not match the actual part body"
+      end
+      line = source.read_line or
+        raise Net::HTTPBadResponse, 'unexpected end of multipart/byteranges body'
+      return if close_delimiter_line?(line, delimiter)
+      unless delimiter_line?(line, delimiter)
+        raise Net::HTTPBadResponse, "malformed boundary line in multipart/byteranges body: #{line.inspect}"
+      end
+    end
+  end
+
+  # Parses a +Content-Range+ field value of the form
+  # <tt>bytes first-last/total</tt> into <tt>[first, last, total]</tt>,
+  # where +total+ is +nil+ when the server sent <tt>*</tt>.
+  def parse_content_range(value) # :nodoc:
+    m = %r<\A\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*\z>i.match(value) or
+      raise Net::HTTPBadResponse, "wrong Content-Range format: #{value.inspect}"
+    first = m[1].to_i
+    last = m[2].to_i
+    total = m[3] == '*' ? nil : m[3].to_i
+    if last < first || (total && last >= total)
+      raise Net::HTTPBadResponse, "wrong Content-Range format: #{value.inspect}"
+    end
+    [first, last, total]
+  end
+
+  # Whether +line+ is the boundary delimiter line +delimiter+, allowing
+  # optional transport padding before the line ending.
+  def delimiter_line?(line, delimiter) # :nodoc:
+    line.start_with?(delimiter) && line[delimiter.length..].chomp.strip.empty?
+  end
+
+  # Whether +line+ is the close delimiter line for +delimiter+.
+  def close_delimiter_line?(line, delimiter) # :nodoc:
+    line.start_with?("#{delimiter}--") && line[delimiter.length + 2..].chomp.strip.empty?
+  end
+
+  # Represents a single byte-range part of a response body, yielded by
+  # Net::HTTPResponse#each_range_part.
+  #
+  # The part content is read on demand from the response stream, so it
+  # must be consumed before Net::HTTPResponse#each_range_part yields the
+  # next part; any unread remainder is discarded when iteration
+  # advances, after which the part can no longer be read.
+  class RangePart
+    # The position of the first byte of this part within the complete
+    # object.
+    attr_reader :first
+
+    # The position of the last byte of this part within the complete
+    # object, or +nil+ if it is unknown.
+    attr_reader :last
+
+    # The complete length of the object in bytes, or +nil+ if the server
+    # did not report it.
+    attr_reader :total
+
+    def initialize(first, last, total, source) # :nodoc: internal use only
+      @first = first
+      @last = last
+      @total = total
+      @size = last ? last - first + 1 : nil
+      @source = source
+      @remaining = @size
+      @active = true
+      @body = nil
+    end
+
+    # The number of content bytes in this part, or +nil+ if unknown.
+    def size
+      @size
+    end
+
+    # Returns the content of this part as a string, reading any of it
+    # that has not been consumed yet; repeated calls return the cached
+    # string.
+    def body
+      read_body if @active && !@body
+      @body
+    end
+
+    # Reads the remaining content of this part.
+    #
+    # If a block is given, the content is passed to the block in
+    # fragments as it is read from the socket.  If +dest+ is given, the
+    # content is written with <code>dest#<<</code>.  Otherwise the
+    # content is returned as a string.
+    #
+    # Raises IOError if the part can no longer be read because
+    # Net::HTTPResponse#each_range_part has moved past it.
+    def read_body(dest = nil, &block)
+      raise IOError, 'range part body is no longer readable' unless @active
+      raise ArgumentError, 'both arg and block given for HTTP method' if dest && block
+      to = block ? Net::ReadAdapter.new(block) : (dest || +''.b)
+      consume(to)
+      @body = to unless dest || block
+      to
+    end
+
+    private
+
+    def consume(to) # :nodoc:
+      if @remaining
+        while @remaining > 0
+          chunk = @source.read([@remaining, RangeBodySource::READ_SIZE].min) or
+            raise Net::HTTPBadResponse, 'unexpected end of range part body'
+          @remaining -= chunk.bytesize
+          to << chunk if to
+        end
+      else
+        while (chunk = @source.read(RangeBodySource::READ_SIZE))
+          to << chunk if to
+        end
+      end
+    end
+
+    def drain_remaining # :nodoc:
+      return unless @active
+      consume(nil)
+      @active = false
+    end
+  end
+
+  # A pull-based byte stream over a response body, transparently
+  # handling chunked transfer coding, Content-Length framing and
+  # read-until-EOF bodies.
+  class RangeBodySource # :nodoc: internal use only
+    READ_SIZE = 16 * 1024
+
+    def initialize(response, socket)
+      @socket = socket
+      @chunked = response.chunked?
+      @chunk_left = 0
+      @length_left = @chunked ? nil : response.content_length
+      @buffer = +''.b
+      @eof = false
+    end
+
+    # Reads exactly +n+ bytes; raises Net::HTTPBadResponse if the body
+    # ends first.
+    def read_exact(n)
+      fill(n)
+      if @buffer.bytesize < n
+        raise Net::HTTPBadResponse, 'unexpected end of response body'
+      end
+      @buffer.slice!(0, n)
+    end
+
+    # Reads up to +n+ bytes; returns +nil+ when the body is exhausted.
+    def read(n)
+      fill(1)
+      return nil if @buffer.empty?
+      @buffer.slice!(0, n)
+    end
+
+    # Reads a single line terminated by <tt>"\n"</tt>; returns +nil+
+    # when the body is exhausted.  A final line without a terminator is
+    # returned as-is.
+    def read_line
+      loop do
+        if (index = @buffer.index("\n"))
+          return @buffer.slice!(0, index + 1)
+        end
+        if @eof
+          return @buffer.empty? ? nil : @buffer.slice!(0, @buffer.bytesize)
+        end
+        fill(@buffer.bytesize + 1)
+      end
+    end
+
+    # Reads and discards any remaining body bytes.
+    def drain
+      until @eof
+        @buffer.clear
+        fill(1)
+      end
+      @buffer.clear
+    end
+
+    private
+
+    def fill(min)
+      while !@eof && @buffer.bytesize < min
+        chunk = read_source_chunk
+        if chunk.nil? || chunk.empty?
+          @eof = true
+        else
+          @buffer << chunk
+        end
+      end
+    end
+
+    def read_source_chunk
+      if @chunked
+        read_chunked_piece
+      elsif @length_left
+        return nil if @length_left == 0
+        chunk = read_socket([@length_left, READ_SIZE].min)
+        @length_left -= chunk.bytesize if chunk
+        chunk
+      else
+        read_socket(READ_SIZE)
+      end
+    end
+
+    def read_socket(n)
+      dest = +''.b
+      begin
+        @socket.read(n, dest)
+      rescue EOFError
+        # Keep the bytes read before the premature EOF.
+      end
+      dest.empty? ? nil : dest
+    end
+
+    def read_chunked_piece
+      if @chunk_left == 0
+        line = Net::HTTPResponse.read_line(@socket, MAX_RESPONSE_HEADER_LENGTH).chop
+        hexlen = line.slice(/[0-9a-fA-F]+/) or
+          raise Net::HTTPBadResponse, "wrong chunk size line: #{line}"
+        @chunk_left = hexlen.hex
+        if @chunk_left == 0
+          until Net::HTTPResponse.read_line(@socket, MAX_RESPONSE_HEADER_LENGTH).chop.empty?
+            # Discard trailers.
+          end
+          return nil
+        end
+      end
+      dest = +''.b
+      begin
+        @socket.read([@chunk_left, READ_SIZE].min, dest)
+      rescue EOFError
+        # Keep the bytes read before the premature EOF.
+      end
+      @chunk_left -= dest.bytesize
+      @socket.read(2) if @chunk_left == 0 && !dest.empty? # CRLF after chunk data
+      dest.empty? ? nil : dest
+    end
+  end
+
   ##
   # Inflater is a wrapper around Net::BufferedIO that transparently inflates
   # zlib and gzip streams.
@@ -758,4 +1134,3 @@ class Net::HTTPResponse
   end
 
 end
-
