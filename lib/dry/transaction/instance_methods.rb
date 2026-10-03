@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "dry/transaction/result_matcher"
+require "dry/transaction/recovery_failure"
 require "dry/transaction/stack"
 
 module Dry
@@ -12,14 +13,19 @@ module Dry
       attr_reader :operations
       attr_reader :listeners
       attr_reader :stack
+      attr_reader :recoveries
 
       def initialize(steps: self.class.steps, listeners: nil, **operations)
         @steps = steps.map { |step|
           operation = resolve_operation(step, **operations)
           step.with(operation: operation)
         }
+        @recoveries = self.class.recoveries.map { |recovery|
+          assert_recovery_step!(recovery)
+          recovery.with(operation: resolve_operation(recovery, **operations))
+        }
         @operations = operations
-        @stack = Stack.new(@steps)
+        @stack = Stack.new(@steps, @recoveries)
         subscribe(listeners) unless listeners.nil?
       end
 
@@ -33,7 +39,7 @@ module Dry
         else
           result.or { |step_failure|
             # Unwrap the value from the StepFailure and return it directly
-            Failure(step_failure.value)
+            Failure(public_failure(step_failure))
           }
         end
       end
@@ -104,6 +110,20 @@ module Dry
           unless steps.any? { |step| step.name == step_name }
             raise ArgumentError, "+#{step_name}+ is not a valid step name"
           end
+        end
+      end
+
+      def assert_recovery_step!(recovery)
+        return if steps.any? { |step| step.name == recovery.step_name }
+
+        raise ArgumentError, "+#{recovery.name}+ references unknown step +#{recovery.step_name}+"
+      end
+
+      def public_failure(step_failure)
+        if step_failure.is_a?(RecoveryFailure)
+          step_failure
+        else
+          step_failure.value
         end
       end
 

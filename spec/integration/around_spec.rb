@@ -87,6 +87,31 @@ RSpec.describe "around steps" do
     expect(database).to be_empty
   end
 
+  it "recovers from a failure returned by an around operation" do
+    transaction_class = Class.new do
+      include Dry::Transaction(container: Test::Container)
+
+      around :transaction, with: :transaction
+      step :validate, with: :validate
+      step :persist_user, with: :persist_user
+      step :persist_account, with: :persist_account
+      step :finalize
+
+      recover :finalize, on: :recoverable
+    end
+
+    recovered = transaction_class.new(
+      finalize: -> _input { Failure(:recoverable) },
+      finalize_recovery: -> failure, input { Success(input) }
+    ).call(input)
+
+    aggregate_failures do
+      expect(recovered).to be_success
+      expect(database).to be_committed
+      expect(database).not_to be_rolled_back
+    end
+  end
+
   it "supports matching on nested failures" do
     invalid_input = input.merge(account: {balance: -10})
 
