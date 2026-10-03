@@ -492,6 +492,59 @@ vehicle.state_name              # => :parked
 # vehicle.state = :parked
 ```
 
+## Path Planning
+
+While `state_paths` enumerates every possible route, path planning picks the
+*cheapest* route to a target state using per-event weights as the business
+cost of firing each event:
+
+```ruby
+plan = vehicle.state_plan_path(to: :second_gear, weights: { shift_up: 2 })
+
+plan.reachable?         # => true
+plan.events             # => [:ignite, :shift_up, :shift_up]
+plan.total_cost         # => 5
+plan.unverified_guards  # => [{:event=>:ignite, :from=>:parked, :to=>:idling, :type=>:if, :condition=>:seatbelt_on?}]
+```
+
+The same functionality is available directly on the machine:
+
+```ruby
+Vehicle.state_machine.plan_path_for(vehicle, to: :second_gear, weights: { shift_up: 2 })
+```
+
+### Guards during planning
+
+Planning never performs transitions, runs actions, or fires callbacks.  It
+also never treats arbitrary Ruby guards as static truth: a guard is only
+evaluated against the object when explicitly whitelisted for that planning
+run via `:evaluate_guards`:
+
+```ruby
+# :seatbelt_on? is evaluated now; every other guard stays unverified
+plan = vehicle.state_plan_path(to: :second_gear, evaluate_guards: [:seatbelt_on?])
+```
+
+Guards that are not whitelisted (including all `if_state` / `unless_state`
+style state guards) are treated as unknown conditions: the transition is
+considered passable and the guard is reported in `unverified_guards` so the
+caller knows what still needs to hold.  Guards requiring event arguments are
+never evaluated, even when whitelisted.
+
+The plan is advisory only -- firing the planned events (via `fire_event` or
+the generated event helpers) still re-evaluates every guard against the live
+object at fire time.
+
+### Deterministic rules
+
+* Events without an explicit weight cost 1; weights must be non-negative
+  numbers (negative weights and unknown event names raise `ArgumentError`).
+* Zero-weight cycles are never part of a plan and cannot loop the planner.
+* Among equally cheap routes, the one with fewer events wins; remaining ties
+  go to the lexicographically smallest sequence of event names.
+* An unreachable target yields `reachable? == false`, empty `events`, and a
+  `nil` `total_cost`.
+
 ## Testing
 
 State Machines provides an optional `TestHelper` module with assertion methods to make testing state machines easier and more expressive.

@@ -95,6 +95,11 @@ module StateMachines
         define_helper(:instance, attribute(:paths)) do |machine, object, *args|
           machine.paths_for(object, *args)
         end
+
+        # Plans the cheapest weighted sequence of events to a target state
+        define_helper(:instance, attribute(:plan_path)) do |machine, object, *args|
+          machine.plan_path_for(object, *args)
+        end
       end
 
       # Adds helper methods for accessing naming information about states and

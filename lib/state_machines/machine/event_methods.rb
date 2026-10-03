@@ -431,6 +431,35 @@ module StateMachines
       def paths_for(object, requirements = {})
         PathCollection.new(object, self, requirements)
       end
+
+      # Plans the cheapest sequence of events that transitions the given
+      # object to a target state, using per-event weights as the business
+      # cost of each event.  Returns a StateMachines::PathPlan describing the
+      # event sequence, the total cost, and the guard conditions that were
+      # left unverified during planning.
+      #
+      # Planning never performs transitions and never evaluates guards unless
+      # they are explicitly whitelisted via the +:evaluate_guards+ option.
+      # Firing the planned events still re-evaluates all guards at fire time.
+      #
+      # == Examples
+      #
+      #   vehicle = Vehicle.new                 # => #<Vehicle:0xb7c464b0 @state="parked">
+      #   plan = Vehicle.state_machine.plan_path_for(vehicle,
+      #     to: :second_gear,
+      #     weights: { shift_up: 2 },
+      #     evaluate_guards: [:seatbelt_on?]
+      #   )
+      #   plan.events                           # => [:ignite, :shift_up, :shift_up]
+      #   plan.total_cost                       # => 5
+      #   plan.unverified_guards                # => [{:event=>:ignite, :from=>:parked, :to=>:idling, :type=>:unless, :condition=>:stalling?}]
+      #
+      # See StateMachines::PathPlanner for the full list of options and the
+      # deterministic rules for zero-weight cycles, unreachable targets, and
+      # equally cheap routes.
+      def plan_path_for(object, requirements = {})
+        PathPlanner.new(object, self, requirements).plan
+      end
     end
   end
 end
