@@ -99,6 +99,75 @@ module Net
       assert_equal "RCPT TO:<foo@example.com> nofty=failure\r\n", server.commands.last
     end
 
+    def test_dsn_address_parameters
+      addr = Net::SMTP::Address.new(
+        "rcpt@example.com",
+        envid: "message+id=one\r\né",
+        ret: :hdrs,
+        notify: [:success, :failure],
+        orcpt: ["rfc822", "Original Recipient <orig@example.com>"]
+      )
+
+      assert_equal [
+        "ENVID=message+2Bid+3Done+0D+0A+C3+A9",
+        "RET=HDRS",
+        "NOTIFY=SUCCESS,FAILURE",
+        "ORCPT=rfc822;Original+20Recipient+20<orig@example.com>"
+      ], addr.parameters
+      assert_equal "ORCPT=rfc822;a+0D+0Ab@example.com",
+                   Net::SMTP::Address.new(
+                     "rcpt@example.com",
+                     orcpt: ["rfc822", "a\r\nb@example.com"]
+                   ).parameters.first
+    end
+
+    def test_dsn_notify_never_cannot_include_other_types
+      assert_raise ArgumentError do
+        Net::SMTP::Address.new("rcpt@example.com", notify: [:never, :success])
+      end
+    end
+
+    def test_dsn_notify_rejects_invalid_type_and_newline
+      assert_raise ArgumentError do
+        Net::SMTP::Address.new("rcpt@example.com", notify: :maybe)
+      end
+      assert_raise ArgumentError do
+        Net::SMTP::Address.new("rcpt@example.com", notify: "success\nfailure")
+      end
+    end
+
+    def test_dsn_ret_and_orcpt_validation
+      assert_raise ArgumentError do
+        Net::SMTP::Address.new("from@example.com", ret: :headers)
+      end
+      assert_raise ArgumentError do
+        Net::SMTP::Address.new("rcpt@example.com", orcpt: ["rfc822"])
+      end
+      assert_raise ArgumentError do
+        Net::SMTP::Address.new("rcpt@example.com", orcpt: ["bad type", "orig@example.com"])
+      end
+      assert_raise ArgumentError do
+        Net::SMTP::Address.new("rcpt@example.com", orcpt: [1, "orig@example.com"])
+      end
+      assert_raise ArgumentError do
+        Net::SMTP::Address.new("rcpt@example.com", orcpt: "rfc822;bad+xxaddress")
+      end
+    end
+
+    def test_duplicate_dsn_parameters
+      assert_raise ArgumentError do
+        Net::SMTP::Address.new("rcpt@example.com", "NOTIFY=NEVER", notify: :never)
+      end
+    end
+
+    def test_dsn_parameters_are_not_reencoded_when_address_is_copied
+      addr = Net::SMTP::Address.new("rcpt@example.com", envid: "a+b", orcpt: ["rfc822", "o x"])
+
+      assert_equal addr.parameters, Net::SMTP::Address.new(addr).parameters
+      assert_equal ["ENVID=a+2Bb", "ORCPT=rfc822;o+20x", "X=Y"],
+                   Net::SMTP::Address.new(addr, "X=Y").parameters
+    end
+
     def test_address
       a = Net::SMTP::Address.new('foo@example.com', 'p0=123', {p1: 456}, p2: nil, p3: '789')
       assert_equal 'foo@example.com', a.address
@@ -184,6 +253,103 @@ module Net
       assert_nothing_raised do
         smtp.send_message("message", "sender@example.com", ["rcpt1@example.com", "rcpt2@example.com"])
       end
+    end
+
+    def test_send_message_with_dsn
+      commands = []
+      from = Net::SMTP::Address.new(
+        "sender@example.com",
+        envid: "message-123",
+        ret: :full
+      )
+      recipients = [
+        Net::SMTP::Address.new("one@example.com", notify: [:success, :failure], orcpt: "rfc822;orig-one@example.com"),
+        Net::SMTP::Address.new("two@example.com", notify: :never)
+      ]
+
+      dsn_smtp_object(commands).send_message("message", from, recipients)
+
+      assert_equal [
+        "MAIL FROM:<sender@example.com> ENVID=message-123 RET=FULL",
+        "RCPT TO:<one@example.com> NOTIFY=SUCCESS,FAILURE ORCPT=rfc822;orig-one@example.com",
+        "RCPT TO:<two@example.com> NOTIFY=NEVER"
+      ], commands
+    end
+
+    def test_send_message_dsn_options_do_not_leak_to_next_message
+      commands = []
+      smtp = dsn_smtp_object(commands)
+      from = Net::SMTP::Address.new("sender@example.com", envid: "message-123", ret: :full)
+      recipients = [
+        Net::SMTP::Address.new("one@example.com", notify: :success, orcpt: "rfc822;orig-one@example.com"),
+        Net::SMTP::Address.new("two@example.com", notify: :never)
+      ]
+      smtp.send_message("first", from, recipients)
+      smtp.send_message("second", "plain-sender@example.com", "plain@example.com")
+
+      assert_equal [
+        "MAIL FROM:<sender@example.com> ENVID=message-123 RET=FULL",
+        "RCPT TO:<one@example.com> NOTIFY=SUCCESS ORCPT=rfc822;orig-one@example.com",
+        "RCPT TO:<two@example.com> NOTIFY=NEVER",
+        "MAIL FROM:<plain-sender@example.com>",
+        "RCPT TO:<plain@example.com>"
+      ], commands
+    end
+
+    def test_send_message_raises_when_dsn_unsupported_by_default
+      smtp = dsn_smtp_object([], dsn: false)
+      from = Net::SMTP::Address.new("sender@example.com", envid: "message-123")
+
+      assert_raise Net::SMTPUnsupportedCommand do
+        smtp.send_message("message", from, "rcpt@example.com")
+      end
+    end
+
+    def test_send_message_omits_dsn_only_when_requested
+      commands = []
+      smtp = dsn_smtp_object(commands, dsn: false)
+      from = Net::SMTP::Address.new("sender@example.com", envid: "message-123")
+      rcpt = Net::SMTP::Address.new("rcpt@example.com", notify: :success)
+
+      smtp.send_message("message", from, rcpt, unsupported_dsn: :omit)
+
+      assert_equal [
+        "MAIL FROM:<sender@example.com>",
+        "RCPT TO:<rcpt@example.com>"
+      ], commands
+    end
+
+    def test_dsn_parameter_context_validation
+      commands = []
+      smtp = dsn_smtp_object(commands)
+
+      assert_raise ArgumentError do
+        smtp.mailfrom(Net::SMTP::Address.new("sender@example.com", notify: :success))
+      end
+      assert_raise ArgumentError do
+        smtp.rcptto(Net::SMTP::Address.new("rcpt@example.com", ret: :full))
+      end
+      assert_empty commands
+    end
+
+    def test_invalid_dsn_unsupported_policy
+      commands = []
+      smtp = dsn_smtp_object(commands)
+      from = Net::SMTP::Address.new("sender@example.com", envid: "message-123")
+
+      assert_raise ArgumentError do
+        smtp.send_message("message", from, "rcpt@example.com", unsupported_dsn: :unknown)
+      end
+    end
+
+    def test_invalid_dsn_unsupported_policy_without_dsn_parameters
+      commands = []
+      smtp = dsn_smtp_object(commands)
+
+      assert_raise ArgumentError do
+        smtp.send_message("message", "sender@example.com", "rcpt@example.com", unsupported_dsn: :unknown)
+      end
+      assert_empty commands
     end
 
     def test_unsuccessful_send_message_server_busy
@@ -618,6 +784,20 @@ module Net
       smtp = Net::SMTP.start 'localhost', server.port
       smtp.mailfrom("rené@example.com")
       assert_equal "MAIL FROM:<rené@example.com> SMTPUTF8\r\n", server.commands.last
+    end
+
+    private
+
+    def dsn_smtp_object(commands, dsn: true)
+      smtp = Net::SMTP.new('localhost', 25)
+      smtp.instance_variable_set(:@capabilities, dsn ? {"DSN" => []} : {})
+      smtp.instance_variable_set(:@socket, Object.new)
+      smtp.define_singleton_method(:getok) do |command|
+        commands << command
+        Net::SMTP::Response.parse("250 OK\n")
+      end
+      smtp.define_singleton_method(:data) { |*| }
+      smtp
     end
 
     def fake_server_start(**kw)

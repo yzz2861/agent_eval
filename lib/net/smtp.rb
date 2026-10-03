@@ -763,6 +763,10 @@ module Net
     # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
     # the destination mail address or addresses.
     #
+    # Pass <tt>unsupported_dsn: :omit</tt> to omit RFC 3461 DSN parameters when
+    # the server does not advertise DSN. The default +:raise+ reports the
+    # missing extension instead of sending the message without notifications.
+    #
     # === Example
     #
     #     Net::SMTP.start('smtp.example.com') do |smtp|
@@ -777,6 +781,11 @@ module Net
     #                         Net::SMTP::Address.new('dest@example.com', notify: :success)
     #     end
     #
+    # Delivery Status Notification parameters from RFC 3461 can be set with
+    # MAIL-level +envid+ and +ret+, and recipient-level +notify+ and +orcpt+.
+    # If the server does not advertise DSN, pass <tt>unsupported_dsn: :omit</tt>
+    # to remove those parameters, or leave the default +:raise+ to fail.
+    #
     # === Errors
     #
     # This method may raise:
@@ -788,12 +797,13 @@ module Net
     # * Net::ReadTimeout
     # * IOError
     #
-    def send_message(msgstr, from_addr, *to_addrs)
+    def send_message(msgstr, from_addr, *to_addrs, unsupported_dsn: :raise)
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      check_dsn_support(from_addr, to_addrs, unsupported_dsn)
+      mailfrom from_addr, unsupported_dsn: unsupported_dsn
+      rcptto_list(to_addrs, unsupported_dsn: unsupported_dsn) {data msgstr}
     end
 
     alias send_mail send_message
@@ -820,6 +830,10 @@ module Net
     # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
     # the destination mail address or addresses.
     #
+    # Pass <tt>unsupported_dsn: :omit</tt> to omit RFC 3461 DSN parameters when
+    # the server does not advertise DSN. The default +:raise+ reports the
+    # missing extension instead of sending the message without notifications.
+    #
     # === Example
     #
     #     Net::SMTP.start('smtp.example.com', 25) do |smtp|
@@ -843,12 +857,13 @@ module Net
     # * Net::ReadTimeout
     # * IOError
     #
-    def open_message_stream(from_addr, *to_addrs, &block)   # :yield: stream
+    def open_message_stream(from_addr, *to_addrs, unsupported_dsn: :raise, &block)   # :yield: stream
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data(&block)}
+      check_dsn_support(from_addr, to_addrs, unsupported_dsn)
+      mailfrom from_addr, unsupported_dsn: unsupported_dsn
+      rcptto_list(to_addrs, unsupported_dsn: unsupported_dsn) {data(&block)}
     end
 
     alias ready open_message_stream   # obsolete
@@ -906,27 +921,35 @@ module Net
     end
 
     # +from_addr+ is +String+ or +Net::SMTP::Address+
-    def mailfrom(from_addr)
+    # Set +unsupported_dsn+ to +:omit+ to omit MAIL-level DSN parameters on a
+    # server without DSN; the default +:raise+ rejects them.
+    def mailfrom(from_addr, unsupported_dsn: :raise)
       addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
                Address.new(from_addr, "SMTPUTF8")
              else
                Address.new(from_addr)
              end
-      getok((["MAIL FROM:<#{addr.address}>"] + addr.parameters).join(' '))
+      parameters = dsn_parameters(addr.parameters, %w[ENVID RET], unsupported_dsn)
+      getok((["MAIL FROM:<#{addr.address}>"] + parameters).join(' '))
     end
 
-    def rcptto_list(to_addrs)
+    # Set +unsupported_dsn+ to +:omit+ to omit recipient DSN parameters on a
+    # server without DSN; the default +:raise+ rejects them.
+    def rcptto_list(to_addrs, unsupported_dsn: :raise)
       raise ArgumentError, 'mail destination not given' if to_addrs.empty?
       to_addrs.flatten.each do |addr|
-        rcptto addr
+        rcptto addr, unsupported_dsn: unsupported_dsn
       end
       yield
     end
 
     # +to_addr+ is +String+ or +Net::SMTP::Address+
-    def rcptto(to_addr)
+    # Set +unsupported_dsn+ to +:omit+ to omit recipient DSN parameters on a
+    # server without DSN; the default +:raise+ rejects them.
+    def rcptto(to_addr, unsupported_dsn: :raise)
       addr = Address.new(to_addr)
-      getok((["RCPT TO:<#{addr.address}>"] + addr.parameters).join(' '))
+      parameters = dsn_parameters(addr.parameters, %w[NOTIFY ORCPT], unsupported_dsn)
+      getok((["RCPT TO:<#{addr.address}>"] + parameters).join(' '))
     end
 
     # This method sends a message.
@@ -995,6 +1018,55 @@ module Net
       # A bare CR or LF is not allowed in RFC5321.
       if /[\r\n]/ =~ line
         raise ArgumentError, "A line must not contain CR or LF"
+      end
+    end
+
+    DSN_MAIL_PARAMETERS = %w[ENVID RET].freeze
+    DSN_RCPT_PARAMETERS = %w[NOTIFY ORCPT].freeze
+
+    def check_dsn_support(from_addr, to_addrs, policy)
+      unless policy == :raise || policy == :omit
+        raise ArgumentError, "unsupported_dsn must be :raise or :omit"
+      end
+      return unless dsn_requested?(Address.new(from_addr).parameters, DSN_MAIL_PARAMETERS) ||
+                    Array(to_addrs).flatten.any? do |addr|
+                      dsn_requested?(Address.new(addr).parameters, DSN_RCPT_PARAMETERS)
+                    end
+
+      case policy
+      when :raise
+        raise SMTPUnsupportedCommand, "DSN is not supported on this server" unless capable?('DSN')
+      when :omit
+        # The caller explicitly chose to omit DSN parameters.
+      end
+    end
+
+    def dsn_requested?(parameters, allowed)
+      parameters.any? { |parameter| allowed.include?(parameter.to_s.split('=', 2).first.upcase) }
+    end
+
+    def dsn_parameters(parameters, allowed, policy)
+      return parameters unless dsn_parameter?(parameters)
+      unless policy == :raise || policy == :omit
+        raise ArgumentError, "unsupported_dsn must be :raise or :omit"
+      end
+      filtered_parameters = parameters.reject do |parameter|
+        name = parameter.to_s.split('=', 2).first.upcase
+        next false unless %w[ENVID RET NOTIFY ORCPT].include?(name)
+        unless allowed.include?(name)
+          raise ArgumentError, "#{name} is not allowed in #{allowed.join(' and ')} parameter"
+        end
+        policy == :omit
+      end
+      if filtered_parameters.any? && policy == :raise && !capable?('DSN')
+        raise SMTPUnsupportedCommand, "DSN is not supported on this server"
+      end
+      filtered_parameters
+    end
+
+    def dsn_parameter?(parameters)
+      parameters.any? do |parameter|
+        %w[ENVID RET NOTIFY ORCPT].include?(parameter.to_s.split('=', 2).first.upcase)
       end
     end
 
@@ -1123,7 +1195,11 @@ module Net
       @debug_output << msg + "\n" if @debug_output
     end
 
-    # Address with parametres for MAIL or RCPT command
+    # Address with parametres for MAIL or RCPT command.
+    #
+    # DSN parameters are normalized and validated when provided with keywords:
+    # +envid+ and +ret+ belong on MAIL, while +notify+ and +orcpt+ belong on
+    # RCPT. Text fields use RFC 3461 xtext encoding.
     class Address
       # mail address [String]
       attr_reader :address
@@ -1138,16 +1214,148 @@ module Net
       def initialize(address, *args, **kw_args)
         if address.kind_of? Address
           @address = address.address
-          @parameters = address.parameters
+          @existing_parameters = address.parameters.dup
+          @parameters = @existing_parameters.dup
         else
           @address = address
+          @existing_parameters = []
           @parameters = []
         end
-        @parameters = (parameters + args + [kw_args]).map{|param| Array(param)}.flatten(1).map{|param| Array(param).compact.join('=')}.uniq
+        raw_parameters = (args + [kw_args]).map{|param| Array(param)}.flatten(1)
+        new_parameters = raw_parameters.map do |param|
+          if param.is_a?(Array)
+            key = param.first
+            value = param.length > 1 ? param[1] : nil
+            dsn_parameter(key, value) || [key, value].compact.join('=')
+          elsif param.is_a?(String)
+            name, value = param.split('=', 2)
+            dsn_parameter(name, value) || param
+          else
+            param
+          end
+        end
+        @parameters = @existing_parameters + new_parameters
+        reject_duplicate_dsn_parameters
+        @parameters.uniq!
       end
 
       def to_s
         @address
+      end
+
+      private
+
+      DSN_PARAMETER_NAMES = %w[ENVID RET NOTIFY ORCPT].freeze
+
+      def dsn_parameter(key, value)
+        name = key.to_s.upcase
+        return unless DSN_PARAMETER_NAMES.include?(name)
+
+        case name
+        when 'ENVID'
+          "ENVID=#{encode_xtext(dsn_value(name, value))}"
+        when 'RET'
+          "RET=#{dsn_ret(value)}"
+        when 'NOTIFY'
+          "NOTIFY=#{dsn_notify(value)}"
+        when 'ORCPT'
+          "ORCPT=#{dsn_orcpt(value)}"
+        end
+      end
+
+      def dsn_value(name, value)
+        raise ArgumentError, "#{name} requires a value" if value.nil?
+        value.to_str
+      rescue NoMethodError
+        raise ArgumentError, "#{name} must be a string"
+      end
+
+      def dsn_ret(value)
+        ret = value.to_s.upcase
+        unless ret == 'FULL' || ret == 'HDRS'
+          raise ArgumentError, 'RET must be FULL or HDRS'
+        end
+        ret
+      end
+
+      def dsn_notify(value)
+        values = value.is_a?(String) ? value.split(',') : Array(value)
+        raise ArgumentError, 'NOTIFY requires a value' if values.empty?
+        names = values.map do |item|
+          name = item.to_s.upcase
+          unless %w[NEVER SUCCESS FAILURE DELAY].include?(name)
+            raise ArgumentError, 'NOTIFY must be NEVER, SUCCESS, FAILURE, or DELAY'
+          end
+          name
+        end
+        if names.include?('NEVER') && names.length > 1
+          raise ArgumentError, 'NOTIFY NEVER cannot be combined with other notification types'
+        end
+        if names.uniq.length != names.length
+          raise ArgumentError, 'NOTIFY must not contain duplicate notification types'
+        end
+        names.join(',')
+      end
+
+      def dsn_orcpt(value)
+        type, original, encoded = orcpt_parts(value)
+        "#{type};#{encoded ? validate_xtext(original) : encode_xtext(original)}"
+      end
+
+      def orcpt_parts(value)
+        if value.is_a?(Array)
+          raise ArgumentError, 'ORCPT must include an address type and address' unless value.length == 2
+          type = value.first
+          original = value.last
+        elsif value.nil?
+          raise ArgumentError, 'ORCPT requires a value'
+        else
+          text = value.to_str
+          type, original = text.split(';', 2)
+          unless original
+            type = 'rfc822'
+            original = text
+          else
+            encoded = true
+          end
+        end
+        original = original.to_str
+        type = type.to_s.downcase
+        unless type.match?(/\A[a-z][a-z0-9!#$%&'*+\-\/?^_`{|}~]*\z/)
+          raise ArgumentError, 'ORCPT address type is invalid'
+        end
+        raise ArgumentError, 'ORCPT original address is required' if original.empty?
+        [type, original, encoded]
+      rescue NoMethodError
+        raise ArgumentError, 'ORCPT must be a string or [type, address] pair'
+      end
+
+      def encode_xtext(value)
+        value.b.bytes.map do |byte|
+          if byte >= 33 && byte <= 126 && byte != 43 && byte != 61
+            byte.chr
+          else
+            format('+%02X', byte)
+          end
+        end.join.force_encoding(Encoding::US_ASCII)
+      end
+
+      def validate_xtext(value)
+        unless value.match?(%r{\A(?:\+[0-9A-Fa-f]{2}|[!-*,-/0-<>-~])*\z})
+          raise ArgumentError, 'ORCPT address must use xtext encoding'
+        end
+        value
+      end
+
+      def reject_duplicate_dsn_parameters
+        names = @parameters.map do |parameter|
+          name = parameter.to_s.split('=', 2).first.upcase
+          name if DSN_PARAMETER_NAMES.include?(name)
+        end.compact
+        if names.uniq.length != names.length
+          duplicate = names.detect { |name| names.count(name) > 1 }
+          raise ArgumentError, "duplicate DSN parameter: #{duplicate}"
+        end
       end
     end
   end   # class SMTP
