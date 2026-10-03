@@ -11,6 +11,18 @@
 #
 # You also need to make sure to provide pluralization algorithms to the
 # backend, i.e. include them to your I18n.load_path accordingly.
+#
+# Ranges of counts (e.g. "3-5 emails") can be pluralized by passing a Range
+# (or a two-element Array of endpoints) as the :count_range option. Both
+# endpoints are pluralized independently through the locale specific rule
+# and the resulting categories are combined through a range category table
+# stored at I18n.t(:'i18n.plural.range_rule'). The table is provided by
+# the application (no external language data is bundled) and may be a Proc
+# accepting both endpoint categories, a nested Hash
+# (<tt>{ :one => { :other => :other } }</tt>) or a flat Hash keyed by
+# category pairs (<tt>{ [:one, :other] => :other }</tt>). Pairs missing
+# from the table - and locales without any table - fall back to the
+# category of the range's last endpoint.
 module I18n
   module Backend
     module Pluralization
@@ -72,6 +84,51 @@ module I18n
         end
       end
 
+      # Pluralizes a range of counts given via the :count_range option,
+      # e.g. <tt>I18n.t(:emails, :count_range => 3..5)</tt> for "3-5 emails".
+      #
+      # Both endpoints are pluralized independently through the locale
+      # specific pluralization rule (exact decimal endpoints are passed to
+      # the rule untouched), and the resulting two categories are combined
+      # into the category for the whole range through a locale specific
+      # range category table. The table is expected to be stored at
+      # I18n.t(:'i18n.plural.range_rule') and is configured by the
+      # application - no external language data (such as the CLDR) is
+      # bundled. The table may be:
+      #
+      # * a Proc responding to #call(start_category, end_category)
+      # * a nested Hash, e.g. <tt>{ :one => { :other => :other } }</tt>
+      # * a flat Hash keyed by category pairs, e.g. <tt>{ [:one, :other] => :other }</tt>
+      #
+      # Pairs missing from the table - and locales without any table - fall
+      # back to the category of the range's last endpoint.
+      #
+      # A range whose endpoints are equal (including a zero range like
+      # <tt>0..0</tt>) takes priority over the range category table and is
+      # pluralized exactly as if that single count had been passed via the
+      # :count option (honouring the explicit "0"/"1" and :zero keys).
+      #
+      # Open ranges, reversed ranges, empty ranges and non-numeric
+      # endpoints are rejected with I18n::InvalidPluralizationRange.
+      def pluralize_range(locale, entry, range)
+        first, last = normalize_count_range(range)
+        return pluralize(locale, entry, first) if first == last
+        return entry unless entry.is_a?(Hash)
+
+        pluralizer = pluralizer(locale)
+        return super unless pluralizer.respond_to?(:call)
+
+        start_category = pluralizer.call(first)
+        end_category = pluralizer.call(last)
+        category = range_category(locale, start_category, end_category)
+
+        if entry.has_key?(category) || entry.has_key?(:other)
+          entry[category] || entry[:other]
+        else
+          raise InvalidPluralizationData.new(entry, range, category)
+        end
+      end
+
       protected
 
       def pluralizers
@@ -82,7 +139,28 @@ module I18n
         pluralizers[locale] ||= I18n.t(:'i18n.plural.rule', :locale => locale, :resolve => false)
       end
 
+      def range_pluralizers
+        @range_pluralizers ||= {}
+      end
+
+      def range_pluralizer(locale)
+        range_pluralizers[locale] ||= I18n.t(:'i18n.plural.range_rule', :locale => locale, :resolve => false)
+      end
+
       private
+
+      def range_category(locale, start_category, end_category)
+        rule = range_pluralizer(locale)
+        category =
+          if rule.respond_to?(:call)
+            rule.call(start_category, end_category)
+          elsif rule.is_a?(Hash)
+            nested = rule[start_category]
+            nested = nested[end_category] if nested.is_a?(Hash)
+            nested || rule[[start_category, end_category]]
+          end
+        category || end_category
+      end
 
       # Normalizes categories of 0.0 and 1.0
       # and returns the symbolic version

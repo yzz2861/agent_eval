@@ -95,6 +95,14 @@ module I18n
     end
   end
 
+  class InvalidPluralizationRange < ArgumentError
+    attr_reader :range
+    def initialize(range, reason)
+      @range = range
+      super "count_range #{range.inspect} is not a valid pluralization range: #{reason}"
+    end
+  end
+
   class MissingInterpolationArgument < ArgumentError
     attr_reader :key, :values, :string
     def initialize(key, values, string)

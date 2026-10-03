@@ -39,8 +39,9 @@ module I18n
         end
 
         count = options[:count]
+        count_range = options[:count_range]
 
-        if entry.nil? && (subtrees? || !count)
+        if entry.nil? && (subtrees? || !(count || count_range))
           if (options.key?(:default) && !options[:default].nil?) || !options.key?(:default)
             throw(:exception, I18n::MissingTranslation.new(locale, key, options))
           end
@@ -48,6 +49,11 @@ module I18n
 
         entry = entry.dup if entry.is_a?(String)
         entry = pluralize(locale, entry, count) if count
+
+        if count_range && !count
+          entry = pluralize_range(locale, entry, count_range)
+          options = options.merge(:count => count_range_string(count_range)) unless options.key?(:count)
+        end
 
         if entry.nil? && !subtrees?
           throw(:exception, I18n::MissingTranslation.new(locale, key, options))
@@ -188,6 +194,31 @@ module I18n
           entry[key]
         end
 
+        # Picks a translation from a pluralized mnemonic subkey for a range of
+        # counts (e.g. "3-5 emails"). The range endpoints are pluralized
+        # independently; backends with locale specific pluralization rules
+        # (see I18n::Backend::Pluralization) combine both endpoint categories
+        # through a configurable range category table.
+        #
+        # A range whose endpoints are equal (including a zero range like
+        # <tt>0..0</tt>) is treated as a single count and takes priority over
+        # any range specific handling, i.e. it is pluralized exactly as if
+        # that count had been passed via the :count option.
+        #
+        # The default implementation simply picks the :other subkey for any
+        # real range, mirroring the English pluralization rules used by
+        # #pluralize.
+        def pluralize_range(locale, entry, range)
+          first, last = normalize_count_range(range)
+          return pluralize(locale, entry, first) if first == last
+
+          entry = entry.reject { |k, _v| k == :attributes } if entry.is_a?(Hash)
+          return entry unless entry.is_a?(Hash)
+
+          raise InvalidPluralizationData.new(entry, range, :other) unless entry.has_key?(:other)
+          entry[:other]
+        end
+
         # Interpolates values into a given subject.
         #
         #   if the given subject is a string then:
@@ -308,6 +339,52 @@ module I18n
         def pluralization_key(entry, count)
           key = :zero if count == 0 && entry.has_key?(:zero)
           key ||= count == 1 ? :one : :other
+        end
+
+        # Validates a :count_range option and returns its endpoints as a
+        # <tt>[first, last]</tt> pair. Endpoints may be any exact Numeric
+        # (Integer, Float, Rational, BigDecimal, ...) and are returned
+        # untouched, so pluralization rules see their precise values.
+        #
+        # Raises I18n::InvalidPluralizationRange for open ranges (a nil or
+        # missing endpoint), reversed ranges (last < first), empty ranges
+        # (e.g. <tt>3...3</tt>) and non-numeric endpoints.
+        def normalize_count_range(range)
+          case range
+          when Range
+            first, last = range.begin, range.end
+            if first.nil? || last.nil?
+              raise InvalidPluralizationRange.new(range, "open ranges are not supported, both endpoints are required")
+            end
+            if range.exclude_end? && first == last
+              raise InvalidPluralizationRange.new(range, "the range is empty")
+            end
+          when Array
+            unless range.size == 2 && !range[0].nil? && !range[1].nil?
+              raise InvalidPluralizationRange.new(range, "expected exactly two non-nil endpoints")
+            end
+            first, last = range
+          else
+            raise InvalidPluralizationRange.new(range, "expected a Range or a two-element Array of endpoints")
+          end
+
+          unless first.is_a?(Numeric) && last.is_a?(Numeric)
+            raise InvalidPluralizationRange.new(range, "endpoints must be numeric")
+          end
+
+          if last < first
+            raise InvalidPluralizationRange.new(range, "reversed ranges are not supported, the last endpoint must be greater than or equal to the first")
+          end
+
+          [first, last]
+        end
+
+        # Formats a :count_range option for interpolation into the %{count}
+        # placeholder, e.g. "3–5". A range with equal endpoints is
+        # formatted as the single value.
+        def count_range_string(range)
+          first, last = range.is_a?(Range) ? [range.begin, range.end] : range
+          first == last ? first.to_s : "#{first}–#{last}"
         end
     end
   end
