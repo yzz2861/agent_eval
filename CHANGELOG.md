@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- `Dry::Types::DiscriminatedUnion` (via `Types.DiscriminatedUnion(tag, mapping, tag_transform: nil)`): a tagged union that selects exactly one branch from a tag in the input, instead of trying every branch like a plain `Sum`. The tag may live at a fixed nested path (`[:metadata, :type]`) and tag conversion must be provided explicitly with `tag_transform:`. Duplicate tags fail at definition time; missing, unknown or mistyped tags raise `MissingTagError`, `UnknownTagError`, and `InvalidTagError` respectively. No branch default value or constructor runs before the branch is selected. The type round-trips through `#to_ast`/`Compiler` via the `:discriminated_union` AST node.
+
 ### Changed
 
 ### Deprecated

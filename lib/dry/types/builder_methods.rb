@@ -133,6 +133,102 @@ module Dry
           type.constrained(respond_to: method)
         end
       end
+
+      # Build a discriminated (tagged) union type
+      #
+      # The branch is chosen from the tag value found in the input; no other
+      # branch is tried and no branch default value or constructor is run
+      # before the branch is selected.
+      #
+      # @example tag at the top level
+      #   Event = Types.DiscriminatedUnion(
+      #     :kind,
+      #     "created" => CreatedEvent,
+      #     "updated" => UpdatedEvent
+      #   )
+      #
+      # @example tag at a fixed nested path
+      #   Event = Types.DiscriminatedUnion(
+      #     [:metadata, :type],
+      #     created: CreatedEvent
+      #   )
+      #
+      # @example explicit tag conversion (must be provided explicitly)
+      #   Event = Types.DiscriminatedUnion(
+      #     :kind,
+      #     {created: CreatedEvent},
+      #     tag_transform: :to_sym.to_proc
+      #   )
+      #
+      # @param [Symbol, String, Array<Symbol, String>] tag key or path to the tag
+      # @param [Hash{Symbol, String => Dry::Types::Type}] mapping tag values to branches
+      # @param [#call, nil] tag_transform explicit callable applied to the raw
+      #   tag value before branch lookup
+      #
+      # @raise [ArgumentError] when tags are duplicated, not symbols/strings
+      #   or branches are not types
+      #
+      # @return [DiscriminatedUnion]
+      #
+      # @api public
+      def DiscriminatedUnion(tag, mapping, tag_transform: nil)
+        path = ::Kernel.Array(tag)
+
+        if path.empty?
+          raise ::ArgumentError, "tag path must not be empty"
+        end
+
+        unless path.all? { |segment| segment.is_a?(::Symbol) || segment.is_a?(::String) }
+          raise ::ArgumentError,
+                  "tag path segments must be Symbols or Strings, #{path.inspect} given"
+        end
+
+        unless mapping.is_a?(::Hash) && !mapping.empty?
+          raise ::ArgumentError,
+                "branch mapping must be a non-empty Hash, #{mapping.inspect} given"
+        end
+
+        original_tags = mapping.keys
+
+        unless original_tags.all? { |key| key.is_a?(::Symbol) || key.is_a?(::String) }
+          bad = original_tags.find { |key| !key.is_a?(::Symbol) && !key.is_a?(::String) }
+          raise ::ArgumentError,
+                "tag values must be Symbols or Strings, #{bad.inspect} is a #{bad.class}"
+        end
+
+        normalized = {}
+
+        mapping.each do |key, branch|
+          converted =
+            if tag_transform
+              converted_tag = tag_transform.call(key)
+
+              unless converted_tag.is_a?(::Symbol) || converted_tag.is_a?(::String)
+                raise ::ArgumentError,
+                      "tag_transform must return a Symbol or a String, " \
+                      "got #{converted_tag.inspect} (#{converted_tag.class}) for #{key.inspect}"
+              end
+
+              converted_tag
+            else
+              key
+            end
+
+          if normalized.key?(converted)
+            raise ::ArgumentError,
+                  "duplicate discriminator tag #{converted.inspect} " \
+                  "(also produced from #{key.inspect})"
+          end
+
+          normalized[converted] = branch
+        end
+
+        DiscriminatedUnion.new(
+          normalized,
+          tag_path: path,
+          tag_transform: tag_transform
+        )
+      end
     end
   end
 end

@@ -32,6 +32,7 @@ module Dry
           Implication,
           Implication::Constrained
         ] => :visit_composition,
+        DiscriminatedUnion => :visit_discriminated_union,
         Any.class => :visit_any
       }.flat_map { |k, v| Array(k).map { |kk| [kk, v] } }.to_h
 
@@ -249,6 +250,29 @@ module Dry
             visit_options(options) do |_opts|
               yield "Map<#{key} => #{value}>"
             end
+          end
+        end
+      end
+
+      def visit_discriminated_union(union)
+        tag = union.tag_path.map(&:inspect).join(" -> ")
+
+        branches = union.mapping.map { |tag_value, branch_type|
+          branch_str = +""
+          visit(branch_type) { |printed| branch_str << printed }
+          "#{tag_value.inspect} => #{branch_str}"
+        }.join(", ")
+
+        visit_options(EMPTY_HASH, union.meta) do |opts|
+          suffix = opts.empty? ? "" : " #{opts}"
+
+          if union.tag_transform
+            visit_callable(union.tag_transform) do |fn|
+              yield "DiscriminatedUnion<tag=#{tag} tag_transform=#{fn} " \
+                    "branches={#{branches}}#{suffix}>"
+            end
+          else
+            yield "DiscriminatedUnion<tag=#{tag} branches={#{branches}}#{suffix}>"
           end
         end
       end

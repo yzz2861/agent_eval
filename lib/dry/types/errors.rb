@@ -84,6 +84,78 @@ module Dry
 
     MapError = ::Class.new(CoercionError)
 
+    # Base class for errors raised by {Dry::Types::DiscriminatedUnion}
+    #
+    class DiscriminatorError < CoercionError
+      # @return [Array<Symbol, String>]
+      attr_reader :path
+
+      # @param [String] message
+      # @param [Array<Symbol, String>] path
+      def initialize(message, path: EMPTY_ARRAY)
+        @path = path
+        super(message)
+      end
+
+      private
+
+      def tag_path = @path.map { |segment| segment.inspect }.join(" -> ")
+    end
+
+    # Raised when the discriminator tag is not present in the input
+    #
+    class MissingTagError < DiscriminatorError
+      # @param [Array<Symbol, String>] path
+      def initialize(path)
+        @path = path
+        super("discriminator tag #{tag_path} is missing in Hash input", path: path)
+      end
+    end
+
+    # Raised when the discriminator tag does not match any of the branches
+    #
+    class UnknownTagError < DiscriminatorError
+      # @return [Object]
+      attr_reader :tag
+
+      # @return [Array<Object>]
+      attr_reader :known_tags
+
+      # @param [Object] tag
+      # @param [Array<Object>] known_tags
+      # @param [Array<Symbol, String>] path
+      def initialize(tag, known_tags, path)
+        @tag = tag
+        @known_tags = known_tags
+        @path = path
+
+        super(
+          "unknown discriminator tag #{tag.inspect} at #{tag_path}, " \
+          "expected one of #{known_tags.inspect}",
+          path: path
+        )
+      end
+    end
+
+    # Raised when the discriminator tag itself has an unexpected type
+    #
+    class InvalidTagError < DiscriminatorError
+      # @return [Object]
+      attr_reader :tag
+
+      # @param [Object] tag
+      # @param [Array<Symbol, String>] path
+      def initialize(tag, path)
+        @tag = tag
+        @path = path
+        super(
+          "discriminator tag at #{tag_path} " \
+          "has invalid type #{tag.class}, expected Symbol or String",
+          path: path
+        )
+      end
+    end
+
     SchemaKeyError = ::Class.new(CoercionError)
     private_constant(:SchemaKeyError)
 

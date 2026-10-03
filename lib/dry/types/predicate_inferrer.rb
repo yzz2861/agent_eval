@@ -145,6 +145,20 @@ module Dry
         end
 
         # @api private
+        def visit_discriminated_union(node)
+          _, branches, = node
+          branch_predicates = branches.map { |_, branch| visit(branch) }
+
+          branch_predicates.reduce do |left, right|
+            if left.eql?(NIL)
+              right
+            else
+              [[left, right]]
+            end
+          end
+        end
+
+        # @api private
         def visit_constrained(node)
           other, rules = node
           predicates = visit(rules)

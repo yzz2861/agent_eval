@@ -45,6 +45,13 @@ module Dry
         end
 
         # @api private
+        def visit_discriminated_union(node)
+          _, branches, = node
+
+          branches.map { |_, branch| visit(branch) }.flatten(1)
+        end
+
+        # @api private
         def visit_constrained(node) = visit(node[0])
 
         # @api private

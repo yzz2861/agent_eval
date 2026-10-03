@@ -63,6 +63,22 @@ module Dry
         types.map { |type| visit(type) }.reduce(:|).meta(meta)
       end
 
+      def visit_discriminated_union(node)
+        tag_path, branches, tag_transform_fn, meta = node
+
+        mapping = branches.to_h do |tag, type_ast|
+          [tag, visit(type_ast)]
+        end
+
+        tag_transform = tag_transform_fn && compile_fn(tag_transform_fn)
+
+        DiscriminatedUnion.new(
+          mapping,
+          tag_path: tag_path,
+          tag_transform: tag_transform
+        ).meta(meta)
+      end
+
       def visit_array(node)
         member, meta = node
         member = visit(member) unless member.is_a?(::Class)

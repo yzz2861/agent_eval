@@ -49,6 +49,54 @@ RSpec.describe Dry::Types, "#to_ast" do
     end
   end
 
+  context "with a discriminated union" do
+    before do
+      stub_const("TestTypes", Module.new { include Dry.Types(default: :nominal) })
+    end
+
+    subject(:type) do
+      TestTypes.DiscriminatedUnion(
+        :kind,
+        {
+          "string" => TestTypes::String,
+          "integer" => TestTypes::Integer
+        }
+      )
+    end
+
+    specify do
+      expect(type.to_ast).to eql(
+        [:discriminated_union, [
+          [:kind],
+          [
+            ["string", [:nominal, [String, {}, {}]]],
+            ["integer", [:nominal, [Integer, {}, {}]]]
+          ],
+          nil,
+          {}
+        ]]
+      )
+    end
+
+    specify "with meta" do
+      expect(type_with_meta.to_ast).to eql(
+        [:discriminated_union, [
+          [:kind],
+          [
+            ["string", [:nominal, [String, {}, {}]]],
+            ["integer", [:nominal, [Integer, {}, {}]]]
+          ],
+          nil,
+          {key: :value}
+        ]]
+      )
+    end
+
+    specify "without meta" do
+      expect(type_with_meta.to_ast(meta: false)).to eql(type.to_ast(meta: false))
+    end
+  end
+
   context "with a constrained type" do
     subject(:type) { Dry::Types["strict.integer"] }
 
