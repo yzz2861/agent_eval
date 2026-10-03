@@ -23,6 +23,20 @@ module I18n
         assert_equal 'bars', I18n.t(:default => { :other => 'bars' }, :count => 3)
       end
 
+      test "pluralization: given a single-value count range it uses ordinary count pluralization" do
+        assert_equal 'bar', I18n.t(:default => { :one => 'bar' }, :count_range => 1..1)
+      end
+
+      test "pluralization: given a count range it returns a pluralized and interpolated translation" do
+        assert_equal '2–3 bars', I18n.t(:default => { :other => '%{count_range} bars' }, :count_range => 2..3)
+      end
+
+      test "pluralization: given an invalid count range it raises an argument error" do
+        assert_raises(I18n::InvalidCountRange) do
+          I18n.t(:default => { :other => 'bars' }, :count_range => 3..2)
+        end
+      end
+
       test "pluralization: given nil it returns the whole entry" do
         assert_equal({ :one => 'bar' }, I18n.t(:default => { :one => 'bar' }, :count => nil))
       end

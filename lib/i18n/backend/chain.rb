@@ -106,7 +106,7 @@ module I18n
           end
 
           def namespace_lookup?(result, options)
-            result.is_a?(Hash) && !options.has_key?(:count)
+            result.is_a?(Hash) && !options.has_key?(:count) && !options.has_key?(:count_range)
           end
 
         private

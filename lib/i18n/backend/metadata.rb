@@ -58,6 +58,10 @@ module I18n
         with_metadata(:count => count) { super }
       end
 
+      def pluralize_count_range(locale, entry, count_range)
+        with_metadata(:count_range => count_range) { super }
+      end
+
       protected
 
         def with_metadata(metadata, &block)

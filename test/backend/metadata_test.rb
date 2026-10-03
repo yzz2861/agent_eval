@@ -41,8 +41,15 @@ class I18nBackendMetadataTest < I18n::TestCase
     assert_equal(1, I18n.t(:missing, :count => 1, :default => { :one => +'foo' }).translation_metadata[:count])
   end
 
+  test "count range pluralization adds the range to metadata on Strings" do
+    range = 1..2
+    metadata = I18n.t(:missing, :count_range => range,
+      :default => { :one => +'foo', :other => +'bars' }).translation_metadata
+
+    assert_equal(range, metadata[:count_range])
+  end
+
   test "metadata works with frozen values" do
     assert_equal(1, I18n.t(:missing, :count => 1, :default => 'foo'.freeze).translation_metadata[:count])
   end
 end
-

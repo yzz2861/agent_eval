@@ -72,6 +72,26 @@ module I18n
         end
       end
 
+      def pluralize_count_range(locale, entry, count_range)
+        return entry unless entry.is_a?(Hash) && count_range
+        # A single-value range uses the same priority as :count:
+        # explicit "0"/"1", then the locale plural category.
+        return pluralize(locale, entry, count_range.begin) if count_range.begin == count_range.end
+
+        pluralizer = pluralizer(locale)
+        return super unless pluralizer.respond_to?(:call)
+
+        start_category = pluralizer.call(count_range.begin)
+        end_category = pluralizer.call(count_range.end)
+        range_category = plural_range_category(locale, start_category, end_category)
+
+        if entry.has_key?(range_category) || entry.has_key?(:other)
+          entry[range_category] || entry[:other]
+        else
+          raise InvalidPluralizationData.new(entry, count_range, range_category)
+        end
+      end
+
       protected
 
       def pluralizers
@@ -80,6 +100,31 @@ module I18n
 
       def pluralizer(locale)
         pluralizers[locale] ||= I18n.t(:'i18n.plural.rule', :locale => locale, :resolve => false)
+      end
+
+      # Range rules are application-supplied locale data at
+      # i18n.plural.range.rule. A hash maps start/end category pairs to the
+      # entry category; a callable receives the two categories.
+      def plural_range_category(locale, start_category, end_category)
+        range_rule = I18n.t(:'i18n.plural.range.rule', :locale => locale, :resolve => false)
+        if range_rule.respond_to?(:call)
+          return range_rule.call(start_category, end_category).to_sym
+        end
+
+        unless range_rule.is_a?(Hash)
+          raise I18n::ArgumentError,
+            "plural range rule is missing for locale #{locale.inspect}. Configure i18n.plural.range.rule."
+        end
+
+        category = range_rule.dig(start_category.to_sym, end_category.to_sym) ||
+          range_rule.dig(start_category.to_s, end_category.to_s)
+
+        unless category
+          raise I18n::ArgumentError,
+            "plural range rule for locale #{locale.inspect} is missing #{start_category.inspect} => #{end_category.inspect}."
+        end
+
+        category.to_sym
       end
 
       private

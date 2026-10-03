@@ -39,15 +39,25 @@ module I18n
         end
 
         count = options[:count]
+        count_range = options[:count_range]
 
-        if entry.nil? && (subtrees? || !count)
+        validate_count_range(count_range) if count_range
+        if count && count_range
+          raise I18n::ArgumentError, ":count and :count_range cannot be used together."
+        end
+
+        if entry.nil? && (subtrees? || (!count && !count_range))
           if (options.key?(:default) && !options[:default].nil?) || !options.key?(:default)
             throw(:exception, I18n::MissingTranslation.new(locale, key, options))
           end
         end
 
         entry = entry.dup if entry.is_a?(String)
-        entry = pluralize(locale, entry, count) if count
+        if count
+          entry = pluralize(locale, entry, count)
+        elsif count_range
+          entry = pluralize_count_range(locale, entry, count_range)
+        end
 
         if entry.nil? && !subtrees?
           throw(:exception, I18n::MissingTranslation.new(locale, key, options))
@@ -56,6 +66,9 @@ module I18n
         deep_interpolation = options[:deep_interpolation]
         skip_interpolation = options[:skip_interpolation]
         values = Utils.except(options, *RESERVED_KEYS) unless options.empty?
+        if values && count_range
+          values = values.merge(:count_range => format_count_range(count_range))
+        end
         if !skip_interpolation && values && !values.empty?
           entry = if deep_interpolation
             deep_interpolate(locale, entry, values)
@@ -186,6 +199,62 @@ module I18n
           key = pluralization_key(entry, count)
           raise InvalidPluralizationData.new(entry, count, key) unless entry.has_key?(key)
           entry[key]
+        end
+
+        def pluralize_count_range(_locale, entry, count_range)
+          return entry unless entry.is_a?(Hash) && count_range
+
+          if count_range.begin == count_range.end
+            return pluralize(_locale, entry, count_range.begin)
+          end
+
+          start_category = pluralization_key(entry, count_range.begin)
+          end_category = pluralization_key(entry, count_range.end)
+          key = start_category == :one && end_category == :one ? :one : :other
+          raise InvalidPluralizationData.new(entry, count_range, key) unless entry.has_key?(key)
+          entry[key]
+        end
+
+        def validate_count_range(count_range)
+          unless count_range.is_a?(::Range)
+            raise InvalidCountRange.new(count_range, "must be a closed, ascending numeric Range")
+          end
+
+          if count_range.begin.nil? || count_range.end.nil?
+            raise InvalidCountRange.new(count_range, "must not be open-ended")
+          end
+
+          unless count_range.begin.is_a?(::Numeric) && count_range.end.is_a?(::Numeric)
+            raise InvalidCountRange.new(count_range, "must have numeric endpoints")
+          end
+
+          unless finite_number?(count_range.begin) && finite_number?(count_range.end)
+            raise InvalidCountRange.new(count_range, "must have finite endpoints")
+          end
+
+          if count_range.exclude_end?
+            raise InvalidCountRange.new(count_range, "must be closed")
+          end
+
+          if count_range.begin > count_range.end
+            raise InvalidCountRange.new(count_range, "must not be reversed")
+          end
+        end
+
+        def format_count_range(count_range)
+          "#{format_count_range_number(count_range.begin)}\u2013#{format_count_range_number(count_range.end)}"
+        end
+
+        def format_count_range_number(number)
+          if defined?(::BigDecimal) && number.is_a?(::BigDecimal)
+            number.to_s("F")
+          else
+            number.to_s
+          end
+        end
+
+        def finite_number?(number)
+          !number.respond_to?(:finite?) || number.finite?
         end
 
         # Interpolates values into a given subject.

@@ -87,6 +87,41 @@ This keeps inherited state safe and lets updates happen by replacing config obje
 * [Gettext support](https://github.com/ruby-i18n/i18n/wiki/Gettext)
 * Translation metadata
 
+## Count Ranges
+
+Pass a closed, ascending, numeric `Range` as `count_range` to pluralize a
+translation from the plural categories of both endpoints. The range is also
+interpolated as `%{count_range}` with an en dash separator.
+
+```ruby
+I18n.backend.store_translations(:en,
+  i18n: {
+    plural: {
+      rule: lambda { |n| n == 1 ? :one : :other },
+      range: {
+        rule: {
+          one:   { one: :one, other: :other },
+          other: { one: :other, other: :other }
+        }
+      }
+    }
+  },
+  emails: { one: '%{count_range} email', other: '%{count_range} emails' }
+)
+
+I18n.t(:emails, count_range: 3..5) # => "3–5 emails"
+```
+
+Range rules are ordinary locale translation data, so applications provide
+only the locales and category combinations they need. A proc can also be stored
+at `i18n.plural.range.rule`; it receives the start and end plural categories.
+
+Single-value ranges use the existing `count` behavior first, including the
+explicit `"0"` and `"1"` keys and backwards-compatible `zero` handling. Thus
+`0..0` behaves like `count: 0` and `1..1` behaves like `count: 1`. Reversed,
+open-ended, half-open, non-numeric, and non-`Range` values are rejected with
+`I18n::InvalidCountRange`.
+
 ## Alternative Backend
 
 * Chain

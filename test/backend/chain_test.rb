@@ -68,6 +68,18 @@ class I18nBackendChainTest < I18n::TestCase
     assert_equal 'one', I18n.t(:plural_2, :count => 1)
   end
 
+  test "count range pluralization does not treat entries as namespaces" do
+    first = backend(:en => {
+      :count_range_1 => { :one => '1–2 first', :other => 'range first' }
+    })
+    second = backend(:en => {
+      :count_range_1 => { :one => '1–2 second', :other => 'range second' }
+    })
+    chain = I18n::Backend::Chain.new(first, second)
+
+    assert_equal 'range first', chain.translate(:en, :count_range_1, :count_range => 2..3)
+  end
+
   test "bulk lookup collects results from all backends" do
     assert_equal ['Foo', 'Bar'], I18n.t([:foo, :bar])
     assert_equal ['Foo', 'Bar', 'Bah'], I18n.t([:foo, :bar, :bah], :default => 'Bah')

@@ -95,6 +95,15 @@ module I18n
     end
   end
 
+  class InvalidCountRange < ArgumentError
+    attr_reader :count_range
+
+    def initialize(count_range, reason)
+      @count_range = count_range
+      super ":count_range => #{count_range.inspect} #{reason}."
+    end
+  end
+
   class MissingInterpolationArgument < ArgumentError
     attr_reader :key, :values, :string
     def initialize(key, values, string)
