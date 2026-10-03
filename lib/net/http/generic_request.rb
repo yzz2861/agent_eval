@@ -205,6 +205,41 @@ class Net::HTTPGenericRequest
     input
   end
 
+  # Whether the request body is uploaded concurrently with waiting for the
+  # final response. Defaults to +false+.
+  #
+  # When enabled together with #body_stream, the request body is sent from a
+  # background execution unit while the final response is watched for. If the
+  # server sends a final response (for example, <tt>413 Payload Too Large)
+  # before the request body has been fully sent, no more data is read from the
+  # body stream and the response is returned as if the request had completed.
+  # Data already written to the socket is not revoked. Informational (1xx)
+  # responses do not stop the upload; sending continues after them.
+  #
+  # An upload interrupted this way leaves the request body incomplete on the
+  # wire, so the connection is always closed afterwards and never reused.
+  #
+  # This option has no effect unless #body_stream is set; in-memory #body
+  # payloads use the normal sending path.
+  #
+  #   File.open('large-file.bin') do |file|
+  #     req = Net::HTTP::Put.new('/upload')
+  #     req.content_length = file.size
+  #     req.body_stream = file
+  #     req.early_response = true
+  #     res = http.request(req) # returns promptly with e.g. 413
+  #   end
+  #
+  attr_accessor :early_response
+
+  def early_response? # :nodoc: internal use only
+    @early_response ? true : false
+  end
+
+  def early_response_aborted? # :nodoc: internal use only
+    @early_response_aborted ? true : false
+  end
+
   def set_body_internal(str)   #:nodoc: internal use only
     raise ArgumentError, "both of body argument and HTTPRequest#body set" if str and (@body or @body_stream)
     self.body = str if str
@@ -221,7 +256,11 @@ class Net::HTTPGenericRequest
     if @body
       send_request_with_body sock, ver, path, @body
     elsif @body_stream
-      send_request_with_body_stream sock, ver, path, @body_stream
+      if early_response?
+        send_request_with_body_stream_early sock, ver, path, @body_stream
+      else
+        send_request_with_body_stream sock, ver, path, @body_stream
+      end
     elsif @body_data
       send_request_with_body_data sock, ver, path, @body_data
     else
@@ -263,6 +302,15 @@ class Net::HTTPGenericRequest
 
   # :stopdoc:
 
+  # Buffer size used when streaming a request body in early response mode.
+  # It bounds how much of the body source may already have been read when the
+  # final response arrives.
+  EARLY_RESPONSE_READ_BUFSIZE = 16 * 1024
+
+  # Interval at which the sender execution unit is re-checked while waiting
+  # for a response during an early-response upload.
+  EARLY_RESPONSE_POLL_INTERVAL = 0.05
+
   class Chunker #:nodoc:
     def initialize(sock)
       @sock = sock
@@ -303,6 +351,89 @@ class Net::HTTPGenericRequest
     else
       IO.copy_stream(f, sock)
     end
+  end
+
+  def send_request_with_body_stream_early(sock, ver, path, f)
+    unless content_length() or chunked?
+      raise ArgumentError,
+          "Content-Length not given and Transfer-Encoding is not `chunked'"
+    end
+    write_header sock, ver, path
+
+    destination = chunked? ? Chunker.new(sock) : sock
+    stop_sending = false
+    write_error = nil
+    informational_count = 0
+    final_response = nil
+    aborted = false
+
+    sender = Thread.new do
+      Thread.current.report_on_exception = false
+      begin
+        buffer = +''
+        loop do
+          chunk = f.read(EARLY_RESPONSE_READ_BUFSIZE, buffer)
+          if chunk.nil?
+            destination.finish if chunked?
+            break
+          end
+          destination.write(chunk)
+          break if stop_sending
+        end
+      rescue StandardError => error
+        write_error = error
+      end
+    end
+
+    begin
+      until final_response
+        if sender.alive?
+          next unless sock.io.to_io.wait_readable(EARLY_RESPONSE_POLL_INTERVAL)
+        elsif write_error
+          # The sender failed; still prefer a fully parseable final response
+          # delivered by the server (e.g. 413 followed by a broken pipe).
+          raise write_error unless sock.io.to_io.wait_readable(0)
+        end
+
+        begin
+          response = Net::HTTPResponse.read_new(sock)
+        rescue StandardError
+          raise write_error if write_error
+          raise
+        end
+        if response.kind_of?(Net::HTTPInformation)
+          informational_count += 1
+          if informational_count > Net::HTTPResponse::MAX_INFORMATIONAL_RESPONSES
+            raise Net::HTTPBadResponse, 'too many informational responses'
+          end
+        else
+          final_response = response
+          aborted = sender.alive? || !write_error.nil?
+          stop_sending = true
+        end
+      end
+    ensure
+      stop_sending = true
+      if sender.alive?
+        # Unblock a sender stuck writing to a peer that stopped draining.
+        shutdown_writer_half(sock)
+        unless sender.join(EARLY_RESPONSE_POLL_INTERVAL * 2)
+          sender.kill
+          sender.join
+        end
+      end
+    end
+
+    @early_response_aborted = aborted
+    throw :response, final_response
+  end
+
+  def shutdown_writer_half(sock)
+    io = sock.io
+    # OpenSSL::SSL::SSLSocket wraps the transport socket in #io.
+    io = io.io if defined?(OpenSSL::SSL::SSLSocket) && io.is_a?(OpenSSL::SSL::SSLSocket)
+    io.shutdown(Socket::SHUT_WR)
+  rescue IOError, Errno::ENOTCONN, SystemCallError
   end
 
   def send_request_with_body_data(sock, ver, path, params)

@@ -439,6 +439,14 @@ class TestHTTPRequest < Test::Unit::TestCase
                      Net::HTTP::Get.new(URI('https://www.ruby-lang.org')), :body_stream
     assert_send_type "(untyped) -> untyped",
                      Net::HTTP::Get.new(URI('https://www.ruby-lang.org')), :body_stream=, "Pass any stream"
+    assert_send_type "() -> boolish",
+                     Net::HTTP::Get.new(URI('https://www.ruby-lang.org')), :early_response
+    assert_send_type "(boolish) -> boolish",
+                     Net::HTTP::Get.new(URI('https://www.ruby-lang.org')), :early_response=, true
+    assert_send_type "() -> bool",
+                     Net::HTTP::Get.new(URI('https://www.ruby-lang.org')), :early_response?
+    assert_send_type "() -> bool",
+                     Net::HTTP::Get.new(URI('https://www.ruby-lang.org')), :early_response_aborted?
   end
 
   def test_manipulation_of_headers

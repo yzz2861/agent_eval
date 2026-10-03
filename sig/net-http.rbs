@@ -2232,6 +2232,18 @@ module Net
     #     req.body_stream                         # => #<StringIO:0x0000027d1e5affa8>
     #
     attr_accessor body_stream: untyped
+
+    # <!-- rdoc-file=lib/net/http/generic_request.rb -->
+    # Whether to concurrently watch for the final response while streaming the
+    # request body. Defaults to `nil` (disabled).
+    #
+    attr_accessor early_response: boolish
+
+    # :nodoc:
+    def early_response?: () -> bool
+
+    # :nodoc:
+    def early_response_aborted?: () -> bool
   end
 
   # <!-- rdoc-file=lib/net/http/header.rb -->

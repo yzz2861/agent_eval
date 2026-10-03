@@ -21,6 +21,7 @@
 #
 
 require 'net/protocol'
+require 'socket'
 require 'uri'
 require 'resolv'
 autoload :OpenSSL, 'openssl'
@@ -2495,6 +2496,7 @@ module Net   #:nodoc:
           rescue Errno::EPIPE
             # Failure when writing full request, but we can probably
             # still read the received response.
+            raise if req.early_response? && !@socket.io.to_io.wait_readable(0)
           end
 
           informational_count = 0
@@ -2514,6 +2516,9 @@ module Net   #:nodoc:
 
           res
         }
+        res.decode_content = req.decode_content
+        res.body_encoding = @response_body_encoding
+        res.ignore_eof = @ignore_eof
         res.reading_body(@socket, req.response_body_permitted?) {
           if block_given?
             count = max_retries # Don't restart in the middle of a download
@@ -2572,7 +2577,10 @@ module Net   #:nodoc:
     def end_transport(req, res)
       @curr_http_version = res.http_version
       @last_communicated = nil
-      if @socket.closed?
+      if req.early_response_aborted?
+        debug 'Conn close because of early response while sending request body'
+        @socket.close
+      elsif @socket.closed?
         debug 'Conn socket closed'
       elsif not res.body and @close_on_empty_response
         debug 'Conn close'
