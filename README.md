@@ -645,6 +645,30 @@ rescue JWT::TokenError
 end
 ```
 
+Leaf certificate policies can be applied during the same path validation. The
+certificate chain is never trusted because a self-signed root appears in the
+`x5c` header; it must also be included in `root_certificates`. `verification_time`
+is used for certificate and CRL time checks, and `max_chain_depth` counts
+intermediate certificates above the leaf. Set the `allow_missing_*` options to
+treat a missing extension as acceptable; an extension that is present but does
+not match is always rejected.
+
+```ruby
+JWT.decode(token, nil, true, {
+  algorithms: ['RS256'],
+  x5c: {
+    root_certificates: root_certificates,
+    crls: crls,
+    eku: '1.3.6.1.5.5.7.3.2', # clientAuth
+    require_digital_signature: true,
+    max_chain_depth: 1,
+    verification_time: Time.now,
+    allow_missing_eku: false,
+    allow_missing_digital_signature: false
+  }
+})
+```
+
 ## JSON Web Key (JWK)
 
 JWK is a JSON structure representing a cryptographic key. This gem currently supports RSA, EC, OKP and HMAC keys. OKP support requires [RbNaCl](https://github.com/RubyCrypto/rbnacl) and currently only supports the Ed25519 curve.

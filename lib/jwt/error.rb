@@ -34,6 +34,42 @@ module JWT
   # verification cannot be used, as opposed to a signature that does not match.
   class VerificationKeyError < VerificationError; end
 
+  # Raised when an x5c certificate chain is structurally invalid.
+  class CertificateChainError < VerificationError; end
+
+  # Raised when x5c certificates are not ordered from leaf toward root.
+  class CertificateChainOrderError < CertificateChainError; end
+
+  # Raised when an x5c certificate chain is longer than the configured depth.
+  class CertificateChainDepthError < CertificateChainError; end
+
+  # Raised when an x5c certificate chain contains the same certificate more than once.
+  class DuplicateCertificateError < CertificateChainError; end
+
+  # Raised when an x5c certificate is outside its validity period.
+  class CertificateTimeError < CertificateChainError; end
+
+  # Raised when an x5c certificate has expired.
+  class CertificateExpiredError < CertificateTimeError; end
+
+  # Raised when an x5c certificate is not yet valid.
+  class CertificateNotYetValidError < CertificateTimeError; end
+
+  # Raised when a certificate contains an unsupported critical extension.
+  class UnsupportedCriticalExtensionError < CertificateChainError; end
+
+  # Raised when an x5c leaf certificate has an invalid key usage.
+  class InvalidKeyUsageError < CertificateChainError; end
+
+  # Raised when an x5c leaf certificate does not contain a required key usage extension.
+  class MissingKeyUsageError < InvalidKeyUsageError; end
+
+  # Raised when an x5c leaf certificate has an invalid extended key usage.
+  class InvalidExtendedKeyUsageError < CertificateChainError; end
+
+  # Raised when an x5c leaf certificate does not contain a required extended key usage extension.
+  class MissingExtendedKeyUsageError < InvalidExtendedKeyUsageError; end
+
   # The IncorrectAlgorithm class is raised when the JWT algorithm is incorrect.
   class IncorrectAlgorithm < SignatureError; end
 
