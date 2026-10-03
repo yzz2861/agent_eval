@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- Validate OpenAPI operation request parameters: query `form`/`deepObject` and path/header `simple` styles with `explode` support, raw duplicate-preserving inputs, and distinct missing/empty/invalid-percent-encoding/key-conflict errors
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes

@@ -34,5 +34,9 @@ module JSONSchemer
     def schema(name)
       ref("#/components/schemas/#{name}")
     end
+
+    def operation(path, method)
+      Operation.new(@schema, @document, path, method)
+    end
   end
 end

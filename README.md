@@ -494,6 +494,33 @@ document.ref('#/components/schemas/example').valid?('one')
 # => false
 ```
 
+```ruby
+# request parameter validation using operation parameters
+
+operation = document.operation('/pets/{petId}', 'get')
+
+operation.valid?(
+  :query => 'limit=10&tags=cat&tags=dog&filter[color]=blue',
+  :path => { 'petId' => '42' },
+  :headers => { 'X-Request-Id' => 'abc123' }
+)
+# => true
+
+# query parameters support `form` (default) and `deepObject` styles,
+# path and header parameters support `simple` (default); `explode` is honored.
+# raw inputs keep duplicate fields and original (encoded) positions, so
+# missing parameters, empty values, invalid percent-encoding, and object
+# key conflicts are reported as distinct error types (`required`,
+# `invalid_percent_encoding`, `key_conflict`, `invalid_object`).
+# unsupported styles and locations raise when the operation is prepared.
+
+operation.validate(:query => 'limit=ten', :path => { 'petId' => '42' })
+# => [{...
+#      "parameter"=>"limit",
+#      "in"=>"query"},
+#     ...]
+```
+
 ## CLI
 
 The `json_schemer` executable takes a JSON schema file as the first argument followed by one or more JSON data files to validate. If there are any validation errors, it outputs them and returns an error code.
