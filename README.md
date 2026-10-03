@@ -66,6 +66,24 @@ I18n.config.with(locale: :ja).set!
 `set!` stores a frozen config in the current execution context.
 This keeps inherited state safe and lets updates happen by replacing config objects.
 
+### Translation references
+
+Strings can reference other translations before ordinary `%{...}` interpolation runs:
+
+```yaml
+en:
+  users:
+    title: Mr.
+    greeting: Hello %{@.title} %{name}
+    absolute_greeting: Hello %{@users.title}
+```
+
+`%{@key}` references an absolute key, while `%{@.key}` references a sibling key.
+References are resolved using the current locale and its fallback chain. A referenced
+value must resolve to a String; numbers, booleans, arrays, and hashes are not converted.
+Use `%%{@key}` to escape a reference literally. Circular references raise
+`I18n::CircularTranslationReference`, whose `reference_chain` contains every key visited.
+
 ## Features
 
 * Translation and localization

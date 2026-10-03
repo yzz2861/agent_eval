@@ -111,6 +111,24 @@ module I18n
     end
   end
 
+  class InvalidTranslationReference < I18n::ArgumentError
+    attr_reader :reference, :reason
+    def initialize(reference, reason)
+      @reference, @reason = reference, reason
+      super "invalid translation reference #{reference.inspect}: #{reason}"
+    end
+  end
+
+  class CircularTranslationReference < I18n::ArgumentError
+    attr_reader :reference_chain
+    alias_method :keys, :reference_chain
+
+    def initialize(reference_chain)
+      @reference_chain = reference_chain.map { |key| Array(key).join('.') }
+      super "circular translation reference: #{@reference_chain.join(' -> ')}"
+    end
+  end
+
   class UnknownFileType < ArgumentError
     attr_reader :type, :filename
     def initialize(type, filename)

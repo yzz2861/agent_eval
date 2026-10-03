@@ -7,6 +7,7 @@ module I18n
   module Backend
     module Base
       include I18n::Backend::Transliterator
+      TRANSLATION_REFERENCE_PATTERN = /(%*)%\{@([^}]*)\}/
 
       # Accepts a list of paths to translation files. Loads translations from
       # plain Ruby (*.rb), YAML files (*.yml), or JSON files (*.json). See #load_rb, #load_yml, and #load_json
@@ -29,6 +30,9 @@ module I18n
         raise I18n::ArgumentError if (key.is_a?(String) || key.is_a?(Symbol)) && key.empty?
         raise InvalidLocale.new(locale) unless locale
         return nil if key.nil? && !options.key?(:default)
+
+        reference_chain = translation_reference_chain(options, locale, key)
+        options = options.merge(:translation_reference_chain => reference_chain) if reference_chain
 
         entry = lookup(locale, key, options[:scope], options) unless key.nil?
 
@@ -53,10 +57,11 @@ module I18n
           throw(:exception, I18n::MissingTranslation.new(locale, key, options))
         end
 
+        entry = resolve_translation_references(locale, key, entry, options) unless options[:skip_interpolation]
+
         deep_interpolation = options[:deep_interpolation]
-        skip_interpolation = options[:skip_interpolation]
         values = Utils.except(options, *RESERVED_KEYS) unless options.empty?
-        if !skip_interpolation && values && !values.empty?
+        if !options[:skip_interpolation] && values && !values.empty?
           entry = if deep_interpolation
             deep_interpolate(locale, entry, values)
           else
@@ -121,6 +126,137 @@ module I18n
           true
         end
 
+        def resolve_translation_references(locale, key, entry, options = EMPTY_HASH, path = [])
+          case entry
+          when ::String
+            return entry unless entry.match?(TRANSLATION_REFERENCE_PATTERN)
+
+            current_key = Array(translation_key(locale, key, options)) + path
+            resolved_entry = entry.gsub(TRANSLATION_REFERENCE_PATTERN) do
+              whole_match = Regexp.last_match(0)
+              percents = Regexp.last_match(1)
+              reference = Regexp.last_match(2)
+              percent_count = percents.length + 1
+
+              if percent_count.odd?
+                "#{"%" * (percents.length / 2)}#{resolve_translation_reference(locale, current_key, reference, options)}"
+              else
+                whole_match
+              end
+            end
+            preserve_translation_metadata(entry, resolved_entry)
+          when ::Array
+            entry.map { |element| resolve_translation_references(locale, key, element, options, path) }
+          when ::Hash
+            return entry unless options[:deep_interpolation]
+
+            entry.each_with_object({}) do |(hash_key, value), result|
+              result[hash_key] = resolve_translation_references(
+                locale,
+                key,
+                value,
+                options,
+                path + [hash_key.is_a?(::Symbol) || hash_key.is_a?(::Integer) ? hash_key : hash_key.to_s]
+              )
+            end
+          else
+            entry
+          end
+        end
+
+        def resolve_translation_reference(locale, current_key, reference, options)
+          target_key = referenced_translation_key(current_key, reference, options[:separator])
+          target_segments = translation_key(locale, target_key, EMPTY_HASH)
+          reference_locale = options[:fallback_original_locale] || locale
+          reference_chain = Array(options[:translation_reference_chain])
+          if reference_chain.include?(target_segments)
+            raise CircularTranslationReference.new(reference_chain + [target_segments])
+          end
+
+          reference_options = Utils.except(options, *RESERVED_KEYS).merge(
+            :locale => reference_locale,
+            :throw => true,
+            :fallback => options.fetch(:fallback, true),
+            :translation_reference_chain => reference_chain + [target_segments]
+          )
+          reference_options[:separator] = options[:separator] if options.key?(:separator)
+
+          result = catch(:exception) do
+            I18n.translate(target_key, **reference_options)
+          end
+
+          if result.nil? || result.is_a?(MissingTranslation)
+            raise MissingTranslationData.new(locale, target_key, EMPTY_HASH)
+          end
+          unless result.is_a?(::String)
+            raise InvalidTranslationReference.new("@#{reference}", "#{target_key.inspect} does not resolve to a String")
+          end
+
+          result
+        end
+
+        def referenced_translation_key(current_key, reference, separator = nil)
+          separator ||= I18n.default_separator
+          absolute = !reference.start_with?('.')
+          target = absolute ? reference : reference[1..]
+          segments = target.to_s.split(separator)
+
+          validate_translation_reference!(reference, absolute, segments)
+
+          segments = if absolute
+            segments
+          else
+            current_segments = Array(current_key)
+            if current_segments.empty?
+              raise InvalidTranslationReference.new("@#{reference}", 'can not use a relative reference without a current key')
+            end
+
+            current_segments[0...-1] + segments
+          end
+
+          segments.map(&:to_s).join(separator)
+        end
+
+        def validate_translation_reference!(reference, absolute, segments)
+          reason = if !absolute && reference == '.'
+            'relative reference must name a key'
+          elsif !absolute && reference.start_with?('..')
+            'parent directory references are not supported'
+          elsif segments.empty? || segments.any? { |segment| segment.empty? || !segment.match?(/\A[\w-]+\z/) }
+            'expected %{@key} or %{@.sibling_key}'
+          end
+
+          raise InvalidTranslationReference.new("@#{reference}", reason) if reason
+        end
+
+        def translation_key(locale, key, options = EMPTY_HASH)
+          return nil if key.nil?
+
+          I18n.normalize_keys(locale, key, options[:scope], options[:separator])[1..]
+        end
+
+        def translation_reference_chain(options, locale, key)
+          key_segments = translation_key(locale, key, options)
+          return nil if key_segments.nil?
+
+          chain = Array(options[:translation_reference_chain])
+          return nil if chain.last == key_segments
+
+          raise CircularTranslationReference.new(chain + [key_segments]) if chain.include?(key_segments)
+
+          chain + [key_segments]
+        end
+
+        def preserve_translation_metadata(original, resolved)
+          return resolved unless original.respond_to?(:translation_metadata)
+
+          metadata = original.translation_metadata
+          return resolved unless metadata.is_a?(::Hash) && metadata.any?
+
+          resolved.translation_metadata = resolved.translation_metadata.merge(metadata)
+          resolved
+        end
+
         # Evaluates defaults.
         # If given subject is an Array, it walks the array and returns the
         # first translation that can be resolved. Otherwise it tries to resolve
@@ -161,8 +297,10 @@ module I18n
                 )
               )
             when Proc
-              date_or_time = options.delete(:object) || object
-              resolve(locale, object, subject.call(date_or_time, **options))
+              proc_options = options.dup
+              date_or_time = proc_options.delete(:object) || object
+              proc_options.delete(:translation_reference_chain)
+              resolve(locale, object, subject.call(date_or_time, **proc_options), options)
             else
               subject
             end

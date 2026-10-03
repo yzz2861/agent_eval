@@ -51,7 +51,7 @@ module I18n
         return super if options[:fallback_in_progress]
         default = extract_non_symbol_default!(options) if options[:default]
 
-        fallback_options = options.merge(:fallback_in_progress => true, fallback_original_locale: locale)
+        fallback_options = options.merge(:fallback_in_progress => true, :fallback_original_locale => locale)
         I18n.fallbacks[locale].each do |fallback|
           begin
             catch(:exception) do
@@ -85,8 +85,10 @@ module I18n
               :skip_interpolation => true
             ))
           when Proc
-            date_or_time = options.delete(:object) || object
-            resolve_entry(options[:fallback_original_locale], object, subject.call(date_or_time, **options))
+            proc_options = options.dup
+            date_or_time = proc_options.delete(:object) || object
+            proc_options.delete(:translation_reference_chain)
+            resolve_entry(options[:fallback_original_locale], object, subject.call(date_or_time, **proc_options), options)
           else
             subject
           end
