@@ -71,10 +71,13 @@ module TZInfo
         raise_not_implemented('transitions_up_to')
       end
 
+      # @param data_source [DataSource] the {DataSource} the new {DataTimezone}
+      #   should be explicitly bound to, or `nil` for the process-wide
+      #   default.
       # @return [DataTimezone] a new {DataTimezone} instance for the time zone
       #   represented by this {DataTimezoneInfo}.
-      def create_timezone
-        DataTimezone.new(self)
+      def create_timezone(data_source = nil)
+        DataTimezone.new(self, data_source)
       end
 
       private

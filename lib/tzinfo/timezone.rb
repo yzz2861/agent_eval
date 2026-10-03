@@ -122,10 +122,17 @@ module TZInfo
       #
       # @param identifier [String] an IANA Time Zone Database time zone
       #   identifier.
+      # @param data_source [DataSource] an optional {DataSource} to bind the
+      #   returned {Timezone} to. When specified, the returned time zone (and
+      #   any linked time zone derived from it) continues to use this data
+      #   source even if the process-wide default is later changed with
+      #   {DataSource.set}. When `nil`, the current default {DataSource} is
+      #   used. See also {DataSource#get_timezone}.
       # @return [Timezone] the {Timezone} with the given `identifier`.
       # @raise [InvalidTimezoneIdentifier] if the `identifier` is not valid.
-      def get(identifier)
-        data_source.get_timezone_info(identifier).create_timezone
+      def get(identifier, data_source = nil)
+        source = data_source || DataSource.get
+        source.get_timezone_info(identifier).create_timezone(data_source)
       end
 
       # Returns a proxy for the time zone with the given identifier. This allows
@@ -136,10 +143,23 @@ module TZInfo
       #
       # @param identifier [String] an IANA Time Zone Database time zone
       #   identifier.
+      # @param data_source [DataSource] an optional {DataSource} the proxy
+      #   should be bound to. When `nil`, the proxy captures the current
+      #   default {DataSource} at creation time (if one has been initialized)
+      #   so that a later {DataSource.set} does not change the version it
+      #   resolves against. See also {DataSource#get_timezone_proxy}.
       # @return [TimezoneProxy] a proxy for the time zone with the given
       #   `identifier`.
-      def get_proxy(identifier)
-        TimezoneProxy.new(identifier)
+      def get_proxy(identifier, data_source = nil)
+        if data_source
+          TimezoneProxy.new(identifier, data_source, true)
+        else
+          # Pin the current default DataSource at proxy creation time so that
+          # a later change with DataSource.set cannot resolve the proxy against
+          # a different version of the time zone database.
+          current = DataSource.current
+          TimezoneProxy.new(identifier, current, !current.nil?)
+        end
       end
 
       # Returns an `Array` of all the available time zones.
@@ -1135,7 +1155,7 @@ module TZInfo
     # @param limit [Integer] the maximum depth to dump - ignored.
     # @return [String] a serialized representation of this {Timezone}.
     def _dump(limit)
-      identifier
+      bound_data_source ? DataSource.dump_with_data_source(identifier, bound_data_source) : identifier
     end
 
     # Loads a {Timezone} from the serialized representation returned by {_dump}.
@@ -1145,10 +1165,22 @@ module TZInfo
     # @param data [String] a serialized representation of a {Timezone}.
     # @return [Timezone] the result of converting `data` back into a {Timezone}.
     def self._load(data)
-      Timezone.get(data)
+      if DataSource.bound_serialization?(data)
+        data_source, identifier = DataSource.load_with_data_source(data)
+        Timezone.get(identifier, data_source)
+      else
+        Timezone.get(data)
+      end
     end
 
     private
+
+    # @return [DataSource] the {DataSource} this {Timezone} is explicitly
+    #   bound to, or `nil` if the time zone was obtained through the
+    #   process-wide default.
+    def bound_data_source
+      @bound_data_source
+    end
 
     # Raises an {UnknownTimezone} exception.
     #

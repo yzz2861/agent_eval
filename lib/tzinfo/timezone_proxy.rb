@@ -20,10 +20,17 @@ module TZInfo
     #
     # @param identifier [String] an IANA Time Zone Database time zone
     #   identifier.
-    def initialize(identifier)
+    # @param data_source [DataSource] the {DataSource} to resolve the proxy
+    #   against, or `nil` to use the process-wide default at first
+    #   resolution.
+    # @param explicit [Boolean] whether `data_source` should be retained as
+    #   an explicit binding (surviving serialization). Internal use only.
+    def initialize(identifier, data_source = nil, explicit = !data_source.nil?)
       super()
       @identifier = identifier
       @real_timezone = nil
+      @data_source = data_source
+      @explicit = explicit
     end
 
     # (see Timezone#identifier)
@@ -58,7 +65,7 @@ module TZInfo
     #   [String] a serialized representation of this {TimezoneProxy}.
     # @return [String] a serialized representation of this {TimezoneProxy}.
     def _dump(limit)
-      identifier
+      @explicit && @data_source ? DataSource.dump_with_data_source(identifier, @data_source) : identifier
     end
 
     # Loads a {TimezoneProxy} from the serialized representation returned by
@@ -69,7 +76,12 @@ module TZInfo
     # @return [TimezoneProxy] the result of converting `data` back into a
     #   {TimezoneProxy}.
     def self._load(data)
-      TimezoneProxy.new(data)
+      if DataSource.bound_serialization?(data)
+        data_source, identifier = DataSource.load_with_data_source(data)
+        TimezoneProxy.new(identifier, data_source, true)
+      else
+        TimezoneProxy.new(data)
+      end
     end
 
     private
@@ -85,7 +97,11 @@ module TZInfo
       # worth the overhead of locking to ensure that @real_timezone is only
       # calculated once.
       unless @real_timezone
-        result = Timezone.get(@identifier)
+        if @data_source
+          result = Timezone.get(@identifier, @data_source)
+        else
+          result = Timezone.get(@identifier)
+        end
         return result if frozen?
         @real_timezone = result
       end

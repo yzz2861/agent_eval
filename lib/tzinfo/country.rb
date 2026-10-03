@@ -37,8 +37,9 @@ module TZInfo
       #   country identified by the `code` parameter.
       # @raise [InvalidCountryCode] If {code} is not a valid ISO 3166-1 alpha-2
       #   code it couldn't be found.
-      def get(code)
-        Country.new(data_source.get_country_info(code))
+      def get(code, data_source = nil)
+        source = data_source || DataSource.get
+        Country.new(source.get_country_info(code), data_source)
       end
 
       # @return [Array<String>] an `Array` containing all the valid ISO 3166-1
@@ -69,8 +70,11 @@ module TZInfo
     #
     # @param info [DataSources::CountryInfo] the data to base the new {Country}
     #   instance upon.
-    def initialize(info)
+    # @param data_source [DataSource] the {DataSource} this {Country} is
+    #   explicitly bound to, or `nil` for the process-wide default.
+    def initialize(info, data_source = nil)
       @info = info
+      @bound_data_source = data_source
     end
 
     # @return [String] the ISO 3166-1 alpha-2 country code.
@@ -130,7 +134,7 @@ module TZInfo
     # @return [Array<Timezone>] an `Array` containing a {Timezone} instance for
     #   each time zone observed by the country.
     def zones
-      zone_info.map(&:timezone)
+      zone_info.map {|country_timezone| country_timezone.timezone(@bound_data_source) }
     end
 
     # Returns a frozen `Array` containing a {CountryTimezone} instance for each
@@ -192,7 +196,7 @@ module TZInfo
     # @param limit [Integer] the maximum depth to dump - ignored.
     # @return [String] a serialized representation of this {Country}.
     def _dump(limit)
-      code
+      @bound_data_source ? DataSource.dump_with_data_source(code, @bound_data_source) : code
     end
 
     # Loads a {Country} from the serialized representation returned by {_dump}.
@@ -202,7 +206,12 @@ module TZInfo
     # @param data [String] a serialized representation of a {Country}.
     # @return [Country] the result of converting `data` back into a {Country}.
     def self._load(data)
-      Country.get(data)
+      if DataSource.bound_serialization?(data)
+        data_source, code = DataSource.load_with_data_source(data)
+        Country.get(code, data_source)
+      else
+        Country.get(data)
+      end
     end
   end
 end

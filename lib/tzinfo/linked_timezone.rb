@@ -12,9 +12,11 @@ module TZInfo
     # @param info [DataSources::LinkedTimezoneInfo] a
     #   {DataSources::LinkedTimezoneInfo} instance supplied by a {DataSource}
     #   that will be used as the source of data for this {LinkedTimezone}.
-    def initialize(info)
-      super
-      @linked_timezone = Timezone.get(info.link_to_identifier)
+    # @param data_source [DataSource] the {DataSource} this {LinkedTimezone} is
+    #   explicitly bound to, or `nil` for the process-wide default.
+    def initialize(info, data_source = nil)
+      super(info, data_source)
+      @linked_timezone = data_source ? Timezone.get(info.link_to_identifier, data_source) : Timezone.get(info.link_to_identifier)
     end
 
     # (see Timezone#period_for)

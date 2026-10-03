@@ -23,10 +23,13 @@ module TZInfo
         @link_to_identifier = link_to_identifier.freeze
       end
 
+      # @param data_source [DataSource] the {DataSource} the new
+      #   {LinkedTimezone} should be explicitly bound to, or `nil` for the
+      #   process-wide default.
       # @return [LinkedTimezone] a new {LinkedTimezone} instance for the time
       #   zone represented by this {LinkedTimezoneInfo}.
-      def create_timezone
-        LinkedTimezone.new(self)
+      def create_timezone(data_source = nil)
+        LinkedTimezone.new(self, data_source)
       end
     end
   end

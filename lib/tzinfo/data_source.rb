@@ -32,6 +32,13 @@ module TZInfo
     # @private
     @@instance = nil
 
+    # A registry of data source instances keyed by `object_id`. Used to retain
+    # the identity of a {DataSource} when serializing {Timezone} and {Country}
+    # instances that are explicitly bound to a particular data source.
+    #
+    # @private
+    @@instances = {}
+
     # A `Mutex` used to ensure the default data source is only created once.
     #
     # @private
@@ -57,6 +64,83 @@ module TZInfo
         end
 
         @@instance
+      end
+
+      # @return [DataSource] the currently selected data source without
+      #   triggering creation of the default data source. Returns `nil` if
+      #   neither {set} nor {get} has been called.
+      #
+      # @api private
+      def current
+        @@instance
+      end
+
+      # @return [Hash{Integer => DataSource}] the registry of data source
+      #   instances keyed by `object_id`.
+      #
+      # @private
+      def instances
+        @@instances
+      end
+
+      # Registers a newly created {DataSource} instance so that its identity
+      # can be preserved when serializing explicitly bound {Timezone} and
+      # {Country} instances.
+      #
+      # @param data_source [DataSource] the data source to register.
+      # @return [DataSource] `data_source`.
+      #
+      # @private
+      def register(data_source)
+        @@instances[data_source.object_id] = data_source
+      end
+
+      # @param identity [Integer] the `object_id` of a previously registered
+      #   {DataSource}.
+      # @return [DataSource] the {DataSource} with the given `object_id`.
+      # @raise [InvalidDataSource] if no data source with the given identity
+      #   has been registered.
+      #
+      # @private
+      def by_identity(identity)
+        @@instances[Integer(identity)] or raise InvalidDataSource, "No registered DataSource with identity #{identity}"
+      end
+
+      # Returns the serialized representation used for objects that are
+      # explicitly bound to a data source. The payload is prefixed so that it
+      # can be distinguished from the legacy serialized format (a bare
+      # identifier or country code `String`).
+      #
+      # @param identifier [String] the serialized identifier payload.
+      # @param data_source [DataSource] the data source the object is bound
+      #   to.
+      # @return [String] a serialized representation that includes the data
+      #   source identity.
+      #
+      # @private
+      def dump_with_data_source(identifier, data_source)
+        "\0ts".dup << Marshal.dump([data_source.object_id, identifier])
+      end
+
+      # Loads a representation previously produced by
+      # {dump_with_data_source}.
+      #
+      # @param data [String] the serialized representation.
+      # @return [Array(DataSource, String)] the bound data source and the
+      #   identifier payload.
+      #
+      # @private
+      def load_with_data_source(data)
+        identity, identifier = Marshal.load(data.byteslice(3, data.bytesize - 3))
+        [by_identity(identity), identifier]
+      end
+
+      # @return [Boolean] whether `data` is a representation produced by
+      #   {dump_with_data_source}.
+      #
+      # @private
+      def bound_serialization?(data)
+        data.start_with?("\0ts")
       end
 
       # Sets the currently selected data source for time zone and country data.
@@ -165,6 +249,51 @@ module TZInfo
     # subclasses of {DataSource}.
     def initialize
       @timezones = Concurrent::Map.new
+      DataSource.register(self)
+    end
+
+    # Returns the {Timezone} with the given IANA Time Zone Database identifier
+    # using this data source. Unlike {Timezone.get}, the returned time zone
+    # remains bound to this data source even if the process-wide default data
+    # source is later changed with {DataSource.set}.
+    #
+    # Linked time zones and proxies derived from the result continue to use
+    # this data source.
+    #
+    # @param identifier [String] an IANA Time Zone Database time zone
+    #   identifier.
+    # @return [Timezone] the {Timezone} with the given `identifier`, bound to
+    #   this data source.
+    # @raise [InvalidTimezoneIdentifier] if the `identifier` is not valid.
+    def get_timezone(identifier)
+      Timezone.get(identifier, self)
+    end
+
+    # Returns a lazy {TimezoneProxy} for the given time zone identifier that is
+    # bound to this data source. The proxy will resolve against this data
+    # source when first used, regardless of any later change to the
+    # process-wide default data source.
+    #
+    # The identifier will not be validated. If an invalid identifier is
+    # specified, no exception will be raised until the proxy is used.
+    #
+    # @param identifier [String] an IANA Time Zone Database time zone
+    #   identifier.
+    # @return [TimezoneProxy] a proxy for the time zone with the given
+    #   `identifier`, bound to this data source.
+    def get_timezone_proxy(identifier)
+      Timezone.get_proxy(identifier, self)
+    end
+
+    # Returns a {Country} for the given ISO 3166-1 alpha-2 country code using
+    # this data source. Time zones obtained from the returned country remain
+    # bound to this data source.
+    #
+    # @param code [String] an ISO 3166-1 alpha-2 country code.
+    # @return [Country] a {Country} instance bound to this data source.
+    # @raise [InvalidCountryCode] if `code` is not a valid country code.
+    def get_country(code)
+      Country.get(code, self)
     end
 
     # Returns a {DataSources::TimezoneInfo} instance for the given identifier.

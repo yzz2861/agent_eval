@@ -53,9 +53,11 @@ module TZInfo
     # The result is actually an instance of {TimezoneProxy} in order to defer
     # loading of the time zone transition data until it is first needed.
     #
+    # @param data_source [DataSource] the {DataSource} the returned proxy should
+    #   be bound to, or `nil` to use the process-wide default.
     # @return [Timezone] the associated {Timezone}.
-    def timezone
-      Timezone.get_proxy(@identifier)
+    def timezone(data_source = nil)
+      Timezone.get_proxy(@identifier, data_source)
     end
 
     # @return [String] the {description} if present, otherwise a human-readable

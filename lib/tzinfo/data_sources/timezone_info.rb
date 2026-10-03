@@ -26,9 +26,12 @@ module TZInfo
         "#<#{self.class}: #@identifier>"
       end
 
+      # @param data_source [DataSource] the {DataSource} the new {Timezone}
+      #   should be explicitly bound to, or `nil` for the process-wide
+      #   default.
       # @return [Timezone] a new {Timezone} instance for the time zone
       #   represented by this {TimezoneInfo}.
-      def create_timezone
+      def create_timezone(data_source = nil)
         raise_not_implemented('create_timezone')
       end
 

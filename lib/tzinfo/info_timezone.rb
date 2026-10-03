@@ -14,9 +14,12 @@ module TZInfo
     # @param info [DataSources::TimezoneInfo] a {DataSources::TimezoneInfo}
     #   instance supplied by a {DataSource} that will be used as the source of
     #   data for this {InfoTimezone}.
-    def initialize(info)
+    # @param data_source [DataSource] the {DataSource} this {InfoTimezone} is
+    #   explicitly bound to, or `nil` for the process-wide default.
+    def initialize(info, data_source = nil)
       super()
       @info = info
+      @bound_data_source = data_source
     end
 
     # (see Timezone#identifier)
