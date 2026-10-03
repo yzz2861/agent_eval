@@ -406,5 +406,161 @@ module Concurrent
         expect(subject).to be_shutdown
       end
     end
+
+    context 'manual clock' do
+
+      let(:executor){ Concurrent::ImmediateExecutor.new }
+      subject{ TimerSet.new(executor: executor, clock: :manual) }
+
+      it 'reports the clock mode and a virtual time starting at zero' do
+        expect(subject).to be_manual_clock
+        expect(subject.current_time).to eq 0.0
+      end
+
+      it 'does not start the background timer thread' do
+        timer = subject.instance_variable_get(:@timer_executor)
+        expect(timer).not_to receive(:post)
+        subject.post(10){ nil }
+      end
+
+      it 'does not execute tasks before the clock is advanced' do
+        executed = AtomicBoolean.new(false)
+        subject.post(5){ executed.make_true }
+        subject.advance_to(4)
+        expect(executed.true?).to be false
+      end
+
+      it 'executes tasks due at the advanced time' do
+        executed = AtomicBoolean.new(false)
+        subject.post(5){ executed.make_true }
+        subject.advance_to(5)
+        expect(executed.true?).to be true
+      end
+
+      it 'executes zero-delay tasks without advancing the clock' do
+        executed = AtomicBoolean.new(false)
+        subject.post(0){ executed.make_true }
+        subject.advance(0)
+        expect(executed.true?).to be true
+      end
+
+      it 'advances the virtual clock by a relative amount' do
+        executed = AtomicBoolean.new(false)
+        subject.post(2.5){ executed.make_true }
+        subject.advance(2)
+        expect(executed.true?).to be false
+        expect(subject.current_time).to be_within(0.0001).of(2.0)
+        subject.advance(0.5)
+        expect(executed.true?).to be true
+        expect(subject.current_time).to be_within(0.0001).of(2.5)
+      end
+
+      it 'does not execute future tasks while processing earlier ones' do
+        later = AtomicBoolean.new(false)
+        subject.post(10){ later.make_true }
+        subject.advance_to(5)
+        expect(later.true?).to be false
+        subject.advance_to(10)
+        expect(later.true?).to be true
+      end
+
+      it 'executes tasks with the same deadline in submission order' do
+        order = []
+        5.times { |i| subject.post(1){ order << i } }
+        subject.advance_to(1)
+        expect(order).to eq [0, 1, 2, 3, 4]
+      end
+
+      it 'runs callback-added due tasks after previously queued same-deadline tasks' do
+        order = []
+        subject.post(1) { order << :first }
+        subject.post(1) { order << :second }
+        subject.post(1) do
+          order << :third
+          subject.post(0){ order << :added }
+        end
+        subject.advance_to(1)
+        expect(order).to eq [:first, :second, :third, :added]
+      end
+
+      it 'processes newly due tasks scheduled from a callback in the same advance' do
+        executed = AtomicBoolean.new(false)
+        subject.post(1) do
+          subject.post(0){ executed.make_true }
+        end
+        subject.advance_to(1)
+        expect(executed.true?).to be true
+      end
+
+      it 'bounds the number of executed tasks and leaves a resumable state' do
+        count = 0
+        schedule = nil
+        schedule = lambda do
+          subject.post(0){ count += 1; schedule.call }
+        end
+        schedule.call
+
+        executed = subject.advance_to(1, 10)
+        expect(executed).to eq 10
+        expect(count).to eq 10
+        expect(subject.current_time).to eq 1.0
+
+        more = subject.advance(0, 5)
+        expect(more).to eq 5
+        expect(count).to eq 15
+      end
+
+      it 'stops at the cap even when no callback adds tasks' do
+        executed = []
+        3.times { |i| subject.post(0){ executed << i } }
+        expect(subject.advance_to(1, 2)).to eq 2
+        expect(executed).to eq [0, 1]
+        expect(subject.advance(0)).to eq 1
+        expect(executed).to eq [0, 1, 2]
+      end
+
+      it 'returns the number of executed tasks' do
+        3.times { subject.post(1){ nil } }
+        subject.post(2){ nil }
+        expect(subject.advance_to(1)).to eq 3
+        expect(subject.advance_to(2)).to eq 1
+      end
+
+      it 'keeps cancelled tasks from running on advance' do
+        executed = AtomicBoolean.new(false)
+        task = subject.post(5){ executed.make_true }
+        expect(task.cancel).to be true
+        subject.advance_to(5)
+        expect(executed.true?).to be false
+      end
+
+      it 'honors reschedule relative to the virtual clock' do
+        executed = AtomicBoolean.new(false)
+        task = subject.post(5){ executed.make_true }
+        subject.advance_to(3)
+        expect(task.reschedule(4)).to be true
+        subject.advance_to(6)
+        expect(executed.true?).to be false
+        subject.advance_to(7)
+        expect(executed.true?).to be true
+      end
+
+      it 'raises when advancing backwards' do
+        subject.advance_to(5)
+        expect { subject.advance_to(4) }.to raise_error(ArgumentError)
+        expect { subject.advance(-1) }.to raise_error(ArgumentError)
+      end
+
+      it 'raises for a non-positive task limit' do
+        expect { subject.advance_to(1, 0) }.to raise_error(ArgumentError)
+        expect { subject.advance_to(1, -1) }.to raise_error(ArgumentError)
+      end
+
+      it 'refuses advance on a real clock set' do
+        real_set = TimerSet.new(executor: executor)
+        expect { real_set.advance_to(1) }.to raise_error(ArgumentError)
+        real_set.shutdown
+      end
+    end
   end
 end

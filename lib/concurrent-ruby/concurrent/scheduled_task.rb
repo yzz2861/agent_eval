@@ -162,6 +162,12 @@ module Concurrent
     # @!visibility private
     attr_reader :executor
 
+    # Monotonically increasing order assigned by the parent timer set when the
+    # task is enqueued. Used to break ties between tasks with the same schedule
+    # time so that they fire in submission order.
+    # @!visibility private
+    attr_reader :schedule_order
+
     # Schedule a task for execution at a specified future time.
     #
     # @param [Float] delay the number of seconds to wait for before executing the task
@@ -188,9 +194,15 @@ module Concurrent
         @delay = delay.to_f
         @task = task
         @time = nil
+        @schedule_order = 0
         @executor = Options.executor_from_options(opts) || Concurrent.global_io_executor
         self.observers = Collection::CopyOnNotifyObserverSet.new
       end
+    end
+
+    # @!visibility private
+    def schedule_order=(order)
+      @schedule_order = order
     end
 
     # The `delay` value given at instantiation.
@@ -211,7 +223,9 @@ module Concurrent
     #
     # @!visibility private
     def <=>(other)
-      schedule_time <=> other.schedule_time
+      time_comparison = schedule_time <=> other.schedule_time
+      return time_comparison unless time_comparison == 0
+      schedule_order <=> other.schedule_order
     end
 
     # Has the task been cancelled?
@@ -311,7 +325,7 @@ module Concurrent
     # @!visibility private
     def ns_schedule(delay)
       @delay = delay
-      @time = Concurrent.monotonic_time + @delay
+      @time = @parent.send(:current_time) + @delay
       @parent.send(:post_task, self)
     end
 
