@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
-from copy import copy
+from copy import copy as shallow_copy
 from functools import reduce
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -89,6 +89,161 @@ class AliasedQuery(Selectable):
 
     def __hash__(self) -> int:
         return hash(str(self.name))
+
+
+class Values(Selectable, Term):
+    def __init__(
+        self,
+        rows: Sequence[Sequence[Any] | dict[str, Any]],
+        columns: Sequence[str | Field] | None = None,
+        alias: str | None = None,
+    ) -> None:
+        Selectable.__init__(self, alias)
+        Term.__init__(self, alias)
+
+        if not rows:
+            raise QueryException("VALUES requires at least one row.")
+
+        prepared_rows = []
+        width = None
+        has_explicit_columns = columns is not None
+        for row in rows:
+            if isinstance(row, dict):
+                if columns is None:
+                    columns = tuple(row.keys())
+                row = tuple(row.get(column.name if isinstance(column, Field) else column) for column in columns)
+
+            if not isinstance(row, (list, tuple)):
+                row = (row,)
+
+            if width is None:
+                width = len(row)
+            elif len(row) != width:
+                raise QueryException("VALUES rows must all have the same number of columns.")
+
+            if not row:
+                raise QueryException("VALUES rows cannot be empty.")
+
+            prepared_rows.append([self.wrap_constant(value) for value in row])
+
+        if columns is None:
+            columns = [f"column{index + 1}" for index in range(width)]
+        else:
+            columns = [column.name if isinstance(column, Field) else column for column in columns]
+
+        if len(columns) != width:
+            raise QueryException("VALUES columns must match the number of columns in each row.")
+
+        if len(set(columns)) != len(columns):
+            raise QueryException("VALUES column names must be unique.")
+
+        self._columns = tuple(columns)
+        self._rows = prepared_rows
+        self._has_explicit_columns = has_explicit_columns
+        self._render_as_cte = False
+
+    @property
+    def columns(self) -> tuple[Field, ...]:
+        return tuple(Field(name, table=self) for name in self._columns)
+
+    def __getitem__(self, name: str | int) -> Field:
+        if isinstance(name, int):
+            return Field(self._columns[name], table=self)
+        return self.field(name)
+
+    def __copy__(self) -> Values:
+        newone = type(self).__new__(type(self))
+        newone.__dict__.update(self.__dict__)
+        newone._columns = shallow_copy(self._columns)
+        newone._rows = shallow_copy(self._rows)
+        return newone
+
+    def nodes_(self):
+        yield self
+        for row in self._rows:
+            for value in row:
+                yield from value.nodes_()
+
+    def get_table_name(self) -> str:
+        if self.alias is None:
+            raise QueryException("VALUES requires an alias when used as a relation.")
+        return self.alias
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, AliasedQuery):
+            return self.alias == other.name
+        return isinstance(other, Values) and self.alias == other.alias and self._columns == other._columns
+
+    def __hash__(self) -> int:
+        return hash(self.alias)
+
+    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Term:
+        if self is not current_table:
+            return self
+
+        replacement_rows = [
+            [value.replace_table(current_table, new_table) for value in row] for row in self._rows
+        ]
+        replacement = Values(replacement_rows, columns=self._columns, alias=self.alias)
+        replacement._render_as_cte = self._render_as_cte
+        return replacement
+
+    def _column_list_sql(self, quote_char: str | None, alias_quote_char: str | None = None) -> str:
+        return "(" + ",".join(format_quotes(name, alias_quote_char or quote_char) for name in self._columns) + ")"
+
+    def _values_sql(self, **kwargs: Any) -> str:
+        rows_sql = ",".join(
+            "(" + ",".join(value.get_sql(**kwargs) for value in row) + ")" for row in self._rows
+        )
+        return "VALUES " + rows_sql
+
+    def get_sql(self, with_alias: bool = False, subquery: bool = False, **kwargs: Any) -> str:
+        if self.alias is None and (with_alias or not self._render_as_cte):
+            raise QueryException("VALUES requires an alias when used as a relation.")
+
+        parameter = kwargs.get("parameter")
+        if parameter is not None and not kwargs.pop("_parameter_values_reset", False):
+            if hasattr(parameter, "_parameters"):
+                parameter._parameters.clear()
+        if parameter is not None:
+            kwargs["_parameter_values_reset"] = True
+
+        dialect = kwargs.get("dialect")
+        quote_char = kwargs.get("quote_char")
+        alias_quote_char = kwargs.get("alias_quote_char") or quote_char
+        values_sql = self._values_sql(**kwargs)
+
+        if self._render_as_cte:
+            return values_sql
+
+        if not self._has_explicit_columns and not with_alias:
+            return f"({values_sql})"
+
+        if dialect == Dialects.SQLLITE:
+            if self._has_explicit_columns:
+                default_names = (f"column{index + 1}" for index in range(len(self._columns)))
+                selects = ",".join(
+                    format_quotes(default_name, quote_char) + " " + format_quotes(name, alias_quote_char)
+                    for default_name, name in zip(default_names, self._columns)
+                )
+                sql = f"(SELECT {selects} FROM ({values_sql}))"
+            else:
+                sql = f"({values_sql})"
+
+            if with_alias:
+                return format_alias_sql(sql, self.alias, **kwargs)
+        else:
+            sql = f"({values_sql})"
+            if with_alias:
+                sql = format_alias_sql(sql, self.alias, **kwargs)
+            if self._has_explicit_columns:
+                sql += self._column_list_sql(quote_char, alias_quote_char)
+            return sql
+
+        return sql
+
+    def __str__(self) -> str:
+        return self.get_sql(quote_char='"')
 
 
 class Schema:
@@ -483,7 +638,7 @@ class Query:
         return cls._builder(**kwargs).into(table)
 
     @classmethod
-    def with_(cls, table: str | Selectable, name: str, **kwargs: Any) -> QueryBuilder:
+    def with_(cls, table: str | Selectable, name: str | None = None, **kwargs: Any) -> QueryBuilder:
         return cls._builder(**kwargs).with_(table, name)
 
     @classmethod
@@ -777,19 +932,19 @@ class QueryBuilder(Selectable, Term):
     def __copy__(self) -> QueryBuilder:
         newone = type(self).__new__(type(self))
         newone.__dict__.update(self.__dict__)
-        newone._select_star_tables = copy(self._select_star_tables)
-        newone._from = copy(self._from)
-        newone._with = copy(self._with)
-        newone._selects = copy(self._selects)
-        newone._columns = copy(self._columns)
-        newone._values = copy(self._values)
-        newone._groupbys = copy(self._groupbys)
-        newone._orderbys = copy(self._orderbys)
-        newone._joins = copy(self._joins)
-        newone._unions = copy(self._unions)
-        newone._updates = copy(self._updates)
-        newone._force_indexes = copy(self._force_indexes)
-        newone._use_indexes = copy(self._use_indexes)
+        newone._select_star_tables = shallow_copy(self._select_star_tables)
+        newone._from = shallow_copy(self._from)
+        newone._with = shallow_copy(self._with)
+        newone._selects = shallow_copy(self._selects)
+        newone._columns = shallow_copy(self._columns)
+        newone._values = shallow_copy(self._values)
+        newone._groupbys = shallow_copy(self._groupbys)
+        newone._orderbys = shallow_copy(self._orderbys)
+        newone._joins = shallow_copy(self._joins)
+        newone._unions = shallow_copy(self._unions)
+        newone._updates = shallow_copy(self._updates)
+        newone._force_indexes = shallow_copy(self._force_indexes)
+        newone._use_indexes = shallow_copy(self._use_indexes)
         return newone
 
     @builder
@@ -808,6 +963,18 @@ class QueryBuilder(Selectable, Term):
         """
 
         self._from.append(Table(selectable) if isinstance(selectable, str) else selectable)
+
+        if isinstance(selectable, Values):
+            cte = next(
+                (
+                    clause
+                    for clause in self._with
+                    if isinstance(clause, Values) and clause.alias == selectable.alias
+                ),
+                None,
+            )
+            if cte is not None:
+                self._from[-1] = AliasedQuery(cte.alias)
 
         if isinstance(selectable, (QueryBuilder, _SetOperation)) and selectable.alias is None:
             if isinstance(selectable, QueryBuilder):
@@ -858,9 +1025,29 @@ class QueryBuilder(Selectable, Term):
             self._select_star_tables.add(new_table)
 
     @builder
-    def with_(self, selectable: Selectable, name: str) -> None:
-        t = AliasedQuery(name, selectable)
-        self._with.append(t)
+    def with_(self, selectable: Selectable, name: str | None = None) -> None:
+        if isinstance(selectable, Values):
+            relation = shallow_copy(selectable)
+            if name is not None and relation.alias is not None and name != relation.alias:
+                raise QueryException("VALUES CTE name must match the relation alias.")
+            relation.alias = name or relation.alias
+            relation._render_as_cte = True
+            if relation.alias is None:
+                raise QueryException("VALUES requires an alias when used in a CTE.")
+            self._with.append(relation)
+            self._from = [
+                AliasedQuery(relation.alias) if isinstance(item, Values) and item == relation else item
+                for item in self._from
+            ]
+            for join in self._joins:
+                if join.item is selectable:
+                    join.item = AliasedQuery(relation.alias)
+            return
+
+        if name is None:
+            raise QueryException("A name is required when using a non-VALUES selectable in a CTE.")
+
+        self._with.append(AliasedQuery(name, selectable))
 
     @builder
     def into(self, table: str | Table) -> None:
@@ -1180,6 +1367,18 @@ class QueryBuilder(Selectable, Term):
         return []
 
     def do_join(self, join: Join) -> None:
+        if isinstance(join.item, Values):
+            cte = next(
+                (
+                    clause
+                    for clause in self._with
+                    if isinstance(clause, Values) and clause.alias == join.item.alias
+                ),
+                None,
+            )
+            if cte is not None:
+                join.item = AliasedQuery(cte.alias)
+
         base_tables = self._from + [self._update_table] + self._with
         join.validate(base_tables, self._joins)
 
@@ -1266,6 +1465,12 @@ class QueryBuilder(Selectable, Term):
 
     def get_sql(self, with_alias: bool = False, subquery: bool = False, **kwargs: Any) -> str:
         self._set_kwargs_defaults(kwargs)
+        parameter = kwargs.get("parameter")
+        if parameter is not None and not kwargs.get("_parameter_values_reset"):
+            if hasattr(parameter, "_parameters"):
+                parameter._parameters.clear()
+            kwargs["_parameter_values_reset"] = True
+
         if not (self._selects or self._insert_table or self._delete_from or self._update_table):
             return ""
         if self._insert_table and not (self._selects or self._values):
@@ -1399,10 +1604,26 @@ class QueryBuilder(Selectable, Term):
         return querystring
 
     def _with_sql(self, **kwargs: Any) -> str:
-        return "WITH " + ",".join(
-            clause.name + " AS (" + clause.get_sql(subquery=False, with_alias=False, **kwargs) + ") "
-            for clause in self._with
-        )
+        clauses = []
+        for clause in self._with:
+            if isinstance(clause, Values):
+                quote_char = kwargs.get("quote_char")
+                alias_quote_char = kwargs.get("alias_quote_char") or quote_char
+                column_names = ",".join(
+                    format_quotes(name, alias_quote_char or quote_char) for name in clause._columns
+                )
+                clauses.append(
+                    clause.alias
+                    + f"({column_names})"
+                    + " AS ("
+                    + clause.get_sql(subquery=False, with_alias=False, **kwargs)
+                    + ")"
+                )
+            else:
+                clauses.append(
+                    clause.name + " AS (" + clause.get_sql(subquery=False, with_alias=False, **kwargs) + ")"
+                )
+        return "WITH " + ",".join(clauses) + " "
 
     def _distinct_sql(self, **kwargs: Any) -> str:
         distinct = 'DISTINCT ' if self._distinct else ''
