@@ -66,6 +66,39 @@ I18n.config.with(locale: :ja).set!
 `set!` stores a frozen config in the current execution context.
 This keeps inherited state safe and lets updates happen by replacing config objects.
 
+### Canonical locales and aliases
+
+Integrations sometimes send legacy language codes, script tags with inconsistent
+casing, or locales carrying extension subtags. A canonical locale layer maps all
+equivalent identifiers onto one identity so they share lookups, fallbacks and
+caches.
+
+Configure the application supplied alias table with `I18n.locale_aliases=`. It
+supports replacements for `language`, `script`, `region`, and explicit whole
+`tag` aliases:
+
+```ruby
+I18n.locale_aliases = {
+  language: { iw: :he, in: :id },          # legacy language codes
+  script:   { hant: :'Hant' },             # normalize script casing
+  region:   { us: :US },                   # normalize region casing
+  tag:      { :'zh-TW' => :'zh-Hant-TW' }  # explicit whole-tag aliases
+}
+
+I18n.canonical_locale(:'zh-tw')  # => :'zh-Hant-TW'
+I18n.t(:hello, locale: 'zh-TW')  # looks up :'zh-Hant-TW'
+```
+
+Aliases may chain (`a => b => c`) but must never form a cycle; a cycle raises
+`I18n::LocaleAliasCycle` while the table is built. No registry data is fetched
+from the network.
+
+Extension, variant and private use subtags are preserved: `:'de-de-u-ca-gregory'`
+canonicalizes to `:'de-DE-u-ca-gregory'` and keeps its extension while fallbacks
+are generated. Aliases are accepted by `available_locales` validation,
+`I18n.locale=`, `I18n.default_locale=` and `I18n.with_locale`; validation errors
+keep the caller's original input.
+
 ## Features
 
 * Translation and localization

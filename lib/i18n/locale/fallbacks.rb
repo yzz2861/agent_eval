@@ -60,7 +60,7 @@ module I18n
       def [](locale)
         raise InvalidLocale.new(locale) if locale.nil?
         raise Disabled.new('fallback#[]') if locale == false
-        locale = locale.to_sym
+        locale = I18n.canonical_locale(locale).to_sym
         super || store(locale, compute(locale))
       end
 
@@ -68,8 +68,10 @@ module I18n
         if args.count == 1 && !block_given?
           mappings = args.first
           mappings.each do |from, to|
-            from, to = from.to_sym, Array(to)
+            from = I18n.canonical_locale(from).to_sym
+            to = Array(to)
             to.each do |_to|
+              _to = I18n.canonical_locale(_to)
               @map[from] ||= []
               @map[from] << _to.to_sym
             end
@@ -92,15 +94,40 @@ module I18n
       def compute(tags, include_defaults = true, exclude = [])
         result = []
         Array(tags).each do |tag|
-          tags = I18n::Locale::Tag.tag(tag).self_and_parents.map! { |t| t.to_sym } - exclude
+          canonical = I18n.canonical_locale(tag)
+          tags = parents(canonical).map! { |t| t.to_sym } - exclude
           result += tags
-          tags.each { |_tag| result += compute(@map[_tag], false, exclude + result) if @map[_tag] }
+          tags.each do |_tag|
+            result += compute(@map[_tag], false, exclude + result) if @map[_tag]
+          end
         end
 
         result.push(*defaults) if include_defaults
         result.uniq!
         result.compact!
         result
+      end
+
+      # Builds the self-and-parents chain for the canonical tag. Uses the RFC
+      # 4646 tag implementation so extension/variant subtags are never silently
+      # dropped (e.g. "de-DE-u-ca-gregory" keeps its extension on every parent).
+      def parents(tag)
+        rfc_tag = I18n::Locale::Tag::Rfc4646.tag(tag.to_s)
+        return I18n::Locale::Tag.tag(tag).self_and_parents unless rfc_tag
+
+        suffix = [:variant, :extension, :privateuse].filter_map do |part|
+          value = rfc_tag[part]
+          value && "-#{value}"
+        end.join
+
+        primary = I18n::Locale::Tag::Rfc4646.tag(
+          [rfc_tag.language, rfc_tag.script, rfc_tag.region].compact.join('-')
+        )
+
+        return [tag.to_s] unless primary
+
+        with_suffix = primary.self_and_parents.map { |parent| "#{parent}#{suffix}" }
+        suffix.empty? ? with_suffix : with_suffix + primary.self_and_parents.map(&:to_s)
       end
     end
   end

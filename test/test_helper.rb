@@ -20,6 +20,8 @@ class I18n::TestCase < Minitest::Test
   end
 
   def teardown
+    I18n.enforce_available_locales = false
+    I18n.locale_aliases = nil
     I18n.locale = nil
     I18n.default_locale = nil
     I18n.load_path = nil

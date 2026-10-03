@@ -35,6 +35,15 @@ module I18n
     end
   end
 
+  class LocaleAliasCycle < ArgumentError
+    attr_reader :kind, :cycle
+    def initialize(kind, cycle)
+      @kind = kind
+      @cycle = cycle
+      super "#{kind} locale aliases contain a cycle: #{cycle}"
+    end
+  end
+
   class InvalidLocaleData < ArgumentError
     attr_reader :filename
     def initialize(filename, exception_message)

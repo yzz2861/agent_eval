@@ -100,7 +100,7 @@ module I18n
 
         def cache_key(locale, key, options)
           # This assumes that only simple, native Ruby values are passed to I18n.translate.
-          "i18n/#{I18n.cache_namespace}/#{locale}/#{digest_item(key)}/#{digest_item(options)}"
+          "i18n/#{I18n.cache_namespace}/#{I18n.canonical_locale(locale)}/#{digest_item(key)}/#{digest_item(options)}"
         end
 
       private

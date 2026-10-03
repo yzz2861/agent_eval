@@ -47,7 +47,7 @@ module I18n
     # Sets the current locale pseudo-globally, i.e. in the Thread.current or Fiber local hash.
     def locale=(locale)
       I18n.enforce_available_locales!(locale)
-      @locale = locale && locale.to_sym
+      @locale = (locale == false || locale.nil?) ? locale : I18n.canonical_locale(locale).to_sym
     end
 
     # Returns the current backend. Defaults to +Backend::Simple+.
@@ -68,7 +68,34 @@ module I18n
     # Sets the current default locale. Used to set a custom default locale.
     def default_locale=(locale)
       I18n.enforce_available_locales!(locale)
-      @@default_locale = locale && locale.to_sym
+      @@default_locale = (locale == false || locale.nil?) ? locale : I18n.canonical_locale(locale).to_sym
+    end
+
+    # Returns the configured locale alias table.
+    def locale_aliases
+      defined?(@@locale_aliases) ? @@locale_aliases : nil
+    end
+
+    # Sets the application supplied locale alias table. Accepts a Hash passed to
+    # I18n::Locale::Canonical.new or an already built canonicalizer instance.
+    # Raises I18n::LocaleAliasCycle when the table contains a cycle.
+    def locale_aliases=(aliases)
+      @@canonical_locales = aliases.nil? ? nil : I18n::Locale::Canonical.coerce(aliases)
+      @@locale_aliases = aliases
+      @@available_locales_set = nil
+    end
+
+    # Returns the canonical identity for the given locale. Without a configured
+    # alias table the locale is passed through unchanged, preserving its
+    # original type and value.
+    def canonical_locale(locale)
+      return nil if locale.nil?
+      return false if locale == false
+      if defined?(@@canonical_locales) && @@canonical_locales
+        @@canonical_locales.canonical(locale)
+      else
+        locale
+      end
     end
 
     # Returns an array of locales for which translations are available.
@@ -89,7 +116,7 @@ module I18n
 
     # Sets the available locales.
     def available_locales=(locales)
-      @@available_locales = Array(locales).map { |locale| locale.to_sym }
+      @@available_locales = Array(locales).map { |locale| canonical_locale(locale).to_sym }
       @@available_locales = nil if @@available_locales.empty?
       @@available_locales_set = nil
     end

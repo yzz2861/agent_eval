@@ -81,6 +81,7 @@ module I18n
         end
 
         def store_translations(locale, data, options = EMPTY_HASH)
+          locale = I18n.canonical_locale(locale)
           escape = options.fetch(:escape, true)
           flatten_translations(locale, data, escape, @subtrees).each do |key, value|
             key = "#{locale}.#{key}"
