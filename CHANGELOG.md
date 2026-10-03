@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- New `Reader` monad (`include Dry::Monads[:reader]`). It represents a computation that receives its environment at run time: `Reader.ask` reads it, `#fmap`/`#bind` compose without evaluating, `#local` transforms the environment for a single sub-computation, and `#run` evaluates the result. The same Reader can be run against multiple environments, `#local` never mutates the passed environment, and raised exceptions are propagated rather than converted into `Failure`.
+
 ### Changed
 
 ### Deprecated

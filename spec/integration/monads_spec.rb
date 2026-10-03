@@ -160,6 +160,40 @@ RSpec.describe(Dry::Monads) do
     end
   end
 
+  describe "Reader" do
+    describe ".Reader" do
+      it "creates a reader run against an environment" do
+        expect(m.Reader { |env| env + 1 }.run(1)).to eql(2)
+      end
+    end
+
+    describe ".[] mixin" do
+      it "exposes the constructor through a cherry-picked mixin" do
+        ctx = Class.new do
+          include Dry::Monads[:reader]
+
+          def call(env)
+            Dry::Monads::Reader.ask.run(env)
+          end
+        end
+
+        expect(ctx.new.(:env)).to be(:env)
+      end
+
+      it "composes with :result" do
+        ctx = Class.new do
+          include Dry::Monads[:reader, :result]
+
+          def call
+            Dry::Monads::Reader.ask.fmap { |env| Success(env) }
+          end
+        end
+
+        expect(ctx.new.().run(:ok)).to eql(m.Success(:ok))
+      end
+    end
+  end
+
   describe "[]" do
     it "creates a module with cherry-picked monad" do
       maybe_only = Class.new { include Dry::Monads[:maybe] }
