@@ -59,12 +59,16 @@ require 'json_schemer/openapi30/meta'
 require 'json_schemer/openapi30/vocab/base'
 require 'json_schemer/openapi30/vocab'
 require 'json_schemer/openapi'
+require 'json_schemer/openapi/request'
 require 'json_schemer/configuration'
 require 'json_schemer/resources'
 require 'json_schemer/schema'
 
 module JSONSchemer
   class UnsupportedOpenAPIVersion < StandardError; end
+  class UnsupportedOpenAPIParameterStyle < StandardError; end
+  class UnsupportedOpenAPIParameterLocation < StandardError; end
+  class UnsupportedOpenAPIParameterContent < StandardError; end
   class UnknownRef < StandardError; end
   class UnknownFormat < StandardError; end
   class UnknownVocabulary < StandardError; end

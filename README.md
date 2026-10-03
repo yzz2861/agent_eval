@@ -494,6 +494,57 @@ document.ref('#/components/schemas/example').valid?('one')
 # => false
 ```
 
+### Request parameters
+
+Request query, path, and header parameters can be decoded directly from their
+raw transport representation and validated against each parameter's schema. The
+supported styles are `form` and `deepObject` for `query` parameters and
+`simple` for `path` and `header` parameters (with each style's documented
+`explode` default). Unsupported styles, locations (such as `cookie`), and
+parameters that use `content` raise while the operation is being prepared.
+
+Query input preserves repeated fields and the original byte offsets, so it is
+not flattened into a `Hash` first. Pass the raw query string, an array of
+`[name, value]` pairs, or a `Hash`.
+
+```ruby
+document = JSONSchemer.openapi({
+  'openapi' => '3.1.0',
+  'info' => { 'title' => 'example', 'version' => '0.0.1' },
+  'paths' => {
+    '/pets/{pet_id}' => {
+      'get' => {
+        'parameters' => [
+          { 'name' => 'pet_id', 'in' => 'path', 'required' => true, 'schema' => { 'type' => 'integer' } },
+          { 'name' => 'tags', 'in' => 'query', 'schema' => { 'type' => 'array', 'items' => { 'type' => 'string' } } },
+          { 'name' => 'color', 'in' => 'query', 'style' => 'deepObject', 'schema' => { 'type' => 'object', 'properties' => { 'R' => { 'type' => 'integer' } } } },
+          { 'name' => 'X-Trace', 'in' => 'header', 'required' => true, 'schema' => { 'type' => 'string' } }
+        ]
+      }
+    }
+  }
+})
+
+request = document.operation('/pets/{pet_id}', 'get').request(
+  :query => 'tags=cat&tags=dog&color[R]=10',
+  :path => '/pets/7',
+  :headers => [['X-Trace', 'abc']]
+)
+
+request.valid?
+# => true
+
+request.parameters
+# => {"pet_id" => 7, "tags" => ["cat", "dog"], "color" => {"R" => 10}, "X-Trace" => "abc"}
+```
+
+`request.validate` returns classic error hashes. Parsing errors
+(`missing_parameter`, `empty_value`, `invalid_percent_encoding`,
+`duplicate_parameter`, `object_key_conflict`, and `invalid_parameter_value`)
+are distinguished from schema errors, and both include the parameter name,
+location, document pointer, and a `source` describing the original field and
+its offset.
+
 ## CLI
 
 The `json_schemer` executable takes a JSON schema file as the first argument followed by one or more JSON data files to validate. If there are any validation errors, it outputs them and returns an error code.
