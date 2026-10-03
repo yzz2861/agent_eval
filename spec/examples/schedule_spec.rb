@@ -86,6 +86,104 @@ describe IceCube::Schedule do
       schedule.add_recurrence_time(t0)
       expect(schedule.recurrence_times).to eq([t0])
     end
+
+    it "supports an additional occurrence with an end time" do
+      start_time = Time.utc(2020, 1, 1, 12)
+      end_time = start_time + 900
+      schedule = IceCube::Schedule.new(start_time, duration: 3600)
+      schedule.add_recurrence_time(start_time, end_time)
+
+      occurrence = schedule.first
+      expect(occurrence.start_time).to eq(start_time)
+      expect(occurrence.end_time).to eq(end_time)
+    end
+
+    it "supports an additional occurrence with an independent duration" do
+      start_time = Time.utc(2020, 1, 1, 12)
+      schedule = IceCube::Schedule.new(start_time, duration: 3600)
+      schedule.add_recurrence_time(start_time, duration: 900)
+
+      expect(schedule.first.end_time).to eq(start_time + 900)
+    end
+
+    it "supports Occurrence and Range additional occurrences" do
+      start_time = Time.utc(2020, 1, 1, 12)
+      occurrence = IceCube::Occurrence.new(start_time, start_time + 900)
+      range_start = start_time + IceCube::ONE_DAY
+
+      schedule = IceCube::Schedule.new(start_time, duration: 3600)
+      schedule.add_recurrence_time(occurrence)
+      schedule.add_recurrence_time(range_start..(range_start + 1800))
+
+      expect(schedule.first(2).map(&:end_time)).to eq([start_time + 900, range_start + 1800])
+    end
+
+    it "uses an explicit RDATE duration for a duplicate rule occurrence" do
+      start_time = Time.utc(2020, 1, 1)
+      schedule = IceCube::Schedule.new(start_time, duration: 3600)
+      schedule.add_recurrence_rule IceCube::Rule.daily.count(2)
+      schedule.add_recurrence_time(start_time, duration: 900)
+      schedule.add_recurrence_time(start_time)
+
+      occurrences = schedule.all_occurrences
+      expect(occurrences.map(&:start_time)).to eq([start_time, start_time + ONE_DAY])
+      expect(occurrences.map(&:end_time)).to eq([start_time + 900, start_time + ONE_DAY + ONE_HOUR])
+    end
+
+    it "replaces an explicit RDATE with another explicit RDATE at the same start" do
+      start_time = Time.utc(2020, 1, 1)
+      schedule = IceCube::Schedule.new(start_time, duration: 3600)
+      schedule.add_recurrence_rule IceCube::Rule.daily.count(1)
+      schedule.add_recurrence_time(start_time, duration: 900)
+      schedule.add_recurrence_time(start_time, duration: 1800)
+
+      expect(schedule.first.end_time).to eq(start_time + 1800)
+    end
+
+    it "allows an explicit zero-duration additional occurrence" do
+      start_time = Time.utc(2020, 1, 1)
+      schedule = IceCube::Schedule.new(start_time, duration: 3600)
+      schedule.add_recurrence_rule IceCube::Rule.daily.count(2)
+      schedule.add_recurrence_time(start_time, duration: 0)
+
+      expect(schedule.first.duration).to eq(0)
+      expect(schedule.occurring_at?(start_time)).to be_truthy
+      expect(schedule.occurring_at?(start_time + 1)).to be_falsey
+    end
+
+    it "serializes an explicit zero-duration additional occurrence as a period" do
+      start_time = Time.utc(2020, 1, 1)
+      schedule = IceCube::Schedule.new(start_time, duration: 3600)
+      schedule.add_recurrence_time(start_time, duration: 0)
+
+      expect(schedule.to_ical).to include("RDATE;VALUE=PERIOD:#{start_time.strftime("%Y%m%dT%H%M%SZ")}/PT0S")
+    end
+
+    it "rejects negative durations and end times before start" do
+      start_time = Time.utc(2020, 1, 1)
+      schedule = IceCube::Schedule.new(start_time)
+
+      expect { schedule.add_recurrence_time(start_time, duration: -1) }
+        .to raise_error(ArgumentError, "duration cannot be negative")
+      expect { schedule.add_recurrence_time(start_time, start_time - 1) }
+        .to raise_error(ArgumentError, "end_time cannot precede start_time")
+    end
+
+    it "finds a long additional occurrence that starts before the query window" do
+      start_time = Time.utc(2020, 1, 1)
+      extra_time = start_time + ONE_DAY
+      schedule = IceCube::Schedule.new(start_time, duration: ONE_HOUR)
+      schedule.add_recurrence_time(extra_time, extra_time + ONE_DAY)
+
+      occurrences = schedule.occurrences_between(
+        extra_time + ONE_HOUR,
+        extra_time + 2 * ONE_HOUR,
+        spans: true
+      )
+
+      expect(occurrences.map(&:start_time)).to eq([extra_time])
+      expect(schedule.occurring_between?(extra_time + ONE_HOUR, extra_time + 2 * ONE_HOUR)).to be_truthy
+    end
   end
 
   describe :conflicts_with? do

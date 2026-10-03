@@ -172,6 +172,16 @@ describe IceCube, "to_ical" do
     expect(schedule.to_ical).to eq(expectation)
   end
 
+  it "serializes an additional occurrence period" do
+    schedule = IceCube::Schedule.new(Time.utc(2010, 5, 10, 10))
+    schedule.add_recurrence_time(Time.utc(2010, 6, 20, 5), Time.utc(2010, 6, 20, 6))
+
+    expect(schedule.to_ical).to eq(
+      "DTSTART:20100510T100000Z\n" \
+      "RDATE;VALUE=PERIOD:20100620T050000Z/20100620T060000Z"
+    )
+  end
+
   it "should be able to serialize a schedule with an exception time" do
     schedule = IceCube::Schedule.new(Time.utc(2010, 5, 10, 10, 0, 0))
     schedule.add_exception_time Time.utc(2010, 6, 20, 5, 0, 0)

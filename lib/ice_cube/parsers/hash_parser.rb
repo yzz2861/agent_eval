@@ -70,7 +70,25 @@ module IceCube
     def apply_rtimes(schedule, data)
       return unless data[:rtimes]
       data[:rtimes].each do |t|
-        schedule.add_recurrence_time TimeUtil.deserialize_time(t)
+        case t
+        when Hash
+          h = FlexibleHash.new(t)
+          start_time = TimeUtil.deserialize_time(h[:start_time] || h[:time] || h[:start])
+          if h[:end_time] || h[:end]
+            end_time = TimeUtil.deserialize_time(h[:end_time] || h[:end])
+            if h[:period_duration]
+              schedule.add_recurrence_time(start_time, end_time, duration: h[:period_duration])
+            else
+              schedule.add_recurrence_time(start_time, end_time)
+            end
+          elsif !h[:duration].nil? || !h[:period_duration].nil?
+            schedule.add_recurrence_time(start_time, duration: h[:period_duration] || h[:duration])
+          else
+            schedule.add_recurrence_time(start_time)
+          end
+        else
+          schedule.add_recurrence_time TimeUtil.deserialize_time(t)
+        end
       end
     end
 

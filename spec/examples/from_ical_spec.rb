@@ -402,6 +402,37 @@ module IceCube
       end
     end
 
+    describe "recurrence periods" do
+      it "parses a period expressed with an end time" do
+      ical = <<-ICAL.gsub(/^\s*/, "")
+        DTSTART:20200101T120000Z
+        RDATE;VALUE=PERIOD:20200102T120000Z/20200102T121500Z
+      ICAL
+
+      schedule = IceCube::Schedule.from_ical(ical)
+      occurrence = schedule.rtimes.first
+      expect(occurrence.start_time).to eq(Time.utc(2020, 1, 2, 12))
+      expect(occurrence.end_time).to eq(Time.utc(2020, 1, 2, 12, 15))
+      expect(schedule.to_ical).to eq(ical.chomp)
+    end
+
+      it "parses a period expressed with a duration and preserves its end time" do
+        ical = <<-ICAL.gsub(/^\s*/, "")
+          DTSTART:20200101T120000Z
+          RDATE;TZID=America/Denver;VALUE=PERIOD:20200812T143000/PT2H
+        ICAL
+
+        schedule = IceCube::Schedule.from_ical(ical)
+        occurrence = schedule.rtimes.first
+        expect(occurrence.start_time).to eq(Time.find_zone!("America/Denver").local(2020, 8, 12, 14, 30))
+        expect(occurrence.end_time).to eq(Time.find_zone!("America/Denver").local(2020, 8, 12, 16, 30))
+
+        round_trip = IceCube::Schedule.from_hash(schedule.to_hash)
+        expect(round_trip.rtimes.first.start_time).to eq(occurrence.start_time)
+        expect(round_trip.rtimes.first.end_time).to eq(occurrence.end_time)
+      end
+    end
+
     describe "multiple rules" do
       it "handles multiple recurrence rules" do
         schedule = IceCube::Schedule.from_ical ical_string_with_multiple_rules

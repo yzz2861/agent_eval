@@ -32,6 +32,7 @@ module IceCube
     def initialize(start_time, end_time = nil)
       @start_time = start_time
       @end_time = end_time || start_time
+      raise ArgumentError, "end_time cannot precede start_time" if @end_time < @start_time
       __setobj__ @start_time
     end
 

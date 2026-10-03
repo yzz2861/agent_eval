@@ -14,21 +14,23 @@ module IceCube
       end
 
       lines.each do |line|
-        (property, value) = line.split(":")
-        (property, _tzid) = property.split(";")
+        line = line.chomp
+        (property_with_params, value) = line.split(":", 2)
+        property, *params = property_with_params.split(";")
+        params = parse_params(params)
         case property
         when "DTSTART"
-          data[:start_time] = TimeUtil.deserialize_time(value)
+          data[:start_time] = TimeUtil.parse_ical_time(value, params["TZID"])
         when "DTEND"
-          data[:end_time] = TimeUtil.deserialize_time(value)
+          data[:end_time] = TimeUtil.parse_ical_time(value, params["TZID"])
         when "RDATE"
           data[:rtimes] ||= []
-          data[:rtimes] += value.split(",").map { |v| TimeUtil.deserialize_time(v) }
+          data[:rtimes] += value.split(",").map { |v| parse_recurrence_value(v, params) }
         when "EXDATE"
           data[:extimes] ||= []
-          data[:extimes] += value.split(",").map { |v| TimeUtil.deserialize_time(v) }
+          data[:extimes] += value.split(",").map { |v| TimeUtil.parse_ical_time(v, params["TZID"]) }
         when "DURATION"
-          data[:duration] # FIXME
+          data[:duration] = parse_duration(value)
         when "RRULE"
           data[:rrules] ||= []
           data[:rrules] += [rule_from_ical(value)]
@@ -36,6 +38,37 @@ module IceCube
       end
       Schedule.from_hash data
     end
+
+    def self.parse_params(params)
+      params.each_with_object({}) do |param, hash|
+        name, value = param.split("=", 2)
+        hash[name.upcase] = value
+      end
+    end
+
+    def self.parse_recurrence_value(value, params)
+      return TimeUtil.parse_ical_time(value, params["TZID"]) unless value.include?("/")
+
+      start_value, end_value = value.split("/", 2)
+      start_time = TimeUtil.parse_ical_time(start_value, params["TZID"])
+      duration = parse_duration(end_value) if end_value.start_with?("P")
+      end_time = if duration
+        start_time + duration
+      else
+        TimeUtil.parse_ical_time(end_value, params["TZID"])
+      end
+      {time: start_time, end_time: end_time, period_duration: duration}
+    end
+
+    def self.parse_duration(value)
+      match = /\AP(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?\z/.match(value)
+      raise ArgumentError, "Invalid iCalendar duration: #{value}" unless match
+
+      weeks, days, hours, minutes, seconds = match.captures
+      seconds.to_f + minutes.to_i * 60 + hours.to_i * 3600 + days.to_i * 86400 + weeks.to_i * 604800
+    end
+
+    private_class_method :parse_params, :parse_recurrence_value, :parse_duration
 
     def self.rule_from_ical(ical)
       raise ArgumentError, "empty ical rule" if ical.nil?

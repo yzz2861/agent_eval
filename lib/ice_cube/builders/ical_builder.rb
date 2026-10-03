@@ -42,7 +42,24 @@ module IceCube
       end
     end
 
+    def self.ical_period(start_time, end_time, force_utc, period_duration: nil)
+      start_prefix, start_value = ical_format(start_time, force_utc).split(":", 2)
+      end_value = period_duration ? ical_duration(period_duration) : ical_time(end_time, force_utc)
+      value_params = start_prefix.sub(/\A;/, "")
+      params = ["VALUE=PERIOD", value_params].reject(&:empty?).join(";")
+      params = ";#{params}" unless params.empty?
+      "RDATE#{params}:#{start_value}/#{end_value}"
+    end
+
+    def self.ical_time(time, force_utc)
+      time = time.dup.utc if force_utc
+      format = time.utc? ? "%Y%m%dT%H%M%SZ" : "%Y%m%dT%H%M%S"
+      IceCube::I18n.l(time, format: format)
+    end
+
     def self.ical_duration(duration)
+      return "PT0S" if duration.zero?
+
       hours = duration / 3600
       duration %= 3600
       minutes = duration / 60
@@ -50,7 +67,7 @@ module IceCube
       repr = ""
       repr << "#{hours}H" if hours > 0
       repr << "#{minutes}M" if minutes > 0
-      repr << "#{duration}S" if duration > 0
+      repr << "#{duration.to_i == duration ? duration.to_i : duration}S" if duration > 0
       "PT#{repr}"
     end
   end

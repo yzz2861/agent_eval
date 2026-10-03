@@ -113,6 +113,24 @@ module IceCube
       end
     end
 
+    def self.parse_ical_time(value, zone = nil)
+      time = deserialize_time(value)
+      return time unless zone
+
+      if defined?(ActiveSupport::TimeZone)
+        time_zone = ActiveSupport::TimeZone[zone] || Time.find_zone(zone)
+        return time_zone.local(time.year, time.month, time.day, time.hour, time.min, time.sec) if time_zone
+      end
+
+      begin
+        require "tzinfo"
+        time_zone = TZInfo::Timezone.get(zone)
+        return Time.new(time.year, time.month, time.day, time.hour, time.min, time.sec, in: time_zone)
+      rescue LoadError, TZInfo::InvalidTimezoneIdentifier
+        time
+      end
+    end
+
     # Get a more precise equality for time objects
     # Ruby provides a Time#hash method, but it fails to account for UTC
     # offset (so the current date may be different) or DST rules (so the
