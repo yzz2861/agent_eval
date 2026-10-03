@@ -11,6 +11,8 @@ require 'securerandom'
 
 require 'rack/utils'
 
+require_relative 'decode_budget'
+
 module Rack
   module Session
     class Encryptor
@@ -48,7 +50,11 @@ module Rack
 
           # Slice out the serialized_data and deserialize it
           serialized_data = data.slice(2 + padding_bytes, data.bytesize)
-          serializer.load serialized_data
+          if @options[:decode_budget]
+            @options[:decode_budget].parse_json(serialized_data)
+          else
+            serializer.load serialized_data
+          end
         end
 
         def serializer
@@ -102,6 +108,10 @@ module Rack
           @options = {
             serialize_json: false, pad_size: 32, purpose: nil
           }.update(opts)
+
+          if @options[:decode_budget] && !@options[:serialize_json]
+            raise ArgumentError, 'decode_budget requires serialize_json: true'
+          end
 
           @hmac_secret = secret.dup.force_encoding(Encoding::BINARY)
           @cipher_secret = @hmac_secret.slice!(0, 32)
@@ -247,6 +257,10 @@ module Rack
           @options = {
             serialize_json: false, pad_size: 32, purpose: nil
           }.update(opts)
+
+          if @options[:decode_budget] && !@options[:serialize_json]
+            raise ArgumentError, 'decode_budget requires serialize_json: true'
+          end
 
           @cipher_secret = secret.dup.force_encoding(Encoding::BINARY).slice!(0, 32)
           @cipher_secret.freeze
