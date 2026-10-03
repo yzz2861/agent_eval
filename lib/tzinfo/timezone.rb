@@ -87,6 +87,16 @@ module TZInfo
     # @!visibility private
     @@default_dst = nil
 
+    # The maximum difference between local time and UTC (in seconds) that is
+    # taken into account when converting local times to UTC. Used to determine
+    # how far either side of a local time range transitions need to be
+    # considered. This is greater than the largest offset from UTC used by any
+    # zone in the IANA Time Zone database (14 hours).
+    #
+    # @!visibility private
+    LOCAL_TO_UTC_OFFSET_LIMIT = 172800
+    private_constant :LOCAL_TO_UTC_OFFSET_LIMIT
+
     class << self
       # Sets the default value of the optional `dst` parameter of the
       # {local_datetime}, {local_time}, {local_timestamp}, {local_to_utc} and
@@ -654,6 +664,114 @@ module TZInfo
 
         ts.add_and_set_utc_offset(-period.observed_utc_offset, :utc)
       end
+    end
+
+    # Converts a local time range for the time zone to the equivalent set of
+    # UTC time ranges.
+    #
+    # The range is treated as a half-open interval, inclusive of `start_time`
+    # and exclusive of `end_time`. The UTC offsets of the `start_time` and
+    # `end_time` parameters are ignored (they are treated as local times in
+    # the time zone represented by `self`).
+    #
+    # The result is an `Array` of two-element `Array`s. Each element
+    # represents a half-open UTC time range `[start, end)` that is the
+    # equivalent of all or part of the local time range. The ranges are
+    # returned in ascending order and do not overlap. Adjacent ranges that
+    # would meet at a boundary are merged into a single range.
+    #
+    # Local times that are not valid for the time zone (for example, during
+    # the transition from standard time to daylight savings time, or a date
+    # that was skipped entirely when moving across the international date
+    # line) have no equivalent UTC times and are omitted from the result. An
+    # empty `Array` is returned if the whole of the local time range is
+    # invalid.
+    #
+    # Local times that are ambiguous, occurring more than once (for example,
+    # during the transition from daylight savings time to standard time), will
+    # have each of their occurrences included in the result. This can produce
+    # more than one UTC range for a continuous local time range.
+    #
+    # The elements of the result will be instances of `Time`, `DateTime`
+    # or {Timestamp} according to the type of the `start_time` parameter.
+    # `Time` and `DateTime` results will be in UTC. {Timestamp} results
+    # will have a UTC offset of 0. Fractional seconds are preserved in the
+    # results.
+    #
+    # @param start_time [Object] a `Time`, `DateTime` or {Timestamp}
+    #   specifying the start (inclusive) of the local time range.
+    # @param end_time [Object] a `Time`, `DateTime` or {Timestamp}
+    #   specifying the end (exclusive) of the local time range.
+    # @return [Array<Array(Object, Object)>] an `Array` of two-element
+    #   `Array`s, each containing the start (inclusive) and end (exclusive)
+    #   of a UTC time range equivalent to all or part of the local time range.
+    # @raise [ArgumentError] if either `start_time` or `end_time` is
+    #   `nil`.
+    # @raise [ArgumentError] if `end_time` is not greater than
+    #   `start_time`.
+    def local_range_to_utc(start_time, end_time)
+      raise ArgumentError, 'start_time must be specified' unless start_time
+      raise ArgumentError, 'end_time must be specified' unless end_time
+
+      start_timestamp = Timestamp.for(start_time, :ignore)
+      end_timestamp = Timestamp.for(end_time, :ignore)
+
+      raise ArgumentError, 'end_time must be greater than start_time' unless end_timestamp > start_timestamp
+
+      # Find all the transitions that could affect the conversion. UTC times
+      # equivalent to local times in the range can differ by at most
+      # LOCAL_TO_UTC_OFFSET_LIMIT seconds.
+      from = start_timestamp.add_and_set_utc_offset(-LOCAL_TO_UTC_OFFSET_LIMIT, :utc)
+      to = end_timestamp.add_and_set_utc_offset(LOCAL_TO_UTC_OFFSET_LIMIT, :utc)
+
+      transitions = transitions_up_to(to, from)
+
+      # Split the search window into sections that each observe a constant
+      # UTC offset.
+      sections = []
+      section_start = from
+      offset = transitions.empty? ? period_for_utc(from).offset : transitions[0].previous_offset
+
+      transitions.each do |transition|
+        sections << [section_start, transition.at, offset.observed_utc_offset]
+        section_start = transition.at
+        offset = transition.offset
+      end
+
+      sections << [section_start, to, offset.observed_utc_offset]
+
+      result = []
+
+      sections.each do |utc_start, utc_end, observed_utc_offset|
+        # The local times observed within the section.
+        local_start = utc_start.add_and_set_utc_offset(observed_utc_offset, nil)
+        local_end = utc_end.add_and_set_utc_offset(observed_utc_offset, nil)
+
+        local_start = start_timestamp if start_timestamp > local_start
+        local_end = end_timestamp if end_timestamp < local_end
+
+        next unless local_start < local_end
+
+        interval_start = local_start.add_and_set_utc_offset(-observed_utc_offset, :utc)
+        interval_end = local_end.add_and_set_utc_offset(-observed_utc_offset, :utc)
+
+        last = result[-1]
+
+        if last && interval_start <= last[1]
+          # Overlapping or adjacent to the previous interval. Merge.
+          last[1] = interval_end if interval_end > last[1]
+        else
+          result << [interval_start, interval_end]
+        end
+      end
+
+      if start_time.kind_of?(Time)
+        result.map! {|interval| interval.map {|timestamp| timestamp.to_time } }
+      elsif start_time.kind_of?(DateTime)
+        result.map! {|interval| interval.map {|timestamp| timestamp.to_datetime } }
+      end
+
+      result
     end
 
     # Creates a `Time` object based on the given (Gregorian calendar) date and

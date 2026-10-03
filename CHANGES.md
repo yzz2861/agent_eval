@@ -1,5 +1,14 @@
 # Changes
 
+## Unreleased
+
+* Added `Timezone#local_range_to_utc`, which converts a local time range to
+  the equivalent set of UTC time ranges. The returned ranges are sorted,
+  non-overlapping half-open intervals. Local times that are not valid (for
+  example, during the transition to daylight savings time or on a skipped day)
+  are omitted. Ambiguous local times have all of their occurrences included.
+
+
 ## Version 2.0.6 - 28-Jan-2023
 
 * Eliminate `Object#untaint` deprecation warnings on JRuby 9.4.0.0. #145.
