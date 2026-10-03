@@ -1,5 +1,7 @@
 ## Current
 
+* Add `Concurrent::Phaser`, a reusable barrier supporting dynamic party registration and deregistration.
+
 ## Release v1.3.8 (19 July 2026)
 
 concurrent-ruby:
