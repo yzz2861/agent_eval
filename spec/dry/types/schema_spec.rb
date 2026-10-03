@@ -422,6 +422,132 @@ RSpec.describe Dry::Types::Schema do
     end
   end
 
+  describe "field groups" do
+    subject(:type) do
+      Dry::Types["hash"].schema(
+        username?: Dry::Types["string"].optional,
+        password?: Dry::Types["string"].optional,
+        token?: Dry::Types["string"].optional,
+        contact?: Dry::Types["string"].optional
+      )
+    end
+
+    it "accepts exactly one member of an exactly-one group" do
+      constrained = type.exactly_one(:username, :password, name: :credentials)
+
+      expect(constrained.(username: "jane")).to eql(username: "jane")
+    end
+
+    it "treats an explicit nil as present but a missing key as absent" do
+      constrained = type.exactly_one(:username, :token)
+
+      expect(constrained.(username: nil)).to eql(username: nil)
+      expect(constrained.(token: nil)).to eql(token: nil)
+      expect(constrained.try({})).to be_failure
+    end
+
+    it "keeps member type errors when the group is also violated" do
+      constrained = type.exactly_one(:username, :token)
+      result = constrained.try(username: 1, token: 1)
+
+      expect(result).to be_failure
+      expect(result.error.meta[:username]).to be_failure
+      expect(result.error.meta[:groups].first).to be_a(Dry::Types::Schema::FieldGroupError)
+    end
+
+    it "supports at-least-one and all-or-none groups" do
+      expect(type.at_least_one(:username, :token).try({})).to be_failure
+      expect(type.at_least_one(:username, :token).(token: "x")).to eql(token: "x")
+
+      all_or_none = type.all_or_none(:username, :password)
+      expect(all_or_none.try(username: "jane")).to be_failure
+      expect(all_or_none.(username: "jane", password: "secret")).to eql(
+        username: "jane", password: "secret"
+      )
+      expect(all_or_none.({})).to eql({})
+    end
+
+    it "checks before defaults by default" do
+      calls = 0
+      token = Dry::Types["string"].default { calls += 1; "token" }
+      constrained = type.schema(token: token).exactly_one(:username, :token)
+
+      expect { constrained.({}) }.to raise_error(Dry::Types::Schema::FieldGroupError)
+      expect(calls).to eq(0)
+    end
+
+    it "can check after defaults" do
+      token = Dry::Types["string"].default("token")
+      constrained = type.schema(token: token).exactly_one(
+        :username, :token, after_defaults: true
+      )
+
+      expect(constrained.({})).to eql(token: "token")
+      expect {
+        constrained.(username: "jane")
+      }.to raise_error(Dry::Types::Schema::FieldGroupError)
+    end
+
+    it "does not run a constructor a second time when checking presence" do
+      calls = 0
+      username = Dry::Types["string"].constructor { |value| calls += 1; String(value) }
+      constrained = type.schema(username: username).at_least_one(:username, :token)
+
+      constrained.(username: :jane)
+
+      expect(calls).to be(1)
+    end
+
+    it "rejects unknown paths when the group is defined" do
+      expect { type.exactly_one(:username, :unknown) }.to raise_error(
+        ArgumentError, /:unknown.*not defined in schema/
+      )
+    end
+
+    it "round-trips groups through AST" do
+      constrained = type.exactly_one(:username, :token, name: :auth)
+      restored = Dry::Types::Compiler.new(Dry::Types).(constrained.to_ast)
+
+      expect(restored).to eql(constrained)
+      expect(restored.try({}).error).to be_a(Dry::Types::Schema::FieldGroupError)
+    end
+
+    context "with fixed nested paths" do
+      subject(:type) do
+        credentials = Dry::Types["hash"].schema(
+          password?: Dry::Types["string"].optional,
+          token?: Dry::Types["string"].optional
+        )
+
+        Dry::Types["hash"].schema(credentials?: credentials, api_key?: "string").exactly_one(
+          [:credentials, :token], :api_key
+        )
+      end
+
+      it "validates presence through a nested schema" do
+        expect(type.(credentials: {token: "x"})).to eql(credentials: {token: "x"})
+        result = type.try(credentials: {token: "x"}, api_key: "key")
+        expect(result.error.meta[:groups].first).to be_a(Dry::Types::Schema::FieldGroupError)
+      end
+
+      it "unwraps nested constructors while resolving fixed paths" do
+        nested = Dry::Types["hash"].schema(token: "string").constructor(&:itself)
+        constrained = Dry::Types["hash"].schema(credentials?: nested, api_key?: "string")
+          .exactly_one([:credentials, :token], :api_key)
+
+        expect(constrained.(credentials: {token: "x"})).to eql(credentials: {token: "x"})
+      end
+
+      it "rejects a missing nested path" do
+        nested = Dry::Types["hash"].schema(token: "string")
+
+        expect {
+          Dry::Types["hash"].schema(credentials: nested).exactly_one([:credentials, :password])
+        }.to raise_error(ArgumentError, /\[:credentials, :password\].*not defined in schema/)
+      end
+    end
+  end
+
   describe "#to_s" do
     context "empty schema" do
       subject(:type) { Dry::Types["nominal.hash"].schema({}) }

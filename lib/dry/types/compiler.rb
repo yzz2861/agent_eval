@@ -76,7 +76,13 @@ module Dry
 
       def visit_schema(node)
         keys, options, meta = node
-        registry["nominal.hash"].schema(keys.map { |key| visit(key) }).with(**options, meta: meta)
+        field_groups = options.fetch(:field_groups, []).map do |group|
+          Schema::FieldGroup.from_ast(group)
+        end
+
+        schema = registry["nominal.hash"].schema(keys.map { |key| visit(key) })
+        schema = schema.with(field_groups: field_groups) unless field_groups.empty?
+        schema.with(**options.except(:field_groups), meta: meta)
       end
 
       def visit_json_hash(node)

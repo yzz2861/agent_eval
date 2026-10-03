@@ -31,6 +31,9 @@ module Dry
       # @return [#call]
       attr_reader :transform_key
 
+      # @return [Array[Dry::Types::Schema::FieldGroup]]
+      attr_reader :field_groups
+
       # @param [Class] _primitive
       # @param [Hash] options
       #
@@ -47,6 +50,12 @@ module Dry
         key_fn = options.fetch(:key_transform_fn, NO_TRANSFORM)
 
         @transform_key = ::Dry::Types::FnContainer[key_fn]
+        @field_groups = options.fetch(:field_groups, EMPTY_ARRAY).map do |group|
+          normalized = group.is_a?(FieldGroup) ? group : FieldGroup.from_ast(group)
+          validate_group_paths!(normalized)
+          normalized
+        end.freeze
+        options = options.merge(field_groups: field_groups) unless field_groups.empty?
 
         super
       end
@@ -57,7 +66,8 @@ module Dry
       #
       # @api private
       def call_unsafe(hash, options = EMPTY_HASH)
-        resolve_unsafe(coerce(hash), options)
+        result = Evaluator.new(self, coerce(hash), options, mode: :unsafe).call
+        result.success? ? result.input : raise(result.error)
       end
 
       # @param [Hash] hash
@@ -66,7 +76,10 @@ module Dry
       #
       # @api private
       def call_safe(hash, options = EMPTY_HASH)
-        resolve_safe(coerce(hash) { return yield }, options) { return yield }
+        result = Evaluator.new(self, coerce(hash) { return yield }, options, mode: :safe).call
+        return result.input if result.success?
+
+        yield(result.input)
       end
 
       # @param [Hash] hash
@@ -88,56 +101,10 @@ module Dry
       # @return [Object] if coercion fails and a block is given
       #
       # @api public
-      # rubocop:disable Metrics/AbcSize
-      # rubocop:disable Metrics/PerceivedComplexity
       def try(input)
-        if primitive?(input)
-          success = true
-          output = {}
-          result = {}
-
-          input.each do |key, value|
-            k = @transform_key.(key)
-            type = @name_key_map[k]
-
-            if type
-              key_result = type.try(value)
-              result[k] = key_result
-              output[k] = key_result.input
-              success &&= key_result.success?
-            elsif strict?
-              success = false
-            end
-          end
-
-          if output.size < keys.size
-            resolve_missing_keys(output, options) do
-              success = false
-            end
-          end
-
-          success &&= primitive?(output)
-
-          if success
-            failure = nil
-          else
-            error = CoercionError.new("#{input} doesn't conform schema", meta: result)
-            failure = failure(output, error)
-          end
-        else
-          failure = failure(input, CoercionError.new("#{input} must be a hash"))
-        end
-
-        if failure.nil?
-          success(output)
-        elsif block_given?
-          yield(failure)
-        else
-          failure
-        end
+        result = Evaluator.new(self, input, EMPTY_HASH, mode: :try).call
+        block_given? && result.failure? ? yield(result) : result
       end
-      # rubocop:enable Metrics/AbcSize
-      # rubocop:enable Metrics/PerceivedComplexity
 
       # @param meta [Boolean] Whether to dump the meta to the AST
       #
@@ -148,7 +115,9 @@ module Dry
         [
           :schema,
           [keys.map { |key| key.to_ast(meta: meta) },
-           options.slice(:key_transform_fn, :type_transform_fn, :strict, :namespace),
+           options.slice(
+             :key_transform_fn, :type_transform_fn, :strict, :namespace
+           ).merge(field_groups_ast),
            meta_ast(meta)]
         ]
       end
@@ -195,6 +164,62 @@ module Dry
       # @api public
       def transform_keys?
         !options[:key_transform_fn].nil?
+      end
+
+      # Require exactly one field or nested field to be present.
+      #
+      # @param paths [Array<Symbol, Array<Symbol>>]
+      # @param name [Symbol, nil]
+      # @param check [Symbol] :before_defaults or :after_defaults
+      #
+      # @return [Schema]
+      #
+      # @api public
+      def exactly_one(
+        *paths, name: nil, check: nil,
+        before_defaults: false, after_defaults: false
+      )
+        add_field_group(
+          :exactly_one, paths,
+          name: name,
+          check: resolve_group_check(check, before_defaults, after_defaults)
+        )
+      end
+
+      # Require at least one field or nested field to be present.
+      #
+      # @param (see #exactly_one)
+      #
+      # @return [Schema]
+      #
+      # @api public
+      def at_least_one(
+        *paths, name: nil, check: nil,
+        before_defaults: false, after_defaults: false
+      )
+        add_field_group(
+          :at_least_one, paths,
+          name: name,
+          check: resolve_group_check(check, before_defaults, after_defaults)
+        )
+      end
+
+      # Require all members of a group to be present together or absent.
+      #
+      # @param (see #exactly_one)
+      #
+      # @return [Schema]
+      #
+      # @api public
+      def all_or_none(
+        *paths, name: nil, check: nil,
+        before_defaults: false, after_defaults: false
+      )
+        add_field_group(
+          :all_or_none, paths,
+          name: name,
+          check: resolve_group_check(check, before_defaults, after_defaults)
+        )
       end
 
       # @overload schema(type_map, meta = EMPTY_HASH)
@@ -294,10 +319,53 @@ module Dry
       #
       # @api public
       def clear
-        with(keys: EMPTY_ARRAY)
+        with(keys: EMPTY_ARRAY, **field_groups_ast)
       end
 
       private
+
+      def resolve_group_check(check, before_defaults, after_defaults)
+        if before_defaults && after_defaults
+          raise ::ArgumentError, "choose either before_defaults: true or after_defaults: true"
+        end
+
+        check || (after_defaults ? :after_defaults : :before_defaults)
+      end
+
+      def add_field_group(kind, paths, name:, check:)
+        group = FieldGroup.[](kind, paths, name: name, check: check)
+        validate_group_paths!(group)
+        with(field_groups: field_groups + [group])
+      end
+
+      def validate_group_paths!(group)
+        group.paths.each do |path|
+          unless path_present_in_schema?(self, path)
+            raise ::ArgumentError, "field group path #{path.inspect} is not defined in schema"
+          end
+        end
+      end
+
+      def path_present_in_schema?(current_schema, path)
+        key_type = current_schema.name_key_map[path.first]
+        return false unless key_type
+        return true if path.size == 1
+
+        nested_schema = schema_for_validation(key_type)
+        nested_schema && path_present_in_schema?(nested_schema, path[1..])
+      end
+
+      def schema_for_validation(key_type)
+        type = key_type
+        while type.respond_to?(:type) && !type.is_a?(Schema)
+          type = type.type
+        end
+        type if type.is_a?(Schema)
+      end
+
+      def field_groups_ast
+        field_groups.empty? ? EMPTY_HASH : {field_groups: field_groups.map(&:to_ast)}
+      end
 
       # @param [Array<Dry::Types::Schema::Keys>] keys
       #
@@ -309,82 +377,6 @@ module Dry
           .flatten(1)
           .each_with_object({}) { |key, merged| merged[key.name] = key }
           .values
-      end
-
-      # Validate and coerce a hash. Raise an exception on any error
-      #
-      # @api private
-      #
-      # @return [Hash]
-      def resolve_unsafe(hash, options = EMPTY_HASH)
-        result = {}
-
-        hash.each do |key, value|
-          k = @transform_key.(key)
-          type = @name_key_map[k]
-
-          if type
-            begin
-              result[k] = type.call_unsafe(value)
-            rescue ConstraintError => exception
-              raise SchemaError.new(type.name, value, exception.result)
-            rescue CoercionError => exception
-              raise SchemaError.new(type.name, value, exception.message)
-            end
-          elsif strict?
-            raise unexpected_keys(hash.keys)
-          end
-        end
-
-        resolve_missing_keys(result, options) if result.size < keys.size
-
-        result
-      end
-
-      # Validate and coerce a hash. Call a block and halt on any error
-      #
-      # @api private
-      #
-      # @return [Hash]
-      def resolve_safe(hash, options = EMPTY_HASH, &block)
-        result = {}
-
-        hash.each do |key, value|
-          k = @transform_key.(key)
-          type = @name_key_map[k]
-
-          if type
-            result[k] = type.call_safe(value, &block)
-          elsif strict?
-            yield
-          end
-        end
-
-        resolve_missing_keys(result, options, &block) if result.size < keys.size
-
-        result
-      end
-
-      # Try to add missing keys to the hash
-      #
-      # @api private
-      def resolve_missing_keys(hash, options) # rubocop:disable Metrics/PerceivedComplexity
-        skip_missing = options.fetch(:skip_missing, false)
-        resolve_defaults = options.fetch(:resolve_defaults, true)
-
-        keys.each do |key|
-          next if hash.key?(key.name)
-
-          if key.default? && resolve_defaults
-            hash[key.name] = key.call_unsafe(Undefined)
-          elsif key.required? && !skip_missing
-            if block_given?
-              return yield
-            else
-              raise missing_key(key.name)
-            end
-          end
-        end
       end
 
       # @param hash_keys [Array<Symbol>]

@@ -222,6 +222,7 @@ module Dry
         end
 
         keys = options.delete(:keys)
+        options.delete(:field_groups)
 
         visit_options(options, schema.meta) do |opts|
           opts = "#{opts[1..]} " unless opts.empty?
