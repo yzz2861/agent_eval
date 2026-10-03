@@ -9,6 +9,11 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Cyclic dependency detection for `Lazy`. Forcing lazy computations that
+  (directly or across threads) wait on each other now raises
+  `Dry::Monads::Lazy::CyclicDependencyError` with the dependency chain
+  instead of deadlocking.
+
 ### Changed
 
 ### Deprecated
