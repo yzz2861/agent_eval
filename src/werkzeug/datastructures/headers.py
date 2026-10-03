@@ -7,6 +7,16 @@ import typing as t
 from .._internal import _missing
 from ..exceptions import BadRequestKeyError
 from ..http import dump_options_header
+from ..structured_fields import _parse_dictionary as parse_sf_dictionary
+from ..structured_fields import dump_dictionary as dump_sf_dictionary
+from ..structured_fields import dump_item as dump_sf_item
+from ..structured_fields import dump_list as dump_sf_list
+from ..structured_fields import Item
+from ..structured_fields import parse_item as parse_sf_item
+from ..structured_fields import parse_list as parse_sf_list
+from ..structured_fields import StructuredDictionary
+from ..structured_fields import StructuredFieldError
+from ..structured_fields import StructuredList
 from .mixins import ImmutableHeadersMixin
 from .structures import iter_multi_items
 from .structures import MultiDict
@@ -212,6 +222,86 @@ class Headers:
         :meth:`~wsgiref.headers.Headers.get_all` method.
         """
         return self.getlist(name)
+
+    def get_item(self, key: str, default: Item | None = None) -> Item | None:
+        """Parse a repeated RFC 8941 item field.
+
+        An item field may not appear more than once, otherwise a
+        StructuredFieldError is raised.
+        """
+        values = self.getlist(key)
+
+        if not values:
+            return default
+
+        if len(values) > 1:
+            raise StructuredFieldError("Item field may not be repeated.", 0, 1)
+
+        return parse_sf_item(values[0])
+
+    def get_list(self, key: str) -> StructuredList:
+        """Parse repeated RFC 8941 list fields and merge them in order."""
+        values = self.getlist(key)
+
+        if not values:
+            return []
+
+        if len(values) == 1:
+            return parse_sf_list(values[0])
+
+        result: StructuredList = []
+
+        for index, value in enumerate(values):
+            if not value.strip(" \t"):
+                raise StructuredFieldError("Expected list member after ','.", 0, index)
+
+            parsed = parse_sf_list(value, field=index)
+            result.extend(parsed)
+
+        return result
+
+    def get_dictionary(self, key: str) -> StructuredDictionary:
+        """Parse repeated RFC 8941 dictionary fields and merge them in order."""
+        result: StructuredDictionary = {}
+        key_positions: dict[str, int] = {}
+
+        for index, value in enumerate(self.getlist(key)):
+            if not value.strip(" \t"):
+                raise StructuredFieldError(
+                    "Expected dictionary member after ','.", 0, index
+                )
+
+            parsed = parse_sf_dictionary(
+                value, field=index, key_positions=key_positions
+            )
+
+            for member_key, member in parsed.items():
+                if member_key in result:
+                    raise StructuredFieldError(
+                        f"Duplicate dictionary key {member_key!r}.",
+                        key_positions[member_key],
+                        index,
+                    )
+
+                result[member_key] = member
+
+        return result
+
+    def set_item(self, key: str, value: t.Any, **parameters: t.Any) -> None:
+        """Replace a header with a serialized RFC 8941 item."""
+        if isinstance(value, Item) and parameters:
+            raise TypeError("Cannot pass parameters when value is an Item.")
+
+        item = value if isinstance(value, Item) else Item(value, parameters)
+        self.set(key, dump_sf_item(item))
+
+    def set_list(self, key: str, value: cabc.Iterable[t.Any]) -> None:
+        """Replace a header with a serialized RFC 8941 list."""
+        self.set(key, dump_sf_list(value))
+
+    def set_dictionary(self, key: str, value: cabc.Mapping[str, t.Any]) -> None:
+        """Replace a header with a serialized RFC 8941 dictionary."""
+        self.set(key, dump_sf_dictionary(value))
 
     def items(self, lower: bool = False) -> t.Iterable[tuple[str, str]]:
         for key, value in self:

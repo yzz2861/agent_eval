@@ -34,6 +34,10 @@ Version 3.2.0
     ``parse_content_range_header``, ``parse_csp_header``, ``parse_etags``,
     ``parse_if_range_header``, ``parse_range_header``, ``parse_set_header``.
     This improves static typing and reduces circular imports. :pr:`3116`
+-   Added strict RFC 8941 structured field parsing and serialization for items,
+    lists, and dictionaries. ``Headers`` has read and write methods that merge
+    repeated list and dictionary fields, while retaining the existing header
+    API.
 -   An empty ``ContentRange`` (no ``start``, ``stop``, or ``length``) is
     considered false. ``units`` is always a string. Constructor arguments
     have defaults. The ``set`` and ``unset`` methods are deprecated in favor of

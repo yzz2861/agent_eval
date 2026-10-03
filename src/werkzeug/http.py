@@ -14,8 +14,20 @@ from time import struct_time
 from urllib.parse import quote
 from urllib.parse import unquote
 
+from . import structured_fields as sf
 from ._internal import _dt_as_utc
 from ._internal import _plain_int
+
+InnerList = sf.InnerList
+Item = sf.Item
+StructuredFieldError = sf.StructuredFieldError
+Token = sf.Token
+dump_dictionary = sf.dump_dictionary
+dump_item = sf.dump_item
+dump_list = sf.dump_list
+parse_dictionary = sf.parse_dictionary
+parse_item = sf.parse_item
+parse_list = sf.parse_list
 
 if t.TYPE_CHECKING:
     from _typeshed.wsgi import WSGIEnvironment

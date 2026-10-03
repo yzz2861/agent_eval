@@ -49,6 +49,30 @@ by :rfc:`2616`, Werkzeug implements some custom data structures that are
 
 .. autofunction:: parse_dict_header
 
+.. autoclass:: StructuredFieldError
+    :members:
+
+.. autoclass:: Token
+    :members:
+
+.. autoclass:: Item
+    :members:
+
+.. autoclass:: InnerList
+    :members:
+
+.. autofunction:: parse_item
+
+.. autofunction:: parse_list
+
+.. autofunction:: parse_dictionary
+
+.. autofunction:: dump_item
+
+.. autofunction:: dump_list
+
+.. autofunction:: dump_dictionary
+
 .. autofunction:: parse_accept_header(value, [class])
 
 .. autofunction:: parse_cache_control_header
