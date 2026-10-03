@@ -1,5 +1,18 @@
 # News
 
+## 3.3.7 - 2026-10-04
+
+### Improvements
+
+  * Added `CSV::SpreadsheetSafe`, an explicit opt-in write-time
+    strategy that protects generated CSV against spreadsheet formula
+    injection. The caller declares numeric fields; untrusted text
+    whose first significant character (after leading whitespace and
+    control characters) is `=`, `+`, `-` or `@` is prefixed with an
+    apostrophe, and each rewritten field is recorded in
+    `CSV::SpreadsheetSafe#conversions`. The default behavior of
+    `CSV.generate` is unchanged.
+
 ## 3.3.6 - 2026-07-27
 
 ### Improvements
