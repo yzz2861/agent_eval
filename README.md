@@ -141,7 +141,9 @@ the schedule's start_time. Schedule start times are supported as:
 ice_cube implements its own hash-based .to_yaml, so you can quickly (and
 safely) serialize schedule objects in and out of your data store
 
-It also supports partial serialization to/from `ICAL`. Parsing datetimes with time zone information is not currently supported.
+It supports serialization to and parsing from `ICAL`. UTC and floating times
+are always supported. Custom embedded `VTIMEZONE` definitions can be parsed
+when the caller supplies the years the calendar may use:
 
 ``` ruby
 yaml = schedule.to_yaml
@@ -152,7 +154,15 @@ IceCube::Schedule.from_hash(hash)
 
 ical = schedule.to_ical
 IceCube::Schedule.from_ical(ical)
+
+# years: 2020..2030 enables embedded VTIMEZONE support for that calendar
+IceCube::Schedule.from_ical(ical_with_vtimezone, years: 2020..2030)
 ```
+
+The custom time zone conversion table is local to the parsed schedule. It does
+not change the process time zone or register a global time zone name. Times
+outside the supplied range, unknown rules, and conflicting observations raise
+an error.
 
 ---
 

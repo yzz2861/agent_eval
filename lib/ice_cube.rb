@@ -6,6 +6,9 @@ module IceCube
 
   autoload :TimeUtil, "ice_cube/time_util"
   autoload :FlexibleHash, "ice_cube/flexible_hash"
+  autoload :LocalTimeZone, "ice_cube/local_time_zone"
+  autoload :LocalTime, "ice_cube/local_time"
+  autoload :FloatingTime, "ice_cube/floating_time"
 
   require "ice_cube/i18n"
 

@@ -324,6 +324,7 @@ module IceCube
     # Serialize this schedule to_ical
     def to_ical(force_utc = false)
       pieces = []
+      pieces.concat(vtimezone_definitions) unless force_utc
       pieces << "DTSTART#{IcalBuilder.ical_format(start_time, force_utc)}"
       pieces.concat recurrence_rules.map { |r| "RRULE:#{r.to_ical}" }
       pieces.concat exception_rules.map { |r| "EXRULE:#{r.to_ical}" }
@@ -408,6 +409,15 @@ module IceCube
 
     private
 
+    def vtimezone_definitions
+      [start_time, end_time, *recurrence_times, *exception_times].compact
+        .select { |time| time.is_a?(LocalTime) }
+        .map(&:time_zone)
+        .uniq(&:name)
+        .sort_by(&:name)
+        .map(&:to_ical)
+    end
+
     # Reset all rules for another run
     def reset
       @all_recurrence_rules.each(&:reset)
@@ -419,7 +429,7 @@ module IceCube
     # Iteration is unrolled in pairs to skip duplicate times in end of DST
     def enumerate_occurrences(opening_time, closing_time = nil, options = {})
       opening_time = TimeUtil.match_zone(opening_time, start_time)
-      closing_time = TimeUtil.match_zone(closing_time, start_time)
+      closing_time = closing_time && TimeUtil.match_zone(closing_time, start_time)
       opening_time += TimeUtil.subsec(start_time) - TimeUtil.subsec(opening_time)
       opening_time = start_time if opening_time < start_time
       spans = options[:spans] == true && duration != 0
@@ -430,6 +440,10 @@ module IceCube
         t1 = start_time if t1 < start_time
         loop do
           break unless (t0 = next_time(t1, closing_time))
+          occurrence_time = t0.to_time
+          if occurrence_time.is_a?(LocalTime)
+            occurrence_time.time_zone.validate_supported_wall_year(occurrence_time.year)
+          end
           break if closing_time && t0 > closing_time
           if spans ? (t0.end_time > opening_time) : (t0 >= opening_time)
             yielder << (block_given? ? yield(t0) : t0)
