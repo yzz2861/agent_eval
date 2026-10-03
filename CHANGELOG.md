@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- Add `strict_json_data` option to check that instance data is strictly JSON-compatible before validation
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes

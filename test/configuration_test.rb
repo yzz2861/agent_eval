@@ -197,6 +197,14 @@ class ConfigurationTest < Minitest::Test
     )
   end
 
+  def test_strict_json_data
+    run_configuration_test(
+      :strict_json_data,
+      default: false,
+      test: true
+    )
+  end
+
   def test_configuration_option_and_override
     configuration = JSONSchemer::Configuration.new
     configuration.format = false

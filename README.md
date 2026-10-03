@@ -241,7 +241,14 @@ JSONSchemer.schema(
   # validate `readOnly`/`writeOnly` keywords (https://spec.openapis.org/oas/v3.0.3#fixed-fields-19)
   # 'read'/'write'/nil
   # default: nil
-  access_mode: 'read'
+  access_mode: 'read',
+
+  # check that instance data is strictly JSON-compatible before validation
+  # raises JSONSchemer::InvalidJSONData for circular references, non-string
+  # hash keys, NaN/Infinity, and values JSON cannot represent
+  # true/false/{ max_depth:, max_nodes: }
+  # default: false
+  strict_json_data: true
 )
 ```
 
@@ -257,6 +264,34 @@ end
 
 # configuration accessors
 JSONSchemer.configuration.insert_property_defaults = true
+```
+
+## Strict JSON Data
+
+By default, instances are validated as-is and symbol hash keys are treated as strings. Enable the `strict_json_data` option to check that instance data belongs to the JSON data domain before schema evaluation. The check raises `JSONSchemer::InvalidJSONData` when it finds:
+
+- circular references (subobjects shared between locations are allowed)
+- non-string hash keys (e.g. symbols)
+- `NaN` or `Infinity`
+- values that JSON cannot represent (e.g. `Time`, `Date`, or other application objects)
+
+Objects are inspected as-is: `to_json`, `to_hash`, and other coercion methods are never called, and the input is never modified. Errors report a JSON pointer `path` and a `type` without including instance values. The check itself is bounded by `max_depth` (default: 100) and `max_nodes` (default: 10,000) limits.
+
+```ruby
+schemer = JSONSchemer.schema({ 'type' => 'object' }, :strict_json_data => true)
+
+schemer.valid?({ :one => 1 })
+# => JSONSchemer::InvalidJSONData: invalid JSON data: Symbol key at `/one`
+
+schemer.valid?({ 'one' => 1 })
+# => true
+
+# custom limits
+JSONSchemer.schema(schema, :strict_json_data => { :max_depth => 10, :max_nodes => 100 })
+
+# standalone usage
+JSONSchemer::JSONData.validate({ :one => 1 })
+# => [#<struct JSONSchemer::JSONData::Error path="/one", type="symbol_key", message="Symbol key at `/one`">]
 ```
 
 ## Custom Error Messages

@@ -70,7 +70,8 @@ module JSONSchemer
       regexp_resolver: configuration.regexp_resolver,
       output_format: configuration.output_format,
       resolve_enumerators: configuration.resolve_enumerators,
-      access_mode: configuration.access_mode
+      access_mode: configuration.access_mode,
+      strict_json_data: configuration.strict_json_data
     )
       @value = deep_stringify_keys(value)
       @parent = parent
@@ -96,7 +97,8 @@ module JSONSchemer
         :regexp_resolver => regexp_resolver,
         :output_format => output_format,
         :resolve_enumerators => resolve_enumerators,
-        :access_mode => access_mode
+        :access_mode => access_mode,
+        :strict_json_data => strict_json_data
       )
       @parsed = parse
     end
@@ -106,6 +108,7 @@ module JSONSchemer
     end
 
     def validate(instance, output_format: @configuration.output_format, resolve_enumerators: @configuration.resolve_enumerators, access_mode: @configuration.access_mode)
+      check_strict_json_data!(instance)
       instance_location = Location.root
       context = Context.new(instance, [], nil, (!insert_property_defaults && output_format == 'flag'), access_mode)
       result = validate_instance(deep_stringify_keys(instance), instance_location, root_keyword_location, context)
@@ -364,6 +367,13 @@ module JSONSchemer
     end
 
   private
+
+    def check_strict_json_data!(instance)
+      strict_json_data = @configuration.strict_json_data
+      return unless strict_json_data
+      limits = strict_json_data.is_a?(Hash) ? strict_json_data : {}
+      JSONData.validate!(instance, **limits.transform_keys(&:to_sym))
+    end
 
     def parse
       @parsed = {}
