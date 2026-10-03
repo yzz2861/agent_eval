@@ -9,6 +9,9 @@ class ConnectionPool
         # All we need to do is ensure the main thread doesn't have a
         # checked out connection
         pool.checkin(force: true)
+        # Any quiesce barrier or checked-out slots owned by now-dead
+        # threads must not pause the child process permanently.
+        pool.send(:reset_quiesce_state)
         pool.reload do |connection|
           # Unfortunately we don't know what method to call to close the connection,
           # so we try the most common one.

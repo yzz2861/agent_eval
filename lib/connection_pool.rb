@@ -57,6 +57,10 @@ class ConnectionPool
     @key_count = :"pool-#{@available.object_id}-count"
     @key_kwargs = :"pool-#{@available.object_id}-kwargs"
     @discard_key = :"pool-#{@available.object_id}-discard"
+    @quiesce_mutex = Thread::Mutex.new
+    @quiesce_resource = Thread::ConditionVariable.new
+    @quiescing = false
+    @checked_out = 0
     INSTANCES[self] = self if auto_reload_after_fork && INSTANCES
   end
 
@@ -116,7 +120,13 @@ class ConnectionPool
       ::Thread.current[@key_count] += 1
       ::Thread.current[@key]
     else
-      conn = @available.pop(timeout:, **kwargs)
+      reserve_connection_slot(timeout)
+      begin
+        conn = @available.pop(timeout:, **kwargs)
+      rescue Exception
+        release_connection_slot
+        raise
+      end
       ::Thread.current[@key] = conn
       ::Thread.current[@key_count] = 1
       ::Thread.current[@key_kwargs] = kwargs
@@ -144,6 +154,7 @@ class ConnectionPool
           ::Thread.current[@key] = nil
           ::Thread.current[@key_count] = nil
           ::Thread.current[@key_kwargs] = nil
+          release_connection_slot
         end
       else
         ::Thread.current[@key_count] -= 1
@@ -153,6 +164,53 @@ class ConnectionPool
     end
 
     nil
+  end
+
+  ##
+  # Quiesces the ConnectionPool: blocks new checkouts, waits for all
+  # currently checked-out connections to be checked back in, and then
+  # yields while the pool is fully idle. When the block exits, waiting
+  # checkouts are woken up and the pool resumes normal service.
+  #
+  # This is useful for maintenance operations which require exclusive
+  # access to the pool's resources, e.g. reconfiguring or replacing
+  # every connection at once.
+  #
+  # Threads which already hold a checked-out connection are unaffected:
+  # nested +with+/+checkout+ calls on the same thread still reuse their
+  # current connection and never block on the quiesce barrier. For the
+  # same reason, calling +quiesce+ from a thread which holds a checked-out
+  # connection raises +ConnectionPool::Error+, as it could never complete.
+  #
+  # If not all connections are checked in within +timeout+ seconds, the
+  # barrier is released and a +ConnectionPool::TimeoutError+ is raised.
+  # The barrier is also released if the block raises an exception, so a
+  # failed maintenance can never leave the pool permanently paused.
+  #
+  # @option options [Float] :timeout (@timeout) Wait this many seconds for
+  #   all checked-out connections to be returned
+  #
+  # @return the value of the block
+  def quiesce(timeout: @timeout)
+    if ::Thread.current[@key]
+      raise ConnectionPool::Error, "cannot quiesce while holding a checked-out connection"
+    end
+
+    @quiesce_mutex.synchronize do
+      raise ConnectionPool::Error, "another quiesce is already in progress" if @quiescing
+
+      @quiescing = true
+    end
+
+    begin
+      wait_for_checkin_of_all_connections(timeout)
+      yield
+    ensure
+      @quiesce_mutex.synchronize do
+        @quiescing = false
+        @quiesce_resource.broadcast
+      end
+    end
   end
 
   ##
@@ -185,6 +243,56 @@ class ConnectionPool
   # Number of pool entries created and idle in the pool.
   def idle
     @available.idle
+  end
+
+  private
+
+  # Blocks the calling thread while a quiesce is in progress, then
+  # reserves a slot so the quiescer can observe the upcoming checkout.
+  def reserve_connection_slot(timeout)
+    deadline = monotonic_time + timeout
+    @quiesce_mutex.synchronize do
+      while @quiescing
+        to_wait = deadline - monotonic_time
+        if to_wait <= 0
+          raise ConnectionPool::TimeoutError, "Waited #{timeout} sec, pool is quiescing"
+        end
+        @quiesce_resource.wait(@quiesce_mutex, to_wait)
+      end
+      @checked_out += 1
+    end
+  end
+
+  def release_connection_slot
+    @quiesce_mutex.synchronize do
+      @checked_out -= 1
+      @quiesce_resource.broadcast
+    end
+  end
+
+  def wait_for_checkin_of_all_connections(timeout)
+    deadline = monotonic_time + timeout
+    @quiesce_mutex.synchronize do
+      until @checked_out == 0
+        to_wait = deadline - monotonic_time
+        if to_wait <= 0
+          raise ConnectionPool::TimeoutError, "Waited #{timeout} sec, #{@checked_out} connection(s) still checked out"
+        end
+        @quiesce_resource.wait(@quiesce_mutex, to_wait)
+      end
+    end
+  end
+
+  # Called after fork, when all other threads are known to be dead and
+  # their checked-out connections are gone. Prevents a barrier engaged
+  # before the fork from pausing the child process permanently.
+  def reset_quiesce_state
+    @quiescing = false
+    @checked_out = 0
+  end
+
+  def monotonic_time
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 end
 

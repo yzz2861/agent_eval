@@ -100,6 +100,29 @@ cp.with { |conn| conn.get('some-count') }
 
 Like `shutdown`, `reload` will block until all connections are checked in and closed.
 
+## Quiesce
+
+You can quiesce a ConnectionPool to run a maintenance block while no
+connections are checked out. `quiesce` blocks new checkouts, waits for
+all currently checked-out connections to be checked back in, runs the
+block, and then wakes up any waiting checkouts so the pool resumes
+normal service.
+
+```ruby
+cp = ConnectionPool.new { Redis.new }
+cp.quiesce do
+  # no connections are checked out here; safe to maintain shared state
+  cp.reap(idle_seconds: 0, &:close)
+end
+```
+
+Threads which already hold a connection are unaffected: nested `with`
+calls still reuse their connection. Calling `quiesce` from a thread
+which holds a checked-out connection raises `ConnectionPool::Error`.
+If the connections are not all checked in within `:timeout` seconds, or
+if the block raises, the barrier is released and waiting checkouts
+resume, so a failed maintenance never leaves the pool paused.
+
 ## Reap
 
 You can call `reap` periodically on the ConnectionPool instance to close connections that were created but have not been used for a certain amount of time. This can be useful in environments where connections are expensive.

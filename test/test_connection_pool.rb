@@ -512,6 +512,205 @@ class TestConnectionPool < Minitest::Test
     refute_same @inner, pool.checkout
   end
 
+  def test_quiesce_waits_for_checkins_and_blocks_new_checkouts
+    pool_size = 2
+    pool = ConnectionPool.new(size: pool_size, timeout: 5) { NetworkConnection.new }
+
+    acquired = Queue.new
+    release = Queue.new
+    holders = Array.new(pool_size) do
+      Thread.new do
+        pool.with do |conn|
+          acquired << conn
+          release.pop
+        end
+      end
+    end
+    # wait until every connection is checked out
+    pool_size.times { acquired.pop }
+
+    entered = Queue.new
+    proceed = Queue.new
+    observed = nil
+    quiescer = Thread.new do
+      pool.quiesce do
+        observed = [pool.available, pool.idle]
+        entered << true
+        proceed.pop
+      end
+    end
+
+    # the barrier is engaged but cannot complete while borrows are outstanding
+    Thread.pass until pool.instance_variable_get(:@quiescing)
+    assert entered.empty?
+
+    # returning all connections lets the maintenance block run;
+    # available == size proves it observed zero checked-out connections
+    pool_size.times { release << true }
+    entered.pop
+    assert_equal [pool_size, pool_size], observed
+
+    # new checkouts are blocked by the barrier even though every
+    # connection is idle in the pool
+    assert_raises ConnectionPool::TimeoutError do
+      pool.checkout(timeout: 0.01)
+    end
+
+    waiter = Queue.new
+    waiting_thread = Thread.new { pool.with { |conn| waiter << conn } }
+    assert_nil waiting_thread.join(0.2)
+
+    # exiting the maintenance block wakes up waiting checkouts
+    proceed << true
+    assert_kind_of NetworkConnection, waiter.pop
+    quiescer.join
+    waiting_thread.join
+    holders.each(&:join)
+  end
+
+  def test_quiesce_does_not_block_nested_with_from_connection_holder
+    pool = ConnectionPool.new(size: 1, timeout: 1) { NetworkConnection.new }
+
+    acquired = Queue.new
+    release = Queue.new
+    nested = Queue.new
+    holder = Thread.new do
+      pool.with do |outer|
+        acquired << outer
+        release.pop
+        pool.with do |inner|
+          nested << inner
+        end
+      end
+    end
+    outer = acquired.pop
+
+    entered = Queue.new
+    quiescer = Thread.new { pool.quiesce { entered << true } }
+    Thread.pass until pool.instance_variable_get(:@quiescing)
+
+    # the holder's nested checkout reuses its connection and is not
+    # blocked by the barrier it would otherwise be waiting on itself
+    release << true
+    assert_same outer, nested.pop
+
+    # once the holder checks in, the quiesce completes
+    entered.pop
+    quiescer.join
+    holder.join
+  end
+
+  def test_quiesce_raises_when_calling_thread_holds_a_connection
+    pool = ConnectionPool.new(size: 1) { NetworkConnection.new }
+
+    pool.with do |conn|
+      error = assert_raises(ConnectionPool::Error) { pool.quiesce { flunk } }
+      assert_match "checked-out", error.message
+    end
+
+    pool.with { |conn| assert_kind_of NetworkConnection, conn }
+  end
+
+  def test_quiesce_rejects_concurrent_quiesce
+    pool = ConnectionPool.new(size: 1) { NetworkConnection.new }
+
+    entered = Queue.new
+    proceed = Queue.new
+    quiescer = Thread.new { pool.quiesce { entered << true && proceed.pop } }
+    entered.pop
+
+    assert_raises(ConnectionPool::Error) { pool.quiesce { flunk } }
+
+    proceed << true
+    quiescer.join
+  end
+
+  def test_quiesce_returns_block_value
+    pool = ConnectionPool.new(size: 1) { Object.new }
+
+    assert_equal 42, pool.quiesce { 42 }
+  end
+
+  def test_quiesce_timeout_releases_the_barrier
+    pool = ConnectionPool.new(size: 1, timeout: 1) { NetworkConnection.new }
+
+    acquired = Queue.new
+    release = Queue.new
+    holder = Thread.new do
+      pool.with do |conn|
+        acquired << conn
+        release.pop
+      end
+    end
+    acquired.pop
+
+    assert_raises ConnectionPool::TimeoutError do
+      pool.quiesce(timeout: 0.05) { flunk "maintenance must not run" }
+    end
+
+    # the barrier is gone: the pool works normally again
+    release << true
+    holder.join
+    pool.with { |conn| assert_kind_of NetworkConnection, conn }
+    pool.quiesce { assert_equal 1, pool.available }
+  end
+
+  def test_quiesce_exception_releases_the_barrier
+    pool = ConnectionPool.new(size: 1) { NetworkConnection.new }
+
+    assert_raises(RuntimeError) { pool.quiesce { raise "boom" } }
+
+    pool.with { |conn| assert_kind_of NetworkConnection, conn }
+    pool.quiesce { assert_equal 1, pool.available }
+  end
+
+  def test_checkout_times_out_while_quiescing
+    pool = ConnectionPool.new(size: 1, timeout: 1) { NetworkConnection.new }
+
+    entered = Queue.new
+    proceed = Queue.new
+    quiescer = Thread.new { pool.quiesce { entered << true && proceed.pop } }
+    entered.pop
+
+    assert_raises ConnectionPool::TimeoutError do
+      pool.checkout(timeout: 0.05)
+    end
+
+    proceed << true
+    quiescer.join
+    pool.with { |conn| assert_kind_of NetworkConnection, conn }
+  end
+
+  def test_quiesce_racing_shutdown_leaves_no_permanent_pause
+    pool = ConnectionPool.new(size: 1, timeout: 5) { NetworkConnection.new }
+
+    acquired = Queue.new
+    release = Queue.new
+    holder = Thread.new do
+      pool.with do |conn|
+        acquired << conn
+        release.pop
+      end
+    end
+    acquired.pop
+
+    entered = Queue.new
+    quiescer = Thread.new { pool.quiesce { entered << true } }
+    Thread.pass until pool.instance_variable_get(:@quiescing)
+
+    discarded = Queue.new
+    pool.shutdown { |conn| discarded << conn }
+    release << true
+
+    # the outstanding borrow is returned (and discarded by shutdown),
+    # so the quiesce still completes and releases its barrier
+    entered.pop
+    quiescer.join
+    holder.join
+    assert_kind_of NetworkConnection, discarded.pop
+    assert_raises(ConnectionPool::PoolShuttingDownError) { pool.checkout }
+  end
+
   def test_shutdown_is_executed_for_all_connections
     recorders = []
 
