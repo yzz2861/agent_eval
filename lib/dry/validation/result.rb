@@ -52,6 +52,7 @@ module Dry
         @context = context
         @options = options
         @errors = initialize_errors
+        @warnings = initialize_warnings
       end
 
       # Return values wrapper with the input processed by schema
@@ -78,6 +79,20 @@ module Dry
         new_options.empty? ? @errors : @errors.with(schema_errors(new_options), new_options)
       end
 
+      # Get warning set
+      #
+      # Warnings are messages that don't affect the success status
+      # of the result
+      #
+      # @!macro errors-options
+      #
+      # @return [MessageSet]
+      #
+      # @api public
+      def warnings(new_options = EMPTY_HASH)
+        new_options.empty? ? @warnings : @warnings.with(EMPTY_ARRAY.dup, new_options)
+      end
+
       # Check if result is successful
       #
       # @return [Bool]
@@ -101,6 +116,13 @@ module Dry
       # @api public
       def error?(key)
         errors.any? { |msg| Schema::Path[msg.path].include?(Schema::Path[key]) }
+      end
+
+      # Check if values include a warning for the provided key
+      #
+      # @api public
+      def warning?(key)
+        warnings.any? { |msg| Schema::Path[msg.path].include?(Schema::Path[key]) }
       end
 
       # Check if the base schema (without rules) includes an error for the provided key
@@ -148,6 +170,14 @@ module Dry
         self
       end
 
+      # Add a new warning for the provided key
+      #
+      # @api private
+      def add_warning(warning)
+        @warnings.add(warning)
+        self
+      end
+
       # Read a value under provided key
       #
       # @param [Symbol] key
@@ -181,11 +211,10 @@ module Dry
       #
       # @api public
       def inspect
-        if context.empty?
-          "#<#{self.class}#{to_h} errors=#{errors.to_h}>"
-        else
-          "#<#{self.class}#{to_h} errors=#{errors.to_h} context=#{context.each.to_h}>"
-        end
+        parts = ["#<#{self.class}#{to_h} errors=#{errors.to_h}"]
+        parts << "warnings=#{warnings.to_h}" unless warnings.empty?
+        parts << "context=#{context.each.to_h}" unless context.empty?
+        "#{parts.join(" ")}>"
       end
 
       # Freeze result and its error set
@@ -194,6 +223,7 @@ module Dry
       def freeze
         values.freeze
         errors.freeze
+        warnings.freeze
         super
       end
 
@@ -216,6 +246,11 @@ module Dry
       # @api private
       def initialize_errors(options = self.options)
         MessageSet.new(schema_errors(options), options)
+      end
+
+      # @api private
+      def initialize_warnings(options = self.options)
+        MessageSet.new(EMPTY_ARRAY.dup, options)
       end
 
       # @api private

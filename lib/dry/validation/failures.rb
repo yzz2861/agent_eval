@@ -57,13 +57,45 @@ module Dry
       #
       # @api public
       def failure(message, tokens = EMPTY_HASH)
-        opts << {message: message, tokens: tokens, path: path}
+        opts << {message: message, tokens: tokens, path: path, severity: :error}
+        self
+      end
+
+      # Set warning
+      #
+      # Warnings are exposed via Result#warnings and don't affect
+      # the success status of the result
+      #
+      # @overload warning(message)
+      #   Set message text explicitly
+      #   @param message [String] The message text
+      #   @example
+      #     warning('this could be better')
+      #
+      # @overload warning(id)
+      #   Use message identifier (needs localized messages setup)
+      #   @param id [Symbol] The message id
+      #   @example
+      #     warning(:weak_password)
+      #
+      # @overload warning(meta_hash)
+      #   Use meta_hash[:text] as a message (either explicitely or as an identifier),
+      #   setting the rest of the hash as warning meta attribute
+      #   @param meta [Hash] The hash containing the message as value for the :text key
+      #   @example
+      #     warning({text: :weak_password, strength: 2})
+      #
+      # @see Failures#failure
+      #
+      # @api public
+      def warning(message, tokens = EMPTY_HASH)
+        opts << {message: message, tokens: tokens, path: path, severity: :warning}
         self
       end
 
       # @api private
       def empty?
-        opts.empty?
+        opts.none? { |opt| opt[:severity] == :error }
       end
     end
   end

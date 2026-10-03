@@ -6,7 +6,7 @@ module Dry
     #
     # @api public
     class Message < Schema::Message
-      include ::Dry::Equalizer(:text, :path, :meta)
+      include ::Dry::Equalizer(:text, :path, :meta, :severity)
 
       # The error message text
       #
@@ -29,6 +29,13 @@ module Dry
       # @api public
       attr_reader :meta
 
+      # The severity of the message (:error or :warning)
+      #
+      # @return [Symbol]
+      #
+      # @api public
+      attr_reader :severity
+
       # A localized message type
       #
       # Localized messsages can be translated to other languages at run-time
@@ -48,32 +55,33 @@ module Dry
         # @api public
         def evaluate(**opts)
           evaluated_text, rest = text.(**opts)
-          Message.new(evaluated_text, path: path, meta: rest.merge(meta))
+          Message.new(evaluated_text, path: path, meta: rest.merge(meta), severity: severity)
         end
       end
 
-      # Build an error
+      # Build a message
       #
       # @return [Message, Message::Localized]
       #
       # @api private
-      def self.[](text, path, meta)
+      def self.[](text, path, meta, severity = :error)
         klass = text.respond_to?(:call) ? Localized : Message
-        klass.new(text, path: path, meta: meta)
+        klass.new(text, path: path, meta: meta, severity: severity)
       end
 
-      # Initialize a new error object
+      # Initialize a new message object
       #
       # @api private
       # rubocop: disable Lint/MissingSuper
-      def initialize(text, path:, meta: EMPTY_HASH)
+      def initialize(text, path:, meta: EMPTY_HASH, severity: :error)
         @text = text
         @path = Array(path)
         @meta = meta
+        @severity = severity
       end
       # rubocop: enable Lint/MissingSuper
 
-      # Check if this is a base error not associated with any key
+      # Check if this is a base message not associated with any key
       #
       # @return [Boolean]
       #
@@ -82,7 +90,18 @@ module Dry
         @base ||= path.compact.empty?
       end
 
-      # Dump error to a string
+      # Check if this is a warning
+      #
+      # Warnings don't affect the result's success status
+      #
+      # @return [Boolean]
+      #
+      # @api public
+      def warning?
+        severity.equal?(:warning)
+      end
+
+      # Dump message to a string
       #
       # @return [String]
       #

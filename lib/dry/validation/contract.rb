@@ -104,7 +104,13 @@ module Dry
             rule_result = rule.(self, result)
 
             rule_result.failures.each do |failure|
-              result.add_error(message_resolver.(**failure))
+              message = message_resolver.(**failure)
+
+              if message.warning?
+                result.add_warning(message)
+              else
+                result.add_error(message)
+              end
             end
           end
         end
