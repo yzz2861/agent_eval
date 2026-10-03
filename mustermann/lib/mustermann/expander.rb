@@ -151,12 +151,67 @@ module Mustermann
       behavior, values = nil, behavior if behavior.is_a? Hash
       values = map_values(values)
 
+      if defined?(::Mustermann::Template) and @patterns.size == 1 and @patterns.first.is_a?(::Mustermann::Template)
+        return template_expand(behavior, values)
+      end
+
       case behavior || additional_values
       when :raise  then @api_expander.expand(values)
       when :ignore then with_rest(values) { |uri, rest| uri }
       when :append then with_rest(values) { |uri, rest| append(uri, rest) }
       else raise ArgumentError, "unknown behavior %p" % behavior
       end
+    end
+
+    # URI templates implement their own, RFC 6570 compliant expansion (this is
+    # where list and map values, as well as the ; ? and & operators, live).
+    def template_expand(behavior, values)
+      pattern = @patterns.first
+      keys    = template_variable_keys(pattern)
+      case behavior || additional_values
+      when :raise
+        pattern.expand(values)
+      when :ignore
+        pattern.expand_known(values)
+      when :append
+        used, extra = values.partition { |key, _| keys.include?(key) }.map(&:to_h)
+        append(pattern.expand_known(used), extra)
+      else raise ArgumentError, "unknown behavior %p" % behavior
+      end
+    end
+
+    def template_variable_keys(pattern)
+      pattern.template_variable_names
+    end
+
+    # Partially expands the registered patterns: known values are expanded
+    # right away, while unknown variables remain in the returned URI template
+    # and can be expanded in a later step.
+    #
+    # This is supported for a single URI template pattern
+    # ({Mustermann::Template}, registered as +template+ or +uri_template+).
+    # Expanding in two steps yields the same result as expanding all values at
+    # once, and already expanded values are not escaped a second time.
+    #
+    # @example building a link in two stages
+    #   expander = Mustermann::Expander.new('/tenants/{tenant}/users/{id}{?q}', type: :template)
+    #   partial = expander.partial_expand(tenant: 'acme')
+    #   partial.to_s # => "/tenants/acme/users/{id}{?q}"
+    #   partial.expand(id: 42, q: 'ruby')
+    #   # => "/tenants/acme/users/42?q=ruby"
+    #
+    # @param [Hash{Symbol, String => #to_s, Array<#to_s>, Hash}] values
+    #   Values known at this point.
+    #
+    # @return [Mustermann::Template] a new, partially expanded template
+    # @raise [NotImplementedError] raised unless exactly one URI template is registered
+    # @raise [Mustermann::ExpandError] raised if a value cannot be expanded
+    def partial_expand(values = EMPTY_HASH)
+      pattern = @patterns.first
+      unless @patterns.size == 1 and defined?(::Mustermann::Template) and pattern.is_a?(::Mustermann::Template)
+        raise NotImplementedError, "partial expansion is only supported for a single URI template"
+      end
+      pattern.partial_expand(map_values(values))
     end
 
     # @!visibility private
@@ -222,8 +277,10 @@ module Mustermann
 
     def map_values(values)
       values = values.dup
-      @api_expander.keys.each { |key| values[key] ||= values.delete(key.to_s) if values.include? key.to_s }
-      caster.cast(values).delete_if { |k, v| v.nil? }
+      @api_expander.keys.each do |key|
+        values[key] ||= values.delete(key.to_s) if values.include? key.to_s
+      end
+      caster.cast(values).delete_if { |k, v| v.equal?(nil) }
     end
 
     private :with_rest, :slice, :append, :caster, :map_values, :split_values

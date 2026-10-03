@@ -6,6 +6,19 @@ Mustermann follows [Semantic Versioning 2.0](http://semver.org/). Anything docum
 
 ### Mustermann 4.0.1
 
+#### New features
+
+* Add partial expansion for RFC 6570 URI templates: `Mustermann::Template#partial_expand` and
+  `Mustermann::Expander#partial_expand` expand the variables that are already known while keeping the
+  remaining ones as a template that can be expanded in a later step. Expanding in several steps is
+  equivalent to expanding all values at once for every operator (`+ # . / ; ? &`), including list and
+  map values, and already expanded values are not escaped a second time.
+
+#### Bug fixes
+
+* Fix URI template expansion raising an `ArgumentError` for the `+ # . / ; ? &` operators and for
+  the comma continuation operator.
+
 #### Performance improvements
 
 * Reduce memory usage by deduplicating internal data structures. This is especially effective when using large `Mustermann::Set` objects. [#159](https://github.com/sinatra/mustermann/issues/159) [#160](https://github.com/sinatra/mustermann/pull/160) [@byroot](https://github.com/byroot)

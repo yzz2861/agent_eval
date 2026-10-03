@@ -43,6 +43,29 @@ require 'mustermann'
 Mustermann.new('/{name}').expand(name: "example") # => "/example"
 ```
 
+## Partial expansion
+
+Sometimes a link has to be built in stages: the tenant might be known long before the resource id or the
+query parameters are. `partial_expand` expands the variables that are already known and keeps the
+remaining ones as a URI template, so the resulting pattern can be expanded again later.
+
+``` ruby
+pattern = Mustermann.new('/tenants/{tenant}/users/{id}{?q,lang}', type: :template)
+
+partial = pattern.partial_expand(tenant: 'acme')
+partial.to_s # => "/tenants/acme/users/{id}{?q,lang}"
+
+partial.expand(id: 42, q: 'ruby', lang: 'en')
+# => "/tenants/acme/users/42?q=ruby&lang=en"
+```
+
+The expansion follows [RFC 6570](https://tools.ietf.org/html/rfc6570) for all operators
+(`+ # . / ; ? &` and the operator-less form), including prefix modifiers as well as list (`Array`)
+and map (`Hash`) values. Expanding in two or more steps produces exactly the same URI as expanding all
+values in one call, values already turned into literal URI text are never escaped again, and the final
+URI is recognized by the original pattern. Invalid values raise `Mustermann::ExpandError` at the stage
+they are passed in.
+
 ## Syntax
 
 <table>

@@ -33,11 +33,11 @@ module Mustermann
         t(payload)
       end
 
-      translate :char do
+      translate :char do |*_args, **_options|
         t.pattern(t.escape(payload, also_escape: /[\/\?#\&\=%]/).gsub(?%, "%%"))
       end
 
-      translate :separator do
+      translate :separator do |*_args, **_options|
         t.pattern(payload.gsub(?%, "%%"))
       end
 

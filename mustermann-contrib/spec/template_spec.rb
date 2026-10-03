@@ -839,4 +839,224 @@ describe Mustermann::Template do
       example { pattern.peek_params("/foo bar")       .should be_nil }
     end
   end
+
+  describe :partial_expand do
+    def partially(pattern, **values)
+      Mustermann::Template.new(pattern).partial_expand(values)
+    end
+
+    def round_trip(pattern, first, second)
+      original = Mustermann::Template.new(pattern)
+      partial  = original.partial_expand(first)
+      final    = partial.expand(second)
+      full     = original.expand(**first, **second)
+      [partial, final, full, original === final]
+    end
+
+    example { Mustermann::Template.new('/{a}').should respond_to(:partial_expand) }
+
+    context 'return value' do
+      subject(:partial) { partially('/{a}/{b}', a: 'foo') }
+
+      example { partial.should be_a(Mustermann::Template) }
+      example { partial.to_s.should be == '/foo/{b}' }
+      example { partial.expand(b: 'bar').should be == '/foo/bar' }
+    end
+
+    context 'string keys' do
+      example { partially('/{a}/{b}', 'a' => 'foo').to_s.should be == '/foo/{b}' }
+    end
+
+    context 'operators' do
+      {
+        '{a,b}'   => ['1{,b}',       '1,p%2Fq'],
+        '{+a,b}'  => ['1,{+b}',      '1,p/q'],
+        '{#a,b}'  => ['#1,{+b}',     '#1,p/q'],
+        '{.a,b}'  => ['.1{.b}',      '.1.p%2Fq'],
+        '{/a,b}'  => ['/1{/b}',      '/1/p%2Fq'],
+        '{;a,b}'  => [';a=1{;b}',    ';a=1;b=p%2Fq'],
+        '{?a,b}'  => ['?a=1{&b}',    '?a=1&b=p%2Fq'],
+        '{&a,b}'  => ['&a=1{&b}',    '&a=1&b=p%2Fq']
+      }.each do |pattern, (partial_string, final_string)|
+        example "partially expands #{pattern}" do
+          partially(pattern, a: '1').to_s.should be == partial_string
+        end
+
+        example "two-step expansion of #{pattern} matches one-step expansion" do
+          _, final, full, recognized = round_trip(pattern, { a: '1' }, { b: 'p/q' })
+          final.should be == final_string
+          final.should be == full
+          recognized.should be == true
+        end
+      end
+
+      example 'keeps unknown query variables in order when none is known' do
+        partially('{?a,b}', c: 'x').to_s.should be == '{?a,b}'
+      end
+
+      example 'moves unknown query variables into a continuation expression' do
+        partially('{?a,b,c}', a: '1', c: '3').to_s.should be == '?a=1&c=3{&b}'
+      end
+
+      example 'expands the first known query variable with a ? prefix' do
+        partial = partially('{?a,b}', b: '2')
+        partial.to_s.should be == '?b=2{&a}'
+        partial.expand(a: '1').should be == '?b=2&a=1'
+      end
+
+      example 'treats nil values as unknown' do
+        partially('{a,b}', a: nil).to_s.should be == '{a,b}'
+      end
+
+      example 'supports the semicolon operator without a value' do
+        partially('{;a,b}', a: '').to_s.should be == ';a{;b}'
+      end
+    end
+
+    context 'prefix modifier' do
+      example { partially('{x:3}', x: 'hello world').to_s.should be == 'hel' }
+    end
+
+    context 'list expansion' do
+      example do
+        partially('{/list*}', list: ['a', 'b/c', 'd e']).to_s.
+          should be == '/a/b%2Fc/d%20e'
+      end
+
+      example 'expands a non-exploded list with commas' do
+        Mustermann::Template.new('{list}').expand(list: %w[a b]).should be == 'a,b'
+      end
+
+      example 'expands an object responding to to_ary as a list' do
+        list = Class.new do
+          def to_ary = ['a', 'b']
+        end.new
+        Mustermann::Template.new('{/list*}').expand(list: list).should be == '/a/b'
+      end
+
+      example do
+        partial, final, full, recognized = round_trip('{/list*,x}',
+          { list: ['a', 'b/c'] }, { x: 'z' })
+        partial.to_s.should be == '/a/b%2Fc{/x}'
+        final.should be == '/a/b%2Fc/z'
+        final.should be == full
+        recognized.should be == true
+      end
+
+      [
+        ['{;list*,x}', ';list=a;list=b{;x}', ';list=a;list=b;x=z'],
+        ['{?list*,x}', '?list=a&list=b{&x}', '?list=a&list=b&x=z'],
+        ['{&list*,x}', '&list=a&list=b{&x}', '&list=a&list=b&x=z'],
+        ['{.list*,x}', '.a.b{.x}',           '.a.b.z']
+      ].each do |pattern, partial_string, final_string|
+        example "expands exploded lists for #{pattern}" do
+          partial, final, full, recognized = round_trip(pattern,
+            { list: %w[a b] }, { x: 'z' })
+          partial.to_s.should be == partial_string
+          final.should be == final_string
+          final.should be == full
+          recognized.should be == true
+        end
+      end
+    end
+
+    context 'map expansion' do
+      example do
+        partially('{?m*}', m: { 'k1' => 'v 1', 'k2' => 'a/b' }).to_s.
+          should be == '?m=k1=v%201&k2=a%2Fb'
+      end
+
+      example do
+        partially('{m}', m: { 'k1' => 'v1', 'k2' => 'a/b' }).to_s.
+          should be == 'k1,v1,k2,a%2Fb'
+      end
+
+      example do
+        partially('{/m*}', m: { 'a' => '1', 'b' => '2' }).to_s.
+          should be == '/a=1/b=2'
+      end
+    end
+
+    context 'multiple stages' do
+      example do
+        original = Mustermann::Template.new('/{a}/{b}/{c}{?d,e}')
+        first  = original.partial_expand(a: 'x/y')
+        second = first.partial_expand(b: 'z')
+        final  = second.expand(c: 'w', d: '1', e: '2')
+        full   = original.expand(a: 'x/y', b: 'z', c: 'w', d: '1', e: '2')
+        first.to_s.should  be == '/x%2Fy/{b}/{c}{?d,e}'
+        second.to_s.should be == '/x%2Fy/z/{c}{?d,e}'
+        final.should be == full
+        (original === final).should be == true
+      end
+    end
+
+    context 'reserved characters' do
+      example do
+        partial = partially('{+p}/{q}', p: 'a/b')
+        partial.to_s.should be == 'a/b/{q}'
+        partial.expand(q: 'c/d').should be == 'a/b/c%2Fd'
+      end
+
+      example 'does not re-escape literal text in a later expansion pass' do
+        partial = Mustermann::Template.new('{+a}/{b}').partial_expand(a: 'a?b&c=d')
+        partial.expand(b: 'x').should be == 'a?b&c=d/x'
+      end
+    end
+
+    context 'errors' do
+      example 'reports an invalid list entry as an expansion error' do
+        expect { partially('{list*}', list: [BasicObject.new]) }.
+          to raise_error(Mustermann::ExpandError)
+      end
+
+      example 'reports an invalid value at the partial expansion stage' do
+        expect { partially('/{a}/{b}', a: BasicObject.new) }.
+          to raise_error(Mustermann::ExpandError)
+      end
+
+      example 'reports an invalid value at the final expansion stage' do
+        partial = partially('/{a}/{b}', a: 'x')
+        expect { partial.expand(b: BasicObject.new) }.
+          to raise_error(Mustermann::ExpandError)
+      end
+
+      example 'raises when a value is still missing at final expansion' do
+        expect { partially('/{a}/{b}', a: 'x').expand({}) }.
+          to raise_error(Mustermann::ExpandError, /b/)
+      end
+    end
+
+    context 'no values' do
+      example { partially('/{a}/{b}').to_s.should be == '/{a}/{b}' }
+      example { partially('/{a}/{b}').should be_a(Mustermann::Template) }
+    end
+
+    context 'additional value behaviors on direct expansion' do
+      subject(:pattern) { Mustermann::Template.new('/{a}{?b}') }
+
+      example 'omits unknown query variables with :ignore' do
+        pattern.expand(:ignore, a: 'x', c: 'z').should be == '/x'
+      end
+
+      example 'appends extra values with :append' do
+        pattern.expand(:append, a: 'x', c: 'hello world').
+          should be == '/x?c=hello%20world'
+      end
+
+      example 'joins extra values with an ampersand when a query exists' do
+        pattern.expand(:append, a: 'x', b: 'y', c: 'z').
+          should be == '/x?b=y&c=z'
+      end
+
+      example 'escapes reserved characters in appended values' do
+        pattern.expand(:append, a: 'x', path: 'a/b?c&d=e').
+          should be == '/x?path=a%2Fb%3Fc%26d%3De'
+      end
+
+      example 'raises on an unknown behavior' do
+        expect { pattern.expand(:bogus, a: 'x') }.to raise_error(ArgumentError)
+      end
+    end
+  end
 end

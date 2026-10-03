@@ -89,7 +89,8 @@ module Mustermann
         # Operators available for expressions.
         # @!visibility private
         OPERATORS ||= {
-          nil => Operator.new(?,, false, false, false), ?+  => Operator.new(?,, true,  false, false),
+          nil => Operator.new(?,, false, false, false), ?,  => Operator.new(?,, false, false, false),
+          ?+  => Operator.new(?,, true,  false, false),
           ?#  => Operator.new(?,, true,  ?#,    false), ?.  => Operator.new(?., false, ?.,    false),
           ?/  => Operator.new(?/, false, ?/,    false), ?;  => Operator.new(?;, false, ?;,    true),
           ??  => Operator.new(?&, false, ??,    true),  ?&  => Operator.new(?&, false, ?&,    true)
