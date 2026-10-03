@@ -91,6 +91,33 @@ class Net::HTTPGenericRequest
   #
   attr_reader :decode_content
 
+  # Returns the Proc called when an informational (1xx) response is received
+  # before the final response, or +nil+ if none is set; see #informational_response=.
+  attr_reader :informational_response
+
+  # Sets a Proc (or other object responding to +call+) to invoke for each
+  # informational (1xx) response received before the final response:
+  #
+  #   req = Net::HTTP::Get.new(uri)
+  #   req.informational_response = -> (res) {
+  #     puts res.code
+  #     puts res['Link']
+  #   }
+  #
+  # Each informational response (for example a 103 Early Hints response) is
+  # passed to the callable separately; they are never merged with each other
+  # and are never returned as the final response of Net::HTTP#request. A 101
+  # (Switching Protocols) response is not delivered to the callable: it is
+  # returned as the final response because it switches the protocol on the
+  # connection.
+  #
+  # If the callable raises an exception, the connection is closed (and not
+  # reused for a subsequent request).
+  def informational_response=(proc)
+    raise ArgumentError, "respond_to?(:call) expected" unless proc.nil? || proc.respond_to?(:call)
+    @informational_response = proc
+  end
+
   # Returns a string representation of the request:
   #
   #   Net::HTTP::Post.new(uri).inspect # => "#<Net::HTTP::Post POST>"
@@ -411,9 +438,28 @@ class Net::HTTPGenericRequest
   def wait_for_continue(sock, ver)
     if ver >= '1.1' and @header['expect'] and
         @header['expect'].include?('100-continue')
-      if sock.io.to_io.wait_readable(sock.continue_timeout)
+      informational_count = 0
+      while sock.io.to_io.wait_readable(sock.continue_timeout)
         res = Net::HTTPResponse.read_new(sock)
-        unless res.kind_of?(Net::HTTPContinue)
+        case res
+        when Net::HTTPSwitchProtocol
+          # A 101 (Switching Protocols) response switches the protocol on this
+          # connection, so it is the final response for this request.
+          throw :response, res
+        when Net::HTTPContinue
+          # The request body may now be sent; stop waiting. A 100 Continue
+          # response controls body sending and is not reported to the
+          # informational response callback.
+          return
+        when Net::HTTPInformation
+          # Other informational responses (for example a 103 Early Hints
+          # response) are reported individually; keep waiting for the
+          # 100 Continue response.
+          informational_count += 1
+          raise Net::HTTPBadResponse, 'too many informational responses' if
+            informational_count > Net::HTTPResponse::MAX_INFORMATIONAL_RESPONSES
+          @informational_response&.call(res)
+        else
           res.decode_content = @decode_content
           throw :response, res
         end

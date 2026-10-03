@@ -2449,6 +2449,13 @@ module Net   #:nodoc:
     #
     #   #<Net::HTTPOK 200 OK readbody=false>
     #
+    # Informational (1xx) responses received before the final response are
+    # not returned by this method. If +req+ has an
+    # Net::HTTPGenericRequest#informational_response callable set, that
+    # callable is invoked once for each informational response (for example
+    # each 103 Early Hints response), with separate header fields. A 101
+    # (Switching Protocols) response is returned as the final response.
+    #
     def request(req, body = nil, &block)  # :yield: +response+
       unless started?
         start {
@@ -2498,17 +2505,30 @@ module Net   #:nodoc:
           end
 
           informational_count = 0
-          begin
+          loop do
             res = HTTPResponse.read_new(@socket)
             res.decode_content = req.decode_content
             res.body_encoding = @response_body_encoding
             res.ignore_eof = @ignore_eof
-            if res.kind_of?(HTTPInformation)
-              informational_count += 1
-              raise HTTPBadResponse, 'too many informational responses' if
-                informational_count > HTTPResponse::MAX_INFORMATIONAL_RESPONSES
-            end
-          end while res.kind_of?(HTTPInformation)
+            break unless res.kind_of?(HTTPInformation)
+
+            informational_count += 1
+            raise HTTPBadResponse, 'too many informational responses' if
+              informational_count > HTTPResponse::MAX_INFORMATIONAL_RESPONSES
+
+            # A 101 (Switching Protocols) response switches the protocol on
+            # this connection, so it is the final response for this request
+            # and must not be discarded or passed to the informational
+            # response callback.
+            break if res.kind_of?(HTTPSwitchProtocol)
+
+            # A 100 Continue response controls request body sending (see
+            # continue_timeout and the Expect: 100-continue handling); it is
+            # not an informational response to report.
+            next if res.kind_of?(HTTPContinue)
+
+            req.informational_response&.call(res)
+          end
 
           res.uri = req.uri
 
@@ -2574,6 +2594,11 @@ module Net   #:nodoc:
       @last_communicated = nil
       if @socket.closed?
         debug 'Conn socket closed'
+      elsif res.kind_of?(HTTPSwitchProtocol)
+        # The protocol on this connection has been switched, so it can no
+        # longer be used for further HTTP requests.
+        debug 'Conn close because of protocol switch'
+        @socket.close
       elsif not res.body and @close_on_empty_response
         debug 'Conn close'
         @socket.close

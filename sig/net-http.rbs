@@ -2148,6 +2148,18 @@ module Net
     #
     attr_reader decode_content: bool
 
+    # <!-- rdoc-file=lib/net/http/generic_request.rb -->
+    # Returns the Proc called when an informational (1xx) response is received
+    # before the final response, or `nil` if none is set.
+    #
+    attr_reader informational_response: (^(HTTPResponse) -> untyped) | nil
+
+    # <!-- rdoc-file=lib/net/http/generic_request.rb -->
+    # Sets a callable invoked for each informational (1xx) response received
+    # before the final response.
+    #
+    def informational_response=: ((^(HTTPResponse) -> untyped) | nil proc) -> ((^(HTTPResponse) -> untyped) | nil)
+
     # <!--
     #   rdoc-file=lib/net/http/generic_request.rb
     #   - inspect()

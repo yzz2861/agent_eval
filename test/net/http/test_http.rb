@@ -1151,23 +1151,40 @@ class TestNetHTTPSwitchingProtocols < Test::Unit::TestCase
     @debug = StringIO.new('')
   end
 
-  def mount_proc(&block)
-    @server.mount('/continue', block.to_proc)
-  end
+  # A 101 (Switching Protocols) response switches the protocol on the
+  # connection, so it must be returned as the final response (rather than
+  # being discarded like other 1xx responses), and it must not be passed to
+  # the informational response callback.
+  def test_switching_protocols_is_final_response
+    TCPServer.open('127.0.0.1', 0) {|server|
+      port = server.addr[1]
+      server_thread = Thread.new do
+        client = server.accept
+        client.gets # request line
+        while (line = client.gets)
+          break if line.chomp.empty? # end of request headers
+        end
+        client.write "HTTP/1.1 101 Switching Protocols\r\n"
+        client.write "Upgrade: websocket\r\n"
+        client.write "Connection: Upgrade\r\n\r\n"
+        client.write "websocket-data"
+        client.close
+      end
 
-  def test_info
-    mount_proc {|req, res|
-      req.instance_variable_get(:@socket) << "HTTP/1.1 101 Switching Protocols\r\n\r\n"
-      res.body = req.query['body']
+      informational = []
+      http = Net::HTTP.new('127.0.0.1', port)
+      req = Net::HTTP::Get.new('/')
+      req.informational_response = ->(res) { informational << res }
+      http.start do |session|
+        res = session.request(req)
+        assert_kind_of Net::HTTPSwitchProtocol, res
+        assert_equal '101', res.code
+        assert_equal 'websocket', res['Upgrade']
+        assert_predicate session.instance_variable_get(:@socket), :closed?
+      end
+      assert_equal [], informational
+      server_thread.join
     }
-    start {|http|
-      http.continue_timeout = 0.2
-      http.request_post('/continue', 'body=BODY',
-                        'content-type' => 'application/x-www-form-urlencoded') {|res|
-        assert_equal('BODY', res.read_body)
-      }
-    }
-    assert_match(/HTTP\/1.1 101 Switching Protocols/, @debug.string)
   end
 end
 
@@ -1210,6 +1227,174 @@ class TestNetHTTPInformationalResponses < Test::Unit::TestCase
         http.get('/info')
       }
     }
+  end
+end
+
+class TestNetHTTPInformationalResponseCallback < Test::Unit::TestCase
+
+  InfoResponseError = Class.new(StandardError)
+
+  def start_raw_server(&handler)
+    server = TCPServer.open('127.0.0.1', 0)
+    port = server.addr[1]
+    thread = Thread.new do
+      loop do
+        client = server.accept
+        begin
+          handler.call(client)
+        ensure
+          client.close unless client.closed?
+        end
+      end
+    rescue IOError
+    end
+    http = Net::HTTP.new('127.0.0.1', port)
+    http.read_timeout = 5
+    http.start
+    return http, server, thread
+  end
+
+  def read_request(client)
+    request = +''
+    while (line = client.gets)
+      request << line
+      break if line == "\r\n"
+    end
+    request
+  end
+
+  def test_each_informational_response_is_passed_separately
+    http, server, thread = start_raw_server do |client|
+      read_request(client)
+      client.write "HTTP/1.1 103 Early Hints\r\n"
+      client.write "Link: </style.css>; rel=preload; as=style\r\n"
+      client.write "X-Hint-Num: 1\r\n\r\n"
+      client.write "HTTP/1.1 103 Early Hints\r\n"
+      client.write "Link: </script.js>; rel=preload; as=script\r\n"
+      client.write "X-Hint-Num: 2\r\n\r\n"
+      client.write "HTTP/1.1 200 OK\r\n"
+      client.write "Content-Length: 4\r\n\r\n"
+      client.write "BODY"
+    end
+
+    received = []
+    req = Net::HTTP::Get.new('/')
+    req.informational_response = ->(res) { received << [res.code, res.to_hash.dup] }
+    res = http.request(req)
+
+    assert_equal '200', res.code
+    assert_equal 'BODY', res.body
+    assert_equal 2, received.length
+    received.each do |code, _headers|
+      assert_equal '103', code
+    end
+    assert_equal ['</style.css>; rel=preload; as=style'], received[0][1]['link']
+    assert_equal ['1'], received[0][1]['x-hint-num']
+    assert_equal ['</script.js>; rel=preload; as=script'], received[1][1]['link']
+    assert_equal ['2'], received[1][1]['x-hint-num']
+  ensure
+    http&.finish rescue nil
+    server&.close
+    thread&.join
+  end
+
+  def test_informational_responses_are_not_merged
+    http, server, thread = start_raw_server do |client|
+      read_request(client)
+      client.write "HTTP/1.1 103 Early Hints\r\n"
+      client.write "Link: </a>; rel=preload\r\n\r\n"
+      client.write "HTTP/1.1 103 Early Hints\r\n"
+      client.write "Link: </b>; rel=preload\r\n\r\n"
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nBODY"
+    end
+
+    link_values = []
+    req = Net::HTTP::Get.new('/')
+    req.informational_response = ->(res) { link_values << res.get_fields('Link') }
+    res = http.request(req)
+
+    assert_equal '200', res.code
+    assert_equal [['</a>; rel=preload'], ['</b>; rel=preload']], link_values
+  ensure
+    http&.finish rescue nil
+    server&.close
+    thread&.join
+  end
+
+  def test_callback_exception_closes_connection
+    http, server, thread = start_raw_server do |client|
+      read_request(client)
+      client.write "HTTP/1.1 103 Early Hints\r\n"
+      client.write "Link: </a>; rel=preload\r\n\r\n"
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nBODY"
+    end
+
+    req = Net::HTTP::Get.new('/')
+    req.informational_response = ->(_res) { raise InfoResponseError, 'boom' }
+    assert_raise(InfoResponseError) { http.request(req) }
+    assert_predicate http.instance_variable_get(:@socket), :closed?
+  ensure
+    http&.finish rescue nil
+    server&.close
+    thread&.join
+  end
+
+  def test_callback_during_continue_wait
+    http, server, thread = start_raw_server do |client|
+      read_request(client)
+      client.write "HTTP/1.1 103 Early Hints\r\n"
+      client.write "Link: </a>; rel=preload\r\n\r\n"
+      client.write "HTTP/1.1 100 Continue\r\n\r\n"
+      body = client.read(4)
+      client.write "HTTP/1.1 200 OK\r\n"
+      client.write "Content-Length: #{body.bytesize}\r\n\r\n"
+      client.write body
+    end
+
+    hints = []
+    req = Net::HTTP::Post.new('/', {'expect' => '100-continue'})
+    req.informational_response = ->(res) { hints << res }
+    http.continue_timeout = 2
+    res = http.request(req, 'BODY')
+
+    assert_equal '200', res.code
+    assert_equal 'BODY', res.body
+    assert_equal 1, hints.length
+    assert_kind_of Net::HTTPEarlyHints, hints.first
+    assert_equal '103', hints.first.code
+    assert_equal ['</a>; rel=preload'], hints.first.get_fields('Link')
+  ensure
+    http&.finish rescue nil
+    server&.close
+    thread&.join
+  end
+
+  def test_continue_wait_callback_exception_closes_connection
+    http, server, thread = start_raw_server do |client|
+      read_request(client)
+      client.write "HTTP/1.1 103 Early Hints\r\n"
+      client.write "Link: </a>; rel=preload\r\n\r\n"
+      client.write "HTTP/1.1 100 Continue\r\n\r\n"
+      client.read(4)
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nBODY"
+    end
+
+    req = Net::HTTP::Post.new('/', {'expect' => '100-continue'})
+    req.informational_response = ->(_res) { raise InfoResponseError, 'boom' }
+    http.continue_timeout = 2
+    assert_raise(InfoResponseError) { http.request(req, 'BODY') }
+    assert_predicate http.instance_variable_get(:@socket), :closed?
+  ensure
+    http&.finish rescue nil
+    server&.close
+    thread&.join
+  end
+
+  def test_setting_invalid_callback_raises
+    req = Net::HTTP::Get.new('/')
+    assert_raise(ArgumentError) { req.informational_response = 42 }
+    assert_nothing_raised { req.informational_response = nil }
+    assert_nil req.informational_response
   end
 end
 
