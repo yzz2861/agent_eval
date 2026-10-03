@@ -8,6 +8,14 @@ module Net
   end
 
   # <!-- rdoc-file=lib/net/http.rb -->
+  # Raised when the address admission callback (see Net::HTTP#address_admission=)
+  # rejects every resolved candidate address for a connection, so that no
+  # connection is attempted.
+  #
+  class HTTPAddressNotAllowed < StandardError
+  end
+
+  # <!-- rdoc-file=lib/net/http.rb -->
   # Class Net::HTTP provides a rich library that implements the client in a
   # client-server model that uses the HTTP request-response protocol. For
   # information about HTTP, see:
@@ -1180,6 +1188,18 @@ module Net
     # The IP address may not be set if the session has been started.
     #
     attr_accessor ipaddr: String?
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets the resolver used to resolve the connection hostname into candidate IP
+    # addresses before dialing.
+    #
+    attr_accessor resolver: ^(String host) -> Array[String]?
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets the address admission callback that decides which resolved IP addresses
+    # may be dialed.
+    #
+    attr_accessor address_admission: ^(String addr) -> untyped
 
     # <!-- rdoc-file=lib/net/http.rb -->
     # Sets or returns the numeric (Integer or Float) number of seconds to wait for a

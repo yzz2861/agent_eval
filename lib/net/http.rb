@@ -30,6 +30,10 @@ module Net   #:nodoc:
   # :stopdoc:
   class HTTPBadResponse < StandardError; end
   class HTTPHeaderSyntaxError < StandardError; end
+  # Raised when the address admission callback (see
+  # Net::HTTP#address_admission=) rejects every resolved candidate
+  # address for a connection, so that no connection is attempted.
+  class HTTPAddressNotAllowed < StandardError; end
   # :startdoc:
 
   # \Class \Net::HTTP provides a rich library that implements the client
@@ -486,6 +490,10 @@ module Net   #:nodoc:
   #
   # === Connections
   #
+  # - {:address_admission}[rdoc-ref:Net::HTTP#address_admission]:
+  #   Returns the address admission callback.
+  # - {#address_admission=}[rdoc-ref:Net::HTTP#address_admission=]:
+  #   Sets the address admission callback.
   # - {:continue_timeout}[rdoc-ref:Net::HTTP#continue_timeout]:
   #   Returns the continue timeout.
   # - {#continue_timeout=}[rdoc-ref:Net::HTTP#continue_timeout=]:
@@ -506,6 +514,10 @@ module Net   #:nodoc:
   #   Returns the open timeout.
   # - {:read_timeout=}[rdoc-ref:Net::HTTP#read_timeout=]:
   #   Sets the read timeout.
+  # - {:resolver}[rdoc-ref:Net::HTTP#resolver]:
+  #   Returns the resolver.
+  # - {#resolver=}[rdoc-ref:Net::HTTP#resolver=]:
+  #   Sets the resolver.
   # - {:ssl_timeout}[rdoc-ref:Net::HTTP#ssl_timeout]:
   #   Returns the ssl timeout.
   # - {:ssl_timeout=}[rdoc-ref:Net::HTTP#ssl_timeout=]:
@@ -1024,6 +1036,7 @@ module Net   #:nodoc:
     #
     # The keys may include:
     #
+    # - #address_admission
     # - #ca_file
     # - #ca_path
     # - #cert
@@ -1035,6 +1048,7 @@ module Net   #:nodoc:
     # - #key
     # - #open_timeout
     # - #read_timeout
+    # - #resolver
     # - #ssl_timeout
     # - #ssl_version
     # - +use_ssl+ (calls #use_ssl=)
@@ -1167,6 +1181,8 @@ module Net   #:nodoc:
       @address = address
       @port    = (port || HTTP.default_port)
       @ipaddr = nil
+      @resolver = nil
+      @address_admission = nil
       @local_host = nil
       @local_port = nil
       @curr_http_version = HTTPVersion
@@ -1366,6 +1382,61 @@ module Net   #:nodoc:
       raise IOError, "ipaddr value changed, but session already started" if started?
       @ipaddr = addr
     end
+
+    # Sets the resolver used to resolve the connection hostname into
+    # candidate IP addresses before dialing.
+    #
+    # The value must respond to +call+, accept a hostname string,
+    # and return an array of IP address strings:
+    #
+    #   http.resolver = ->(host) { Addrinfo.getaddrinfo(host, nil).map(&:ip_address) }
+    #
+    # When a resolver (or an address admission callback, see
+    # #address_admission=) is set, \Net::HTTP resolves the hostname
+    # itself and dials the resulting IP addresses directly, so that
+    # every concrete candidate address can be checked by the admission
+    # callback before any connection attempt.
+    #
+    # The logical host (#address) keeps its identity for the HTTP
+    # +Host+ header, TLS SNI, and certificate hostname verification;
+    # dialing a resolved IP address does not weaken certificate
+    # verification.
+    #
+    # Resolution runs on every connect, including reconnects, so a
+    # changed DNS answer is checked again.
+    #
+    # When a proxy is used, the resolver applies to the *proxy*
+    # connection, which is the only TCP connection \Net::HTTP opens;
+    # the origin server is resolved by the proxy and its address is
+    # not seen or checked here.
+    #
+    # By default the system resolver is used.
+    attr_accessor :resolver
+
+    # Sets the address admission callback that decides which resolved
+    # IP addresses may be dialed.
+    #
+    # The value must respond to +call+ and accept a candidate IP
+    # address string; only candidates for which it returns a truthy
+    # value are ever dialed:
+    #
+    #   http.address_admission = ->(ip) { !IPAddr.new(ip).private? }
+    #
+    # The callback receives each concrete candidate address produced by
+    # the resolver (see #resolver=) before any connection attempt;
+    # a rejected address is never dialed. If no candidate is admitted,
+    # Net::HTTPAddressNotAllowed is raised and no connection is
+    # attempted.
+    #
+    # The check runs on every connect, including reconnects.
+    #
+    # When a proxy is used, the callback checks the *proxy* connection
+    # address, which is the only TCP connection \Net::HTTP opens;
+    # the origin server is resolved by the proxy and its address is
+    # not seen or checked here.
+    #
+    # By default every resolved address is admitted.
+    attr_accessor :address_admission
 
     # Sets or returns the numeric (\Integer or \Float) number of seconds
     # to wait for a connection to open;
@@ -1789,6 +1860,15 @@ module Net   #:nodoc:
     private_constant :TCP_SOCKET_NEW_HAS_OPEN_TIMEOUT
 
     def timeouted_connect(conn_addr, conn_port)
+      if @resolver || @address_admission
+        connect_to_admitted_address(conn_addr, conn_port)
+      else
+        open_tcp_socket(conn_addr, conn_port)
+      end
+    end
+    private :timeouted_connect
+
+    def open_tcp_socket(conn_addr, conn_port)
       if TCP_SOCKET_NEW_HAS_OPEN_TIMEOUT
         TCPSocket.open(conn_addr, conn_port, @local_host, @local_port, open_timeout: @open_timeout)
       else
@@ -1797,7 +1877,43 @@ module Net   #:nodoc:
         }
       end
     end
-    private :timeouted_connect
+    private :open_tcp_socket
+
+    DEFAULT_RESOLVER = ->(host) {
+      Addrinfo.getaddrinfo(host, nil, :UNSPEC, :STREAM).map {|addrinfo| addrinfo.ip_address }.uniq
+    }
+    private_constant :DEFAULT_RESOLVER
+
+    # Resolves +conn_addr+ into candidate IP addresses and dials only
+    # the candidates admitted by the address admission callback,
+    # in resolver order.
+    def connect_to_admitted_address(conn_addr, conn_port)
+      candidates = Array((@resolver || DEFAULT_RESOLVER).call(conn_addr))
+      raise SocketError, "no addresses resolved for #{conn_addr}" if candidates.empty?
+
+      admitted = candidates.select {|addr| address_admitted?(addr) }
+      if admitted.empty?
+        raise Net::HTTPAddressNotAllowed,
+          "connection to #{conn_addr}:#{conn_port} rejected: no resolved address admitted"
+      end
+
+      last_error = nil
+      admitted.each do |addr|
+        begin
+          debug "connecting to admitted address #{addr}:#{conn_port}..."
+          return open_tcp_socket(addr, conn_port)
+        rescue SystemCallError, SocketError => e
+          last_error = e
+        end
+      end
+      raise last_error
+    end
+    private :connect_to_admitted_address
+
+    def address_admitted?(addr)
+      @address_admission.nil? || @address_admission.call(addr)
+    end
+    private :address_admitted?
 
     def on_connect
     end
