@@ -121,6 +121,42 @@ Or install it yourself as:
     header['Set-Cookie'] = cookie2.set_cookie_value
 
 
+## Public suffix rules
+
+A cookie jar checks the domain of every domain cookie against a
+public suffix rule provider, and refuses cookies scoped to a public
+suffix.  The provider is injectable, which is useful when the rules
+change over time or a private deployment needs internal suffixes:
+
+    # Any object responding to public_suffix?(hostname) works.
+    rules_a = HTTP::Cookie::PublicSuffixList::InMemory.new(%w[com internal])
+    jar = HTTP::CookieJar.new(public_suffix_list: rules_a)
+
+    jar.parse('session=abc; Domain=apps.internal; Path=/',
+              'http://www.apps.internal/')   # accepted: ordinary domain
+
+    # "apps.internal" is designated a public suffix:
+    rules_b = HTTP::Cookie::PublicSuffixList::InMemory.new(%w[com internal apps.internal])
+    report = jar.replace_public_suffix_list(rules_b)
+
+    # Existing domain cookies are re-adjudicated, not just new writes.
+    # Host-only cookies are kept; domain cookies on a public suffix
+    # are removed, and the reason of each decision stays queryable.
+    report.removed            #=> [#<HTTP::Cookie session=abc ...>]
+    report.reason_for(cookie) #=> :public_suffix, :host_only,
+                              #    :registrable_domain or :provider_error
+    jar.last_recheck          #=> the same report
+    jar.rules_version         #=> 1 (incremented on each replacement)
+
+The swap and the recheck are atomic with respect to other jar
+operations, so concurrent reads always see a consistent rules
+version.  If the provider raises, the jar fails closed: a lookup
+failure is treated as "public suffix" and never defaults to allowing
+the cookie.  The default provider
+(HTTP::Cookie::PublicSuffixList::DomainNameList) derives the rules
+from the +domain_name+ gem, preserving the historic behavior.
+
+
 ## Incompatibilities with Mechanize::Cookie/CookieJar
 
 There are several incompatibilities between

@@ -12,6 +12,69 @@ class HTTP::CookieJar
 
   attr_reader :store
 
+  # The outcome of re-adjudicating the jar's contents after the
+  # public suffix rules were replaced (see
+  # #replace_public_suffix_list).
+  #
+  # Every cookie that was examined is recorded with an action
+  # (+:kept+ or +:removed+) and a reason:
+  #
+  # [:+:host_only+]
+  #   Kept.  Host-only cookies are bound to an exact host and are
+  #   never scoped by suffix rules.
+  # [:+:registrable_domain+]
+  #   Kept.  The cookie's domain is still a registrable domain under
+  #   the current rules.
+  # [:+:public_suffix+]
+  #   Removed.  The cookie's domain has become a public suffix.
+  # [:+:provider_error+]
+  #   Removed.  The rule provider failed, and a failure is never
+  #   defaulted to allowing a public suffix (fail closed).
+  class RecheckReport
+    Entry = Struct.new(:cookie, :action, :reason)
+
+    include Enumerable
+
+    # The rules version (HTTP::CookieJar#rules_version) this recheck
+    # was performed under.
+    attr_accessor :rules_version
+
+    def initialize
+      @entries = []
+    end
+
+    def record(cookie, action, reason) # :nodoc:
+      @entries << Entry.new(cookie, action, reason)
+      self
+    end
+
+    def each(&block)
+      @entries.each(&block)
+    end
+
+    # Cookies that survived the recheck.
+    def kept
+      select { |entry| entry.action == :kept }.map(&:cookie)
+    end
+
+    # Cookies that were removed by the recheck.
+    def removed
+      select { |entry| entry.action == :removed }.map(&:cookie)
+    end
+
+    # The reason a given cookie was kept or removed, or nil if the
+    # cookie was not part of the recheck.
+    def reason_for(cookie)
+      if (entry = find { |e| e.cookie.equal?(cookie) })
+        entry.reason
+      end
+    end
+
+    def empty?
+      @entries.empty?
+    end
+  end
+
   def get_impl(base, value, *args)
     case value
     when base
@@ -49,18 +112,70 @@ class HTTP::CookieJar
   # specified store class.  For example, the `:mozilla`
   # (HTTP::CookieJar::MozillaStore) store class requires a `:filename`
   # option.  See individual store classes for details.
+  #
+  # :public_suffix_list
+  # : A rule provider used to decide whether the domain of a domain
+  # cookie is a public suffix.  Any object responding to
+  # `public_suffix?(hostname)` is accepted; see
+  # HTTP::Cookie::PublicSuffixList.  Defaults to
+  # HTTP::Cookie::PublicSuffixList.default.  The provider can be
+  # replaced later with #replace_public_suffix_list, which also
+  # re-adjudicates the cookies already in the jar.
   def initialize(options = nil)
     opthash = {
       :store => :hash,
     }
     opthash.update(options) if options
+    @rules_lock = Mutex.new
+    @public_suffix_list = opthash[:public_suffix_list] || HTTP::Cookie::PublicSuffixList.default
+    validate_public_suffix_list!(@public_suffix_list)
+    @rules_version = 0
+    @last_recheck = nil
     @store = get_impl(AbstractStore, opthash[:store], opthash)
   end
 
   # The copy constructor.  Not all backend store classes support cloning.
   def initialize_copy(other)
+    @rules_lock = Mutex.new
     @store = other.instance_eval { @store.dup }
   end
+
+  # The public suffix rule provider currently in effect.
+  attr_reader :public_suffix_list
+
+  # The version of the suffix rules currently in effect.  It starts
+  # at 0 and is incremented every time the provider is replaced.
+  attr_reader :rules_version
+
+  # The report of the most recent rules recheck, or nil if the
+  # provider has never been replaced.
+  attr_reader :last_recheck
+
+  # Replaces the public suffix rule provider and re-adjudicates every
+  # cookie already in the jar against the new rules, not just future
+  # writes.  Domain cookies whose domain is now a public suffix are
+  # removed; host-only cookies are left untouched.  Returns a
+  # RecheckReport (also available as #last_recheck) from which the
+  # fate and reason of each cookie can be queried.
+  #
+  # The swap and the recheck are performed atomically with respect to
+  # other jar operations: reads such as #each and #cookies either see
+  # the old rules with the old contents or the new rules with the
+  # rechecked contents, never a mixture.
+  def replace_public_suffix_list(provider)
+    provider ||= HTTP::Cookie::PublicSuffixList.default
+    validate_public_suffix_list!(provider)
+    report = nil
+    @rules_lock.synchronize do
+      @public_suffix_list = provider
+      @rules_version += 1
+      report = recheck_domain_cookies
+      report.rules_version = @rules_version
+    end
+    @last_recheck = report
+    report
+  end
+  alias public_suffix_list= replace_public_suffix_list
 
   # Adds a cookie to the jar if it is acceptable, and returns self in
   # any case.  A given cookie must have domain and path attributes
@@ -86,12 +201,11 @@ class HTTP::CookieJar
   #       jar.origin = origin
   #       jar.add(cookie)     # acceptance check is performed
   def add(cookie)
-    @store.add(cookie) if
-      begin
-        cookie.acceptable?
-      rescue RuntimeError => e
-        raise ArgumentError, e.message
+    @rules_lock.synchronize do
+      if acceptable_under_rules?(cookie)
+        @store.add(cookie)
       end
+    end
     self
   end
   alias << add
@@ -103,7 +217,7 @@ class HTTP::CookieJar
   # depends on the store used.  See individual store classes for that
   # matter.
   def delete(cookie)
-    @store.delete(cookie)
+    @rules_lock.synchronize { @store.delete(cookie) }
     self
   end
 
@@ -121,7 +235,7 @@ class HTTP::CookieJar
       each(url) { return false }
       return true
     else
-      @store.empty?
+      @rules_lock.synchronize { @store.empty? }
     end
   end
 
@@ -143,7 +257,15 @@ class HTTP::CookieJar
       return self unless URI::HTTP === uri && uri.host
     end
 
-    @store.each(uri, &block)
+    # Materialize under the rules lock so that a concurrent
+    # #replace_public_suffix_list cannot change the rule version in
+    # the middle of a read.
+    selected = @rules_lock.synchronize {
+      cookies = []
+      @store.each(uri) { |cookie| cookies << cookie }
+      cookies
+    }
+    selected.each(&block)
     self
   end
   include Enumerable
@@ -314,17 +436,71 @@ class HTTP::CookieJar
 
   # Clears the cookie jar and returns self.
   def clear
-    @store.clear
+    @rules_lock.synchronize { @store.clear }
     self
   end
 
   # Removes expired cookies and returns self.  If `session` is true,
   # all session cookies are removed as well.
   def cleanup(session = false)
-    @store.cleanup session
+    @rules_lock.synchronize { @store.cleanup(session) }
     self
+  end
+
+  private
+
+  def validate_public_suffix_list!(provider)
+    provider.respond_to?(:public_suffix?) or
+      raise ArgumentError, 'public suffix list provider must respond to #public_suffix?'
+  end
+
+  def acceptable_under_rules?(cookie)
+    acceptable = begin
+      cookie.acceptable?
+    rescue RuntimeError => e
+      raise ArgumentError, e.message
+    end
+    acceptable && !domain_cookie_on_public_suffix?(cookie)
+  end
+
+  # Fail closed: a rule lookup failure is treated as "public suffix"
+  # so that a domain cookie is never allowed by default.
+  def domain_cookie_on_public_suffix?(cookie)
+    return false unless cookie.for_domain?
+    domain = cookie.domain
+    return false if domain.nil? || domain.empty?
+    @public_suffix_list.public_suffix?(domain) ? true : false
+  rescue StandardError
+    true
+  end
+
+  # Must be called with @rules_lock held.
+  def recheck_domain_cookies
+    report = RecheckReport.new
+    removals = []
+    @store.each do |cookie|
+      if cookie.for_domain?
+        if (reason = domain_recheck_reason(cookie.domain))
+          report.record(cookie, :removed, reason)
+          removals << cookie
+        else
+          report.record(cookie, :kept, :registrable_domain)
+        end
+      else
+        report.record(cookie, :kept, :host_only)
+      end
+    end
+    removals.each { |cookie| @store.delete(cookie) }
+    report
+  end
+
+  def domain_recheck_reason(domain)
+    @public_suffix_list.public_suffix?(domain) ? :public_suffix : nil
+  rescue StandardError
+    :provider_error
   end
 end
 
 require 'http/cookie_jar/abstract_store'
 require 'http/cookie_jar/abstract_saver'
+require 'http/cookie/public_suffix_list'

@@ -1,3 +1,16 @@
+## Unreleased
+
+- Make the public suffix rules of a cookie jar injectable via the new
+  `:public_suffix_list` option and
+  `HTTP::CookieJar#replace_public_suffix_list`, which re-adjudicates
+  existing domain cookies (host-only cookies are unaffected) and
+  returns a queryable report of kept/removed cookies with reasons.
+  Rule provider failures fail closed instead of defaulting to
+  allowing a public suffix.  Ships with
+  `HTTP::Cookie::PublicSuffixList::DomainNameList` (default) and
+  `HTTP::Cookie::PublicSuffixList::InMemory` providers.
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)
