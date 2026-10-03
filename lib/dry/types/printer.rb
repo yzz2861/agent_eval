@@ -206,6 +206,7 @@ module Dry
         key_fn_str = ""
         type_fn_str = ""
         strict_str = ""
+        groups_str = ""
 
         strict_str = "strict " if options.delete(:strict)
 
@@ -222,10 +223,23 @@ module Dry
         end
 
         keys = options.delete(:keys)
+        options.delete(:key_groups)
+
+        unless schema.key_groups.empty?
+          groups = schema.key_groups.map { |group|
+            paths = group.members.map { |member|
+              formatted = member.map { |path| path.join(".") }
+              formatted.size == 1 ? formatted.first : "(#{formatted.join(" + ")})"
+            }.join(" | ")
+            check = group.check == :after_defaults ? "(after_defaults)" : ""
+            "#{group.kind}(#{paths})#{check}"
+          }.join(" ")
+          groups_str = "groups={#{groups}} "
+        end
 
         visit_options(options, schema.meta) do |opts|
           opts = "#{opts[1..]} " unless opts.empty?
-          schema_parameters = "#{key_fn_str}#{type_fn_str}#{strict_str}#{opts}"
+          schema_parameters = "#{key_fn_str}#{type_fn_str}#{strict_str}#{groups_str}#{opts}"
 
           header = "Schema<#{schema_parameters}keys={"
 

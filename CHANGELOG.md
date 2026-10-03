@@ -9,6 +9,15 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Schemas support key groups with `#exactly_one`, `#at_least_one` and
+  `#all_or_none`. Members are keys, fixed nested paths (e.g. `[:creds, :token]`)
+  or bundles of paths (e.g. `[:username, :password]`). Presence is checked
+  before defaults are evaluated by default; pass `check: :after_defaults` to
+  count default values. Missing keys and explicit `nil` values are treated as
+  distinct. Violations raise group-level `Dry::Types::KeyGroupError`s and are
+  reported alongside member type errors. Groups survive AST compilation,
+  `#try`, constructor wrappers and nested schemas.
+
 ### Changed
 
 ### Deprecated

@@ -28,6 +28,9 @@ module Dry
       # @return [Hash[Symbol, Dry::Types::Schema::Key]]
       attr_reader :name_key_map
 
+      # @return [Array[Dry::Types::Schema::KeyGroup]]
+      attr_reader :key_groups
+
       # @return [#call]
       attr_reader :transform_key
 
@@ -44,11 +47,61 @@ module Dry
           idx[key.name] = key
         end
 
+        raw_groups = options.fetch(:key_groups, EMPTY_ARRAY)
+        @key_groups = raw_groups.map { |group| KeyGroup.coerce(group) }
+        if @key_groups.empty?
+          options.delete(:key_groups)
+        else
+          options[:key_groups] = @key_groups
+        end
+
+        validate_key_groups!
+
         key_fn = options.fetch(:key_transform_fn, NO_TRANSFORM)
 
         @transform_key = ::Dry::Types::FnContainer[key_fn]
 
         super
+      end
+
+      # Groups of keys of which exactly one must be present
+      #
+      # Each member is a key name, a fixed nested path wrapped in an array
+      # (+[[:creds, :token]]+) or a bundle of keys/paths required together
+      # (+[:username, :password]+).
+      #
+      # @param paths [Array<Symbol, Array>] group members
+      # @param check [Symbol] +:before_defaults+ (default) or +:after_defaults+
+      #
+      # @return [Schema]
+      #
+      # @api public
+      def exactly_one(*paths, check: :before_defaults)
+        add_key_group(KeyGroup.new(:exactly_one, paths, check: check))
+      end
+
+      # Groups of keys of which at least one must be present
+      #
+      # @param paths (see #exactly_one)
+      # @param check (see #exactly_one)
+      #
+      # @return [Schema]
+      #
+      # @api public
+      def at_least_one(*paths, check: :before_defaults)
+        add_key_group(KeyGroup.new(:at_least_one, paths, check: check))
+      end
+
+      # Groups of keys that must all be present or all missing
+      #
+      # @param paths (see #exactly_one)
+      # @param check (see #exactly_one)
+      #
+      # @return [Schema]
+      #
+      # @api public
+      def all_or_none(*paths, check: :before_defaults)
+        add_key_group(KeyGroup.new(:all_or_none, paths, check: check))
       end
 
       # @param [Hash] hash
@@ -110,11 +163,17 @@ module Dry
             end
           end
 
+          group_errors = evaluate_key_groups(input, :before_defaults)
+          success &&= group_errors.empty?
+
           if output.size < keys.size
             resolve_missing_keys(output, options) do
               success = false
             end
           end
+
+          group_errors.concat(evaluate_key_groups(output, :after_defaults))
+          success &&= group_errors.empty?
 
           success &&= primitive?(output)
 
@@ -122,6 +181,7 @@ module Dry
             failure = nil
           else
             error = CoercionError.new("#{input} doesn't conform schema", meta: result)
+            error.group_errors = group_errors
             failure = failure(output, error)
           end
         else
@@ -148,7 +208,9 @@ module Dry
         [
           :schema,
           [keys.map { |key| key.to_ast(meta: meta) },
-           options.slice(:key_transform_fn, :type_transform_fn, :strict, :namespace),
+           options.slice(
+             :key_transform_fn, :type_transform_fn, :strict, :namespace, :key_groups
+           ).then { |opts| serialize_key_groups(opts) },
            meta_ast(meta)]
         ]
       end
@@ -273,7 +335,7 @@ module Dry
       #
       # @api public
       def lax
-        Lax.new(schema(keys.map(&:lax)))
+        Lax.new(schema(keys.map(&:lax)).with(key_groups: EMPTY_ARRAY))
       end
 
       # Merge given schema keys into current schema
@@ -294,7 +356,20 @@ module Dry
       #
       # @api public
       def clear
-        with(keys: EMPTY_ARRAY)
+        with(keys: EMPTY_ARRAY, key_groups: EMPTY_ARRAY)
+      end
+
+      # Build a hash with keys transformed by this schema's key transform
+      # without invoking any member constructors
+      #
+      # @api private
+      def transformed_input(input)
+        return input unless transform_keys?
+        return input unless input.is_a?(::Hash)
+
+        input.each_with_object({}) do |(raw_key, value), normalized|
+          normalized[@transform_key.(raw_key)] = value
+        end
       end
 
       private
@@ -318,6 +393,8 @@ module Dry
       # @return [Hash]
       def resolve_unsafe(hash, options = EMPTY_HASH)
         result = {}
+        aggregate = !key_groups.empty?
+        errors = []
 
         hash.each do |key, value|
           k = @transform_key.(key)
@@ -327,16 +404,41 @@ module Dry
             begin
               result[k] = type.call_unsafe(value)
             rescue ConstraintError => exception
-              raise SchemaError.new(type.name, value, exception.result)
+              error = SchemaError.new(type.name, value, exception.result)
+              raise error unless aggregate
+              errors << error
             rescue CoercionError => exception
-              raise SchemaError.new(type.name, value, exception.message)
+              error = SchemaError.new(type.name, value, exception.message)
+              raise error unless aggregate
+              errors << error
             end
           elsif strict?
             raise unexpected_keys(hash.keys)
           end
         end
 
-        resolve_missing_keys(result, options) if result.size < keys.size
+        before_errors = evaluate_key_groups(hash, :before_defaults)
+        after_errors = []
+
+        if aggregate
+          errors.concat(before_errors)
+
+          if result.size < keys.size
+            resolve_missing_keys(result, options) { |error| errors << error }
+          end
+
+          after_errors = evaluate_key_groups(result, :after_defaults)
+          errors.concat(after_errors)
+          raise_errors(errors)
+        else
+          raise before_errors.first unless before_errors.empty?
+
+          if result.size < keys.size
+            resolve_missing_keys(result, options) { |error| raise error }
+          end
+
+          raise after_errors.first unless after_errors.empty?
+        end
 
         result
       end
@@ -360,7 +462,13 @@ module Dry
           end
         end
 
-        resolve_missing_keys(result, options, &block) if result.size < keys.size
+        return yield(result) unless evaluate_key_groups(hash, :before_defaults).empty?
+
+        if result.size < keys.size
+          resolve_missing_keys(result, options) { return yield(result) }
+        end
+
+        return yield(result) unless evaluate_key_groups(result, :after_defaults).empty?
 
         result
       end
@@ -378,11 +486,8 @@ module Dry
           if key.default? && resolve_defaults
             hash[key.name] = key.call_unsafe(Undefined)
           elsif key.required? && !skip_missing
-            if block_given?
-              return yield
-            else
-              raise missing_key(key.name)
-            end
+            error = missing_key(key.name)
+            block_given? ? yield(error) : raise(error)
           end
         end
       end
@@ -395,6 +500,171 @@ module Dry
       def unexpected_keys(hash_keys)
         extra_keys = hash_keys.map(&transform_key) - name_key_map.keys
         UnknownKeysError.new(extra_keys)
+      end
+
+      # Raise the only error or a MultipleError aggregating all of them
+      #
+      # @api private
+      def raise_errors(errors)
+        return if errors.empty?
+
+        raise errors.first if errors.size == 1
+
+        raise MultipleError.new(errors)
+      end
+
+      # @return [Schema]
+      #
+      # @api private
+      def add_key_group(group)
+        validate_group_paths!(group)
+        with(key_groups: [*key_groups, group])
+      end
+
+      # Make sure every group references an existing fixed path
+      #
+      # @api private
+      def validate_key_groups!
+        key_groups.each { |group| validate_group_paths!(group) }
+      end
+
+      # @api private
+      def validate_group_paths!(group)
+        group.paths.each do |path|
+          validate_path!(path)
+        end
+      end
+
+      # @api private
+      def validate_path!(path)
+        schema = self
+
+        path.each_with_index do |segment, index|
+          key = schema.name_key_map[segment]
+
+          if key.nil?
+            raise ::ArgumentError,
+              "cannot define a group on #{path.inspect}: " \
+              "#{path[0..index].inspect} is not a key of the schema"
+          end
+
+          nested = unwrap_schema(key.type)
+
+          if index < path.size - 1 && nested.nil?
+            raise ::ArgumentError,
+              "cannot define a group on #{path.inspect}: " \
+              "#{path[0..index].inspect} is not a nested schema"
+          end
+
+          schema = nested
+        end
+      end
+
+      # Unwrap decorators until a Schema is found
+      #
+      # @api private
+      def unwrap_schema(type)
+        seen = {}
+
+        while type.respond_to?(:type) && !type.is_a?(Schema)
+          break if seen.key?(type.object_id)
+
+          seen[type.object_id] = true
+          type = type.type
+        end
+
+        type if type.is_a?(Schema)
+      end
+
+      # Evaluate groups assigned to a given phase against raw input
+      #
+      # @param input [Hash]
+      # @param moment [Symbol]
+      #
+      # @return [Array<KeyGroupError>]
+      #
+      # @api private
+      def evaluate_key_groups(input, moment)
+        key_groups.each_with_object([]) do |group, errors|
+          next unless group.check == moment
+
+          present, missing = partition_members(group.members, input)
+          error = group_violation(group, present, missing)
+          errors << error if error
+        end
+      end
+
+      # @return [KeyGroupError, nil]
+      #
+      # @api private
+      def group_violation(group, present, missing) # rubocop:disable Metrics/PerceivedComplexity
+        count = present.size
+
+        violated =
+          case group.kind
+          when :exactly_one then count != 1
+          when :at_least_one then count.zero?
+          when :all_or_none then !present.empty? && !missing.empty?
+          end
+
+        KeyGroupError.new(group.kind, group.members, present, missing) if violated
+      end
+
+      # Split group members into present and missing ones without
+      # running any constructors
+      #
+      # @return [Array(Array, Array)]
+      #
+      # @api private
+      def partition_members(members, input)
+        present = []
+        missing = []
+
+        members.each do |paths|
+          if paths.all? { |path| path_present?(input, path) }
+            present << paths
+          else
+            missing << paths
+          end
+        end
+
+        [present, missing]
+      end
+
+      # Whether a fixed nested path exists in raw input. An explicit nil
+      # counts as present.
+      #
+      # @api private
+      def path_present?(input, path)
+        schema = self
+        current = input
+
+        path.each do |segment|
+          current = schema.transformed_input(current)
+          return false unless current.is_a?(::Hash)
+          return false unless current.key?(segment)
+
+          current = current[segment]
+          next_schema = unwrap_schema(schema.name_key_map[segment].type)
+          schema = next_schema if next_schema
+        end
+
+        true
+      end
+
+
+      # @return [Hash]
+      #
+      # @api private
+      def serialize_key_groups(options)
+        return options unless options.key?(:key_groups)
+
+        groups = options[:key_groups].map do |group|
+          group = KeyGroup.coerce(group)
+          {kind: group.kind, members: group.members, check: group.check}
+        end
+
+        options.merge(key_groups: groups)
       end
 
       # @return [MissingKeyError]

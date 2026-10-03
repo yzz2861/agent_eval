@@ -31,6 +31,11 @@ module Dry
       # @return [Object]
       attr_reader :meta
 
+      # Group-level errors collected while evaluating a schema
+      #
+      # @return [Array<KeyGroupError>]
+      attr_accessor :group_errors
+
       # @api private
       def initialize(message, meta: Undefined, backtrace: Undefined)
         unless message.is_a?(::String)
@@ -39,6 +44,7 @@ module Dry
 
         super(message)
         @meta = Undefined.default(meta, nil)
+        @group_errors = EMPTY_ARRAY
         set_backtrace(backtrace) unless Undefined.equal?(backtrace)
       end
     end
@@ -106,6 +112,61 @@ module Dry
       def initialize(keys)
         @keys = keys
         super("unexpected keys #{keys.inspect} in Hash input")
+      end
+    end
+
+    # Error raised when a group of keys violates its presence constraint
+    #
+    class KeyGroupError < CoercionError
+      # @return [Symbol]
+      attr_reader :kind
+
+      # @return [Array<Array<Array<Symbol>>>]
+      attr_reader :members
+
+      # @return [Array<Array<Array<Symbol>>>] members present in the input
+      attr_reader :present_paths
+
+      # @return [Array<Array<Array<Symbol>>>] members missing from the input
+      attr_reader :missing_paths
+
+      # @param kind [Symbol]
+      # @param members [Array<Array<Array<Symbol>>>]
+      # @param present_paths [Array<Array<Array<Symbol>>>]
+      # @param missing_paths [Array<Array<Array<Symbol>>>]
+      #
+      # @api private
+      def initialize(kind, members, present_paths, missing_paths)
+        @kind = kind
+        @members = members
+        @present_paths = present_paths
+        @missing_paths = missing_paths
+
+        super(message_for(kind))
+      end
+
+      private
+
+      # @api private
+      def message_for(kind)
+        case kind
+        when :exactly_one
+          "expected exactly one of #{format_members(members)} to be present, " \
+          "got #{format_members(present_paths)}"
+        when :at_least_one
+          "expected at least one of #{format_members(members)} to be present, got none"
+        when :all_or_none
+          "expected all or none of #{format_members(members)} to be present, " \
+          "missing #{format_members(missing_paths)}"
+        end
+      end
+
+      # @api private
+      def format_members(members)
+        members.map { |paths|
+          formatted = paths.map { |path| path.map(&:to_s).join(".") }
+          formatted.size == 1 ? formatted.first : "(#{formatted.join(" + ")})"
+        }.inspect
       end
     end
 
