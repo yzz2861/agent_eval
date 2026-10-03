@@ -136,6 +136,51 @@ pool.with do |conn|
 end
 ```
 
+## Transferring Ownership (Leases)
+
+Sometimes background code needs to hand a borrowed resource to another
+thread instead of passing the raw connection and agreeing on who returns it.
+A *lease* makes that handoff explicit and one-time: the current owner creates
+the lease and transfers the connection, while the new owner receives it. The
+connection is returned to the pool exactly once, by whoever owns it when the
+work finishes.
+
+```ruby
+lease = pool.lease
+
+# The new owner waits to receive the connection.
+receiver = Thread.new do
+  lease.receive do |conn|
+    conn.do_work
+  end
+end
+
+# The current owner hands its checked-out connection over. A connection held
+# by a nested checkout cannot be transferred because ownership is ambiguous.
+pool.with do |conn|
+  pool.transfer(lease)
+end
+
+receiver.join
+```
+
+Rules and failure semantics:
+
+- Until the handoff completes, the current owner still owns the connection.
+- If the new owner never calls `receive` within the timeout, `transfer`
+  raises `ConnectionPool::TimeoutError` and the owner keeps the connection.
+- If the new owner calls `receive` before the transfer, it waits (and raises
+  `ConnectionPool::TimeoutError` if the owner does not hand off in time).
+- A lease can be received exactly once; a second `receive` raises
+  `ConnectionPool::LeaseError`.
+- If either thread goes away during the rendezvous, the handoff fails, the
+  current owner keeps the connection and the other side gets a
+  `ConnectionPool::LeaseError`.
+- After a successful transfer the old owner no longer owns anything: using or
+  checking in the connection raises, while the new owner's block (or explicit
+  `checkin`) returns it once, after which the pool can check it out again.
+- Ordinary `with` usage is unchanged.
+
 ## Current State
 
 There are several methods that return information about a pool.

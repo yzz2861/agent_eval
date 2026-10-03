@@ -1,5 +1,17 @@
 # connection_pool Changelog
 
+Unreleased
+----------
+
+- Add an optional lease API (`ConnectionPool#lease`, `ConnectionPool#transfer`
+  and `ConnectionPool::Lease#receive`) for transferring ownership of a single
+  checked-out connection from one thread to another. The handoff is one-time
+  and requires both the current owner and the new owner to take part; on
+  success the connection is returned to the pool exactly once, by the new
+  owner. Timeouts, an owner or receiver going away, nested checkouts and
+  repeated reception all have explicit outcomes and never return a resource
+  twice.
+
 3.0.2
 ------
 
