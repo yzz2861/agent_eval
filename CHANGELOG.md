@@ -7,6 +7,12 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ## [Unreleased]
 
+### Added
+
+- `Contract.contract` applies another contract to a nested key or, with `each: true`, to each
+  element of an array key. The nested contract's schema and rules are reused, its output is
+  merged into the result values and its errors are imported with the nested path (and element
+  index) prepended. Context values can be passed down explicitly via `context:`
 
 ## [1.11.1] - 2025-01-21
 

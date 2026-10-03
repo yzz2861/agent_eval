@@ -101,6 +101,75 @@ module Dry
           end
         end
 
+        # Apply another contract to a nested value or to each element of an
+        # array value
+        #
+        # The nested contract's schema and rules are applied to the value
+        # found under the given key. Its output replaces the value in the
+        # result and its errors are imported with the key path (and the
+        # element index for arrays) prepended to their paths
+        #
+        # The nested contract is not applied when the parent schema rejected
+        # the value or when there's no value under the key
+        #
+        # @example nested hash
+        #   class OrderContract < Dry::Validation::Contract
+        #     params do
+        #       required(:address).filled(:hash)
+        #     end
+        #
+        #     contract :address, AddressContract
+        #   end
+        #
+        # @example array of hashes
+        #   contract :line_items, LineItemContract, each: true
+        #
+        # @example passing parent context values to the nested contract
+        #   contract :address, AddressContract, context: %i[account_id]
+        #
+        # @example passing parent context values under different names
+        #   contract :address, AddressContract, context: {account_id: :current_account_id}
+        #
+        # @param [Symbol, String, Hash] key Path to the nested value
+        # @param [Class, Contract] contract Contract class or instance to apply
+        # @param [Boolean] each Apply the contract to each element of an array
+        # @param [Array<Symbol>, Hash] context Context keys to pass down to the
+        #   nested contract, either as a list of keys or as a mapping of nested
+        #   context keys to parent context keys
+        #
+        # @return [Array<NestedContract>]
+        #
+        # @api public
+        def contract(key, contract, each: false, context: EMPTY_HASH)
+          ensure_valid_keys(key, source: :contract) if __schema__
+
+          nested = contract.is_a?(Class) ? contract.new : contract
+
+          unless nested.is_a?(Contract)
+            raise ::ArgumentError, "+contract+ must be a #{Contract} class or instance"
+          end
+
+          context_keys =
+            case context
+            when ::Array then context.to_h { |name| [name, name] }
+            when ::Hash then context
+            else
+              raise ::ArgumentError, "+context+ must be an Array or a Hash"
+            end
+
+          path = Schema::Path[key]
+          paths = path.multi_value? ? path.expand.map(&:to_a) : [path.to_a]
+
+          paths.map { |nested_path|
+            NestedContract.new(
+              path: nested_path,
+              contract: nested,
+              each: each,
+              context_keys: context_keys
+            ).tap { |nested_contract| nested_contracts << nested_contract }
+          }
+        end
+
         # A shortcut that can be used to define contracts that won't be reused or inherited
         #
         # @example
@@ -135,6 +204,19 @@ module Dry
             .concat(superclass.respond_to?(:rules) ? superclass.rules : EMPTY_ARRAY)
         end
 
+        # Return nested contracts defined in this class
+        #
+        # @return [Array<NestedContract>]
+        #
+        # @api private
+        def nested_contracts
+          @nested_contracts ||= EMPTY_ARRAY
+            .dup
+            .concat(
+              superclass.respond_to?(:nested_contracts) ? superclass.nested_contracts : EMPTY_ARRAY
+            )
+        end
+
         # Return messages configured for this class
         #
         # @return [Dry::Schema::Messages]
@@ -147,7 +229,7 @@ module Dry
         private
 
         # @api private
-        def ensure_valid_keys(*keys)
+        def ensure_valid_keys(*keys, source: :rule)
           valid_paths = key_map.to_dot_notation
           key_paths = key_paths(keys)
 
@@ -162,7 +244,7 @@ module Dry
           return if invalid_keys.empty?
 
           raise InvalidKeysError, <<~STR.strip
-            #{name}.rule specifies keys that are not defined by the schema: #{invalid_keys.inspect}
+            #{name}.#{source} specifies keys that are not defined by the schema: #{invalid_keys.inspect}
           STR
         end
 

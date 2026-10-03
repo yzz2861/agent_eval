@@ -1,0 +1,7 @@
+pl:
+  dry_validation:
+    errors:
+      filled?: "cannot be empty (pl)"
+      rules:
+        zip:
+          invalid_zip: "%{zip} jest nieprawidlowym kodem"

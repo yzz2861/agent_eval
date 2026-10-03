@@ -75,6 +75,11 @@ module Dry
       #   @api private
       option :rules, default: -> { self.class.rules }
 
+      # @!attribute [r] nested_contracts
+      #   @return [Array<NestedContract>]
+      #   @api private
+      option :nested_contracts, default: -> { self.class.nested_contracts }
+
       # @!attribute [r] message_resolver
       #   @return [Messages::Resolver]
       #   @api private
@@ -106,6 +111,12 @@ module Dry
             rule_result.failures.each do |failure|
               result.add_error(message_resolver.(**failure))
             end
+          end
+
+          nested_contracts.each do |nested|
+            next if !nested.each? && error?(result, nested.path)
+
+            nested.(result)
           end
         end
       end
