@@ -581,7 +581,8 @@ module Net
   #   and +SPECIAL-USE+.</em>
   #
   # ==== RFC2087: +QUOTA+
-  # +NOTE:+ Only the +STORAGE+ quota resource type is currently supported.
+  # Multiple quota resources (e.g. +STORAGE+ and +MESSAGE+) are supported,
+  # including unknown resources, with resource names and values preserved.
   # - Obsoleted by <tt>QUOTA=RES-*</tt> [RFC9208[https://www.rfc-editor.org/rfc/rfc9208]],
   #   although the commands are backward compatible.
   # - #getquota: returns the resource usage and limits for a quota root
@@ -709,7 +710,8 @@ module Net
   # - Updates #status with support for the +MAILBOXID+ status attribute.
   #
   # ==== RFC9208: <tt>QUOTA=RES-*</tt>
-  # +NOTE:+ Only the +STORAGE+ quota resource type is currently supported.
+  # Multiple quota resources (e.g. +STORAGE+ and +MESSAGE+) are supported,
+  # including unknown resources, with resource names and values preserved.
   # - Obsoletes the +QUOTA+ [RFC2087[https://www.rfc-editor.org/rfc/rfc2087]]
   #   extension and provides strict semantics for different resource types.
   # - #getquota: returns the resource usage and limits for a quota root
@@ -2056,9 +2058,11 @@ module Net
     # to both admin and user.  If this mailbox exists, it returns an array
     # containing objects of type MailboxQuotaRoot and MailboxQuota.
     #
-    # *NOTE:* Currently, Net::IMAP only supports +QUOTA+ responses with a single
-    # resource type.  This is usually +STORAGE+, but you may need to verify this
-    # with UntaggedResponse#raw_data.
+    # All resources returned by the server are collected in
+    # MailboxQuota#resources (e.g. +STORAGE+ and +MESSAGE+), preserving
+    # the server provided resource names and values.  The legacy
+    # MailboxQuota#usage and MailboxQuota#quota accessors refer to the
+    # +STORAGE+ resource.
     #
     # Related: #getquota, #setquota, MailboxQuotaRoot, MailboxQuota
     #
@@ -2085,9 +2089,11 @@ module Net
     # The names of quota roots that are applicable to a particular mailbox can
     # be discovered with #getquotaroot.
     #
-    # *NOTE:* Currently, Net::IMAP only supports +QUOTA+ responses with a single
-    # resource type.  This is usually +STORAGE+, but you may need to verify this
-    # with UntaggedResponse#raw_data.
+    # All resources returned by the server are collected in
+    # MailboxQuota#resources (e.g. +STORAGE+ and +MESSAGE+), preserving
+    # the server provided resource names and values.  The legacy
+    # MailboxQuota#usage and MailboxQuota#quota accessors refer to the
+    # +STORAGE+ resource.
     #
     # Related: #getquotaroot, #setquota, MailboxQuota
     #
@@ -2105,19 +2111,38 @@ module Net
     end
 
     # Sends a {SETQUOTA command [RFC2087 §4.1]}[https://www.rfc-editor.org/rfc/rfc2087#section-4.1]
-    # along with the specified +quota_root+ and +storage_limit+.  If
-    # +storage_limit+ is +nil+, resource limits are unset for that quota root.
-    # If +storage_limit+ is a number, it sets the +STORAGE+ resource limit.
+    # along with the specified +quota_root+ and one or more quota resource
+    # limits.
+    #
+    # Passing +nil+ unsets _all_ resource limits for the quota root:
+    #
+    #   imap.setquota "#user/alice", nil
+    #   # Sends: SETQUOTA "#user/alice" ()
+    #
+    # Passing an +Integer+ or a numeric +String+ sets only the +STORAGE+
+    # resource limit, in units of 1024 octets:
     #
     #   imap.setquota "#user/alice", 100
-    #   imap.getquota "#user/alice"
-    #   # => [#<struct Net::IMAP::MailboxQuota mailbox="#user/alice" usage=54 quota=100>]
+    #   # Sends: SETQUOTA "#user/alice" (STORAGE 100)
+    #
+    # Pass a +Hash+ to set the limits of one or more named resources in a
+    # single command.  The resource names are sent exactly as given:
+    #
+    #   imap.setquota "#user/alice", "STORAGE" => 100, "MESSAGE" => 1000
+    #   # Sends: SETQUOTA "#user/alice" (STORAGE 100 MESSAGE 1000)
+    #
+    # Pass an array of _name_/_limit_ pairs to set multiple resources and
+    # preserve their order:
+    #
+    #   imap.setquota "#user/alice", [["MESSAGE", 1000], ["STORAGE", 100]]
+    #   # Sends: SETQUOTA "#user/alice" (MESSAGE 1000 STORAGE 100)
+    #
+    # Each limit must be an unsigned +Integer+ or a numeric +String+ (a valid
+    # number64).  A resource name may appear only once per command.
     #
     # Typically one needs to be logged in as a server admin for this to work.
     #
-    # *NOTE:* Currently, Net::IMAP only supports setting +STORAGE+ quota limits.
-    #
-    # Related: #getquota, #getquotaroot
+    # See also #getquota, #getquotaroot, QuotaResource, MailboxQuota.
     #
     # ==== Capabilities
     #
@@ -2125,13 +2150,8 @@ module Net
     # capability, or a capability prefixed with <tt>QUOTA=RES-*</tt>
     # {[RFC9208]}[https://www.rfc-editor.org/rfc/rfc9208] for each supported
     # resource type.
-    def setquota(quota_root, storage_limit)
-      if storage_limit.nil?
-        list = []
-      else
-        list = ["STORAGE", NumValidator.coerce_number64(storage_limit)]
-      end
-      send_command("SETQUOTA", quota_root, list)
+    def setquota(quota_root, limits)
+      send_command("SETQUOTA", quota_root, normalize_quota_limits(limits))
     end
 
     # Sends a {SETACL command [RFC4314 §3.1]}[https://www.rfc-editor.org/rfc/rfc4314#section-3.1]
@@ -4119,6 +4139,47 @@ module Net
           i
         end
       }
+    end
+
+    def normalize_quota_limits(limits)
+      return [] if limits.nil?
+
+      pairs =
+        case limits
+        when Integer, String
+          # validate scalar limits before wrapping as the legacy STORAGE resource
+          NumValidator.coerce_number64(limits)
+          [["STORAGE", limits]]
+        when Hash
+          limits.to_a
+        when Array
+          limits
+        else
+          raise ArgumentError,
+                "expected nil, a number, a Hash, or an Array of pairs"
+        end
+
+      seen = {}
+      pairs.flat_map do |pair|
+        name, limit =
+          case pair
+          when Array
+            unless pair.length == 2 && pair.first.is_a?(String)
+              raise ArgumentError,
+                    "quota resources must be [name, limit] pairs: %p" % [pair]
+            end
+            pair
+          else
+            raise ArgumentError,
+                  "quota resources must be [name, limit] pairs: %p" % [pair]
+          end
+        value = NumValidator.coerce_number64(limit)
+        if seen.key?(name)
+          raise ArgumentError, "quota resource listed more than once: %p" % [name]
+        end
+        seen[name] = true
+        [name, value]
+      end
     end
 
     def coerce_search_arg_to_seqset?(obj)

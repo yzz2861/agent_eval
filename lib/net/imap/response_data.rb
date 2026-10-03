@@ -463,6 +463,42 @@ module Net
       # Returns the mailbox name.
     end
 
+    # QuotaResource represents one resource type (with its current usage and
+    # limit) in an untagged +QUOTA+ response.
+    #
+    # The resource #name and the #usage and #limit values are all
+    # preserved exactly as they were received from the server: numeric values
+    # are *not* converted to +Integer+.  Unknown resource types are
+    # retained as well.  Beware that +STORAGE+ is measured in units of
+    # 1024 octets, +MESSAGE+ is a count of messages, and other resources
+    # may use entirely different units; do not interpret every resource as bytes.
+    #
+    # See also: MailboxQuota
+    class QuotaResource < Struct.new(:name, :usage, :limit)
+      ##
+      # :method: name
+      # :call-seq: name -> string
+      #
+      # The server provided name of the quota resource, e.g. +"STORAGE"+
+      # [RFC2087[https://www.rfc-editor.org/rfc/rfc2087]] or
+      # +"MESSAGE"+ [RFC9208[https://www.rfc-editor.org/rfc/rfc9208]].
+      # It is preserved exactly as received from the server.
+
+      ##
+      # :method: usage
+      # :call-seq: usage -> string or nil
+      #
+      # Current resource usage, preserved as the original decimal string
+      # rather than converted to an +Integer+.
+
+      ##
+      # :method: limit
+      # :call-seq: limit -> string
+      #
+      # Resource limit, preserved as the original decimal string rather than
+      # converted to an +Integer+.
+    end
+
     # MailboxQuota represents the data of an untagged +QUOTA+ response.
     #
     # IMAP#getquota returns an array of MailboxQuota objects.
@@ -475,7 +511,7 @@ module Net
     # Requires +QUOTA+ [RFC2087[https://www.rfc-editor.org/rfc/rfc2087]]
     # or <tt>QUOTA=RES-STORAGE</tt>
     # [RFC9208[https://www.rfc-editor.org/rfc/rfc9208]] capability.
-    class MailboxQuota < Struct.new(:mailbox, :usage, :quota)
+    class MailboxQuota < Struct.new(:mailbox, :usage, :quota, :resources)
       ##
       # :method: mailbox
       # :call-seq: mailbox -> string
@@ -493,14 +529,36 @@ module Net
       # :method: usage
       # :call-seq: usage -> Integer
       #
-      # Current storage usage of the mailbox.
+      # Current usage of the +STORAGE+ resource of the quota root, or
+      # +nil+ when no +STORAGE+ resource was returned.  The value is
+      # preserved exactly as received from the server (a decimal string).
 
       ##
       # :method: quota
       # :call-seq: quota -> Integer
       #
-      # Storage limit imposed on the mailbox.
+      # Limit imposed on the +STORAGE+ resource of the quota root, or +nil+
+      # when no +STORAGE+ resource was returned.  The value is preserved
+      # exactly as received from the server (a decimal string).
       #
+      # Alias for the +STORAGE+ resource limit, for backwards compatibility.
+      alias storage_limit quota
+
+      ##
+      # :method: resources
+      # :call-seq: resources -> array of QuotaResource
+      #
+      # Every resource returned for this quota root, in the order returned
+      # by the server.  Each resource is represented by a QuotaResource,
+      # preserving the server provided resource name and the original usage and
+      # limit values.  Unknown resource types are retained unchanged and
+      # duplicate resources (if returned by the server) are all retained.
+      def storage_resource
+        resources.find {|resource| resource.name.upcase == "STORAGE" }
+      end
+
+      # Current usage of the +STORAGE+ resource; see #usage.
+      alias storage_usage usage
     end
 
     # MailboxQuotaRoot represents the data of an untagged +QUOTAROOT+ response.

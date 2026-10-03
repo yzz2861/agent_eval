@@ -9,6 +9,11 @@
         mailbox: "!partition/sda4"
         usage: '104'
         quota: '10923847'
+        resources:
+        - !ruby/struct:Net::IMAP::QuotaResource
+          name: STORAGE
+          usage: '104'
+          limit: '10923847'
       raw_data: "* QUOTA \"!partition/sda4\" (STORAGE 104 10923847)\r\n"
 
   rfc9208_4.1.2_example_1:
@@ -28,12 +33,33 @@
       name: QUOTA
       data: !ruby/struct:Net::IMAP::MailboxQuota
         mailbox: "#user/alice"
-        usage: '42'
-        quota: '1000'
+        usage:
+        quota:
+        resources:
+        - !ruby/struct:Net::IMAP::QuotaResource
+          name: MESSAGE
+          usage: '42'
+          limit: '1000'
       raw_data: "* QUOTA \"#user/alice\" (MESSAGE 42 1000)\r\n"
 
-  # rfc9208_4.1.3_example_1:
-  #   :response: "* QUOTA \"#user/alice\" (STORAGE 54 111 MESSAGE 42 1000)\r\n"
+  rfc9208_4.1.3_example_1:
+    :response: "* QUOTA \"#user/alice\" (STORAGE 54 111 MESSAGE 42 1000)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: QUOTA
+      data: !ruby/struct:Net::IMAP::MailboxQuota
+        mailbox: "#user/alice"
+        usage: '54'
+        quota: '111'
+        resources:
+        - !ruby/struct:Net::IMAP::QuotaResource
+          name: STORAGE
+          usage: '54'
+          limit: '111'
+        - !ruby/struct:Net::IMAP::QuotaResource
+          name: MESSAGE
+          usage: '42'
+          limit: '1000'
+      raw_data: "* QUOTA \"#user/alice\" (STORAGE 54 111 MESSAGE 42 1000)\r\n"
 
   rfc9208_4.1.4_example:
     :response: "* STATUS INBOX (MESSAGES 12 DELETED 4 DELETED-STORAGE 8)\r\n"
@@ -55,7 +81,56 @@
         mailbox: ''
         usage: '10'
         quota: '512'
+        resources:
+        - !ruby/struct:Net::IMAP::QuotaResource
+          name: STORAGE
+          usage: '10'
+          limit: '512'
       raw_data: "* QUOTA \"\" (STORAGE 10 512)\r\n"
+
+  empty_resource_list:
+    :response: "* QUOTA \"\" ()\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: QUOTA
+      data: !ruby/struct:Net::IMAP::MailboxQuota
+        mailbox: ''
+        usage:
+        quota:
+        resources: []
+      raw_data: "* QUOTA \"\" ()\r\n"
+
+  duplicate_resources_preserved:
+    :response: "* QUOTA root (STORAGE 1 2 STORAGE 3 4 X-UNKNOWN 5 6)\r\n"
+    :expected: !ruby/struct:Net::IMAP::UntaggedResponse
+      name: QUOTA
+      data: !ruby/struct:Net::IMAP::MailboxQuota
+        mailbox: root
+        usage: '1'
+        quota: '2'
+        resources:
+        - !ruby/struct:Net::IMAP::QuotaResource
+          name: STORAGE
+          usage: '1'
+          limit: '2'
+        - !ruby/struct:Net::IMAP::QuotaResource
+          name: STORAGE
+          usage: '3'
+          limit: '4'
+        - !ruby/struct:Net::IMAP::QuotaResource
+          name: X-UNKNOWN
+          usage: '5'
+          limit: '6'
+      raw_data: "* QUOTA root (STORAGE 1 2 STORAGE 3 4 X-UNKNOWN 5 6)\r\n"
+
+  malformed_quota_resource_missing_limit:
+    :test_type: :assert_parse_failure
+    :response: "* QUOTA root (STORAGE 1)\r\n"
+    :message: unexpected token
+
+  malformed_quota_resource_extra_value:
+    :test_type: :assert_parse_failure
+    :response: "* QUOTA root (STORAGE 1 2 3)\r\n"
+    :message: unexpected token
 
   rfc9208_4.2.2_example_1:
     :response: "* QUOTAROOT INBOX \"\"\r\n"

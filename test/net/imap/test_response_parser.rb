@@ -416,4 +416,94 @@ class ResponseParserTest < Net::IMAP::TestCase
     assert_instance_of SystemStackError, error.cause
   end
 
+  test "QUOTA preserves every resource name and value for a quota root" do
+    parser = Net::IMAP::ResponseParser.new
+    response = parser.parse(
+      "* QUOTA \"#user/alice\" (STORAGE 54 111 MESSAGE 42 1000)\r\n")
+    quota = response.data
+    assert_equal "#user/alice", quota.quota_root
+    assert_equal "54", quota.usage
+    assert_equal "111", quota.quota
+    assert_equal [
+      Net::IMAP::QuotaResource.new("STORAGE", "54",  "111"),
+      Net::IMAP::QuotaResource.new("MESSAGE", "42", "1000"),
+    ], quota.resources
+    assert_equal quota.resources.first, quota.storage_resource
+    assert_equal "54", quota.storage_usage
+    assert_equal "111", quota.storage_limit
+  end
+
+  test "QUOTA without STORAGE leaves legacy accessors nil but keeps resources" do
+    parser = Net::IMAP::ResponseParser.new
+    response = parser.parse("* QUOTA root (MESSAGE 42 1000)\r\n")
+    quota = response.data
+    assert_nil quota.usage
+    assert_nil quota.quota
+    assert_nil quota.storage_resource
+    assert_equal [Net::IMAP::QuotaResource.new("MESSAGE", "42", "1000")],
+                   quota.resources
+  end
+
+  test "QUOTA legacy STORAGE accessors are case insensitive" do
+    parser = Net::IMAP::ResponseParser.new
+    quota = parser.parse("* QUOTA root (storage 7 8)\r\n").data
+    assert_equal "7", quota.usage
+    assert_equal "8", quota.quota
+    assert_equal quota.resources.first, quota.storage_resource
+  end
+
+  test "QUOTA with an empty resource list returns an empty resources array" do
+    parser = Net::IMAP::ResponseParser.new
+    quota = parser.parse("* QUOTA root ()\r\n").data
+    assert_equal "root", quota.quota_root
+    assert_nil quota.usage
+    assert_nil quota.quota
+    assert_equal [], quota.resources
+  end
+
+  test "QUOTA preserves duplicate and unknown resources in order" do
+    parser = Net::IMAP::ResponseParser.new
+    response = parser.parse(
+      "* QUOTA root (X-UNKNOWN 5 6 STORAGE 1 2 STORAGE 3 4)\r\n")
+    quota = response.data
+    assert_equal "1", quota.usage
+    assert_equal "2", quota.quota
+    assert_equal [
+      Net::IMAP::QuotaResource.new("X-UNKNOWN", "5", "6"),
+      Net::IMAP::QuotaResource.new("STORAGE",   "1", "2"),
+      Net::IMAP::QuotaResource.new("STORAGE",   "3", "4"),
+    ], quota.resources
+  end
+
+  test "QUOTA with a malformed resource triple raises ResponseParseError" do
+    parser = Net::IMAP::ResponseParser.new
+    assert_raise(Net::IMAP::ResponseParseError) do
+      parser.parse("* QUOTA root (STORAGE 1)\r\n")
+    end
+    assert_raise(Net::IMAP::ResponseParseError) do
+      parser.parse("* QUOTA root (STORAGE 1 2 3)\r\n")
+    end
+    assert_raise(Net::IMAP::ResponseParseError) do
+      parser.parse("* QUOTA root (123 1 2)\r\n")
+    end
+  end
+
+  test "QUOTAROOT followed by multiple QUOTA responses preserves quota roots" do
+    parser = Net::IMAP::ResponseParser.new
+    quotaroot = parser.parse(
+      "* QUOTAROOT INBOX \"#user/alice\" \"!partition/sda4\"\r\n").data
+    assert_equal "INBOX", quotaroot.mailbox
+    assert_equal ["#user/alice", "!partition/sda4"], quotaroot.quotaroots
+
+    user = parser.parse(
+      "* QUOTA \"#user/alice\" (STORAGE 54 111 MESSAGE 42 1000)\r\n").data
+    partition = parser.parse(
+      "* QUOTA \"!partition/sda4\" (STORAGE 104 10923847)\r\n").data
+    assert_equal("#user/alice", user.mailbox)
+    assert_equal(2, user.resources.length)
+    assert_equal("!partition/sda4", partition.mailbox)
+    assert_equal([Net::IMAP::QuotaResource.new("STORAGE", "104", "10923847")],
+                   partition.resources)
+  end
+
 end

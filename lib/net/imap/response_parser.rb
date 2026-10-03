@@ -1415,33 +1415,41 @@ module Net
         # If quota never established, get back
         # `NO Quota root does not exist'.
         # If quota removed, get `()' after the
-        # folder spec with no mention of `STORAGE'.
+        # folder spec with no resource list.
+        #
+        # quota-response  = "QUOTA" SP astring
+        #                  SP "(" 1#quota-res SP usage SP limit ")"
+        # quota-res     = quota-res-name
+        #                  SP resource-usage SP resource-limit
+        # quota-res-name= "STORAGE" / "MESSAGE" / quota-res-atom
+        #                  ; case-insensitive; Atoms other
+        #                  ; than STORAGE and MESSAGE
+        #                  ; are allowed
+        # resource-usage = number64
+        # resource-limit = number64
         token = match(T_ATOM)
         name = token.value.upcase
         match(T_SPACE)
-        mailbox = astring
+        quota_root = astring
         match(T_SPACE)
         match(T_LPAR)
-        token = lookahead
-        case token.symbol
-        when T_RPAR
-          shift_token
-          data = MailboxQuota.new(mailbox, nil, nil)
-          return UntaggedResponse.new(name, data, @str)
-        when T_ATOM
-          shift_token
+        resources = []
+        until peek_rpar?
+          match(T_SPACE) unless resources.empty?
+          resource_name = match(T_ATOM).value
           match(T_SPACE)
-          token = match(T_NUMBER)
-          usage = token.value
+          usage = match(T_NUMBER).value
           match(T_SPACE)
-          token = match(T_NUMBER)
-          quota = token.value
-          match(T_RPAR)
-          data = MailboxQuota.new(mailbox, usage, quota)
-          return UntaggedResponse.new(name, data, @str)
-        else
-          parse_error("unexpected token %s", token.symbol)
+          limit = match(T_NUMBER).value
+          resources << QuotaResource.new(resource_name, usage, limit)
         end
+        rpar
+        storage = resources.find {|resource| resource.name.upcase == "STORAGE" }
+        data =
+          MailboxQuota.new(quota_root,
+                            storage&.usage, storage&.limit,
+                            resources)
+        UntaggedResponse.new(name, data, @str)
       end
 
       def quotaroot_response
