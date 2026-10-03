@@ -207,6 +207,30 @@ pattern.expand(ext: 'jpg')               # raises Mustermann::ExpandError
 
 Expanding can be useful for instance when implementing link helpers.
 
+### Partial Expansion (URI Templates)
+
+When generating links with a tenant prefix, the tenant is usually known long
+before the entity id or query parameters are. URI template patterns support
+`expand_partial`, which expands all known variables and leaves the unknown
+ones as valid URI template expressions instead of turning them into empty
+strings. Expanding the result in one or more further steps yields exactly the
+same link as expanding everything at once, and already percent-encoded values
+are not escaped twice.
+
+``` ruby
+pattern = Mustermann.new('/t/{tenant}/orders/{id}{?q}', type: :template)
+
+partial = pattern.expand_partial(tenant: 'acme')
+partial.to_s                         # => "/t/acme/orders/{id}{?q}"
+
+partial.expand(id: 42, q: 'search')  # => "/t/acme/orders/42?q=search"
+pattern.expand(tenant: 'acme', id: 42, q: 'search') # same result
+```
+
+All [RFC 6570](http://tools.ietf.org/html/rfc6570) operators (`+ # . / ; ? &`)
+and list/map values (including the `*` explode modifier) are supported. The
+final link is always recognized by the original pattern.
+
 ### Expander Objects
 
 To get fine-grained control over expansion, you can use `Mustermann::Expander` directly.

@@ -50,8 +50,9 @@ module Mustermann
       end
 
       translate :expression do |greedy: true, **options|
+        names = payload.grep(AST::Node::Variable).map(&:name)
         t(payload, allow_reserved: operator.allow_reserved, greedy: greedy && !operator.allow_reserved,
-                   parametric: operator.parametric, separator: operator.separator, **options)
+                   parametric: operator.parametric, separator: operator.separator, expression_names: names, **options)
       end
 
       translate :with_look_ahead do |atomic: false, **options|
@@ -176,12 +177,52 @@ module Mustermann
         end
 
         # @!visibility private
-        def pattern(parametric: false, separator: nil, **options)
+        def pattern(parametric: false, separator: nil, expression_names: nil, **options)
           register_param(parametric: parametric, separator: separator, **options)
           pattern = super(**options)
-          pattern = parametric(pattern) if parametric
-          pattern = "#{pattern}(?:#{Regexp.escape(separator)}#{pattern})*" if explode and separator
+          if explode
+            pattern = exploded(pattern, parametric: parametric, separator: separator,
+                               expression_names: expression_names) if separator
+          elsif separator == ',' && !parametric
+            # RFC 6570 non-exploded lists and maps join values with commas.
+            pattern = "#{pattern}(?:,#{pattern})*"
+          end
           pattern
+        end
+
+        # Exploded variables repeat with the operator separator. Parametric
+        # operators (`;`, `?`, `&`) normally render list entries as
+        # `name=value` pairs, but a level-4 map renders `key=value` pairs with
+        # dynamic keys instead.
+        # @!visibility private
+        def exploded(value, parametric:, separator:, expression_names: nil)
+          return "#{value}(?:#{Regexp.escape(separator)}#{value})*" unless separator
+          sep = Regexp.escape(separator)
+          if parametric
+            list_pair = "#{Regexp.escape(name)}(?:=#{value})?"
+            map_pair  = map_pair(value, expression_names)
+            "(?:#{list_pair}(?:#{sep}#{list_pair})*|#{map_pair}(?:#{sep}#{map_pair})*)"
+          else
+            map_value = map_value_pattern
+            map_pair  = map_pair(map_value, expression_names)
+            list     = "#{value}(?:#{sep}#{value})*"
+            "(?:#{list}|#{map_pair}(?:#{sep}#{map_pair})*)"
+          end
+        end
+
+        # Values of non-parametric exploded maps may contain `=`, which the
+        # normal value character class excludes.
+        # @!visibility private
+        def map_value_pattern
+          '[\w\-.~%=]+'
+        end
+
+        # @!visibility private
+        def map_pair(value, expression_names)
+          forbidden = Array(expression_names).map { |other| Regexp.escape(other) }
+          key = forbidden.empty? ? '[\w.\-~%]+' :
+                "(?!(?:#{forbidden.join('|')})(?![\\w.\\-~%]))[\\w.\\-~%]+"
+          "#{key}=#{value}"
         end
 
         # @!visibility private
@@ -202,7 +243,6 @@ module Mustermann
         # @!visibility private
         def register_param(parametric: false, split_params: nil, separator: nil, **options)
           return unless explode and split_params
-
           split_params[name] = { separator: separator, parametric: parametric }
         end
       end
