@@ -1210,3 +1210,177 @@ class TestHTTPCookie < Test::Unit::TestCase
     assert_equal expected_hash, cookie.to_h
   end
 end
+
+class TestHTTPCookieDiagnostics < Test::Unit::TestCase
+  def setup
+    @url = URI.parse('http://example.org/')
+  end
+
+  def parse_diag(set_cookie, options = nil)
+    HTTP::Cookie.parse_with_diagnostics(set_cookie, @url, options)
+  end
+
+  def test_clean_input
+    result = parse_diag('a=1; Path=/; HttpOnly, b=2; Secure')
+    assert_predicate result, :success?
+    assert_empty result.issues
+    assert_equal %w[a b], result.cookies.map(&:name)
+  end
+
+  def test_expires_comma_and_concatenated_input
+    result = parse_diag('a=1; Expires=Wed, 01 Jan 2031 00:00:00 GMT; Path=/, b=2')
+    assert_predicate result, :success?
+    assert_equal %w[a b], result.cookies.map(&:name)
+    assert_equal Time.utc(2031, 1, 1), result.cookies[0].expires
+  end
+
+  def test_quoted_value
+    result = parse_diag('a="quoted value"; Path=/')
+    assert_predicate result, :success?
+    assert_equal 'quoted value', result.cookies[0].value
+  end
+
+  def test_unknown_attribute
+    header = 'a=1; Foo=bar; Path=/'
+    result = parse_diag(header)
+    assert_equal %w[a], result.cookies.map(&:name)
+    assert_equal 1, result.issues.size
+    issue = result.issues[0]
+    assert_equal :unknown_attribute, issue.category
+    assert_equal :attribute_ignored, issue.action
+    assert_equal 'foo', issue.attribute
+    assert_equal 'Foo=bar', header.byteslice(issue.range)
+  end
+
+  def test_duplicate_attribute
+    result = parse_diag('a=1; Path=/x; Path=/y')
+    assert_equal '/y', result.cookies[0].path
+    issue = result.issues.find { |i| i.category == :duplicate_attribute }
+    assert_not_nil issue
+    assert_equal :overrode_previous, issue.action
+    assert_equal 'path', issue.attribute
+  end
+
+  def test_bad_attribute_does_not_drop_following_content
+    result = parse_diag('a=1; Expires=not-a-date; Max-Age=abc; Path=relative; Domain=, b=2')
+    assert_equal %w[a b], result.cookies.map(&:name)
+    categories = result.issues.map(&:category)
+    assert_include categories, :invalid_date
+    assert_include categories, :invalid_max_age
+    assert_include categories, :relative_path
+    assert_include categories, :empty_domain
+    result.issues.each { |issue|
+      assert_equal :attribute_ignored, issue.action
+    }
+    cookie = result.cookies[0]
+    assert_nil cookie.expires
+    assert_equal '/', cookie.path
+  end
+
+  def test_missing_name_value
+    result = parse_diag('loose, a=1')
+    assert_equal %w[a], result.cookies.map(&:name)
+    assert_equal [:missing_name_value], result.issues.map(&:category)
+    assert_equal :skipped, result.issues[0].action
+  end
+
+  def test_empty_name
+    result = parse_diag('=value, a=1')
+    assert_equal %w[a], result.cookies.map(&:name)
+    assert_equal [:empty_name], result.issues.map(&:category)
+  end
+
+  def test_too_long
+    header = "foo=#{'Cookie' * 700}; path=/"
+    result = parse_diag(header)
+    assert_empty result.cookies
+    assert_equal [:too_long], result.issues.map(&:category)
+    assert_equal :skipped, result.issues[0].action
+  end
+
+  def test_invalid_name_or_value
+    result = parse_diag("a=b\001c, d=2")
+    assert_equal %w[d], result.cookies.map(&:name)
+    assert_equal [:invalid_name_or_value], result.issues.map(&:category)
+    assert_equal :rejected, result.issues[0].action
+  end
+
+  def test_unacceptable
+    result = parse_diag('a=1; Domain=other.org')
+    assert_empty result.cookies
+    assert_equal [:unacceptable], result.issues.map(&:category)
+    assert_equal :rejected, result.issues[0].action
+  end
+
+  def test_missing_seconds
+    result = parse_diag('a=1; Expires=Wed, 01 Jan 2031 10:20 GMT')
+    assert_equal 1, result.cookies.size
+    issue = result.issues.find { |i| i.category == :missing_seconds }
+    assert_not_nil issue
+    assert_equal :defaulted, issue.action
+    assert_equal 'expires', issue.attribute
+    assert_equal Time.utc(2031, 1, 1, 10, 20, 0), result.cookies[0].expires
+  end
+
+  def test_strict_mode_rejects_selected_categories
+    header = 'a=1; Foo=bar, b=2; Path=/x; Path=/y, c=3'
+    result = parse_diag(header, strict: [:unknown_attribute, :duplicate_attribute])
+    assert_equal %w[c], result.cookies.map(&:name)
+    rejected = result.issues.select { |i| i.action == :rejected }
+    assert_equal %i[duplicate_attribute unknown_attribute],
+                 rejected.map(&:category).sort
+  end
+
+  def test_lenient_mode_keeps_cookies_with_issues
+    header = 'a=1; Foo=bar, b=2; Path=/x; Path=/y, c=3'
+    result = parse_diag(header)
+    assert_equal %w[a b c], result.cookies.map(&:name)
+    assert_equal 2, result.issues.size
+  end
+
+  def test_strict_mode_unknown_category_list_keeps_other_issues_lenient
+    result = parse_diag('a=1; Max-Age=abc', strict: [:unknown_attribute])
+    assert_equal %w[a], result.cookies.map(&:name)
+    assert_equal :attribute_ignored, result.issues[0].action
+  end
+
+  def test_values_not_recorded_by_default
+    result = parse_diag('secret=supersecretvalue; Foo=bar')
+    assert_equal 1, result.cookies.size
+    result.issues.each { |issue|
+      assert_nil issue.excerpt
+      assert_not_match 'supersecretvalue', issue.detail
+      assert_not_match 'supersecretvalue', issue.to_h.inspect
+    }
+  end
+
+  def test_include_values_option
+    header = 'a=1; Foo=bar'
+    result = parse_diag(header, include_values: true)
+    assert_equal 'Foo=bar', result.issues[0].excerpt
+  end
+
+  def test_issues_for
+    result = parse_diag('a=1; Foo=bar; Baz=qux')
+    assert_equal 2, result.issues_for(:unknown_attribute).size
+    assert_empty result.issues_for(:invalid_date)
+  end
+
+  def test_parse_and_diagnostics_share_results
+    header = 'a=1; Expires=bad, b="q u"; Path=/x; Path=/y, c=3; Max-Age=10'
+    plain = HTTP::Cookie.parse(header, @url)
+    diag = parse_diag(header)
+    assert_equal plain.map(&:name), diag.cookies.map(&:name)
+    assert_equal plain.map(&:value), diag.cookies.map(&:value)
+    assert_equal plain.map(&:path), diag.cookies.map(&:path)
+  end
+
+  def test_parse_return_form_unchanged
+    cookies = HTTP::Cookie.parse('a=1, b=2', @url)
+    assert_kind_of Array, cookies
+    assert_equal %w[a b], cookies.map(&:name)
+    yielded = []
+    returned = HTTP::Cookie.parse('a=1, b=2', @url) { |c| yielded << c }
+    assert_equal yielded, returned
+  end
+end

@@ -21,6 +21,26 @@ class HTTP::Cookie::Scanner < StringScanner
     super(string)
   end
 
+  # When set to true, scan_set_cookie collects HTTP::Cookie::ParseIssue
+  # objects for each cookie definition and yields them along with the
+  # byte range of the definition.  Off by default.
+  attr_accessor :collect_issues
+
+  # Reports a parsing issue for the cookie definition currently being
+  # scanned.  Issues are appended to the per-definition issue list
+  # that scan_set_cookie yields; nothing is recorded when
+  # #collect_issues is off.
+  def report_issue(category, range, action, attribute: nil, detail: nil)
+    issues = @current_issues or return
+    issues << HTTP::Cookie::ParseIssue.new(
+      category: category,
+      range: range,
+      action: action,
+      attribute: attribute,
+      detail: detail
+    )
+  end
+
   class << self
     def quote(s)
       return s unless s.match(RE_BAD_CHAR)
@@ -115,6 +135,9 @@ class HTTP::Cookie::Scanner < StringScanner
           else
             # violation of the RFC
             @logger.warn("Time lacks the second part: #{token}") if @logger
+            report_issue(:missing_seconds, @current_attr_range, :defaulted,
+                         attribute: 'expires',
+                         detail: 'time part lacks seconds; 0 was assumed')
             0
           end
         time = [$1.to_i, $2.to_i, sec]
@@ -159,14 +182,20 @@ class HTTP::Cookie::Scanner < StringScanner
     until eos?
       start = pos
       len = nil
+      @current_issues = [] if @collect_issues
+      @current_attr_range = nil
 
       skip_wsp
 
       name, value = scan_name_value(true)
       if value.nil?
         @logger.warn("Cookie definition lacks a name-value pair.") if @logger
+        report_issue(:missing_name_value, start...pos, :skipped,
+                     detail: 'cookie definition lacks a name-value pair')
       elsif name.empty?
         @logger.warn("Cookie definition has an empty name.") if @logger
+        report_issue(:empty_name, start...pos, :skipped,
+                     detail: 'cookie definition has an empty name')
         value = nil
       end
       attrs = {}
@@ -179,28 +208,60 @@ class HTTP::Cookie::Scanner < StringScanner
         break
       when skip(/;/)
         skip_wsp
+        astart = pos
         aname, avalue = scan_name_value(true)
+        arange = astart...pos
         next if aname.empty? || value.nil?
         aname.downcase!
+        @current_attr_range = arange
         case aname
         when 'expires'
           # RFC 6265 5.2.1
-          avalue &&= parse_cookie_date(avalue) or next
+          if avalue.nil? || (avalue = parse_cookie_date(avalue)).nil?
+            report_issue(:invalid_date, arange, :attribute_ignored,
+                         attribute: aname,
+                         detail: 'Expires attribute has an unparseable date')
+            next
+          end
         when 'max-age'
           # RFC 6265 5.2.2
-          next unless /\A-?\d+\z/.match(avalue)
+          unless /\A-?\d+\z/.match(avalue)
+            report_issue(:invalid_max_age, arange, :attribute_ignored,
+                         attribute: aname,
+                         detail: 'Max-Age attribute is not an integer')
+            next
+          end
         when 'domain'
           # RFC 6265 5.2.3
           # An empty value SHOULD be ignored.
-          next if avalue.nil? || avalue.empty?
+          if avalue.nil? || avalue.empty?
+            report_issue(:empty_domain, arange, :attribute_ignored,
+                         attribute: aname,
+                         detail: 'Domain attribute has an empty value')
+            next
+          end
         when 'path'
           # RFC 6265 5.2.4
           # A relative path must be ignored rather than normalizing it
           # to "/".
-          next unless /\A\//.match(avalue)
+          unless /\A\//.match(avalue)
+            report_issue(:relative_path, arange, :attribute_ignored,
+                         attribute: aname,
+                         detail: 'Path attribute is not an absolute path')
+            next
+          end
         when 'secure', 'httponly'
           # RFC 6265 5.2.5, 5.2.6
           avalue = true
+        else
+          report_issue(:unknown_attribute, arange, :attribute_ignored,
+                       attribute: aname,
+                       detail: 'unknown attribute name')
+        end
+        if attrs.key?(aname)
+          report_issue(:duplicate_attribute, arange, :overrode_previous,
+                       attribute: aname,
+                       detail: 'attribute appeared more than once; the last occurrence won')
         end
         attrs[aname] = avalue
       end until eos?
@@ -209,10 +270,15 @@ class HTTP::Cookie::Scanner < StringScanner
 
       if len > HTTP::Cookie::MAX_LENGTH
         @logger.warn("Cookie definition too long: #{name}") if @logger
-        next
+        report_issue(:too_long, start...pos, :skipped,
+                     detail: "cookie definition exceeds #{HTTP::Cookie::MAX_LENGTH} bytes")
+        value = nil
       end
 
-      yield name, value, attrs if value
+      # A nil value means the definition was rejected during the scan;
+      # it is yielded anyway so that the receiver can collect the
+      # issues recorded for it.
+      yield name, value, attrs, start...pos, @current_issues
     end
   end
 

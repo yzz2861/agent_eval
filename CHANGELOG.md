@@ -1,3 +1,18 @@
+## Unreleased
+
+- Add `HTTP::Cookie.parse_with_diagnostics`, a diagnostic parsing
+  entry point that shares the parsing process with `HTTP::Cookie.parse`
+  and returns a `HTTP::Cookie::ParseResult` pairing the accepted
+  cookies with a structured list of `HTTP::Cookie::ParseIssue`
+  objects.  Each issue reports the byte range in the original header
+  string, a category (e.g. `:invalid_date`, `:unknown_attribute`,
+  `:duplicate_attribute`) and the fallback action taken.  A malformed
+  part never causes later parts of the header to be silently dropped.
+  Cookie values are not recorded unless the `:include_values` option
+  is enabled, and the `:strict` option escalates selected categories
+  so that affected cookie definitions are rejected.
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

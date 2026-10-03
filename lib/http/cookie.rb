@@ -211,6 +211,65 @@ class HTTP::Cookie
 
   autoload :Scanner, 'http/cookie/scanner'
 
+  # A structured description of a single problem encountered while
+  # parsing a Set-Cookie header value with
+  # HTTP::Cookie.parse_with_diagnostics.
+  #
+  # - +category+:  a Symbol identifying the kind of problem, e.g.
+  #   +:unknown_attribute+.
+  # - +range+:     a Range of byte offsets in the original header
+  #   string locating the offending part.
+  # - +action+:    a Symbol describing the fallback action that was
+  #   taken, e.g. +:attribute_ignored+, +:skipped+, +:rejected+,
+  #   +:overrode_previous+ or +:defaulted+.
+  # - +attribute+: the downcased attribute name the problem relates
+  #   to, or nil.
+  # - +detail+:    a human readable message.  Cookie values are never
+  #   included.
+  # - +excerpt+:   the raw bytes of +range+, only filled when the
+  #   +:include_values+ option is enabled; nil by default so that
+  #   diagnostics never leak cookie values.
+  ParseIssue = Struct.new(
+    :category, :range, :action, :attribute, :detail, :excerpt,
+    keyword_init: true
+  ) do
+    def to_h
+      {
+        category: category,
+        range: range,
+        action: action,
+        attribute: attribute,
+        detail: detail,
+        excerpt: excerpt,
+      }
+    end
+  end
+
+  # The outcome of HTTP::Cookie.parse_with_diagnostics.
+  class ParseResult
+    # An array of HTTP::Cookie objects that were accepted.
+    attr_reader :cookies
+
+    # An array of HTTP::Cookie::ParseIssue objects describing every
+    # problem encountered, in the order they occurred.
+    attr_reader :issues
+
+    def initialize(cookies, issues)
+      @cookies = cookies
+      @issues = issues
+    end
+
+    # True if no problem was found at all.
+    def success?
+      @issues.empty?
+    end
+
+    # Issues of a given category.
+    def issues_for(category)
+      @issues.select { |issue| issue.category == category }
+    end
+  end
+
   class << self
     # Tests if +target_path+ is under +base_path+ as described in RFC
     # 6265 5.1.4.  +base_path+ must be an absolute path.
@@ -274,20 +333,90 @@ class HTTP::Cookie
     #   cookie definitions containing double-quotes just as naturally
     #   expected.
     def parse(set_cookie, origin, options = nil, &block)
-      if options
-        logger = options[:logger]
-        created_at = options[:created_at]
+      options ||= {}
+      cookies = scan_set_cookie_with_issues(set_cookie, origin, options, nil)
+      cookies.each(&block) if block
+      cookies
+    end
+
+    # Parses a Set-Cookie header value like HTTP::Cookie.parse, but
+    # returns an HTTP::Cookie::ParseResult that pairs the accepted
+    # cookies with a structured list of every problem encountered.
+    # Each HTTP::Cookie::ParseIssue carries the byte range of the
+    # offending part in the original string, a category, and the
+    # fallback action that was taken.  A malformed part never causes
+    # later parts of the header to be silently dropped.
+    #
+    # Diagnostics never record cookie values: ParseIssue#excerpt is
+    # left nil unless the +:include_values+ option is enabled.
+    #
+    # In addition to the option keywords of HTTP::Cookie.parse, the
+    # following are available:
+    #
+    # :strict
+    # : An array of issue categories (Symbols) that must be
+    #   escalated: a cookie definition exhibiting any of them is
+    #   rejected instead of being repaired or tolerated, and the
+    #   action of the matching issues becomes +:rejected+.
+    #
+    # :include_values
+    # : If true, each issue's +excerpt+ is filled with the raw bytes
+    #   of its byte range.  Off by default so cookie values are not
+    #   recorded.
+    def parse_with_diagnostics(set_cookie, origin, options = nil)
+      options ||= {}
+      issues = []
+      cookies = scan_set_cookie_with_issues(set_cookie, origin, options, issues)
+      if options[:include_values]
+        issues.each { |issue|
+          range = issue.range and
+            issue.excerpt = set_cookie.byteslice(range)
+        }
       end
+      ParseResult.new(cookies, issues)
+    end
+
+    # Shared parsing process behind HTTP::Cookie.parse and
+    # HTTP::Cookie.parse_with_diagnostics.  Returns an array of
+    # accepted cookies and appends structured issues to +issues+
+    # unless it is nil.
+    private def scan_set_cookie_with_issues(set_cookie, origin, options, issues)
+      logger = options[:logger]
+      created_at = options[:created_at]
+      strict = options[:strict]
       origin = HTTP::Cookie::URIParser.parse(origin)
 
       [].tap { |cookies|
-        Scanner.new(set_cookie, logger).scan_set_cookie { |name, value, attrs|
-          break if name.nil? || name.empty?
+        scanner = Scanner.new(set_cookie, logger)
+        scanner.collect_issues = true if issues || strict
+        scanner.scan_set_cookie { |name, value, attrs, range, seg_issues|
+          if value.nil? || name.nil? || name.empty?
+            # The definition was rejected during the scan; just keep
+            # its issues, if any.
+            issues.concat(seg_issues) if issues && seg_issues
+            next
+          end
+
+          if strict && seg_issues &&
+              seg_issues.any? { |issue| strict.include?(issue.category) }
+            seg_issues.each { |issue|
+              issue.action = :rejected if strict.include?(issue.category)
+              issues << issue if issues
+            }
+            next
+          end
+          issues.concat(seg_issues) if issues && seg_issues
 
           begin
             cookie = new(name, value)
           rescue => e
             logger.warn("Invalid name or value: #{e}") if logger
+            issues << ParseIssue.new(
+              category: :invalid_name_or_value,
+              range: range,
+              action: :rejected,
+              detail: "invalid cookie name or value: #{e.class}"
+            ) if issues
             next
           end
           cookie.created_at = created_at if created_at
@@ -315,14 +444,27 @@ class HTTP::Cookie
               end
             rescue => e
               logger.warn("Couldn't parse #{aname} '#{avalue}': #{e}") if logger
+              issues << ParseIssue.new(
+                category: :attribute_error,
+                range: range,
+                action: :attribute_ignored,
+                attribute: aname,
+                detail: "couldn't apply attribute #{aname}: #{e.class}"
+              ) if issues
             end
           }
 
           cookie.origin = origin
 
-          cookie.acceptable? or next
-
-          yield cookie if block_given?
+          unless cookie.acceptable?
+            issues << ParseIssue.new(
+              category: :unacceptable,
+              range: range,
+              action: :rejected,
+              detail: 'cookie is not acceptable from the origin'
+            ) if issues
+            next
+          end
 
           cookies << cookie
         }

@@ -121,6 +121,34 @@ Or install it yourself as:
     header['Set-Cookie'] = cookie2.set_cookie_value
 
 
+    ########################
+    # Diagnostic parsing
+    ########################
+
+    # When importing a Set-Cookie header from a third party and you
+    # need to know not just which cookies were dropped but why, use
+    # HTTP::Cookie.parse_with_diagnostics.  It shares the parsing
+    # process with HTTP::Cookie.parse and returns both the accepted
+    # cookies and a structured list of problems.
+    result = HTTP::Cookie.parse_with_diagnostics(header['Set-Cookie'], uri)
+    result.cookies        #=> array of accepted HTTP::Cookie objects
+    result.issues         #=> array of HTTP::Cookie::ParseIssue
+
+    # Each issue carries the byte range in the original string, a
+    # category, and the fallback action taken.  Cookie values are
+    # never recorded unless you opt in with include_values: true.
+    result.issues.each { |issue|
+      warn '%s at %p: %s (%s)' % [issue.category, issue.range,
+                                  issue.action, issue.detail]
+    }
+
+    # Strict mode escalates selected categories: a cookie definition
+    # exhibiting any of them is rejected instead of tolerated.
+    result = HTTP::Cookie.parse_with_diagnostics(
+      header['Set-Cookie'], uri,
+      strict: [:unknown_attribute, :duplicate_attribute])
+
+
 ## Incompatibilities with Mechanize::Cookie/CookieJar
 
 There are several incompatibilities between
