@@ -113,6 +113,7 @@ module Dry
         def visit_array(_)
           ARRAY
         end
+        alias_method :visit_tuple, :visit_array
 
         # @api private
         def visit_lax(node)

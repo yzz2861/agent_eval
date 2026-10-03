@@ -69,6 +69,19 @@ module Dry
         registry["nominal.array"].of(member).meta(meta)
       end
 
+      def visit_tuple(node)
+        types, rest, meta = node
+        visited_types = types.map { _1.is_a?(::Class) ? _1 : visit(_1) }
+        tuple = registry["nominal.array"].tuple(*visited_types)
+
+        if rest
+          visited_rest = rest.is_a?(::Class) ? rest : visit(rest)
+          tuple = tuple.with(rest: visited_rest)
+        end
+
+        tuple.meta(meta)
+      end
+
       def visit_hash(node)
         opts, meta = node
         registry["nominal.hash"].with(**opts, meta: meta)

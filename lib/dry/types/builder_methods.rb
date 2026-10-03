@@ -25,6 +25,19 @@ module Dry
       # @return [Dry::Types::Array]
       def Array(type) = Strict(::Array).of(type)
 
+      # Build a tuple type.
+      #
+      # @example
+      #   Types::Event = Types.Tuple(Types::String, Types::Integer, rest: Types::Float)
+      #
+      # @param [Array<Dry::Types::Type>] types
+      # @param [Dry::Types::Type, undefined] rest
+      #
+      # @return [Dry::Types::Tuple]
+      def Tuple(*types, rest: Undefined)
+        Nominal(::Array).tuple(*types, rest: rest)
+      end
+
       # Build a hash schema
       #
       # @param [Hash{Symbol => Dry::Types::Type}] type_map

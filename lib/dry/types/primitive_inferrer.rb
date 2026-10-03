@@ -27,6 +27,7 @@ module Dry
 
         # @api private
         def visit_array(_) = ::Array
+        alias_method :visit_tuple, :visit_array
 
         # @api private
         def visit_lax(node) = visit(node)

@@ -6,6 +6,18 @@ module Dry
     #
     # @api public
     class Array < Nominal
+      # Build a tuple type with fixed positional types and an optional rest type
+      #
+      # @param [Array<Type>] types
+      # @param [Type, undefined] rest
+      #
+      # @return [Tuple]
+      #
+      # @api public
+      def tuple(*types, rest: Undefined)
+        Tuple.new(primitive, **options, types: types, rest: rest, meta: meta)
+      end
+
       # Build an array type with a member type
       #
       # @param [Type,#call] type

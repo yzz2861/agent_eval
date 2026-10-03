@@ -9,6 +9,11 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Add fixed-position tuple types with an optional `rest` element type. Tuple
+  errors include the failing positional path and failures preserve the original
+  input. Tuples support AST compilation, inspect, defaults, constraints, lax
+  coercion, and nesting.
+
 ### Changed
 
 ### Deprecated
