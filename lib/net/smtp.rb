@@ -293,6 +293,12 @@ module Net
       capable?('STARTTLS')
     end
 
+    # true if server advertises PIPELINING.
+    # You cannot get valid value before opening SMTP session.
+    def capable_pipelining?
+      capable?('PIPELINING')
+    end
+
     # true if the EHLO response contains +key+.
     def capable?(key)
       return nil unless @capabilities
@@ -763,6 +769,14 @@ module Net
     # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
     # the destination mail address or addresses.
     #
+    # If +pipelining+ is true or :raise, the MAIL FROM and RCPT TO commands
+    # are sent in one batch when the server advertises PIPELINING (see
+    # #mailfrom_rcptto_pipelined), and the first rejected recipient raises
+    # its error.  If +pipelining+ is :skip, rejected recipients are skipped
+    # and the message is sent to the accepted ones.  When the server does
+    # not advertise PIPELINING, the commands are sent one at a time as
+    # usual.  The default is false (no pipelining).
+    #
     # === Example
     #
     #     Net::SMTP.start('smtp.example.com') do |smtp|
@@ -788,12 +802,21 @@ module Net
     # * Net::ReadTimeout
     # * IOError
     #
-    def send_message(msgstr, from_addr, *to_addrs)
+    def send_message(msgstr, from_addr, *to_addrs, pipelining: false)
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      if pipelining
+        res = nil
+        mailfrom_rcptto_pipelined(from_addr, to_addrs,
+                                  on_rcpt_error: pipelining == true ? :raise : pipelining) do
+          res = data msgstr
+        end
+        res
+      else
+        mailfrom from_addr
+        rcptto_list(to_addrs) {data msgstr}
+      end
     end
 
     alias send_mail send_message
@@ -820,6 +843,14 @@ module Net
     # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
     # the destination mail address or addresses.
     #
+    # If +pipelining+ is true or :raise, the MAIL FROM and RCPT TO commands
+    # are sent in one batch when the server advertises PIPELINING (see
+    # #mailfrom_rcptto_pipelined), and the first rejected recipient raises
+    # its error.  If +pipelining+ is :skip, rejected recipients are skipped
+    # and the message is sent to the accepted ones.  When the server does
+    # not advertise PIPELINING, the commands are sent one at a time as
+    # usual.  The default is false (no pipelining).
+    #
     # === Example
     #
     #     Net::SMTP.start('smtp.example.com', 25) do |smtp|
@@ -843,12 +874,21 @@ module Net
     # * Net::ReadTimeout
     # * IOError
     #
-    def open_message_stream(from_addr, *to_addrs, &block)   # :yield: stream
+    def open_message_stream(from_addr, *to_addrs, pipelining: false, &block)   # :yield: stream
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data(&block)}
+      if pipelining
+        res = nil
+        mailfrom_rcptto_pipelined(from_addr, to_addrs,
+                                  on_rcpt_error: pipelining == true ? :raise : pipelining) do
+          res = data(&block)
+        end
+        res
+      else
+        mailfrom from_addr
+        rcptto_list(to_addrs) {data(&block)}
+      end
     end
 
     alias ready open_message_stream   # obsolete
@@ -907,12 +947,7 @@ module Net
 
     # +from_addr+ is +String+ or +Net::SMTP::Address+
     def mailfrom(from_addr)
-      addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
-               Address.new(from_addr, "SMTPUTF8")
-             else
-               Address.new(from_addr)
-             end
-      getok((["MAIL FROM:<#{addr.address}>"] + addr.parameters).join(' '))
+      getok(mailfrom_command(from_addr))
     end
 
     def rcptto_list(to_addrs)
@@ -925,8 +960,60 @@ module Net
 
     # +to_addr+ is +String+ or +Net::SMTP::Address+
     def rcptto(to_addr)
-      addr = Address.new(to_addr)
-      getok((["RCPT TO:<#{addr.address}>"] + addr.parameters).join(' '))
+      getok(rcptto_command(to_addr))
+    end
+
+    #
+    # Sends MAIL FROM for +from_addr+ and RCPT TO for each of +to_addrs+
+    # as a single batch, using the PIPELINING extension
+    # [RFC2920[https://www.rfc-editor.org/rfc/rfc2920.txt]], then collects
+    # the replies in the order the commands were sent.  Because every
+    # reply is consumed, a rejected recipient cannot shift the remaining
+    # replies out of order.
+    #
+    # If the server does not advertise PIPELINING, the commands are sent
+    # and replied one at a time, as with #mailfrom and #rcptto_list.
+    #
+    # +on_rcpt_error+ is the policy for rejected recipients:
+    #
+    # [:raise] raise the error of the first rejected recipient (after all
+    #          replies have been collected) and do not yield.  This is
+    #          the default.
+    # [:skip]  skip rejected recipients and yield if at least one
+    #          recipient was accepted; raises the first rejection if all
+    #          recipients were rejected.
+    #
+    # If the MAIL FROM command itself fails, its error is raised after
+    # the replies of the already sent RCPT TO commands have been
+    # collected, so the session stays synchronized.
+    #
+    # Yields once the envelope has been accepted, typically to #data.
+    # Returns an Array of Net::SMTP::Response, one per recipient, in the
+    # same order as +to_addrs+.
+    #
+    def mailfrom_rcptto_pipelined(from_addr, to_addrs, on_rcpt_error: :raise)
+      to_addrs = to_addrs.flatten
+      raise ArgumentError, 'mail destination not given' if to_addrs.empty?
+      unless :raise == on_rcpt_error or :skip == on_rcpt_error
+        raise ArgumentError, "invalid on_rcpt_error policy: #{on_rcpt_error.inspect}"
+      end
+      unless capable_pipelining?
+        return mailfrom_rcptto_serial(from_addr, to_addrs, on_rcpt_error) { yield }
+      end
+      commands = [mailfrom_command(from_addr)]
+      to_addrs.each {|addr| commands.push rcptto_command(addr) }
+      commands.each {|line| validate_line line }
+      responses = critical {
+        @socket.write(commands.map {|line| "#{line}\r\n" }.join)
+        commands.size.times.map { recv_response() }
+      }
+      # All replies have been collected at this point, so the errors
+      # raised below cannot desynchronize the session.
+      check_response responses.shift
+      handle_rcpt_results responses, on_rcpt_error do
+        yield
+      end
+      responses
     end
 
     # This method sends a message.
@@ -995,6 +1082,52 @@ module Net
       # A bare CR or LF is not allowed in RFC5321.
       if /[\r\n]/ =~ line
         raise ArgumentError, "A line must not contain CR or LF"
+      end
+    end
+
+    def mailfrom_command(from_addr)
+      addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
+               Address.new(from_addr, "SMTPUTF8")
+             else
+               Address.new(from_addr)
+             end
+      (["MAIL FROM:<#{addr.address}>"] + addr.parameters).join(' ')
+    end
+
+    def rcptto_command(to_addr)
+      addr = Address.new(to_addr)
+      (["RCPT TO:<#{addr.address}>"] + addr.parameters).join(' ')
+    end
+
+    # Serial fallback of #mailfrom_rcptto_pipelined, used when the server
+    # does not advertise PIPELINING.
+    def mailfrom_rcptto_serial(from_addr, to_addrs, on_rcpt_error)
+      mailfrom from_addr
+      results = to_addrs.map do |addr|
+        begin
+          rcptto addr
+        rescue SMTPError => err
+          raise if on_rcpt_error == :raise
+          err.response
+        end
+      end
+      handle_rcpt_results results, on_rcpt_error do
+        yield
+      end
+      results
+    end
+
+    def handle_rcpt_results(results, on_rcpt_error)
+      case on_rcpt_error
+      when :raise
+        results.each {|res| check_response res }
+        yield
+      when :skip
+        if results.any? {|res| res.success? }
+          yield
+        else
+          check_response results.first   # no recipient was accepted
+        end
       end
     end
 

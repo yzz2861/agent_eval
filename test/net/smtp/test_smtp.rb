@@ -186,6 +186,168 @@ module Net
       end
     end
 
+    def test_capable_pipelining
+      server = FakeServer.start(pipelining: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_equal true, smtp.capable_pipelining?
+      smtp.finish
+    end
+
+    def test_not_capable_pipelining
+      server = FakeServer.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_equal false, smtp.capable_pipelining?
+      smtp.finish
+    end
+
+    def test_send_message_with_pipelining
+      server = FakeServer.start(pipelining: true, batch_replies: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      res = smtp.send_message("message", "sender@example.com",
+                              ["rcpt1@example.com", "rcpt2@example.com"],
+                              pipelining: true)
+      assert res.success?
+      assert_equal "MAIL FROM:<sender@example.com>\r\n", server.commands[1]
+      assert_equal "RCPT TO:<rcpt1@example.com>\r\n", server.commands[2]
+      assert_equal "RCPT TO:<rcpt2@example.com>\r\n", server.commands[3]
+      assert_equal "DATA\r\n", server.commands[4]
+      assert_equal "message\r\n", server.body
+      # the server replied to the whole envelope in a single write
+      assert_equal 1, server.reply_batches.size
+      assert_equal 3, server.reply_batches.first.scan("250").size
+      smtp.finish
+    end
+
+    def test_open_message_stream_with_pipelining
+      server = FakeServer.start(pipelining: true, batch_replies: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.open_message_stream("sender@example.com", ["rcpt1@example.com"],
+                               pipelining: true) do |f|
+        f.puts "message"
+      end
+      assert_equal "DATA\r\n", server.commands[3]
+      assert_equal "message\r\n", server.body
+      smtp.finish
+    end
+
+    def test_mailfrom_rcptto_pipelined_returns_each_recipient_result
+      server = FakeServer.start(pipelining: true, batch_replies: true,
+                                reject_rcpts: ["rcpt2@example.com"])
+      smtp = Net::SMTP.start 'localhost', server.port
+      results = smtp.mailfrom_rcptto_pipelined("sender@example.com",
+                                               ["rcpt1@example.com", "rcpt2@example.com"],
+                                               on_rcpt_error: :skip) do
+        smtp.data "message"
+      end
+      assert_equal 2, results.size
+      assert_equal "250", results[0].status
+      assert_equal "550", results[1].status
+      assert_equal "message\r\n", server.body
+      smtp.finish
+    end
+
+    def test_pipelining_rejected_rcpt_skip_sends_data
+      server = FakeServer.start(pipelining: true, batch_replies: true,
+                                reject_rcpts: ["rcpt2@example.com"])
+      smtp = Net::SMTP.start 'localhost', server.port
+      res = smtp.send_message("message", "sender@example.com",
+                              ["rcpt1@example.com", "rcpt2@example.com"],
+                              pipelining: :skip)
+      assert res.success?
+      assert_equal "DATA\r\n", server.commands[4]
+      smtp.finish
+    end
+
+    def test_pipelining_rejected_rcpt_raise_keeps_session_in_sync
+      server = FakeServer.start(pipelining: true, batch_replies: true,
+                                reject_rcpts: ["rcpt1@example.com"])
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com",
+                          ["rcpt1@example.com", "rcpt2@example.com"],
+                          pipelining: :raise)
+      end
+      assert_equal "550", err.response.status
+      assert_not_include server.commands, "DATA\r\n"
+      # every pipelined reply was collected, so the next command gets
+      # its own reply and not a leftover one
+      res = smtp.rset
+      assert_include res.string, "2.0.0"
+      smtp.finish
+    end
+
+    def test_pipelining_all_rcpts_rejected
+      server = FakeServer.start(pipelining: true, batch_replies: true,
+                                reject_rcpts: ["rcpt1@example.com", "rcpt2@example.com"])
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com",
+                          ["rcpt1@example.com", "rcpt2@example.com"],
+                          pipelining: :skip)
+      end
+      assert_not_include server.commands, "DATA\r\n"
+      smtp.finish
+    end
+
+    def test_pipelining_rejected_mailfrom_drains_rcptto_replies
+      server = FakeServer.start(pipelining: true, batch_replies: true,
+                                reject_mail: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com",
+                          ["rcpt1@example.com", "rcpt2@example.com"],
+                          pipelining: true)
+      end
+      assert_equal "553", err.response.status
+      # the RCPT TO commands had already been sent and their replies
+      # were collected before the MAIL FROM error was raised
+      assert_include server.commands, "RCPT TO:<rcpt2@example.com>\r\n"
+      assert_not_include server.commands, "DATA\r\n"
+      res = smtp.rset
+      assert_include res.string, "2.0.0"
+      smtp.finish
+    end
+
+    def test_pipelining_falls_back_to_serial_without_capability
+      server = FakeServer.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_equal false, smtp.capable_pipelining?
+      res = smtp.send_message("message", "sender@example.com",
+                              ["rcpt1@example.com", "rcpt2@example.com"],
+                              pipelining: true)
+      assert res.success?
+      assert_equal "MAIL FROM:<sender@example.com>\r\n", server.commands[1]
+      assert_equal "RCPT TO:<rcpt1@example.com>\r\n", server.commands[2]
+      assert_equal "RCPT TO:<rcpt2@example.com>\r\n", server.commands[3]
+      assert_equal "DATA\r\n", server.commands[4]
+      assert_equal [], server.reply_batches
+      smtp.finish
+    end
+
+    def test_pipelining_serial_fallback_returns_each_recipient_result
+      server = FakeServer.start(reject_rcpts: ["rcpt2@example.com"])
+      smtp = Net::SMTP.start 'localhost', server.port
+      results = smtp.mailfrom_rcptto_pipelined("sender@example.com",
+                                               ["rcpt1@example.com", "rcpt2@example.com"],
+                                               on_rcpt_error: :skip) do
+        smtp.data "message"
+      end
+      assert_equal 2, results.size
+      assert_equal "250", results[0].status
+      assert_equal "550", results[1].status
+      smtp.finish
+    end
+
+    def test_pipelining_invalid_policy
+      server = FakeServer.start(pipelining: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_raise(ArgumentError) do
+        smtp.send_message("message", "sender@example.com", "rcpt1@example.com",
+                          pipelining: :bogus)
+      end
+      smtp.finish
+    end
+
     def test_unsuccessful_send_message_server_busy
       server = FakeServer.new
       def server.greeting
@@ -650,6 +812,9 @@ module Net
     attr_reader :port
     attr_reader :commands
     attr_reader :body
+    # Replies written by the server, one element per write(2) when
+    # +batch_replies+ is enabled.
+    attr_reader :reply_batches
 
     def starttls_started?
       !!@starttls_started
@@ -660,6 +825,11 @@ module Net
       @body = +''
       @capa = capabilities
       @tls = @capa.delete(:tls)
+      @batch_replies = @capa.delete(:batch_replies)
+      @reject_mail = @capa.delete(:reject_mail)
+      @reject_rcpts = Array(@capa.delete(:reject_rcpts))
+      @pending_replies = []
+      @reply_batches = []
       @servers = Socket.tcp_server_sockets('localhost', 0)
       @port = @servers[0].local_address.ip_port
       @server_thread = Thread.start do
@@ -764,11 +934,40 @@ module Net
     end
 
     def mail(_)
-      @sock.puts "250 2.1.0 Ok\r\n"
+      if @reject_mail
+        respond "553 5.1.7 Error: sender address rejected\r\n"
+      else
+        respond "250 2.1.0 Ok\r\n"
+      end
     end
 
-    def rcpt(_)
-      @sock.puts "250 2.1.0 Ok\r\n"
+    def rcpt(addr)
+      if @reject_rcpts.any? {|a| addr.include?(a) }
+        respond "550 5.1.1 Error: recipient address rejected\r\n"
+      else
+        respond "250 2.1.0 Ok\r\n"
+      end
+    end
+
+    # Writes a reply, or buffers it when +batch_replies+ is enabled so
+    # that the replies to a pipelined envelope go out in a single write.
+    def respond(str)
+      if @batch_replies
+        @pending_replies.push str
+      else
+        @sock.write str
+      end
+    end
+
+    def flush_replies
+      return if @pending_replies.empty?
+      @reply_batches.push @pending_replies.join
+      @sock.write @reply_batches.last
+      @pending_replies.clear
+    end
+
+    def more_input?
+      !!IO.select([@sock], nil, nil, 0.1)
     end
 
     def data
@@ -802,8 +1001,10 @@ module Net
           auth(*$'.split)
         when /\AMAIL FROM:/
           mail($')
+          flush_replies if @batch_replies && !more_input?
         when /\ARCPT TO:/
           rcpt($')
+          flush_replies if @batch_replies && !more_input?
         when "DATA"
           data
         when "RSET"
