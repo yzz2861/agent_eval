@@ -136,6 +136,38 @@ the schedule's start_time. Schedule start times are supported as:
 
 ---
 
+## Availability within a window
+
+`IceCube::Availability` computes bookable free intervals inside a finite
+query window from a set of "available" schedules (e.g. business hours)
+minus a set of "busy" schedules (e.g. existing appointments):
+
+``` ruby
+hours = IceCube::Schedule.new(Time.utc(2026, 10, 5, 9), duration: 8 * 3600) do |s|
+  s.add_recurrence_rule IceCube::Rule.daily
+end
+lunch = IceCube::Schedule.new(Time.utc(2026, 10, 5, 12), duration: 3600)
+
+availability = IceCube::Availability.new(available: hours, busy: [lunch], duration: 45 * 60)
+availability.free_intervals(Time.utc(2026, 10, 5), Time.utc(2026, 10, 6))
+# => [2026-10-05 09:00:00 UTC...2026-10-05 12:00:00 UTC,
+#     2026-10-05 13:00:00 UTC...2026-10-05 17:00:00 UTC]
+```
+
+The result is a sorted list of non-overlapping half-open ranges
+(`start...end`) in which an appointment of `duration` seconds fits.
+Occurrences of all available schedules are merged into one union (likewise
+for busy schedules) before the busy union is subtracted. Occurrences are
+clipped to the query window, so occurrences that begin before the window —
+including ones crossing midnight — still contribute the part that falls
+inside it. Zero-duration occurrences neither provide nor block
+availability. Rules without `count`/`until` are truncated by the window,
+and `max_occurrences:` (default 1000) caps how many occurrences a single
+schedule may contribute before `IceCube::Availability::LimitExceeded` is
+raised.
+
+---
+
 ## Persistence
 
 ice_cube implements its own hash-based .to_yaml, so you can quickly (and

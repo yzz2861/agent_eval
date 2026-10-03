@@ -212,6 +212,13 @@ module IceCube
       enumerate_occurrences(begin_time, closing_time, options).to_a
     end
 
+    # A lazy enumerator of occurrences between two times. Unlike
+    # #occurrences_between this does not materialize the whole set, so
+    # callers can cap how many occurrences are produced.
+    def occurrences_between_enumerator(begin_time, closing_time, options = {})
+      enumerate_occurrences(begin_time, closing_time, options)
+    end
+
     # Return a boolean indicating if an occurrence falls between two times
     def occurs_between?(begin_time, closing_time, options = {})
       enumerate_occurrences(begin_time, closing_time, options).next
