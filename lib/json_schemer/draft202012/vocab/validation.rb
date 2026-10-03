@@ -8,6 +8,10 @@ module JSONSchemer
             instance.is_a?(Numeric) && (instance.is_a?(Integer) || instance.floor == instance)
           end
 
+          def self.valid_exact_integer?(instance)
+            instance.is_a?(BigDecimal) && instance.floor == instance
+          end
+
           def error(formatted_instance_location:, **)
             case value
             when 'null'
@@ -29,18 +33,18 @@ module JSONSchemer
             end
           end
 
-          def validate(instance, instance_location, keyword_location, _context)
+          def validate(instance, instance_location, keyword_location, context)
             case parsed
             when String
-              result(instance, instance_location, keyword_location, valid_type(parsed, instance), :type => parsed)
+              result(instance, instance_location, keyword_location, valid_type(parsed, instance, context), :type => parsed)
             when Array
-              result(instance, instance_location, keyword_location, parsed.any? { |type| valid_type(type, instance) })
+              result(instance, instance_location, keyword_location, parsed.any? { |type| valid_type(type, instance, context) })
             end
           end
 
         private
 
-          def valid_type(type, instance)
+          def valid_type(type, instance, context)
             case type
             when 'null'
               instance.nil?
@@ -49,7 +53,7 @@ module JSONSchemer
             when 'number'
               instance.is_a?(Numeric)
             when 'integer'
-              self.class.valid_integer?(instance)
+              context.exact_numbers ? self.class.valid_exact_integer?(instance) : self.class.valid_integer?(instance)
             when 'string'
               instance.is_a?(String)
             when 'array'
@@ -67,8 +71,9 @@ module JSONSchemer
             "value at #{formatted_instance_location} is not one of: #{value}"
           end
 
-          def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !value || value.include?(instance))
+          def validate(instance, instance_location, keyword_location, context)
+            matched = context.exact_numbers ? JsonText.includes?(value, instance) : value.include?(instance)
+            result(instance, instance_location, keyword_location, !value || matched)
           end
         end
 
@@ -77,8 +82,9 @@ module JSONSchemer
             "value at #{formatted_instance_location} is not: #{value}"
           end
 
-          def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, value == instance)
+          def validate(instance, instance_location, keyword_location, context)
+            matched = context.exact_numbers ? JsonText.exact_equal?(value, instance) : value == instance
+            result(instance, instance_location, keyword_location, matched)
           end
         end
 
@@ -87,8 +93,13 @@ module JSONSchemer
             "number at #{formatted_instance_location} is not a multiple of: #{value}"
           end
 
-          def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || BigDecimal(instance.to_s).modulo(value).zero?)
+          def validate(instance, instance_location, keyword_location, context)
+            valid = !instance.is_a?(Numeric) || if context.exact_numbers
+              JsonText.decimal(instance).modulo(JsonText.decimal(value)).zero?
+            else
+              BigDecimal(instance.to_s).modulo(value).zero?
+            end
+            result(instance, instance_location, keyword_location, valid)
           end
         end
 
@@ -97,8 +108,13 @@ module JSONSchemer
             "number at #{formatted_instance_location} is greater than: #{value}"
           end
 
-          def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || instance <= value)
+          def validate(instance, instance_location, keyword_location, context)
+            valid = !instance.is_a?(Numeric) || if context.exact_numbers
+              JsonText.decimal(instance) <= JsonText.decimal(value)
+            else
+              instance <= value
+            end
+            result(instance, instance_location, keyword_location, valid)
           end
         end
 
@@ -107,8 +123,13 @@ module JSONSchemer
             "number at #{formatted_instance_location} is greater than or equal to: #{value}"
           end
 
-          def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || instance < value)
+          def validate(instance, instance_location, keyword_location, context)
+            valid = !instance.is_a?(Numeric) || if context.exact_numbers
+              JsonText.decimal(instance) < JsonText.decimal(value)
+            else
+              instance < value
+            end
+            result(instance, instance_location, keyword_location, valid)
           end
         end
 
@@ -117,8 +138,13 @@ module JSONSchemer
             "number at #{formatted_instance_location} is less than: #{value}"
           end
 
-          def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || instance >= value)
+          def validate(instance, instance_location, keyword_location, context)
+            valid = !instance.is_a?(Numeric) || if context.exact_numbers
+              JsonText.decimal(instance) >= JsonText.decimal(value)
+            else
+              instance >= value
+            end
+            result(instance, instance_location, keyword_location, valid)
           end
         end
 
@@ -127,8 +153,13 @@ module JSONSchemer
             "number at #{formatted_instance_location} is less than or equal to: #{value}"
           end
 
-          def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || instance > value)
+          def validate(instance, instance_location, keyword_location, context)
+            valid = !instance.is_a?(Numeric) || if context.exact_numbers
+              JsonText.decimal(instance) > JsonText.decimal(value)
+            else
+              instance > value
+            end
+            result(instance, instance_location, keyword_location, valid)
           end
         end
 
@@ -191,8 +222,13 @@ module JSONSchemer
             "array items at #{formatted_instance_location} are not unique"
           end
 
-          def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Array) || value == false || instance.size == instance.uniq.size)
+          def validate(instance, instance_location, keyword_location, context)
+            unique = if context.exact_numbers
+              instance.uniq { |item| JsonText.exact_key(item) }
+            else
+              instance.uniq
+            end
+            result(instance, instance_location, keyword_location, !instance.is_a?(Array) || value == false || instance.size == unique.size)
           end
         end
 

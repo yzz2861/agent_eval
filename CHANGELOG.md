@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- `Schema#valid_json_text?` and `Schema#validate_json_text` validate JSON text directly. Numbers are parsed as `BigDecimal`, preserving exact semantics for `multipleOf`, `minimum`/`maximum` (incl. draft 4 exclusive bounds), `enum`, `const`, `uniqueItems` and `type: integer`. `JSONSchemer.parse_json_text` exposes the parser, which rejects overlong numbers and exponents and reports parse errors with line, column, byte offset and JSON pointer.
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes

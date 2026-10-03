@@ -53,6 +53,20 @@ schemer.validate({ 'abc' => 10 }).to_a
 #      "type"=>"minimum",
 #      "error"=>"number at `/abc` is less than: 11"}]
 
+# JSON text input (numbers keep their exact decimal semantics)
+
+schemer.valid_json_text?('{"abc": 99999999999999999999}')
+# => true (the large integer is preserved as BigDecimal, never rounded to a Float)
+
+schemer.validate_json_text('{"abc": 10}', :output_format => 'flag')
+# => {"valid"=>false, ...}
+
+JSONSchemer.parse_json_text('0.1')
+# => 0.1e0 (BigDecimal)
+
+JSONSchemer.valid_json_text?(schema, '{"abc": 11}')
+# => true
+
 # default property values
 
 data = {}

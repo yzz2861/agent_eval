@@ -25,6 +25,7 @@ require 'json_schemer/errors'
 require 'json_schemer/cached_resolver'
 require 'json_schemer/ecma_regexp'
 require 'json_schemer/location'
+require 'json_schemer/json_text'
 require 'json_schemer/result'
 require 'json_schemer/output'
 require 'json_schemer/keyword'
@@ -120,6 +121,18 @@ module JSONSchemer
     def schema(schema, **options)
       schema = resolve(schema, options)
       Schema.new(schema, **options)
+    end
+
+    def validate_json_text(schema, json_text, **options)
+      schema(schema, **options).validate_json_text(json_text, **options.slice(:output_format, :resolve_enumerators, :access_mode))
+    end
+
+    def valid_json_text?(schema, json_text, **options)
+      schema(schema, **options).valid_json_text?(json_text, **options.slice(:resolve_enumerators, :access_mode))
+    end
+
+    def parse_json_text(json_text)
+      JsonText.parse(json_text)
     end
 
     def valid_schema?(schema, **options)
