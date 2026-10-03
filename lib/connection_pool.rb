@@ -57,6 +57,8 @@ class ConnectionPool
     @key_count = :"pool-#{@available.object_id}-count"
     @key_kwargs = :"pool-#{@available.object_id}-kwargs"
     @discard_key = :"pool-#{@available.object_id}-discard"
+    @lease_key = :"pool-#{@available.object_id}-lease"
+    @lease_aborting_key = :"pool-#{@available.object_id}-lease-aborting"
     INSTANCES[self] = self if auto_reload_after_fork && INSTANCES
   end
 
@@ -70,12 +72,99 @@ class ConnectionPool
         Thread.handle_interrupt(Exception => :immediate) do
           yield conn
         end
+      rescue Exception
+        ::Thread.current[@lease_aborting_key] = true
+        raise
       ensure
         checkin
       end
     end
   end
   alias_method :then, :with
+
+  ##
+  # Offers the connection currently checked out by the calling thread for a
+  # one-time transfer to another thread. The connection is detached from the
+  # current owner immediately: it can no longer be accessed or checked back in
+  # through the pool by that thread. The returned ConnectionPool::Lease object
+  # can be passed to another thread, which receives ownership with #accept.
+  #
+  # The handoff is completed when the connection is checked in (e.g. at the end
+  # of the enclosing +with+ block): the checkin blocks until another thread
+  # accepts the lease or until +timeout+ seconds have elapsed. If the lease is
+  # not accepted in time, or the owning thread raises or is killed before the
+  # handoff completes, the connection is returned to the pool exactly once and
+  # the lease becomes invalid.
+  #
+  # Transfers are not allowed inside nested checkouts because the resource
+  # would otherwise have more than one possible owner. Borrow with a single
+  # +with+ block (or a single +checkout+) before offering it.
+  #
+  # @param timeout [Numeric] maximum seconds the owner waits for a receiver
+  # @return [ConnectionPool::Lease]
+  #
+  # @example
+  #   lease = pool.with { |conn| pool.lease }
+  #   Thread.new do
+  #     pool.accept(lease) { |conn| conn.do_work }
+  #   end.join
+  def lease(timeout: @timeout)
+    if ::Thread.current[@lease_key]
+      raise ConnectionPool::LeaseError, "a lease is already pending for this thread"
+    end
+    raise ConnectionPool::LeaseError, "no connections are checked out" unless ::Thread.current[@key]
+    unless ::Thread.current[@key_count] == 1
+      raise ConnectionPool::LeaseError, "cannot transfer a connection that is part of a nested checkout"
+    end
+
+    conn = ::Thread.current[@key]
+    kwargs = ::Thread.current[@key_kwargs]
+    discard = ::Thread.current[@discard_key]
+    ::Thread.current[@discard_key] = nil
+    ::Thread.current[@key] = nil
+    ::Thread.current[@key_count] = nil
+    ::Thread.current[@key_kwargs] = nil
+    lease = ConnectionPool::Lease.new(self, conn, kwargs, Float(timeout), discard)
+    ::Thread.current[@lease_key] = lease
+    lease
+  end
+
+  ##
+  # Receives a connection previously offered with ConnectionPool#lease by
+  # another thread. This must be called by a thread other than the one that
+  # created the lease and each lease can only be received once.
+  #
+  # Blocks until the owner completes the handoff. Raises
+  # ConnectionPool::TimeoutError if the lease expires before the owner hands
+  # the connection over, ConnectionPool::Error if the owner cancelled the
+  # offer, and ConnectionPool::LeaseError for an invalid or already received
+  # lease.
+  #
+  # When given a block, the received connection is checked back into the pool
+  # automatically when the block finishes, just like #with. Without a block the
+  # connection is returned and must be checked in manually with #checkin.
+  #
+  # @param lease [ConnectionPool::Lease] the lease to receive
+  # @param timeout [Numeric] maximum seconds to wait for the handoff
+  # @yield [conn]
+  def accept(lease, timeout: @timeout)
+    raise ConnectionPool::LeaseError, "expected a ConnectionPool::Lease" unless lease.is_a?(ConnectionPool::Lease)
+    raise ConnectionPool::LeaseError, "lease belongs to a different pool" unless lease.pool.equal?(self)
+    raise ConnectionPool::LeaseError, "a lease must be received by a different thread" if ::Thread.current[@key]
+
+    if block_given?
+      receive_lease(lease, timeout:)
+      begin
+        Thread.handle_interrupt(Exception => :immediate) do
+          yield ::Thread.current[@key]
+        end
+      ensure
+        checkin
+      end
+    else
+      receive_lease(lease, timeout:)
+    end
+  end
 
   ##
   # Marks the current thread's checked-out connection for discard.
@@ -124,35 +213,114 @@ class ConnectionPool
     end
   end
 
-  def checkin(force: false)
-    if ::Thread.current[@key]
-      if ::Thread.current[@key_count] == 1 || force
-        begin
-          if ::Thread.current[@discard_key]
-            begin
-              @available.decrement_created
-              ::Thread.current[@discard_key].call(::Thread.current[@key])
-            rescue
-              nil
-            ensure
-              ::Thread.current[@discard_key] = nil
-            end
-          else
-            @available.push(::Thread.current[@key], **::Thread.current[@key_kwargs])
-          end
-        ensure
-          ::Thread.current[@key] = nil
-          ::Thread.current[@key_count] = nil
-          ::Thread.current[@key_kwargs] = nil
-        end
-      else
-        ::Thread.current[@key_count] -= 1
+  private
+
+  def receive_lease(lease, timeout:)
+    conn = Thread.handle_interrupt(Exception => :never) do
+      lease.claim(timeout:).tap do
+        ::Thread.current[@key] = lease.conn
+        ::Thread.current[@key_count] = 1
+        ::Thread.current[@key_kwargs] = lease.kwargs
+        ::Thread.current[@discard_key] = lease.take_discard!
       end
-    elsif !force
+    end
+    conn
+  end
+
+  def return_checked_out_connection
+    if ::Thread.current[@discard_key]
+      begin
+        @available.decrement_created
+        ::Thread.current[@discard_key].call(::Thread.current[@key])
+      rescue
+        nil
+      ensure
+        ::Thread.current[@discard_key] = nil
+      end
+    else
+      @available.push(::Thread.current[@key], **::Thread.current[@key_kwargs])
+    end
+  ensure
+    ::Thread.current[@key] = nil
+    ::Thread.current[@key_count] = nil
+    ::Thread.current[@key_kwargs] = nil
+    ::Thread.current[@lease_aborting_key] = nil
+    nil
+  end
+
+  def restore_leased_connection(lease)
+    unless ::Thread.current[@key]
+      ::Thread.current[@key] = lease.conn
+      ::Thread.current[@key_count] = 1
+      ::Thread.current[@key_kwargs] = lease.kwargs
+      if (discard = lease.take_discard!)
+        ::Thread.current[@discard_key] = discard
+      end
+    end
+  end
+  public
+
+  def checkin(force: false)
+    lease = ::Thread.current[@lease_key]
+    if lease
+      # The owner detached the connection via #lease; rendezvous with the
+      # receiver instead of touching the pool directly.
+      ::Thread.current[@lease_key] = nil
+      if force
+        # Forced checkin (e.g. after fork) cannot wait for another thread to
+        # receive: cancel the offer and return the connection at once.
+        lease.cancel_owner
+        restore_leased_connection(lease)
+        return_checked_out_connection
+        return nil
+      end
+      transferred = false
+      handled = false
+      begin
+        state =
+          if ::Thread.current[@lease_aborting_key] || ::Thread.current.status == "aborting"
+            lease.cancel_owner
+          else
+            lease.release_owner
+          end
+        if state == :claimed
+          # Ownership is transferred; release the receiver and never touch the
+          # connection on this thread again.
+          lease.complete_release!
+          transferred = true
+        else
+          # Offer expired or was cancelled: restore the owner's checkout state
+          # so the common return path below returns the connection exactly
+          # once, including any pending discard marker.
+          restore_leased_connection(lease)
+          return_checked_out_connection
+          handled = true
+          return nil
+        end
+      ensure
+        if !transferred && !handled && ::Thread.current.status == "aborting"
+          # Thread#kill can unwind the stack straight here, even from inside
+          # the rendezvous wait. Cancel any still-pending offer and reinstall
+          # the connection so it is returned to the pool exactly once.
+          lease.cancel_owner
+          restore_leased_connection(lease)
+          return_checked_out_connection
+        end
+      end
+
+      return nil if transferred
+    elsif ::Thread.current[@key]
+      if ::Thread.current[@key_count] != 1 && !force
+        ::Thread.current[@key_count] -= 1
+        return nil
+      end
+    elsif force
+      return nil
+    else
       raise ConnectionPool::Error, "no connections are checked out"
     end
 
-    nil
+    return_checked_out_connection
   end
 
   ##
@@ -189,5 +357,6 @@ class ConnectionPool
 end
 
 require_relative "connection_pool/timed_stack"
+require_relative "connection_pool/lease"
 require_relative "connection_pool/wrapper"
 require_relative "connection_pool/fork"

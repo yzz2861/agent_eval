@@ -121,6 +121,55 @@ end
 
 ## Discarding Connections
 
+## Transferring Ownership with a Lease
+
+Sometimes background code needs to hand a borrowed resource to another thread
+for processing. Rather than passing the raw connection and agreeing informally
+on who returns it, you can transfer ownership explicitly with a **lease**.
+
+The current owner calls `pool.lease` inside its `with` block. This detaches the
+connection from the owner immediately: that thread can no longer use or return
+it through the pool. It then passes the returned `ConnectionPool::Lease` object
+to the new owner, which receives the connection with `pool.accept`.
+
+```ruby
+queue = Thread::Queue.new
+
+worker = Thread.new do
+  lease = queue.pop
+  pool.accept(lease) do |conn|
+    conn.do_work
+  end
+end
+
+pool.with do |conn|
+  queue << pool.lease
+end
+```
+
+The handoff is a rendezvous: when the owner's `with` block finishes, its checkin
+blocks until another thread accepts the lease. Ownership then moves to that
+thread and the connection is **not** returned to the pool; it is returned later,
+exactly once, when the new owner finishes its `accept` block.
+
+The outcomes are explicit:
+
+- If no thread accepts the lease before `timeout` (defaults to the pool's
+  `timeout`), the offer expires and the owner's checkin returns the connection
+  to the pool as usual. A late `accept` raises `ConnectionPool::TimeoutError`.
+- If the owning thread raises or is killed before the handoff completes, the
+  offer is cancelled, the connection is returned to the pool, and a waiting
+  `accept` raises `ConnectionPool::Error`.
+- A lease can only be received once; a second (or losing) `accept` raises
+  `ConnectionPool::LeaseError`.
+- A lease must be accepted by a different thread than the one that created it.
+- Transfers are not allowed inside nested checkouts, because the resource would
+  have more than one possible owner. Offer the connection from a single
+  `with`/`checkout` level instead.
+
+`accept` also works without a block: it returns the connection and you must
+return it yourself with `pool.checkin`.
+
 You can discard connections in the ConnectionPool instance to remove connections that are broken and can't be repaired. 
 It can only be done inside the block passed to `with`.
 Takes an optional block that will be executed with the connection.

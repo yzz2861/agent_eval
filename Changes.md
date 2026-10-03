@@ -1,5 +1,15 @@
 # connection_pool Changelog
 
+Unreleased
+----------
+
+- Add optional lease API (`ConnectionPool#lease` and `ConnectionPool#accept`)
+  for transferring ownership of a checked-out connection from one thread to
+  another exactly once. The handoff rendezvous at the owner's checkin:
+  unaccepted offers expire and return the connection, owners that raise or are
+  killed cancel the offer, and each lease can only be received once. Transfers
+  are disallowed inside nested checkouts.
+
 3.0.2
 ------
 
