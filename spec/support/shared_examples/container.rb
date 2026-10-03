@@ -683,6 +683,134 @@ RSpec.shared_examples "a container" do
       container.dup.register(:foo, "bar")
       expect(container.key?(:foo)).to be false
     end
+
+    it "shares memoized instances with the parent" do
+      container.register(:item, memoize: true) { Object.new }
+
+      copy = container.dup
+
+      expect(copy.resolve(:item)).to be(container.resolve(:item))
+    end
+  end
+
+  describe ".fork" do
+    it "returns a child container that keeps the parent registrations" do
+      container.register(:value, "value")
+      container.register(:factory) { "factory" }
+
+      child = container.fork
+
+      expect(child).to_not be(container)
+      expect(child.keys).to eq(container.keys)
+      expect(child.resolve(:value)).to be(container.resolve(:value))
+      expect(child.resolve(:factory)).to eq("factory")
+      expect(container.key?(:added)).to be(false)
+
+      child.register(:added, "added")
+
+      expect(container.key?(:added)).to be(false)
+    end
+
+    it "rebuilds memoized instances with an independent cache and lock" do
+      container.register(:item, memoize: true) { Object.new }
+
+      parent_value = container.resolve(:item)
+      child_a = container.fork
+      child_b = container.fork
+
+      expect(child_a.resolve(:item)).to be(child_a.resolve(:item))
+      expect(child_b.resolve(:item)).to be(child_b.resolve(:item))
+      expect(child_a.resolve(:item)).to_not be(parent_value)
+      expect(child_b.resolve(:item)).to_not be(parent_value)
+      expect(child_b.resolve(:item)).to_not be(child_a.resolve(:item))
+    end
+
+    it "gives fresh memoized instances to decorated chains" do
+      require "delegate"
+
+      container.register(:item, memoize: true) { Object.new }
+      container.decorate(:item, with: SimpleDelegator)
+
+      parent_value = container.resolve(:item).__getobj__
+      child_a = container.fork
+      child_b = container.fork
+
+      expect(child_a.resolve(:item).__getobj__).to be(child_a.resolve(:item).__getobj__)
+      expect(child_b.resolve(:item).__getobj__).to be(child_b.resolve(:item).__getobj__)
+      expect(child_a.resolve(:item).__getobj__).to_not be(parent_value)
+      expect(child_b.resolve(:item).__getobj__).to_not be(parent_value)
+      expect(child_b.resolve(:item).__getobj__).to_not be(child_a.resolve(:item).__getobj__)
+      expect(container.resolve(:item).__getobj__).to be(parent_value)
+    end
+
+    it "rebuilds independently across a multi-level decoration chain" do
+      container.register(:item, memoize: true) { Object.new }
+      container.decorate(:item, &:itself)
+      container.decorate(:item, &:itself)
+
+      parent_value = container.resolve(:item)
+      child_a = container.fork
+      child_b = container.fork
+
+      expect(child_a.resolve(:item)).to be(child_a.resolve(:item))
+      expect(child_b.resolve(:item)).to be(child_b.resolve(:item))
+      expect(parent_value).to be(container.resolve(:item))
+      expect(child_b.resolve(:item)).to_not be(child_a.resolve(:item))
+      expect(child_a.resolve(:item)).to_not be(parent_value)
+      expect(child_b.resolve(:item)).to_not be(parent_value)
+    end
+
+    it "passes the child container to factories that request it" do
+      container.register(:dependency, "dependency")
+      container.register(:service, call: true) do |resolving_container|
+        resolving_container.resolve(:dependency)
+      end
+      container.register(:memoized_service, memoize: true, call: true) do |resolving_container|
+        resolving_container
+      end
+
+      parent = container
+      child_a = container.fork
+      child_b = container.fork
+
+      expect(child_a.resolve(:service)).to eq("dependency")
+      expect(child_b.resolve(:service)).to eq("dependency")
+      expect(parent.resolve(:service)).to eq("dependency")
+      expect(child_a.resolve(:memoized_service)).to be(child_a)
+      expect(child_b.resolve(:memoized_service)).to be(child_b)
+      expect(child_b.resolve(:memoized_service)).to_not be(child_a.resolve(:memoized_service))
+      expect(parent.resolve(:memoized_service)).to be(parent)
+    end
+
+    it "does not share the initialization lock between children during first resolve" do
+      entered = Queue.new
+      release = Queue.new
+
+      container.register(:item, memoize: true) do
+        entered << true
+        release.pop
+        Object.new
+      end
+
+      child_a = container.fork
+      child_b = container.fork
+
+      thread_a = Thread.new { child_a.resolve(:item) }
+      thread_b = Thread.new { child_b.resolve(:item) }
+
+      expect(entered.pop).to be(true)
+      expect(entered.pop).to be(true)
+
+      release << true
+      release << true
+
+      value_a = thread_a.value
+      value_b = thread_b.value
+
+      expect(value_a).to_not be(value_b)
+      expect(container.key?(:item)).to be(true)
+    end
+
   end
 
   describe ".clone" do

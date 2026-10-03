@@ -172,7 +172,11 @@ module Dry
       #
       # @api public
       def resolve(key, &block)
-        config.resolver.call(_container, key, &block)
+        if config.resolver.is_a?(::Dry::Container::Resolver)
+          config.resolver.call(_container, key, self, &block)
+        else
+          config.resolver.call(_container, key, &block)
+        end
       end
 
       # Resolve an item from the container
@@ -259,7 +263,34 @@ module Dry
       #       over not just the registered keys, but to see what was registered would be
       #       very helpful. This is a step toward doing that.
       def each(&block)
-        config.resolver.each(_container, &block)
+        if config.resolver.is_a?(::Dry::Container::Resolver)
+          config.resolver.each(_container, self, &block)
+        else
+          config.resolver.each(_container, &block)
+        end
+      end
+
+      # Derive a child container that keeps the parent's registrations but
+      # rebuilds every memoized instance cache and initialization lock
+      #
+      # Registered values are shared as-is, while factory definitions and
+      # decoration chains are reused with fresh memoization state. Factories
+      # declared with a single parameter receive the child container when
+      # they are first resolved.
+      #
+      # @return [Dry::Container::Mixin] a new child container
+      #
+      # @api public
+      def fork
+        copy = dup
+        child_container = ::Concurrent::Hash.new
+
+        _container.each do |key, item|
+          child_container[key] = item.fork
+        end
+
+        copy.instance_variable_set(:@_container, child_container)
+        copy
       end
 
       # Decorates an item from the container with specified decorator

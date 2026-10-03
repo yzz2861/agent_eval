@@ -30,11 +30,40 @@ module Dry
 
         # Returns the result of item call using a syncronized mutex
         #
+        # @param [Dry::Container::Mixin, nil] container
+        #   The container performing the resolution, passed to factories
+        #   that declare a single positional parameter
+        #
         # @return [Dry::Container::Item::Base]
-        def call
+        def call(container = nil)
           memoize_mutex.synchronize do
-            @memoized_item ||= item.call
+            @memoized_item ||= invoke(item, container)
           end
+        end
+
+        # Build a copy with a fresh cache and initialization mutex
+        #
+        # @return [Dry::Container::Item::Memoizable]
+        #
+        # @private
+        def fork
+          inner_item = item.is_a?(Item) ? item.fork : item
+          self.class.new(inner_item, options.merge(call: true))
+        end
+
+        # Memoize the decorated result while keeping the inner chain
+        # independently forkable
+        #
+        # @private
+        def map(func)
+          inner_item =
+            if item.is_a?(Item)
+              item.map(func)
+            else
+              Item::DecoratedCall.new(item, func, options.merge(call: true))
+            end
+
+          Memoizable.new(inner_item, options.merge(call: true))
         end
 
         private
