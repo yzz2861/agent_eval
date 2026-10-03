@@ -509,6 +509,28 @@ Fugit.parse('~ * * * *', random: SecureRandom) # on a cryptographically secure r
 Please note that the random values are determined at parse time. So `"~29 * * * *"` at parse time could become `"17 * * * *"` for example and go on triggering every hour at minute 17, until a new parsing occurs and another (or the same) minute is picked. This aligns with the OpenBSD [`man 5 crontab`](https://man.openbsd.org/crontab.5), OpenBSD `crond` rolling the dice at load time.
 
 
+### the stable hash extension
+
+Fugit also accepts `H` for values derived from a stable hash instead of Ruby's randomized `Object#hash` or a value chosen at parse time. Stable hash fields require a non-empty String `task_id:` option. An optional String `salt:` makes it possible to derive independent schedules for the same task identifier.
+
+```ruby
+Fugit.parse_cron('H * * * *', task_id: 'task-01').to_cron_s
+# ==> '22 * * * *'
+
+Fugit.parse_cron('H(0-29) * * * *', task_id: 'task-01').to_cron_s
+# ==> '24 * * * *'
+
+Fugit.parse_cron('H/10 * * * *', task_id: 'task-01').to_cron_s
+# ==> '9,19,29,39,49,59 * * * *'
+
+Fugit.parse_cron(
+  'H/10 * * * *', task_id: 'task-01', salt: 'salt-02').to_cron_s
+# ==> '4,14,24,34,44,54 * * * *'
+```
+
+`H` can be used in any field. `H(a-b)` limits the candidates, and `/n` selects a stable phase within a range or step sequence. Sunday may be written as `sun` or `7`, and is expanded as `0`. Without a step, one stable value is selected. With a step, `to_cron_s` shows the complete ordinary cron that will be used for matching. The same task identifier, salt, field, range, and step always expand to the same result, independently of the Ruby process.
+
+
 ### the second extension
 
 Fugit accepts cron strings with five elements, `minute hour day-of-month month day-of-week`, the standard cron format or six elements `second minute hour day-of-month month day-of-week`.
@@ -713,4 +735,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-

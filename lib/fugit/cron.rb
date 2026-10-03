@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'digest'
+
 module Fugit
 
   class Cron
@@ -577,6 +579,14 @@ module Fugit
       @cron_s = nil # just to be sure
       @day_and = h[:&]
 
+      stable_fields = [ :sec, :min, :hou, :dom, :mon, :dow ]
+        .select { |k| h[k]&.any? { |entry| entry.is_a?(Array) && entry[6] } }
+
+      if stable_fields.any?
+        stable_hash_id(opts)
+        stable_hash_salt(opts)
+      end
+
       valid =
         determine_seconds(h[:sec], opts) &&
         determine_minutes(h[:min], opts) &&
@@ -592,9 +602,16 @@ module Fugit
       self
     end
 
-    def expand(min, max, opts, r)
+    def expand(key, min, max, opts, r)
+
+      r = Array(r) unless r.is_a?(Array)
+      r += [ nil ] while r.length < 7
 
       sta, edn, sep, sla = r
+
+      stable = r[6]
+
+      return stable_values(key, min, max, opts, stable) if stable
 
       #return false if sla && sla > max
         #
@@ -680,13 +697,106 @@ module Fugit
         .uniq
     end
 
+    STABLE_HASH_OPTION_KEYS = [
+      :task_id, :task_identifier, :stable_hash_id, :hash_id, :identifier
+    ].freeze
+
+    def stable_hash_id(opts)
+
+      id = STABLE_HASH_OPTION_KEYS.map { |k| opts[k] }.compact.first
+
+      fail ArgumentError.new(
+        'stable hash cron fields require a non-empty String :task_id option'
+      ) unless id.is_a?(::String) && id.strip.length > 0
+
+      id
+    end
+
+    def stable_hash_salt(opts)
+
+      salt = opts[:hash_salt] || opts[:salt]
+
+      fail ArgumentError.new(
+        'stable hash cron :salt option must be a String'
+      ) unless salt.nil? || salt.is_a?(::String)
+
+      salt || ''
+    end
+
+    def stable_hash_integer(key, cardinality, opts, stable)
+
+      _sta, _edn, step = stable[1..]
+      id = stable_hash_id(opts)
+      salt = stable_hash_salt(opts)
+
+      message = [
+        'fugit-cron-stable-hash',
+        key,
+        id,
+        stable[1], stable[2], step || 1,
+        cardinality
+      ].collect(&:to_s).join("\u{1f}")
+
+      ::Digest::SHA256
+        .digest("#{salt}\u{1e}#{message}")
+        .unpack1('Q>') % cardinality
+    end
+
+    def stable_candidates(key, min, max, sta, edn)
+
+      sta ||= min
+      edn ||= max
+
+      candidates =
+        if sta == min && edn == max
+          (min..max).to_a
+        else
+          range(min, max, sta, edn, 1)
+        end
+
+      candidates = candidates.collect { |v| yield(v) }
+      candidates.uniq
+    end
+
+    def stable_values(key, min, max, opts, stable)
+
+      _marker, sta, edn, step = stable
+
+      candidates =
+        stable_candidates(key, min, max, sta, edn) { |v|
+          (key == :hours && v == 24) ? 0 : v
+        }
+
+      return false if step && (step < 1 || step > candidates.length)
+
+      index = stable_hash_integer(key, candidates.length, opts, stable)
+
+      return candidates.values_at(index) unless step
+
+      phase = stable_hash_integer("#{key}:phase".to_sym, step, opts, stable)
+
+      candidates
+        .each_with_index
+        .select { |_v, i| (i - phase) % step == 0 }
+        .collect(&:first)
+    end
+
     def do_determine(key, arr, min, max, opts)
 
       null = false
 
+      return false if arr.any? { |v|
+        v.is_a?(Array) && v.fetch(6, nil) == false }
+
+      return false if arr.count { |v| v.is_a?(Array) && v[6] } > 1
+
       r = arr
         .collect { |v|
-          expand(min, max, opts, v) }
+          v = Array(v) unless v.is_a?(Array)
+          v += [ nil ] while v.length < 7
+          expand(
+            Fugit::Cron::Parser::STABLE_KEYS.fetch(key, key),
+            min, max, opts, v) }
         .flatten(1)
         .collect { |e|
           return false if e == false
@@ -721,7 +831,25 @@ module Fugit
 
       @weekdays = []
 
-      arr.each do |a, z, sp, sl, ha, mo| # a to z, seperator, slash, hash, and mod
+      return false if arr.count { |entry| entry.is_a?(Array) && entry[6] } > 1
+
+      arr.each do |entry| # a to z, separator, slash, hash, modulo, stable hash
+
+        return false unless entry.is_a?(Array)
+
+        entry = entry + [ nil ] while entry.length < 7
+
+        return false if entry[6] == false
+
+        a, z, sp, sl, ha, mo, stable = entry
+
+        if stable
+          values = stable_weekday_values(stable, opts)
+          return false if values == false
+          values.sort.each { |i| @weekdays << [ i ] }
+          next
+        end
+
         if sp == :tilde
           a = random(0, 6, a, z, sl, opts)
           z = nil unless sl
@@ -750,6 +878,29 @@ module Fugit
       @weekdays = nil if @weekdays.empty?
 
       true
+    end
+
+    def stable_weekday_values(stable, opts)
+
+      _marker, sta, edn, step = stable
+
+      candidates =
+        stable_candidates(:weekdays, 0, 6, sta, edn) { |v|
+          v == 7 ? 0 : v
+        }
+
+      return false if step && (step < 1 || step > candidates.length)
+
+      index = stable_hash_integer(:weekdays, candidates.length, opts, stable)
+
+      return candidates.values_at(index) unless step
+
+      phase = stable_hash_integer(:weekdays_phase, step, opts, stable)
+
+      candidates
+        .each_with_index
+        .select { |_v, i| (i - phase) % step == 0 }
+        .collect(&:first)
     end
 
     def determine_timezone(z)
@@ -804,6 +955,11 @@ module Fugit
       def and?(i); rex(nil, i, /&?/); end
 
       def slash(i); rex(:slash, i, /\/\d\d?/); end
+      STABLE_ELT_REX =
+        /h(?:\(([^()]{0,30})\))?(?:\/\d{1,2})?(?=\s|,|$)/i
+          .freeze
+
+      def stable_elt(i); rex(:stable, i, STABLE_ELT_REX); end
 
       def mos(i); rex(:mos, i, /[0-5]?\d/); end # min or sec
       def hou(i); rex(:hou, i, /(2[0-4]|[01]?[0-9])/); end
@@ -848,11 +1004,11 @@ module Fugit
       def sorws_dow(i); seq(nil, i, :sor_dow, :slash, '?'); end
 
       # ssws: slash or sorws
-      def mos_elt(i); alt(:elt, i, :slash, :sorws_mos); end
-      def hou_elt(i); alt(:elt, i, :slash, :sorws_hou); end
-      def dom_elt(i); alt(:elt, i, :slash, :sorws_dom); end
-      def mon_elt(i); alt(:elt, i, :slash, :sorws_mon); end
-      def dow_elt(i); alt(:elt, i, :slash, :sorws_dow); end
+      def mos_elt(i); alt(:elt, i, :slash, :stable_elt, :sorws_mos); end
+      def hou_elt(i); alt(:elt, i, :slash, :stable_elt, :sorws_hou); end
+      def dom_elt(i); alt(:elt, i, :slash, :stable_elt, :sorws_dom); end
+      def mon_elt(i); alt(:elt, i, :slash, :stable_elt, :sorws_mon); end
+      def dow_elt(i); alt(:elt, i, :slash, :stable_elt, :sorws_dow); end
 
       def mod(i); rex(:mod, i, /%\d+(\+\d+)?/); end
 
@@ -922,6 +1078,7 @@ module Fugit
 
         t.subgather(nil).each do |tt|
           case tt.name
+          when :stable then return rewrite_stable_elt(k, tt)
           when :slash then slt = tt
           when :hash then hat = tt
           when :mod then mot = tt
@@ -949,11 +1106,90 @@ module Fugit
         [ a, z, sp, sl, ha, mo ]
       end
 
+      STABLE_BOUND_RES = {
+        sec: '[0-5]?\d',
+        min: '[0-5]?\d',
+        hou: '2[0-4]|[01]?\d',
+        dom: '3[01]|[12]\d|0?[1-9]',
+        mon: '1[0-2]|0?[1-9]|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec',
+        dow: '[0-7]|sun|mon|tue|wed|thu|fri|sat'
+      }.freeze
+
+      def rewrite_stable_elt(k, t)
+
+        m = t.string.match(
+          /\Ah(?:\((?<inner>[^()]*)\))?
+             (?:\/(?<outer_step>\d{1,2}))?(?=\s|,|$)/ix)
+
+        return nil unless m
+
+        sta = edn = nil
+        inner_step = nil
+        outer_step = m[:outer_step] && m[:outer_step].to_i
+        inner = m[:inner]
+
+        if inner
+
+          return nil if outer_step && inner.include?('/')
+
+          unless inner == '*'
+
+            bound = STABLE_BOUND_RES[k]
+            im =
+              /\A(?:#{bound})(?:-(?:#{bound}))?(?:\/\d{1,2})?\z/i
+                .match(inner)
+
+            return nil unless im
+
+            range_s, inner_step_s = inner.split('/', 2)
+            start_s, end_s = range_s.split('-', 2)
+
+            sta = rewrite_stable_bound(k, start_s)
+            edn = end_s ? rewrite_stable_bound(k, end_s) : sta
+            inner_step = inner_step_s && inner_step_s.to_i
+          end
+        end
+
+        step = inner_step || outer_step
+
+        [ nil, nil, nil, nil, nil, nil, [ true, sta, edn, step ] ]
+      end
+
+      def rewrite_stable_bound(k, s)
+
+        s = s.downcase
+
+        (k == :mon && MONTHS.index(s)) ||
+        (k == :dow && WEEKDS.index(s)) ||
+        s.to_i
+      end
+
+      STABLE_KEYS = {
+        sec: :seconds, min: :minutes, hou: :hours,
+        dom: :monthdays, mon: :months, dow: :weekdays
+      }.freeze
+
+      def successful_gather(t, name, acc=[])
+
+        return acc unless t.result == 1
+
+        children = t.successful_children
+
+        if t.name == name && children.none? { |c| c.name == name }
+          acc << t
+        else
+          children.each { |c| successful_gather(c, name, acc) }
+        end
+
+        acc
+      end
+
       def rewrite_entry(t)
 
-        t
-          .subgather(:elt)
-          .collect { |et| rewrite_elt(t.name, et) }
+        successful_gather(t, :elt)
+          .collect { |et|
+            rewrite_elt(t.name, et) ||
+              [ nil, nil, nil, nil, nil, nil, false ] }
       end
 
       def rewrite_tz(t)
@@ -967,7 +1203,9 @@ module Fugit
       def rewrite_cron(t)
 
         st = t
-          .sublookup(nil) # go to :ccron or :scron
+          .successful_children
+          .find { |c| c.name == :ccron || c.name == :scron } ||
+          t.sublookup(nil)
 
         return nil unless st
 
@@ -985,4 +1223,3 @@ module Fugit
     end
   end
 end
-

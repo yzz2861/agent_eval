@@ -1639,6 +1639,124 @@ group Fugit::Cron do
       end
     end
   end
+
+  group 'stable hash extension' do
+
+    {
+      'H * * * *' => '22 * * * *',
+      'H(0-29) * * * *' => '24 * * * *',
+      'H/10 * * * *' => '9,19,29,39,49,59 * * * *',
+      'H(0-59)/15 * * * * *' => '5,20,35,50 * * * * *',
+      'H(45-5)/10 * * * * *' => '5,45,55 * * * * *',
+      '0 H(0-23)/8 * * *' => '0 5,13,21 * * *',
+      '0 0 H(1-10) * *' => '0 0 8 * *',
+      '0 0 H(28-31) * *' => '0 0 30 * *',
+      '0 0 * H(jan-mar) *' => '0 0 * 2 *',
+      '0 0 * H(nov-feb)/2 *' => '0 0 * 1,11 *',
+      '0 0 * * H' => '0 0 * * 2',
+      '0 0 * * H(mon-fri)' => '0 0 * * 2',
+      '0 0 * * H(sun)' => '0 0 * * 0',
+      '0 0 * * H(7)' => '0 0 * * 0',
+    }.each do |source, target|
+
+      test "expands #{source.inspect} for task-01 to #{target.inspect}" do
+
+        cron = Fugit.parse_cron(source, task_id: 'task-01')
+
+        assert(cron.class, Fugit::Cron)
+        assert(cron.to_cron_s, target)
+      end
+    end
+
+    test 'is stable across parse calls and accepts a salt' do
+
+      source = 'H/10 * * * *'
+      first = Fugit.parse_cron(source, task_id: 'task-01')
+      second = Fugit.parse_cron(source, task_id: 'task-01')
+      salted = Fugit.parse_cron(source, task_id: 'task-01', salt: 'salt-02')
+
+      assert(second.to_cron_s, first.to_cron_s)
+      assert(salted.to_cron_s, '4,14,24,34,44,54 * * * *')
+    end
+
+    test 'computes fixed trigger times' do
+
+      cron = Fugit.parse_cron('H * * * *', task_id: 'task-01')
+
+      assert(
+        cron.next_time(Time.utc(2026, 10, 3, 12, 0)).strftime('%F %T'),
+        '2026-10-03 12:22:00')
+      assert(
+        cron.next_time(Time.utc(2026, 10, 3, 12, 22)).strftime('%F %T'),
+        '2026-10-03 13:22:00')
+
+      weekday_cron =
+        Fugit.parse_cron('0 8 * * H(mon-fri)', task_id: 'task-01')
+
+      assert(
+        weekday_cron.next_time(Time.utc(2026, 10, 3, 9)).strftime('%F %T'),
+        '2026-10-06 08:00:00')
+    end
+
+    [
+      '0 H(0-29) * * *',
+      '0 H/0 * * *',
+      '0 H(60) * * *',
+      '0 H(30-0) * * *',
+      '0 H(0-59)/0 * * *',
+      '0 H(0-59/10) * * *',
+      '0 H#1 * * *',
+      '0 H%2 * * *',
+      '0 0 * * H(8)',
+      '0 0 * * H(mon#1)',
+      '0 0 * * H(1-8)',
+      '0 0 * * H(mon%2)',
+      '0 H,H * * *',
+      '0 0 * * H,H',
+    ].each do |source|
+
+      test "rejects invalid stable hash field #{source.inspect}" do
+
+        assert(Fugit::Cron.parse(source, task_id: 'task-01'), nil)
+        assert_error(
+          lambda { Fugit::Cron.do_parse(source, task_id: 'task-01') },
+          ArgumentError,
+          "invalid cron string #{source.inspect}")
+      end
+    end
+
+    [ nil, '', '   ', 1, true ].each do |task_id|
+
+      test "requires a non-empty String task id for #{task_id.inspect}" do
+
+        assert_error(
+          lambda { Fugit::Cron.parse('H * * * *', task_id: task_id) },
+          ArgumentError,
+          'stable hash cron fields require a non-empty String :task_id option')
+      end
+    end
+
+    [ :salt, 1, true, [] ].each do |salt|
+
+      test "requires a String salt for #{salt.inspect}" do
+
+        assert_error(
+          lambda {
+            Fugit::Cron.parse('H * * * *', task_id: 'task-01', salt: salt)
+          },
+          ArgumentError,
+          'stable hash cron :salt option must be a String')
+      end
+    end
+
+    test 'does not change ordinary or random crons' do
+
+      assert(Fugit::Cron.parse('22 * * * *').to_cron_s, '22 * * * *')
+      assert(
+        Fugit::Cron.parse('~ * * * *', random: false).to_cron_s,
+        '0 * * * *')
+    end
+  end
 end
 
 group Fugit::Cron do
@@ -1974,4 +2092,3 @@ group Fugit do
     end
   end
 end
-
