@@ -57,13 +57,18 @@ class TestConnectionPool < Minitest::Test
   end
 
   def use_pool(pool, size)
-    Array.new(size) {
-      Thread.new do
-        pool.with { sleep }
-      end
-    }.each do |thread|
-      Thread.pass until thread.status == "sleep"
-    end
+    pool = pool.wrapped_pool if pool.respond_to?(:wrapped_pool)
+    checked_out = Thread::Queue.new
+    threads = Array.new(size) {
+      Thread.new {
+        pool.with do |connection|
+          checked_out << connection
+          sleep
+        end
+      }
+    }
+    size.times { checked_out.pop }
+    threads
   end
 
   def kill_threads(threads)
@@ -573,6 +578,56 @@ class TestConnectionPool < Minitest::Test
     pool.checkin
 
     assert_equal [["shutdown"], ["shutdown"], ["shutdown"]], recorders.map { |r| r.calls }
+  end
+
+  def test_slow_construction_allows_concurrent_checkin_and_shutdown
+    entered = Thread::Queue.new
+    release = Thread::Queue.new
+    events = Thread::Queue.new
+    closed = Thread::Queue.new
+    existing_connection = Object.new
+    slow_connection = Object.new
+    connections = [existing_connection, slow_connection]
+    attempts = 0
+
+    pool = ConnectionPool.new(size: 2) do
+      attempts += 1
+      if attempts == 1
+        entered << :started
+        release.pop
+        slow_connection
+      else
+        existing_connection
+      end
+    end
+
+    creator = Thread.start do
+      pool.checkout
+    end
+    creator.report_on_exception = false
+    assert_equal :started, entered.pop(timeout: 1)
+
+    holder = Thread.start do
+      connection = pool.checkout
+      pool.checkin
+      events << :checkin
+    end
+
+    assert_equal :checkin, events.pop(timeout: 1)
+
+    shutdown = Thread.start do
+      pool.shutdown { |connection| closed << connection }
+      events << :shutdown
+    end
+
+    release << :finish
+    assert_equal :shutdown, events.pop(timeout: 1)
+    assert_raises(ConnectionPool::PoolShuttingDownError) { creator.value }
+    assert_equal connections, 2.times.map { closed.pop(timeout: 1) }
+    assert_equal 2, pool.available
+    assert_equal 0, pool.idle
+    holder.join
+    shutdown.join
   end
 
   def test_raises_an_error_if_shutdown_is_called_without_a_block

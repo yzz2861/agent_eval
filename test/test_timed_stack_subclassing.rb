@@ -30,4 +30,37 @@ class TestTimedStackSubclassing < Minitest::Test
     stack.define_singleton_method(:try_fetch_connection) { fetch_connection }
     assert_equal obj, stack.send(:try_fetch_connection)
   end
+
+  def test_override_try_create_keeps_historical_mutex_behavior
+    klass = Class.new(ConnectionPool::TimedStack) do
+      attr_reader :created_with_mutex
+
+      def try_create(**options)
+        @created_with_mutex = @mutex.owned?
+        @created += 1
+        options
+      end
+    end
+
+    stack = klass.new(size: 1) { raise "legacy constructor should not be called" }
+
+    assert_equal({tag: :connection}, stack.pop(tag: :connection))
+    assert stack.created_with_mutex
+  end
+
+  def test_override_create_connection_runs_without_mutex
+    klass = Class.new(ConnectionPool::TimedStack) do
+      attr_reader :created_with_mutex
+
+      def create_connection(**options)
+        @created_with_mutex = @mutex.owned?
+        options
+      end
+    end
+
+    stack = klass.new(size: 1) { nil }
+
+    assert_equal({tag: :connection}, stack.pop(tag: :connection))
+    refute stack.created_with_mutex
+  end
 end

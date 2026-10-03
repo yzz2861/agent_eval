@@ -87,6 +87,162 @@ class TestConnectionPoolTimedStack < Minitest::Test
     assert_equal 2, stack.length
   end
 
+  def test_object_creation_failure_releases_reservation
+    attempts = 0
+    entered = Thread::Queue.new
+    release = Thread::Queue.new
+    stack = ConnectionPool::TimedStack.new(size: 1) do
+      attempts += 1
+      if attempts == 1
+        entered << :started
+        release.pop
+        raise "failure"
+      end
+
+      Object.new
+    end
+
+    creator = Thread.start { stack.pop(timeout: 1) }
+    creator.report_on_exception = false
+    assert_equal :started, entered.pop(timeout: 1)
+
+    release << :finish
+
+    assert_equal "failure", assert_raises(RuntimeError) { creator.value }.message
+    refute_empty stack
+    assert_equal 1, stack.length
+    refute_nil stack.pop(timeout: 0.01)
+  end
+
+  def test_waiter_timeout_does_not_reserve_capacity
+    entered = Thread::Queue.new
+    release = Thread::Queue.new
+    connection = Object.new
+    stack = ConnectionPool::TimedStack.new(size: 1) do
+      entered << :started
+      release.pop
+      connection
+    end
+
+    creator = Thread.start { stack.pop(timeout: 1) }
+    creator.report_on_exception = false
+    assert_equal :started, entered.pop(timeout: 1)
+
+    waiter = Thread.start { stack.pop(timeout: 0.01) }
+    waiter.report_on_exception = false
+    waiter_error = assert_raises(ConnectionPool::TimeoutError) { waiter.value }
+    assert_match "Waited 0.01 sec", waiter_error.message
+    assert_equal 0, stack.length
+
+    release << :finish
+    assert_same connection, creator.value
+    assert_equal 0, stack.length
+  end
+
+  def test_timeout_after_slow_construction_returns_resource_without_leaking_capacity
+    entered = Thread::Queue.new
+    release = Thread::Queue.new
+    connection = Object.new
+    stack_class = Class.new(ConnectionPool::TimedStack) do
+      attr_accessor :stored
+
+      def store_connection(connection, **kwargs)
+        super
+        stored&.call(connection)
+      end
+    end
+    stack = stack_class.new(size: 1) do
+      entered << :started
+      release.pop
+      connection
+    end
+    stored = Thread::Queue.new
+    stack.stored = ->(stored_connection) { stored << stored_connection }
+
+    checkout = Thread.start do
+      begin
+        stack.pop(timeout: 0.01)
+      rescue ConnectionPool::TimeoutError
+        nil
+      end
+    end
+    checkout.report_on_exception = false
+    assert_equal :started, entered.pop(timeout: 1)
+
+    assert_nil checkout.value
+    assert_equal 0, stack.length
+
+    release << :finish
+    assert_same connection, stored.pop(timeout: 1)
+    checkout.join
+    assert_equal 1, stack.length
+    assert_equal 1, stack.idle
+    popped = stack.pop(timeout: 0.01)
+    assert_same connection, popped
+    stack.push(popped)
+    stack.shutdown {}
+  end
+
+  def test_slow_construction_timeout_raises_to_checkout_thread
+    entered = Thread::Queue.new
+    release = Thread::Queue.new
+    stack = ConnectionPool::TimedStack.new(size: 1) do
+      entered << :started
+      release.pop
+      Object.new
+    end
+
+    checkout = Thread.start do
+      stack.pop(timeout: 0.01)
+    end
+    checkout.report_on_exception = false
+    assert_equal :started, entered.pop(timeout: 1)
+
+    error = assert_raises(ConnectionPool::TimeoutError) { checkout.value }
+    assert_match "Waited 0.01 sec", error.message
+  ensure
+    release << :finish
+    stack.shutdown {} if stack
+  end
+
+  def test_slow_construction_allows_concurrent_checkin_and_shutdown
+    entered = Thread::Queue.new
+    release = Thread::Queue.new
+    events = Thread::Queue.new
+    closed = Thread::Queue.new
+    existing_connection = Object.new
+    slow_connection = Object.new
+
+    stack = ConnectionPool::TimedStack.new(size: 2) do
+      entered << :started
+      release.pop
+      slow_connection
+    end
+
+    creator = Thread.start { stack.pop(timeout: 1) }
+    creator.report_on_exception = false
+    assert_equal :started, entered.pop(timeout: 1)
+
+    checkin = Thread.start do
+      stack.push(existing_connection)
+      events << :checkin
+    end
+    shutdown = Thread.start do
+      stack.shutdown { |connection| closed << connection }
+      events << :shutdown
+    end
+
+    release << :finish
+    completed = 2.times.map { events.pop(timeout: 1) }.sort_by(&:to_s)
+    assert_equal [:checkin, :shutdown], completed
+    assert_raises(ConnectionPool::PoolShuttingDownError) { creator.value }
+    assert_equal [existing_connection, slow_connection], 2.times.map { closed.pop(timeout: 1) }
+    assert_equal 2, stack.length
+    assert_equal 0, stack.idle
+    checkin.join
+    shutdown.join
+  end
+
   def test_pop
     object = Object.new
     @stack.push object
