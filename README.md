@@ -247,6 +247,52 @@ vehicle.alarm_state_name                        # => :active
 
 vehicle.fire_events!(:ignite, :enable_alarm)    # => StateMachines:InvalidParallelTransition: Cannot run events in parallel: ignite, enable_alarm
 
+```
+
+## Joint transitions across objects
+
+While `fire_events` runs multiple events on a *single* object,
+`StateMachines.joint_transition` fires events on *multiple* objects as one
+all-or-nothing operation.  Each participant names an object, a state
+machine, and an event:
+
+```ruby
+StateMachines.joint_transition([
+  { object: assignee, machine: :state, event: :release },
+  { object: task,     machine: :state, event: :hand_off },
+  { object: reviewer, machine: :state, event: :assign }
+]) # => true
+```
+
+Participants can also be written as `[object, machine, event]` arrays, and
+`:machine` defaults to `:state`.
+
+The semantics are:
+
+* The whole group is validated first.  If any participant's event cannot
+  transition from its object's current state, nothing is executed and the
+  call returns `false`.
+* Only then are the transitions executed (before callbacks, state
+  persistence, actions, after callbacks).
+* If execution fails -- a before callback halts, an action fails, or an
+  exception is raised -- the state attribute of *every* participant is
+  restored to its original value.
+
+*Note* that the rollback guarantee covers only the in-memory state
+attributes of the participating objects.  Side effects produced by user
+callbacks or actions -- most notably database writes -- are *not* rolled
+back.  Wrap the call in your own transaction if you need database-level
+atomicity.
+
+This interface is intended for plain in-memory objects: it never opens a
+transaction and ignores each machine's `use_transactions` setting.
+
+For concurrency, each participating object is guarded by its own lock and
+locks are always acquired in a canonical order, so two concurrent joint
+transitions listing the same objects -- even in opposite orders -- cannot
+deadlock.  Listing the same object more than once in a single group raises
+an `ArgumentError` before anything is executed.
+
 # Coordinated State Management
 
 State machines can coordinate with each other using state guards, allowing transitions to depend on the state of other state machines within the same object. This enables complex system modeling where components are interdependent.
