@@ -17,6 +17,9 @@ module IceCube
   autoload :HashBuilder, "ice_cube/builders/hash_builder"
   autoload :StringBuilder, "ice_cube/builders/string_builder"
 
+  autoload :Availability, "ice_cube/availability"
+
+  autoload :TooManyOccurrences, "ice_cube/errors/too_many_occurrences"
   autoload :HashParser, "ice_cube/parsers/hash_parser"
   autoload :YamlParser, "ice_cube/parsers/yaml_parser"
   autoload :IcalParser, "ice_cube/parsers/ical_parser"

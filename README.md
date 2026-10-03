@@ -120,6 +120,49 @@ To limit schedules use `count` or `until` on the recurrence rules. Setting `end_
 
 ---
 
+## Availability windows
+
+Given one or more available (open) schedules and busy schedules,
+`IceCube::Availability` computes the free time inside a finite query window.
+Results are sorted, disjoint, half-open `[start, end)` Time ranges, so a busy
+block starting exactly when an open block ends never overlaps.
+
+```ruby
+window_start = Time.utc(2020, 1, 6, 0, 0)
+window_end   = Time.utc(2020, 1, 7, 0, 0)
+
+open_hours = IceCube::Schedule.new(Time.utc(2020, 1, 6, 8, 0), duration: 8 * 3600)
+lunch      = IceCube::Schedule.new(Time.utc(2020, 1, 6, 12, 0), duration: 3600)
+
+# free windows after overlapping busy intervals are merged and subtracted
+IceCube::Availability.free_windows(
+  window_start, window_end,
+  available_schedules: [open_hours],
+  busy_schedules: [lunch]
+)
+# => [08:00..12:00, 13:00..16:00) (half-open ranges)
+
+# pack fixed-length appointments (e.g. 45 minutes) into the free windows
+IceCube::Availability.appointment_windows(
+  window_start, window_end, duration: 45 * 60,
+  available_schedules: [open_hours],
+  busy_schedules: [lunch]
+)
+```
+
+Semantics:
+
+- Infinite rules are clipped to the finite query window; an occurrence that
+  starts before the window but extends into it is included and clipped. Use
+  `max_occurrences` (default 10,000 per schedule) to bound expansion; the
+  call raises `IceCube::TooManyOccurrences` if a schedule exceeds it.
+- Zero-duration occurrences are point events and cover no time, so they never
+  block availability.
+- Overlapping occurrences within each side (available or busy) are merged
+  first, then the merged busy intervals are subtracted from the open ones.
+
+---
+
 ## Time Zones and ActiveSupport vs. Standard Ruby Time Classes
 
 ice_cube works great without ActiveSupport but only supports the environment's
