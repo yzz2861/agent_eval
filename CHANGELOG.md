@@ -9,6 +9,16 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Formal support for recursive types via `Dry::Types::Recursive`. Named lazy
+  references (`Dry::Types::Recursive.define` and `Dry::Types::Recursive::Scope`)
+  make it possible to define self-referential and mutually recursive types
+  without building the whole type graph upfront; the resolved type is cached on
+  first use. Alias-only cycles that never reach a concrete type raise
+  `Dry::Types::AliasCycleError`, while cyclic input objects raise
+  `Dry::Types::CyclicDataError` carrying the path of the cycle instead of
+  overflowing the stack. Recursive types support `call`, `try`, AST
+  compilation (`:recursive`/`:recursive_ref` nodes) and printing.
+
 ### Changed
 
 ### Deprecated

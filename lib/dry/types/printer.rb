@@ -8,6 +8,8 @@ module Dry
   module Types
     # @api private
     class Printer
+      RECURSIVE_PRINT_KEY = :"dry-types.recursive-print"
+
       MAPPING = {
         Nominal => :visit_nominal,
         Constructor => :visit_constructor,
@@ -32,7 +34,8 @@ module Dry
           Implication,
           Implication::Constrained
         ] => :visit_composition,
-        Any.class => :visit_any
+        Any.class => :visit_any,
+        Recursive => :visit_recursive
       }.flat_map { |k, v| Array(k).map { |kk| [kk, v] } }.to_h
 
       def initialize
@@ -42,7 +45,16 @@ module Dry
 
       def call(type)
         output = "".dup
-        visit(type) { |str| output << str }
+        stack = ::Thread.current[RECURSIVE_PRINT_KEY] ||= []
+        top_level = stack.empty?
+        stack << {}
+
+        begin
+          visit(type) { |str| output << str }
+        ensure
+          stack.pop if top_level
+        end
+
         "#<Dry::Types[#{output}]>"
       end
 
@@ -60,6 +72,26 @@ module Dry
       end
 
       def visit_any(_) = yield "Any"
+
+      def visit_recursive(type)
+        begin
+          state = (::Thread.current[RECURSIVE_PRINT_KEY] || []).last || {}
+          key = [type.scope.scope_id, type.ref_name]
+
+          if state.key?(key)
+            yield "recursive_ref(#{type.name})"
+          else
+            state[key] = true
+            visit(type.resolve) do |inner|
+              yield "Recursive(#{type.name})<#{inner}>"
+            end
+          end
+        rescue AliasCycleError
+          yield "Recursive(#{type.name})<alias cycle>"
+        rescue ::KeyError
+          yield "Recursive(#{type.name})<undefined>"
+        end
+      end
 
       def visit_array(type)
         visit_options(EMPTY_HASH, type.meta) do |opts|

@@ -134,5 +134,42 @@ module Dry
       end
       alias_method :to_s, :message
     end
+
+    # Raised when a named lazy reference is part of an alias cycle
+    # that never resolves to a concrete type
+    #
+    # @api public
+    class AliasCycleError < CoercionError
+      # @return [Array<Symbol>]
+      attr_reader :names
+
+      # @param [Array<Symbol>] names Names forming the cycle
+      #
+      # @api private
+      def initialize(names)
+        @names = names
+        cycle = (names + [names.first]).join(" -> ")
+        super("alias cycle detected: #{cycle}; every name in the cycle refers " \
+              "to another lazy reference and never to a concrete type")
+      end
+    end
+
+    # Raised when an input value contains a cycle (the same object
+    # is reached through its own structure)
+    #
+    # @api public
+    class CyclicDataError < CoercionError
+      # @return [String]
+      attr_reader :path
+
+      # @param [String] path Path at which the cycle was detected
+      #
+      # @api private
+      def initialize(path)
+        @path = path
+        super("cyclic data detected at path #{path}; recursive types cannot " \
+              "be applied to self-referencing objects")
+      end
+    end
   end
 end

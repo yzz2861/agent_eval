@@ -12,7 +12,16 @@ module Dry
         @registry = registry
       end
 
-      def call(ast) = visit(ast)
+      def call(ast)
+        stack = thread_stack(RECURSIVE_SCOPES_KEY)
+        stack << {}
+
+        begin
+          visit(ast)
+        ensure
+          stack.pop
+        end
+      end
 
       def visit(node)
         type, body = node
@@ -116,6 +125,45 @@ module Dry
 
       def visit_any(meta)
         registry["any"].meta(meta)
+      end
+
+      def visit_recursive(node)
+        scope_id, name, inner_ast, meta = node
+        table = thread_stack(RECURSIVE_SCOPES_KEY).last
+        scope = table[scope_id] ||= Recursive::Scope.new(scope_id)
+
+        scope.register(name) do |_|
+          tables = thread_stack(RECURSIVE_SCOPES_KEY)
+          tables << table
+          begin
+            visit(inner_ast)
+          ensure
+            tables.pop
+          end
+        end
+
+        scope[name].meta(meta)
+      end
+
+      def visit_recursive_ref(node)
+        scope_id, name, meta = node
+        table = thread_stack(RECURSIVE_SCOPES_KEY).last
+        scope = table && table[scope_id]
+
+        unless scope&.scope_id == scope_id
+          raise ::ArgumentError,
+            "unresolved recursive reference #{name.inspect} (scope #{scope_id.inspect})"
+        end
+
+        scope[name].meta(meta)
+      end
+
+      RECURSIVE_SCOPES_KEY = :"dry-types.compiler-recursive-scopes"
+
+      private
+
+      def thread_stack(key)
+        ::Thread.current[key] ||= []
       end
 
       def compile_fn(fn)
