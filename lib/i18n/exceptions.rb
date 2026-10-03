@@ -35,6 +35,14 @@ module I18n
     end
   end
 
+  class CircularLocaleAlias < ArgumentError
+    attr_reader :chain
+    def initialize(chain)
+      @chain = chain
+      super "circular locale alias detected: #{chain.map(&:to_s).join(' -> ')}"
+    end
+  end
+
   class InvalidLocaleData < ArgumentError
     attr_reader :filename
     def initialize(filename, exception_message)

@@ -47,7 +47,7 @@ module I18n
     # Sets the current locale pseudo-globally, i.e. in the Thread.current or Fiber local hash.
     def locale=(locale)
       I18n.enforce_available_locales!(locale)
-      @locale = locale && locale.to_sym
+      @locale = locale && canonical_locale(locale).to_sym
     end
 
     # Returns the current backend. Defaults to +Backend::Simple+.
@@ -68,7 +68,7 @@ module I18n
     # Sets the current default locale. Used to set a custom default locale.
     def default_locale=(locale)
       I18n.enforce_available_locales!(locale)
-      @@default_locale = locale && locale.to_sym
+      @@default_locale = locale && canonical_locale(locale).to_sym
     end
 
     # Returns an array of locales for which translations are available.
@@ -83,7 +83,7 @@ module I18n
     # that we can have faster lookups to do the available locales enforce check.
     def available_locales_set #:nodoc:
       @@available_locales_set ||= available_locales.inject(Set.new) do |set, locale|
-        set << locale.to_s << locale.to_sym
+        set << locale.to_s << locale.to_sym << canonical_locale(locale)
       end
     end
 
@@ -103,6 +103,37 @@ module I18n
     # gets reloaded.
     def clear_available_locales_set #:nodoc:
       @@available_locales_set = nil
+    end
+
+    # The canonicalizer compiled from the locale alias table, if any.
+    @@locale_canonicalizer = nil
+
+    # Returns the locale alias table used to canonicalize locale tags.
+    # Defaults to nil (no aliases).
+    def locale_aliases
+      @@locale_aliases ||= nil
+    end
+
+    # Sets a locale alias table used to canonicalize locale tags, so that
+    # equivalent identifiers (legacy language codes, differently cased script
+    # names, explicit whole-tag aliases) share the same lookup and cache
+    # identity. The table is compiled locally and checked for circular
+    # aliases, which raise I18n::CircularLocaleAlias.
+    #
+    # E.g.:
+    #   I18n.config.locale_aliases = { :iw => :he, :"zh-Hant-TW" => :"zh-TW" }
+    def locale_aliases=(aliases)
+      @@locale_aliases = aliases
+      @@locale_canonicalizer = aliases && !aliases.empty? ? Locale::Canonical.new(aliases) : nil
+      @@available_locales_set = nil
+    end
+
+    # Returns the canonical locale for the given locale, applying the alias
+    # table configured through locale_aliases=. Returns a Symbol when an
+    # alias table is configured and the locale unchanged otherwise.
+    def canonical_locale(locale) #:nodoc:
+      canonicalizer = @@locale_canonicalizer
+      canonicalizer ? canonicalizer.canonicalize(locale) : locale
     end
 
     # Returns the current default scope separator. Defaults to '.'

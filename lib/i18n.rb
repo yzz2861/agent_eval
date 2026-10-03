@@ -95,7 +95,7 @@ module I18n
 
     # Write methods which delegates to the configuration object
     %w(locale backend default_locale available_locales default_separator
-      exception_handler load_path enforce_available_locales).each do |method|
+      exception_handler load_path enforce_available_locales locale_aliases).each do |method|
       module_eval <<-DELEGATORS, __FILE__, __LINE__ + 1
         def #{method}
           config.#{method}
@@ -242,6 +242,7 @@ module I18n
       locale ||= config.locale
       raise Disabled.new('t') if locale == false
       enforce_available_locales!(locale)
+      locale = canonical_locale(locale)
 
       backend = config.backend
 
@@ -297,7 +298,7 @@ module I18n
       raise Disabled.new('exists?') if locale == false
       raise I18n::ArgumentError if (key.is_a?(String) && key.empty?) || key.nil?
 
-      config.backend.exists?(locale, key, options)
+      config.backend.exists?(canonical_locale(locale), key, options)
     end
 
     # Transliterates UTF-8 characters to ASCII. By default this method will
@@ -355,6 +356,7 @@ module I18n
       locale ||= config.locale
       raise Disabled.new('transliterate') if locale == false
       enforce_available_locales!(locale)
+      locale = canonical_locale(locale)
 
       config.backend.transliterate(locale, key, replacement)
     rescue I18n::ArgumentError => exception
@@ -366,6 +368,7 @@ module I18n
       locale ||= config.locale
       raise Disabled.new('l') if locale == false
       enforce_available_locales!(locale)
+      locale = canonical_locale(locale)
 
       format ||= :default
       config.backend.localize(locale, object, format, options)
@@ -403,7 +406,16 @@ module I18n
     # Returns true when the passed locale, which can be either a String or a
     # Symbol, is in the list of available locales. Returns false otherwise.
     def locale_available?(locale)
-      I18n.config.available_locales_set.include?(locale)
+      return false unless locale
+
+      I18n.config.available_locales_set.include?(canonical_locale(locale))
+    end
+
+    # Returns the canonical locale for the given locale, applying the alias
+    # table configured through I18n.locale_aliases= (if any) so that
+    # equivalent locale identifiers share the same lookup and cache identity.
+    def canonical_locale(locale)
+      config.canonical_locale(locale)
     end
 
     # Raises an InvalidLocale exception when the passed locale is not available.

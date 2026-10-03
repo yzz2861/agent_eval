@@ -60,7 +60,7 @@ module I18n
       def [](locale)
         raise InvalidLocale.new(locale) if locale.nil?
         raise Disabled.new('fallback#[]') if locale == false
-        locale = locale.to_sym
+        locale = I18n.canonical_locale(locale).to_sym
         super || store(locale, compute(locale))
       end
 
@@ -68,10 +68,10 @@ module I18n
         if args.count == 1 && !block_given?
           mappings = args.first
           mappings.each do |from, to|
-            from, to = from.to_sym, Array(to)
+            from, to = I18n.canonical_locale(from).to_sym, Array(to)
             to.each do |_to|
               @map[from] ||= []
-              @map[from] << _to.to_sym
+              @map[from] << I18n.canonical_locale(_to).to_sym
             end
           end
         else
@@ -92,7 +92,7 @@ module I18n
       def compute(tags, include_defaults = true, exclude = [])
         result = []
         Array(tags).each do |tag|
-          tags = I18n::Locale::Tag.tag(tag).self_and_parents.map! { |t| t.to_sym } - exclude
+          tags = I18n::Locale::Tag.tag(I18n.canonical_locale(tag)).self_and_parents.map! { |t| t.to_sym } - exclude
           result += tags
           tags.each { |_tag| result += compute(@map[_tag], false, exclude + result) if @map[_tag] }
         end

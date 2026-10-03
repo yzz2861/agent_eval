@@ -66,6 +66,31 @@ I18n.config.with(locale: :ja).set!
 `set!` stores a frozen config in the current execution context.
 This keeps inherited state safe and lets updates happen by replacing config objects.
 
+### Canonical locales and aliases
+
+Applications that receive locale identifiers from external sources (legacy
+language codes, inconsistently cased script names, redundant tags) can
+configure an alias table so that equivalent identifiers share the same
+lookup and cache identity:
+
+```ruby
+I18n.locale_aliases = {
+  :iw             => :he,      # subtag alias: legacy language code
+  :Cyrl           => :Latn,    # subtag alias: script
+  :BU             => :MM,      # subtag alias: region
+  :"zh-Hant-TW"   => :"zh-TW"  # explicit whole-tag alias
+}
+
+I18n.canonical_locale(:iw)        # => :he
+I18n.canonical_locale(:"sr-cyrl") # => :"sr-Latn"
+```
+
+Canonicalization is applied before fallbacks are generated and is honored by
+`I18n.locale=`, `I18n.with_locale` and the `available_locales` enforcement.
+Variant, extension and private use subtags are always preserved. Alias chains
+are resolved locally (no registry is fetched) and circular aliases raise
+`I18n::CircularLocaleAlias` when the table is assigned.
+
 ## Features
 
 * Translation and localization

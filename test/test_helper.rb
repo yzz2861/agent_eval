@@ -27,6 +27,7 @@ class I18n::TestCase < Minitest::Test
     I18n.backend = nil
     I18n.default_separator = nil
     I18n.enforce_available_locales = true
+    I18n.locale_aliases = nil
     I18n.fallbacks = nil if I18n.respond_to?(:fallbacks=)
     super
   end
