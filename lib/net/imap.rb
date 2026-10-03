@@ -522,6 +522,9 @@ module Net
   # - #status: Returns mailbox information, e.g. message count, unseen message
   #   count, +UIDVALIDITY+ and +UIDNEXT+.
   # - #append: Appends a message to the end of a mailbox.
+  # - #append_multi: Appends multiple messages to the end of a mailbox, with a
+  #   single atomic +APPEND+ command.
+  #   <em>Requires the +MULTIAPPEND+ or +IMAP4rev2+ capability.</em>
   # - #idle: Allows the server to send updates to the client, without the client
   #   needing to poll using #noop.
   #   <em>Requires the +IDLE+ or +IMAP4rev2+ capability.</em>
@@ -569,8 +572,9 @@ module Net
   #
   # Although IMAP4rev2[https://www.rfc-editor.org/rfc/rfc9051] is not fully
   # supported yet, Net::IMAP supports several extensions that have been folded
-  # into it: +ENABLE+, +IDLE+, +LITERAL-+, +MOVE+, +NAMESPACE+, +SASL-IR+,
-  # +UIDPLUS+, +UNSELECT+, <tt>STATUS=SIZE</tt>, and the fetch side of +BINARY+.
+  # into it: +ENABLE+, +IDLE+, +LITERAL-+, +MOVE+, +MULTIAPPEND+, +NAMESPACE+,
+  # +SASL-IR+, +UIDPLUS+, +UNSELECT+, <tt>STATUS=SIZE</tt>,
+  # and the fetch side of +BINARY+.
   # Commands for these extensions are listed with the {Core IMAP
   # commands}[rdoc-ref:Net::IMAP@Core+IMAP+commands], above.
   #
@@ -602,6 +606,12 @@ module Net
   #
   # ==== RFC2971: +ID+
   # - #id: exchanges client and server implementation information.
+  #
+  # ==== RFC3502: +MULTIAPPEND+
+  # Folded into IMAP4rev2[https://www.rfc-editor.org/rfc/rfc9051] and also included
+  # above with {Core IMAP commands}[rdoc-ref:Net::IMAP@Core+IMAP+commands].
+  # - #append_multi: Appends multiple messages to a mailbox, with a single
+  #   atomic +APPEND+ command.
   #
   # ==== RFC3516: +BINARY+
   # The fetch side of +BINARY+ has been folded into
@@ -853,6 +863,10 @@ module Net
   # [ID[https://www.rfc-editor.org/rfc/rfc2971]]::
   #   Showalter, T., "IMAP4 ID extension", RFC 2971, DOI 10.17487/RFC2971,
   #   October 2000, <https://www.rfc-editor.org/info/rfc2971>.
+  # [MULTIAPPEND[https://www.rfc-editor.org/rfc/rfc3502]]::
+  #   Crispin, M., "Internet Message Access Protocol (IMAP) - MULTIAPPEND
+  #   Extension", RFC 3502, DOI 10.17487/RFC3502, March 2003,
+  #   <https://www.rfc-editor.org/info/rfc3502>.
   # [BINARY[https://www.rfc-editor.org/rfc/rfc3516]]::
   #   Nerenberg, L., "IMAP4 Binary Content Extension", RFC 3516,
   #   DOI 10.17487/RFC3516, April 2003,
@@ -2288,9 +2302,7 @@ module Net
     # This will report the UIDVALIDITY of the destination mailbox and the
     # assigned UID of the appended message.
     #
-    #--
-    # TODO: add MULTIAPPEND support
-    #++
+    # Related: #append_multi
     def append(mailbox, message, flags = nil, date_time = nil)
       message = StringFormatter.literal_or_literal8(message, name: "message")
       args = []
@@ -2298,6 +2310,76 @@ module Net
       args.push(date_time) if date_time
       args.push(message)
       send_command("APPEND", mailbox, *args)
+    end
+
+    # Sends an {APPEND command [RFC3502 §3]}[https://www.rfc-editor.org/rfc/rfc3502#section-3]
+    # to append multiple +messages+ to the end of the +mailbox+, as a single
+    # atomic +APPEND+ command.  This avoids the round-trips of sending each
+    # message with a separate #append command.
+    #
+    # Each element of +messages+ may be a String (or anything accepted as the
+    # +message+ argument to #append), or a Hash with the following keys:
+    # [+:message+]   The message to be appended (required).
+    # [+:flags+]     An array of flags initially set on the new message.
+    # [+:date_time+] The creation time to assign to the new message.
+    #
+    # For example:
+    #
+    #   imap.append_multi("inbox", [
+    #     {message: msg1, flags: [:Seen], date_time: Time.now},
+    #     {message: msg2, flags: [:Draft]},
+    #     msg3,
+    #   ])
+    #
+    # All arguments are validated before anything is sent to the server.
+    # ArgumentError, TypeError, or DataFormatError is raised for input errors
+    # that can be detected locally, e.g. an empty +messages+ array, a missing
+    # or invalid +:message+, or invalid flags.
+    #
+    # When the server supports +UIDPLUS+ (or +IMAP4rev2+) and the destination
+    # supports persistent UIDs, the server's response should include an
+    # +APPENDUID+ response code, and an array of the assigned UIDs is
+    # returned---each element corresponds to the message at the same position
+    # in +messages+.  +nil+ is returned when the server does not return an
+    # +APPENDUID+ response code.  A Net::IMAP::Error is raised when the
+    # +APPENDUID+ response code does not assign exactly one UID for each
+    # appended message.
+    #
+    # Like #append, message literals are sent using synchronizing or
+    # non-synchronizing literals according to the server's advertised
+    # capabilities (+LITERAL+ [RFC7888[https://www.rfc-editor.org/rfc/rfc7888.html]],
+    # +LITERAL-+, or +IMAP4rev2+).  When the server rejects the command before
+    # a literal's continuation request, the remaining messages are not sent.
+    #
+    # ==== Capabilities
+    #
+    # The server's capabilities must include +MULTIAPPEND+
+    # {[RFC3502]}[https://www.rfc-editor.org/rfc/rfc3502.html] or +IMAP4rev2+
+    # {[RFC9051]}[https://www.rfc-editor.org/rfc/rfc9051.html].  A
+    # Net::IMAP::Error is raised when +MULTIAPPEND+ is unsupported: the
+    # messages are <em>not</em> silently split into multiple non-atomic
+    # +APPEND+ commands.
+    #
+    # Related: #append
+    def append_multi(mailbox, messages)
+      messages = messages.to_a
+      if messages.empty?
+        raise ArgumentError, "messages must contain at least one message"
+      end
+      unless capable?("MULTIAPPEND") || capable?("IMAP4rev2")
+        raise Error, "server does not support MULTIAPPEND"
+      end
+      args = messages.flat_map { multiappend_message_args(_1) }
+      response = send_command("APPEND", mailbox, *args)
+      code = response.data.code
+      return unless code && code.name.casecmp?("APPENDUID")
+      appenduid = code.data
+      unless appenduid.size == messages.size
+        raise Error, format("APPENDUID response code assigned %d UIDs " \
+                            "for %d appended messages",
+                            appenduid.size, messages.size)
+      end
+      appenduid.assigned_uids.each_ordered_number.to_a
     end
 
     # Sends a {CHECK command [IMAP4rev1 §6.4.1]}[https://www.rfc-editor.org/rfc/rfc3501#section-6.4.1]
@@ -3823,6 +3905,25 @@ module Net
           put_string(client_response + CRLF)
         end
       end
+    end
+
+    # Normalizes one #append_multi message entry into APPEND command args:
+    # optional flags, optional date_time, and the message literal.  Raises
+    # ArgumentError or TypeError for locally detectable input errors.
+    def multiappend_message_args(entry)
+      entry = {message: entry} unless entry.is_a?(Hash)
+      unknown_keys = entry.keys - %i[message flags date_time]
+      unless unknown_keys.empty?
+        raise ArgumentError, "unknown message keys: %p" % [unknown_keys]
+      end
+      message = entry.fetch(:message) {
+        raise ArgumentError, "message entry is missing :message"
+      }
+      message = StringFormatter.literal_or_literal8(message, name: "message")
+      args = []
+      args.push(entry[:flags])     if entry[:flags]
+      args.push(entry[:date_time]) if entry[:date_time]
+      args.push(message)
     end
 
     def send_command(cmd, *args, &block)

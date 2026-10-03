@@ -13,8 +13,9 @@ module Net
     #
     # A server that supports +UIDPLUS+ (or +IMAP4rev2+) should send
     # AppendUIDData inside every TaggedResponse returned by the
-    # append[rdoc-ref:Net::IMAP#append] command---unless the target mailbox
-    # reports +UIDNOTSTICKY+.
+    # append[rdoc-ref:Net::IMAP#append] or
+    # append_multi[rdoc-ref:Net::IMAP#append_multi] command---unless the
+    # target mailbox reports +UIDNOTSTICKY+.
     #
     # == Required capability
     # Requires either +UIDPLUS+ [RFC4315[https://www.rfc-editor.org/rfc/rfc4315]]

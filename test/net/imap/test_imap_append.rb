@@ -122,4 +122,99 @@ class IMAPAppendTest < Net::IMAP::TestCase
     end
   end
 
+  test "#append_multi sends one APPEND command with all messages" do
+    with_fake_server(with_extensions: %i[MULTIAPPEND UIDPLUS]) do |server, imap|
+      server.on("APPEND") do |resp|
+        resp.done_ok code: "APPENDUID 38505 3955:3956,3960"
+      end
+
+      time = Time.new(2026, 2, 20, 10, 00, in: "-0500")
+      uids = imap.append_multi("INBOX", [
+        {message: "msg1", flags: %i[Seen], date_time: time},
+        {message: "msg2", flags: %i[Draft]},
+        "msg3",
+      ])
+
+      assert_equal [3955, 3956, 3960], uids
+      command = server.commands.pop
+      assert_equal "APPEND", command.name
+      assert_equal %(INBOX (\\Seen) "20-Feb-2026 10:00:00 -0500" {4}\r\nmsg1 ) +
+                   %((\\Draft) {4}\r\nmsg2 {4}\r\nmsg3),
+                   command.args
+      assert server.commands.empty?
+    end
+  end
+
+  test "#append_multi returns nil without an APPENDUID response code" do
+    with_fake_server(with_extensions: %i[MULTIAPPEND]) do |server, imap|
+      server.on("APPEND", &:done_ok)
+      assert_nil imap.append_multi("INBOX", ["msg1", "msg2"])
+    end
+  end
+
+  test "#append_multi raises when MULTIAPPEND is unsupported, sending nothing" do
+    with_fake_server do |server, imap|
+      error = assert_raise(Net::IMAP::Error) do
+        imap.append_multi("INBOX", ["msg1", "msg2"])
+      end
+      assert_match(/MULTIAPPEND/, error.message)
+      imap.noop
+      assert_equal "NOOP", server.commands.pop.name
+      assert server.commands.empty?
+    end
+  end
+
+  test "#append_multi raises when APPENDUID assigns the wrong number of UIDs" do
+    with_fake_server(with_extensions: %i[MULTIAPPEND UIDPLUS]) do |server, imap|
+      server.on("APPEND") { _1.done_ok code: "APPENDUID 38505 3955:3956" }
+      error = assert_raise(Net::IMAP::Error) do
+        imap.append_multi("INBOX", ["msg1", "msg2", "msg3"])
+      end
+      assert_match(/2 UIDs for 3 appended messages/, error.message)
+    end
+  end
+
+  test "#append_multi stops sending when a literal continuation is rejected" do
+    with_fake_server(with_extensions: %i[MULTIAPPEND]) do |server, imap|
+      server.literal_acceptor = ->(_buf, size) { size <= 4 }
+      assert_raise(Net::IMAP::NoResponseError) do
+        imap.append_multi("INBOX", ["a much larger message", "msg2"])
+      end
+      # the remaining messages were not sent, and the connection still works
+      imap.noop
+      assert_equal "NOOP", server.commands.pop.name
+      assert server.commands.empty?
+    end
+  end
+
+  test "#append_multi uses non-synchronizing literals only when permitted" do
+    with_fake_server(with_extensions: %i[MULTIAPPEND LITERAL+]) do |server, imap|
+      server.on("APPEND", &:done_ok)
+      imap.append_multi("INBOX", ["msg1", "msg2"])
+      assert_equal "INBOX {4+}\r\nmsg1 {4+}\r\nmsg2",
+                   server.commands.pop.args
+    end
+  end
+
+  test "#append_multi validates input before sending anything" do
+    with_fake_server(with_extensions: %i[MULTIAPPEND]) do |server, imap|
+      assert_raise(ArgumentError) { imap.append_multi("INBOX", []) }
+      assert_raise(TypeError) do
+        imap.append_multi("INBOX", [{message: 42}])
+      end
+      assert_raise(ArgumentError) do
+        imap.append_multi("INBOX", [{flags: %i[Seen]}])
+      end
+      assert_raise(ArgumentError) do
+        imap.append_multi("INBOX", [{message: "msg1", flag: %i[Seen]}])
+      end
+      assert_raise(Net::IMAP::DataFormatError) do
+        imap.append_multi("INBOX", [{message: "msg1", flags: [:"bad flag"]}])
+      end
+      imap.noop
+      assert_equal "NOOP", server.commands.pop.name
+      assert server.commands.empty?
+    end
+  end
+
 end
