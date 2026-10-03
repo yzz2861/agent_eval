@@ -15,6 +15,7 @@ module Dry
       task: "Task",
       try: "Try",
       validated: "Validated",
+      result_t: "ResultT",
       result: [
         "Result",
         "Result::Fixed"
