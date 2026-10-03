@@ -78,6 +78,37 @@ class ConnectionPool
   alias_method :then, :with
 
   ##
+  # Quiesces the pool for the duration of +block+: no new external checkouts
+  # are allowed and the call blocks until every connection currently checked
+  # out by another thread has been returned. The block therefore runs with
+  # zero connections on loan.
+  #
+  # A thread that already holds a connection must never wait for itself, so
+  # nested +with+/+checkout+ calls inside that thread are served directly from
+  # its thread-local connection and never hit the quiesce barrier. Calling
+  # +quiesce+ from a thread that currently holds a connection is rejected up
+  # front with ConnectionPool::Error, since that thread's own connection could
+  # never be returned while the block is running.
+  #
+  # Raises ConnectionPool::TimeoutError if outstanding connections are not
+  # returned within +timeout+ seconds. If the block raises, or if +shutdown+
+  # races with the wait, the barrier is released and waiting checkouts are
+  # resumed (or receive ConnectionPool::PoolShuttingDownError).
+  #
+  # @example
+  #   pool.quiesce do
+  #     # At this point no other thread holds a connection.
+  #     File.write(STATE_PATH, serialize_state)
+  #   end
+  def quiesce(timeout: @timeout, &block)
+    if ::Thread.current[@key]
+      raise ConnectionPool::Error,
+        "cannot quiesce a pool while the current thread holds a connection"
+    end
+    @available.quiesce(timeout: timeout, &block)
+  end
+
+  ##
   # Marks the current thread's checked-out connection for discard.
   #
   # When a connection is marked for discard, it will not be returned to the pool
@@ -180,6 +211,11 @@ class ConnectionPool
   # Number of pool entries available for checkout at this instant.
   def available
     @available.length
+  end
+
+  # Number of connections currently checked out from the pool.
+  def checked_out_count
+    @available.checked_out_count
   end
 
   # Number of pool entries created and idle in the pool.

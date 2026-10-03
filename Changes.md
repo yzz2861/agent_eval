@@ -1,5 +1,15 @@
 # connection_pool Changelog
 
+Unreleased
+---------
+
+- Add `ConnectionPool#quiesce`, which blocks new checkouts, waits for every
+  checked-out connection to be returned, runs a maintenance block with zero
+  connections on loan, and resumes service afterwards. Nested checkouts by an
+  existing holder are not blocked; calling `quiesce` from a thread that holds
+  a connection raises `ConnectionPool::Error`. Timeouts, raised maintenance
+  blocks, and `shutdown`/`reload` races always release the barrier.
+
 3.0.2
 ------
 

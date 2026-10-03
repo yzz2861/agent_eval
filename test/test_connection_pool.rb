@@ -71,6 +71,31 @@ class TestConnectionPool < Minitest::Test
     threads.each(&:join)
   end
 
+  def refute_joinable(thread, timeout = 1)
+    assert_nil thread.join(timeout), "expected #{thread.inspect} to still be blocked"
+  end
+
+  def assert_join(thread, timeout = 5)
+    refute_nil thread.join(timeout), "expected #{thread.inspect} to finish within #{timeout}s"
+    thread
+  end
+
+  def wait_for_stop(thread, timeout = 5)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    sleep 0.001 while thread.alive? && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+    refute thread.alive?, "expected #{thread.inspect} to stop within #{timeout}s"
+  end
+
+  def assert_join_error(thread, timeout = 5)
+    wait_for_stop(thread, timeout)
+    begin
+      thread.value
+    rescue StandardError => e
+      return e
+    end
+    flunk "expected #{thread.inspect} to raise but it succeeded"
+  end
+
   def test_basic_multithreaded_usage
     pool_size = 5
     pool = ConnectionPool.new(size: pool_size) { NetworkConnection.new }
@@ -599,6 +624,278 @@ class TestConnectionPool < Minitest::Test
     kill_threads(threads)
 
     assert_equal [["shutdown"]] * 3, recorders.map { |r| r.calls }
+  end
+
+  def test_quiesce_block_runs_with_zero_checked_out_connections
+    pool = ConnectionPool.new(size: 2) { Object.new }
+
+    ready = Queue.new
+    release = Queue.new
+    checked_out_inside = nil
+    available_inside = nil
+    main_entered = Queue.new
+    release_main = Queue.new
+
+    workers = Array.new(2) do
+      Thread.new do
+        pool.with do |_conn|
+          ready << true
+          release.pop
+        end
+      end
+    end
+
+    2.times { ready.pop }
+
+    main = Thread.new do
+      pool.quiesce do
+        checked_out_inside = pool.checked_out_count
+        available_inside = pool.available
+        main_entered << true
+        release_main.pop
+      end
+    end
+
+    2.times { release << true }
+    main_entered.pop
+
+    assert_equal 0, checked_out_inside
+    assert_equal pool.size, available_inside
+
+    # While maintenance is still running, a new external checkout is blocked.
+    late = Thread.new { pool.with { |conn| conn } }
+    refute_joinable late
+
+    release_main << true
+    assert_join main
+    assert_join late
+    workers.each { |thread| assert_join thread }
+  end
+
+  def test_quiesce_nested_with_for_existing_holder_is_not_blocked
+    pool = ConnectionPool.new(size: 1) { Recorder.new }
+
+    pool.with do |recorder|
+      pool.with do |inner|
+        inner.do_work("nested")
+      end
+      recorder.do_work("outer")
+    end
+
+    recorder = pool.checkout
+    assert_equal %w[nested outer], recorder.calls
+    pool.checkin
+  end
+
+  def test_quiesce_rejected_from_thread_holding_a_connection
+    pool = ConnectionPool.new(size: 1) { Object.new }
+
+    pool.with do
+      error = assert_raises ConnectionPool::Error do
+        pool.quiesce {}
+      end
+      assert_match(/holds a connection/, error.message)
+    end
+
+    pool.quiesce {}
+  end
+
+  def test_quiesce_times_out_when_a_connection_stays_checked_out
+    pool = ConnectionPool.new(size: 1, timeout: 1) { Object.new }
+    ready = Queue.new
+    release = Queue.new
+    holder = Thread.new do
+      pool.with do |_conn|
+        ready << true
+        release.pop
+      end
+    end
+    ready.pop
+
+    error = assert_raises ConnectionPool::TimeoutError do
+      pool.quiesce(timeout: 0.02) {}
+    end
+    assert_match(/1 connection/, error.message)
+
+    release << true
+    assert_join holder
+    pool.quiesce(timeout: 1) {}
+  end
+
+  def test_quiesce_checkout_waiter_times_out_while_barrier_is_active
+    pool = ConnectionPool.new(size: 1, timeout: 0.02) { Object.new }
+    entered = Queue.new
+    release = Queue.new
+    maintenance = Thread.new do
+      pool.quiesce do
+        entered << true
+        release.pop
+      end
+    end
+    entered.pop
+
+    waiter = Thread.new { Thread.current.report_on_exception = false; pool.with { |conn| conn } }
+    error = assert_join_error waiter
+    assert_kind_of ConnectionPool::TimeoutError, error
+    assert_match(/quiescing/, error.message)
+
+    release << true
+    assert_join maintenance
+  end
+
+  def test_quiesce_succeeds_once_holder_returns_connection
+    pool = ConnectionPool.new(size: 1, timeout: 1) { Object.new }
+    ready = Queue.new
+    release = Queue.new
+    holder = Thread.new do
+      pool.with do |_conn|
+        ready << true
+        release.pop
+      end
+    end
+    ready.pop
+
+    release << true
+    assert_join holder
+    pool.quiesce(timeout: 1) {}
+
+    pool.with { |conn| refute_nil conn }
+  end
+
+  def test_quiesce_releases_barrier_when_block_raises
+    pool = ConnectionPool.new(size: 1) { Object.new }
+
+    assert_raises RuntimeError do
+      pool.quiesce { raise "maintenance failed" }
+    end
+
+    pool.with { |conn| refute_nil conn }
+  end
+
+  def test_quiesce_shutdown_race_while_waiting_for_checkins
+    pool = ConnectionPool.new(size: 1) { Object.new }
+
+    ready = Queue.new
+    release = Queue.new
+    holder = Thread.new do
+      pool.with do |_conn|
+        ready << true
+        release.pop
+      end
+    end
+    ready.pop
+
+    maintenance = Thread.new do
+      Thread.current.report_on_exception = false
+      pool.quiesce { flunk "maintenance block must not run" }
+    end
+    refute_joinable maintenance
+
+    pool.shutdown {}
+
+    error = assert_join_error maintenance
+    assert_kind_of ConnectionPool::PoolShuttingDownError, error
+
+    release << true
+    assert_join holder
+
+    assert_raises ConnectionPool::PoolShuttingDownError do
+      pool.checkout(timeout: 0.02)
+    end
+  end
+
+  def test_quiesce_shutdown_race_while_block_runs_releases_waiters
+    pool = ConnectionPool.new(size: 2) { Object.new }
+
+    ready = Queue.new
+    release_holder = Queue.new
+    block_started = Queue.new
+    release_block = Queue.new
+
+    # The holder must check out first: a lazy pool with no connections yet
+    # would otherwise look already quiescent.
+    holder = Thread.new do
+      pool.with do |_conn|
+        ready << true
+        release_holder.pop
+      end
+    end
+    ready.pop
+
+    maintenance = Thread.new do
+      pool.quiesce do
+        block_started << true
+        release_block.pop
+      end
+    end
+    refute_joinable maintenance
+
+    release_holder << true
+    block_started.pop
+    refute_joinable maintenance
+
+    waiter = Thread.new { Thread.current.report_on_exception = false; pool.with { |conn| conn } }
+    refute_joinable waiter
+
+    # reload races with the active maintenance block; waiters must not hang.
+    pool.reload {}
+    wait_for_stop waiter
+    waiter_error = begin
+      waiter.value
+      nil
+    rescue StandardError => e
+      e
+    end
+    assert_kind_of ConnectionPool::PoolShuttingDownError, waiter_error
+
+    release_block << true
+    assert_join maintenance
+    assert_join holder
+
+    # After the barrier is released and reload completes, service resumes.
+    pool.with { |conn| refute_nil conn }
+  end
+
+  def test_quiesce_serializes_concurrent_maintenance_blocks
+    pool = ConnectionPool.new(size: 1) { Object.new }
+    events = []
+    events_mutex = Thread::Mutex.new
+    entered = Queue.new
+    release = Queue.new
+
+    first = Thread.new do
+      pool.quiesce do
+        events_mutex.synchronize { events << :first }
+        entered << true
+        release.pop
+      end
+    end
+    entered.pop
+
+    second = Thread.new do
+      pool.quiesce { events_mutex.synchronize { events << :second } }
+    end
+    refute_joinable second
+
+    release << true
+    assert_join first
+    assert_join second
+    assert_equal [:first, :second], events
+  end
+
+  def test_quiesce_requires_a_block
+    pool = ConnectionPool.new(size: 1) { Object.new }
+
+    assert_raises ArgumentError do
+      pool.quiesce
+    end
+  end
+
+  def test_wrapped_pool_quiesce
+    wrapper = ConnectionPool::Wrapper.new(size: 1) { Object.new }
+    ran = false
+    wrapper.pool_quiesce { ran = true }
+    assert ran
   end
 
   def test_reap_removes_idle_connections

@@ -30,6 +30,8 @@ class ConnectionPool::TimedStack
     @mutex = Thread::Mutex.new
     @resource = Thread::ConditionVariable.new
     @shutdown_block = nil
+    @quiescing = false
+    @shutdown_epoch = 0
   end
 
   ##
@@ -62,8 +64,25 @@ class ConnectionPool::TimedStack
   def pop(timeout: 0.5, exception: ConnectionPool::TimeoutError, **kwargs)
     deadline = current_time + timeout
     @mutex.synchronize do
+      shutdown_epoch = @shutdown_epoch
       loop do
-        raise ConnectionPool::PoolShuttingDownError if @shutdown_block
+        raise ConnectionPool::PoolShuttingDownError if @shutdown_block || @shutdown_epoch != shutdown_epoch
+
+        if @quiescing
+          to_wait = deadline - current_time
+          if to_wait <= 0
+            if exception
+              raise exception, "Waited #{timeout} sec, pool is quiescing"
+            else
+              return nil
+            end
+          end
+          @resource.wait(@mutex, to_wait)
+          raise ConnectionPool::PoolShuttingDownError if @shutdown_epoch != shutdown_epoch
+          # Re-check at the top of the loop: the barrier may have ended.
+          next
+        end
+
         if (conn = try_fetch_connection(**kwargs))
           return conn
         end
@@ -85,6 +104,61 @@ class ConnectionPool::TimedStack
   end
 
   ##
+  # Prevents new connections from being checked out, waits for every
+  # connection currently checked out to be returned, then calls the given
+  # +block+ while the stack is known to be quiescent (no connections out).
+  #
+  # Connections returned while the block is running are stored as usual but
+  # remain unavailable to new +pop+ callers until the block finishes. The
+  # barrier is always released and waiting threads are woken when the block
+  # returns, raises, the wait times out, or the stack is shut down.
+  #
+  # Raises ConnectionPool::TimeoutError if the stack cannot be drained within
+  # +timeout+ seconds and ConnectionPool::PoolShuttingDownError if +shutdown+
+  # wins the race.
+  def quiesce(timeout: 5)
+    raise ArgumentError, "quiesce must receive a block" unless block_given?
+
+    deadline = current_time + timeout
+
+    @mutex.synchronize do
+      shutdown_epoch = @shutdown_epoch
+      loop do
+        raise ConnectionPool::PoolShuttingDownError if @shutdown_block || @shutdown_epoch != shutdown_epoch
+        break unless @quiescing
+
+        to_wait = deadline - current_time
+        raise ConnectionPool::TimeoutError, "Waited #{timeout} sec for an active quiesce block" if to_wait <= 0
+        @resource.wait(@mutex, to_wait)
+      end
+
+      @quiescing = true
+
+      begin
+        until checked_out_count.zero?
+          raise ConnectionPool::PoolShuttingDownError if @shutdown_block || @shutdown_epoch != shutdown_epoch
+
+          to_wait = deadline - current_time
+          if to_wait <= 0
+            raise ConnectionPool::TimeoutError,
+              "Waited #{timeout} sec for #{checked_out_count} connection(s) to be checked in"
+          end
+          @resource.wait(@mutex, to_wait)
+        end
+      rescue Exception
+        release_quiesce_barrier
+        raise
+      end
+    end
+
+    begin
+      yield
+    ensure
+      @mutex.synchronize { release_quiesce_barrier }
+    end
+  end
+
+  ##
   # Shuts down the TimedStack by passing each connection to +block+ and then
   # removing it from the pool. Attempting to checkout a connection after
   # shutdown will raise +ConnectionPool::PoolShuttingDownError+ unless
@@ -94,10 +168,15 @@ class ConnectionPool::TimedStack
 
     @mutex.synchronize do
       @shutdown_block = block
+      @shutdown_epoch += 1
       @resource.broadcast
 
       shutdown_connections
       @shutdown_block = nil if reload
+      # Reload clears the shutdown state: wake threads parked on an active
+      # quiesce barrier (or on pop) so they observe the new state immediately
+      # instead of sleeping through their full wait slice.
+      @resource.broadcast if reload
     end
   end
 
@@ -139,6 +218,12 @@ class ConnectionPool::TimedStack
   end
 
   ##
+  # The number of connections currently checked out.
+  def checked_out_count
+    @created - @que.length
+  end
+
+  ##
   # Reduce the created count
   def decrement_created
     @mutex.synchronize do
@@ -148,6 +233,11 @@ class ConnectionPool::TimedStack
   end
 
   private
+
+  def release_quiesce_barrier
+    @quiescing = false
+    @resource.broadcast
+  end
 
   def current_time
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
