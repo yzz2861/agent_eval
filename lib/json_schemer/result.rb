@@ -10,7 +10,7 @@ module JSONSchemer
   end
 
   Result = Struct.new(:source, :instance, :instance_location, :keyword_location, :valid, :nested, :type, :annotation, :details, :ignore_nested, :nested_key) do
-    def output(output_format)
+    def output(output_format, explanation_limit = nil)
       case output_format
       when 'classic'
         classic
@@ -22,6 +22,8 @@ module JSONSchemer
         detailed
       when 'verbose'
         verbose
+      when 'explanation'
+        Explanation.build(self, explanation_limit)
       else
         raise UnknownOutputFormat, output_format
       end

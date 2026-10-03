@@ -72,7 +72,7 @@ module JSONSchemer
 
           def validate(instance, instance_location, keyword_location, context)
             subschema_result = parsed.validate_instance(instance, instance_location, keyword_location, context)
-            result(instance, instance_location, keyword_location, !subschema_result.valid, subschema_result.nested)
+            result(instance, instance_location, keyword_location, !subschema_result.valid, [subschema_result])
           end
         end
 

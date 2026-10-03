@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Optional `'explanation'` output format for `allOf`/`anyOf`/`oneOf`/`not` and
+  `if`/`then`/`else` failures: preserves the branch tree, merges identical leaf
+  errors across branches, distinguishes "all branches failed" from "multiple
+  branches matched", and supports an `:explanation_limit` with omitted counts
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes

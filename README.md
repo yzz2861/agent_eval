@@ -234,7 +234,7 @@ JSONSchemer.schema(
   end,
 
   # output formatting (https://json-schema.org/draft/2020-12/json-schema-core.html#section-12)
-  # 'classic'/'flag'/'basic'/'detailed'/'verbose'
+  # 'classic'/'flag'/'basic'/'detailed'/'verbose'/'explanation'
   # default: 'classic'
   output_format: 'basic',
 
@@ -444,6 +444,56 @@ In the example above, custom error messsages are looked up using the following k
 7. `en.json_schemer.errors.'http://json-schema.org/draft-07/schema#'.*`
 8. `en.json_schemer.errors.required`
 9. `en.json_schemer.errors.*`
+
+## Combination Error Explanations
+
+When a schema fails inside `allOf`/`anyOf`/`oneOf`, the standard output formats
+can produce dozens of similar errors that are hard to trace back to a branch.
+The optional `'explanation'` output format keeps the full branch tree while
+merging leaf errors that are identical across branches, and it states why a
+combination failed:
+
+- `anyOf`: `all_branches_failed`; `allOf`: `all_branches_required` (with
+  `matchedBranchIndexes` for branches that passed)
+- `oneOf`: `all_branches_failed` vs `multiple_branches_matched` (with
+  `matchedBranchIndexes` naming every branch that passed)
+- `not`: `not_schema_matched`, with the matched subschema under `annotations`
+- `if`/`then`/`else`: `then_schema_failed`/`else_schema_failed` for an applied
+  branch and `then_not_applied`/`else_not_applied` for a skipped branch, each
+  with the evaluated `if` condition attached
+
+Every node keeps `keywordLocation`, `absoluteKeywordLocation`, and
+`instanceLocation`. Identical leaf errors are hoisted to the combination node
+once with `occurrenceCount`, the `branchIndexes` they came from, and their
+per-branch `keywordLocations`. The branch nodes themselves are always retained.
+
+```ruby
+schemer = JSONSchemer.schema({
+  'anyOf' => [
+    { '$ref' => '#/$defs/person' },
+    { '$ref' => '#/$defs/person' }
+  ],
+  '$defs' => { 'person' => { 'type' => 'object', 'required' => ['name'] } }
+})
+
+output = schemer.validate('x', :output_format => 'explanation')
+node = output.fetch('errors').first
+node.fetch('reason')        # => 'all_branches_failed'
+node.fetch('branchCount')   # => 2
+node.fetch('errors')       # merged identical leaves, with 'occurrenceCount',
+                           # 'branchIndexes', and 'keywordLocations'
+node.fetch('branches')     # both branch nodes retained
+```
+
+Pass `:explanation_limit` (an integer) to cap how many branches, leaf errors,
+and annotations are shown. Nodes report the number of omitted items
+(`branchOmittedCount`, `errorOmittedCount`, `annotationOmittedCount`), and
+matched `oneOf` branches are always retained so truncation cannot make a
+"multiple branches matched" failure look like "all branches failed".
+
+```ruby
+schemer.validate(instance, :output_format => 'explanation', :explanation_limit => 10)
+```
 
 ## OpenAPI
 
