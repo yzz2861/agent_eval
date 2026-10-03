@@ -116,6 +116,18 @@ module Dry
         @failures
       end
 
+      # Return aggregated warnings
+      #
+      # @return [Array<Hash>]
+      #
+      # @api private
+      def warnings
+        @warnings ||= []
+        @warnings += @base.warning_opts if defined?(@base)
+        @warnings.concat(@key.values.flat_map(&:warning_opts)) if defined?(@key)
+        @warnings
+      end
+
       # @api private
       def with(new_opts, &)
         self.class.new(_contract, **_options, **new_opts, &)

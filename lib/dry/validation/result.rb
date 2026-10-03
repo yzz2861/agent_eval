@@ -52,6 +52,7 @@ module Dry
         @context = context
         @options = options
         @errors = initialize_errors
+        @warnings = initialize_warnings
       end
 
       # Return values wrapper with the input processed by schema
@@ -78,7 +79,24 @@ module Dry
         new_options.empty? ? @errors : @errors.with(schema_errors(new_options), new_options)
       end
 
+      # Get warning set
+      #
+      # Warnings are messages that don't affect the result's success status.
+      # They are exposed separately from errors so that you can present them
+      # to the users without treating them as validation failures
+      #
+      # @!macro errors-options
+      #
+      # @return [MessageSet]
+      #
+      # @api public
+      def warnings(new_options = EMPTY_HASH)
+        new_options.empty? ? @warnings : @warnings.with(EMPTY_ARRAY, new_options)
+      end
+
       # Check if result is successful
+      #
+      # Warnings don't affect the success status
       #
       # @return [Bool]
       #
@@ -101,6 +119,13 @@ module Dry
       # @api public
       def error?(key)
         errors.any? { |msg| Schema::Path[msg.path].include?(Schema::Path[key]) }
+      end
+
+      # Check if values include a warning for the provided key
+      #
+      # @api public
+      def warning?(key)
+        warnings.any? { |msg| Schema::Path[msg.path].include?(Schema::Path[key]) }
       end
 
       # Check if the base schema (without rules) includes an error for the provided key
@@ -145,6 +170,14 @@ module Dry
       # @api private
       def add_error(error)
         @errors.add(error)
+        self
+      end
+
+      # Add a new warning for the provided key
+      #
+      # @api private
+      def add_warning(warning)
+        @warnings.add(warning)
         self
       end
 
@@ -194,6 +227,7 @@ module Dry
       def freeze
         values.freeze
         errors.freeze
+        warnings.freeze
         super
       end
 
@@ -216,6 +250,11 @@ module Dry
       # @api private
       def initialize_errors(options = self.options)
         MessageSet.new(schema_errors(options), options)
+      end
+
+      # @api private
+      def initialize_warnings(options = self.options)
+        MessageSet.new(EMPTY_ARRAY.dup, options)
       end
 
       # @api private

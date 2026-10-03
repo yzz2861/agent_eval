@@ -39,4 +39,30 @@ RSpec.describe Dry::Validation::Result do
       end
     end
   end
+
+  context "with warnings only" do
+    let(:schema) do
+      Class.new(Dry::Validation::Contract) do
+        schema do
+          required(:name).filled(:string)
+        end
+
+        rule(:name) do
+          key.warning("could be longer") if value.length < 4
+        end
+      end.new
+    end
+
+    let(:input) { {name: "Jan"} }
+
+    describe "#to_monad" do
+      it "returns a Success value" do
+        monad = result.to_monad
+
+        expect(result.warnings).not_to be_empty
+        expect(monad).to be_a_success
+        expect(monad.value!).to be(result)
+      end
+    end
+  end
 end

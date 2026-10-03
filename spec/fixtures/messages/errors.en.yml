@@ -2,10 +2,13 @@ en:
   dry_validation:
     rules:
       email: "E-mail"
+      password: "Password"
     errors:
       format: "has invalid format"
       rules:
         not_weekend: "this only works on weekends"
+        password:
+          weak: "should be at least %{min} chars long"
         email:
           invalid: "oh noez bad email"
           taken: "looks like %{email} is taken"
