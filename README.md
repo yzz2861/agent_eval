@@ -209,6 +209,41 @@ decoded_token = JWT.decode(token, nil, true, { algorithm: 'none' })
 #     ]
 ```
 
+### **JSON Web Encryption (JWE)**
+
+Compact JWE support is available through the separate `JWT::JWE` entry point. Only direct use of a shared key (`alg=dir`) with AES-256 GCM authenticated encryption (`enc=A256GCM`) is supported. There is no algorithm fallback and `JWT.decode` does not decrypt JWE tokens.
+
+The key must be a 32-byte binary String. The protected header segment is authenticated as additional authenticated data. Compression (`zip`) is rejected.
+
+```ruby
+key = OpenSSL::Random.random_bytes(32)
+
+jwe = JWT::JWE.encrypt(payload: 'plaintext', key: key)
+plaintext = JWT::JWE.decrypt(jwe: jwe, key: key)
+# => "plaintext"
+```
+
+For reproducible tests, provide an object responding to `random_bytes`:
+
+```ruby
+deterministic_iv = Object.new
+def deterministic_iv.random_bytes(length)
+  '0' * length
+end
+
+JWT::JWE.encrypt(payload: 'plaintext', key: key, iv_generator: deterministic_iv)
+```
+
+JWE does not inspect or verify nested tokens. Encrypt a compact JWS first and verify it explicitly after decryption:
+
+```ruby
+nested_jws = JWT.encode({ data: 'test' }, 'jws-secret', 'HS256')
+jwe = JWT::JWE.encrypt(payload: nested_jws, key: key, headers: { cty: 'JWT' })
+
+decrypted_jws = JWT::JWE.decrypt(jwe: jwe, key: key)
+payload, header = JWT.decode(decrypted_jws, 'jws-secret', true, algorithm: 'HS256')
+```
+
 ## `JWT::Token` and `JWT::EncodedToken`
 
 The `JWT::Token` and `JWT::EncodedToken` classes can be used to manage your JWTs.

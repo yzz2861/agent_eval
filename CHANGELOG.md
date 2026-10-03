@@ -6,7 +6,7 @@
 
 **Features:**
 
-- Your contribution here
+- Add a separate compact JWE entry point for direct key agreement (`dir`) with `A256GCM` authenticated encryption
 
 **Fixes and enhancements:**
 

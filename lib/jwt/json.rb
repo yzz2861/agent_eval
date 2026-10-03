@@ -10,8 +10,8 @@ module JWT
         ::JSON.generate(data)
       end
 
-      def parse(data)
-        ::JSON.parse(data)
+      def parse(data, **options)
+        ::JSON.parse(data, **options)
       end
     end
   end
