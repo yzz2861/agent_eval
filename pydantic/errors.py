@@ -75,6 +75,11 @@ PydanticErrorCodes = Literal[
     'overlapping-unpack-typed-dict',
     'invalid-self-type',
     'validate-by-alias-and-name-false',
+    'model-view-invalid-fields',
+    'model-view-invalid-name',
+    'model-view-invalid-policy',
+    'model-view-invalid-dependency',
+    'model-view-missing-dependency',
 ]
 
 
