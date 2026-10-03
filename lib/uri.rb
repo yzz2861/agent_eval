@@ -69,6 +69,7 @@
 # - URI::Parser - (in uri/common.rb)
 # - URI::REGEXP - (in uri/common.rb)
 #   - URI::REGEXP::PATTERN - (in uri/common.rb)
+# - URI::Origin, URI::OpaqueOrigin - (in uri/origin.rb)
 # - URI::Util - (in uri/common.rb)
 # - URI::Error - (in uri/common.rb)
 #   - URI::InvalidURIError - (in uri/common.rb)

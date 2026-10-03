@@ -9,6 +9,7 @@
 #
 
 require_relative 'common'
+require_relative 'origin'
 autoload :IPSocket, 'socket'
 autoload :IPAddr, 'ipaddr'
 
@@ -998,6 +999,22 @@ module URI
     #
     def relative?
       !absolute?
+    end
+
+    #
+    # Returns the origin of the URI as defined in
+    # https://www.rfc-editor.org/rfc/rfc6454.
+    #
+    # A generic URI has no defined origin tuple, so this returns a fresh
+    # URI::OpaqueOrigin.  Schemes whose origin is defined (such as
+    # +http:+ and +https:+, see URI::HTTP#origin) override this method
+    # to return a URI::Origin value object.
+    #
+    #   URI("mailto:joe@example.com").origin   #=> #<URI::OpaqueOrigin null>
+    #   URI("file:///etc/passwd").origin       #=> #<URI::OpaqueOrigin null>
+    #
+    def origin
+      OpaqueOrigin.new
     end
 
     #

@@ -77,9 +77,9 @@ class URI::TestHTTP < Test::Unit::TestCase
 
 
   def test_origin
-    assert_equal('http://a.b.c', URI.parse('http://a.b.c/').origin)
-    assert_equal('http://a.b.c:8081', URI.parse('http://a.b.c:8081/').origin)
-    assert_equal('http://a.b.c', URI.parse('http://a.b.c:80/').origin)
-    assert_equal('https://a.b.c', URI.parse('https://a.b.c/').origin)
+    assert_equal('http://a.b.c', URI.parse('http://a.b.c/').origin.to_s)
+    assert_equal('http://a.b.c:8081', URI.parse('http://a.b.c:8081/').origin.to_s)
+    assert_equal('http://a.b.c', URI.parse('http://a.b.c:80/').origin.to_s)
+    assert_equal('https://a.b.c', URI.parse('https://a.b.c/').origin.to_s)
   end
 end

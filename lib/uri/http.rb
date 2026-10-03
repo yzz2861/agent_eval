@@ -120,16 +120,29 @@ module URI
     # Returns the origin for an HTTP uri, as defined in
     # https://www.rfc-editor.org/rfc/rfc6454.
     #
+    # The result is a URI::Origin value object that ignores the userinfo,
+    # path, query and fragment components and compares schemes,
+    # canonical hosts and effective ports.  URIs without a host have an
+    # opaque origin, represented by a distinct URI::OpaqueOrigin that
+    # serializes as "null" but compares unequal to every other origin.
     #
     # Example:
     #
-    #     URI::HTTP.build(host: 'www.example.com', path: '/foo/bar').origin #=> "http://www.example.com"
-    #     URI::HTTP.build(host: 'www.example.com', port: 8000, path: '/foo/bar').origin #=> "http://www.example.com:8000"
-    #     URI::HTTP.build(host: 'www.example.com', port: 80, path: '/foo/bar').origin #=> "http://www.example.com"
-    #     URI::HTTPS.build(host: 'www.example.com', path: '/foo/bar').origin #=> "https://www.example.com"
+    #     URI::HTTP.build(host: 'www.example.com', path: '/foo/bar').origin.to_s #=> "http://www.example.com"
+    #     URI::HTTP.build(host: 'www.example.com', port: 8000, path: '/foo/bar').origin.to_s #=> "http://www.example.com:8000"
+    #     URI::HTTP.build(host: 'www.example.com', port: 80, path: '/foo/bar').origin.to_s #=> "http://www.example.com"
+    #     URI::HTTPS.build(host: 'www.example.com', path: '/foo/bar').origin.to_s #=> "https://www.example.com"
+    #
+    #     URI("http://www.example.com:80/a").origin ==
+    #       URI("http://WWW.EXAMPLE.COM/b").origin                         #=> true
+    #     URI("http:foo").origin                                            #=> #<URI::OpaqueOrigin null>
     #
     def origin
-      "#{scheme}://#{authority}"
+      if @host.nil? || @host.empty?
+        OpaqueOrigin.new
+      else
+        Origin.new(scheme, host, port, default_port: default_port)
+      end
     end
   end
 
