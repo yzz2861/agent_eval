@@ -293,6 +293,12 @@ module Net
       capable?('STARTTLS')
     end
 
+    # true if server advertises CHUNKING (BDAT).
+    # You cannot get valid value before opening SMTP session.
+    def capable_chunking?
+      capable?('CHUNKING')
+    end
+
     # true if the EHLO response contains +key+.
     def capable?(key)
       return nil unless @capabilities
@@ -755,8 +761,17 @@ module Net
     #
     # Sends +msgstr+ as a message.  Single CR ("\r") and LF ("\n") found
     # in the +msgstr+, are converted into the CR LF pair.  You cannot send a
-    # binary message with this method. +msgstr+ should include both
+    # binary message with this method unless +msgstr+ is an IO-like object
+    # (see below). +msgstr+ should include both
     # the message headers and body.
+    #
+    # If +msgstr+ is an IO-like object (responds to +read+), the message is
+    # sent in chunks with the BDAT command (CHUNKING extension, RFC 3030)
+    # instead of DATA.  The message bytes are sent as-is: no CR/LF conversion
+    # and no dot-stuffing is applied, so binary content (including zero bytes
+    # and lines consisting of a single ".") is transmitted verbatim.  This
+    # requires the server to advertise CHUNKING; Net::SMTPUnsupportedCommand
+    # is raised otherwise (there is no fallback to DATA for IO input).
     #
     # +from_addr+ is a String or Net::SMTP::Address representing the source mail address.
     #
@@ -793,7 +808,11 @@ module Net
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
       mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      if msgstr.respond_to?(:read)
+        rcptto_list(to_addrs) {bdat msgstr}
+      else
+        rcptto_list(to_addrs) {data msgstr}
+      end
     end
 
     alias send_mail send_message
@@ -979,6 +998,68 @@ module Net
       res
     end
 
+    # The default size, in bytes, of each chunk sent by #bdat.
+    BDAT_DEFAULT_CHUNK_SIZE = 4096
+
+    # Sends a message read from +msgio+ using the BDAT command
+    # (the CHUNKING extension, RFC 3030).
+    #
+    # +msgio+ is an IO-like object responding to +read+; it is read in
+    # chunks of at most +chunk_size+ bytes and each chunk is sent with a
+    # +BDAT <size>+ command, the final chunk with +BDAT <size> LAST+.
+    # Chunk sizes are counted in bytes, and the message bytes are sent
+    # verbatim: unlike #data, no CR/LF conversion or dot-stuffing is
+    # applied, so binary content is transmitted as-is.  An empty message
+    # is sent as a single +BDAT 0 LAST+ command.
+    #
+    # The server must advertise the CHUNKING capability; otherwise
+    # Net::SMTPUnsupportedCommand is raised (this method never falls back
+    # to DATA).
+    #
+    # Returns the Net::SMTP::Response to the final +BDAT ... LAST+ command,
+    # which confirms whether the message was accepted.  If the connection
+    # is lost before that final response arrives, an IOError (or subclass,
+    # e.g. EOFError) is raised and the delivery status of the message is
+    # unknown.
+    #
+    #   smtp.bdat(File.open('message.eml', 'rb'))
+    #
+    # === Errors
+    #
+    # This method may raise:
+    #
+    # * Net::SMTPUnsupportedCommand
+    # * Net::SMTPServerBusy
+    # * Net::SMTPSyntaxError
+    # * Net::SMTPFatalError
+    # * Net::SMTPUnknownError
+    # * Net::ReadTimeout
+    # * IOError
+    #
+    def bdat(msgio, chunk_size: BDAT_DEFAULT_CHUNK_SIZE)
+      raise ArgumentError, 'message IO is required' unless msgio.respond_to?(:read)
+      unless chunk_size.is_a?(Integer) && chunk_size > 0
+        raise ArgumentError, 'chunk_size must be a positive integer'
+      end
+      unless capable?('CHUNKING')
+        raise SMTPUnsupportedCommand, 'CHUNKING is not supported on this server'
+      end
+      critical {
+        res = nil
+        loop do
+          chunk = bdat_read_chunk(msgio, chunk_size)
+          last = chunk.nil? || chunk.bytesize < chunk_size
+          chunk ||= +''.b
+          @socket.writeline "BDAT #{chunk.bytesize}#{' LAST' if last}"
+          @socket.write chunk unless chunk.empty?
+          res = recv_response
+          check_response res
+          break if last
+        end
+        res
+      }
+    end
+
     def quit
       getok('QUIT')
     end
@@ -996,6 +1077,19 @@ module Net
       if /[\r\n]/ =~ line
         raise ArgumentError, "A line must not contain CR or LF"
       end
+    end
+
+    # Reads up to +size+ bytes from +io+, looping over short reads.
+    # Returns nil at end of input with no data, otherwise a binary String
+    # of at most +size+ bytes (fewer only at end of input).
+    def bdat_read_chunk(io, size)
+      buf = +''.b
+      while buf.bytesize < size
+        data = io.read(size - buf.bytesize)
+        break if data.nil? || data.empty?
+        buf << data.b
+      end
+      buf.empty? ? nil : buf
     end
 
     def getok(reqline)

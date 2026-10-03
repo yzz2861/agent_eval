@@ -2,6 +2,7 @@
 
 require 'net/smtp'
 require 'test/unit'
+require 'stringio'
 
 module Net
   class TestSMTP < Test::Unit::TestCase
@@ -251,6 +252,119 @@ module Net
       err = assert_raise(Net::SMTPUnknownError) { smtp.data('message') }
       assert_equal "could not get 3xx (250: 250 OK\n)", err.message
       assert_equal "250", err.response.status
+    end
+
+    # An IO-like object that never returns more than +max+ bytes per read,
+    # to exercise short-read handling in the BDAT chunking loop.
+    class ShortReadIO
+      def initialize(data, max)
+        @data = data.b
+        @max = max
+        @pos = 0
+      end
+
+      def read(len)
+        return nil if @pos >= @data.bytesize
+        chunk = @data.byteslice(@pos, [len, @max].min)
+        @pos += chunk.bytesize
+        chunk
+      end
+    end
+
+    BDAT_TEST_MESSAGE = "Subject: binary\r\n\r\nzero \x00 byte\r\n.\r\nlone dot above\r\n\xff\r\n".b
+
+    def test_send_message_io_uses_bdat
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert smtp.capable_chunking?
+      res = smtp.send_message(StringIO.new(BDAT_TEST_MESSAGE),
+                              'sender@example.com', 'rcpt@example.com')
+      assert res.success?
+      # binary content is sent verbatim: no dot-stuffing, no CRLF conversion
+      assert_equal BDAT_TEST_MESSAGE, server.body
+      bdat_commands = server.commands.grep(/\ABDAT /)
+      assert_equal BDAT_TEST_MESSAGE.bytesize, server.bdat_chunks.sum
+      assert_equal BDAT_TEST_MESSAGE.bytesize, bdat_commands.sum { |c| c.split[1].to_i }
+      assert_match(/ LAST\r\n\z/, bdat_commands.last)
+      assert server.commands.none? { |c| c.start_with?('DATA') }
+      smtp.finish
+    end
+
+    def test_bdat_chunk_boundaries
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom 'sender@example.com'
+      smtp.rcptto 'rcpt@example.com'
+      msg = "ab\x00cd\r\n.\r\n".b  # 10 bytes, zero byte and lone dot line
+      res = smtp.bdat(StringIO.new(msg), chunk_size: 4)
+      assert res.success?
+      assert_equal [4, 4, 2], server.bdat_chunks
+      assert_equal ["BDAT 4\r\n", "BDAT 4\r\n", "BDAT 2 LAST\r\n"],
+                   server.commands.grep(/\ABDAT /)
+      assert_equal msg, server.body
+      smtp.finish
+    end
+
+    def test_bdat_empty_message
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom 'sender@example.com'
+      smtp.rcptto 'rcpt@example.com'
+      res = smtp.bdat(StringIO.new(''.b), chunk_size: 4)
+      assert res.success?
+      assert_equal [0], server.bdat_chunks
+      assert_equal ["BDAT 0 LAST\r\n"], server.commands.grep(/\ABDAT /)
+      assert_equal ''.b, server.body
+      smtp.finish
+    end
+
+    def test_bdat_short_reads
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom 'sender@example.com'
+      smtp.rcptto 'rcpt@example.com'
+      msg = "ab\x00cd\r\n.\r\n".b  # 10 bytes
+      res = smtp.bdat(ShortReadIO.new(msg, 3), chunk_size: 4)
+      assert res.success?
+      assert_equal [4, 4, 2], server.bdat_chunks
+      assert_equal msg, server.body
+      smtp.finish
+    end
+
+    def test_bdat_rejected_chunk
+      server = FakeServer.start(chunking: true, reject_bdat: '554 5.6.0 Transaction failed')
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom 'sender@example.com'
+      smtp.rcptto 'rcpt@example.com'
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.bdat(StringIO.new('message'.b), chunk_size: 4)
+      end
+      assert_equal '554', err.response.status
+      smtp.finish
+    end
+
+    def test_bdat_disconnect_before_final_response
+      server = FakeServer.start(chunking: true, close_on_bdat_last: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom 'sender@example.com'
+      smtp.rcptto 'rcpt@example.com'
+      # the server closes the connection without confirming the final
+      # chunk, so delivery status is unknown and must not be reported
+      # as either success or a definitive protocol failure
+      assert_raise(EOFError) { smtp.bdat(StringIO.new('message'.b), chunk_size: 4) }
+      smtp.finish
+    end
+
+    def test_bdat_without_chunking_capability
+      server = FakeServer.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_false smtp.capable_chunking?
+      # no fallback to DATA for IO input
+      assert_raise(Net::SMTPUnsupportedCommand) do
+        smtp.send_message(StringIO.new('message'.b), 'sender@example.com', 'rcpt@example.com')
+      end
+      assert server.commands.none? { |c| c.start_with?('DATA', 'BDAT') }
+      smtp.finish
     end
 
     def test_crlf_injection
@@ -650,6 +764,7 @@ module Net
     attr_reader :port
     attr_reader :commands
     attr_reader :body
+    attr_reader :bdat_chunks
 
     def starttls_started?
       !!@starttls_started
@@ -657,9 +772,12 @@ module Net
 
     def start(**capabilities)
       @commands = []
-      @body = +''
+      @body = +''.b
+      @bdat_chunks = []
       @capa = capabilities
       @tls = @capa.delete(:tls)
+      @reject_bdat = @capa.delete(:reject_bdat)
+      @close_on_bdat_last = @capa.delete(:close_on_bdat_last)
       @servers = Socket.tcp_server_sockets('localhost', 0)
       @port = @servers[0].local_address.ip_port
       @server_thread = Thread.start do
@@ -780,6 +898,30 @@ module Net
       @sock.puts "250 2.0.0 Ok: queued as ABCDEFG\r\n"
     end
 
+    def bdat(arg)
+      size, last = arg.split
+      size = size.to_i
+      chunk = +''.b
+      while chunk.bytesize < size
+        data = @sock.read(size - chunk.bytesize)
+        break unless data
+        chunk << data
+      end
+      @bdat_chunks.push chunk.bytesize
+      @body.concat chunk
+      if @reject_bdat
+        @sock.puts "#{@reject_bdat}\r\n"
+      elsif last
+        if @close_on_bdat_last
+          @sock.close
+        else
+          @sock.puts "250 2.0.0 Ok: queued as ABCDEFG\r\n"
+        end
+      else
+        @sock.puts "250 2.0.0 Ok\r\n"
+      end
+    end
+
     def rset
       @sock.puts "250 2.0.0 Ok\r\n"
     end
@@ -806,6 +948,8 @@ module Net
           rcpt($')
         when "DATA"
           data
+        when /\ABDAT /
+          bdat($')
         when "RSET"
           rset
         when "QUIT"
@@ -815,7 +959,7 @@ module Net
           @sock.puts "502 5.5.2 Error: command not recognized\r\n"
         end
       end
-    rescue Errno::ECONNRESET, Errno::ECONNABORTED
+    rescue Errno::ECONNRESET, Errno::ECONNABORTED, IOError
       nil
     end
   end
