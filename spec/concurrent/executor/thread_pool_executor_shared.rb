@@ -289,6 +289,166 @@ RSpec.shared_examples :thread_pool_executor do
     end
   end
 
+  context '#managed_block' do
+    subject { described_class.new(min_threads: 1, max_threads: 1, max_queue: 0) }
+
+    it 'runs a child task on a temporary worker while the parent worker is blocked' do
+      child_started = Queue.new
+      finish_child = Queue.new
+      parent_finished = Queue.new
+      child_finished = Queue.new
+
+      subject.post do
+        subject.managed_block do
+          subject.post do
+            child_started << true
+            finish_child.pop
+            child_finished << true
+          end
+          child_started.pop
+        end
+        parent_finished << true
+      end
+
+      repeat_until_success { expect(subject.length).to eq 2 }
+      expect(subject.active_count).to eq 1
+
+      finish_child << true
+      expect(parent_finished.pop).to eq true
+      expect(child_finished.pop).to eq true
+      repeat_until_success { expect(subject.length).to eq 1 }
+    end
+
+    it 'counts nested managed blocks once and returns the compensation worker' do
+      child_started = Queue.new
+      finish_child = Queue.new
+      parent_finished = Queue.new
+      child_finished = Queue.new
+
+      subject.post do
+        subject.managed_block do
+          subject.managed_block do
+            subject.post do
+              child_started << true
+              finish_child.pop
+              child_finished << true
+            end
+            child_started.pop
+          end
+        end
+        parent_finished << true
+      end
+
+      repeat_until_success { expect(subject.length).to eq 2 }
+
+      finish_child << true
+      expect(parent_finished.pop).to eq true
+      expect(child_finished.pop).to eq true
+      repeat_until_success { expect(subject.length).to eq 1 }
+    end
+
+    it 'returns the compensation worker when the block exits through an exception' do
+      child_started = Queue.new
+      finish_child = Queue.new
+      parent_failed = Queue.new
+      child_finished = Queue.new
+      parent_saw_child = Queue.new
+
+      subject.post do
+        begin
+          subject.managed_block do
+            subject.post do
+              child_started << true
+              finish_child.pop
+              child_finished << true
+            end
+            child_started.pop
+            parent_saw_child << true
+            raise 'block failed'
+          end
+        rescue RuntimeError
+          parent_failed << true
+        end
+      end
+
+      expect(parent_saw_child.pop).to eq true
+      finish_child << true
+      expect(parent_failed.pop).to eq true
+      expect(child_finished.pop).to eq true
+      repeat_until_success { expect(subject.length).to eq 1 }
+    end
+
+    it 'rejects calls from threads which are not workers of the pool' do
+      expect { subject.managed_block { } }.to raise_error(Concurrent::IllegalOperationError)
+    end
+
+    it 'rejects a worker from another pool' do
+      other_pool = described_class.new(min_threads: 1, max_threads: 1, max_queue: 0)
+      checked = Queue.new
+
+      other_pool.post do
+        expect { subject.managed_block { } }.to raise_error(Concurrent::IllegalOperationError)
+        checked << true
+      end
+
+      expect(checked.pop).to eq true
+      other_pool.shutdown
+      expect(other_pool.wait_for_termination(pool_termination_timeout)).to eq true
+    end
+
+    it 'does not allow normal tasks to exceed the configured running capacity' do
+      finish_child = Queue.new
+      second_queued = Queue.new
+      release_parent = Queue.new
+      second_posted = Queue.new
+      child_started = Mutex.new
+      child_started_cond = ConditionVariable.new
+      child_running = false
+
+      subject.post do
+        subject.managed_block do
+          subject.post do
+            child_started.synchronize do
+              child_running = true
+              child_started_cond.broadcast
+            end
+            finish_child.pop
+          end
+          child_started.synchronize { child_started_cond.wait(child_started) until child_running }
+          subject.post { second_queued << true }
+          second_posted << true
+          release_parent.pop
+        end
+      end
+
+      expect(second_posted.pop).to eq true
+      repeat_until_success { expect(subject.length).to eq 2 }
+      expect(subject.active_count).to eq 1
+      expect(subject.queue_length).to eq 1
+      expect { second_queued.pop(true) }.to raise_error(ThreadError)
+
+      finish_child << true
+      release_parent << true
+      expect(second_queued.pop).to eq true
+    end
+
+    it 'does not enter a managed block after shutdown' do
+      worker_started = Queue.new
+      finish_worker = Queue.new
+
+      subject.post do
+        worker_started << true
+        finish_worker.pop
+        expect { subject.managed_block { } }.to raise_error(Concurrent::IllegalOperationError)
+      end
+
+      worker_started.pop
+      subject.shutdown
+      finish_worker << true
+      expect(subject.wait_for_termination(pool_termination_timeout)).to eq true
+    end
+  end
+
   context '#fallback_policy' do
 
     let!(:min_threads){ 1 }

@@ -39,6 +39,50 @@ if Concurrent.on_jruby?
         super(opts)
       end
 
+      def managed_block
+        raise ArgumentError.new('no block given') unless block_given?
+
+        unless ns_executor_thread_local.get.equal?(@executor)
+          raise IllegalOperationError.new('managed_block can only be called by a worker of this pool')
+        end
+
+        thread = java.lang.Thread.currentThread
+        depth = nil
+        synchronize do
+          depth = @managed_block_depths[thread] || 0
+          if depth.zero?
+            unless running?
+              raise IllegalOperationError.new('cannot enter managed_block after shutdown')
+            end
+
+            @managed_block_count += 1
+            @executor.corePoolSize += 1
+            @executor.maximumPoolSize += 1
+            @executor.allowCoreThreadTimeOut(true)
+          end
+
+          @managed_block_depths[thread] = depth + 1
+        end
+
+        yield
+      ensure
+        synchronize do
+          depth = @managed_block_depths[thread]
+          if depth
+            depth -= 1
+            if depth.zero?
+              @managed_block_depths.delete(thread)
+              @managed_block_count -= 1
+              @executor.corePoolSize -= 1
+              @executor.maximumPoolSize -= 1
+              @executor.allowCoreThreadTimeOut(idletime > 0) if @managed_block_count.zero?
+            else
+              @managed_block_depths[thread] = depth
+            end
+          end
+        end
+      end
+
       # @!macro executor_service_method_can_overflow_question
       def can_overflow?
         @max_queue != 0
@@ -76,7 +120,7 @@ if Concurrent.on_jruby?
 
       # @!macro thread_pool_executor_method_active_count
       def active_count
-        @executor.getActiveCount
+        [@executor.activeCount - @managed_block_count, 0].max
       end
 
       # @!macro thread_pool_executor_attr_reader_idletime
@@ -113,6 +157,8 @@ if Concurrent.on_jruby?
         @max_queue       = opts.fetch(:max_queue, DEFAULT_MAX_QUEUE_SIZE).to_i
         @synchronous     = opts.fetch(:synchronous, DEFAULT_SYNCHRONOUS)
         @fallback_policy = opts.fetch(:fallback_policy, :abort)
+        @managed_block_count = 0
+        @managed_block_depths = java.util.concurrent.ConcurrentHashMap.new
 
         raise ArgumentError.new("`synchronous` cannot be set unless `max_queue` is 0") if @synchronous && @max_queue > 0
         raise ArgumentError.new("`max_threads` cannot be less than #{DEFAULT_MIN_POOL_SIZE}") if max_length < DEFAULT_MIN_POOL_SIZE
@@ -139,6 +185,7 @@ if Concurrent.on_jruby?
             queue,
             DaemonThreadFactory.new(ns_auto_terminate?),
             FALLBACK_POLICY_CLASSES[@fallback_policy].new)
+        @executor.allowCoreThreadTimeOut(false)
 
       end
     end

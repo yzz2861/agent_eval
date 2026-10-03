@@ -21,7 +21,7 @@ if Concurrent.on_jruby?
       def post(*args, &task)
         raise ArgumentError.new('no block given') unless block_given?
         return fallback_action(*args, &task).call unless running?
-        @executor.submit Job.new(args, task)
+        @executor.submit Job.new(args, task, @executor)
         true
       rescue Java::JavaUtilConcurrent::RejectedExecutionException
         raise RejectedExecutionError
@@ -65,15 +65,28 @@ if Concurrent.on_jruby?
         @executor.isTerminated
       end
 
+      def ns_executor_thread_local
+        Job::EXECUTOR_THREAD_LOCAL
+      end
+
       class Job
         include Runnable
-        def initialize(args, block)
+        EXECUTOR_THREAD_LOCAL = java.lang.ThreadLocal.new
+
+        def initialize(args, block, executor = nil)
           @args = args
           @block = block
+          @executor = executor
         end
 
         def run
-          @block.call(*@args)
+          previous_pool = EXECUTOR_THREAD_LOCAL.get
+          EXECUTOR_THREAD_LOCAL.set(@executor) if @executor
+          begin
+            @block.call(*@args)
+          ensure
+            EXECUTOR_THREAD_LOCAL.set(previous_pool) if @executor
+          end
         end
       end
       private_constant :Job
