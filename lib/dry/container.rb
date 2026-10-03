@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "dry/container/error"
+require "dry/container/read_only_view"
 require "dry/container/namespace"
 require "dry/container/registry"
 require "dry/container/resolver"

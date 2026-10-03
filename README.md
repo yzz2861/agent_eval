@@ -20,3 +20,20 @@ This library officially supports the following Ruby versions:
 ## License
 
 See `LICENSE` file.
+
+## Read-only views
+
+Give third-party code a restricted facade instead of the complete container:
+
+```ruby
+view = container.read_only_view(
+  keys: "billing.invoice_generator",
+  namespaces: "public_api"
+)
+```
+
+`resolve`, `[]`, `key?`, `keys`, and `each` only see the explicitly granted
+keys or namespaces. Unauthorized keys are reported like missing keys, so their
+existence is not disclosed. The view is not a Ruby sandbox: if a permitted
+factory captured the original container, code executed by that factory remains
+outside the view's control.

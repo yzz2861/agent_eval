@@ -66,6 +66,7 @@ module Dry
     end
 
     EMPTY_HASH = {}.freeze
+    EMPTY_ARRAY = [].freeze
 
     # Mixin to expose Inversion of Control (IoC) container behaviour
     #
@@ -186,6 +187,27 @@ module Dry
       # @see Dry::Container::Mixin#resolve
       def [](key)
         resolve(key)
+      end
+
+      # Create a read-only view restricted to explicit keys and namespaces
+      #
+      # @param [Array<String, Symbol>, String, Symbol] keys
+      #   Individual keys the view is allowed to resolve
+      # @param [Array<String, Symbol>, String, Symbol] namespaces
+      #   Namespaces whose descendants the view is allowed to resolve
+      #
+      # @raise [ArgumentError] if no key or namespace is granted access
+      #
+      # @return [Dry::Container::ReadOnlyView]
+      #
+      # @api public
+      def read_only_view(keys: EMPTY_ARRAY, namespaces: EMPTY_ARRAY)
+        ::Dry::Container::ReadOnlyView.new(
+          self,
+          keys: keys,
+          namespaces: namespaces,
+          namespace_separator: config.namespace_separator
+        )
       end
 
       # Merge in the items of the other container
