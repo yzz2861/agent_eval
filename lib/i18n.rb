@@ -363,6 +363,8 @@ module I18n
 
     # Localizes certain objects, such as dates and numbers to local formatting.
     def localize(object, locale: nil, format: nil, **options)
+      return localize_range(object, :locale => locale, :format => format, **options) if object.is_a?(::Range)
+
       locale ||= config.locale
       raise Disabled.new('l') if locale == false
       enforce_available_locales!(locale)
@@ -371,6 +373,37 @@ module I18n
       config.backend.localize(locale, object, format, options)
     end
     alias :l :localize
+
+    # Localizes a date or time range using the compact range formats for the
+    # given locale. The first argument may also be a Range.
+    #
+    # Range formats are looked up from date.range_formats or
+    # time.range_formats. For each outer format they can define :same_day,
+    # :same_month, :cross_month and :cross_year variants. A pattern can be an
+    # interpolation template, an array of start/end strftime patterns, or a
+    # hash with :template, :start and :end values. If no range pattern is
+    # present, both endpoints are localized separately with the requested
+    # format.
+    #
+    # Calendar field selection uses the endpoints after applying the explicit
+    # :time_zone option. Start/end validation always compares their actual
+    # instants. Endpoints with different time zones require :time_zone; I18n
+    # does not infer one from the host system's time zone.
+    def localize_range(start_object, end_object = nil, locale: nil, format: nil, **options)
+      if end_object.nil? && start_object.is_a?(::Range)
+        range = start_object
+        start_object = range.begin
+        end_object = range.end
+      end
+
+      locale ||= config.locale
+      raise Disabled.new('l') if locale == false
+      enforce_available_locales!(locale)
+
+      format ||= :default
+      config.backend.localize_range(locale, start_object, end_object, format, options)
+    end
+    alias :l_range :localize_range
 
     # Executes block with given I18n.locale set.
     def with_locale(tmp_locale = nil)

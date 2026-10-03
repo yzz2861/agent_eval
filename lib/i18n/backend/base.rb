@@ -92,6 +92,33 @@ module I18n
         object.strftime(format)
       end
 
+      # Localizes date/time ranges. The selected compact pattern is based on
+      # the highest displayed calendar field whose values differ, while range
+      # validity remains a comparison of the underlying instants.
+      def localize_range(locale, start_object, end_object, format = :default, options = EMPTY_HASH)
+        validate_range_objects(start_object, end_object)
+
+        type = range_type(start_object, end_object)
+        display_start, display_end = range_objects_in_time_zone(start_object, end_object, type, options)
+        start_instant = range_instant(start_object, options[:time_zone] || options[:zone])
+        end_instant = range_instant(end_object, options[:time_zone] || options[:zone])
+        raise ArgumentError, 'The range start must be earlier than or equal to the end.' if start_instant > end_instant
+
+        base_format = resolve_range_base_format(locale, type, format, options)
+        mode = range_mode(display_start, display_end, base_format)
+        range_format = lookup_range_format(locale, type, format, mode, options)
+
+        if range_format
+          format_range(locale, display_start, display_end, range_format, options)
+        else
+          separator = lookup_range_separator(locale, type, format, options) || ' - '
+          [
+            localize(locale, display_start, format, range_localization_options(options)),
+            localize(locale, display_end, format, range_localization_options(options))
+          ].join(separator)
+        end
+      end
+
       # Returns an array of locales for which translations are available
       # ignoring the reserved translation meta data key :i18n.
       def available_locales
@@ -308,6 +335,198 @@ module I18n
         def pluralization_key(entry, count)
           key = :zero if count == 0 && entry.has_key?(:zero)
           key ||= count == 1 ? :one : :other
+        end
+
+        def validate_range_objects(start_object, end_object)
+          [start_object, end_object].each do |object|
+            raise ArgumentError, "Object must be a Date, DateTime or Time object. #{object.inspect} given." unless object.respond_to?(:strftime)
+          end
+        end
+
+        def range_type(start_object, end_object)
+          types = [start_object, end_object].map { |object| object.respond_to?(:sec) ? 'time' : 'date' }.uniq
+          types.include?('time') ? 'time' : 'date'
+        end
+
+        def range_objects_in_time_zone(start_object, end_object, type, options)
+          time_zone = options[:time_zone] || options[:zone]
+          offsets = [start_object, end_object].map { |object| range_time_zone_identity(object) }.uniq
+
+          if offsets.size > 1 && time_zone.nil?
+            raise ArgumentError, 'Range endpoints use different time zones. Pass :time_zone to select the calendar fields to display.'
+          end
+
+          [start_object, end_object].map { |object| convert_range_object(object, type, time_zone) }
+        end
+
+        def range_offset(object)
+          return object.utc_offset if object.respond_to?(:utc_offset)
+          return (object.offset * 86_400).to_i if object.is_a?(::DateTime)
+          nil
+        end
+
+        def range_time_zone_identity(object)
+          return object.time_zone if object.respond_to?(:time_zone)
+          range_offset(object)
+        end
+
+        def convert_range_object(object, type, time_zone)
+          return object if object.is_a?(::Date) && !object.is_a?(::DateTime) && type == 'date'
+          return object if object.is_a?(::Date) && !object.is_a?(::DateTime) && time_zone.nil?
+          return object unless time_zone
+
+          offset = range_time_zone_offset(time_zone)
+          if object.respond_to?(:getlocal)
+            object.getlocal(offset)
+          elsif object.is_a?(::DateTime)
+            object.new_offset(Rational(offset, 86_400))
+          else
+            ::DateTime.civil(object.year, object.mon, object.mday, 0, 0, 0, Rational(offset, 86_400))
+          end
+        end
+
+        def range_time_zone_offset(time_zone)
+          return time_zone.utc_offset if time_zone.respond_to?(:utc_offset)
+          return time_zone.to_i if time_zone.is_a?(::Numeric)
+          return 0 if time_zone.to_s.upcase == 'UTC'
+          unless time_zone.to_s =~ /\A([+-])(\d{2}):?(\d{2})(?::?(\d{2}))?\z/
+            raise ArgumentError, 'Time zone must be an offset in seconds, an offset string such as "+09:00", UTC, or an object responding to #utc_offset.'
+          end
+
+          sign = $1 == '-' ? -1 : 1
+          sign * (($2.to_i * 3600) + ($3.to_i * 60) + ($4.to_i))
+        end
+
+        def range_instant(object, time_zone)
+          if object.respond_to?(:to_r) && object.respond_to?(:utc_offset)
+            object.utc.to_r
+          elsif object.is_a?(::DateTime)
+            object.new_offset(0).ajd
+          elsif object.is_a?(::Date)
+            if time_zone.nil?
+              ::DateTime.civil(object.year, object.mon, object.mday).ajd
+            else
+              offset = Rational(range_time_zone_offset(time_zone), 86_400)
+              ::DateTime.civil(object.year, object.mon, object.mday, 0, 0, 0, offset).new_offset(0).ajd
+            end
+          end
+        end
+
+        def resolve_range_base_format(locale, type, format, options)
+          return format.to_s unless format.is_a?(::Symbol)
+
+          resolved = I18n.t(
+            :"#{type}.formats.#{format}",
+            **options.except(:object).merge(
+              :locale => locale,
+              :raise => true,
+              :skip_interpolation => true
+            )
+          )
+          resolved.respond_to?(:call) ? nil : resolved.to_s
+        end
+
+        def range_mode(start_object, end_object, format)
+          displayed_fields = format_directives(format)
+
+          if displayed_fields.include?(:year) && start_object.year != end_object.year
+            :cross_year
+          elsif displayed_fields.include?(:month) && start_object.mon != end_object.mon
+            :cross_month
+          elsif displayed_fields.include?(:day) && start_object.mday != end_object.mday
+            :same_month
+          else
+            :same_day
+          end
+        end
+
+        def format_directives(format)
+          directives = []
+          return [:year, :month, :day] if format.nil?
+
+          format.scan(/%%|%(?<flags>[\-_0^#:]+)?(?<width>\d+)?(?<directive>[a-zA-Z])/) do |*|
+            match = Regexp.last_match
+            next if match[0] == '%%'
+
+            directive = match[:directive]
+            case directive
+            when 'Y', 'C', 'G', 'g', 'y'
+              directives << :year
+            when 'm', 'B', 'b', 'h'
+              directives << :month
+            when 'd', 'e'
+              directives << :day
+            end
+          end
+          directives.uniq
+        end
+
+        def lookup_range_format(locale, type, format, mode, options)
+          range_format_keys(type, format, mode).each do |key|
+            result = translate_if_available(locale, key, options)
+            return result unless result.nil?
+          end
+          nil
+        end
+
+        def lookup_range_separator(locale, type, format, options)
+          keys = [type]
+          keys << format if format.is_a?(::Symbol)
+          translate_if_available(locale, (keys + [:'range_separator']).join('.').to_sym, options) ||
+            translate_if_available(locale, :range_separator, options)
+        end
+
+        def format_range(locale, start_object, end_object, range_format, options)
+          case range_format
+          when ::Array
+            start_format, end_format = range_format
+            [
+              start_format && localize(locale, start_object, start_format, range_localization_options(options)),
+              end_format && localize(locale, end_object, end_format, range_localization_options(options))
+            ].join
+          when ::Hash
+            template = range_format[:template] || range_format[:format]
+            separator = range_format[:separator] || ' - '
+            template ||= "%{start}#{separator}%{end}"
+            values = {
+              :start => range_format[:start] && localize(locale, start_object, range_format[:start], range_localization_options(options)),
+              :end => range_format[:end] && localize(locale, end_object, range_format[:end], range_localization_options(options))
+            }
+            ::I18n.interpolate(template, values)
+          else
+            ::I18n.interpolate(
+              range_format,
+              :start => localize(locale, start_object, :default, range_localization_options(options)),
+              :end => localize(locale, end_object, :default, range_localization_options(options))
+            )
+          end
+        end
+
+        def range_localization_options(options)
+          options.except(:time_zone, :zone, :object)
+        end
+
+        def translate_if_available(locale, key, options)
+          result = catch(:exception) do
+            I18n.t(
+              key,
+              **options.except(:default, :object).merge(
+                :locale => locale,
+                :throw => true,
+                :skip_interpolation => true
+              )
+            )
+          end
+          result unless result.is_a?(MissingTranslation)
+        end
+
+        def range_format_keys(type, format, mode)
+          keys = []
+          keys << :"#{type}.range_formats.#{format}.#{mode}" if format.is_a?(::Symbol)
+          keys << :"#{type}.range_formats.#{mode}"
+          keys << :"#{type}.interval_formats.#{format}.#{mode}" if format.is_a?(::Symbol)
+          keys << :"#{type}.interval_formats.#{mode}"
+          keys
         end
     end
   end

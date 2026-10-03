@@ -48,6 +48,7 @@ class I18nAllFeaturesApiTest < I18n::TestCase
   include I18n::Tests::Localization::DateTime
   include I18n::Tests::Localization::Time
   include I18n::Tests::Localization::Procs
+  include I18n::Tests::Localization::Range
 
   test "make sure we use a Chain backend with an all features backend" do
     assert_equal I18n::Backend::Chain, I18n.backend.class

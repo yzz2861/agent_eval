@@ -17,6 +17,7 @@ class I18nLazyLoadableBackendApiTest < I18n::TestCase
   include I18n::Tests::Localization::DateTime
   include I18n::Tests::Localization::Time
   include I18n::Tests::Localization::Procs
+  include I18n::Tests::Localization::Range
 
   test "make sure we use the LazyLoadable backend" do
     assert_equal I18n::Backend::LazyLoadable, I18n.backend.class

@@ -11,6 +11,7 @@ class I18nKeyValueApiTest < I18n::TestCase
   include I18n::Tests::Localization::Date
   include I18n::Tests::Localization::DateTime
   include I18n::Tests::Localization::Time
+  include I18n::Tests::Localization::Range
   # include Tests::Api::Localization::Procs
 
   def setup

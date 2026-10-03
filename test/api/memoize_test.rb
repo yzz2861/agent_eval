@@ -12,6 +12,7 @@ class I18nMemoizeBackendWithSimpleApiTest < I18n::TestCase
   include I18n::Tests::Localization::DateTime
   include I18n::Tests::Localization::Time
   include I18n::Tests::Localization::Procs
+  include I18n::Tests::Localization::Range
 
   class MemoizeBackend < I18n::Backend::Simple
     include I18n::Backend::Memoize
@@ -37,6 +38,7 @@ class I18nMemoizeBackendWithKeyValueApiTest < I18n::TestCase
   include I18n::Tests::Localization::Date
   include I18n::Tests::Localization::DateTime
   include I18n::Tests::Localization::Time
+  include I18n::Tests::Localization::Range
 
   # include I18n::Tests::Procs
   # include I18n::Tests::Localization::Procs

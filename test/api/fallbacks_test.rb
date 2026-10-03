@@ -21,6 +21,7 @@ class I18nFallbacksApiTest < I18n::TestCase
   include I18n::Tests::Localization::DateTime
   include I18n::Tests::Localization::Time
   include I18n::Tests::Localization::Procs
+  include I18n::Tests::Localization::Range
 
   test "make sure we use a backend with Fallbacks included" do
     assert_equal Backend, I18n.backend.class

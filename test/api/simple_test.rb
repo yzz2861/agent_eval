@@ -21,6 +21,7 @@ class I18nSimpleBackendApiTest < I18n::TestCase
   include I18n::Tests::Localization::DateTime
   include I18n::Tests::Localization::Time
   include I18n::Tests::Localization::Procs
+  include I18n::Tests::Localization::Range
 
   test "make sure we use the Simple backend" do
     assert_equal I18n::Backend::Simple, I18n.backend.class
