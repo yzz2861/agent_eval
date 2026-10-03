@@ -96,6 +96,25 @@ module StateMachines
       machine.transition(options.merge(options[:to] ? { from: state.name } : { to: state.name }))
     end
 
+    # Declares an invariant that must hold once an object has transitioned
+    # into this state and the configured action has run.  The check may be a
+    # callable passed as the +:do+ option or given as a block.  See
+    # StateMachines::Machine#invariant for the failure semantics.
+    #
+    #   state :shipped do
+    #     invariant { |order| order.tracking_number }
+    #     invariant :do => :shipped_within_sla
+    #   end
+    def invariant(*checks, &block)
+      options = checks.last.is_a?(Hash) ? checks.pop : {}
+      StateMachines::OptionsValidator.assert_valid_keys!(options, :do)
+      checks.concat(Array(options[:do]))
+      checks << block if block
+      raise ArgumentError, 'Invariant must be specified' if checks.empty?
+
+      state.add_invariant(checks)
+    end
+
     # Hooks in condition-merging to methods that don't exist in this module
     def method_missing(*args, &)
       # Get the configuration

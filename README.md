@@ -247,6 +247,53 @@ vehicle.alarm_state_name                        # => :active
 
 vehicle.fire_events!(:ignite, :enable_alarm)    # => StateMachines:InvalidParallelTransition: Cannot run events in parallel: ignite, enable_alarm
 
+# State invariants
+#
+# A state can declare invariants that are checked AFTER the configured action
+# has run (e.g. after +save+), but before the transition is considered
+# successful.  This validates values written by the action itself - like a
+# tracking number when entering +shipped+ - which a pre-transition guard
+# cannot see.
+
+class Order
+  attr_accessor :state, :tracking_number
+
+  state_machine initial: :pending, action: :save do
+    state :pending, :shipped
+
+    event :ship do
+      transition pending: :shipped
+    end
+
+    # Any of these forms work:
+    state :shipped, invariant: ->(order) { !order.tracking_number.nil? }
+    invariant :shipped, :tracking_number?
+
+    state :shipped do
+      invariant { |order, transition| order.tracking_number }
+    end
+  end
+
+  def save
+    self.tracking_number ||= generate_tracking_number
+    true
+  end
+end
+
+order = Order.new
+order.ship   # => true - the invariant observes the number written by #save
+
+# Failure semantics:
+# * An invariant returning false/nil fails the transition: the managed state
+#   attributes are rolled back, after_failure callbacks run, and the event
+#   returns false.  after_transition callbacks never run.
+# * An invariant raising an exception is distinguishable from a false result:
+#   every target state is still checked, the managed state attributes are
+#   rolled back, and the exception is re-raised (failure callbacks do not run).
+# * When multiple state machines share one action, the invariants of every
+#   target state are checked before the action result is returned; a failure
+#   rolls back only the library-managed state attributes.
+
 # Coordinated State Management
 
 State machines can coordinate with each other using state guards, allowing transitions to depend on the state of other state machines within the same object. This enables complex system modeling where components are interdependent.

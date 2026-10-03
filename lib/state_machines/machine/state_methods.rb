@@ -78,6 +78,11 @@ module StateMachines
       #   (e.g. :value => lambda {Time.now}, :if => lambda {|state| !state.nil?}).
       #   By default, the configured value is matched.
       # * <tt>:human_name</tt> - The human-readable version of this state's name.
+      # * <tt>:invariant</tt> - A method name, Proc/callable, or an array of
+      #   them that must hold once an object has transitioned into the state
+      #   and the configured action has run.  Returning false or nil fails the
+      #   transition (state is rolled back); raising an exception fails it as
+      #   well and the exception is re-raised.
       #   By default, this is either defined by the integration or stringifies the
       #   name and converts underscores to spaces.
       #
@@ -336,7 +341,7 @@ module StateMachines
       # options hash which contains at least <tt>:if</tt> condition support.
       def state(*names, &)
         options = names.last.is_a?(Hash) ? names.pop : {}
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name, :invariant)
 
         # Store the context so that it can be used for / matched against any state
         # that gets added
@@ -361,6 +366,7 @@ module StateMachines
             state.human_name = options[:human_name] if options.include?(:human_name)
             state.cache = options[:cache] if options.include?(:cache)
             state.matcher = options[:if] if options.include?(:if)
+            Array(options[:invariant]).each { |check| state.add_invariant(check) } if options.include?(:invariant)
           end
         end
 
@@ -368,6 +374,68 @@ module StateMachines
       end
 
       alias other_states state
+
+      # Declares one or more invariants for the given target states.  Each
+      # invariant gets evaluated after an object transitions into one of the
+      # target states (and the machine's action has run), but before the
+      # transition is reported as successful.
+      #
+      # An invariant may be a Symbol/String naming a method on the object, a
+      # Proc, or any other callable.  Procs/methods may accept just the
+      # object or the object and the StateMachines::Transition.  A result of
+      # false or nil invalidates the transition and triggers the normal
+      # failure / rollback flow; an exception propagates to the caller after
+      # rolling the state back.
+      #
+      # When several state machines share the same action, every target
+      # state's invariants are checked before the action result is returned.
+      #
+      # == Examples
+      #
+      #   state_machine do
+      #     state :pending, :shipped
+      #
+      #     invariant :shipped, :tracking_number?
+      #     invariant :shipped, :shipped_within_sla
+      #
+      #     invariant all - :pending do |order, transition|
+      #       order.confirmed?
+      #     end
+      #   end
+      #
+      # Invariants can also be declared inside a +state+ block:
+      #
+      #   state :shipped do
+      #     invariant { |order| order.tracking_number }
+      #   end
+      def invariant(*states, &block)
+        options = states.last.is_a?(Hash) ? states.pop : {}
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :do)
+        checks = Array(options[:do])
+        checks << block if block
+
+        # Trailing arguments describe the invariant itself.  Symbols /
+        # Strings name a method on the object; other callables are invoked
+        # directly, e.g.
+        #   invariant :shipped, :tracking_number?
+        #   invariant :shipped, ->(order) { order.tracking_number }
+        last = states.last
+        if states.length > 1 && !last.is_a?(Matcher) &&
+           (last.is_a?(Symbol) || last.is_a?(String) || last.respond_to?(:call))
+          checks << states.pop
+        end
+        raise ArgumentError, 'Invariant must be specified' if checks.empty?
+        raise ArgumentError, 'Must specify at least one state for the invariant' if states.empty?
+
+        # A matcher (e.g. +all - :pending+) resolves to every matched state.
+        known_names = self.states.keys(:name)
+        target_names = states.flat_map do |target|
+          target.is_a?(Matcher) ? target.filter(known_names) : Array(target)
+        end
+        target_states = add_states(target_names)
+        target_states.each { |target_state| target_state.add_invariant(checks) }
+        target_states.length == 1 ? target_states.first : target_states
+      end
 
       # Gets the current value stored in the given object's attribute.
       def read(object, attribute, ivar = false)

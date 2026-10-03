@@ -54,8 +54,9 @@ module StateMachines
     # 1. Before callbacks
     # 2. Persist state
     # 3. Invoke action
-    # 4. After callbacks (if configured)
-    # 5. Rollback (if action is unsuccessful)
+    # 4. Verify target-state invariants
+    # 5. After callbacks (if configured)
+    # 6. Rollback (if action / invariants are unsuccessful)
     #
     # If a block is passed to this method, that block will be called instead
     # of invoking each transition's action.
@@ -78,7 +79,10 @@ module StateMachines
         end
       end
 
-      if actions.length == 1 && results.include?(actions.first)
+      # With a single action the action's own return value is normally passed
+      # through, but a failed target-state invariant invalidates the run even
+      # when the action itself returned a truthy value.
+      if actions.length == 1 && results.include?(actions.first) && !@invariant_failed
         results[actions.first]
       else
         success?
@@ -129,6 +133,8 @@ module StateMachines
     def reset
       @results = {}
       @success = false
+      @invariant_failed = false
+      @actions_run = false
     end
 
     # Runs each transition's callbacks recursively.  Once all before callbacks
@@ -155,7 +161,52 @@ module StateMachines
       else
         persist
         run_actions(&)
+        verify_invariants
       end
+    end
+
+    # Verifies the invariants declared for each transition's target state.
+    # This runs after every state machine sharing the action has persisted
+    # its state and the action itself has completed, so that values written
+    # by the action (e.g. a tracking number) are visible to the checks.
+    #
+    # Every target state is checked before the result is reported.  A check
+    # returning false or nil marks the whole collection unsuccessful, which
+    # routes the run through the existing failure callbacks and rolls the
+    # managed state attributes back.  An exception is distinguished from a
+    # false result: the remaining checks still run, the managed state
+    # attributes are rolled back, and the first exception is re-raised
+    # (failure callbacks do not run for hard exceptions, matching the
+    # behavior of exceptions raised by the action itself).
+    def verify_invariants
+      # Invariants describe post-action state, so they only run once the
+      # action (or explicit action block) has actually executed.  The inner
+      # collection used by attribute-based events passes <tt>actions: false</tt>
+      # even though the outer collection invoked the action, which is tracked
+      # here via +@actions_run+.
+      return unless @actions_run
+      return unless @success
+
+      invariant_error = nil
+
+      each do |transition|
+        state = transition.machine.states[transition.to_name]
+        next unless state && !state.invariants.empty?
+
+        begin
+          unless state.check_invariants(object, transition)
+            @invariant_failed = true
+            @success = false
+          end
+        rescue StandardError => e
+          invariant_error ||= e
+        end
+      end
+
+      return unless invariant_error
+
+      rollback
+      raise invariant_error
     end
 
     # Transitions the current value of the object's states to those specified by
@@ -171,11 +222,17 @@ module StateMachines
     def run_actions
       catch_exceptions do
         @success = if block_given?
+                     @actions_run = true
                      result = yield
                      actions.each { |action| results[action] = result }
                      !!result
                    else
-                     actions.compact.each { |action| !skip_actions && (results[action] = object.send(action)) }
+                     actions.compact.each do |action|
+                       next if skip_actions
+
+                       @actions_run = true
+                       results[action] = object.send(action)
+                     end
                      results.values.all?
                    end
       end

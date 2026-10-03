@@ -111,6 +111,7 @@ module StateMachines
       def run_actions(&)
         catch_exceptions do
           @success = if block_given?
+                      @actions_run = true
                       result = yield
                       actions.each { |action| results[action] = result }
                       !!result
@@ -119,6 +120,7 @@ module StateMachines
                         next if skip_actions
 
                         # Use thread-safe write for results
+                        @actions_run = true
                         if object.respond_to?(:state_machine_mutex)
                           object.state_machine_mutex.with_write_lock do
                             results[action] = object.send(action)

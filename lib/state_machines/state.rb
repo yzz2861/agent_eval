@@ -40,6 +40,12 @@ module StateMachines
     # state
     attr_accessor :matcher
 
+    # The list of invariants that must hold once an object has transitioned
+    # into this state.  Each invariant is a method name, Proc, or callable
+    # that gets evaluated against the object (and the transition) after the
+    # configured action has run.
+    attr_reader :invariants
+
     # Creates a new state within the context of the given machine.
     #
     # Configuration options:
@@ -53,20 +59,21 @@ module StateMachines
     #   (e.g. :value => lambda {Time.now}, :if => lambda {|state| !state.nil?}).
     #   By default, the configured value is matched.
     # * <tt>:human_name</tt> - The human-readable version of this state's name
-    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, **extra_options) # :nodoc:
+    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, invariant: nil, **extra_options) # :nodoc:
       # Handle both old hash style and new kwargs style for backward compatibility
       case options
       in Hash
         # Old style: initialize(machine, name, {initial: true, value: 'foo'})
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name, :invariant)
         initial = options.fetch(:initial, false)
         value = options.include?(:value) ? options[:value] : :__not_provided__
         cache = options[:cache]
         if_condition = options[:if]
         human_name = options[:human_name]
+        invariant = options[:invariant]
       in nil
         # New style: initialize(machine, name, initial: true, value: 'foo')
-        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name) unless extra_options.empty?
+        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name, :invariant) unless extra_options.empty?
         if_condition = binding.local_variable_get(:if) # 'if' is a keyword, need special handling
       else
         # Handle unexpected options
@@ -81,6 +88,8 @@ module StateMachines
       @cache = cache
       @matcher = if_condition
       @initial = initial == true
+      @invariants = []
+      Array(invariant).each { |check| add_invariant(check) }
       @context = StateContext.new(self)
 
       return unless name
@@ -108,6 +117,7 @@ module StateMachines
     def initialize_copy(orig) # :nodoc:
       super
       @context = StateContext.new(self)
+      @invariants = orig.invariants.dup
     end
 
     def machine=(machine)
@@ -197,6 +207,39 @@ module StateMachines
       matcher ? matcher.call(other_value) : other_value == value
     end
 
+    # Registers one or more invariants for this state.  Invariants are checked
+    # after an object transitions into the state and the configured action
+    # has run, but before the transition is considered successful.
+    #
+    # Invariants may be specified as a method name (Symbol/String), a Proc,
+    # or any other callable.  Procs and methods receive the object being
+    # transitioned and, when they accept an additional argument, the actual
+    # StateMachines::Transition describing the event / states involved.
+    #
+    # == Examples
+    #
+    #   state :shipped, invariant: :tracking_number?
+    #
+    #   state :shipped do
+    #     invariant { |order| order.tracking_number }
+    #   end
+    def add_invariant(*checks)
+      checks.flatten.each do |check|
+        raise ArgumentError, 'Invariant must be a method name, Proc, or callable' unless valid_invariant?(check)
+
+        @invariants << check
+      end
+      @invariants
+    end
+
+    # Checks every invariant registered for this state against the given
+    # object.  Evaluation stops at the first invariant that returns false or
+    # nil; any exception raised by an invariant is allowed to propagate so
+    # that callers can distinguish a hard failure from a soft one.
+    def check_invariants(object, transition = nil)
+      @invariants.all? { |check| evaluate_invariant(object, check, transition) }
+    end
+
     # Defines a context for the state which will be enabled on instances of
     # the owner class when the machine is in this state.
     #
@@ -278,6 +321,19 @@ module StateMachines
     end
 
     private
+
+    def valid_invariant?(check)
+      check.is_a?(Symbol) || check.is_a?(String) || check.respond_to?(:call)
+    end
+
+    def evaluate_invariant(object, check, transition)
+      case check
+      when Symbol, String, Proc, Method
+        machine.evaluate_method(object, check, transition)
+      else
+        check.call(object, transition)
+      end
+    end
 
     # Should the value be cached after it's evaluated for the first time?
     def cache_value?
