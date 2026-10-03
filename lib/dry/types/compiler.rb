@@ -69,6 +69,12 @@ module Dry
         registry["nominal.array"].of(member).meta(meta)
       end
 
+      def visit_stream(node)
+        member, options, meta = node
+        member = visit(member) unless member.is_a?(::Class)
+        registry["nominal.stream"].of(member, **options).meta(meta)
+      end
+
       def visit_hash(node)
         opts, meta = node
         registry["nominal.hash"].with(**opts, meta: meta)

@@ -25,6 +25,14 @@ module Dry
       # @return [Dry::Types::Array]
       def Array(type) = Strict(::Array).of(type)
 
+      # Build a streaming collection type.
+      #
+      # @param [Dry::Types::Type] type
+      # @option options [Symbol] :on_error either +:raise+ or +:continue+
+      #
+      # @return [Dry::Types::Stream::Member]
+      def Stream(type, **options) = Strict(::Enumerator).of(type, **options)
+
       # Build a hash schema
       #
       # @param [Hash{Symbol => Dry::Types::Type}] type_map
@@ -97,6 +105,8 @@ module Dry
       def Nominal(klass)
         if klass <= ::Array
           Array.new(klass)
+        elsif klass <= ::Enumerator
+          Stream.new(klass)
         elsif klass <= ::Hash
           Hash.new(klass)
         else

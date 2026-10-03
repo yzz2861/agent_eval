@@ -51,6 +51,8 @@ module Dry
       register("nominal.#{name}", type)
     end
 
+    register("nominal.stream", Stream.new(::Enumerator))
+
     # Register strict types for {ALL_PRIMITIVES}
     ALL_PRIMITIVES.each do |name, primitive|
       type = self["nominal.#{name}"].constrained(type: primitive)
@@ -98,6 +100,12 @@ module Dry
     register("any", Any)
     register("nominal.any", Any)
     register("strict.any", Any)
+
+    register(
+      "stream",
+      self["nominal.stream"].constrained(type: ::Enumerator).of(Any)
+    )
+    register("strict.stream", self["stream"])
   end
 end
 

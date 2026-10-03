@@ -21,6 +21,8 @@ module Dry
         Map => :visit_map,
         Array => :visit_array,
         Array::Member => :visit_array_member,
+        Stream => :visit_stream,
+        Stream::Member => :visit_stream_member,
         Lax => :visit_lax,
         Enum => :visit_enum,
         [Default, Default::Callable] => :visit_default,
@@ -71,6 +73,22 @@ module Dry
         visit(array.member) do |type|
           visit_options(EMPTY_HASH, array.meta) do |opts|
             yield "Array<#{type}#{opts}>"
+          end
+        end
+      end
+
+      def visit_stream(type)
+        visit_options(EMPTY_HASH, type.meta) do |opts|
+          yield "Stream#{opts}"
+        end
+      end
+
+      def visit_stream_member(stream)
+        visit(stream.member) do |type|
+          options = {on_error: stream.on_error}
+
+          visit_options(options, stream.meta) do |opts|
+            yield "Stream<#{type}#{opts}>"
           end
         end
       end

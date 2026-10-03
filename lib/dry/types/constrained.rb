@@ -25,6 +25,15 @@ module Dry
         @rule = options.fetch(:rule)
       end
 
+      # Build a member type while retaining the outer constraint.
+      #
+      # @return [Type]
+      #
+      # @api public
+      def of(member, **options)
+        constrained_type.new(type.of(member, **options), rule: rule)
+      end
+
       # @return [Object]
       #
       # @api private

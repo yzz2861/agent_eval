@@ -115,6 +115,11 @@ module Dry
         end
 
         # @api private
+        def visit_stream(node)
+          visit(node[0])
+        end
+
+        # @api private
         def visit_lax(node)
           visit(node)
         end

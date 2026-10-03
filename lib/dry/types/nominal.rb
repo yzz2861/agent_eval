@@ -29,6 +29,8 @@ module Dry
       def self.[](primitive)
         if primitive == ::Array
           Types::Array
+        elsif primitive == ::Enumerator
+          Types::Stream
         elsif primitive == ::Hash
           Types::Hash
         else
