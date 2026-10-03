@@ -193,6 +193,15 @@ module URI
         self.query = query
         self.opaque = opaque
         self.fragment = fragment
+      elsif parser == RFC3987_PARSER
+        self.set_scheme(scheme)
+        self.set_host(host)
+        self.set_port(port)
+        self.set_userinfo(userinfo)
+        set_path(path)
+        @query = query
+        self.set_opaque(opaque)
+        @fragment = fragment
       else
         self.set_scheme(scheme)
         self.set_host(host)
@@ -589,6 +598,84 @@ module URI
     def decoded_password
       URI.decode_uri_component(@password) if @password
     end
+
+    # Returns an ASCII-only URI representing this IRI. Path, query and
+    # fragment are percent-encoded component by component; +hostname_converter+
+    # is responsible for Unicode domain conversion.
+    def to_uri(hostname_converter = nil)
+      converted = dup
+      converted.send(:convert_iri_to_uri!, hostname_converter)
+      converted
+    end
+
+    # Returns an IRI with decodable Unicode restored in path, query and
+    # fragment. Percent-encoded reserved characters are preserved.
+    def to_iri
+      converted = dup
+      converted.send(:convert_uri_to_iri!)
+      converted
+    end
+
+    def convert_iri_to_uri!(hostname_converter)
+      if @host && !@host.ascii_only?
+        converted_host = convert_iri_host!(hostname_converter)
+        set_host(converted_host)
+      end
+
+      set_path(IRI.encode_component(@path, :path)) if @path
+      @query = IRI.encode_component(@query, :query) if @query
+      @fragment = IRI.encode_component(@fragment, :fragment) if @fragment
+      @parser = nil
+    end
+
+    def convert_iri_host!(hostname_converter)
+      host = self.host
+      if host.start_with?('[') && host.end_with?(']')
+        converted = hostname(host)
+        converted = invoke_hostname_converter(hostname_converter, converted)
+        return "[#{converted}]"
+      end
+
+      invoke_hostname_converter(hostname_converter, host)
+    end
+
+    def invoke_hostname_converter(converter, host)
+      unless converter.respond_to?(:call)
+        raise InvalidIRIError.new(
+          'invalid host component at byte position 0: hostname converter is required',
+          :host,
+          0
+        )
+      end
+
+      converted = converter.call(host)
+      converted = String.try_convert(converted) or
+        raise InvalidIRIError.new(
+          "invalid host component at byte position 0: converter returned #{converted.inspect}",
+          :host,
+          0
+        )
+
+      unless converted.ascii_only? && RFC3986_PARSER.regexp[:HOST] =~ converted
+        raise InvalidIRIError.new(
+          "invalid host component at byte position 0: #{converted.inspect} is not an ASCII host",
+          :host,
+          0
+        )
+      end
+
+      converted
+    end
+
+    def convert_uri_to_iri!
+      set_path(IRI.decode_component(@path, :path)) if @path
+      @query = IRI.decode_component(@query, :query) if @query
+      @fragment = IRI.decode_component(@fragment, :fragment) if @fragment
+      @parser = RFC3987_PARSER
+    end
+
+    private :convert_iri_to_uri!, :convert_iri_host!, :invoke_hostname_converter,
+            :convert_uri_to_iri!
 
     #
     # Checks the host +v+ component for RFC2396 compliance

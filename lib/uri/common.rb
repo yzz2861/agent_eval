@@ -211,6 +211,30 @@ module URI
   #
   class BadURIError < Error; end
 
+  require_relative "iri"
+  require_relative "rfc3987_parser"
+
+  # The default parser instance for RFC 3987 (IRI).
+  RFC3987_PARSER = RFC3987_Parser.new
+  Ractor.make_shareable(RFC3987_PARSER) if defined?(Ractor)
+
+  # Parses +iri+ as an RFC 3987 IRI. Components containing Unicode are
+  # retained. Use URI::Generic#to_uri to produce a transmittable ASCII URI.
+  def self.parse_iri(iri)
+    RFC3987_PARSER.parse(iri)
+  end
+
+  # Converts +iri+ to an ASCII-only URI. The given +hostname_converter+ is
+  # called for a Unicode host and must return its ASCII form.
+  def self.encode_iri(iri, hostname_converter = nil, &block)
+    parse_iri(iri).to_uri(hostname_converter || block)
+  end
+
+  # Decodes percent-encoded Unicode in path, query and fragment.
+  def self.decode_iri(uri)
+    parse(uri).to_iri
+  end
+
   # Returns a 9-element array representing the parts of the \URI
   # formed from the string +uri+;
   # each array element is a string or +nil+:
