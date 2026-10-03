@@ -160,6 +160,14 @@ RSpec.describe(Dry::Monads) do
     end
   end
 
+  describe "State" do
+    describe ".State" do
+      it "creates a state computation" do
+        expect(m.State { |state| [:value, state + 1] }.run(1)).to eql([:value, 2])
+      end
+    end
+  end
+
   describe "[]" do
     it "creates a module with cherry-picked monad" do
       maybe_only = Class.new { include Dry::Monads[:maybe] }

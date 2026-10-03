@@ -9,6 +9,12 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Add `Dry::Monads::State`, an eager-to-compose, lazy-to-run state monad with
+  `get`, `put`, `modify`, `fmap`, `bind`, `run_value`, and `run_state`. Use
+  `bind_result` to sequence `Result`-returning state computations; failures
+  retain the state present when the failure is produced, without an implicit
+  rollback.
+
 ### Changed
 
 ### Deprecated
