@@ -35,6 +35,30 @@ The default data source selection can be overridden by calling
 Custom data sources can also be used. See the `TZInfo::DataSource.set`
 documentation for further details.
 
+### Limited JSON Packages
+
+A fixed set of time zones can be exported to ordinary JSON for reproducible
+audit windows. The package contains offsets, transitions and alias links, but
+no executable Ruby code:
+
+```ruby
+json = TZInfo::DataSources::JsonTimezonePackage.dump(
+  ['America/New_York', 'US/Eastern'],
+  Time.utc(2026, 1, 1),
+  Time.utc(2026, 12, 31, 23, 59, 59)
+)
+```
+
+Importing validates transition ordering, offset references and alias chains,
+then returns a finite data source. Constant-offset zones remain unbounded; for
+transition zones, queries outside the saved window raise
+`TZInfo::PeriodNotFound` instead of continuing with the last offset:
+
+```ruby
+data_source = TZInfo::DataSources::JsonTimezonePackage.load(json)
+TZInfo::DataSource.set(data_source)
+tz = TZInfo::Timezone.get('America/New_York')
+```
 
 ## Installation
 

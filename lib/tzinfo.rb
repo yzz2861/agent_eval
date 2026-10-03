@@ -42,6 +42,7 @@ require_relative 'tzinfo/data_sources/data_timezone_info'
 require_relative 'tzinfo/data_sources/linked_timezone_info'
 require_relative 'tzinfo/data_sources/constant_offset_data_timezone_info'
 require_relative 'tzinfo/data_sources/transitions_data_timezone_info'
+require_relative 'tzinfo/data_sources/bounded_transitions_data_timezone_info'
 
 require_relative 'tzinfo/data_sources/country_info'
 
@@ -51,6 +52,7 @@ require_relative 'tzinfo/data_sources/zoneinfo_reader'
 require_relative 'tzinfo/data_source'
 require_relative 'tzinfo/data_sources/ruby_data_source'
 require_relative 'tzinfo/data_sources/zoneinfo_data_source'
+require_relative 'tzinfo/data_sources/json_timezone_package'
 
 require_relative 'tzinfo/timezone_period'
 require_relative 'tzinfo/offset_timezone_period'
