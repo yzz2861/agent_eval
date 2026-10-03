@@ -162,6 +162,11 @@ module Concurrent
     # @!visibility private
     attr_reader :executor
 
+    # Monotonic submission order within the parent timer set. Used to keep
+    # tasks with the same schedule time in submission order.
+    # @!visibility private
+    attr_accessor :queue_order
+
     # Schedule a task for execution at a specified future time.
     #
     # @param [Float] delay the number of seconds to wait for before executing the task
@@ -207,11 +212,15 @@ module Concurrent
       synchronize { @time }
     end
 
-    # Comparator which orders by schedule time.
+    # Comparator which orders by schedule time, breaking ties with the
+    # submission order assigned by the parent timer set.
     #
     # @!visibility private
     def <=>(other)
-      schedule_time <=> other.schedule_time
+      time_comparison = schedule_time <=> other.schedule_time
+      return nil if time_comparison.nil?
+      return time_comparison unless time_comparison.zero?
+      queue_order.to_i <=> other.queue_order.to_i
     end
 
     # Has the task been cancelled?
@@ -311,7 +320,7 @@ module Concurrent
     # @!visibility private
     def ns_schedule(delay)
       @delay = delay
-      @time = Concurrent.monotonic_time + @delay
+      @time = @parent.send(:current_time) + @delay
       @parent.send(:post_task, self)
     end
 

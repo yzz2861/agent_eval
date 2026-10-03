@@ -406,5 +406,226 @@ module Concurrent
         expect(subject).to be_shutdown
       end
     end
+
+    context 'manual clock' do
+
+      subject{ TimerSet.manual(executor: executor) }
+
+      it 'can be constructed with the :clock option' do
+        timers = TimerSet.new(executor: executor, clock: :manual)
+        expect(timers).to be_manual_clock
+        expect(timers.now).to eq 0.0
+      end
+
+      it 'is not a manual clock by default' do
+        timers = TimerSet.new(executor: executor)
+        expect(timers).not_to be_manual_clock
+        timers.shutdown
+        expect(timers.wait_for_termination(pool_termination_timeout)).to eq true
+      end
+
+      it 'rejects an unknown clock mode' do
+        expect { TimerSet.new(clock: :bogus) }.to raise_error(ArgumentError)
+      end
+
+      it 'does not allow advancing a real clock timer set' do
+        timers = TimerSet.new(executor: executor)
+        expect { timers.advance(1) }.to raise_error(ArgumentError)
+        expect { timers.advance_to(1) }.to raise_error(ArgumentError)
+        timers.shutdown
+        expect(timers.wait_for_termination(pool_termination_timeout)).to eq true
+      end
+
+      it 'rejects a non-positive execution limit' do
+        expect { TimerSet.manual(max_tasks_per_advance: 0) }.to raise_error(ArgumentError)
+        expect { TimerSet.manual(max_tasks_per_advance: -1) }.to raise_error(ArgumentError)
+      end
+
+      it 'does not execute tasks until the clock is advanced' do
+        executed = AtomicBoolean.new(false)
+        subject.post(1) { executed.make_true }
+        expect(executed.value).to be false
+      end
+
+      it 'never posts work to the timer monitor executor' do
+        timer_executor = subject.instance_variable_get(:@timer_executor)
+        monitor_posts = 0
+        timer_executor.singleton_class.send(:alias_method, :__original_post, :post)
+        timer_executor.define_singleton_method(:post) do |*args, &block|
+          monitor_posts += 1
+          __original_post(*args, &block)
+        end
+        subject.post(1) { nil }
+        subject.advance(0)
+        expect(monitor_posts).to eq 0
+      end
+
+      it 'reports the virtual clock time' do
+        subject.advance(2.5)
+        expect(subject.now).to eq 2.5
+        subject.advance_to(10)
+        expect(subject.now).to eq 10.0
+      end
+
+      it 'refuses to move the clock backwards' do
+        subject.advance(5)
+        expect { subject.advance_to(4) }.to raise_error(ArgumentError)
+        expect(subject.now).to eq 5.0
+      end
+
+      it 'refuses a negative advance' do
+        expect { subject.advance(-1) }.to raise_error(ArgumentError)
+        expect(subject.now).to eq 0.0
+      end
+
+      it 'executes a due task when advanced by the delay' do
+        latch = CountDownLatch.new(1)
+        subject.post(1) { latch.count_down }
+        subject.advance(1)
+        expect(latch.wait(0.2)).to be_truthy
+      end
+
+      it 'executes a due task when advanced to its schedule time' do
+        latch = CountDownLatch.new(1)
+        subject.post(3) { latch.count_down }
+        subject.advance_to(3)
+        expect(latch.wait(0.2)).to be_truthy
+      end
+
+      it 'executes a zero delay task on the first advance' do
+        latch = CountDownLatch.new(1)
+        subject.post(0) { latch.count_down }
+        subject.advance(0)
+        expect(latch.wait(0.2)).to be_truthy
+      end
+
+      it 'does not execute tasks scheduled beyond the new time' do
+        executed = AtomicBoolean.new(false)
+        subject.post(5) { executed.make_true }
+        subject.advance(4)
+        expect(executed).not_to be_true
+      end
+
+      it 'executes overdue tasks without further delay' do
+        latch = CountDownLatch.new(1)
+        subject.post(1) { latch.count_down }
+        subject.advance(3)
+        expect(latch.wait(0.2)).to be_truthy
+      end
+
+      it 'returns the number of dispatched tasks' do
+        2.times { subject.post(1) { nil } }
+        subject.post(5) { nil }
+        expect(subject.advance(2)).to eq 2
+        expect(subject.advance(3)).to eq 1
+      end
+
+      it 'executes tasks with the same deadline in submission order' do
+        order = []
+        3.times { |i| subject.post(1) { order << i } }
+        subject.advance(1)
+        expect(order).to eq [0, 1, 2]
+      end
+
+      it 'executes callbacks scheduled by an earlier callback within the same advance' do
+        events = Queue.new
+        subject.post(1) do
+          events << :first
+          subject.post(0) { events << :second }
+        end
+        subject.advance(1)
+        expect(events.length).to eq 2
+        expect([events.pop, events.pop]).to eq [:first, :second]
+      end
+
+      it 'does not execute a callback task scheduled with a positive delay until it is due' do
+        events = Queue.new
+        subject.post(1) do
+          events << :first
+          subject.post(1) { events << :second }
+        end
+        subject.advance(2)
+        expect(events.length).to eq 1
+        expect(events.pop).to eq :first
+        subject.advance(1)
+        expect(events.length).to eq 1
+        expect(events.pop).to eq :second
+      end
+
+      it 'stops after the execution limit and leaves remaining tasks queued' do
+        timers = TimerSet.manual(executor: executor, max_tasks_per_advance: 2)
+        executed = Queue.new
+        3.times { |i| timers.post(1) { executed << i } }
+
+        expect(timers.advance(1)).to eq 2
+        expect(executed.length).to eq 2
+        expect(timers.now).to eq 1.0
+
+        expect(timers.advance(0)).to eq 1
+        expect(executed.length).to eq 3
+        timers.shutdown
+        expect(timers.wait_for_termination(pool_termination_timeout)).to eq true
+      end
+
+      it 'caps self-rescheduling zero delay callbacks so an advance can finish' do
+        timers = TimerSet.manual(executor: Concurrent::ImmediateExecutor.new, max_tasks_per_advance: 3)
+        count = 0
+        reschedule = nil
+        reschedule = proc do
+          count += 1
+          timers.post(0, &reschedule)
+        end
+        timers.post(0, &reschedule)
+
+        expect { timers.advance(0) }.not_to raise_error
+        expect(count).to eq 3
+        expect(timers.advance(0)).to eq 3
+        expect(count).to eq 6
+        timers.shutdown
+        expect(timers.wait_for_termination(pool_termination_timeout)).to eq true
+      end
+
+      it 'keeps a pending ScheduledTask cancellable before it is due' do
+        executed = AtomicBoolean.new(false)
+        task = subject.post(1) { executed.make_true }
+        expect(task.cancel).to be true
+        subject.advance(1)
+        expect(executed.value).to be false
+        expect(task.reason).to be_a CancelledOperationError
+      end
+
+      it 'completes the ScheduledTask after advancing' do
+        task = subject.post(1) { 42 }
+        subject.advance(1)
+        expect(task.value(0.2)).to eq 42
+        expect(task).to be_fulfilled
+      end
+
+      it 'honors reschedule before advancing' do
+        task = subject.post(1) { 42 }
+        original_schedule = task.schedule_time
+        expect(task.reschedule(5)).to be true
+        subject.advance(2)
+        expect(task.pending?).to be true
+        subject.advance(3)
+        expect(task.value(0.2)).to eq 42
+        expect(task.schedule_time).to be > original_schedule
+      end
+
+      it 'rejects new tasks after shutdown' do
+        subject.shutdown
+        expect(subject.wait_for_termination(pool_termination_timeout)).to eq true
+        expect(subject.post(1) { nil }).to be false
+      end
+
+      it 'dispatches nothing when advanced after shutdown' do
+        latch = CountDownLatch.new(1)
+        subject.post(1) { latch.count_down }
+        subject.shutdown
+        expect(subject.wait_for_termination(pool_termination_timeout)).to eq true
+        expect(subject.advance(1)).to eq 0
+        expect(latch.wait(0.1)).to be_falsey
+      end
+    end
   end
 end
