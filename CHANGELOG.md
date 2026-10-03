@@ -1,5 +1,10 @@
 ## Current
 
+concurrent-ruby:
+
+* Add \`Concurrent::StampedLock\`, a read/write lock with optimistic reads
+  (\`try_optimistic_read\` + \`validate\`) for read-mostly data structures
+
 ## Release v1.3.8 (19 July 2026)
 
 concurrent-ruby:
