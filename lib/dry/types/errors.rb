@@ -84,6 +84,35 @@ module Dry
 
     MapError = ::Class.new(CoercionError)
 
+    # Raised when a recursive definition contains an alias cycle that never
+    # reaches an entity (structural) type, e.g. `a = a` or `a = b; b = a`
+    #
+    class RecursiveAliasError < ::StandardError
+      # @return [Array<Symbol>] the names participating in the alias cycle
+      attr_reader :names
+
+      # @param [Array<Symbol>] names
+      def initialize(names)
+        @names = names
+        chain = (names + [names.first]).join(" -> ")
+        super("recursive type alias #{chain} never resolves to an entity type")
+      end
+    end
+
+    # Raised when an input passed to a recursive type contains a cycle
+    #
+    class CircularStructureError < CoercionError
+      # @return [String] path of the reference back to an ancestor value
+      attr_reader :path
+
+      # @param [String] message
+      # @param [String] path
+      def initialize(message, path)
+        @path = path
+        super(message)
+      end
+    end
+
     SchemaKeyError = ::Class.new(CoercionError)
     private_constant(:SchemaKeyError)
 

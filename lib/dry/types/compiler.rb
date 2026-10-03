@@ -118,6 +118,15 @@ module Dry
         registry["any"].meta(meta)
       end
 
+      def visit_ref(_node)
+        raise ::ArgumentError,
+          "cannot compile a bare recursive reference; compile the :recursive node instead"
+      end
+
+      def visit_recursive(node)
+        Dry::Types::Recursive.compile_ast(node, self)
+      end
+
       def compile_fn(fn)
         type, *node = fn
 

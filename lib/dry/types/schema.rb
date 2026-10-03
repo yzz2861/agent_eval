@@ -326,6 +326,8 @@ module Dry
           if type
             begin
               result[k] = type.call_unsafe(value)
+            rescue CircularStructureError
+              raise
             rescue ConstraintError => exception
               raise SchemaError.new(type.name, value, exception.result)
             rescue CoercionError => exception

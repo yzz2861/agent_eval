@@ -38,15 +38,19 @@ module Dry
         end
 
         # @api private
-        def call_safe(input, &) = type.call_safe(input, &)
+        def call_safe(input, &)
+          Recursive.segment(name) { type.call_safe(input, &) }
+        end
 
         # @api private
-        def call_unsafe(input) = type.call_unsafe(input)
+        def call_unsafe(input)
+          Recursive.segment(name) { type.call_unsafe(input) }
+        end
 
         # @see Dry::Types::Nominal#try
         #
         # @api public
-        def try(input, &) = type.try(input, &)
+        def try(input, &) = Recursive.segment(name) { type.try(input, &) }
 
         # Whether the key is required in schema input
         #

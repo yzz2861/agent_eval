@@ -104,6 +104,30 @@ module Dry
         end
       end
 
+      # Build a recursive type with a named lazy reference.
+      #
+      # @example a self-referencing type
+      #   Tree = Types.Recursive(:node) do |node|
+      #     Types::Hash.schema(
+      #       value: Types::Integer,
+      #       children: Types::Array.of(node)
+      #     )
+      #   end
+      #
+      # @example mutually referencing types
+      #   Tree = Types.Recursive do |t|
+      #     t.declare(:node) do |node|
+      #       Types::Hash.schema(children: Types::Array.of(node))
+      #     end
+      #   end
+      #
+      # @param [Symbol] name name of the root reference
+      #
+      # @return [Dry::Types::Recursive::Root]
+      def Recursive(name = Dry::Core::Constants::Undefined, &block)
+        Dry::Types::Recursive.build(name, &block)
+      end
+
       # Build a map type
       #
       # @example

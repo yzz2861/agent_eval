@@ -9,6 +9,16 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- `Types.Recursive` — a formal entry point for recursive types. It supports
+  self-referencing types with a named lazy reference
+  (`Types.Recursive(:node) { |node| ... }`) as well as groups of mutually
+  referencing types declared through the yielded DSL. References are resolved
+  lazily and the result is cached after the first use. Alias cycles that
+  never reach an entity type raise `RecursiveAliasError`, while cycles in the
+  input passed to `#call`/`#try` raise `CircularStructureError` carrying the
+  offending path instead of overflowing the stack. Recursive types round-trip
+  through the AST compiler and print as `Recursive(:name)`.
+
 ### Changed
 
 ### Deprecated
