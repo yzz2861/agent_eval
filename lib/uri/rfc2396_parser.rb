@@ -173,6 +173,9 @@ module URI
         # server        = [ [ userinfo "@" ] hostport ]
 
       else
+        if /\A\s*+urn:/i.match?(uri)
+          raise InvalidComponentError, "bad URN (is not URN?): #{uri}"
+        end
         raise InvalidURIError, "bad URI (is not URI?): #{uri}"
       end
 

@@ -127,6 +127,9 @@ module URI
           m["fragment"]
         ]
       else
+        if /\Aurn:/i.match?(uri)
+          raise InvalidComponentError, "bad URN (is not URN?): #{uri.inspect}"
+        end
         raise InvalidURIError, "bad URI (is not URI?): #{uri.inspect}"
       end
     end

@@ -82,7 +82,7 @@ class URI::TestCommon < Test::Unit::TestCase
     RUBY
   end
 
-  DEFAULT_SCHEMES = ["FILE", "FTP", "HTTP", "HTTPS", "LDAP", "LDAPS", "MAILTO", "WS", "WSS"].sort.freeze
+  DEFAULT_SCHEMES = ["FILE", "FTP", "HTTP", "HTTPS", "LDAP", "LDAPS", "MAILTO", "URN", "WS", "WSS"].sort.freeze
 
   def test_register_scheme
     assert_equal(DEFAULT_SCHEMES, URI.scheme_list.keys.sort)
