@@ -84,6 +84,38 @@ module Dry
 
     MapError = ::Class.new(CoercionError)
 
+    class TupleError < CoercionError
+      class << self
+        def missing(index)
+          new(index, "missing tuple element")
+        end
+
+        def unexpected(index)
+          new(index, "unexpected tuple element")
+        end
+
+        def at(index, error)
+          if error.is_a?(TupleError)
+            new(index, error.base_message, path: [index, *error.path], inner_error: error)
+          else
+            new(index, error.message, path: [index], inner_error: error)
+          end
+        end
+      end
+
+      attr_reader :index, :path, :inner_error
+      attr_reader :base_message
+
+      def initialize(index, message, path: [index], inner_error: nil)
+        @index = index
+        @path = path
+        @inner_error = inner_error
+        @base_message = message
+        path_prefix = path.empty? ? "" : "#{path.map { |i| "[#{i}]" }.join}: "
+        super("#{path_prefix}#{message}")
+      end
+    end
+
     SchemaKeyError = ::Class.new(CoercionError)
     private_constant(:SchemaKeyError)
 

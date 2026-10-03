@@ -21,6 +21,17 @@ RSpec.describe Dry::Types, "#to_ast" do
     end
   end
 
+  context "with a default" do
+    subject(:type) { Dry::Types["nominal.integer"].default(1) }
+
+    specify do
+      expect(type.to_ast).to eql([
+        :default,
+        [[:nominal, [Integer, {}, {}]], 1, {}]
+      ])
+    end
+  end
+
   context "with a sum" do
     subject(:type) { Dry::Types["nominal.string"] | Dry::Types["nominal.integer"] }
 

@@ -29,10 +29,16 @@ module Dry
         def visit_array(_) = ::Array
 
         # @api private
+        def visit_tuple(_) = ::Array
+
+        # @api private
         def visit_lax(node) = visit(node)
 
         # @api private
         def visit_constructor(node) = visit(node[0])
+
+        # @api private
+        def visit_default(node) = visit(node[0])
 
         # @api private
         def visit_enum(node) = visit(node[0])

@@ -31,8 +31,18 @@ module Dry
         primitive.constructor(compile_fn(fn))
       end
 
+      def visit_default(node)
+        type, value, meta = node
+        visit(type).default(value).meta(meta || EMPTY_HASH)
+      end
+
       def visit_lax(node)
-        Types::Lax.new(visit(node))
+        type = visit(node)
+        if tuple_lax?(type)
+          type.lax
+        else
+          Types::Lax.new(type)
+        end
       end
       deprecate(:visit_safe, :visit_lax)
 
@@ -67,6 +77,30 @@ module Dry
         member, meta = node
         member = visit(member) unless member.is_a?(::Class)
         registry["nominal.array"].of(member).meta(meta)
+      end
+
+      def visit_tuple(node)
+        fixed, rest, meta = node
+
+        if node.size == 2
+          if rest.is_a?(::Hash)
+            meta = rest
+            rest = nil
+          else
+            meta = EMPTY_HASH
+          end
+        elsif node.size == 1
+          fixed = node[0]
+          rest = nil
+          meta = EMPTY_HASH
+        end
+
+        meta ||= EMPTY_HASH
+
+        fixed = fixed.map { |type| compile_type(type) }
+        rest = compile_type(rest) if rest
+        tuple = registry["nominal.array"].tuple(*fixed, **(rest ? {rest: rest} : {}))
+        tuple.meta(meta)
       end
 
       def visit_hash(node)
@@ -132,6 +166,16 @@ module Dry
         else
           raise ::ArgumentError, "Cannot build callable from #{fn.inspect}"
         end
+      end
+
+      def compile_type(type)
+        type.is_a?(::Class) ? type : visit(type)
+      end
+
+      def tuple_lax?(type)
+        type.is_a?(Tuple) ||
+          type.is_a?(Tuple::Constructor) ||
+          (type.is_a?(Constrained) && type.type.is_a?(Tuple))
       end
     end
   end

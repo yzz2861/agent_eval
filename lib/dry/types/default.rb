@@ -117,6 +117,20 @@ module Dry
       #
       # @api private
       def callable? = false
+
+      # @see Nominal#to_ast
+      #
+      # @api public
+      def to_ast(meta: true)
+        [:default, [type.to_ast(meta: meta), value, EMPTY_HASH]]
+      end
+
+      # Build a lax default type
+      #
+      # @return [Default]
+      #
+      # @api public
+      def lax = type.lax.default(value)
     end
   end
 end

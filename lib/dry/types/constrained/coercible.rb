@@ -7,6 +7,13 @@ module Dry
       #
       # @api public
       class Coercible < Constrained
+        # Build a lax type while retaining the constructor function
+        #
+        # @return [Lax]
+        #
+        # @api public
+        def lax = type.lax
+
         # @return [Object]
         #
         # @api private

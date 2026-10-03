@@ -115,6 +115,11 @@ module Dry
         end
 
         # @api private
+        def visit_tuple(_)
+          ARRAY
+        end
+
+        # @api private
         def visit_lax(node)
           visit(node)
         end
@@ -123,6 +128,11 @@ module Dry
         def visit_constructor(node)
           other, * = node
           visit(other)
+        end
+
+        # @api private
+        def visit_default(node)
+          visit(node[0])
         end
 
         # @api private
