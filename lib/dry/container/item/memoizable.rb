@@ -28,13 +28,35 @@ module Dry
           @memoize_mutex = ::Mutex.new
         end
 
+        # Build a fresh, unresolved copy so a forked container keeps the
+        # factory definition but has its own cache and initialization lock
+        #
+        # @return [Dry::Container::Item::Memoizable]
+        #
+        # @api private
+        def fork
+          self.class.new(item, options)
+        end
+
         # Returns the result of item call using a syncronized mutex
         #
+        # @param [Dry::Container::Mixin] container
+        #   The container that is resolving the item
+        #
         # @return [Dry::Container::Item::Base]
-        def call
+        def call(container = nil)
           memoize_mutex.synchronize do
-            @memoized_item ||= item.call
+            @memoized_item ||= call_item(container)
           end
+        end
+
+        # Whether the registered item should be given the resolving container
+        #
+        # @return [Bool]
+        #
+        # @private
+        def containerized?
+          Item.accepts_container?(item)
         end
 
         private

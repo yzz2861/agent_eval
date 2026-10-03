@@ -32,7 +32,7 @@ module Dry
           end
         end
 
-        item.call
+        call_item(item, container)
       end
 
       # Check whether an items is registered under the given key
@@ -81,7 +81,25 @@ module Dry
       #       to iterate over not just the registered keys, but to see what was
       #       registered would be very helpful. This is a step toward doing that.
       def each(container, &block)
-        container.map { |key, value| [key, value.call] }.each(&block)
+        container.map { |key, value| [key, call_item(value, container)] }.each(&block)
+      end
+
+      private
+
+      # Call a registered item, passing the resolving container only when the
+      # item explicitly asks for it
+      def call_item(item, container)
+        if item.respond_to?(:containerized?) && item.containerized?
+          item.call(owner(container))
+        else
+          item.call
+        end
+      end
+
+      # The mixin container currently performing the resolution. Falls back to
+      # the raw item hash for custom item stores without a back-reference.
+      def owner(container)
+        container.instance_variable_get(:@_owner) || container
       end
     end
   end

@@ -6,6 +6,7 @@
 ### Added
 
 - Add a warning about deprecation of the gem (via #89) (@solnic)
+- Add `Dry::Container::Mixin#fork` for derived containers with independent memoized caches and initialization locks, and pass the resolving container to factories that declare a parameter
 
 
 [Compare v0.11.0...master](https://github.com/dry-rb/dry-container/compare/v0.11.0...master)

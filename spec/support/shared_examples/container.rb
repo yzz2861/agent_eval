@@ -683,6 +683,163 @@ RSpec.shared_examples "a container" do
       container.dup.register(:foo, "bar")
       expect(container.key?(:foo)).to be false
     end
+
+    it "keeps sharing the memoized instance cache (legacy behavior)" do
+      container.register(:item, memoize: true) { Object.new }
+
+      copy = container.dup
+
+      expect(copy.resolve(:item)).to be(container.resolve(:item))
+    end
+  end
+
+  describe ".fork" do
+    it "returns a different container" do
+      expect(container.fork).to_not be(container)
+    end
+
+    it "shares registered definitions but not registered keys" do
+      container.register(:item, "item")
+
+      forked = container.fork
+      forked.register(:other, "other")
+
+      expect(forked.key?(:item)).to be true
+      expect(container.key?(:other)).to be false
+    end
+
+    it "keeps plain values by their original reference" do
+      item = Object.new
+      container.register(:item, item)
+
+      expect(container.fork.resolve(:item)).to be(item)
+    end
+
+    it "keeps non-memoized factories by their original reference" do
+      container.register(:item) { Object.new }
+
+      forked = container.fork
+      item = forked.resolve(:item)
+
+      expect(forked._container[:item]).to be(container._container[:item])
+      expect(forked.resolve(:item)).to_not be(item)
+    end
+
+    it "rebuilds memoized instances independently of the parent" do
+      container.register(:item, memoize: true) { Object.new }
+
+      forked = container.fork
+      forked_item = forked.resolve(:item)
+
+      expect(forked.resolve(:item)).to be(forked_item)
+      expect(container.resolve(:item)).to_not be(forked_item)
+    end
+
+    it "gives two forks independent memoized instances and initialization locks" do
+      container.register(:item, memoize: true) { Object.new }
+
+      first = container.fork
+      second = container.fork
+
+      expect(first.resolve(:item)).to_not be(second.resolve(:item))
+      expect(
+        first._container["item"].memoize_mutex
+      ).to_not be(second._container["item"].memoize_mutex)
+    end
+
+    it "does not reset an already resolved parent instance" do
+      container.register(:item, memoize: true) { Object.new }
+      parent_item = container.resolve(:item)
+
+      expect(container.fork.resolve(:item)).to_not be(parent_item)
+      expect(container.resolve(:item)).to be(parent_item)
+    end
+
+    it "re-uses the decoration chain for memoized factories" do
+      container.register(:item, memoize: true) { "value" }
+      container.decorate(:item) { |value| "<#{value}>" }
+
+      forked = container.fork
+      item = forked.resolve(:item)
+
+      expect(item).to eq("<value>")
+      expect(forked.resolve(:item)).to be(item)
+    end
+
+    it "re-uses definitions registered inside namespaces" do
+      container.namespace("one") do
+        register("two", memoize: true) { Object.new }
+      end
+
+      forked = container.fork
+      item = forked.resolve("one.two")
+
+      expect(forked.resolve("one.two")).to be(item)
+      expect(container.resolve("one.two")).to_not be(item)
+    end
+
+    it "passes the forked container to factories that accept it" do
+      container.register(:parent_dep, "from parent")
+      container.register(:service, memoize: true) do |child|
+        if child.key?(:child_dep)
+          child.resolve(:child_dep)
+        else
+          child.resolve(:parent_dep)
+        end
+      end
+
+      forked = container.fork
+      forked.register(:child_dep, "from fork")
+
+      expect(forked.resolve(:service)).to eq("from fork")
+      expect(container.resolve(:service)).to eq("from parent")
+    end
+
+    it "passes the forked container to non-memoized factories registered with call: true" do
+      container.register(:item, call: true) { |forked| forked }
+
+      forked = container.fork
+
+      expect(forked.resolve(:item)).to be(forked)
+    end
+
+    it "lets forked factories resolve sibling memoized dependencies from the fork" do
+      container.register(:low, memoize: true) { Object.new }
+      container.register(:high, memoize: true) { |forked| forked.resolve(:low) }
+
+      forked = container.fork
+
+      expect(forked.resolve(:high)).to be(forked.resolve(:low))
+      expect(container.resolve(:high)).to be(container.resolve(:low))
+      expect(forked.resolve(:low)).to_not be(container.resolve(:low))
+    end
+
+    it "resolves memoized factories concurrently in two child containers" do
+      container.register(:item, memoize: true) do |forked|
+        sleep(rand * 0.01)
+        [forked, Object.new]
+      end
+
+      children = [container.fork, container.fork]
+      ready = Queue.new
+      start = Queue.new
+
+      threads = children.map do |child|
+        Thread.new do
+          ready << true
+          start.pop
+          child.resolve(:item)
+        end
+      end
+
+      2.times { ready.pop }
+      2.times { start << true }
+
+      results = threads.map(&:value)
+
+      expect(results.map(&:first)).to match_array(children)
+      expect(results.first.last).to_not be(results.last.last)
+    end
   end
 
   describe ".clone" do

@@ -12,9 +12,17 @@ module Dry
       class Callable < Item
         # Returns the result of item call or item
         #
+        # @param [Dry::Container::Mixin] container
+        #   The container that is resolving the item
+        #
         # @return [Mixed]
-        def call
-          callable? ? item.call : item
+        def call(container = nil)
+          callable? ? call_item(container) : item
+        end
+
+        # @private
+        def containerized?
+          callable? && Item.accepts_container?(item)
         end
       end
     end

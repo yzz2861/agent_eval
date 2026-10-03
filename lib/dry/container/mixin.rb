@@ -106,6 +106,7 @@ module Dry
           extend hooks_mod
 
           @_container = ::Concurrent::Hash.new
+          @_container.instance_variable_set(:@_owner, self)
         end
       end
 
@@ -113,6 +114,7 @@ module Dry
       module Initializer
         def initialize(*args, &block)
           @_container = ::Concurrent::Hash.new
+          @_container.instance_variable_set(:@_owner, self)
           super
         end
       end
@@ -335,7 +337,7 @@ module Dry
       # @api public
       def dup
         copy = super
-        copy.instance_variable_set(:@_container, _container.dup)
+        copy.instance_variable_set(:@_container, _copied_container(copy))
         copy
       end
 
@@ -343,9 +345,48 @@ module Dry
       def clone
         copy = super
         unless copy.frozen?
-          copy.instance_variable_set(:@_container, _container.dup)
+          copy.instance_variable_set(:@_container, _copied_container(copy))
         end
         copy
+      end
+
+      # Create a derived container that shares the registered definitions but
+      # builds its own instances of memoized factories
+      #
+      # Plain registered values keep their original references, factories,
+      # decoration chains and namespace definitions are re-used, while
+      # memoized instance caches and their initialization locks are
+      # independent. Factories that declare a container argument are resolved
+      # against the forked container.
+      #
+      # @return [Dry::Container::Mixin] the forked container
+      #
+      # @api public
+      def fork
+        copy = dup
+        copy._reset_memoized_items!
+        copy
+      end
+
+      # Replace every memoized item with a fresh, unresolved copy of itself
+      #
+      # @return [Dry::Container::Mixin] self
+      #
+      # @api private
+      def _reset_memoized_items!
+        reset = ::Concurrent::Hash.new
+        reset.instance_variable_set(:@_owner, self)
+        _container.each { |key, item| reset[key] = item.respond_to?(:fork) ? item.fork : item }
+        @_container = reset
+
+        self
+      end
+
+      private
+
+      # Copy the item hash and point it back at the container that owns it
+      def _copied_container(owner)
+        _container.dup.tap { |container| container.instance_variable_set(:@_owner, owner) }
       end
     end
     # rubocop:enable Metrics/ModuleLength
