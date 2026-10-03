@@ -99,7 +99,7 @@ module Dry
 
         Result.new(schema.(input), context_map) do |result|
           rules.each do |rule|
-            next if rule.keys.any? { |key| error?(result, key) }
+            next if rule.skip_schema_errors && rule.keys.any? { |key| error?(result, key) }
 
             rule_result = rule.(self, result)
 

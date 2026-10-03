@@ -25,6 +25,11 @@ module Dry
       #   @api private
       option :macros, default: proc { EMPTY_ARRAY.dup }
 
+      # @!attribute [r] skip_schema_errors
+      #   @return [Boolean]
+      #   @api private
+      option :skip_schema_errors, default: proc { true }
+
       # Evaluate the rule within the provided context
       #
       # @param [Contract] contract
@@ -99,6 +104,54 @@ module Dry
         self
       end
       # rubocop:enable Metrics/AbcSize
+
+      # Define a validation function for matching two arrays
+      #
+      # The function receives an Association with matched records and the
+      # original array indexes. Records whose association keys failed schema
+      # checks are ignored. Repeated keys keep every record instead of only
+      # making the last record available.
+      #
+      # @example
+      #   rule(:invoices, :allocations).associate(
+      #     :id, :invoice_id
+      #   ) do |association:|
+      #     association.groups.each do |group|
+      #       key([:invoices, group[:left_index]]).failure("too much")
+      #     end
+      #   end
+      #
+      # @return [Rule]
+      #
+      # @api public
+      def associate(left_key, right_key, &block)
+        left_root, right_root = keys
+
+        @skip_schema_errors = false
+
+        @block = proc do
+          next if result.base_error?(left_root) || result.base_error?(right_root)
+          next unless values.key?(left_root) && values.key?(right_root)
+          next if values[left_root].nil? || values[right_root].nil?
+
+          association = Association.new(
+            left: values[left_root],
+            right: values[right_root],
+            left_key: left_key,
+            right_key: right_key,
+            left_path: left_root,
+            right_path: right_root,
+            result: result
+          )
+
+          evaluator = with(keys: [], association: association, &block)
+          failures.concat(evaluator.failures)
+        end
+
+        @block_options = map_keywords(block) if block
+
+        self
+      end
 
       # Return a nice string representation
       #
