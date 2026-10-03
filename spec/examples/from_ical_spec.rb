@@ -1,4 +1,5 @@
 require File.dirname(__FILE__) + "/../spec_helper"
+require "active_support"
 require "active_support/time"
 
 module IceCube
@@ -459,6 +460,149 @@ module IceCube
         ical_string = "DTSTART:20130314T201500Z\nDTEND:20130314T201545Z\nRRULE:FREQ=WEEKLY;BYDAY=TH;UNT\n  IL=20130531T100000Z\nDESCRIPTION:This is a test event\nSUMMARY:Test Event\n"
         schedule = IceCube::Schedule.from_ical(ical_string)
         expect(schedule.to_ical.split("\n").find { |x| x =~ /RRULE/ }).to eq("RRULE:FREQ=WEEKLY;UNTIL=20130531T100000Z;BYDAY=TH")
+      end
+    end
+
+    describe "custom VTIMEZONE rules" do
+      let(:custom_vtimezone) do
+        <<~ICAL
+          BEGIN:VTIMEZONE
+          TZID:Custom/TwoHour
+          BEGIN:STANDARD
+          DTSTART:19700601T000000
+          TZOFFSETFROM:+0300
+          TZOFFSETTO:+0200
+          RRULE:FREQ=YEARLY;BYMONTH=6;BYMONTHDAY=1
+          END:STANDARD
+          BEGIN:DAYLIGHT
+          DTSTART:19700101T000000
+          TZOFFSETFROM:+0200
+          TZOFFSETTO:+0300
+          RRULE:FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=1
+          END:DAYLIGHT
+          END:VTIMEZONE
+        ICAL
+      end
+
+      it "round-trips a small custom DST calendar without machine zone dependence" do
+        ical = custom_vtimezone + <<~ICAL
+          DTSTART;TZID=Custom/TwoHour:20240115T100000
+          RRULE:FREQ=DAILY;COUNT=169
+          EXDATE;TZID=Custom/TwoHour:20240601T100000
+          RDATE;TZID=Custom/TwoHour:20240630T100000
+        ICAL
+
+        schedule = IceCube::Schedule.from_ical(ical, timezone_years: 2024..2024)
+        occurrences = schedule.all_occurrences
+
+        expect {
+          IceCube::Schedule.from_ical(ical, timezone_years: 2024..2024)
+        }.not_to change { ENV["TZ"] }
+        expect {
+          Time.find_zone!("Custom/TwoHour")
+        }.to raise_error(ArgumentError)
+        expect(schedule.start_time).to eq(Time.new(2024, 1, 15, 10, 0, 0, "+03:00"))
+        expect(schedule.start_time.dst?).to eq(true)
+        expect(schedule.start_time.utc).to eq(Time.utc(2024, 1, 15, 7, 0, 0))
+        expect(occurrences.first.utc).to eq(Time.utc(2024, 1, 15, 7, 0, 0))
+        expect(occurrences.last).to eq(Time.new(2024, 7, 1, 10, 0, 0, "+02:00"))
+        expect(occurrences.last.dst?).to eq(false)
+        expect(occurrences.last.utc).to eq(Time.utc(2024, 7, 1, 8, 0, 0))
+        expect(occurrences.count).to eq(168)
+        expect(schedule.occurrences_between(Time.utc(2024, 5, 31, 6, 30), Time.utc(2024, 5, 31, 7, 30)).map(&:utc))
+          .to eq([Time.utc(2024, 5, 31, 7)])
+        expect(schedule.occurrences_between(Time.utc(2024, 6, 2, 7, 30), Time.utc(2024, 6, 2, 8, 30)).map(&:utc))
+          .to eq([Time.utc(2024, 6, 2, 8)])
+        expect(schedule.to_ical).to eq(<<~ICAL.chomp)
+          DTSTART;TZID=Custom/TwoHour:20240115T100000
+          RRULE:FREQ=DAILY;COUNT=169
+          RDATE;TZID=Custom/TwoHour:20240630T100000
+          EXDATE;TZID=Custom/TwoHour:20240601T100000
+        ICAL
+      end
+
+      it "keeps floating and UTC times separate from TZID times" do
+        ical = <<~ICAL
+          DTSTART:20240301T090000
+          RDATE:20240302T090000
+          EXDATE:20240303T090000
+          DTEND:20240301T100000Z
+        ICAL
+
+        schedule = IceCube::Schedule.from_ical(ical, timezone_years: 2024..2024)
+
+        expect(schedule.start_time).to be_floating
+        expect(schedule.start_time.utc_offset).to eq(0)
+        expect(schedule.end_time).to be_utc
+        expect(schedule.recurrence_times.first).to be_floating
+        expect(schedule.exception_times.first).to be_floating
+        expect(schedule.to_ical).to eq(ical.chomp)
+      end
+
+      it "raises for a TZID without a matching embedded VTIMEZONE" do
+        ical = "DTSTART;TZID=Unknown/Zone:20240301T090000\n"
+
+        expect {
+          IceCube::Schedule.from_ical(ical, timezone_years: 2024..2024)
+        }.to raise_error(ArgumentError, 'unknown TZID "Unknown/Zone"')
+      end
+
+      it "raises when an occurrence is outside the caller's year range" do
+        ical = custom_vtimezone + "DTSTART;TZID=Custom/TwoHour:20250101T000000\n"
+
+        expect {
+          IceCube::Schedule.from_ical(ical, timezone_years: 2024..2024)
+        }.to raise_error(ArgumentError, /only supported for years 2024 through 2024/)
+      end
+
+      it "raises for unsupported VTIMEZONE observations" do
+        ical = <<~ICAL
+          BEGIN:VTIMEZONE
+          TZID:Custom/Bad
+          BEGIN:STANDARD
+          DTSTART:19700601T000000
+          TZOFFSETFROM:+0300
+          TZOFFSETTO:+0200
+          RRULE:FREQ=MONTHLY;BYMONTH=6;BYMONTHDAY=1
+          END:STANDARD
+          BEGIN:DAYLIGHT
+          DTSTART:19700101T000000
+          TZOFFSETFROM:+0200
+          TZOFFSETTO:+0300
+          RRULE:FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=1
+          END:DAYLIGHT
+          END:VTIMEZONE
+          DTSTART;TZID=Custom/Bad:20240101T000000
+        ICAL
+
+        expect {
+          IceCube::Schedule.from_ical(ical, timezone_years: 2024..2024)
+        }.to raise_error(ArgumentError, /only supports yearly observations/)
+      end
+
+      it "raises for conflicting observations" do
+        ical = <<~ICAL
+          BEGIN:VTIMEZONE
+          TZID:Custom/Conflict
+          BEGIN:STANDARD
+          DTSTART:19700101T000000
+          TZOFFSETFROM:+0300
+          TZOFFSETTO:+0200
+          RRULE:FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=1
+          END:STANDARD
+          BEGIN:DAYLIGHT
+          DTSTART:19700101T000000
+          TZOFFSETFROM:+0200
+          TZOFFSETTO:+0300
+          RRULE:FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=1
+          END:DAYLIGHT
+          END:VTIMEZONE
+          DTSTART;TZID=Custom/Conflict:20240101T000000
+        ICAL
+
+        expect {
+          IceCube::Schedule.from_ical(ical, timezone_years: 2024..2024)
+        }.to raise_error(ArgumentError, /conflicting observations/)
       end
     end
   end

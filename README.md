@@ -141,7 +141,19 @@ the schedule's start_time. Schedule start times are supported as:
 ice_cube implements its own hash-based .to_yaml, so you can quickly (and
 safely) serialize schedule objects in and out of your data store
 
-It also supports partial serialization to/from `ICAL`. Parsing datetimes with time zone information is not currently supported.
+It also supports partial serialization to/from `ICAL`. Embedded custom
+`VTIMEZONE` components can be imported when the caller declares the exact
+year range to materialize:
+
+```ruby
+IceCube::Schedule.from_ical(ical, timezone_years: 2024..2025)
+```
+
+This builds a conversion table local to that parsed calendar. It never changes
+the process time zone or globally registers the `TZID`. UTC, floating, and
+`TZID` date-times remain distinct. Only yearly `STANDARD`/`DAYLIGHT` rules with
+a fixed day or ordinal weekday are accepted; unsupported rules, unknown
+references, out-of-range dates, and conflicting observations raise an error.
 
 ``` ruby
 yaml = schedule.to_yaml

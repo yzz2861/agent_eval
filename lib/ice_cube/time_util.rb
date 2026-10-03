@@ -29,7 +29,9 @@ module IceCube
     end
 
     def self.build_in_zone(args, reference)
-      if reference.respond_to?(:time_zone)
+      if reference.respond_to?(:floating?) && reference.floating?
+        IcalTimezone.floating_time(args)
+      elsif reference.respond_to?(:time_zone)
         reference.time_zone.local(*args)
       elsif reference.utc?
         Time.utc(*args)
@@ -42,8 +44,18 @@ module IceCube
 
     def self.match_zone(input_time, reference)
       return unless (time = ensure_time(input_time, reference))
-      time = if reference.respond_to? :time_zone
-        time.in_time_zone(reference.time_zone)
+      time = if reference.respond_to?(:floating?) && reference.floating?
+        IcalTimezone.floating_time([
+          time.year, time.month, time.day, time.hour, time.min,
+          time.sec + subsec(time)
+        ])
+      elsif reference.respond_to? :time_zone
+        zone = reference.time_zone
+        if zone.respond_to?(:period_for_utc)
+          zone.utc_to_local(time)
+        else
+          time.in_time_zone(zone)
+        end
       elsif reference.utc?
         time.getgm
       elsif reference.zone
@@ -86,7 +98,9 @@ module IceCube
     def self.serialize_time(time)
       case time
       when Time, Date
-        if time.respond_to?(:time_zone)
+        if time.respond_to?(:floating?)
+          time
+        elsif time.respond_to?(:time_zone)
           {time: time.utc, zone: time.time_zone.name}
         else
           time

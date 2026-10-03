@@ -16,6 +16,7 @@ module IceCube
   autoload :IcalBuilder, "ice_cube/builders/ical_builder"
   autoload :HashBuilder, "ice_cube/builders/hash_builder"
   autoload :StringBuilder, "ice_cube/builders/string_builder"
+  autoload :IcalTimezone, "ice_cube/ical_timezone"
 
   autoload :HashParser, "ice_cube/parsers/hash_parser"
   autoload :YamlParser, "ice_cube/parsers/yaml_parser"
