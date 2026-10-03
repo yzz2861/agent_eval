@@ -268,10 +268,8 @@ module Dry
         cons = type.pure { |list, i| list + List.pure(i) }
         with = proc || block || Traverse[type]
 
-        foldl(type.pure(EMPTY)) do |acc, el|
-          cons
-            .apply(acc)
-            .apply { with.(el) }
+        value.each_with_index.reduce(type.pure(EMPTY)) do |acc, (el, index)|
+          cons.apply(acc).apply { traverse_element(with, el, index) }
         end
       end
 
@@ -345,6 +343,16 @@ module Dry
       private
 
       def coerce(other) = self.class.coerce(other)
+
+      # Calls a traverse callable, giving it the element index whenever it
+      # asks for two positional arguments. For non-lambda procs, a negative
+      # arity (the common `{ |x| }` and numbered-parameter form) is treated
+      # as single-argument, so existing blocks keep working unchanged.
+      def traverse_element(callable, element, index)
+        arity = callable.arity
+        with_index = callable.lambda? ? arity == 2 || arity.negative? : arity >= 2
+        with_index ? callable.(element, index) : callable.(element)
+      end
 
       # Empty list
       EMPTY = List.new([].freeze).freeze

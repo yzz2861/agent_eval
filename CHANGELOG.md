@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- New optional `Validated::ErrorTree` error carrier for accumulating errors keyed by nested paths. Paths tell object keys (`ErrorTree::Key`) apart from array indices (`ErrorTree::Index`), several errors may share the same path, and `#prefix` prepends a path to a whole subtree. Trees merge with `+`/`#merge` in a stable order without mutating inputs or losing the original error objects. `List::Validated#traverse` now prefixes ErrorTree errors with the element index; plain arrays of errors keep working exactly as before. A traverse callable that takes two arguments additionally receives the element index.
+
 ### Changed
 
 ### Deprecated

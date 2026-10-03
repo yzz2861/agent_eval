@@ -12,8 +12,18 @@ module Dry
     # List of default traverse functions for types.
     # It is implicitly used by List#traverse for
     # making common cases easier to handle.
+    # The callable receives the element together with its index. A callable
+    # taking one argument (like `id`) is called without the index.
     Traverse = {
-      Validated => -> el { el.alt_map(to_list) }
+      Validated => ->(el, index) {
+        el.alt_map do |error|
+          if error.is_a?(Validated::ErrorTree)
+            error.prefix(Validated::ErrorTree::Index.new(index))
+          else
+            to_list.(error)
+          end
+        end
+      }
     }
 
     # By default the identity function is used

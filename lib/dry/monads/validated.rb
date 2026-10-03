@@ -82,7 +82,14 @@ module Dry
         #   @return [Validated::Valid,Validated::Invalid]
         #
         def apply(val = Undefined, &)
-          Undefined.default(val, &).fmap(Curry.(value!))
+          other = Undefined.default(val, &)
+
+          case other
+          when Valid
+            other.fmap(Curry.(value!))
+          else
+            other
+          end
         end
 
         # Lifts a block/proc over Valid
@@ -222,6 +229,10 @@ module Dry
         # Unsuccessful validation result
         # @see Dry::Monads::Validated::Invalid
         Invalid = Invalid
+
+        # Error carrier keyed by nested paths
+        # @see Dry::Monads::Validated::ErrorTree
+        ErrorTree = ErrorTree
 
         # Actual constructor methods
         #

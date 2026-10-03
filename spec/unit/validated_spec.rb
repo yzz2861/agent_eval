@@ -90,6 +90,31 @@ RSpec.describe(Dry::Monads::Validated) do
       end
     end
 
+    describe "applicative accumulation" do
+      it "collects errors from every invalid argument" do
+        fn = valid.(-> a, b { a + b })
+
+        expect(fn.apply(invalid.(1)).apply(invalid.(2))).to eql(invalid.(3))
+      end
+
+      it "does not lose a later invalid argument after an earlier one" do
+        tree_class = Dry::Monads::Validated::ErrorTree
+        first = invalid.(tree_class.new(:city => :blank))
+        second = invalid.(tree_class.new(:zip => :bad_format))
+
+        result = validated
+          .pure { |street, city, zip| { street: street, city: city, zip: zip } }
+          .apply(valid.("Main St"))
+          .apply(first)
+          .apply(second)
+
+        expect(result).to eql(invalid.(tree_class.new(
+          :city => :blank,
+          :zip => :bad_format
+        )))
+      end
+    end
+
     describe "#===" do
       it "matches on the wrapped value" do
         expect(valid["foo"]).to be === valid["foo"]

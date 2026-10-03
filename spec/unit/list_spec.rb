@@ -338,6 +338,54 @@ RSpec.describe(Dry::Monads::List) do
       end
     end
 
+    context "list of validations" do
+      let(:validation) { Dry::Monads::Validated }
+      let(:valid_result) { validation::Valid.method(:new) }
+      let(:invalid_result) { validation::Invalid.method(:new) }
+      let(:error_tree) { validation::ErrorTree }
+      let(:index) { error_tree::Index }
+
+      it "passes the element index to a lambda that accepts two arguments" do
+        elements = list::Validated[invalid_result.(:a), valid_result.(1)]
+
+        result = elements.traverse(->(el, i) {
+          el.alt_map { |error| error_tree.new([[i, error]]) }
+        })
+
+        expect(result).to eql(invalid_result.(error_tree.new([[index.new(0), :a]])))
+      end
+
+      it "still calls single-argument blocks without the index" do
+        elements = list::Validated[valid_result.(1), valid_result.(2)]
+
+        expect(elements.traverse { |el| el }).to eql(valid_result.(list[1, 2]))
+      end
+
+      it "wraps plain errors in a list, preserving each error object" do
+        first = Object.new
+        second = Object.new
+        elements = list::Validated[
+          invalid_result.(first), invalid_result.(second)
+        ]
+
+        expect(elements.traverse).to eql(invalid_result.(list[first, second]))
+      end
+
+      it "prefixes ErrorTree errors with the element index" do
+        elements = list::Validated[
+          invalid_result.(error_tree.new(:street => :blank)),
+          valid_result.(1),
+          invalid_result.(error_tree.new(:street => :short, :zip => :bad))
+        ]
+
+        expect(elements.traverse).to eql(invalid_result.(error_tree.new(
+          [[[index.new(0), :street], :blank],
+           [[index.new(2), :street], :short],
+           [[index.new(2), :zip], :bad]]
+        )))
+      end
+    end
+
     it "raises an error for untyped list" do
       expect { subject.traverse }.to raise_error(StandardError, /Cannot traverse/)
     end

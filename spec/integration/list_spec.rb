@@ -41,5 +41,26 @@ RSpec.describe(Dry::Monads::List) do
 
       expect(errors.traverse).to eql(Valid(list["john@doe.me", "John"]))
     end
+
+    it "traverses an empty list" do
+      expect(list::Validated[].traverse).to eql(Valid(list[]))
+    end
+
+    it "passes the element index to callables that accept it" do
+      errors = list::Validated[
+        Invalid("boom"), Valid(1), Invalid("again")
+      ]
+
+      ErrorTree = Dry::Monads::Validated::ErrorTree
+
+      result = errors.traverse(->(el, i) {
+        el.alt_map { |error| ErrorTree.new([[i, error]]) }
+      })
+
+      expect(result).to eql(Invalid(ErrorTree.new(
+        [[[ErrorTree::Index.new(0)], "boom"],
+         [[ErrorTree::Index.new(2)], "again"]]
+      )))
+    end
   end
 end
