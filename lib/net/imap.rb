@@ -525,6 +525,9 @@ module Net
   # - #idle: Allows the server to send updates to the client, without the client
   #   needing to poll using #noop.
   #   <em>Requires the +IDLE+ or +IMAP4rev2+ capability.</em>
+  # - #idle_listen: Keeps listening for server updates with #idle, pausing the
+  #   listener automatically when other threads send commands.
+  #   <em>Requires the +IDLE+ or +IMAP4rev2+ capability.</em>
   # - *Obsolete* #lsub: <em>Replaced by <tt>LIST-EXTENDED</tt> and removed from
   #   +IMAP4rev2+.</em>  Lists mailboxes in the "subscribed" set.
   #
@@ -594,6 +597,8 @@ module Net
   # above with {Core IMAP commands}[rdoc-ref:Net::IMAP@Core+IMAP+commands].
   # - #idle: Allows the server to send updates to the client, without the client
   #   needing to poll using #noop.
+  # - #idle_listen: Keeps listening for server updates with #idle, pausing the
+  #   listener automatically when other threads send commands.
   #
   # ==== RFC2342: +NAMESPACE+
   # Folded into IMAP4rev2[https://www.rfc-editor.org/rfc/rfc9051] and also included
@@ -1269,6 +1274,13 @@ module Net
       @continuation_request_arrival = new_cond
       @continuation_request_exception = nil
       @idle_done_cond = nil
+      @idle_listen_thread = nil
+      @idle_listen_in_idle = false
+      @idle_listen_commands = 0
+      @idle_listen_stop = false
+      @idle_listen_idle_end_cond = new_cond
+      @idle_listen_resume_cond = new_cond
+      @idle_listen_stopped_cond = new_cond
       @logout_command_tag = nil
 
       # Connection
@@ -3438,6 +3450,108 @@ module Net
       end
     end
 
+    # Starts a managed +IDLE+ listener that keeps the connection listening for
+    # server notifications, and returns only after listening has stopped.
+    #
+    # Each notification is yielded to +response_handler+, exactly like #idle.
+    # Unlike #idle, the +IDLE+ command is automatically re-issued after every
+    # +DONE+, so the connection keeps listening until #stop_idle_listen is
+    # called or the connection is lost.  Use +timeout+ (in seconds) to
+    # periodically re-issue +IDLE+ as a keep-alive, just like #idle.
+    #
+    # While listening, commands sent from other threads are coordinated
+    # automatically: the current +IDLE+ is first ended with +DONE+, the
+    # command is sent only after the server confirms the +IDLE+ tagged
+    # completion, and listening resumes after the command completes.
+    #
+    # Commands must not be sent from inside +response_handler+ itself (it
+    # runs inside the connection's receiver thread); attempting to do so
+    # raises Net::IMAP::Error.  To react to a notification with a command,
+    # signal another thread and send the command from there.
+    #
+    # If the server does not confirm +DONE+ within
+    # {config.idle_response_timeout}[rdoc-ref:Config#idle_response_timeout]
+    # seconds, listening stops and Net::IMAP::Error is raised.  When the
+    # connection is lost (for example after an untagged +BYE+), the
+    # connection's exception is raised and all threads waiting to send a
+    # command are woken with the same exception.
+    #
+    # Related: #idle, #idle_done, #stop_idle_listen, #noop
+    #
+    # ==== Capabilities
+    #
+    # Same as #idle: the server's capabilities must include either
+    # +IMAP4rev2+ or +IDLE+.
+    def idle_listen(timeout = nil, &response_handler)
+      raise LocalJumpError, "no block given" unless response_handler
+
+      synchronize do
+        if @idle_listen_thread
+          raise Net::IMAP::Error, "already listening with idle_listen"
+        end
+        @idle_listen_thread   = Thread.current
+        @idle_listen_in_idle  = false
+        @idle_listen_commands = 0
+        @idle_listen_stop     = false
+      end
+
+      begin
+        synchronize do
+          until @idle_listen_stop || @receiver_thread_terminating
+            @idle_listen_in_idle = true
+            response = idle(timeout, &response_handler)
+            @idle_listen_in_idle = false
+            @idle_listen_idle_end_cond.broadcast
+            if response.nil? &&
+               !@idle_listen_stop && !@receiver_thread_terminating
+              raise Net::IMAP::Error,
+                    "server did not confirm IDLE DONE, stopping idle_listen"
+            end
+            @idle_listen_resume_cond.wait while @idle_listen_commands > 0 &&
+                                                !@idle_listen_stop &&
+                                                !@receiver_thread_terminating
+          end
+        end
+      ensure
+        synchronize do
+          @idle_listen_thread  = nil
+          @idle_listen_in_idle = false
+          @idle_listen_idle_end_cond.broadcast
+          @idle_listen_resume_cond.broadcast
+          @idle_listen_stopped_cond.broadcast
+        end
+      end
+
+      nil
+    end
+
+    # Stops a managed #idle_listen loop.  Only the listener is ended; the
+    # connection itself is neither logged out nor disconnected, and remains
+    # usable for other commands.
+    #
+    # When called from any thread other than the listener or the connection's
+    # receiver thread, this waits until the listener has fully stopped: the
+    # server has confirmed the final +DONE+ and no +IDLE+ command remains in
+    # progress.  When called from inside the listener's response handler, it
+    # only requests the stop and returns immediately.
+    #
+    # Returns +true+ when a listener was active, +false+ otherwise.
+    #
+    # Related: #idle_listen, #idle_done, #disconnect
+    def stop_idle_listen
+      synchronize do
+        return false unless @idle_listen_thread
+        @idle_listen_stop = true
+        @idle_done_cond&.signal
+        @idle_listen_resume_cond.broadcast
+        unless Thread.current == @idle_listen_thread ||
+               Thread.current == @receiver_thread
+          @idle_listen_stopped_cond.wait while @idle_listen_thread
+        end
+        true
+      end
+    end
+
     RESPONSES_DEPRECATION_MSG =
       "Pass a type or block to #responses, " \
       "set config.responses_without_block to :frozen_dup " \
@@ -3828,26 +3942,62 @@ module Net
     def send_command(cmd, *args, &block)
       args.each do validate_data _1 end
       synchronize do
-        tag = generate_tag
-        command = Command[tag:, name: cmd]
-        put_string(tag + " " + cmd)
-        args.each do |i|
-          put_string(" ")
-          send_data(i, tag)
-        end
-        @logout_command_tag = tag if cmd == "LOGOUT"
-        finish_sending_command(command)
-        add_response_handler(&block) if block
+        idle_listen_paused = idle_listen_pause
         begin
-          put_string(CRLF)
-          get_tagged_response(tag, cmd)
+          tag = generate_tag
+          command = Command[tag:, name: cmd]
+          put_string(tag + " " + cmd)
+          args.each do |i|
+            put_string(" ")
+            send_data(i, tag)
+          end
+          @logout_command_tag = tag if cmd == "LOGOUT"
+          finish_sending_command(command)
+          add_response_handler(&block) if block
+          begin
+            put_string(CRLF)
+            get_tagged_response(tag, cmd)
+          ensure
+            remove_response_handler(block) if block
+          end
         ensure
-          remove_response_handler(block) if block
+          idle_listen_resume if idle_listen_paused
         end
       rescue InvalidResponseError
         disconnect
         raise
       end
+    end
+
+    # Ends the managed #idle_listen IDLE (if any) and waits until the server
+    # has confirmed it, so this command is sent on a quiet connection.
+    # Returns +true+ when the listener was paused, and the caller must ensure
+    # #idle_listen_resume is called after the command completes.
+    def idle_listen_pause
+      return false unless @idle_listen_thread
+      if Thread.current == @idle_listen_thread ||
+         Thread.current == @receiver_thread
+        raise Net::IMAP::Error,
+              "cannot send a command from the idle_listen response handler"
+      end
+      @idle_listen_commands += 1
+      begin
+        if @idle_listen_in_idle
+          @idle_done_cond&.signal
+          @idle_listen_idle_end_cond.wait while @idle_listen_in_idle
+        end
+        reraise @exception if @receiver_thread_terminating
+      rescue Exception
+        idle_listen_resume
+        raise
+      end
+      true
+    end
+
+    # Allows #idle_listen to resume listening after a command completes.
+    def idle_listen_resume
+      @idle_listen_commands -= 1
+      @idle_listen_resume_cond.broadcast if @idle_listen_commands <= 0
     end
 
     # NOTE: This must be synchronized with sending the command's final CRLF and
