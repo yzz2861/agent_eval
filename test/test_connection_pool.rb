@@ -679,6 +679,181 @@ class TestConnectionPool < Minitest::Test
     end
   end
 
+  def test_health_check_replaces_bad_connection
+    broken = Object.new
+    healthy = Object.new
+    factory_connections = [broken, healthy]
+    checker = ->(conn) { !conn.equal?(broken) }
+    pool = ConnectionPool.new(size: 2, timeout: 1, health_check: checker) { factory_connections.shift }
+
+    conn = pool.checkout
+
+    assert_same healthy, conn
+
+    pool.checkin
+
+    # the broken connection's slot was released
+    assert_equal 2, pool.available
+  end
+
+  def test_health_check_does_not_block_checkin
+    block_check = false
+    started = Queue.new
+    gate = Queue.new
+    checker = ->(conn) do
+      if block_check
+        started << true
+        gate.pop
+      else
+        true
+      end
+    end
+    pool = ConnectionPool.new(size: 2, timeout: 5, health_check: checker) { Object.new }
+
+    conn = pool.checkout
+    block_check = true
+
+    thread = Thread.new do
+      other = pool.checkout
+      pool.checkin
+      other
+    end
+    started.pop # wait until the health check is blocked
+
+    checked_in = false
+    releaser = Thread.new do
+      sleep 0.5
+      saw_checkin = checked_in
+      gate << true
+      saw_checkin
+    end
+
+    pool.checkin
+    checked_in = true
+
+    assert releaser.value, "checkin blocked while a health check was running"
+    refute_nil thread.value
+    refute_same conn, thread.value
+  end
+
+  def test_health_check_timeout_recovers_capacity
+    healthy = false
+    checker = ->(conn) do
+      sleep 0.15
+      healthy
+    end
+    pool = ConnectionPool.new(size: 1, timeout: 0.4, health_check: checker, health_check_attempts: 10) { Object.new }
+
+    assert_raises ConnectionPool::TimeoutError do
+      pool.checkout
+    end
+
+    # discarded connections were accounted for
+    assert_equal 1, pool.available
+
+    healthy = true
+    conn = pool.checkout
+    refute_nil conn
+    pool.checkin
+  end
+
+  def test_health_check_attempts_limit
+    created = 0
+    checker = ->(conn) { false }
+    pool = ConnectionPool.new(size: 2, timeout: 30, health_check: checker, health_check_attempts: 3) do
+      created += 1
+      Object.new
+    end
+
+    assert_raises ConnectionPool::TimeoutError do
+      pool.checkout
+    end
+
+    assert_equal 3, created
+    assert_equal 2, pool.available
+  end
+
+  def test_health_check_exception_recovers_capacity
+    boom = Class.new(StandardError)
+    calls = 0
+    checker = ->(conn) do
+      calls += 1
+      raise boom if calls == 1
+      true
+    end
+    pool = ConnectionPool.new(size: 1, timeout: 1, health_check: checker) { Object.new }
+
+    assert_raises boom do
+      pool.checkout
+    end
+
+    assert_equal 1, pool.available
+
+    conn = pool.checkout
+    refute_nil conn
+    pool.checkin
+  end
+
+  def test_health_check_concurrent_bad_connections
+    bad = [Object.new, Object.new]
+    created = 0
+    created_mutex = Mutex.new
+    checker = ->(conn) { !bad.include?(conn) }
+    pool = ConnectionPool.new(size: 2, timeout: 5, health_check: checker) do
+      created_mutex.synchronize do
+        created += 1
+        (created <= 2) ? bad[created - 1] : Object.new
+      end
+    end
+
+    results = Queue.new
+    ready = Queue.new
+    release = Queue.new
+    threads = Array.new(2) do
+      Thread.new do
+        conn = pool.checkout
+        results << conn
+        ready << true
+        release.pop
+        pool.checkin
+      end
+    end
+    2.times { ready.pop }
+    2.times { release << true }
+    threads.each(&:join)
+
+    got = [results.pop, results.pop]
+    assert_equal 2, got.uniq.size
+    got.each { |conn| refute bad.include?(conn) }
+    assert_equal 2, pool.available
+    assert_equal 2, pool.idle
+  end
+
+  def test_health_check_shutdown_during_check
+    started = Queue.new
+    gate = Queue.new
+    checker = ->(conn) do
+      started << true
+      gate.pop
+    end
+    pool = ConnectionPool.new(size: 1, timeout: 5, health_check: checker) { Object.new }
+
+    thread = Thread.new do
+      begin
+        pool.checkout
+        :checked_out
+      rescue ConnectionPool::PoolShuttingDownError
+        :shutting_down
+      end
+    end
+    started.pop # wait until the health check is blocked
+
+    pool.shutdown {}
+
+    gate << false
+    assert_equal :shutting_down, thread.value
+  end
+
   def test_wrapper_wrapped_pool
     wrapper = ConnectionPool::Wrapper.new { NetworkConnection.new }
     assert_equal ConnectionPool, wrapper.wrapped_pool.class

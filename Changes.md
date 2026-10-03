@@ -1,5 +1,12 @@
 # connection_pool Changelog
 
+3.1.0
+------
+
+- Add optional `health_check` and `health_check_attempts` options to verify
+  connections before checkout. Unhealthy connections are discarded and
+  replaced without holding the pool lock, bounded per checkout.
+
 3.0.2
 ------
 

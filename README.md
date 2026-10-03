@@ -136,6 +136,24 @@ pool.with do |conn|
 end
 ```
 
+## Health Checks
+
+You can pass a `health_check` callable to verify each connection before it is
+delivered by `checkout`. Connections that fail the check are discarded and
+replaced with fresh ones. The check runs outside the pool lock, so a slow
+check does not block other threads. All attempts within one checkout share
+that checkout's original timeout deadline.
+
+```ruby
+pool = ConnectionPool.new(size: 5, timeout: 5,
+  health_check: ->(conn) { conn.ping },
+  health_check_attempts: 3) { Redis.new }
+```
+
+`health_check_attempts` (default: 3) bounds how many bad connections a single
+checkout will discard before raising `ConnectionPool::TimeoutError`, so a
+pool full of broken connections fails fast instead of spinning.
+
 ## Current State
 
 There are several methods that return information about a pool.

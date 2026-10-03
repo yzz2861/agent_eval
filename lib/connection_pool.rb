@@ -37,6 +37,15 @@ end
 # - :size - number of connections to pool, defaults to 5
 # - :timeout - amount of time to wait for a connection if none currently available, defaults to 5 seconds
 # - :auto_reload_after_fork - automatically drop all connections after fork, defaults to true
+# - :health_check - optional callable invoked with each connection before it is
+#   delivered by +checkout+. Return a truthy value if the connection is usable.
+#   Connections that fail the check are discarded and replaced, subject to
+#   :health_check_attempts. The check runs outside the pool lock, so slow
+#   checks do not block other threads checking connections in or out.
+# - :health_check_attempts - maximum number of connections to health check
+#   during a single +checkout+, defaults to 3. Bounds how many bad connections
+#   one checkout will discard before raising ConnectionPool::TimeoutError,
+#   preventing a checkout from spinning when every connection is bad.
 #
 class ConnectionPool
   def self.wrap(**kwargs, &block)
@@ -45,13 +54,16 @@ class ConnectionPool
 
   attr_reader :size
 
-  def initialize(timeout: 5, size: 5, auto_reload_after_fork: true, name: nil, &block)
+  def initialize(timeout: 5, size: 5, auto_reload_after_fork: true, name: nil, health_check: nil, health_check_attempts: 3, &block)
     raise ArgumentError, "Connection pool requires a block" unless block_given?
 
     @size = Integer(size)
     raise ArgumentError, "Connection pool size cannot be negative" if @size.negative?
 
     @timeout = Float(timeout)
+    @health_check = health_check
+    @health_check_attempts = Integer(health_check_attempts)
+    raise ArgumentError, "Connection pool health_check_attempts must be positive" if @health_check_attempts < 1
     @available = TimedStack.new(size: @size, &block)
     @key = :"pool-#{@available.object_id}"
     @key_count = :"pool-#{@available.object_id}-count"
@@ -116,7 +128,7 @@ class ConnectionPool
       ::Thread.current[@key_count] += 1
       ::Thread.current[@key]
     else
-      conn = @available.pop(timeout:, **kwargs)
+      conn = checkout_connection(timeout:, **kwargs)
       ::Thread.current[@key] = conn
       ::Thread.current[@key_count] = 1
       ::Thread.current[@key_kwargs] = kwargs
@@ -185,6 +197,42 @@ class ConnectionPool
   # Number of pool entries created and idle in the pool.
   def idle
     @available.idle
+  end
+
+  private
+
+  # Pops a connection, running the optional health check outside the pool
+  # lock. Unhealthy connections are discarded (freeing their slot) and
+  # replaced until a healthy one is found, the attempt budget is exhausted,
+  # or the original checkout deadline passes.
+  def checkout_connection(timeout:, **kwargs)
+    return @available.pop(timeout:, **kwargs) unless @health_check
+
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    attempts_left = @health_check_attempts
+
+    loop do
+      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      if remaining <= 0
+        raise ConnectionPool::TimeoutError, "Waited #{timeout} sec for a healthy connection"
+      end
+
+      conn = @available.pop(timeout: remaining, **kwargs)
+      return conn unless conn
+
+      healthy = false
+      begin
+        healthy = @health_check.call(conn)
+      ensure
+        @available.decrement_created unless healthy
+      end
+      return conn if healthy
+
+      attempts_left -= 1
+      if attempts_left <= 0
+        raise ConnectionPool::TimeoutError, "No healthy connection after #{@health_check_attempts} attempts"
+      end
+    end
   end
 end
 
