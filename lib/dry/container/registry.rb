@@ -11,6 +11,7 @@ module Dry
       # @private
       def initialize
         @_mutex = ::Mutex.new
+        @sequence = 0
       end
 
       # Register an item with the container to be resolved later
@@ -24,6 +25,10 @@ module Dry
       # @param [Hash] options
       # @option options [Symbol] :call
       #   Whether the item should be called when resolved
+      # @option options [Array] :tags
+      #   Tags grouping the item for multi-binding resolution
+      # @option options [Integer] :order
+      #   Priority used to sort items sharing a tag (defaults to 0)
       #
       # @raise [Dry::Container::Error]
       #   If an item is already registered with the given key
@@ -38,12 +43,22 @@ module Dry
             raise Error, "There is already an item registered with the key #{key.inspect}"
           end
 
-          container[key] = factory.call(item, options)
+          container[key] = factory.call(item, registration_options(options))
         end
       end
 
       def factory
         @factory ||= ::Dry::Container::Item::Factory.new
+      end
+
+      private
+
+      # @private
+      def registration_options(options)
+        return options if options.key?(:sequence)
+
+        @sequence += 1
+        {sequence: @sequence}.merge(options)
       end
     end
   end

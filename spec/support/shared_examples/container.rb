@@ -416,6 +416,114 @@ RSpec.shared_examples "a container" do
       end
     end
 
+    describe "tagged multi-bindings" do
+      describe "#keys_for" do
+        before do
+          container.register("notifiers.sms", tags: %i[notifier], order: 2) { :sms }
+          container.register("notifiers.email", tags: %i[notifier alerts], order: 1) { :email }
+          container.register("notifiers.push", tags: %i[notifier]) { :push }
+          container.register("unrelated") { :other }
+        end
+
+        it "returns keys ordered by order, then registration order" do
+          expect(container.keys_for(:notifier)).to eq(%w[notifiers.push notifiers.email notifiers.sms])
+        end
+
+        it "matches tags given as strings or symbols" do
+          expect(container.keys_for("alerts")).to eq(%w[notifiers.email])
+        end
+
+        it "returns an empty array when nothing is tagged" do
+          expect(container.keys_for(:missing)).to eq([])
+        end
+
+        it "does not resolve the registered items" do
+          factory_spy = spy("factory")
+          container.register("lazy", tags: %i[notifier]) { factory_spy.call }
+
+          container.keys_for(:notifier)
+
+          expect(factory_spy).not_to have_received(:call)
+        end
+      end
+
+      describe "#resolve_all" do
+        it "resolves every item tagged with the given tag in tag order" do
+          container.register("notifiers.sms", tags: %i[notifier], order: 2) { :sms }
+          container.register("notifiers.email", tags: %i[notifier alerts], order: 1) { :email }
+          container.register("notifiers.push", tags: %i[notifier]) { :push }
+          container.register("unrelated") { :other }
+
+          expect(container.resolve_all(:notifier)).to eq(%i[push email sms])
+          expect(container.resolve_all(:alerts)).to eq(%i[email])
+        end
+
+        it "returns an empty array when nothing is tagged" do
+          expect(container.resolve_all(:missing)).to eq([])
+        end
+
+        it "resolves only the members fixed at the start of the round" do
+          container.register("plugins.one", tags: %i[plugin]) {
+            unless container.key?("plugins.two")
+              container.register("plugins.two", tags: %i[plugin]) { :two }
+            end
+            :one
+          }
+
+          expect(container.resolve_all(:plugin)).to eq(%i[one])
+          expect(container.resolve_all(:plugin)).to eq(%i[one two])
+        end
+
+        it "names the key when a factory fails" do
+          container.register("plugins.ok", tags: %i[plugin], order: 1) { :ok }
+          container.register("plugins.broken", tags: %i[plugin], order: 2) { raise "boom" }
+
+          expect { container.resolve_all(:plugin) }.to raise_error(
+            Dry::Container::Error,
+            /plugins\.broken.*boom/
+          )
+        end
+
+        it "keeps tags and order when merging containers" do
+          other = Dry::Container.new
+          other.register("merged", tags: %i[plugin], order: 1) { :merged }
+          container.register("own", tags: %i[plugin], order: 2) { :own }
+
+          container.merge(other)
+
+          expect(container.resolve_all(:plugin)).to eq(%i[merged own])
+        end
+
+        it "keeps tags and order when decorating" do
+          container.register("notifiers.sms", tags: %i[notifier], order: 1) { "sms" }
+          container.register("notifiers.email", tags: %i[notifier], order: 2) { "email" }
+
+          container.decorate("notifiers.sms") { |inner| "<#{inner}>" }
+
+          expect(container.resolve_all(:notifier)).to eq(["<sms>", "email"])
+        end
+
+        it "resolves tagged items registered in namespaces in order" do
+          container.namespace(:notifiers) do
+            register(:sms, tags: %i[notifier], order: 2) { :sms }
+            register(:email, tags: %i[notifier], order: 1) { :email }
+          end
+
+          expect(container.keys_for(:notifier)).to eq(%w[notifiers.email notifiers.sms])
+          expect(container.resolve_all(:notifier)).to eq(%i[email sms])
+        end
+
+        it "keeps tags and order when duplicated" do
+          container.register("notifiers.sms", tags: %i[notifier], order: 2) { :sms }
+          container.register("notifiers.email", tags: %i[notifier], order: 1) { :email }
+
+          copy = container.dup
+
+          expect(copy.resolve_all(:notifier)).to eq(%i[email sms])
+        end
+      end
+    end
+
     describe "#decorate" do
       require "delegate"
 

@@ -188,6 +188,38 @@ module Dry
         resolve(key)
       end
 
+      # Resolve all items registered with the given tag
+      #
+      # Items are returned in tag order: by their :order option first, then by
+      # registration order. The set of keys is fixed before resolving, so items
+      # registered while resolving (e.g. by a factory) are not part of this
+      # round.
+      #
+      # @param [Mixed] tag
+      #   The tag for the items you wish to resolve
+      #
+      # @return [Array]
+      #
+      # @api public
+      def resolve_all(tag)
+        config.resolver.resolve_all(_container, tag)
+      end
+
+      # An array of keys registered with the given tag, in resolution order
+      #
+      # This only inspects registration metadata and never resolves (calls)
+      # the registered items.
+      #
+      # @param [Mixed] tag
+      #   The tag you wish to list keys for
+      #
+      # @return [Array<String>]
+      #
+      # @api public
+      def keys_for(tag)
+        config.resolver.keys_for(_container, tag)
+      end
+
       # Merge in the items of the other container
       #
       # @param [Dry::Container] other

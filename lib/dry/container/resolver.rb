@@ -35,6 +35,58 @@ module Dry
         item.call
       end
 
+      # Resolve all items registered with the given tag
+      #
+      # The set of keys is snapshotted before any item is resolved, so items
+      # registered while resolving (e.g. by a factory) are not part of this
+      # round. Items are sorted by their :order option, then by registration
+      # order.
+      #
+      # @param [Concurrent::Hash] container
+      #   The container
+      # @param [Mixed] tag
+      #   The tag for the items you wish to resolve
+      #
+      # @raise [Dry::Container::Error]
+      #   If resolving an item fails, naming the offending key
+      #
+      # @return [Array]
+      #
+      # @api public
+      def resolve_all(container, tag)
+        keys_for(container, tag).map do |key|
+          container.fetch(key).call
+        rescue ::StandardError => e
+          raise ::Dry::Container::Error,
+                "Failed to resolve #{key.inspect} (tagged #{tag.inspect}): #{e.message}"
+        end
+      end
+
+      # An array of keys registered with the given tag, in resolution order
+      #
+      # This only inspects registration metadata and never resolves (calls)
+      # the registered items.
+      #
+      # @param [Concurrent::Hash] container
+      #   The container
+      # @param [Mixed] tag
+      #   The tag you wish to list keys for
+      #
+      # @return [Array<String>]
+      #
+      # @api public
+      def keys_for(container, tag)
+        tag = tag.to_s
+
+        container.each_with_object([]) do |(key, item), entries|
+          options = item.respond_to?(:options) ? item.options : {}
+          tags = options[:tags]
+          next unless tags && Array(tags).any? { |t| t.to_s == tag }
+
+          entries << [key, options.fetch(:order, 0), options.fetch(:sequence, 0)]
+        end.sort_by { |key, order, sequence| [order, sequence, key] }.map(&:first)
+      end
+
       # Check whether an items is registered under the given key
       #
       # @param [Concurrent::Hash] container
