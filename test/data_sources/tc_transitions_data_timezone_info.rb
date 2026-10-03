@@ -133,6 +133,246 @@ module DataSources
       assert_equal('timestamp must be specified', error.message)
     end
 
+    # A TimezoneTransition that counts how many times its timestamp_value is
+    # examined while scanning for the applicable period. The transition is
+    # built directly (rather than delegating) so that comparison operators
+    # cannot be accidentally proxied.
+    class CountingTransition < TimezoneTransition
+      attr_reader :examinations
+
+      def initialize(transition)
+        super(transition.offset, transition.previous_offset, transition.timestamp_value)
+        @examinations = 0
+      end
+
+      def timestamp_value
+        @examinations += 1
+        super
+      end
+    end
+
+    # A TransitionsDataTimezoneInfo that records every call to the binary
+    # search used by period_for. The in-order cursor must never trigger it.
+    class CountingInfo < TransitionsDataTimezoneInfo
+      attr_reader :find_minimum_transition_calls
+
+      def initialize(identifier, transitions)
+        super(identifier, transitions)
+        @find_minimum_transition_calls = 0
+      end
+
+      protected
+
+      def find_minimum_transition
+        @find_minimum_transition_calls += 1
+        super
+      end
+    end
+
+    def create_ordered_info(transitions = nil)
+      o1 = TimezoneOffset.new(-17900,    0, 'TESTLMT')
+      o2 = TimezoneOffset.new(-18000, 3600, 'TESTD')
+      o3 = TimezoneOffset.new(-18000,    0, 'TESTS')
+
+      t1 = TimezoneTransition.new(o2, o1, Time.utc(2000, 4,1,1,0,0).to_i)
+      t2 = TimezoneTransition.new(o3, o2, Time.utc(2000,10,1,1,0,0).to_i)
+      t3 = TimezoneTransition.new(o2, o3, Time.utc(2001, 3,1,1,0,0).to_i)
+      t4 = TimezoneTransition.new(o3, o2, Time.utc(2001,10,1,1,0,0).to_i)
+
+      all = [t1, t2, t3, t4]
+      chosen = transitions || all
+      TransitionsDataTimezoneInfo.new('Test/Zone', chosen)
+    end
+
+    def test_periods_for_in_order_matches_period_for
+      info = create_ordered_info
+
+      utc_times = [
+        Time.utc(1999, 1, 1, 0, 0, 0),
+        Time.utc(2000, 4, 1, 0,59,59),
+        Time.utc(2000, 4, 1, 1, 0, 0, Rational(1,2)),
+        Time.utc(2000,10, 1, 0,59,59),
+        Time.utc(2000,10, 1, 1, 0, 0),
+        Time.utc(2001, 3, 1, 1, 0, 0),
+        Time.utc(2001,10, 1, 1, 0, 0),
+        Time.utc(2050, 1, 1, 0, 0, 0)
+      ]
+
+      timestamps = utc_times.map {|t| Timestamp.for(t) }
+      expected = timestamps.map {|t| info.period_for(t) }
+
+      assert_equal(expected, info.periods_for_in_order(timestamps).to_a)
+    end
+
+    def test_periods_for_in_order_allows_equal_timestamps
+      info = create_ordered_info
+
+      transition_time = Time.utc(2000, 4, 1, 1, 0, 0).to_i
+      timestamps = [
+        Timestamp.utc(transition_time - 1, 0),
+        Timestamp.utc(transition_time - 1, Rational(1,2)),
+        Timestamp.utc(transition_time),
+        Timestamp.utc(transition_time, 0),
+        Timestamp.utc(transition_time, Rational(9,10)),
+        Timestamp.utc(transition_time, Rational(9,10))
+      ]
+
+      expected = timestamps.map {|t| info.period_for(t) }
+      assert_equal(expected, info.periods_for_in_order(timestamps).to_a)
+    end
+
+    def test_periods_for_in_order_record_on_transition_second_uses_new_period
+      # A record in the same whole second as a transition belongs to the new
+      # period, even with a non-zero sub-second. This is the same rule that
+      # period_for applies (transitions only occur on whole seconds).
+      info = create_ordered_info
+
+      transition_time = Time.utc(2000,10,1,1,0,0).to_i
+
+      just_before = Timestamp.utc(transition_time - 1, Rational(999,1000))
+      on_transition = Timestamp.utc(transition_time, Rational(1,1000))
+
+      assert_equal(info.period_for(just_before), info.periods_for_in_order([just_before]).first)
+      assert_equal(info.period_for(on_transition), info.periods_for_in_order([on_transition]).first)
+      refute_equal(info.period_for(just_before), info.period_for(on_transition))
+
+      assert_equal(
+        [info.period_for(just_before), info.period_for(on_transition)],
+        info.periods_for_in_order([just_before, on_transition]).to_a)
+    end
+
+    def test_periods_for_in_order_never_uses_binary_search
+      o1 = TimezoneOffset.new(-17900,    0, 'TESTLMT')
+      o2 = TimezoneOffset.new(-18000, 3600, 'TESTD')
+      o3 = TimezoneOffset.new(-18000,    0, 'TESTS')
+
+      t1 = TimezoneTransition.new(o2, o1, Time.utc(2000, 4,1,1,0,0).to_i)
+      t2 = TimezoneTransition.new(o3, o2, Time.utc(2000,10,1,1,0,0).to_i)
+      t3 = TimezoneTransition.new(o2, o3, Time.utc(2001, 3,1,1,0,0).to_i)
+      t4 = TimezoneTransition.new(o3, o2, Time.utc(2001,10,1,1,0,0).to_i)
+
+      counted = [t1, t2, t3, t4].map {|t| CountingTransition.new(t) }
+      info = CountingInfo.new('Test/Zone', counted)
+
+      timestamps = [
+        Time.utc(1999, 1,1),
+        Time.utc(2000, 4,1,1,0,0),
+        Time.utc(2000, 4,1,1,0,0),
+        Time.utc(2000,10,1,1,0,0),
+        Time.utc(2001, 3,1,1,0,0),
+        Time.utc(2001,10,1,1,0,0),
+        Time.utc(2050, 1,1)
+      ].map {|t| Timestamp.for(t) }
+
+      results = info.periods_for_in_order(timestamps).to_a
+
+      # The binary search that period_for relies on is never used.
+      assert_equal(0, info.find_minimum_transition_calls)
+      examinations = counted.map(&:examinations)
+
+      # Every period agrees with an independent lookup.
+      plain_info = TransitionsDataTimezoneInfo.new('Test/Zone', [t1,t2,t3,t4])
+      timestamps.each_with_index do |timestamp, index|
+        expected = plain_info.period_for(timestamp)
+        actual = results[index]
+        assert_equal(expected.base_utc_offset, actual.base_utc_offset)
+        assert_equal(expected.std_offset, actual.std_offset)
+        assert_equal(expected.observed_utc_offset, actual.observed_utc_offset)
+        assert_equal(expected.start_transition && expected.start_transition.timestamp_value,
+                     actual.start_transition && actual.start_transition.timestamp_value)
+        assert_equal(expected.end_transition && expected.end_transition.timestamp_value,
+                     actual.end_transition && actual.end_transition.timestamp_value)
+      end
+
+      # The cursor only ever moves forward. Each transition is advanced over
+      # at most once in total and each input performs one boundary check,
+      # so the number of examinations is at most the number of transitions
+      # plus the number of inputs. Independent binary searches would cost
+      # O(inputs * log(transitions)).
+      # Each transition is advanced over at most once and each input performs
+      # one boundary check, so the number of examinations is at most the
+      # number of transitions plus the number of inputs. Independent binary
+      # searches would cost O(inputs * log(transitions)).
+      assert_operator examinations.sum, :<=, counted.length + timestamps.length
+      assert_operator examinations.last, :>, 1
+    end
+
+    def test_periods_for_in_order_duplicates_do_not_advance_cursor
+      info_unwrapped = create_ordered_info
+      counted = info_unwrapped.transitions.map {|t| CountingTransition.new(t) }
+      info = TransitionsDataTimezoneInfo.new('Test/Zone', counted)
+
+      value = Time.utc(2000, 6, 1).to_i
+      timestamps = Array.new(100) { Timestamp.utc(value) }
+
+      results = info.periods_for_in_order(timestamps).to_a
+
+      assert_equal(100, results.length)
+      expected_period = info_unwrapped.period_for(Timestamp.utc(value))
+
+      # The cursor advances past t1 on the first input (examined once), then
+      # examines t2 once per input to confirm the cursor has not moved. t3
+      # and t4 (later transitions) are never touched; no backwards scans
+      # occur. These counts are captured before any independent period_for
+      # lookups below.
+      examinations = counted.map(&:examinations)
+      assert_equal([1, 100, 0, 0], examinations)
+
+      assert(results.all? {|period| period == expected_period })
+    end
+
+    def test_periods_for_in_order_empty
+      info = create_ordered_info
+      assert_equal([], info.periods_for_in_order([]).to_a)
+    end
+
+    def test_periods_for_in_order_consumes_lazily
+      info = create_ordered_info
+      pulled = 0
+
+      source = Enumerator.new do |yielder|
+        10.times do |i|
+          pulled += 1
+          yielder.yield(Timestamp.utc(Time.utc(2000 + i, 1, 1).to_i))
+        end
+      end
+
+      enumerator = info.periods_for_in_order(source)
+      assert_equal(0, pulled)
+
+      assert_kind_of(TimezonePeriod, enumerator.next)
+      assert_equal(1, pulled)
+
+      enumerator.next
+      assert_equal(2, pulled)
+      enumerator.rewind
+
+      info.periods_for_in_order(source).first(3)
+      assert_equal(5, pulled)
+    end
+
+    def test_periods_for_in_order_with_block
+      info = create_ordered_info
+      timestamps = [Timestamp.for(Time.utc(2000, 6, 1)), Timestamp.for(Time.utc(2001, 6, 1))]
+      yielded = []
+      result = info.periods_for_in_order(timestamps) {|period| yielded << period }
+      assert_nil(result)
+      assert_equal(timestamps.map {|t| info.period_for(t) }, yielded)
+    end
+
+    def test_periods_for_in_order_unspecified_offset
+      info = create_ordered_info
+      timestamps = [Timestamp.for(Time.utc(2000,1,1), :ignore)]
+      error = assert_raises(ArgumentError) { info.periods_for_in_order(timestamps).to_a }
+      assert_equal('timestamp must have a specified utc_offset', error.message)
+    end
+
+    def test_periods_for_in_order_nil
+      info = create_ordered_info
+      error = assert_raises(ArgumentError) { info.periods_for_in_order([nil]).to_a }
+      assert_equal('timestamp must be specified', error.message)
+    end
+
     def test_periods_for_local
       o1 = TimezoneOffset.new(-17900,    0, 'TESTLMT')
       o2 = TimezoneOffset.new(-18000, 3600, 'TESTD')

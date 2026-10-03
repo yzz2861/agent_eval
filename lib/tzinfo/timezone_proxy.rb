@@ -46,6 +46,16 @@ module TZInfo
       real_timezone.transitions_up_to(to, from)
     end
 
+    # (see Timezone#to_local_in_order)
+    def to_local_in_order(times, &block)
+      real_timezone.to_local_in_order(times, &block)
+    end
+
+    # (see Timezone#utc_to_local_in_order)
+    def utc_to_local_in_order(utc_times, &block)
+      real_timezone.utc_to_local_in_order(utc_times, &block)
+    end
+
     # (see Timezone#canonical_zone)
     def canonical_zone
       real_timezone.canonical_zone

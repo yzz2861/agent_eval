@@ -19,6 +19,25 @@ module TZInfo
         raise_not_implemented('period_for')
       end
 
+      # Returns an `Enumerator` that yields the {TimezonePeriod
+      # TimezonePeriods} observed at a sequence of timestamps in
+      # chronological order.
+      #
+      # Unlike repeatedly calling {#period_for}, the timestamps are processed
+      # lazily in a single pass, advancing a cursor through the time zone's
+      # transitions rather than performing a separate binary search for each
+      # timestamp. Equal timestamps are permitted. Timestamps must not be
+      # earlier than a preceding timestamp.
+      #
+      # @param timestamps [Enumerable] an `Enumerable` of {Timestamp}
+      #   instances with specified {Timestamp#utc_offset utc_offset} values,
+      #   in non-decreasing chronological order.
+      # @return [Enumerator] an `Enumerator` that yields the {TimezonePeriod}
+      #   observed at each timestamp in turn.
+      def periods_for_in_order(timestamps)
+        raise_not_implemented('periods_for_in_order')
+      end
+
       # Returns an `Array` containing the {TimezonePeriod TimezonePeriods} that
       # could be observed at the local time specified by `local_timestamp`. The
       # results are are ordered by increasing UTC start date. An empty `Array`

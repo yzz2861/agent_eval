@@ -14,6 +14,8 @@ class TCLinkedTimezone < Minitest::Test
     attr_reader :local_time
     attr_reader :to
     attr_reader :from
+    attr_reader :in_order_times
+    attr_reader :in_order_offset_mode
 
     def initialize(identifier, no_local_periods = false)
       super()
@@ -46,6 +48,18 @@ class TCLinkedTimezone < Minitest::Test
       @to = to
       @from = from
       @transitions_up_to_result
+    end
+
+    def to_local_in_order(times, &block)
+      @in_order_times = times
+      @in_order_offset_mode = :preserve
+      block ? block.call(@period_for_result) : [@period_for_result]
+    end
+
+    def utc_to_local_in_order(utc_times, &block)
+      @in_order_times = utc_times
+      @in_order_offset_mode = :treat_as_utc
+      block ? block.call(@period_for_result) : [@period_for_result]
     end
 
     def canonical_zone
@@ -104,6 +118,31 @@ class TCLinkedTimezone < Minitest::Test
         assert_same(linked_tz.periods_for_local_result, tz.periods_for_local(t))
         assert_same(t, linked_tz.local_time)
       end
+    end
+  end
+
+  def test_to_local_in_order
+    stub_timezone_get do |linked_tz|
+      times = [Time.utc(2006, 1, 1), Time.utc(2006, 2, 1)]
+      tz = LinkedTimezone.new(DataSources::LinkedTimezoneInfo.new('Test/Zone', 'Test/Linked'))
+
+      assert_equal([linked_tz.period_for_result], tz.to_local_in_order(times).to_a)
+      assert_same(times, linked_tz.in_order_times)
+      assert_equal(:preserve, linked_tz.in_order_offset_mode)
+
+      yielded = nil
+      tz.to_local_in_order(times) {|result| yielded = result }
+      assert_same(linked_tz.period_for_result, yielded)
+    end
+  end
+
+  def test_utc_to_local_in_order
+    stub_timezone_get do |linked_tz|
+      times = [Time.utc(2006, 1, 1), Time.utc(2006, 2, 1)]
+      tz = LinkedTimezone.new(DataSources::LinkedTimezoneInfo.new('Test/Zone', 'Test/Linked'))
+
+      assert_equal([linked_tz.period_for_result], tz.utc_to_local_in_order(times).to_a)
+      assert_equal(:treat_as_utc, linked_tz.in_order_offset_mode)
     end
   end
 

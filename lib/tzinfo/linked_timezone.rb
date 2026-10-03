@@ -22,6 +22,16 @@ module TZInfo
       @linked_timezone.period_for(time)
     end
 
+    # (see Timezone#to_local_in_order)
+    def to_local_in_order(times, &block)
+      @linked_timezone.to_local_in_order(times, &block)
+    end
+
+    # (see Timezone#utc_to_local_in_order)
+    def utc_to_local_in_order(utc_times, &block)
+      @linked_timezone.utc_to_local_in_order(utc_times, &block)
+    end
+
     # (see Timezone#periods_for_local)
     def periods_for_local(local_time)
       @linked_timezone.periods_for_local(local_time)

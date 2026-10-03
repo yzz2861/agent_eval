@@ -32,6 +32,25 @@ module TZInfo
   class UnknownTimezone < StandardError
   end
 
+  # {ChronologicalOrderError} is raised by {Timezone#to_local_in_order} and
+  # {Timezone#utc_to_local_in_order} when an input is encountered that is
+  # earlier than a preceding input. The {ChronologicalOrderError#index index}
+  # method gives the zero-based position of the out of order input.
+  class ChronologicalOrderError < ArgumentError
+    # @return [Integer] the zero-based index within the input sequence of the
+    #   first time that was earlier than a preceding time.
+    attr_reader :index
+
+    # Initializes a new {ChronologicalOrderError}.
+    #
+    # @param index [Integer] the zero-based index within the input sequence of
+    #   the first time that was earlier than a preceding time.
+    def initialize(index)
+      @index = index
+      super("times must be supplied in chronological order (time at index #{index} is earlier than a previous time)")
+    end
+  end
+
   # The {Timezone} class represents a time zone. It provides a factory method,
   # {get}, to retrieve {Timezone} instances by their identifier.
   #
@@ -575,6 +594,60 @@ module TZInfo
       Timestamp.for(utc_time, :treat_as_utc) do |ts|
         to_local(ts)
       end
+    end
+
+    # Converts a sequence of times in chronological (non-decreasing) order to
+    # the corresponding local times for the time zone.
+    #
+    # Like {to_local}, the UTC offset of each input is taken into
+    # consideration and the result type follows that of the input (a
+    # {TimeWithOffset} for a `Time`, a {DateTimeWithOffset} for a `DateTime`
+    # and a {TimestampWithOffset} for a {Timestamp}). Sub-second precision is
+    # preserved.
+    #
+    # Because the inputs are known to be in order, the period that applies to
+    # each time is found by advancing a cursor through the time zone's
+    # transition list, instead of performing a separate binary search for each
+    # input. This is useful when archiving large numbers of log entries that
+    # have already been sorted by their UTC timestamp.
+    #
+    # Inputs are consumed lazily. If a block is not given, an `Enumerator` is
+    # returned; nothing is read from `times` until the returned `Enumerator`
+    # is iterated. The input is never sorted.
+    #
+    # Equal timestamps are allowed (the cursor does not move and no additional
+    # period lookups are required). If a time is encountered that is earlier
+    # than a previous time, a {ChronologicalOrderError} is raised with the
+    # {ChronologicalOrderError#index index} of the offending input.
+    #
+    # @param times [Enumerable] an `Enumerable` of `Time`, `DateTime` and/or
+    #   {Timestamp} instances in non-decreasing chronological order.
+    # @yieldparam local_time [Object] each converted local time.
+    # @return [Enumerator, nil] an `Enumerator` that yields the converted local
+    #   times if no block is provided, otherwise `nil`.
+    # @raise [ChronologicalOrderError] if an input is earlier than a preceding
+    #   input.
+    def to_local_in_order(_times)
+      raise_unknown_timezone
+    end
+
+    # Converts a sequence of UTC times in chronological (non-decreasing) order
+    # to the corresponding local times for the time zone.
+    #
+    # This is the ordered equivalent of {utc_to_local}: the UTC offset of each
+    # input is ignored and it is treated as a UTC time. See
+    # {to_local_in_order} for details of the ordering requirements, result
+    # types, lazy evaluation and exceptions.
+    #
+    # @param utc_times [Enumerable] an `Enumerable` of `Time`, `DateTime`
+    #   and/or {Timestamp} instances in non-decreasing chronological order.
+    # @yieldparam local_time [Object] each converted local time.
+    # @return [Enumerator, nil] an `Enumerator` that yields the converted local
+    #   times if no block is provided, otherwise `nil`.
+    # @raise [ChronologicalOrderError] if an input is earlier than a preceding
+    #   input.
+    def utc_to_local_in_order(_utc_times)
+      raise_unknown_timezone
     end
 
     # Converts a local time for the time zone to UTC.

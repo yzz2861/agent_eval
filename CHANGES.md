@@ -1,5 +1,16 @@
 # Changes
 
+## Unreleased
+
+* Added `TZInfo::Timezone#to_local_in_order` and
+  `TZInfo::Timezone#utc_to_local_in_order` for lazily converting a sequence
+  of chronologically ordered UTC times to local time. Instead of performing a
+  separate binary search through the transitions for each input, a cursor is
+  advanced through the transition list. Equal timestamps are permitted and an
+  out of order input raises `TZInfo::ChronologicalOrderError` (a subclass of
+  `ArgumentError`) with the zero-based `index` of the offending input. The
+  input type and sub-second precision are preserved.
+
 ## Version 2.0.6 - 28-Jan-2023
 
 * Eliminate `Object#untaint` deprecation warnings on JRuby 9.4.0.0. #145.

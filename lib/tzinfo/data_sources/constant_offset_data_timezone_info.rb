@@ -29,6 +29,16 @@ module TZInfo
         constant_period
       end
 
+      # @param timestamps [Enumerable] ignored apart from being iterated.
+      # @return [Enumerator] an `Enumerator` that yields the unbounded
+      #   {TimezonePeriod} for the time zone's constantly observed offset once
+      #   for each timestamp (no lookups are required, since there are no
+      #   transitions).
+      def periods_for_in_order(timestamps)
+        return to_enum(__method__, timestamps) unless block_given?
+        timestamps.each {|_timestamp| yield constant_period }
+      end
+
       # @param local_timestamp [Timestamp] ignored.
       # @return [Array<TimezonePeriod>] an `Array` containing a single unbounded
       #   {TimezonePeriod} for the time zone's constantly observed offset.

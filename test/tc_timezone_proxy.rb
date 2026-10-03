@@ -35,8 +35,10 @@ class TCTimezoneProxy < Minitest::Test
       assert_raises_invalid_timezone_identifier('Nothing/Special') { proxy.periods_for_local(t) }
       assert_raises_invalid_timezone_identifier('Nothing/Special') { proxy.strftime('%Z', t) }
       assert_raises_invalid_timezone_identifier('Nothing/Special') { proxy.to_local(t) }
+      assert_raises_invalid_timezone_identifier('Nothing/Special') { proxy.to_local_in_order([t]).to_a }
       assert_raises_invalid_timezone_identifier('Nothing/Special') { proxy.transitions_up_to(t) }
       assert_raises_invalid_timezone_identifier('Nothing/Special') { proxy.utc_to_local(t) }
+      assert_raises_invalid_timezone_identifier('Nothing/Special') { proxy.utc_to_local_in_order([t]).to_a }
     end
 
     define_method("test_valid_with_#{encoding.to_method}_encoded_identifier") do
@@ -154,5 +156,21 @@ class TCTimezoneProxy < Minitest::Test
   def test_inspect
     tp = TimezoneProxy.new('Europe/London')
     assert_equal('#<TZInfo::TimezoneProxy: Europe/London>', tp.inspect)
+  end
+
+  def test_to_local_in_order
+    proxy = TimezoneProxy.new('Europe/London')
+    real = Timezone.get('Europe/London')
+    times = [Time.utc(2005,8,1,0,0,0), Time.utc(2005,12,1,0,0,0)]
+
+    assert_equal(times.map {|t| real.to_local(t) }, proxy.to_local_in_order(times).to_a)
+  end
+
+  def test_utc_to_local_in_order
+    proxy = TimezoneProxy.new('Europe/London')
+    real = Timezone.get('Europe/London')
+    times = [Time.new(2005,8,1,1,0,0,3600), Time.new(2005,12,1,0,0,0,0)]
+
+    assert_equal(times.map {|t| real.utc_to_local(t) }, proxy.utc_to_local_in_order(times).to_a)
   end
 end

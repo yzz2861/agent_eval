@@ -66,6 +66,56 @@ module TZInfo
         TransitionsTimezonePeriod.new(start_transition, end_transition)
       end
 
+      # (see DataTimezoneInfo#periods_for_in_order)
+      #
+      # Timestamps are processed in a single forward pass over {transitions}.
+      # The cursor only ever advances (or stays put for equal timestamps), so
+      # the total number of transition examinations is at most the number of
+      # transitions plus the number of timestamps; no binary searches are
+      # performed.
+      def periods_for_in_order(timestamps)
+        return to_enum(:periods_for_in_order_to_yielder, timestamps) unless block_given?
+        periods_for_in_order_to_yielder(timestamps) {|period| yield period }
+      end
+
+      # Performs the work of {#periods_for_in_order} by advancing a cursor
+      # through {transitions} and yielding each resolved {TimezonePeriod}.
+      #
+      # @param timestamps [Enumerable] the ordered timestamps to resolve.
+      # @yield [TimezonePeriod] each period as it is resolved.
+      def periods_for_in_order_to_yielder(timestamps)
+        # Index of the last transition that has occurred by the current
+        # timestamp, or -1 if none has occurred yet. As in period_for, a
+        # timestamp in the same whole second as a transition belongs to the
+        # new period (sub-second precision is preserved on the result, but
+        # does not affect period selection).
+        index = -1
+
+        timestamps.each do |timestamp|
+          raise ArgumentError, 'timestamp must be specified' unless timestamp
+          raise ArgumentError, 'timestamp must have a specified utc_offset' unless timestamp.utc_offset
+
+          timestamp_value = timestamp.value
+
+          while index + 1 < @transitions.length && @transitions[index + 1].timestamp_value <= timestamp_value
+            index += 1
+          end
+
+          if index < 0
+            start_transition = nil
+            end_transition = @transitions[0]
+          else
+            start_transition = @transitions[index]
+            end_transition = @transitions[index + 1]
+          end
+
+          yield TransitionsTimezonePeriod.new(start_transition, end_transition)
+        end
+
+        nil
+      end
+      private :periods_for_in_order_to_yielder
+
       # (see DataTimezoneInfo#periods_for_local)
       def periods_for_local(local_timestamp)
         raise ArgumentError, 'local_timestamp must be specified' unless local_timestamp
