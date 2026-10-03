@@ -112,4 +112,10 @@ module StateMachines
   # A method was called in an invalid state context
   class InvalidContext < Error
   end
+
+  # A state timeout could not be scheduled with the configured scheduler.
+  # This is raised on the caller that triggered the transition into the
+  # timed state, so that scheduling failures are never silently swallowed.
+  class SchedulingError < Error
+  end
 end

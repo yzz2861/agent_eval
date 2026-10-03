@@ -36,9 +36,32 @@ module StateMachines
     attr_accessor :initial
     alias initial? initial
 
+    # Sets the timeout for this state and, when a timeout is configured,
+    # ensures the machine is set up to arm timers for objects entering this
+    # state.  The value must be a Numeric (delay in seconds) or a Proc that
+    # evaluates to one when the state is entered.
+    def timeout=(value)
+      unless value.nil? || value.is_a?(Numeric) || value.is_a?(Proc)
+        raise ArgumentError, "timeout must be a Numeric or a Proc, got #{value.inspect}"
+      end
+
+      @timeout = value
+      machine.send(:install_state_timeout_hook) if value
+    end
+
     # A custom lambda block for determining whether a given value matches this
     # state
     attr_accessor :matcher
+
+    # The delay (in seconds) after which this state's timeout event is fired
+    # while an object remains in this state.  This can be either a numeric
+    # value or a lambda block that gets evaluated *once* when the state is
+    # entered.  A nil value (the default) means the state never times out.
+    attr_reader :timeout
+
+    # The event to fire when this state's timeout elapses.  Default is
+    # :timeout.
+    attr_accessor :timeout_event
 
     # Creates a new state within the context of the given machine.
     #
@@ -53,20 +76,28 @@ module StateMachines
     #   (e.g. :value => lambda {Time.now}, :if => lambda {|state| !state.nil?}).
     #   By default, the configured value is matched.
     # * <tt>:human_name</tt> - The human-readable version of this state's name
-    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, **extra_options) # :nodoc:
+    # * <tt>:timeout</tt> - The delay (in seconds) after entering this state
+    #   before the timeout event is fired.  May be a Numeric or a lambda block
+    #   that is evaluated once on entry.  Requires a scheduler to be configured
+    #   on the machine.
+    # * <tt>:timeout_event</tt> - The event to fire when the timeout elapses.
+    #   Default is :timeout.
+    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, timeout: nil, timeout_event: nil, **extra_options) # :nodoc:
       # Handle both old hash style and new kwargs style for backward compatibility
       case options
       in Hash
         # Old style: initialize(machine, name, {initial: true, value: 'foo'})
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name, :timeout, :timeout_event)
         initial = options.fetch(:initial, false)
         value = options.include?(:value) ? options[:value] : :__not_provided__
         cache = options[:cache]
         if_condition = options[:if]
         human_name = options[:human_name]
+        timeout = options[:timeout]
+        timeout_event = options[:timeout_event]
       in nil
         # New style: initialize(machine, name, initial: true, value: 'foo')
-        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name) unless extra_options.empty?
+        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name, :timeout, :timeout_event) unless extra_options.empty?
         if_condition = binding.local_variable_get(:if) # 'if' is a keyword, need special handling
       else
         # Handle unexpected options
@@ -82,6 +113,8 @@ module StateMachines
       @matcher = if_condition
       @initial = initial == true
       @context = StateContext.new(self)
+      @timeout_event = timeout_event
+      self.timeout = timeout
 
       return unless name
 

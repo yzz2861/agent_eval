@@ -341,6 +341,68 @@ StarshipBridge.new.can_red_alert?
 # => ArgumentError: State 'nonexistent_state' is not defined in state machine 'shields'
 ```
 
+## State Timeouts
+
+States can declare a timeout so that an event is fired automatically once an
+object has remained in the state for a given delay — e.g. a payment that
+expires when it stays in `awaiting_payment` for too long:
+
+```ruby
+class Order
+  state_machine :state, initial: :pending, scheduler: MyScheduler.new do
+    state :awaiting_payment, timeout: 300 # seconds
+
+    event :timeout do
+      transition awaiting_payment: :expired
+    end
+  end
+end
+```
+
+The library does **not** spawn background threads or keep a persistent queue.
+Instead, the application provides a scheduler via the machine's `:scheduler`
+option. A scheduler is any object responding to `schedule(delay, &callback)`.
+The returned handle may respond to `cancel`; it is used to eagerly cancel the
+timer when the state is left:
+
+```ruby
+class MyScheduler
+  def schedule(delay, &callback)
+    # e.g. enqueue a job that runs the callback in +delay+ seconds
+  end
+end
+```
+
+Behavior notes:
+
+* The timeout event (`:timeout` by default, customizable per state with
+  `timeout_event:`) is fired through the regular event machinery, so its
+  transitions and guards apply as usual.
+* Leaving the state cancels the timer. Leaving and re-entering the same state
+  (including loopback transitions) invalidates the previous callback and arms
+  a fresh one — stale callbacks are always ignored, even if the scheduler
+  fires them anyway.
+* If a manual event and a timeout fire at the same time, only one transition
+  succeeds: the loser's transition guards no longer match the current state.
+* The timeout may be a lambda for dynamic durations; it is evaluated exactly
+  once when the state is entered:
+
+  ```ruby
+  state :awaiting_payment, timeout: ->(order) { order.express? ? 60 : 300 }
+  ```
+
+* If no scheduler is configured or `schedule` raises, the caller that
+  triggered the transition gets a `StateMachines::SchedulingError` — the
+  failure is never silently swallowed and no timer record is left behind.
+* Callbacks fired by the scheduler before the deadline (clock skew) are
+  re-armed for the remaining delay; callbacks fired after the object left
+  the state are ignored. The clock can be injected with the machine's
+  `:clock` option (defaults to `Time.now`), which is also handy for tests
+  with a fake scheduler.
+* Like transition callbacks, timers are armed when an event transitions the
+  object *into* the state — initializing an object directly into a timed
+  state does not arm a timer.
+
 # Asynchronous State Machines
 
 State machines can operate asynchronously for high-performance applications. This is ideal for I/O-bound tasks, such as in web servers or other concurrent environments, where you don't want a long-running state transition (like one involving a network call) to block the entire thread.

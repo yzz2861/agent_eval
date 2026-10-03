@@ -15,7 +15,7 @@ module StateMachines
                        end
         
         # Validate options including integration-specific options
-        valid_keys = [:attribute, :initial, :initialize, :action, :plural, :namespace, :integration, :messages, :use_transactions, :async]
+        valid_keys = [:attribute, :initial, :initialize, :action, :plural, :namespace, :integration, :messages, :use_transactions, :async, :scheduler, :clock]
         valid_keys += @integration.integration_options if @integration
         StateMachines::OptionsValidator.assert_valid_keys!(options, valid_keys)
 
@@ -38,6 +38,8 @@ module StateMachines
         @action = options[:action]
         @use_transactions = options[:use_transactions]
         @initialize_state = options[:initialize]
+        @scheduler = options[:scheduler]
+        @clock = options[:clock] || -> { Time.now }
         @action_hook_defined = false
         @async_requested = options[:async]
 
