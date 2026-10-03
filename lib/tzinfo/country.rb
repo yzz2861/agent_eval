@@ -38,7 +38,7 @@ module TZInfo
       # @raise [InvalidCountryCode] If {code} is not a valid ISO 3166-1 alpha-2
       #   code it couldn't be found.
       def get(code)
-        Country.new(data_source.get_country_info(code))
+        data_source.get_country(code)
       end
 
       # @return [Array<String>] an `Array` containing all the valid ISO 3166-1
@@ -69,8 +69,12 @@ module TZInfo
     #
     # @param info [DataSources::CountryInfo] the data to base the new {Country}
     #   instance upon.
-    def initialize(info)
+    # @param data_source [DataSource] an optional {DataSource} to load the
+    #   time zones of the country from. If omitted, the default {DataSource}
+    #   selected with {DataSource.set} is used.
+    def initialize(info, data_source = nil)
       @info = info
+      @data_source = data_source
     end
 
     # @return [String] the ISO 3166-1 alpha-2 country code.
@@ -130,7 +134,7 @@ module TZInfo
     # @return [Array<Timezone>] an `Array` containing a {Timezone} instance for
     #   each time zone observed by the country.
     def zones
-      zone_info.map(&:timezone)
+      zone_info.map {|ct| ct.timezone(@data_source) }
     end
 
     # Returns a frozen `Array` containing a {CountryTimezone} instance for each

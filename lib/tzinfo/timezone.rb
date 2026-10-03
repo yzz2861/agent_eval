@@ -120,12 +120,16 @@ module TZInfo
       # transitions occur) or a {LinkedTimezone} (for a time zone that is just a
       # link to or alias for a another time zone).
       #
+      # The time zone is loaded from the default {DataSource} selected with
+      # {DataSource.set}. Use {DataSource#get_timezone} to load a time zone
+      # from an explicit {DataSource} instance instead.
+      #
       # @param identifier [String] an IANA Time Zone Database time zone
       #   identifier.
       # @return [Timezone] the {Timezone} with the given `identifier`.
       # @raise [InvalidTimezoneIdentifier] if the `identifier` is not valid.
       def get(identifier)
-        data_source.get_timezone_info(identifier).create_timezone
+        data_source.get_timezone(identifier)
       end
 
       # Returns a proxy for the time zone with the given identifier. This allows
@@ -133,6 +137,11 @@ module TZInfo
       #
       # The identifier will not be validated. If an invalid identifier is
       # specified, no exception will be raised until the proxy is used.
+      #
+      # The proxy will be bound to the default {DataSource} selected at the
+      # time of creation (see {DataSource.set}). Use
+      # {DataSource#get_timezone_proxy} to create a proxy bound to an explicit
+      # {DataSource} instance instead.
       #
       # @param identifier [String] an IANA Time Zone Database time zone
       #   identifier.

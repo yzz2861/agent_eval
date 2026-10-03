@@ -22,6 +22,11 @@ module TZInfo
   # To choose a data source and override the default selection, use the
   # {DataSource.set} method.
   #
+  # To use a specific {DataSource} instance without changing the default
+  # selection (for example, to compare two versions of the time zone
+  # database within the same process), use the {#get_timezone},
+  # {#get_timezone_proxy} and {#get_country} methods.
+  #
   # @abstract To create a custom data source, create a subclass of {DataSource}
   #   and implement the {load_timezone_info}, {data_timezone_identifiers},
   #   {linked_timezone_identifiers}, {load_country_info} and {country_codes}
@@ -36,6 +41,18 @@ module TZInfo
     #
     # @private
     @@default_mutex = Mutex.new
+
+    # A registry of {DataSource} instances keyed by serialization token.
+    # Used to resolve the {DataSource} referenced by a serialized
+    # {TimezoneProxy}.
+    #
+    # @private
+    @@serialization_registry = {}
+
+    # A `Mutex` protecting the serialization registry.
+    #
+    # @private
+    @@serialization_registry_mutex = Mutex.new
 
     class << self
       # @return [DataSource] the currently selected source of data.
@@ -136,6 +153,22 @@ module TZInfo
         end
       end
 
+      # Resolves a token previously returned by {DataSource#serialization_token}
+      # to the {DataSource} instance it identifies.
+      #
+      # Tokens are only valid within the process they were generated in.
+      #
+      # @private
+      # @param token [String] a token returned by
+      #   {DataSource#serialization_token}.
+      # @return [DataSource] the {DataSource} the token identifies, or `nil`
+      #   if the token is not recognized.
+      def resolve_serialization_token(token)
+        @@serialization_registry_mutex.synchronize do
+          @@serialization_registry[token]
+        end
+      end
+
       private
 
       # Creates a {DataSource} instance for use as the default. Used if no
@@ -199,6 +232,48 @@ module TZInfo
       result
     end
 
+    # Returns a {Timezone} for the given identifier, using this {DataSource}
+    # as the source of data.
+    #
+    # Unlike {Timezone.get}, which uses the default {DataSource} selected
+    # with {DataSource.set}, this method always uses the {DataSource}
+    # instance it is called on. This allows different versions of time zone
+    # data (for example, different releases of the IANA Time Zone Database)
+    # to be used simultaneously within the same process.
+    #
+    # {LinkedTimezone Linked time zones} returned by this method resolve
+    # their link targets using this same {DataSource}.
+    #
+    # @param identifier [String] an IANA Time Zone Database time zone
+    #   identifier.
+    # @return [Timezone] the {Timezone} with the given `identifier`.
+    # @raise [InvalidTimezoneIdentifier] if the time zone is not found or the
+    #   identifier is invalid.
+    def get_timezone(identifier)
+      info = get_timezone_info(identifier)
+
+      if info.kind_of?(DataSources::LinkedTimezoneInfo)
+        LinkedTimezone.new(info, self)
+      else
+        info.create_timezone
+      end
+    end
+
+    # Returns a {TimezoneProxy} for the given identifier, bound to this
+    # {DataSource}.
+    #
+    # The returned {TimezoneProxy} will always resolve to a {Timezone}
+    # loaded from this {DataSource}, even if the default {DataSource} is
+    # subsequently changed with {DataSource.set}.
+    #
+    # @param identifier [String] an IANA Time Zone Database time zone
+    #   identifier.
+    # @return [TimezoneProxy] a {TimezoneProxy} for the given `identifier`,
+    #   bound to this {DataSource}.
+    def get_timezone_proxy(identifier)
+      TimezoneProxy.new(identifier, self)
+    end
+
     # @return [Array<String>] a frozen `Array`` of all the available time zone
     #   identifiers. The identifiers are sorted according to `String#<=>`.
     def timezone_identifiers
@@ -238,6 +313,24 @@ module TZInfo
       load_country_info(code)
     end
 
+    # Returns a {Country} for the given ISO 3166-1 alpha-2 code, using this
+    # {DataSource} as the source of data.
+    #
+    # Unlike {Country.get}, which uses the default {DataSource} selected
+    # with {DataSource.set}, this method always uses the {DataSource}
+    # instance it is called on. {Timezone Timezones} obtained from the
+    # returned {Country} (for example, with {Country#zones}) will also be
+    # loaded from this {DataSource}.
+    #
+    # @param code [String] an ISO 3166-1 alpha-2 country code.
+    # @return [Country] a {Country} instance for the given ISO 3166-1
+    #   alpha-2 country code.
+    # @raise [InvalidCountryCode] if the country could not be found or the
+    #   code is invalid.
+    def get_country(code)
+      Country.new(get_country_info(code), self)
+    end
+
     # Returns a frozen `Array` of all the available ISO 3166-1 alpha-2 country
     # codes. The identifiers are sorted according to `String#<=>`.
     #
@@ -261,6 +354,25 @@ module TZInfo
     # @return [String] a description of the {DataSource}.
     def to_s
       "Default DataSource"
+    end
+
+    # Returns a token that identifies this {DataSource} instance. The token
+    # can be resolved back to this instance (within the same process) by
+    # passing it to {DataSource.resolve_serialization_token}.
+    #
+    # This is used when serializing {TimezoneProxy} instances so that the
+    # {DataSource} they are bound to can be retained.
+    #
+    # @private
+    # @return [String] a token identifying this {DataSource} instance.
+    def serialization_token
+      token = object_id.to_s
+
+      @@serialization_registry_mutex.synchronize do
+        @@serialization_registry[token] = self
+      end
+
+      token
     end
 
     # @return [String] the internal object state as a programmer-readable

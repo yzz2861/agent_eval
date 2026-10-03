@@ -1,5 +1,20 @@
 # Changes
 
+## Unreleased
+
+* Added `TZInfo::DataSource#get_timezone`, `#get_timezone_proxy` and
+  `#get_country`, allowing time zones and countries to be obtained from an
+  explicit `DataSource` instance instead of the process-wide default. This
+  makes it possible to use two different versions of the time zone database
+  simultaneously (for example, to compare them). Linked time zones, proxies
+  and country time zones derived from these methods resolve against the same
+  `DataSource`.
+* `TimezoneProxy` instances are now bound to the `DataSource` that was
+  selected when they were created. Changing the default `DataSource` with
+  `DataSource.set` no longer affects which data a proxy resolves to. The
+  identity of the bound `DataSource` is retained when serializing proxies
+  with `Marshal`.
+
 ## Version 2.0.6 - 28-Jan-2023
 
 * Eliminate `Object#untaint` deprecation warnings on JRuby 9.4.0.0. #145.
