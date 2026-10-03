@@ -86,6 +86,7 @@ This keeps inherited state safe and lets updates happen by replacing config obje
 * Locale fallbacks, RFC4647 compliant (optionally: RFC4646 locale validation)
 * [Gettext support](https://github.com/ruby-i18n/i18n/wiki/Gettext)
 * Translation metadata
+* Pseudolocalization (optional: wider, altered test locale)
 
 ## Alternative Backend
 
