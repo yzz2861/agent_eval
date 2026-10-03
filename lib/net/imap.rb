@@ -151,34 +151,24 @@ module Net
   #   search_result = imap.uid_search(["SINCE", since, "BEFORE", before])
   #   imap.uid_move(search_result, destination)
   #
-  # When atomic +MOVE+ is not supported, the messages can be copied and deleted.
-  # \IMAP message deletion requires two steps: set <tt>\Deleted</tt> flag to
-  # mark a message for deletion, then expunge the <tt>\Deleted</tt> messages.
+  # When atomic +MOVE+ is not supported, use #uid_move_fallback, which sends
+  # a safe non-atomic fallback---+UID COPY+, +UID STORE+ <tt>\Deleted</tt>,
+  # and a _targeted_ +UID EXPUNGE+---only on servers that support +UIDPLUS+ or
+  # +IMAP4rev2+.  It never sends an untargeted #expunge that could remove
+  # <tt>\Deleted</tt> messages left by another client, and it reports exactly
+  # which stages have completed (with the +COPYUID+ UID mapping) if a later
+  # stage fails.
   #
-  # Use #uid_copy (or #copy) to copy messages to another mailbox.<br>
-  # Use #uid_store (or #store) to mark messages for deletion.<br>
-  # Use #uid_expunge (or #expunge) to remove deleted messages.
-  #
-  # *NOTE:* #uid_expunge is not supported by every server, and #expunge removes
-  # _all_ <tt>\Deleted</tt> messages in the mailbox, even if the
-  # <tt>\Deleted</tt> flag was added by another session.
-  #
-  #   if imap.capable?(:MOVE) || imap.capable?(:IMAP4rev2)
-  #     imap.uid_move(search_result, destination)
-  #   else
-  #     # Atomic MOVE is not supported.  Copy, delete, and expunge.
-  #     imap.uid_copy(search_result, destination)
-  #     imap.uid_store(search_result, "+FLAGS", [:Deleted])
-  #     if imap.capable?(:UIDPLUS) || imap.capable?(:IMAP4rev2)
-  #       imap.uid_expunge(search_result)
-  #     else
-  #       # NOTE: This may expunge _other_ deleted messages, too.
-  #       imap.expunge
-  #     end
+  #   begin
+  #     result = imap.uid_move_fallback(search_result, destination)
+  #   rescue Net::IMAP::FallbackMoveIncomplete => error
+  #     # The fallback is not atomic.  Do not re-copy messages that the result
+  #     # confirms were already copied; resume the remaining stages instead.
+  #     result = error.result
+  #     result.uid_mapping #=> {source_uid => destination_uid, ...}
   #   end
   #
-  # Additional error handling may be required for non-atomic moves.  Smaller
-  # batch sizes are recommended.
+  # Smaller batch sizes are recommended for non-atomic moves.
   #
   # == Capabilities
   #
@@ -552,6 +542,8 @@ module Net
   #   specified destination mailbox.
   # - #move, #uid_move: Moves the specified messages to the end of the
   #   specified destination mailbox, expunging them from the current mailbox.
+  # - #uid_move_fallback: Safely emulates +UID MOVE+ with +UID COPY+, +UID
+  #   STORE+, and targeted +UID EXPUNGE+ on servers that lack +MOVE+.
   #   <em>Requires the +MOVE+ or +IMAP4rev2+ capability.</em>
   # - #check: <em>*Obsolete:* removed from +IMAP4rev2+.</em>
   #   Can be replaced with #noop or #idle.
@@ -953,6 +945,10 @@ module Net
     autoload :SASLAdapter,            "#{dir}/sasl_adapter"
     autoload :SequenceSet,            "#{dir}/sequence_set"
     autoload :StringPrep,             "#{dir}/stringprep"
+    autoload :FallbackMoveResult,     "#{dir}/fallback_move_data"
+    autoload :FallbackMoveError,      "#{dir}/fallback_move_data"
+    autoload :FallbackMoveIncomplete, "#{dir}/fallback_move_data"
+    autoload :FallbackMailboxChanged, "#{dir}/fallback_move_data"
 
     include MonitorMixin
 
@@ -3123,6 +3119,72 @@ module Net
       copy_internal("UID MOVE", set, mailbox)
     end
 
+    # :call-seq:
+    #   uid_move_fallback(set, mailbox, use_move: :auto) -> FallbackMoveResult
+    #
+    # Moves messages to the end of the destination +mailbox+ using a safe,
+    # _explicit_ non-atomic fallback for servers that do not support +MOVE+
+    # [RFC6851[https://www.rfc-editor.org/rfc/rfc6851]] but do support
+    # +UIDPLUS+ [RFC4315[https://www.rfc-editor.org/rfc/rfc4315.html]] (or
+    # +IMAP4rev2+).
+    #
+    # Unlike the fallback suggested in the overview docs, this method never
+    # sends an untargeted #expunge: the source messages are removed with
+    # #uid_expunge only, so other <tt>\\Deleted</tt> messages in the mailbox
+    # are left untouched.
+    #
+    # When +use_move+ is +:auto+ (the default), atomic #uid_move is used when
+    # the server advertises +MOVE+ or +IMAP4rev2+; otherwise the following
+    # separate commands are sent:
+    #
+    # 1. +UID COPY+ +set+ +mailbox+ (see #uid_copy)
+    # 2. +UID STORE+ +set+ <tt>+FLAGS \\Deleted</tt> (see #uid_store)
+    # 3. +UID EXPUNGE+ +set+ (see #uid_expunge)
+    #
+    # Pass +use_move:+ +false+ to force the non-atomic fallback even when
+    # +MOVE+ is available (e.g. for testing), or +true+ to require atomic
+    # +MOVE+ and raise if it is unavailable.
+    #
+    # Returns a FallbackMoveResult describing the completed stages and, when
+    # the server sent one, the CopyUIDData UID mapping.  This method does
+    # _not_ promise cross-command atomicity.
+    #
+    # ==== Partial failure
+    #
+    # The fallback is three independent commands, so it may complete only
+    # partially.  If a command fails (or the connection drops) after an earlier
+    # stage succeeded, a FallbackMoveIncomplete is raised.  Its
+    # FallbackMoveIncomplete#result reports the stages that already happened
+    # and the +COPYUID+ mapping from the copy:
+    #
+    #   begin
+    #     imap.uid_move_fallback(uids, "Trash")
+    #   rescue Net::IMAP::FallbackMoveIncomplete => err
+    #     err.result.copied?      #=> true  -- do NOT copy these again
+    #     err.result.copy_uid    #=> Net::IMAP::CopyUIDData
+    #     err.result.uid_mapping #=> {source_uid => destination_uid, ...}
+    #     # resume the remaining stage(s) instead of retrying the whole move
+    #   end
+    #
+    # If the mailbox is unselected/changed (for example by an unsolicited
+    # +CLOSED+ response code or another thread) or its +UIDVALIDITY+ changes
+    # while the fallback is in progress, a FallbackMailboxChanged is raised
+    # and no further commands are sent.
+    #
+    # ==== Capabilities
+    #
+    # The currently selected mailbox must report a +UIDVALIDITY+.  The
+    # non-atomic fallback requires +UIDPLUS+ or +IMAP4rev2+ for targeted
+    # +UID EXPUNGE+; an ArgumentError is raised otherwise, rather than risking
+    # an untargeted #expunge of unrelated <tt>\\Deleted</tt> messages.
+    def uid_move_fallback(set, mailbox, use_move: :auto)
+      synchronize do
+        uid_set   = SequenceSet.new(set)
+        atomic, result = move_fallback_prepare(mailbox, uid_set, use_move)
+        atomic ? result : move_fallback_copy_store_expunge(result)
+      end
+    end
+
     # Sends a {SORT command [RFC5256 §3]}[https://www.rfc-editor.org/rfc/rfc5256#section-3]
     # to search a mailbox for messages that match +search_keys+ and return an
     # array of message sequence numbers, sorted by +sort_keys+.
@@ -4092,6 +4154,99 @@ module Net
 
     def copy_internal(cmd, set, mailbox)
       send_command(cmd, SequenceSet.new(set), mailbox)
+    end
+
+    def move_fallback_prepare(mailbox, uid_set, use_move)
+      unless [true, false, :auto].include?(use_move)
+        raise ArgumentError, "use_move must be true, false, or :auto"
+      end
+      if uid_set.empty?
+        raise ArgumentError, "uid set must not be empty"
+      end
+      mailbox = mailbox.to_str
+      unless connection_state.selected?
+        raise FallbackMailboxChanged.new(
+          "no mailbox is selected",
+        )
+      end
+      unless (uidvalidity = responses("UIDVALIDITY", &:last))
+        raise FallbackMailboxChanged.new(
+          "selected mailbox has not reported a UIDVALIDITY",
+        )
+      end
+      capable_move = capable?(:MOVE) || capable?(:IMAP4rev2)
+      if use_move == true && !capable_move
+        raise ArgumentError, "MOVE capability is not advertised"
+      end
+      if capable_move && use_move != false
+        tagged = send_command("UID MOVE", uid_set, mailbox)
+        copy_uid = move_fallback_copyuid(tagged)
+        return [true, FallbackMoveResult.new(
+          destination: mailbox, uids: uid_set, uidvalidity: uidvalidity,
+          stages: %i[move], copy_uid: copy_uid,
+        )]
+      end
+      unless capable?(:UIDPLUS) || capable?(:IMAP4rev2)
+        raise ArgumentError,
+          "uid_move_fallback requires UIDPLUS or IMAP4rev2 for targeted" \
+          " UID EXPUNGE; refusing an untargeted EXPUNGE"
+      end
+      [false, FallbackMoveResult.new(
+        destination: mailbox, uids: uid_set, uidvalidity: uidvalidity,
+      )]
+    end
+
+    def move_fallback_copy_store_expunge(result)
+      begin
+        tagged   = send_command("UID COPY", result.uids, result.destination)
+        copy_uid = tagged&.data&.code&.name == "COPYUID" ?
+                   tagged.data.code.data : nil
+        copy_uid ||= clear_responses("COPYUID").last
+        result = result.with_stage(:copy, copy_uid)
+        move_fallback_verify_mailbox!(result)
+
+        store = store_internal(
+          "UID STORE", result.uids, "+FLAGS", [DELETED]
+        )
+        result = result.with_stage(:store, store)
+        move_fallback_verify_mailbox!(result)
+
+        expunged = expunge_internal("UID EXPUNGE", result.uids)
+        result = result.with_stage(:expunge, expunged)
+        move_fallback_verify_mailbox!(result)
+      rescue ResponseError, ResponseParseError,
+             IOError, SystemCallError => error
+        raise error if result.completed?
+        raise FallbackMoveIncomplete.new(
+          "fallback move stopped after stages %p: %s" % [
+            result.stages, error.message
+          ],
+          result: result,
+        )
+      end
+      result
+    end
+
+    def move_fallback_verify_mailbox!(result)
+      unless connection_state.selected?
+        raise FallbackMailboxChanged.new(
+          "source mailbox is no longer selected", result: result,
+        )
+      end
+      current = responses("UIDVALIDITY", &:last)
+      unless current && current == result.uidvalidity
+        raise FallbackMailboxChanged.new(
+          "source mailbox UIDVALIDITY changed (was %s, now %s)" % [
+            result.uidvalidity, current.inspect
+          ],
+          result: result,
+        )
+      end
+    end
+
+    def move_fallback_copyuid(tagged_response)
+      code = tagged_response&.data&.code
+      code&.name == "COPYUID" ? code.data : clear_responses("COPYUID").last
     end
 
     def sort_internal(cmd, sort_keys, search_keys, charset)
