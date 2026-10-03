@@ -84,6 +84,10 @@ module Dry
         adapter.operation.arity
       end
 
+      def call_arity
+        adapter.call_arity
+      end
+
       def operation
         adapter.operation
       end

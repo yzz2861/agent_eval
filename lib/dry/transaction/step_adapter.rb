@@ -17,8 +17,12 @@ module Dry
       attr_reader :adapter
       attr_reader :operation
       attr_reader :options
+      attr_reader :call_arity
 
       def initialize(adapter, operation, options)
+        call_arity_source = adapter.is_a?(Method) ? adapter.receiver : adapter
+        @call_arity = call_arity_source.respond_to?(:call_arity) ? call_arity_source.call_arity : 1
+
         @adapter = case adapter
                    when Proc, Method
                      adapter

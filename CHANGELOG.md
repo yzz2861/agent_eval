@@ -7,6 +7,16 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ## [Unreleased]
 
+### Added
+
+- New `fold` step adapter that lazily folds an enumerable input into a single
+  accumulated value. The operation is called per element with the accumulated
+  value, the element and its zero-based index. Pulling stops at the first
+  `Failure`, which carries the accumulated value so far and the failing index;
+  an empty input folds to the `initial:` value. Pass `owns_source: true` to
+  have the adapter close the source (when it supports `close`) once folding
+  is done.
+
 
 ## [0.16.0] - 2024-01-17
 
