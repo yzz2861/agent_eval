@@ -25,6 +25,11 @@ module Dry
       #   @api private
       option :macros, default: proc { EMPTY_ARRAY.dup }
 
+      # @!attribute [r] association_rule
+      #   @return [Boolean]
+      #   @api private
+      option :association_rule, default: proc { false }
+
       # Evaluate the rule within the provided context
       #
       # @param [Contract] contract
@@ -99,6 +104,57 @@ module Dry
         self
       end
       # rubocop:enable Metrics/AbcSize
+
+      # Define a validation function for matching elements of two arrays
+      #
+      # The function receives an Association with valid items and their original
+      # indexes. Duplicate keys retain every item, and items rejected by the
+      # schema are excluded from the association.
+      #
+      # @example
+      #   rule(:invoices, :allocations).associate(:id, :invoice_id) do |association:|
+      #     association.groups.each do |group|
+      #       total = group[:right].sum { |item| item.value[:amount] }
+      #       if total > group[:left].first.value[:amount]
+      #         key(association.right_error_path(group[:right].first.index)).failure("too much")
+      #       end
+      #     end
+      #
+      #     association.unmatched_right.each do |item|
+      #       key(association.right_error_path(item.index, :invoice_id)).failure("not found")
+      #     end
+      #   end
+      #
+      # @return [Rule]
+      #
+      # @api public
+      def associate(left_key, right_key = left_key, &block)
+        left_root, right_root = keys.map { |key| Schema::Path[key] }
+
+        @block = proc do
+          left_array = values[*left_root]
+          right_array = values[*right_root]
+
+          next unless [left_array, right_array].all?(::Array)
+          next if result.base_error?(left_root) || result.base_error?(right_root)
+
+          association = Association.new(
+            left_path: left_root.to_a,
+            right_path: right_root.to_a,
+            left_key: left_key,
+            right_key: right_key,
+            result: result
+          )
+
+          evaluator = with(keys: [left_root, right_root], association: association, &block)
+          failures.concat(evaluator.failures)
+        end
+
+        @block_options = map_keywords(block) if block
+        @association_rule = true
+
+        self
+      end
 
       # Return a nice string representation
       #
