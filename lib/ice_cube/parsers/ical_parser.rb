@@ -14,19 +14,20 @@ module IceCube
       end
 
       lines.each do |line|
-        (property, value) = line.split(":")
-        (property, _tzid) = property.split(";")
+        property_part, value = line.chomp.split(":", 2)
+        property, *params = property_part.split(";")
+        params = parse_params(params)
         case property
         when "DTSTART"
-          data[:start_time] = TimeUtil.deserialize_time(value)
+          data[:start_time] = parse_time_value(value, params)
         when "DTEND"
-          data[:end_time] = TimeUtil.deserialize_time(value)
+          data[:end_time] = parse_time_value(value, params)
         when "RDATE"
           data[:rtimes] ||= []
-          data[:rtimes] += value.split(",").map { |v| TimeUtil.deserialize_time(v) }
+          data[:rtimes] += parse_rdate_value(value, params)
         when "EXDATE"
           data[:extimes] ||= []
-          data[:extimes] += value.split(",").map { |v| TimeUtil.deserialize_time(v) }
+          data[:extimes] += value.split(",").map { |v| parse_time_value(v, params) }
         when "DURATION"
           data[:duration] # FIXME
         when "RRULE"
@@ -35,6 +36,50 @@ module IceCube
         end
       end
       Schedule.from_hash data
+    end
+
+    def self.parse_params(params)
+      params.each_with_object({}) do |param, hash|
+        name, param_value = param.split("=", 2)
+        hash[name.upcase.to_sym] = param_value
+      end
+    end
+
+    def self.parse_time_value(value, params)
+      time = TimeUtil.deserialize_time(value)
+      apply_tzid(time, params[:TZID])
+    end
+
+    def self.apply_tzid(time, tzid)
+      return time unless tzid
+      if Object.const_defined?(:ActiveSupport) && ActiveSupport::TimeZone[tzid]
+        ActiveSupport::TimeZone[tzid].local(time.year, time.month, time.day, time.hour, time.min, time.sec)
+      else
+        time
+      end
+    end
+
+    def self.parse_rdate_value(value, params)
+      if params[:VALUE]&.upcase == "PERIOD"
+        value.split(",").map { |v| parse_period_value(v, params) }
+      else
+        value.split(",").map { |v| parse_time_value(v, params) }
+      end
+    end
+
+    # A period is either start/end (DATE-TIME/DATE-TIME) or start/duration
+    # (DATE-TIME/DURATION). It is represented in the hash as start/end_time.
+    def self.parse_period_value(value, params)
+      start_value, end_value = value.split("/")
+      raise ArgumentError, "Invalid iCal period: #{value}" unless start_value && end_value
+      start_time = parse_time_value(start_value, params)
+      end_time =
+        if end_value.start_with?("P", "+", "-")
+          start_time + IcalBuilder.ical_duration_to_seconds(end_value)
+        else
+          parse_time_value(end_value, params)
+        end
+      {time: start_time, end_time: end_time}
     end
 
     def self.rule_from_ical(ical)

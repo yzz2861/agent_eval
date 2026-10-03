@@ -42,12 +42,42 @@ module IceCube
       @end_time = start_time + seconds
     end
 
-    # Add a recurrence time to the schedule
-    def add_recurrence_time(time)
+    # Add a recurrence time to the schedule.
+    #
+    # A bare time adds a zero-duration occurrence. An independent duration may
+    # be given positionally, as an +end_time:+/+duration:+ option hash, or
+    # as keywords (seconds). Ranges and IceCube::Occurrence objects
+    # describing start/end are also accepted.
+    def add_recurrence_time(time, end_time = nil, **options)
       return if time.nil?
-      rule = SingleOccurrenceRule.new(time)
+      if end_time.is_a?(Hash)
+        options = end_time
+        end_time = options[:end_time]
+      else
+        end_time = options[:end_time] if end_time.nil?
+      end
+      duration = options[:duration]
+      if !end_time.nil? && !duration.nil?
+        raise ArgumentError, "specify either end_time: or duration:, not both"
+      end
+      if time.is_a?(Occurrence)
+        end_time ||= time.end_time if time.duration > 0
+        time = time.start_time
+      end
+      if time.is_a?(Range)
+        range = time
+        time, end_time = range.first, range.last
+      end
+      if duration
+        duration = duration.to_i
+        if duration < 0
+          raise ArgumentError, "duration must be greater than or equal to zero"
+        end
+        end_time = TimeUtil.ensure_time(time) + duration if duration > 0
+      end
+      rule = SingleOccurrenceRule.new(time, end_time)
       add_recurrence_rule rule
-      time
+      rule.occurrence
     end
     alias_method :rtime, :add_recurrence_time
     deprecated_alias :rdate, :rtime
@@ -67,6 +97,20 @@ module IceCube
     # Add a recurrence rule to the schedule
     def add_recurrence_rule(rule)
       return if rule.nil?
+      if rule.is_a?(SingleOccurrenceRule)
+        existing = @all_recurrence_rules.find do |candidate|
+          candidate.is_a?(SingleOccurrenceRule) && candidate.time == rule.time
+        end
+        if existing
+          # Keep a deterministic duration when the same start time is added more
+          # than once: prefer the longer explicit occurrence (an explicit
+          # period always wins over a zero-duration entry).
+          if (rule.duration || 0) > (existing.duration || 0)
+            @all_recurrence_rules[@all_recurrence_rules.index(existing)] = rule
+          end
+          return
+        end
+      end
       @all_recurrence_rules << rule unless @all_recurrence_rules.include?(rule)
     end
     alias_method :rrule, :add_recurrence_rule
@@ -109,6 +153,12 @@ module IceCube
     alias_method :rtimes, :recurrence_times
     deprecated_alias :rdates, :rtimes
     deprecated_alias :recurrence_dates, :recurrence_times
+
+    # Get the recurrence occurrences (start/end) that are on the schedule
+    def recurrence_occurrences
+      @all_recurrence_rules.select { |r| r.is_a?(SingleOccurrenceRule) }.map(&:occurrence)
+    end
+    alias_method :rtime_occurrences, :recurrence_occurrences
 
     # Remove a recurrence time
     def remove_recurrence_time(time)
@@ -240,9 +290,12 @@ module IceCube
     # Determine if the schedule is occurring at a given time
     def occurring_at?(time)
       time = TimeUtil.match_zone(time, start_time) or raise ArgumentError, "Time required, got #{time.inspect}"
-      if duration > 0
+      if duration > 0 && @all_recurrence_rules.none? { |r| r.is_a?(SingleOccurrenceRule) && r.period? }
         return false if exception_time?(time)
         occurs_between?(time - duration + 1, time)
+      elsif maximum_duration > 0
+        return false if exception_time?(time)
+        enumerate_occurrences(time - maximum_duration + 1, time, spans: true).any? { |occ| occ.cover?(time) }
       else
         occurs_at?(time)
       end
@@ -327,7 +380,13 @@ module IceCube
       pieces << "DTSTART#{IcalBuilder.ical_format(start_time, force_utc)}"
       pieces.concat recurrence_rules.map { |r| "RRULE:#{r.to_ical}" }
       pieces.concat exception_rules.map { |r| "EXRULE:#{r.to_ical}" }
-      pieces.concat recurrence_times_without_start_time.map { |t| "RDATE#{IcalBuilder.ical_format(t, force_utc)}" }
+      pieces.concat(recurrence_occurrences_without_start_time.map do |occ|
+        if occ.duration > 0
+          "RDATE;VALUE=PERIOD#{IcalBuilder.ical_period_format(occ, force_utc)}"
+        else
+          "RDATE#{IcalBuilder.ical_format(occ.start_time, force_utc)}"
+        end
+      end)
       pieces.concat exception_times.map { |t| "EXDATE#{IcalBuilder.ical_format(t, force_utc)}" }
       pieces << "DTEND#{IcalBuilder.ical_format(end_time, force_utc)}" if end_time
       pieces.join("\n")
@@ -359,8 +418,15 @@ module IceCube
       data[:end_time] = TimeUtil.serialize_time(end_time) if end_time
       data[:rrules] = recurrence_rules.map(&:to_hash)
       data[:exrules] = exception_rules.map(&:to_hash) if exception_rules.any?
-      data[:rtimes] = recurrence_times.map do |rt|
-        TimeUtil.serialize_time(rt)
+      data[:rtimes] = recurrence_occurrences.map do |occ|
+        if occ.duration > 0
+          {
+            time: TimeUtil.serialize_time(occ.start_time),
+            end_time: TimeUtil.serialize_time(occ.end_time)
+          }
+        else
+          TimeUtil.serialize_time(occ.start_time)
+        end
       end
       data[:extimes] = exception_times.map do |et|
         TimeUtil.serialize_time(et)
@@ -422,19 +488,19 @@ module IceCube
       closing_time = TimeUtil.match_zone(closing_time, start_time)
       opening_time += TimeUtil.subsec(start_time) - TimeUtil.subsec(opening_time)
       opening_time = start_time if opening_time < start_time
-      spans = options[:spans] == true && duration != 0
+      spans = options[:spans] == true && maximum_duration != 0
       Enumerator.new do |yielder|
         reset
         t1 = full_required? ? start_time : opening_time
-        t1 -= duration if spans
+        t1 -= maximum_duration if spans
         t1 = start_time if t1 < start_time
         loop do
           break unless (t0 = next_time(t1, closing_time))
-          break if closing_time && t0 > closing_time
+          break if closing_time && t0.start_time > closing_time
           if spans ? (t0.end_time > opening_time) : (t0 >= opening_time)
             yielder << (block_given? ? yield(t0) : t0)
           end
-          t1 = t0 + 1
+          t1 = t0.start_time + 1
         end
       end
     end
@@ -445,21 +511,30 @@ module IceCube
         # Probe all rules without consuming counts so we can pick the earliest
         # candidate, then charge counts only to rules that emitted that time.
         min_time = nil
+        min_occurrence = nil
         candidates = []
-        recurrence_rules_with_implicit_start_occurrence.each do |rule|
-          candidate = rule.next_time(time, start_time, min_time || closing_time, increment: false)
+        recurrence_rules_with_implicit_start_occurrence.each_with_index do |rule, index|
+          # The first rule is bounded only by the query window (infinite rules
+          # search freely); later rules can stop at the earliest candidate.
+          bound = index.zero? ? closing_time : min_time
+          candidate = rule.next_time(time, start_time, bound, increment: false)
           next unless candidate
-          candidates << [rule, candidate]
-          min_time = candidate if min_time.nil? || candidate < min_time
+          occurrence = occurrence_for(rule, candidate)
+          candidates << [rule, candidate, occurrence]
+          if min_time.nil? || candidate < min_time ||
+             (candidate == min_time && occurrence.end_time > min_occurrence.end_time)
+            min_time = candidate
+            min_occurrence = occurrence
+          end
         rescue StopIteration
           next
         end
         break unless min_time
-        candidates.each do |rule, candidate|
+        candidates.each do |rule, candidate, _occ|
           rule.increment_uses if candidate == min_time && rule.respond_to?(:increment_uses)
         end
         next (time = min_time + 1) if exception_time?(min_time)
-        break Occurrence.new(min_time, min_time + duration)
+        break min_occurrence
       end
     end
 
@@ -484,12 +559,34 @@ module IceCube
       raise ArgumentError, "All recurrence rules must specify .until or .count to use #{method_name}"
     end
 
+    # Build an occurrence for a rule candidate, using an RDATE's own duration
+    # when it provides one, otherwise the schedule-wide duration.
+    def occurrence_for(rule, time)
+      if rule.is_a?(SingleOccurrenceRule) && rule.period?
+        rule.occurrence
+      else
+        Occurrence.new(time, time + duration)
+      end
+    end
+
+    # Largest duration across the schedule itself and any explicit RDATE periods
+    def maximum_duration
+      rdate_durations = @all_recurrence_rules.map do |rule|
+        rule.is_a?(SingleOccurrenceRule) ? (rule.duration || 0) : 0
+      end
+      [duration, *rdate_durations].max
+    end
+
     def implicit_start_occurrence_rule
-      SingleOccurrenceRule.new(start_time)
+      SingleOccurrenceRule.new(start_time, duration > 0 ? start_time + duration : nil)
     end
 
     def recurrence_times_without_start_time
       recurrence_times.reject { |t| t == start_time }
+    end
+
+    def recurrence_occurrences_without_start_time
+      recurrence_occurrences.reject { |occ| occ.start_time == start_time }
     end
 
     def recurrence_times_with_start_time
