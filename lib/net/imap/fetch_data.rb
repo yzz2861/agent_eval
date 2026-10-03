@@ -544,6 +544,26 @@ module Net
       #
       # [NOTE:]
       #   #seqno is not a message attribute.
+
+      # Represents FETCH literal content that was written to a receiver instead
+      # of being retained in memory.
+      class LiteralReference < Data.define(:field, :bytesize, :receiver)
+        ##
+        # :attr_reader: field
+        #
+        # The FETCH attribute name whose literal content was diverted.
+
+        ##
+        # :attr_reader: bytesize
+        #
+        # The protocol-declared number of bytes sent to #receiver.
+
+        ##
+        # :attr_reader: receiver
+        #
+        # The object that received the literal bytes. Net::IMAP does not close
+        # this object.
+      end
     end
 
     # Net::IMAP::UIDFetchData represents the contents of a +UIDFETCH+ response,

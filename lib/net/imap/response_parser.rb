@@ -22,6 +22,7 @@ module Net
         @pos = nil
         @lex_state = nil
         @token = nil
+        @literal_references = nil
         @config = Config[config]
         @config = @config.new if @config == Config.global || @config.frozen?
       end
@@ -32,11 +33,12 @@ module Net
       #   parse(str) -> TaggedResponse
       #
       # Raises ResponseParseError for unparsable strings.
-      def parse(str)
+      def parse(str, literal_references: nil)
         @str = str
         @pos = 0
         @lex_state = EXPR_BEG
         @token = nil
+        @literal_references = literal_references
         return response
       rescue ResponseParseError => error
         if config.debug?
@@ -2288,6 +2290,10 @@ module Net
 
       def literal_token(len, type = T_LITERAL)
         len = NumValidator.coerce_number64 len
+        if (reference = @literal_references&.[](@pos))
+          @pos += 1
+          return Token.new(type, reference)
+        end
         val = @str[@pos, len]
         @pos += len
         Token.new(type, val)

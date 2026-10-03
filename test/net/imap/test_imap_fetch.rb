@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "net/imap"
+require "stringio"
 require "test/unit"
 require_relative "fake_server"
 
@@ -39,6 +40,35 @@ class IMAPFetchTest < Net::IMAP::TestCase
       assert_equal [],                  fetched[2].flags
       assert_equal("RUBY0002 FETCH 123,456,789 (UID FLAGS)",
                    server.commands.pop.raw.strip)
+    end
+  end
+
+  test "#fetch with literal_receiver" do
+    with_fake_server select: "inbox" do |server, imap|
+      message = "Subject: test\r\n\r\nhi\r\n".b
+      destination = StringIO.new
+      destination.set_encoding(Encoding::BINARY)
+      server.on("FETCH") do |resp|
+        resp.untagged("1 FETCH (UID 42 BODY[] {#{message.bytesize}}\r\n#{message})")
+        resp.done_ok
+      end
+
+      result = imap.fetch(1, "BODY[]", literal_receiver: ->(response, field, size) do
+        assert_instance_of Net::IMAP::FetchData, response
+        assert_equal 1, response.seqno
+        assert_equal "BODY[]", field
+        assert_equal message.bytesize, size
+        destination
+      end).first
+
+      reference = result.attr["BODY[]"]
+      assert_instance_of Net::IMAP::FetchData::LiteralReference, reference
+      assert_equal "BODY[]", reference.field
+      assert_equal message.bytesize, reference.bytesize
+      assert_same destination, reference.receiver
+      assert_equal message, destination.string
+      assert_equal 42, result.uid
+      refute destination.closed?
     end
   end
 
