@@ -16,5 +16,17 @@ RSpec.describe Dry::Container do
 
       expect(parent[:foo]).to_not be(child[:foo])
     end
+
+    it "inherits tagged bindings with their priority and registration order" do
+      parent = Class.new { extend Dry::Container::Mixin }
+      parent.register(:sms, tags: :notifier) { :sms }
+      parent.register(:push, tags: :notifier, priority: -1) { :push }
+      child = Class.new(parent)
+      child.register(:email, tags: :notifier) { :email }
+
+      expect(child.resolve_all(:notifier)).to eq(%i[push sms email])
+      expect(child.tagged_keys(:notifier)).to eq(%w[push sms email])
+      expect(parent.resolve_all(:notifier)).to eq(%i[push sms])
+    end
   end
 end

@@ -35,6 +35,50 @@ module Dry
         item.call
       end
 
+      # Return key/item pairs bound to the given tag, ordered by priority and
+      # then by registration sequence. Item factories are never called.
+      #
+      # @param [Concurrent::Hash] container
+      #   The container
+      # @param [Mixed] tag
+      #   The tag to look up
+      # @param [String, nil] prefix
+      #   Optional key prefix used to scope the lookup to a namespace
+      #
+      # @return [Array<Array(String, Dry::Container::Item)>]
+      #
+      # @api public
+      def tagged_entries(container, tag, prefix: nil)
+        tag = tag.to_s
+
+        entries = container.each_with_index.filter_map do |(key, item), position|
+          next unless item.respond_to?(:tagged?) && item.tagged?(tag)
+          next if prefix && !key.start_with?(prefix)
+
+          [key, item, position]
+        end
+
+        entries.sort_by! { |_key, item, position| [item.priority, item.sequence, position] }
+        entries.map { |key, item, _position| [key, item] }
+      end
+
+      # Return the keys bound to the given tag, ordered by priority and then
+      # by registration sequence. Item factories are never called.
+      #
+      # @param [Concurrent::Hash] container
+      #   The container
+      # @param [Mixed] tag
+      #   The tag to look up
+      # @param [String, nil] prefix
+      #   Optional key prefix used to scope the lookup to a namespace
+      #
+      # @return [Array<String>]
+      #
+      # @api public
+      def tagged_keys(container, tag, prefix: nil)
+        tagged_entries(container, tag, prefix: prefix).map(&:first)
+      end
+
       # Check whether an items is registered under the given key
       #
       # @param [Concurrent::Hash] container

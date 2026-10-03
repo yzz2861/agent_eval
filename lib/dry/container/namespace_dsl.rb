@@ -51,10 +51,35 @@ module Dry
         super(namespaced(key))
       end
 
+      def resolve_all(tag)
+        root_container.resolve_all(tag, prefix: namespace_prefix)
+      end
+
+      def tagged_keys(tag)
+        root_container.config.resolver.tagged_keys(root_container._container, tag,
+                                                   prefix: namespace_prefix)
+      end
+
+      alias_method :keys_for_tag, :tagged_keys
+
       private
 
       def namespaced(key)
         [@namespace, key].join(@namespace_separator)
+      end
+
+      def root_container
+        wrapped = __getobj__
+        wrapped.is_a?(NamespaceDSL) ? wrapped.root_container : wrapped
+      end
+
+      def namespace_prefix
+        wrapped = __getobj__
+        if wrapped.is_a?(NamespaceDSL)
+          [wrapped.namespace_prefix, @namespace].join
+        else
+          "#{@namespace}#{@namespace_separator}"
+        end
       end
     end
   end

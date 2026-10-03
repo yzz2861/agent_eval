@@ -137,6 +137,14 @@ module Dry
       #   The item to register with the container (if no block given)
       # @param [Hash] options
       #   Options to pass to the registry when registering the item
+      # @option options [Symbol, String, Array<Symbol, String>] :tags
+      #   One or several tags the item is bound to; tagged items can be
+      #   resolved as a group with {#resolve_all}
+      # @option options [Symbol, String] :tag
+      #   A single tag (alias of `:tags`)
+      # @option options [Integer] :priority
+      #   Order within a tag, smaller values come first (defaults to 0);
+      #   items with the same priority keep registration order
       # @yield
       #   If a block is given, contents will be ignored and the block
       #   will be registered instead
@@ -174,6 +182,51 @@ module Dry
       def resolve(key, &block)
         config.resolver.call(_container, key, &block)
       end
+
+      # Resolve all items bound to the given tag
+      #
+      # The member set is fixed for this call: registrations performed by a
+      # factory while resolving do not extend the result. Items are ordered by
+      # their priority (smaller values first), then by registration order.
+      #
+      # @param [Mixed] tag
+      #   The tag whose items should be resolved
+      #
+      # @raise [Dry::Container::Error]
+      #   If resolving a member fails, the error reports the failing key
+      #
+      # @return [Array<Mixed>]
+      #
+      # @api public
+      def resolve_all(tag, prefix: nil)
+        keys = config.resolver.tagged_keys(_container, tag, prefix: prefix)
+
+        keys.map do |key|
+          resolve(key)
+        rescue ::StandardError => error
+          raise Error,
+                "Failed to resolve key #{key.inspect} for tag #{tag.to_s.inspect}: " \
+                "#{error.message}"
+        end
+      end
+
+      # Return the keys of all items bound to the given tag
+      #
+      # The keys are ordered by priority and then by registration order.
+      # Querying keys never calls the registered factories.
+      #
+      # @param [Mixed] tag
+      #   The tag to look up
+      #
+      # @return [Array<String>]
+      #
+      # @api public
+      def tagged_keys(tag, prefix: nil)
+        config.resolver.tagged_keys(_container, tag, prefix: prefix)
+      end
+
+      # @api public
+      alias_method :keys_for_tag, :tagged_keys
 
       # Resolve an item from the container
       #

@@ -4,6 +4,9 @@
   date: 
   fixed: 
   added:
+  - 'Multiple bindings with tags: register an item under several tags with a `priority`
+    and resolve the ordered group with `#resolve_all(tag)`; `#tagged_keys(tag)` (aliased
+    as `#keys_for_tag`) lists members without calling factories'
   - 'Add a warning about deprecation of the gem (via #89) (@solnic)'
   changed: 
 - version: 0.11.0

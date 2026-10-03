@@ -592,6 +592,112 @@ RSpec.shared_examples "a container" do
         expect(container.resolve("one.two.three")).to eq(3)
       end
     end
+
+    describe "multiple bindings with tags" do
+      it "resolves all members of a tag ordered by priority then registration order" do
+        container.register(:sms, tags: :notifier) { :sms }
+        container.register(:push, tags: :notifier, priority: -10) { :push }
+        container.register(:email, tags: :notifier) { :email }
+
+        expect(container.resolve_all(:notifier)).to eq(%i[push sms email])
+      end
+
+      it "accepts several tags per registration and resolves from both" do
+        container.register(:email, tags: %i[notifier marketing]) { :email }
+        container.register(:sms, tags: %i[notifier]) { :sms }
+        container.register(:ads, tag: :marketing) { :ads }
+
+        expect(container.resolve_all(:notifier)).to eq(%i[email sms])
+        expect(container.resolve_all("marketing")).to eq(%i[email ads])
+      end
+
+      it "lists tagged keys without calling the factories" do
+        instantiated = []
+        container.register(:sms, tags: :notifier) { instantiated << :sms }
+        container.register(:push, tags: :notifier, priority: -1) { instantiated << :push }
+
+        expect(container.tagged_keys(:notifier)).to eq(%w[push sms])
+        expect(container.keys_for_tag(:notifier)).to eq(%w[push sms])
+        expect(instantiated).to be_empty
+      end
+
+      it "fixes the member set for the duration of the resolution" do
+        resolved_times = 0
+
+        container.register(:first, tags: :tag) do
+          resolved_times += 1
+          container.register("later_#{resolved_times}", tags: :tag) { :later }
+          :first
+        end
+
+        expect(container.resolve_all(:tag)).to eq([:first])
+        expect(container.resolve_all(:tag)).to eq([:first, :later])
+      end
+
+      it "reports the failing key when a member cannot be resolved" do
+        container.register(:ok, tags: :tag) { :ok }
+        container.register(:broken, tags: :tag) { raise "boom" }
+
+        expect { container.resolve_all(:tag) }.to raise_error(
+          Dry::Container::Error,
+          /Failed to resolve key "broken" for tag "tag": boom/
+        )
+      end
+
+      it "returns an empty array for an unknown tag without instantiating anything" do
+        container.register(:item, tags: :tag) { :item }
+
+        expect(container.resolve_all(:unknown)).to eq([])
+      end
+
+      it "keeps tag bindings and ordering when decorating" do
+        container.register(:sms, tags: :notifier) { "sms" }
+        container.register(:push, tags: :notifier, priority: -1) { "push" }
+        container.decorate(:sms) { |value| "decorated-#{value}" }
+
+        expect(container.tagged_keys(:notifier)).to eq(%w[push sms])
+        expect(container.resolve_all(:notifier)).to eq(["push", "decorated-sms"])
+      end
+
+      it "scopes tags to the current namespace" do
+        container.namespace("notifiers") do
+          register(:sms, tags: :plugin) { :sms }
+          register(:push, tags: :plugin, priority: -1) { :push }
+        end
+
+        container.namespace("other") do
+          register(:email, tags: :plugin) { :email }
+        end
+
+        container.namespace("notifiers") do |scoped|
+          expect(scoped.tagged_keys(:plugin)).to eq(%w[notifiers.push notifiers.sms])
+          expect(scoped.resolve_all(:plugin)).to eq(%i[push sms])
+        end
+
+        expect(container.tagged_keys(:plugin)).to eq(%w[notifiers.push notifiers.sms other.email])
+      end
+
+      it "supports nested namespaces" do
+        container.namespace("one") do |one|
+          one.namespace("two") do |two|
+            two.register(:sms, tags: :plugin) { :sms }
+            two.register(:push, tags: :plugin, priority: -1) { :push }
+          end
+
+          expect(one.resolve_all(:plugin)).to eq(%i[push sms])
+        end
+      end
+
+      it "preserves tags when merging another container" do
+        other = Dry::Container.new
+        other.register(:sms, tags: :notifier) { :sms }
+        container.register(:push, tags: :notifier, priority: -1) { :push }
+
+        container.merge(other)
+
+        expect(container.resolve_all(:notifier)).to eq(%i[push sms])
+      end
+    end
   end
 
   describe "stubbing" do
