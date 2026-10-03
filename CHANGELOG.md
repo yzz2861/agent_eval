@@ -1,3 +1,18 @@
+## Unreleased
+
+- Add the optional `:browser_secure` cookie acceptance policy.
+  `HTTP::CookieJar.new(:accept_policy => :browser_secure)` enforces
+  the `__Secure-` and `__Host-` name prefix constraints, rejects
+  Secure cookies offered by insecure origins, and prevents an
+  insecure origin from overwriting or expiring a stored Secure
+  cookie with the same name whose domain scope (comparing the
+  domain values and host-only flags) and path overlap.  Legitimate
+  HTTPS updates and deletions are still accepted.  Rejection
+  reasons are reported as symbols through the `:on_reject` callback
+  (and the `:logger`, if given).  The default `:rfc6265` policy
+  keeps the previous lenient behaviour.
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

@@ -121,6 +121,35 @@ Or install it yourself as:
     header['Set-Cookie'] = cookie2.set_cookie_value
 
 
+### Browser-like secure cookie acceptance
+
+By default the jar follows the lenient RFC 6265 rules.  Pass the
+`:browser_secure` acceptance policy to additionally enforce the
+`__Secure-` and `__Host-` name prefix constraints (secure origin,
+Secure attribute, host-only and root path as applicable) and to
+prevent an insecure (HTTP) origin from overwriting or expiring a
+stored Secure cookie with the same name and an overlapping domain
+scope and path.  Domain values, host-only flags and path prefixes
+are compared against the records already in the jar; legitimate
+updates and deletions over HTTPS remain allowed.
+
+    jar = HTTP::CookieJar.new(accept_policy: :browser_secure)
+
+    # Inspect why a cookie was rejected (optional)
+    jar = HTTP::CookieJar.new(
+      accept_policy: :browser_secure,
+      on_reject: ->(cookie, reason) {
+        warn "rejected #{cookie.name}: #{reason}"
+      }
+    )
+
+Rejection reasons are symbols such as `:secure_prefix_insecure_origin`,
+`:host_prefix_with_domain` and `:insecure_overwrite_of_secure`; see
+`HTTP::CookieJar::AcceptPolicy::BrowserSecurePolicy` for the full
+list.  The historical behaviour is unchanged with the default
+`:rfc6265` policy.
+
+
 ## Incompatibilities with Mechanize::Cookie/CookieJar
 
 There are several incompatibilities between
