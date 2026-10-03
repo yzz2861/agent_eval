@@ -688,4 +688,140 @@ A,B,C
       table.dig("A", 0, 0)
     end
   end
+
+  def test_join_inner_duplicate_keys_on_both_sides
+    left  = CSV.parse("id,ln\n1,a\n1,b\n2,c\n", headers: true)
+    right = CSV.parse("id,rn\n1,x\n1,y\n3,z\n", headers: true)
+
+    result = left.join(right, on: "id")
+
+    # all 2 * 2 pairings for id "1", none for "2" or "3"
+    assert_equal(%w[id ln id rn], result.headers)
+    assert_equal([%w[1 a 1 x],
+                  %w[1 a 1 y],
+                  %w[1 b 1 x],
+                  %w[1 b 1 y]],
+                 result.map(&:fields))
+  end
+
+  def test_join_left_keeps_unmatched_left_rows_in_order
+    left  = CSV.parse("id,ln\n2,c\n1,a\n1,b\n", headers: true)
+    right = CSV.parse("id,rn\n1,x\n1,y\n", headers: true)
+
+    result = left.join(right, on: "id", how: :left)
+
+    assert_equal([["2", "c", nil, nil],
+                  %w[1 a 1 x],
+                  %w[1 a 1 y],
+                  %w[1 b 1 x],
+                  %w[1 b 1 y]],
+                 result.map(&:fields))
+  end
+
+  def test_join_full_appends_unmatched_right_rows_in_order
+    left  = CSV.parse("id,ln\n1,a\n2,c\n", headers: true)
+    right = CSV.parse("id,rn\n1,x\n3,z\n4,w\n", headers: true)
+
+    result = left.join(right, on: "id", how: :full)
+
+    assert_equal([%w[1 a 1 x],
+                  ["2", "c", nil, nil],
+                  [nil, nil, "3", "z"],
+                  [nil, nil, "4", "w"]],
+                 result.map(&:fields))
+  end
+
+  def test_join_composite_key
+    left  = CSV.parse("a,b,v\n1,x,la\n1,y,lb\n2,x,lc\n", headers: true)
+    right = CSV.parse("a,b,w\n1,y,ra\n1,y,rb\n1,x,rc\n", headers: true)
+
+    result = left.join(right, on: %w[a b])
+
+    assert_equal([%w[1 x la 1 x rc],
+                  %w[1 y lb 1 y ra],
+                  %w[1 y lb 1 y rb]],
+                 result.map(&:fields))
+  end
+
+  def test_join_nil_keys_never_match_by_default
+    left  = CSV.parse("id,v\n,a\n1,b\n", headers: true)
+    right = CSV.parse("id,w\n,c\n1,d\n", headers: true)
+
+    assert_equal([%w[1 b 1 d]],
+                 left.join(right, on: "id").map(&:fields))
+    assert_equal([[nil, "a", nil, nil],
+                  %w[1 b 1 d]],
+                 left.join(right, on: "id", how: :left).map(&:fields))
+  end
+
+  def test_join_nil_keys_match_when_nil_matches
+    left  = CSV.parse("id,v\n,a\n,b\n", headers: true)
+    right = CSV.parse("id,w\n,c\n1,d\n", headers: true)
+
+    result = left.join(right, on: "id", nil_matches: true)
+
+    assert_equal([[nil, "a", nil, "c"],
+                  [nil, "b", nil, "c"]],
+                 result.map(&:fields))
+  end
+
+  def test_join_keeps_duplicate_headers_verbatim
+    left  = CSV.parse("id,name\n1,a\n", headers: true)
+    right = CSV.parse("id,name\n1,x\n", headers: true)
+
+    result = left.join(right, on: "id")
+
+    # headers are copied from both sides, never renamed
+    assert_equal(%w[id name id name], result.headers)
+    row = result.first
+    assert_equal(%w[1 a], row.fields(0, 1)) # left side
+    assert_equal(%w[1 x], row.fields(2, 3)) # right side
+    # input headers are untouched
+    assert_equal(%w[id name], left.headers)
+    assert_equal(%w[id name], right.headers)
+  end
+
+  def test_join_does_not_modify_input_tables
+    left  = CSV.parse("id,ln\n1,a\n2,c\n", headers: true)
+    right = CSV.parse("id,rn\n1,x\n3,z\n", headers: true)
+    left_before  = left.to_a
+    right_before = right.to_a
+
+    left.join(right, on: "id", how: :full)
+
+    assert_equal(left_before, left.to_a)
+    assert_equal(right_before, right.to_a)
+  end
+
+  def test_join_mode_wrappers
+    left  = CSV.parse("id,ln\n1,a\n2,c\n", headers: true)
+    right = CSV.parse("id,rn\n1,x\n3,z\n", headers: true)
+
+    assert_equal(left.join(right, on: "id", how: :inner).to_a,
+                 left.inner_join(right, on: "id").to_a)
+    assert_equal(left.join(right, on: "id", how: :left).to_a,
+                 left.left_join(right, on: "id").to_a)
+    assert_equal(left.join(right, on: "id", how: :full).to_a,
+                 left.full_join(right, on: "id").to_a)
+  end
+
+  def test_join_empty_result_keeps_headers
+    left  = CSV.parse("id,ln\n1,a\n", headers: true)
+    right = CSV.parse("id,rn\n2,x\n", headers: true)
+
+    result = left.join(right, on: "id")
+
+    assert_equal(%w[id ln id rn], result.headers)
+    assert_equal([], result.to_a[1..-1])
+  end
+
+  def test_join_invalid_arguments
+    left  = CSV.parse("id,ln\n1,a\n", headers: true)
+    right = CSV.parse("id,rn\n1,x\n", headers: true)
+
+    assert_raise(ArgumentError) { left.join(right, on: "id", how: :right) }
+    assert_raise(ArgumentError) { left.join(right, on: []) }
+    assert_raise(ArgumentError) { left.join(right, on: "missing") }
+    assert_raise(ArgumentError) { left.join(right, on: "ln") }
+  end
 end

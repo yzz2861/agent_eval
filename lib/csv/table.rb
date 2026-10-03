@@ -1032,6 +1032,151 @@ class CSV
       end
     end
 
+    # The join modes supported by #join.
+    JOIN_MODES = %i[inner left full].freeze
+
+    # :call-seq:
+    #   table.join(other_table, on:, how: :inner, nil_matches: false) -> new_table
+    #
+    # Returns a new \CSV::Table combining rows of +self+ and +other_table+
+    # whose join keys are equal, without modifying either table.
+    #
+    # Argument +on+ names the join key column, or an \Array of columns
+    # for a composite key; every key column must exist in both tables:
+    #   left  = CSV.parse("id,ln\n1,a\n1,b\n2,c\n", headers: true)
+    #   right = CSV.parse("id,rn\n1,x\n1,y\n3,z\n", headers: true)
+    #   left.join(right, on: "id").to_a
+    #   # => [["id", "ln", "id", "rn"],
+    #   #     ["1", "a", "1", "x"],
+    #   #     ["1", "a", "1", "y"],
+    #   #     ["1", "b", "1", "x"],
+    #   #     ["1", "b", "1", "y"]]
+    #
+    # === Join modes
+    #
+    # Keyword argument +how+ selects the join mode:
+    # - +:inner+ (the default): only paired rows.
+    # - +:left+:  every row of +self+, paired or not; columns of
+    #   +other_table+ are +nil+ for unpaired rows.
+    # - +:full+:  like +:left+, followed by the unpaired rows of
+    #   +other_table+, with the columns of +self+ set to +nil+.
+    #
+    # === Duplicate keys
+    #
+    # Duplicate keys are never collapsed: when a key appears +m+ times in
+    # +self+ and +n+ times in +other_table+, all <tt>m * n</tt> pairings
+    # appear in the result (see the example above).
+    #
+    # === Row order
+    #
+    # Result rows are in a deterministic order: rows are emitted by
+    # scanning +self+ top to bottom, and for each of its rows the matching
+    # rows of +other_table+ are emitted top to bottom; for +:full+, the
+    # unpaired rows of +other_table+ are appended last, top to bottom.
+    #
+    # === Nil keys
+    #
+    # By default a +nil+ key component never matches anything, not even
+    # another +nil+ (as in SQL).  Pass <tt>nil_matches: true</tt> to make
+    # +nil+ key components equal to each other:
+    #   left  = CSV.parse("id,v\n,a\n", headers: true)
+    #   right = CSV.parse("id,w\n,b\n", headers: true)
+    #   left.join(right, on: "id").size                    # => 0
+    #   left.join(right, on: "id", nil_matches: true).size # => 1
+    #
+    # === Result columns
+    #
+    # The result keeps every column of both tables, in order: first the
+    # columns of +self+, then the columns of +other_table+.  Headers are
+    # copied verbatim and are never renamed, so headers that exist in both
+    # tables appear twice; use positional access (such as
+    # CSV::Row#fields with \Integer indices) to tell the two sides apart:
+    #   row = left.join(right, on: "id").first
+    #   row.fields         # => ["1", "a", "1", "x"]
+    #   row.fields(0, 1)   # => ["1", "a"] (left side)
+    #   row.fields(2, 3)   # => ["1", "x"] (right side)
+    #
+    # See also #inner_join, #left_join and #full_join.
+    def join(other, on:, how: :inner, nil_matches: false)
+      how = how.to_sym
+      unless JOIN_MODES.include?(how)
+        raise ArgumentError,
+              "invalid join mode #{how.inspect}: " +              "must be one of #{JOIN_MODES.map(&:inspect).join(', ')}"
+      end
+      keys = Array(on)
+      raise ArgumentError, "join keys must not be empty" if keys.empty?
+
+      left_headers  = headers
+      right_headers = other.headers
+      left_key_indices  = join_key_indices(left_headers, keys, "left")
+      right_key_indices = join_key_indices(right_headers, keys, "right")
+
+      left_rows  = @table.map {|row| row.is_a?(Row) ? row : Row.new(left_headers, row) }
+      right_rows = other.table.map {|row| row.is_a?(Row) ? row : Row.new(right_headers, row) }
+
+      # Index the right rows by key tuple; rows with a nil key component
+      # are left out unless nil keys are allowed to match.
+      right_index = Hash.new {|hash, key| hash[key] = [] }
+      right_rows.each_with_index do |row, i|
+        key = row.fields.values_at(*right_key_indices)
+        next if !nil_matches && key.any?(&:nil?)
+        right_index[key] << i
+      end
+
+      result_headers = left_headers + right_headers
+      result_rows = []
+      matched_right = Array.new(right_rows.size, false)
+      left_rows.each do |left_row|
+        key = left_row.fields.values_at(*left_key_indices)
+        matches = right_index[key]
+        if matches.empty?
+          unless how == :inner
+            result_rows << Row.new(result_headers,
+                                   left_row.fields + Array.new(right_headers.size))
+          end
+        else
+          matches.each do |right_i|
+            matched_right[right_i] = true
+            result_rows << Row.new(result_headers,
+                                   left_row.fields + right_rows[right_i].fields)
+          end
+        end
+      end
+      if how == :full
+        right_rows.each_with_index do |right_row, i|
+          next if matched_right[i]
+          result_rows << Row.new(result_headers,
+                                 Array.new(left_headers.size) + right_row.fields)
+        end
+      end
+
+      Table.new(result_rows, headers: result_headers)
+    end
+
+    # :call-seq:
+    #   table.inner_join(other_table, on:, nil_matches: false) -> new_table
+    #
+    # Like #join with <tt>how: :inner</tt>.
+    def inner_join(other, on:, nil_matches: false)
+      join(other, on: on, how: :inner, nil_matches: nil_matches)
+    end
+
+    # :call-seq:
+    #   table.left_join(other_table, on:, nil_matches: false) -> new_table
+    #
+    # Like #join with <tt>how: :left</tt>.
+    def left_join(other, on:, nil_matches: false)
+      join(other, on: on, how: :left, nil_matches: nil_matches)
+    end
+
+    # :call-seq:
+    #   table.full_join(other_table, on:, nil_matches: false) -> new_table
+    #
+    # Like #join with <tt>how: :full</tt>.
+    def full_join(other, on:, nil_matches: false)
+      join(other, on: on, how: :full, nil_matches: nil_matches)
+    end
+
     # :call-seq:
     #   table.inspect => string
     #
@@ -1050,6 +1195,21 @@ class CSV
       summary = to_csv(limit: 5)
       inspected << "\n" << summary if summary.encoding.ascii_compatible?
       inspected
+    end
+
+    private
+
+    # Maps join key headers to their column indices in +table_headers+,
+    # raising ArgumentError for a key missing from that side.
+    def join_key_indices(table_headers, keys, side)
+      keys.map do |key|
+        index = table_headers.index(key)
+        unless index
+          raise ArgumentError,
+                "join key #{key.inspect} not found in #{side} headers: " +                "#{table_headers.inspect}"
+        end
+        index
+      end
     end
   end
 end
