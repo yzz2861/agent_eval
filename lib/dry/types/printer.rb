@@ -10,6 +10,7 @@ module Dry
     class Printer
       MAPPING = {
         Nominal => :visit_nominal,
+        Decimal => :visit_decimal,
         Constructor => :visit_constructor,
         [
           Constrained,
@@ -156,6 +157,15 @@ module Dry
       def visit_nominal(type)
         visit_options(type.options, type.meta) do |opts|
           yield "Nominal<#{type.primitive}#{opts}>"
+        end
+      end
+
+      def visit_decimal(type)
+        options = type.send(:decimal_options).reject { |key, value|
+          value.nil? || (key == :accept_float && value == false)
+        }
+        visit_options(options, type.meta) do |opts|
+          yield "Decimal#{opts}"
         end
       end
 

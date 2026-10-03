@@ -22,6 +22,9 @@ module Dry
         def visit_nominal(node) = node[0]
 
         # @api private
+        def visit_decimal(node) = node[0]
+
+        # @api private
         def visit_hash(_) = ::Hash
         alias_method :visit_schema, :visit_hash
 

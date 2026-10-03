@@ -54,6 +54,18 @@ module Dry
         end
       end
 
+      def visit_decimal(node)
+        _primitive, options, meta = node
+
+        Decimal.new(
+          precision: options.fetch(:precision),
+          scale: options.fetch(:scale),
+          rounding: Undefined.default(options[:rounding], Undefined),
+          accept_float: options.fetch(:accept_float, false),
+          meta: meta
+        )
+      end
+
       def visit_rule(node)
         ::Dry::Types.rule_compiler.([node])[0]
       end

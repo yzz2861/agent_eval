@@ -9,6 +9,14 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Add `Dry::Types["decimal.exact"]`, a configurable `BigDecimal` type for
+  exact values such as money. It supports `precision`, `scale` and an opt-in
+  `rounding` mode, rejects inputs that would need rounding by default,
+  handles `String`, `Integer`, `BigDecimal` and `Float` separately, treats
+  floats as opt-in (preserving their exact binary expansion), and covers
+  scientific notation, negative zero, `NaN`/`Infinity` and post-rounding
+  precision overflow.
+
 ### Changed
 
 ### Deprecated

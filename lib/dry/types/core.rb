@@ -98,6 +98,10 @@ module Dry
     register("any", Any)
     register("nominal.any", Any)
     register("strict.any", Any)
+
+    # Register the exact (strict) decimal type. Use `.fixed(...)` to configure
+    # precision, scale and rounding for use cases such as money.
+    register("decimal.exact", Decimal.new)
   end
 end
 
