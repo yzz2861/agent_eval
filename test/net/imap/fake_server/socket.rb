@@ -21,6 +21,7 @@ class Net::IMAP::FakeServer
     def eof?;      ignore_closed?(true) { socket.eof?       } end
     def gets(...)  ignore_closed?(nil)  { socket.gets(...)  } end
     def read(...)  ignore_closed?(nil)  { socket.read(...)  } end
+    def readpartial(...); ignore_closed?(nil) { socket.readpartial(...) } end
     def print(...) ignore_closed?(nil)  { socket.print(...) } end
 
     def use_tls

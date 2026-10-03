@@ -32,17 +32,22 @@ module Net
       #   parse(str) -> TaggedResponse
       #
       # Raises ResponseParseError for unparsable strings.
-      def parse(str)
+      def parse(str, literal_receiver: nil, &literal_receiver_block)
         @str = str
         @pos = 0
         @lex_state = EXPR_BEG
         @token = nil
+        @literal_receiver = literal_receiver || literal_receiver_block
+        @fetch_literal_context = nil
         return response
       rescue ResponseParseError => error
         if config.debug?
           warn error.detailed_message(parser_state: true, parser_backtrace: true)
         end
         raise
+      ensure
+        @literal_receiver = nil
+        @fetch_literal_context = nil
       end
 
       private
@@ -854,7 +859,8 @@ module Net
       def message_data__fetch
         seq  = nz_number;     SP!
         name = label "FETCH"; SP!
-        data = FetchData.new(seq, msg_att(seq))
+        data = FetchData.new(seq, {})
+        msg_att(seq, data)
         UntaggedResponse.new(name, data, @str)
       end
 
@@ -862,7 +868,8 @@ module Net
       def uidfetch_resp
         uid  = uniqueid;         SP!
         name = label "UIDFETCH"; SP!
-        data = UIDFetchData.new(uid, msg_att(uid))
+        data = UIDFetchData.new(uid, {})
+        msg_att(uid, data)
         UntaggedResponse.new(name, data, @str)
       end
 
@@ -937,9 +944,9 @@ module Net
       #
       #   msg-att-static   =/ "BINARY" section-binary ["<" number ">"] SP
       #                       (nstring / literal8)
-      def msg_att(n)
+      def msg_att(n, data = nil)
         lpar
-        attr = {}
+        attr = data&.attr || {}
         while true
           name = msg_att__label; SP!
           val =
@@ -947,16 +954,20 @@ module Net
             when "UID"                  then uniqueid
             when "FLAGS"                then flag_list
             when "BODY"                 then body
-            when /\ABODY\[/ni           then nstring
+            when /\ABODY\[/ni           then fetch_nstring(data, name, binary: false)
             when "BODYSTRUCTURE"        then body
             when "ENVELOPE"             then envelope
             when "INTERNALDATE"         then date_time
             when "RFC822.SIZE"          then number64
-            when /\ABINARY\[/ni         then nstring8           # BINARY, IMAP4rev2
+            when /\ABINARY\[/ni         then
+              fetch_nstring(data, name, binary: true) # BINARY, IMAP4rev2
             when /\ABINARY\.SIZE\[/ni   then number             # BINARY, IMAP4rev2
-            when "RFC822"               then nstring            # not in rev2
-            when "RFC822.HEADER"        then nstring            # not in rev2
-            when "RFC822.TEXT"          then nstring            # not in rev2
+            when "RFC822"               then
+              fetch_nstring(data, name, binary: false) # not in rev2
+            when "RFC822.HEADER"        then
+              fetch_nstring(data, name, binary: false) # not in rev2
+            when "RFC822.TEXT"          then
+              fetch_nstring(data, name, binary: false) # not in rev2
             when "MODSEQ"               then parens__modseq     # CONDSTORE
             when "EMAILID"              then parens__objectid   # OBJECTID
             when "THREADID"             then nparens__objectid  # OBJECTID
@@ -971,6 +982,14 @@ module Net
         end
         rpar
         attr
+      end
+
+      def fetch_nstring(data, name, binary:)
+        return NIL? ? nil : (binary ? string8 : string) unless data
+        @fetch_literal_context = {response: data, field: name, binary:}
+        NIL? ? nil : (binary ? string8 : string)
+      ensure
+        @fetch_literal_context = nil
       end
 
       # appends "[section]" and "<partial>" to the base label
@@ -2288,6 +2307,29 @@ module Net
 
       def literal_token(len, type = T_LITERAL)
         len = NumValidator.coerce_number64 len
+        context = @fetch_literal_context
+        if @literal_receiver
+          prefix = "#{?~ if type == T_LITERAL8}{#{len}}#{CRLF}".b
+          @pos -= prefix.bytesize
+          metadata =
+            if context
+              context.merge(bytesize: len)
+            else
+              {response: nil, field: nil, bytesize: len, binary: type == T_LITERAL8}
+            end
+          destination = @literal_receiver.call(metadata)
+          @pos += prefix.bytesize
+          if destination
+            context or parse_error("literal reference requires a FETCH field")
+            @token = nil
+            return Token.new(type, FetchData::LiteralReference.new(
+              field:    context[:field],
+              bytesize: len,
+              receiver: destination,
+              binary:   context[:binary],
+            ))
+          end
+        end
         val = @str[@pos, len]
         @pos += len
         Token.new(type, val)

@@ -517,6 +517,14 @@ module Net
     #
     # See FetchStruct documentation for a list of standard message attributes.
     class FetchData < FetchStruct.new(:seqno, :attr)
+      # Represents a literal FETCH attribute that was consumed by a literal
+      # receiver instead of being retained as a Ruby string.
+      #
+      # +field+ is the FETCH attribute name, +bytesize+ is the protocol literal
+      # length, +receiver+ is the object returned by the receiver, and +binary+
+      # indicates a literal8.
+      LiteralReference = Data.define(:field, :bytesize, :receiver, :binary)
+
       ##
       # :method: seqno
       # :call-seq: seqno -> Integer

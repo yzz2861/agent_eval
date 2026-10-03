@@ -2842,7 +2842,7 @@ module Net
     end
 
     # :call-seq:
-    #   fetch(set, attr, changedsince: nil) -> array of FetchData
+    #   fetch(set, attr, changedsince: nil, literal_receiver: nil) -> array of FetchData
     #
     # Sends a {FETCH command [IMAP4rev1 §6.4.5]}[https://www.rfc-editor.org/rfc/rfc3501#section-6.4.5]
     # to retrieve data associated with a message in the mailbox.
@@ -2865,6 +2865,13 @@ module Net
     # messages with a mod-sequence greater than +changedsince+.
     #
     # The return value is an array of FetchData.
+    #
+    # +literal_receiver+ receives metadata for FETCH fields whose value is a
+    # protocol literal.  Return a writable object to consume that literal in
+    # small chunks; the corresponding FetchData attribute is then a
+    # FetchData::LiteralReference instead of a string.
+    # The receiver is called in the receiver thread, and returned objects are
+    # not closed by Net::IMAP.
     #
     # Related: #uid_fetch, FetchData
     #
@@ -2903,7 +2910,8 @@ module Net
     end
 
     # :call-seq:
-    #   uid_fetch(set, attr, changedsince: nil, partial: nil) -> array of FetchData (or UIDFetchData)
+    #   uid_fetch(set, attr, changedsince: nil, partial: nil,
+    #             literal_receiver: nil) -> array of FetchData (or UIDFetchData)
     #
     # Sends a {UID FETCH command [IMAP4rev1 §6.4.8]}[https://www.rfc-editor.org/rfc/rfc3501#section-6.4.8]
     # to retrieve data associated with a message in the mailbox.
@@ -2922,6 +2930,7 @@ module Net
     # +changedsince+ (optional) behaves the same as with #fetch.
     #
     # +partial+ is an optional range to limit the number of results returned.
+    # +literal_receiver+ behaves the same as with #fetch.
     # It's useful when +set+ contains an unknown number of messages.
     # <tt>1..500</tt> returns the first 500 messages in +set+ (in mailbox
     # order), <tt>501..1000</tt> the second 500, and so on.  +partial+ may also
@@ -3740,10 +3749,10 @@ module Net
     end
 
     def get_response
-      buff = @reader.read_response_buffer
-      return nil if buff.length == 0
-      $stderr.print(buff.gsub(/^/n, "S: ")) if config.debug?
-      @parser.parse(buff)
+      response = @reader.read_response
+      return nil unless response
+      $stderr.print(response.raw_data.gsub(/^/n, "S: ")) if config.debug?
+      response
     end
 
     #############################
@@ -4041,7 +4050,8 @@ module Net
       end
     end
 
-    def fetch_internal(cmd, set, attr, mod = nil, partial: nil, changedsince: nil)
+    def fetch_internal(cmd, set, attr, mod = nil, partial: nil, changedsince: nil,
+                       literal_receiver: nil)
       if partial && !cmd.start_with?("UID ")
         raise ArgumentError, "partial can only be used with uid_fetch"
       end
@@ -4068,7 +4078,7 @@ module Net
 
       args = [cmd, set, attr]
       args << mod if mod
-      send_command_returning_fetch_results(*args)
+      send_command_returning_fetch_results(*args, literal_receiver: literal_receiver)
     end
 
     def store_internal(cmd, set, attr, flags, unchangedsince: nil)
@@ -4079,15 +4089,25 @@ module Net
       send_command_returning_fetch_results(cmd, *args)
     end
 
-    def send_command_returning_fetch_results(...)
+    def send_command_returning_fetch_results(*args, literal_receiver: nil)
       synchronize do
         clear_responses("FETCH")
         clear_responses("UIDFETCH")
-        send_command(...)
+        with_literal_receiver(literal_receiver) do
+          send_command(*args)
+        end
         fetches    = clear_responses("FETCH")
         uidfetches = clear_responses("UIDFETCH")
         uidfetches.any? ? uidfetches : fetches
       end
+    end
+
+    def with_literal_receiver(receiver)
+      return yield unless receiver
+      @reader.literal_receiver = receiver
+      yield
+    ensure
+      @reader.literal_receiver = nil if receiver
     end
 
     def copy_internal(cmd, set, mailbox)
