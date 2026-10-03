@@ -100,6 +100,32 @@ cp.with { |conn| conn.get('some-count') }
 
 Like `shutdown`, `reload` will block until all connections are checked in and closed.
 
+## Resize
+
+You can change the pool capacity at runtime with `resize`.
+Growing the pool wakes up waiting threads so they immediately get new capacity.
+Shrinking the pool first closes idle connections; connections that are still
+checked out keep working and are closed as they are checked back in, until the
+pool converges to the new size.
+
+An optional block is called with every connection removed by the resize so it
+can be closed. Errors raised by the block are swallowed to keep pool state
+consistent.
+
+```ruby
+cp = ConnectionPool.new(size: 5) { Redis.new }
+cp.resize(10) # scale up, waiters wake up immediately
+cp.resize(2) { |conn| conn.quit } # scale down, closing removed connections
+```
+
+Use `stats` to inspect the pool while a resize is converging. It
+distinguishes the target capacity, checked out connections and checked out
+connections that are still pending reap after a shrink:
+
+```ruby
+cp.stats # => {size: 2, created: 4, idle: 1, checked_out: 3, pending_reap: 2}
+```
+
 ## Reap
 
 You can call `reap` periodically on the ConnectionPool instance to close connections that were created but have not been used for a certain amount of time. This can be useful in environments where connections are expensive.

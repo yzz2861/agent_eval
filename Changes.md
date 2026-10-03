@@ -1,5 +1,14 @@
 # connection_pool Changelog
 
+Unreleased
+------
+
+- Add `ConnectionPool#resize` to change the pool capacity at runtime.
+  Growing wakes up waiting threads; shrinking reaps idle connections first
+  and reaps checked out connections as they are checked in.
+- Add `ConnectionPool#stats` reporting the target size, created, idle,
+  checked out and pending-reap connection counts.
+
 3.0.2
 ------
 

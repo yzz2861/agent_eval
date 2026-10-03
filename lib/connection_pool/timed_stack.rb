@@ -30,6 +30,7 @@ class ConnectionPool::TimedStack
     @mutex = Thread::Mutex.new
     @resource = Thread::ConditionVariable.new
     @shutdown_block = nil
+    @reap_block = nil
   end
 
   ##
@@ -40,6 +41,11 @@ class ConnectionPool::TimedStack
       if @shutdown_block
         @created -= 1 unless @created == 0
         @shutdown_block.call(obj)
+      elsif @created > @max
+        # The pool was shrunk while this connection was checked out, so it
+        # is reaped on return instead of going back onto the stack.
+        @created -= 1
+        reap_connection(obj)
       else
         store_connection obj, **kwargs
       end
@@ -121,6 +127,50 @@ class ConnectionPool::TimedStack
   end
 
   ##
+  # Resizes the pool to +new_size+ connections and returns the new size.
+  #
+  # Growing the pool wakes up waiting threads so they can immediately create
+  # and check out new connections. Shrinking the pool first reaps idle
+  # connections; connections that are still checked out keep working and are
+  # reaped as they are pushed back, until the pool converges to +new_size+.
+  #
+  # An optional block is called with every connection removed by the resize
+  # so it can be closed. Errors raised by the block are swallowed to keep the
+  # pool bookkeeping consistent.
+  def resize(new_size, &block)
+    new_size = Integer(new_size)
+    raise ArgumentError, "Connection pool size cannot be negative" if new_size.negative?
+
+    @mutex.synchronize do
+      @max = new_size
+      @reap_block = block if block
+      reap_excess_idle_connections
+      @resource.broadcast
+    end
+    new_size
+  end
+
+  ##
+  # Returns a snapshot of pool metrics:
+  # - :size - the target capacity of the pool
+  # - :created - connections currently created, both idle and checked out
+  # - :idle - created connections currently sitting on the stack
+  # - :checked_out - created connections currently checked out
+  # - :pending_reap - checked out connections that will be reaped on checkin
+  #   because the pool was shrunk below the created count
+  def stats
+    @mutex.synchronize do
+      {
+        size: @max,
+        created: @created,
+        idle: @que.length,
+        checked_out: @created - @que.length,
+        pending_reap: [@created - @max, 0].max
+      }
+    end
+  end
+
+  ##
   # Returns +true+ if there are no available connections.
   def empty?
     (@created - @que.length) >= @max
@@ -129,7 +179,7 @@ class ConnectionPool::TimedStack
   ##
   # The number of connections available on the stack.
   def length
-    @max - @created + @que.length
+    @que.length + [@max - @created, 0].max
   end
 
   ##
@@ -230,10 +280,35 @@ class ConnectionPool::TimedStack
   # This method must create a connection if and only if the total number of
   # connections allowed has not been met.
   def try_create(**_kwargs)
-    unless @created == @max
+    if @created < @max
       object = @create_block.call
       @created += 1
       object
     end
+  end
+
+  ##
+  # This is an extension point for TimedStack and is called with a mutex.
+  #
+  # This method must reap idle connections until the created count no longer
+  # exceeds the (possibly newly shrunk) maximum. Checked out connections are
+  # reaped on checkin instead, see +push+.
+  def reap_excess_idle_connections
+    while @created > @max && (entry = @que.shift)
+      @created -= 1
+      reap_connection(entry.first)
+    end
+  end
+
+  ##
+  # This is an extension point for TimedStack and is called with a mutex.
+  #
+  # This method must dispose of +obj+, passing it to the current reap block.
+  # Errors raised by the block are swallowed so pool bookkeeping stays
+  # consistent and the pool remains usable.
+  def reap_connection(obj)
+    @reap_block&.call(obj)
+  rescue
+    nil
   end
 end

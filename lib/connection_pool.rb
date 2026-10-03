@@ -164,6 +164,29 @@ class ConnectionPool
   end
 
   ##
+  # Resizes the ConnectionPool to +new_size+ connections at runtime.
+  #
+  # Growing the pool wakes up waiting threads so they immediately get new
+  # capacity. Shrinking the pool first closes idle connections; connections
+  # that are still checked out keep working and are closed as they are
+  # checked back in, until the pool converges to +new_size+.
+  #
+  # An optional block is called with every connection removed by the resize
+  # so it can be closed, e.g. +pool.resize(2) { |conn| conn.close }+.
+  # Errors raised by the block are swallowed to keep pool state consistent.
+  def resize(new_size, &block)
+    @size = @available.resize(new_size, &block)
+  end
+
+  ##
+  # Returns a snapshot of pool metrics, distinguishing the target capacity
+  # (:size), currently checked out connections (:checked_out) and checked
+  # out connections still to be reaped after a shrink (:pending_reap).
+  def stats
+    @available.stats
+  end
+
+  ##
   # Reloads the ConnectionPool by passing each connection to +block+ and then
   # removing it the pool. Subsequent checkouts will create new connections as
   # needed.
