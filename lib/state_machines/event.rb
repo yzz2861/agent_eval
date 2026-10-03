@@ -21,6 +21,10 @@ module StateMachines
     # The human-readable name for the event
     attr_writer :human_name
 
+    # The business cost of firing this event, used by path planning.  Must be
+    # a non-negative number.  Defaults to 1.
+    attr_reader :weight
+
     # The list of branches that determine what state this event transitions
     # objects to when fired
     attr_reader :branches
@@ -33,13 +37,14 @@ module StateMachines
     #
     # Configuration options:
     # * <tt>:human_name</tt> - The human-readable version of this event's name
-    def initialize(machine, name, options = nil, human_name: nil, **extra_options) # :nodoc:
+    def initialize(machine, name, options = nil, human_name: nil, weight: nil, **extra_options) # :nodoc:
       # Handle both old hash style and new kwargs style for backward compatibility
       case options
       in Hash
         # Old style: initialize(machine, name, {human_name: 'Custom Name'})
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :human_name, :weight)
         human_name = options[:human_name]
+        weight = options[:weight] if options.include?(:weight)
       in nil
         # New style: initialize(machine, name, human_name: 'Custom Name')
         StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :human_name) unless extra_options.empty?
@@ -52,6 +57,8 @@ module StateMachines
       @name = name
       @qualified_name = machine.namespace ? :"#{name}_#{machine.namespace}" : name
       @human_name = human_name || @name.to_s.tr('_', ' ')
+      @weight = 1
+      self.weight = weight unless weight.nil?
       reset
 
       # Output a warning if another event has a conflicting qualified name
@@ -75,6 +82,15 @@ module StateMachines
     # "turn on" instead of "turn_on"
     def human_name(klass = @machine.owner_class)
       @human_name.is_a?(Proc) ? @human_name.call(self, klass) : @human_name
+    end
+
+    # Sets the business cost of firing this event.  Weights must be
+    # non-negative numbers so that path planning can rely on deterministic
+    # shortest-path rules.
+    def weight=(value)
+      raise ArgumentError, "weight must be a non-negative number, got #{value.inspect}" unless value.is_a?(Numeric) && value >= 0
+
+      @weight = value
     end
 
     # Evaluates the given block within the context of this event.  This simply

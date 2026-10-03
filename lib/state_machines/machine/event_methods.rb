@@ -231,7 +231,7 @@ module StateMachines
       #   end
       def event(*names, &)
         options = names.last.is_a?(Hash) ? names.pop : {}
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :human_name, :weight)
 
         # Store the context so that it can be used for / matched against any event
         # that gets added
@@ -249,6 +249,7 @@ module StateMachines
           # Update the configuration for the event(s)
           events.each do |event|
             event.human_name = options[:human_name] if options.include?(:human_name)
+            event.weight = options[:weight] if options.include?(:weight)
 
             # Add any states that may have been referenced within the event
             add_states(event.known_states)
@@ -430,6 +431,38 @@ module StateMachines
       #   vehicle.state_paths.events    # => [:ignite, :shift_up, :shift_down]
       def paths_for(object, requirements = {})
         PathCollection.new(object, self, requirements)
+      end
+
+      # Plans the cheapest sequence of events that transitions the given
+      # object to a target state, based on the business cost (weight) of each
+      # event.  Returns a StateMachines::Plan, or nil if the target state
+      # cannot be reached.
+      #
+      # Planning never fires events, runs actions, or evaluates guard
+      # conditions unless they are explicitly whitelisted via the
+      # <tt>:evaluate_guards</tt> option.  Guards that remain unverified are
+      # reported on the plan and are still re-checked when the events are
+      # actually fired.
+      #
+      # Requirement options:
+      # * <tt>:from</tt> - The initial state to start from.  Default is the
+      #   object's current state.
+      # * <tt>:to</tt> - The target state to plan towards.  Required.
+      # * <tt>:weights</tt> - A hash of event name => cost, overriding the
+      #   weights defined on the events for this planning run.
+      # * <tt>:evaluate_guards</tt> - Guard conditions allowed to be evaluated
+      #   against the object during this planning run.  All other guards are
+      #   treated as unknown.
+      #
+      # == Examples
+      #
+      #   vehicle = Vehicle.new   # => #<Vehicle:0xb7c27024 @state="parked">
+      #   plan = Vehicle.state_machine.plan_for(vehicle, to: :first_gear)
+      #   plan.events             # => [:ignite, :shift_up]
+      #   plan.total_cost         # => 2
+      #   plan.pending_guards     # => [{event: :ignite, if: [:seatbelt_on?]}]
+      def plan_for(object, requirements = {})
+        Planner.new(object, self, requirements).plan
       end
     end
   end

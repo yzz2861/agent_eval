@@ -492,6 +492,67 @@ vehicle.state_name              # => :parked
 # vehicle.state = :parked
 ```
 
+## Planning the cheapest path to a state
+
+Operational UIs often need to answer "what would it take to get this object
+into state X?" before anything is executed.  Events can declare a business
+cost (weight), and a planner can then compute the cheapest sequence of events
+that reaches a target state:
+
+```ruby
+class Vehicle
+  state_machine initial: :parked do
+    event :ignite, weight: 1 do
+      transition parked: :idling, if: :seatbelt_on?
+    end
+
+    event :shift_up, weight: 3 do
+      transition idling: :first_gear
+    end
+
+    event :tow, weight: 10 do
+      transition parked: :first_gear
+    end
+  end
+end
+
+vehicle = Vehicle.new
+plan = vehicle.state_plan(to: :first_gear)  # or Vehicle.state_machine.plan_for(vehicle, to: :first_gear)
+plan.events                                 # => [:ignite, :shift_up] (cheaper than [:tow])
+plan.total_cost                             # => 4
+plan.pending_guards                         # => [{event: :ignite, if: [:seatbelt_on?]}]
+plan.verified?                              # => false
+```
+
+Planning is strictly read-only and follows deterministic rules:
+
+* **No side effects** - Planning never fires events, runs actions, or runs
+  callbacks, and the object's state is never changed.
+* **Guards stay unknown unless whitelisted** - Arbitrary Ruby guards are not
+  treated as static truths.  By default every :if / :unless / state guard is
+  left unevaluated and reported via the plan's pending guards.  Pass
+  :evaluate_guards to explicitly allow specific guards to be evaluated
+  against the object for this planning run; branches whose whitelisted guards
+  fail are skipped.  Firing the planned events afterwards still re-checks
+  every guard, so a plan is a hint, never a guarantee.
+* **Deterministic optimum** - The plan minimizes total cost.  Ties are broken
+  by fewer events first, then by the lexicographically smaller sequence of
+  event names, so equal-cost alternatives always resolve to the same plan.
+* **Zero-weight cycles** - Zero-cost loops (e.g. a no-op event) cannot cause
+  infinite searches and are never pointlessly included in a plan.
+* **Unreachable targets** - plan_for returns nil when the target state cannot
+  be reached.  If the object is already in the target state, the plan is
+  empty with a total cost of 0.
+
+Weights default to 1 and must be non-negative numbers.  They can be
+overridden per planning run without changing the machine definition:
+
+```ruby
+Vehicle.state_machine.plan_for(vehicle, to: :first_gear,
+  weights: { tow: 2 },                    # override event weights for this run
+  evaluate_guards: [:seatbelt_on?])       # guards allowed to run during planning
+```
+
 ## Testing
 
 State Machines provides an optional `TestHelper` module with assertion methods to make testing state machines easier and more expressive.
