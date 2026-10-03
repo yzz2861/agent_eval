@@ -68,11 +68,23 @@ module Mustermann
     # @return (see Mustermann::Pattern#params)
     def params(string = nil)
       return unless md = @regexp.match(string)
+      return unless valid_match_data?(md)
       build_params(md)
     end
 
     extend Forwardable
-    def_delegators :regexp, :===, :=~, :names
+    def_delegators :regexp, :names
+
+    # @return [Boolean] whether the regular expression matches and the +:equal+
+    #   duplicate capture strategy is satisfied.
+    def ===(string)
+      !!@regexp.match(string) && valid_match_data?(($~))
+    end
+
+    # @return [Integer, nil] 0 if the pattern matches, nil otherwise.
+    def =~(string)
+      0 if self === string
+    end
 
     private
 
@@ -87,6 +99,7 @@ module Mustermann
 
     def build_match(regexp, string)
       return unless match = regexp.match(string)
+      return unless valid_match_data?(match)
       Match.new(self, match, params: build_params(match))
     end
 
@@ -97,10 +110,43 @@ module Mustermann
         params.each_with_object({}) { |(k, v), h| h[k] = map_param(k, v) }
       else
         match.regexp.named_captures.to_h do |name, positions|
-          value = positions.size < 2 && !always_array?(name) ? map_param(name, match[name]) :
-            positions.flat_map { |pos| map_param(name, match[pos]) }
+          present = positions.filter_map { |pos| match[pos] }
+          value =
+            if positions.size < 2 && !always_array?(name)
+              map_param(name, match[name])
+            elsif collect_capture?(name)
+              present.map { |v| map_param(name, v) }
+            elsif equal_capture?(name)
+              map_param(name, present.first)
+            elsif always_array?(name)
+              positions.flat_map { |pos| Array(map_param(name, match[pos])) }
+            else
+              present.size < 2 ? map_param(name, present.first) : present.map { |v| map_param(name, v) }
+            end
           [name, value]
         end
+      end
+    end
+
+    # Whether a capture name occurs more than once. Overridden by AST patterns.
+    # @!visibility private
+    def repeated_capture?(_name) = false
+
+    # Whether a repeated name collects all present values into an array.
+    # @!visibility private
+    def collect_capture?(_name) = false
+
+    # Whether a repeated name requires all occurrences to be equal (scalar result).
+    # @!visibility private
+    def equal_capture?(_name) = false
+
+    # @!visibility private
+    def valid_match_data?(match)
+      return true if @simple_captures
+      match.regexp.named_captures.all? do |name, positions|
+        next true unless repeated_capture?(name) && equal_capture?(name)
+        values = positions.filter_map { |pos| map_param(name, match[pos]) }
+        values.uniq.size <= 1
       end
     end
 

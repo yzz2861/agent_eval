@@ -28,6 +28,9 @@ module Mustermann
     # @return [Regexp, nil] the regular expression that produced the match, if available
     attr_reader :regexp
 
+    # @return [MatchData, nil] the raw MatchData this match was built from, if any
+    attr_reader :match_data
+
     # @overload initialize(pattern, string, **options)
     #   @param pattern [Mustermann::Pattern] the pattern that produced the match
     #   @param string [String] the string that was matched
@@ -45,7 +48,7 @@ module Mustermann
     # @option options [Regexp] :regexp the regular expression that produced the match
     # @option options [String] :post_match the post match string
     # @option options [String] :pre_match the pre match string
-    def initialize(pattern_or_match, string_or_match = nil, matched: nil, params: nil, post_match: nil, pre_match: nil, captures: nil, named_captures: nil, regexp: nil)
+    def initialize(pattern_or_match, string_or_match = nil, matched: nil, params: nil, post_match: nil, pre_match: nil, captures: nil, named_captures: nil, regexp: nil, capture_ranges: nil)
       case pattern_or_match
       when Mustermann::Match, MatchData then match = pattern_or_match
       when Mustermann::Pattern          then pattern = pattern_or_match
@@ -72,6 +75,24 @@ module Mustermann
         @regexp = match.regexp if match.respond_to?(:regexp)
         @regexp ||= pattern.respond_to?(:regexp) ? pattern.regexp : nil
       end
+
+      @match_data     = match if match.is_a?(MatchData)
+      @match_data   ||= match.match_data if match.is_a?(Mustermann::Match)
+      @capture_ranges = capture_ranges || (match.capture_ranges if match.is_a?(Mustermann::Match))
+    end
+
+    # Character ranges of the raw (not URI-decoded) captures inside {#string}.
+    # A capture occurring once maps to a single Range; a repeated capture name
+    # maps to one entry per occurrence (nil for an absent optional occurrence).
+    #
+    # @example repeated captures
+    #   pattern = Mustermann.new('/accounts/:id/mirror/:id', duplicate_captures: :collect)
+    #   match   = pattern.match('/accounts/42/mirror/17')
+    #   match.capture_ranges['id'] # => [10...12, 20...22]
+    #
+    # @return [Hash{String => Range, Array<Range, nil>}]
+    def capture_ranges
+      @capture_ranges ||= build_capture_ranges
     end
 
     # @return [Array<String>] the names of the named captures
@@ -149,6 +170,20 @@ module Mustermann
           q.text("#{key}:")
           q.pp value
         end
+      end
+    end
+
+    private
+
+    def build_capture_ranges
+      return EMPTY_HASH unless md = @match_data
+      md.regexp.named_captures.to_h do |name, positions|
+        ranges = positions.map do |position|
+          start, stop = md.offset(position)
+          next nil if start.nil? || start < 0
+          start...stop
+        end
+        [name, ranges.size < 2 ? ranges.first : ranges]
       end
     end
   end

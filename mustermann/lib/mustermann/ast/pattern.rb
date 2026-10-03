@@ -16,7 +16,7 @@ module Mustermann
     # Superclass for pattern styles that parse an AST from the string pattern.
     # @abstract
     class Pattern < Mustermann::RegexpBased
-      supported_options :capture, :except, :greedy, :space_matches_plus
+      supported_options :capture, :duplicate_captures, :except, :greedy, :space_matches_plus
 
       extend Forwardable, SingleForwardable
       single_delegate on: :parser, suffix: :parser
@@ -108,11 +108,35 @@ module Mustermann
           ast   = parse(@string, pattern: self)
           ast &&= transform(ast)
           ast &&= set_boundaries(ast, string: @string)
-          validate(ast)
+          validation.validate(ast, **options)
         end
         @param_converters ||= Mustermann.dedup(scan_params(ast, options)) if ast
         ast
       end
+
+      # @return [Symbol] strategy for repeated capture names (+:raise+, +:equal+, or +:collect+)
+      # @!visibility private
+      def duplicate_captures
+        @duplicate_captures ||= options.fetch(:duplicate_captures, :raise)
+      end
+
+      # @return [Hash{String => Integer}] how often every capture name occurs in the pattern
+      # @!visibility private
+      def capture_occurrences
+        @capture_occurrences ||= Mustermann.dedup(AST::Validation.occurrences(to_ast))
+      end
+
+      # @see Mustermann::RegexpBased#repeated_capture?
+      # @!visibility private
+      def repeated_capture?(name) = capture_occurrences[name.to_s].to_i > 1
+
+      # @see Mustermann::RegexpBased#collect_capture?
+      # @!visibility private
+      def collect_capture?(name) = duplicate_captures == :collect && repeated_capture?(name)
+
+      # @see Mustermann::RegexpBased#equal_capture?
+      # @!visibility private
+      def equal_capture?(name) = duplicate_captures == :equal && repeated_capture?(name)
 
       # All AST-based pattern implementations support expanding.
       #

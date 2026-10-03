@@ -9,7 +9,8 @@ module Mustermann
       # @see Mustermann::Pattern#+
       # @!visibility private
       def +(other)
-        other &&= Mustermann.new(other, type: :identity, **options)
+        identity_options = options.select { |key, _| Mustermann::Identity.supported?(key, **options) }
+        other &&= Mustermann.new(other, type: :identity, **identity_options)
         if (patterns = look_ahead(other)) && !patterns.empty?
           concat = (self + patterns.inject(:+))
           concat + other.patterns.slice(patterns.length..-1).inject(:+)
@@ -42,7 +43,7 @@ module Mustermann
     # @!visibility private
     def initialize(*, **)
       super
-      AST::Validation.validate(combined_ast) if respond_to? :expand
+      AST::Validation.validate(combined_ast, **options) if respond_to? :expand
     end
 
     # @see Mustermann::Composite#operator
@@ -100,7 +101,9 @@ module Mustermann
     # (see Mustermann::Pattern#expand)
     def expand(behavior = nil, values = {})
       raise NotImplementedError, 'expanding not supported' unless respond_to? :expand
-      @expander ||= Mustermann::Expander.new(self) { combined_ast }
+      options = patterns.map(&:options).compact
+      duplicate = options.map { |o| o[:duplicate_captures] }.compact.first || :raise
+      @expander ||= Mustermann::Expander.new(self, duplicate_captures: duplicate) { combined_ast }
       @expander.expand(behavior, values)
     end
 

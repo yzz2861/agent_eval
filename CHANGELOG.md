@@ -4,6 +4,10 @@ Mustermann follows [Semantic Versioning 2.0](http://semver.org/). Anything docum
 
 ## Unreleased changes
 
+#### New features
+
+* Added a `duplicate_captures` option for patterns using the same capture name more than once (e.g. `/accounts/:id/mirror/:id`). The default (`:raise`) keeps rejecting such patterns; `:equal` requires every occurrence to carry the same URI decoded value, while `:collect` gathers all occurrences in order. `Mustermann::Match#capture_ranges` exposes the raw (still encoded) range of every occurrence, and expansion validates scalars and lists against the configured strategy, including absent optional occurrences and constrained captures.
+
 ### Mustermann 4.0.1
 
 #### Performance improvements

@@ -29,8 +29,8 @@ module Mustermann
       # Public override: fast path for simple patterns, falls through to super otherwise.
       # Must remain public to match AST::Pattern#to_ast visibility.
       def to_ast
-        return super unless simple_pattern?
-        ast = self.class.ast_cache.fetch(@string) { build_fast_ast }
+        return super unless simple_pattern? && fast_captures_supported?
+        ast = self.class.ast_cache.fetch([@string, options]) { build_fast_ast }
         @param_converters ||= EMPTY_HASH
         ast
       end
@@ -61,11 +61,27 @@ module Mustermann
           @string.match?(SIMPLE)
       end
 
+      def fast_captures_supported?
+        duplicate_captures == :raise || !fast_duplicate_names?
+      end
+
+      # Simple patterns never use optional groups, so any repeated name here is
+      # a real duplicate capture rejected by validation on the slow path.
+      def fast_duplicate_names?
+        @string.scan(/:[a-zA-Z_]\w*/).tally.values.any? { |count| count > 1 }
+      end
+
       def compile(**options)
         return super unless simple_pattern?
-        result = fast_compile
-        @fast_match = true
-        result
+        validate_fast_duplicates!(**options) if fast_duplicate_names? && duplicate_captures == :raise
+        return super unless fast_captures_supported?
+        fast_compile.tap { @fast_match = true }
+      end
+
+      def validate_fast_duplicates!(**options)
+        validation.validate(build_fast_ast, **options)
+      rescue CompileError => error
+        raise error.class, "#{error.message}: #{@string.inspect}", error.backtrace
       end
 
       def fast_compile

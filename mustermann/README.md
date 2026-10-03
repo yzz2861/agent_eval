@@ -709,6 +709,50 @@ pattern === '/foo.jpg' # => true
 pattern === '/foo.png' # => false
 ```
 
+<a name="-available-options--duplicate_captures"></a>
+### `duplicate_captures`
+
+Supported by: All AST based pattern types (Sinatra, Rails, Template, etc.), but not `identity` or `regexp`.
+Default value: `:raise`
+
+By default, using the same capture name more than once (e.g. `/accounts/:id/mirror/:id`) raises a `Mustermann::CompileError`, since silently keeping the last capture is usually a mistake. Set this option to one of the following values to opt into an explicit behavior:
+
+- `:raise` (default): raises a compile error.
+- `:equal`: all occurrences have to carry the same *URI decoded* value, otherwise the pattern does not match. The resulting param is a single scalar.
+- `:collect`: all values are collected into an array, in order of appearance. Absent optional occurrences are simply omitted from the array.
+
+``` ruby
+Mustermann.new('/accounts/:id/mirror/:id')                                  # raises Mustermann::CompileError
+
+equal = Mustermann.new('/accounts/:id/mirror/:id', duplicate_captures: :equal)
+equal.params('/accounts/42/mirror/42')   # => {"id" => "42"}
+equal.params('/accounts/%32/mirror/2')   # => {"id" => "2"} (values are compared after URI decoding)
+equal.params('/accounts/42/mirror/17')   # => nil (values differ)
+
+collect = Mustermann.new('/accounts/:id/mirror/:id', duplicate_captures: :collect)
+collect.params('/accounts/42/mirror/17') # => {"id" => ["42", "17"]}
+```
+
+The raw (still URI encoded) character range of every occurrence is available on the match object, with `nil` entries for absent optional occurrences:
+
+``` ruby
+match = collect.match('/accounts/42/mirror/17')
+match.capture_ranges['id']              # => [10...12, 20...22]
+match.string[match.capture_ranges['id'].first] # => "42"
+```
+
+When expanding, a scalar is broadcast to every occurrence, while an array has to provide exactly one value per occurrence. With `:equal`, all list entries have to be equal, and the error identifies the conflicting occurrence positions.
+
+``` ruby
+equal.expand(id: '9')                   # => "/accounts/9/mirror/9"
+equal.expand(id: ['9', '9'])            # => "/accounts/9/mirror/9"
+equal.expand(id: ['1', '2'])            # raises Mustermann::ExpandError (occurrences 1 vs 2 of :id)
+
+collect.expand(id: '7')                 # => "/accounts/7/mirror/7"
+collect.expand(id: ['1', '2'])          # => "/accounts/1/mirror/2"
+collect.expand(id: ['1', '2', '3'])     # raises Mustermann::ExpandError
+```
+
 <a name="-available-options--greedy"></a>
 ### `greedy`
 

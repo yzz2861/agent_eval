@@ -70,7 +70,7 @@ module Mustermann
 
       attr_accessor :patterns, :set, :static, :dynamic
 
-      def initialize(set, patterns = nil)
+      def initialize(set, patterns = nil, repeated_names: EMPTY_ARRAY)
         @set             = set
         @patterns        = nil
         @dynamic         = nil
@@ -79,6 +79,8 @@ module Mustermann
         @fast_static     = nil
         @byte_lookup     = nil
         @dynamic_entries = nil
+        @repeated_names  = repeated_names
+        @repeated_names  = @repeated_names.dup if @repeated_names.frozen?
         patterns&.each { |pattern| add(pattern) }
       end
 
@@ -86,29 +88,29 @@ module Mustermann
         case key = Mustermann.dedup(key)
         when String
           @static      ||= {}
-          @static[key] ||= Trie.new(@set)
+          @static[key] ||= Trie.new(@set, repeated_names: @repeated_names)
         when Regexp
           @dynamic      ||= {}
-          @dynamic[key] ||= Trie.new(@set)
+          @dynamic[key] ||= Trie.new(@set, repeated_names: @repeated_names)
         end
       end
 
-      def match(string, all: false, peek: false, position: 0, params: {})
+      def match(string, all: false, peek: false, position: 0, params: {}, ranges: {})
         optimize! if @stride.nil?
-        return build_matches(string, params, all:) if position >= string.size
+        return build_matches(string, params, all:, ranges:) if position >= string.size
         result = [] if all
 
         if @fast_static
           stride = @stride
           if node = @fast_static[string[position, stride]]
-            if nested_result = node.match(string, all:, peek:, position: position + stride, params:)
+            if nested_result = node.match(string, all:, peek:, position: position + stride, params:, ranges:)
               return nested_result unless all
               result.concat(nested_result)
             end
           end
         elsif @byte_lookup
           if node = @byte_lookup[string.getbyte(position)]
-            if nested_result = node.match(string, all:, peek:, position: position + 1, params:)
+            if nested_result = node.match(string, all:, peek:, position: position + 1, params:, ranges:)
               return nested_result unless all
               result.concat(nested_result)
             end
@@ -117,14 +119,18 @@ module Mustermann
 
         if @dynamic_entries&.any?
           base_params = all ? params : nil
+          base_ranges = all ? ranges : nil
           @dynamic_entries.each do |matcher, node, capture_names, fast_name|
             if fast_name
               # Fast path: unconstrained single-segment capture — no regex, no MatchData.
-              end_pos = string.index('/', position) || string.size
+              end_char = string.index('/', position) || string.size
+              end_pos  = string.byteslice(0, end_char).bytesize
               next if end_pos == position
               edge_params = all ? base_params.dup : params
+              edge_ranges = all ? base_ranges.dup : ranges
               edge_params[fast_name] = string.byteslice(position, end_pos - position)
-              nested_result = node.match(string, all:, params: edge_params, peek:, position: end_pos)
+              append_range(edge_ranges, fast_name, byte_to_char(string, position)...byte_to_char(string, end_pos))
+              nested_result = node.match(string, all:, params: edge_params, ranges: edge_ranges, peek:, position: end_pos)
               return nested_result unless all
               result.concat(nested_result)
               next
@@ -141,21 +147,26 @@ module Mustermann
             next unless regexp_match
 
             edge_params = all ? base_params.dup : params
-            capture_names.each do |name|
-              value = regexp_match[name]
-              next unless value
-              existing = edge_params[name]
-              edge_params[name] = existing ? (existing.is_a?(Array) ? existing << value : [existing, value]) : value
+            edge_ranges = all ? base_ranges.dup : ranges
+            matcher.named_captures.each do |name, groups|
+              groups.each do |group|
+                start, stop = regexp_match.offset(group)
+                next if start.nil? || start < 0
+                value = regexp_match[group]
+                existing = edge_params[name]
+                edge_params[name] = existing ? (existing.is_a?(Array) ? existing << value : [existing, value]) : value
+                append_range(edge_ranges, name, byte_to_char(string, start)...byte_to_char(string, stop))
+              end
             end
 
-            nested_result = node.match(string, all:, params: edge_params, peek:, position: regexp_match.end(0))
+            nested_result = node.match(string, all:, params: edge_params, ranges: edge_ranges, peek:, position: regexp_match.end(0))
             return nested_result unless all
             result.concat(nested_result)
           end
         end
 
         if peek
-          matches = build_matches(string, params, all:, matched_length: position, post_match: string[position..], pre_match: EMPTY_STRING)
+          matches = build_matches(string, params, all:, ranges:, matched_length: position, post_match: string[position..], pre_match: EMPTY_STRING)
           return matches unless all
           result.concat(matches)
         end
@@ -165,18 +176,19 @@ module Mustermann
 
       NIL_VALUES = [nil].freeze
 
-      def build_matches(string, params, all: false, matched_length: string.size, post_match: EMPTY_STRING, pre_match: EMPTY_STRING)
+      def build_matches(string, params, all: false, ranges: {}, matched_length: string.size, post_match: EMPTY_STRING, pre_match: EMPTY_STRING)
         result = [] if all
         matched = string[0, matched_length]
 
         @patterns&.each do |pattern|
           next if pattern.except_regexp&.match?(matched)
 
-          pattern_params = build_pattern_params(pattern, params)
+          next unless valid_edge_params?(pattern, params)
+          pattern_params, pattern_ranges = build_pattern_params(pattern, params, ranges)
 
           values = @set.values_for_pattern(pattern) || NIL_VALUES
           values.each do |value|
-            match = Set::Match.new(pattern, string, matched:, params: pattern_params, value:, post_match:, pre_match:)
+            match = Set::Match.new(pattern, string, matched:, params: pattern_params, value:, post_match:, pre_match:, capture_ranges: pattern_ranges)
             return match unless all
             result << match
           end
@@ -185,21 +197,66 @@ module Mustermann
         result
       end
 
-      def build_pattern_params(pattern, params)
-        return params if pattern.identity_params?(params)
-
+      def build_pattern_params(pattern, params, ranges)
+        if pattern.identity_params?(params)
+          finalized = params
+          pattern.capture_occurrences.each do |key, count|
+            next unless count > 1
+            finalized = finalized.dup if finalized.equal?(params)
+            if pattern.collect_capture?(key)
+              value = finalized.fetch(key, EMPTY_ARRAY)
+              finalized[key] = value.is_a?(Array) ? value : [value]
+            end
+          end
+          return [finalized, finalize_ranges(pattern, ranges)]
+        end
         result = {}
         params.each do |key, raw|
           if raw.is_a?(Array)
             val = raw.flat_map { |v| pattern.map_param(key, v) }
-            val = val.first if val.size < 2 && !pattern.always_array?(key)
+            val = val.first if (val.size < 2 || pattern.equal_capture?(key)) &&
+              !pattern.always_array?(key) && !pattern.collect_capture?(key)
           else
             val = pattern.map_param(key, raw)
             val = [val] if pattern.always_array?(key)
           end
           result[key] = val
         end
-        result
+        [result, finalize_ranges(pattern, ranges)]
+      end
+
+      def append_range(ranges, name, range)
+        existing = ranges[name]
+        ranges[name] = existing.is_a?(Array) ? existing.dup << range : existing ? [existing, range] : range
+      end
+
+      # Gives repeated captures one entry per occurrence (nil for absent
+      # optional occurrences), matching the regular expression based match path.
+      def finalize_ranges(pattern, ranges)
+        pattern.capture_occurrences.each_with_object({}) do |(name, count), result|
+          next unless ranges.key?(name)
+          value = ranges[name]
+          list = (count > 1 && value.is_a?(Array) ? value : [value]).first(count)
+          result[name] = count > 1 ? list.dup.fill(nil, list.length...count) : value
+        end.merge(ranges.reject { |name, _| pattern.repeated_capture?(name) })
+      end
+
+      # Checks the +:equal+ strategy against raw (still encoded) values; decoding
+      # is applied afterwards and preserves equality.
+      def valid_edge_params?(pattern, params)
+        return true unless pattern.duplicate_captures == :equal
+        pattern.capture_occurrences.all? do |name, count|
+          next true unless count > 1
+          value = params[name]
+          next true if value.nil?
+          values = value.is_a?(Array) ? value : [value]
+          values.map { |v| pattern.map_param(name, v) }.uniq.size <= 1
+        end
+      end
+
+      # Converts a byte offset into a character offset.
+      def byte_to_char(string, byte_offset)
+        string.byteslice(0, byte_offset).length
       end
 
       def add(pattern)
@@ -207,6 +264,9 @@ module Mustermann
         @fast_static     = nil
         @byte_lookup     = nil
         @dynamic_entries = nil
+        if pattern.respond_to?(:capture_occurrences)
+          pattern.capture_occurrences.each { |name, count| @repeated_names << name if count > 1 }
+        end
         Translator.new(pattern).translate(pattern.to_ast, self)
       end
 
@@ -241,7 +301,7 @@ module Mustermann
           # static chars) and (2) the capture's character class excludes '/' (PATH_INFO never has '?' or '#').
           fast = if names.size == 1
             name = names.first
-            matcher.source.start_with?("\\G(?<#{name}>") && !matcher.match?('/') ? name : nil
+            !@repeated_names.include?(name) && matcher.source.start_with?("\\G(?<#{name}>") && !matcher.match?('/') ? name : nil
           end
           [matcher, node, names, fast]
         end

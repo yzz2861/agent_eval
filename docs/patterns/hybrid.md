@@ -34,6 +34,7 @@ pattern.params('/a/b/c') # => { "prefix" => "a/b", "name" => "c" }
 
 **Supported options:**
 [`capture`](#-available-options--capture),
+[`duplicate_captures`](#-available-options--duplicate_captures),
 [`except`](#-available-options--except),
 [`greedy`](#-available-options--greedy),
 [`space_matches_plus`](#-available-options--space_matches_plus),

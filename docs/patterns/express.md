@@ -5,7 +5,7 @@ The `express` pattern type is implemented by the `mustermann-contrib` gem. It is
 ## Overview
 
 **Supported options:**
-`capture`, `except`, `greedy`, `space_matches_plus`, `uri_decode`, and `ignore_unknown_options`.
+`capture`, `duplicate_captures`, `except`, `greedy`, `space_matches_plus`, `uri_decode`, and `ignore_unknown_options`.
 
 **External documentation:**
 [path-to-regexp](https://github.com/pillarjs/path-to-regexp#path-to-regexp),

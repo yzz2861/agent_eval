@@ -4,6 +4,7 @@ The `sinatra` pattern type is implemented by Mustermann itself. Moreover, it is 
 
 **Supported options:**
 [`capture`](#-available-options--capture),
+[`duplicate_captures`](#-available-options--duplicate_captures),
 [`except`](#-available-options--except),
 [`greedy`](#-available-options--greedy),
 [`space_matches_plus`](#-available-options--space_matches_plus),

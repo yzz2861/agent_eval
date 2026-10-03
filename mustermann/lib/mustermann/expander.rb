@@ -47,12 +47,20 @@ module Mustermann
           add(*pattern.patterns)
           next
         end
-        pattern = Mustermann.new(pattern, **@options)
+        unless pattern.is_a?(Pattern)
+          pattern_class   = Mustermann[@options.fetch(:type, Mustermann::DEFAULT_TYPE)]
+          pattern_options = @options.select { |key, _| key == :type || pattern_class.supported?(key, **@options) }
+          pattern = Mustermann.new(pattern, **pattern_options)
+        end
         if block_given?
-          @api_expander.add(yield(pattern))
+          ast = yield(pattern)
+          pattern_options = pattern.respond_to?(:options) ? (pattern.options || EMPTY_HASH) : EMPTY_HASH
+          strategy = pattern_options.fetch(:duplicate_captures, @options[:duplicate_captures] || :raise)
+          @api_expander.add(ast, duplicate_captures: strategy)
         else
-          raise NotImplementedError, "expanding not supported for #{pattern.class}" unless pattern.respond_to? :to_ast
-          @api_expander.add(pattern.to_ast)
+          raise NotImplementedError, "expanding not supported for #{pattern.class}" unless pattern.respond_to?(:to_ast)
+          pattern_options = pattern.respond_to?(:options) ? (pattern.options || EMPTY_HASH) : EMPTY_HASH
+          @api_expander.add(pattern.to_ast, duplicate_captures: pattern_options.fetch(:duplicate_captures, :raise))
         end
         @patterns << pattern
       end
