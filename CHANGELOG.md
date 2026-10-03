@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- Per-validation execution budget for `validate`/`valid?` (`budget:` option): limits keyword evaluations, reference expansion depth and emitted errors, supports active cancellation, and raises `JSONSchemer::IncompleteValidation` subclasses instead of returning an invalid result
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes

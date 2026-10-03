@@ -245,6 +245,42 @@ JSONSchemer.schema(
 )
 ```
 
+## Execution Budget
+
+Untrusted schemas can combine combinators and references into a large amount of work. Pass a `budget:` to `valid?`/`validate` to bound a single validation. The same budget is shared across subschemas, `$ref`/`$dynamicRef`/`$recursiveRef` expansion, `allOf`/`anyOf`/`oneOf` branches and output enumeration. Reusing a `Schema` does not share remaining budget: a fresh budget is created for every call unless one is explicitly passed.
+
+```ruby
+budget = JSONSchemer::Budget.new(
+max_keyword_evaluations: 10_000, # maximum number of keyword evaluations
+max_ref_depth: 100, # maximum nested reference expansion depth
+max_errors: 100 # maximum number of errors emitted by the output enumerator
+)
+
+# a plain options hash is accepted as well
+schemer.validate(data, :budget => { :max_keyword_evaluations => 10_000 })
+```
+
+When a limit is reached, validation raises `JSONSchemer::BudgetExceeded` (a subclass of `JSONSchemer::IncompleteValidation`) instead of returning a result. The validation did not finish, so callers should not treat this as an ordinary invalid result and must not report the data as valid.
+
+```ruby
+begin
+schemer.valid?(data, :budget => budget)
+rescue JSONSchemer::IncompleteValidation
+# validation was cancelled or a budget limit was reached; the result is unknown
+end
+```
+
+Validation can also be cancelled explicitly, for example from another thread or a `before_property_validation` hook:
+
+```ruby
+budget = JSONSchemer::Budget.new
+Thread.new { budget.cancel! }
+# raises JSONSchemer::ValidationCancelled when the budget is next checked
+schemer.validate(data, :budget => budget).to_a
+```
+
+`max_errors` bounds lazy error enumeration (`classic`, `basic`, `detailed`, and `verbose` output); it has no effect on `flag` output because `valid?` does not enumerate errors. Pass the same `Budget` instance to several calls to deliberately accumulate usage across them.
+
 ## Global Configuration
 
 Configuration options can be set globally by modifying `JSONSchemer.configuration`. Global options are applied to any new schemas at creation time (global configuration changes are not reflected in existing schemas). They can be overridden with the regular keyword arguments described [above](#options).

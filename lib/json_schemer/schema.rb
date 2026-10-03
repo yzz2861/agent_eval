@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 module JSONSchemer
   class Schema
-    Context = Struct.new(:instance, :dynamic_scope, :adjacent_results, :short_circuit, :access_mode) do
+    Context = Struct.new(:instance, :dynamic_scope, :adjacent_results, :short_circuit, :access_mode, :budget) do
       def original_instance(instance_location)
         Hana::Pointer.parse(Location.resolve(instance_location)).reduce(instance) do |obj, token|
           if obj.is_a?(Array)
@@ -105,14 +105,15 @@ module JSONSchemer
       validate(instance, :output_format => 'flag', **options).fetch('valid')
     end
 
-    def validate(instance, output_format: @configuration.output_format, resolve_enumerators: @configuration.resolve_enumerators, access_mode: @configuration.access_mode)
+    def validate(instance, output_format: @configuration.output_format, resolve_enumerators: @configuration.resolve_enumerators, access_mode: @configuration.access_mode, budget: nil)
+      budget = Budget.coerce(budget)
       instance_location = Location.root
-      context = Context.new(instance, [], nil, (!insert_property_defaults && output_format == 'flag'), access_mode)
+      context = Context.new(instance, [], nil, (!insert_property_defaults && output_format == 'flag'), access_mode, budget)
       result = validate_instance(deep_stringify_keys(instance), instance_location, root_keyword_location, context)
       if insert_property_defaults && result.insert_property_defaults(context, &property_default_resolver)
         result = validate_instance(deep_stringify_keys(instance), instance_location, root_keyword_location, context)
       end
-      output = result.output(output_format)
+      output = result.output(output_format, budget)
       resolve_enumerators!(output) if resolve_enumerators
       output
     end
@@ -143,6 +144,7 @@ module JSONSchemer
         nested = []
 
         parsed.each do |keyword, keyword_instance|
+          context.budget.keyword_evaluation!
           next unless keyword_result = keyword_instance.validate(instance, instance_location, join_location(keyword_location, keyword), context)
           valid &&= keyword_result.valid
           return result(instance, instance_location, keyword_location, false) if short_circuit && !valid
@@ -155,6 +157,7 @@ module JSONSchemer
           root.custom_keywords.each do |custom_keyword, callable|
             if value.key?(custom_keyword)
               [*callable.call(instance, value, resolved_instance_location)].each do |custom_keyword_result|
+                context.budget.keyword_evaluation!
                 custom_keyword_valid = custom_keyword_result == true
                 valid &&= custom_keyword_valid
                 type = custom_keyword_result.is_a?(String) ? custom_keyword_result : custom_keyword

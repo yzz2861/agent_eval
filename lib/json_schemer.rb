@@ -22,6 +22,7 @@ require 'json_schemer/format/email'
 require 'json_schemer/format'
 require 'json_schemer/content'
 require 'json_schemer/errors'
+require 'json_schemer/budget'
 require 'json_schemer/cached_resolver'
 require 'json_schemer/ecma_regexp'
 require 'json_schemer/location'
@@ -119,17 +120,18 @@ module JSONSchemer
   class << self
     def schema(schema, **options)
       schema = resolve(schema, options)
+      options.delete(:budget)
       Schema.new(schema, **options)
     end
 
     def valid_schema?(schema, **options)
       schema = resolve(schema, options)
-      meta_schema(schema, options).valid?(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode))
+      meta_schema(schema, options).valid?(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode, :budget))
     end
 
     def validate_schema(schema, **options)
       schema = resolve(schema, options)
-      meta_schema(schema, options).validate(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode))
+      meta_schema(schema, options).validate(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode, :budget))
     end
 
     def draft202012

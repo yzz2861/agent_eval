@@ -64,7 +64,15 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, context)
-            ref_schema.validate_instance(instance, instance_location, keyword_location, context)
+            context.budget.check_cancelled!
+            context.budget.enter_ref!
+            begin
+              resolved_ref_schema = ref_schema
+              context.budget.check_cancelled!
+              resolved_ref_schema.validate_instance(instance, instance_location, keyword_location, context)
+            ensure
+              context.budget.exit_ref!
+            end
           end
         end
 
@@ -93,19 +101,26 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, context)
-            schema = ref_schema
+            context.budget.check_cancelled!
+            context.budget.enter_ref!
+            begin
+              schema = ref_schema
 
-            if dynamic_anchor
-              context.dynamic_scope.each do |ancestor|
-                dynamic_uri = URI.join(ancestor.base_uri, "##{dynamic_anchor}")
-                if ancestor.root.resources.fetch(:dynamic).key?(dynamic_uri)
-                  schema = ancestor.root.resources.fetch(:dynamic).fetch(dynamic_uri)
-                  break
+              if dynamic_anchor
+                context.dynamic_scope.each do |ancestor|
+                  dynamic_uri = URI.join(ancestor.base_uri, "##{dynamic_anchor}")
+                  if ancestor.root.resources.fetch(:dynamic).key?(dynamic_uri)
+                    schema = ancestor.root.resources.fetch(:dynamic).fetch(dynamic_uri)
+                    break
+                  end
                 end
               end
-            end
 
-            schema.validate_instance(instance, instance_location, keyword_location, context)
+              context.budget.check_cancelled!
+              schema.validate_instance(instance, instance_location, keyword_location, context)
+            ensure
+              context.budget.exit_ref!
+            end
           end
         end
 

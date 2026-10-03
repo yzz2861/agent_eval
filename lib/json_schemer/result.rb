@@ -10,18 +10,18 @@ module JSONSchemer
   end
 
   Result = Struct.new(:source, :instance, :instance_location, :keyword_location, :valid, :nested, :type, :annotation, :details, :ignore_nested, :nested_key) do
-    def output(output_format)
+    def output(output_format, budget = Budget.new)
       case output_format
       when 'classic'
-        classic
+        classic(budget)
       when 'flag'
         flag
       when 'basic'
-        basic
+        basic(budget)
       when 'detailed'
-        detailed
+        detailed(budget)
       when 'verbose'
-        verbose
+        verbose(budget)
       else
         raise UnknownOutputFormat, output_format
       end
@@ -74,6 +74,11 @@ module JSONSchemer
       )
     end
 
+    def output_unit(budget)
+      budget.error_emitted! unless valid
+      to_output_unit
+    end
+
     def to_output_unit
       out = {
         'valid' => valid,
@@ -89,6 +94,11 @@ module JSONSchemer
         out['i18n'] = true if @i18n
       end
       out
+    end
+
+    def classic_unit(budget)
+      budget.error_emitted!
+      to_classic
     end
 
     def to_classic
@@ -112,20 +122,20 @@ module JSONSchemer
       { 'valid' => valid }
     end
 
-    def basic
-      out = to_output_unit
+    def basic(budget)
+      out = output_unit(budget)
       if nested&.any?
         out[nested_key] = Enumerator.new do |yielder|
           results = [self]
           while result = results.pop
             if result.ignore_nested || !result.nested&.any?
-              yielder << result.to_output_unit
+              yielder << result.output_unit(budget)
             else
               previous_results_size = results.size
               result.nested.reverse_each do |nested_result|
                 results << nested_result if nested_result.valid == valid
               end
-              yielder << result.to_output_unit unless (results.size - previous_results_size) == 1
+              yielder << result.output_unit(budget) unless (results.size - previous_results_size) == 1
             end
           end
         end
@@ -133,45 +143,45 @@ module JSONSchemer
       out
     end
 
-    def detailed
-      return to_output_unit if ignore_nested || !nested&.any?
+    def detailed(budget)
+      return output_unit(budget) if ignore_nested || !nested&.any?
       matching_results = nested.select { |nested_result| nested_result.valid == valid }
       if matching_results.size == 1
-        matching_results.first.detailed
+        matching_results.first.detailed(budget)
       else
-        out = to_output_unit
+        out = output_unit(budget)
         if matching_results.any?
           out[nested_key] = Enumerator.new do |yielder|
-            matching_results.each { |nested_result| yielder << nested_result.detailed }
+            matching_results.each { |nested_result| yielder << nested_result.detailed(budget) }
           end
         end
         out
       end
     end
 
-    def verbose
-      out = to_output_unit
+    def verbose(budget)
+      out = output_unit(budget)
       if nested&.any?
         out[nested_key] = Enumerator.new do |yielder|
-          nested.each { |nested_result| yielder << nested_result.verbose }
+          nested.each { |nested_result| yielder << nested_result.verbose(budget) }
         end
       end
       out
     end
 
-    def classic
+    def classic(budget)
       Enumerator.new do |yielder|
         unless valid
           results = [self]
           while result = results.pop
             if result.ignore_nested || !result.nested&.any?
-              yielder << result.to_classic
+              yielder << result.classic_unit(budget)
             else
               previous_results_size = results.size
               result.nested.reverse_each do |nested_result|
                 results << nested_result if nested_result.valid == valid
               end
-              yielder << result.to_classic if (results.size - previous_results_size) == 0
+              yielder << result.classic_unit(budget) if (results.size - previous_results_size) == 0
             end
           end
         end

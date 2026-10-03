@@ -25,18 +25,25 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, context)
-            schema = ref_schema
+            context.budget.check_cancelled!
+            context.budget.enter_ref!
+            begin
+              schema = ref_schema
 
-            if recursive_anchor
-              context.dynamic_scope.each do |ancestor|
-                if ancestor.root.resources.fetch(:dynamic).key?(ancestor.base_uri)
-                  schema = ancestor.root.resources.fetch(:dynamic).fetch(ancestor.base_uri)
-                  break
+              if recursive_anchor
+                context.dynamic_scope.each do |ancestor|
+                  if ancestor.root.resources.fetch(:dynamic).key?(ancestor.base_uri)
+                    schema = ancestor.root.resources.fetch(:dynamic).fetch(ancestor.base_uri)
+                    break
+                  end
                 end
               end
-            end
 
-            schema.validate_instance(instance, instance_location, keyword_location, context)
+              context.budget.check_cancelled!
+              schema.validate_instance(instance, instance_location, keyword_location, context)
+            ensure
+              context.budget.exit_ref!
+            end
           end
         end
       end
