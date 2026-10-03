@@ -69,7 +69,15 @@ module I18n
       end
 
       def exists?(locale, key, options = EMPTY_HASH)
-        lookup(locale, key, options[:scope]) != nil
+        entry = lookup(locale, key, options[:scope])
+        !entry.nil? && !I18n.disabled_translation?(entry)
+      end
+
+      # Returns true if the entry stored for the given key is explicitly
+      # disabled (see I18n::DisabledTranslation). A disabled entry stops
+      # fallback locales and chained backends from being consulted.
+      def disabled_entry?(locale, key, options = EMPTY_HASH)
+        I18n.disabled_translation?(lookup(locale, key, options[:scope]))
       end
 
       # Acts the same as +strftime+, but uses a localized version of the

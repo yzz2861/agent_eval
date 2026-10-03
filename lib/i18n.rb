@@ -7,6 +7,7 @@ require 'i18n/version'
 require 'i18n/utils'
 require 'i18n/exceptions'
 require 'i18n/interpolate/ruby'
+require 'i18n/disabled_translation'
 
 module I18n
   autoload :Backend, 'i18n/backend'
@@ -50,6 +51,17 @@ module I18n
 
   def self.reserved_keys_pattern # :nodoc:
     @reserved_keys_pattern ||= /(?<!%)%\{(#{RESERVED_KEYS.join("|")})\}/
+  end
+
+  # Returns the sentinel value that can be stored in place of a translation
+  # to explicitly disable it. See I18n::DisabledTranslation.
+  def self.disabled
+    DisabledTranslation.instance
+  end
+
+  # Returns true if the given value is a disabled translation marker.
+  def self.disabled_translation?(value)
+    value.is_a?(DisabledTranslation)
   end
 
   module Base
@@ -427,7 +439,7 @@ module I18n
       if result.is_a?(MissingTranslation)
         handle_exception((throw && :throw || raise && :raise), result, locale, key, options)
       else
-        result
+        DisabledTranslation.scrub(result)
       end
     end
 

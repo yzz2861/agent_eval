@@ -66,6 +66,40 @@ I18n.config.with(locale: :ja).set!
 `set!` stores a frozen config in the current execution context.
 This keeps inherited state safe and lets updates happen by replacing config objects.
 
+### Disabling translations for specific locales
+
+Sometimes a locale must not show a text that other locales provide — e.g. a
+campaign copy supplied by a headquarter locale that a region is not allowed
+to display. Storing `nil` does not help here, because `nil` is treated like a
+missing key: the lookup falls back to other locales (or other backends in a
+chain) and the `default` option kicks in.
+
+Store the `I18n.disabled` sentinel instead:
+
+```ruby
+I18n.backend.store_translations(:en, promo: { banner: "HQ campaign" })
+I18n.backend.store_translations(:de, promo: { banner: I18n.disabled })
+
+I18n.t(:"promo.banner", locale: :en) # => "HQ campaign"
+I18n.t(:"promo.banner", locale: :de) # => nil
+```
+
+A disabled key:
+
+* returns `nil` from `I18n.t` (even with `raise: true`) and `false` from `I18n.exists?`
+* stops locale fallbacks and chained backends from being consulted
+* is not bypassed by the `default` option
+* never leaks into namespace lookups: `I18n.t(:promo, locale: :de)` returns a
+  hash without the disabled entries
+
+In YAML or JSON translation files, use the marker string `i18n:disabled`:
+
+```yml
+de:
+  promo:
+    banner: i18n:disabled
+```
+
 ## Features
 
 * Translation and localization

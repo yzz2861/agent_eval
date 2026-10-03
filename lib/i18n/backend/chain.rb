@@ -60,12 +60,14 @@ module I18n
           backends.each do |backend|
             catch(:exception) do
               options = default_options if backend == backends.last
-              translation = backend.translate(locale, key, options)
-              if namespace_lookup?(translation, options)
-                namespace = _deep_merge(translation, namespace || {})
-              elsif !translation.nil? || (options.key?(:default) && options[:default].nil?)
-                return translation
-              end
+            translation = backend.translate(locale, key, options)
+            if namespace_lookup?(translation, options)
+              namespace = _deep_merge(translation, namespace || {})
+            elsif !translation.nil? || (options.key?(:default) && options[:default].nil?)
+              # A disabled translation marker (I18n.disabled) is not nil,
+              # so it is returned here and stops the chain.
+              return translation
+            end
             end
           end
 
@@ -74,9 +76,26 @@ module I18n
         end
 
         def exists?(locale, key, options = EMPTY_HASH)
-          backends.any? do |backend|
-            backend.exists?(locale, key, options)
+          backends.each do |backend|
+            # A disabled entry stops the chain: the key is explicitly
+            # turned off by this backend, so it does not exist and no
+            # further backend is consulted.
+            if backend.respond_to?(:disabled_entry?) && backend.disabled_entry?(locale, key, options)
+              return false
+            end
+            return true if backend.exists?(locale, key, options)
           end
+          false
+        end
+
+        # Returns true if the first backend that can answer the lookup has
+        # explicitly disabled the key (see I18n::DisabledTranslation).
+        def disabled_entry?(locale, key, options = EMPTY_HASH)
+          backends.each do |backend|
+            return true if backend.respond_to?(:disabled_entry?) && backend.disabled_entry?(locale, key, options)
+            return false if backend.exists?(locale, key, options)
+          end
+          false
         end
 
         def localize(locale, object, format = :default, options = EMPTY_HASH)

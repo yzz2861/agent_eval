@@ -107,6 +107,10 @@ module I18n
         return super unless options.fetch(:fallback, true)
         I18n.fallbacks[locale].each do |fallback|
           begin
+            # A disabled entry stops the fallback chain: the key is
+            # explicitly turned off here, so it does not exist and no
+            # further fallback locale is consulted.
+            return false if disabled_entry?(fallback, key, options)
             return true if super(fallback, key, options)
           rescue I18n::InvalidLocale
             # we do nothing when the locale is invalid, as this is a fallback anyways.
