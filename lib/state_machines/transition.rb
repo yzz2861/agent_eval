@@ -41,6 +41,8 @@ module StateMachines
       @machine = machine
       @args = []
       @transient = false
+      @executed_exits = []
+      @executed_enters = []
       @paused_fiber = nil
       @resuming = false
       @continuation_block = nil
@@ -98,6 +100,45 @@ module StateMachines
     # The new state name *after* the transition
     def to_name
       @to_state.name
+    end
+
+    # States exited before persistence, ordered from leaf toward the LCA.
+    def exit_states
+      @exit_states ||= begin
+        common = @from_state.path & @to_state.path
+        (@from_state.path - common).reverse
+      end
+    end
+
+    # States entered after persistence, ordered from the LCA toward leaf.
+    def enter_states
+      @enter_states ||= begin
+        common = @from_state.path & @to_state.path
+        @to_state.path - common
+      end
+    end
+
+    # Runs exit callbacks for states outside the common ancestor.
+    def run_state_exits
+      return if @state_exits_run
+
+      exit_states.each do |state|
+        state.run_exit(object, self)
+        @executed_exits << state
+      end
+      @state_exits_run = true
+    end
+
+    # Runs enter callbacks in outer-to-inner order.
+    def run_state_enters
+      return if @state_enters_run
+
+      enter_states.each do |state|
+        state.run_enter(object, self)
+        @executed_enters << state
+      end
+      machine.remember_shallow_history(object, @to_state)
+      @state_enters_run = true
     end
 
     # The new fully-qualified state name *after* the transition
@@ -250,8 +291,10 @@ module StateMachines
     def persist
       return if @persisted
 
+      run_state_exits
       machine.write(object, :state, to)
       @persisted = true
+      run_state_enters
     end
 
     # Rolls back changes made to the object's state via this transition.  This
@@ -279,14 +322,27 @@ module StateMachines
     #   transition.rollback
     #   vehicle.state             # => "parked"
     def rollback
+      if @persisted && @state_enters_run
+        @executed_enters.reverse.each { |state| state.run_exit(object, self) }
+        machine.write(object, :state, from)
+        @executed_exits.reverse.each { |state| state.run_enter(object, self) }
+      elsif @persisted
+        machine.write(object, :state, from)
+      else
+        @executed_exits.reverse.each { |state| state.run_enter(object, self) }
+        machine.write(object, :state, from)
+      end
+
       reset
-      machine.write(object, :state, from)
     end
 
     # Resets any tracking of which callbacks have already been run and whether
     # the state has already been persisted
     def reset
       @before_run = @persisted = @after_run = false
+      @state_exits_run = @state_enters_run = false
+      @executed_exits = []
+      @executed_enters = []
       # Kill so ensure blocks in paused callbacks still run (CRuby only:
       # TruffleRuby lacks Fiber#kill, JRuby's doesn't wait for ensure)
       @paused_fiber.kill if RUBY_ENGINE == 'ruby' && @paused_fiber&.alive? && !@paused_fiber.equal?(Fiber.current)

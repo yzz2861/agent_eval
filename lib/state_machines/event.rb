@@ -28,6 +28,7 @@ module StateMachines
     # A list of all of the states known to this event using the configured
     # branches/transitions as the source
     attr_reader :known_states
+    attr_accessor :scope_depth
 
     # Creates a new event within the context of the given machine
     #
@@ -52,6 +53,7 @@ module StateMachines
       @name = name
       @qualified_name = machine.namespace ? :"#{name}_#{machine.namespace}" : name
       @human_name = human_name || @name.to_s.tr('_', ' ')
+      @scope_depth = 0
       reset
 
       # Output a warning if another event has a conflicting qualified name
@@ -67,7 +69,8 @@ module StateMachines
     # branches to prevent conflicts across events within a class hierarchy.
     def initialize_copy(orig) # :nodoc:
       super
-      @branches = @branches.dup
+      @branches = @branches.map(&:dup)
+      @branches.each { |branch| branch.machine = @machine }
       @known_states = @known_states.dup
     end
 
@@ -104,9 +107,18 @@ module StateMachines
 
       # Only a certain subset of explicit options are allowed for transition
       # requirements
-      StateMachines::OptionsValidator.assert_valid_keys!(options, :from, :to, :except_from, :except_to, :if, :unless, :if_state, :unless_state, :if_all_states, :unless_all_states, :if_any_state, :unless_any_state) if (options.keys - %i[from to on except_from except_to except_on if unless if_state unless_state if_all_states unless_all_states if_any_state unless_any_state]).empty?
+      explicit_keys = %i[from to except_from except_to if unless if_state unless_state if_all_states unless_all_states if_any_state unless_any_state]
+      if (options.keys - %i[on except_on if_state unless_state if_all_states unless_all_states if_any_state unless_any_state]).empty?
+        StateMachines::OptionsValidator.assert_valid_keys!(options, *explicit_keys)
+      end
+      if (options.keys - %i[from to except_from except_to if unless history]).empty?
+        StateMachines::OptionsValidator.assert_valid_keys!(options, *explicit_keys, :history)
+      end
 
-      branches << branch = Branch.new(options.merge(on: name))
+      options = options.merge(on: name, machine: machine)
+      definition_depth = machine.instance_variable_get(:@event_definition_depth) || 0
+      options[:scope_depth] ||= definition_depth > @scope_depth ? definition_depth : @scope_depth
+      branches << branch = Branch.new(options)
       @known_states |= branch.known_states
       branch
     end
@@ -139,7 +151,7 @@ module StateMachines
       StateMachines::OptionsValidator.assert_valid_keys!(requirements, :from, :to, :guard)
       requirements[:from] = machine.states.match!(object).name unless (custom_from_state = requirements.include?(:from))
 
-      branches.each do |branch|
+      branches.sort_by.with_index { |branch, index| [-branch.scope_depth, index] }.each do |branch|
         next unless (match = branch.match(object, requirements, event_args))
 
         # Branch allows for the transition to occur
@@ -147,10 +159,11 @@ module StateMachines
         to = if match[:to].is_a?(LoopbackMatcher)
                from
              else
-               values = requirements.include?(:to) ? [requirements[:to]].flatten : [from] | machine.states.map { |state| state.name }
+               values = requirements.include?(:to) ? [requirements[:to]].flatten : [from] | machine.states.map(&:name)
 
                match[:to].filter(values).first
              end
+        to = machine.resolve_state_name(to, object, branch.history_target?) unless to.nil?
 
         return Transition.new(object, machine, name, from, to, !custom_from_state)
       end

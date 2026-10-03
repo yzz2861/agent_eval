@@ -57,7 +57,7 @@ module StateMachines
         # Configure async mode if requested, after owner_class is set and DSL is evaluated
         configure_async_mode!(true) if @async_requested
 
-        self.initial_state = options[:initial] unless sibling_machines.any?
+        set_initial_state(options[:initial]) unless sibling_machines.any?
       end
 
       # Creates a copy of this machine in addition to copies of each associated
@@ -70,9 +70,9 @@ module StateMachines
         @events.machine = self
         @states = @states.dup
         @states.machine = self
-        @callbacks = { before: @callbacks[:before].dup, after: @callbacks[:after].dup, failure: @callbacks[:failure].dup }
+        @callbacks = @callbacks.transform_values { |callbacks| callbacks.map { |callback| callback.dup.tap { |copy| copy.branch.machine = self } } }
         @async_requested = orig.instance_variable_get(:@async_requested)
-        @async_mode_enabled = orig.instance_variable_get(:@async_mode_enabled)
+        @async_mode_enabled = orig.instance_variable_get(:@async_mode_enabled) if orig.instance_variable_defined?(:@async_mode_enabled)
       end
 
       # Sets the class which is the owner of this state machine.  Any methods
@@ -107,16 +107,7 @@ module StateMachines
       # of a state or a lambda block which determines the initial state at
       # creation time.
       def initial_state=(new_initial_state)
-        @initial_state = new_initial_state
-        add_states([@initial_state]) unless dynamic_initial_state?
-
-        # Update all states to reflect the new initial state
-        states.each { |state| state.initial = (state.name == @initial_state) }
-
-        # Warn if the owner class and the machine have conflicting defaults for
-        # the machine's attribute. May be deferred by integrations (e.g.
-        # ActiveRecord) to avoid touching the DB at class load time.
-        schedule_conflicting_attribute_default_check
+        set_initial_state(new_initial_state)
       end
 
       # Gets the attribute name for the given machine scope.

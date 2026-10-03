@@ -1,6 +1,23 @@
 # frozen_string_literal: true
 
 module StateMachines
+  module StateHierarchyMatcher
+    attr_accessor :machine
+
+    private
+
+    def expanded_values
+      @expanded_values ||= values.flat_map do |name|
+        state = machine && machine.states[name]
+        state ? [state.name] + descendants_of(state) : [name]
+      end.uniq
+    end
+
+    def descendants_of(state)
+      state.children.flat_map { |child| [child.name] + descendants_of(child) }
+    end
+  end
+
   # Provides a general strategy pattern for determining whether a match is found
   # for a value.  The algorithm that actually determines the match depends on
   # the matcher in use.
@@ -55,6 +72,13 @@ module StateMachines
 
   # Matches a specific set of values
   class WhitelistMatcher < Matcher
+    include StateHierarchyMatcher
+    attr_accessor :hierarchical
+
+    def initialize(values)
+      super
+    end
+
     # Checks whether the given value exists within the whitelist configured
     # for this matcher.
     #
@@ -64,17 +88,34 @@ module StateMachines
     #   matcher.matches?(:parked)       # => true
     #   matcher.matches?(:first_gear)   # => false
     def matches?(value, _context = {})
-      values.include?(value)
+      values.include?(value) || hierarchical_include?(value)
     end
 
     # A human-readable description of this matcher
     def description
       values.length == 1 ? values.first.inspect : values.inspect
     end
+
+    private
+
+    def hierarchical_include?(value)
+      hierarchical ? expanded_hierarchical_values.include?(value) : false
+    end
+
+    def expanded_hierarchical_values
+      expanded_values
+    end
   end
 
   # Matches everything but a specific set of values
   class BlacklistMatcher < Matcher
+    include StateHierarchyMatcher
+    attr_accessor :hierarchical
+
+    def initialize(values)
+      super
+    end
+
     # Checks whether the given value exists outside the blacklist configured
     # for this matcher.
     #
@@ -84,18 +125,32 @@ module StateMachines
     #   matcher.matches?(:parked)       # => false
     #   matcher.matches?(:first_gear)   # => true
     def matches?(value, _context = {})
-      !values.include?(value)
+      !(values.include?(value) || hierarchical_include?(value))
     end
 
     # Finds all values that are *not* within the blacklist configured for this
     # matcher
     def filter(values)
-      values - self.values
+      values - (hierarchical ? expanded_hierarchical_values : self.values)
     end
 
     # A human-readable description of this matcher
     def description
       "all - #{values.length == 1 ? values.first.inspect : values.inspect}"
+    end
+
+    private
+
+    def hierarchical_include?(value)
+      hierarchical ? expanded_hierarchical_values.include?(value) : false
+    end
+
+    def expanded_values
+      self.values
+    end
+
+    def expanded_hierarchical_values
+      expanded_values
     end
   end
 

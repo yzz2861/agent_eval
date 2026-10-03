@@ -101,6 +101,9 @@ module StateMachines
     #   end
     attr_reader :terminator
 
+    # The callbacks to invoke when this branch matches
+    attr_reader :methods
+
     # The branch that determines whether or not this callback can be invoked
     # based on the context of the transition.  The event, from state, and
     # to state must all match in order for the branch to pass.
@@ -122,16 +125,18 @@ module StateMachines
     #
     # More information about how those options affect the behavior of the
     # callback can be found in their attribute definitions.
-    def initialize(type, *args, &block)
+    def initialize(type, *args, **keyword_options, &block)
       @type = type
       raise ArgumentError, 'Type must be :before, :after, :around, or :failure' unless %i[before after around failure].include?(type)
 
-      options = args.last.is_a?(Hash) ? args.pop : {}
+      hash_options = args.last.is_a?(Hash) ? args.pop : {}
+      options = hash_options.merge(keyword_options)
       @methods = args
       @methods.concat(Array(options.delete(:do)))
       @methods << block if block_given?
       raise ArgumentError, 'Method(s) for callback must be specified' unless @methods.any?
 
+      machine = options.delete(:machine)
       options = { bind_to_object: self.class.bind_to_object, terminator: self.class.terminator }.merge(options)
 
       # Proxy lambda blocks so that they're bound to the object
@@ -141,13 +146,21 @@ module StateMachines
       end
 
       @terminator = options.delete(:terminator)
+      options[:machine] = machine
       @branch = Branch.new(options)
+      @branch.enable_hierarchical_matching if machine
     end
 
     # Gets a list of the states known to this callback by looking at the
     # branch's known states
     def known_states
       branch.known_states
+    end
+
+    def initialize_copy(_orig) # :nodoc:
+      super
+      @methods = @methods.dup
+      @branch = @branch.dup
     end
 
     # Runs the callback as long as the transition context matches the branch

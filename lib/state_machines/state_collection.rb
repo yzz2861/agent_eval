@@ -27,7 +27,7 @@ module StateMachines
     #   states.matches?(vehicle, :idling)   # => false
     #   states.matches?(vehicle, :invalid)  # => IndexError: :invalid is an invalid key for :name index
     def matches?(object, name)
-      fetch(name).matches?(machine.read(object, :state))
+      match_name(object, name)
     end
 
     # Determines the current state of the given object as configured by this
@@ -55,6 +55,13 @@ module StateMachines
     def match(object)
       value = machine.read(object, :state)
       self[value, :value] || detect { |state| state.matches?(value) }
+    end
+
+    # Matches a state or, for a composite state, any descendant leaf.
+    def match_name(object, name)
+      state = fetch(name)
+      current = match(object)
+      current && (current.name == state.name || current.ancestors.include?(state))
     end
 
     # Determines the current state of the given object as configured by this

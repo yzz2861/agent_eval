@@ -46,6 +46,45 @@ module StateMachines
         instance_variable_defined?(:@initial_state) && @initial_state.is_a?(Proc)
       end
 
+      def set_initial_state(new_initial_state)
+        @initial_state = new_initial_state
+        add_states([@initial_state]) unless dynamic_initial_state?
+
+        resolved = dynamic_initial_state? ? @initial_state : resolve_state_name(@initial_state)
+        states.each { |state| state.initial = (state.name == resolved) }
+        schedule_conflicting_attribute_default_check
+      end
+
+      # Resolves a possibly composite destination state to the leaf value that
+      # must actually be stored on the object.
+      def resolve_state_name(name, object = nil, use_history = false)
+        state = states.fetch(name)
+        return state.name unless state.composite?
+
+        if use_history && state.shallow_history?
+          history_name = shallow_history(object, state)
+          return resolve_state_name(history_name, object, false) if history_name
+        end
+
+        initial_name = state.initial_child == true ? state.children.first&.name : state.initial_child
+        return resolve_state_name(initial_name, object, false) if initial_name
+
+        raise ArgumentError, "Composite state #{name.inspect} must define :initial_child to be entered"
+      end
+
+      # Reads the last direct child entered beneath a composite state.
+      def shallow_history(object, state)
+        histories(object)[state.name]
+      end
+
+      # Records the direct child currently active beneath composite ancestors.
+      def remember_shallow_history(object, leaf_state)
+        machine_histories = histories(object)
+        leaf_state.path.each_cons(2) do |ancestor, child|
+          machine_histories[ancestor.name] = child.name if ancestor.shallow_history?
+        end
+      end
+
       # Initializes the state on the given object.  Initial values are only set if
       # the machine's attribute hasn't been previously initialized.
       #
@@ -55,7 +94,8 @@ module StateMachines
       # * <tt>:to</tt> - A hash to set the initial value in instead of writing
       #   directly to the object
       def initialize_state(object, options = {})
-        state = initial_state(object)
+        initial = initial_state(object)
+        state = initial && states.fetch(resolve_state_name(initial.name, object, false))
         return unless state && (options[:force] || initialize_state?(object))
 
         value = state.value
@@ -334,13 +374,21 @@ module StateMachines
       #
       # The minimum requirement is that the last argument in the method be an
       # options hash which contains at least <tt>:if</tt> condition support.
-      def state(*names, &)
+      def state(*names, &block)
         options = names.last.is_a?(Hash) ? names.pop : {}
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name, :parent, :initial_child, :history, :enter, :exit)
 
         # Store the context so that it can be used for / matched against any state
         # that gets added
-        @states.context(names, &) if block_given?
+        if block
+          if block.arity.zero?
+            @states.context(names, &block)
+          elsif names.length == 1
+            add_states(names).first.tap { |state| block.call(StateMachines::NestedStateContext.new(state)) }
+          else
+            raise ArgumentError, 'Nested state DSL can only define one state at a time'
+          end
+        end
 
         if names.first.is_a?(Matcher)
           # Add any states referenced in the matcher.  When matchers are used,
@@ -361,6 +409,35 @@ module StateMachines
             state.human_name = options[:human_name] if options.include?(:human_name)
             state.cache = options[:cache] if options.include?(:cache)
             state.matcher = options[:if] if options.include?(:if)
+            state.parent_name = options[:parent] if options.include?(:parent)
+            state.initial_child = options[:initial_child] if options.include?(:initial_child)
+            state.history = options[:history] if options.include?(:history)
+            state.enter(*Array(options[:enter]))
+            state.exit(*Array(options[:exit]))
+          end
+
+          states.each do |state|
+            next unless state.parent_name
+
+            parent = self.states[state.parent_name]
+            raise ArgumentError, "Parent state #{state.parent_name.inspect} is not defined" unless parent
+
+            visited = [state.name]
+            current = state
+            while current
+              break unless current.parent_name
+              raise ArgumentError, "State #{state.name.inspect} cannot create a cyclic parent chain" if visited.include?(current.parent_name)
+
+              visited << current.parent_name
+              current = self.states[current.parent_name]
+            end
+          end
+
+          states.each do |state|
+            next if state.initial_child.nil? || state.initial_child == true
+
+            child = self.states[state.initial_child]
+            raise ArgumentError, "Initial child #{state.initial_child.inspect} is not a direct child of #{state.name.inspect}" unless child&.parent_name == state.name
           end
         end
 
@@ -392,6 +469,14 @@ module StateMachines
       def initialize_state?(object)
         value = read(object, :state)
         (value.nil? || (value.respond_to?(:empty?) && value.empty?)) && !states[value, :value]
+      end
+
+      private
+
+      def histories(object)
+        all_histories = object.instance_variable_get(:@state_machine_shallow_history)
+        all_histories ||= object.instance_variable_set(:@state_machine_shallow_history, {})
+        all_histories[self.name] ||= {}
       end
     end
   end

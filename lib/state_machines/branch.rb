@@ -24,6 +24,12 @@ module StateMachines
     # The state guards that are set, keyed by option
     attr_reader :state_guards
 
+    # The machine containing this branch
+    attr_accessor :machine
+
+    # The nesting depth that owns this transition
+    attr_reader :scope_depth
+
     # The requirement for verifying the event being matched
     attr_reader :event_requirement
 
@@ -39,6 +45,10 @@ module StateMachines
 
     # Creates a new branch
     def initialize(options = {}) # :nodoc:
+      @machine = options.delete(:machine)
+      @scope_depth = options.delete(:scope_depth) || 0
+      history = options.delete(:history) || false
+
       # Build conditionals
       @if_condition = options.delete(:if)
       @unless_condition = options.delete(:unless)
@@ -70,8 +80,8 @@ module StateMachines
 
         # Implicit from/to requirements specified
         @state_requirements = options.collect do |from, to|
-          from = WhitelistMatcher.new(from) unless from.is_a?(Matcher)
-          to = WhitelistMatcher.new(to) unless to.is_a?(Matcher)
+          from = build_state_matcher(from)
+          to = build_state_matcher(to)
           { from: from, to: to }
         end
       end
@@ -82,6 +92,9 @@ module StateMachines
       @state_requirements.each do |state_requirement|
         %i[from to].each { |option| @known_states |= state_requirement[option].values }
       end
+
+      @history = history
+      enable_hierarchical_matching if @machine
     end
 
     # Determines whether the given object / query matches the requirements
@@ -153,7 +166,27 @@ module StateMachines
       event.machine.renderer.draw_branch(self, graph, event, valid_states, io)
     end
 
+    # Whether this branch explicitly targets the destination state's history.
+    def history_target?
+      @history
+    end
+
+    def enable_hierarchical_matching
+      @state_requirements.each do |requirement|
+        requirement.each_value do |matcher|
+          matcher.machine = @machine if matcher.is_a?(StateHierarchyMatcher)
+          matcher.hierarchical = true if matcher.is_a?(WhitelistMatcher) || matcher.is_a?(BlacklistMatcher)
+        end
+      end
+    end
+
     protected
+
+    def build_state_matcher(value)
+      return value if value.is_a?(Matcher)
+
+      WhitelistMatcher.new(value)
+    end
 
     # Builds a matcher strategy to use for the given options.  If neither a
     # whitelist nor a blacklist option is specified, then an AllMatcher is
@@ -163,7 +196,7 @@ module StateMachines
 
       if options.include?(whitelist_option)
         value = options[whitelist_option]
-        value.is_a?(Matcher) ? value : WhitelistMatcher.new(options[whitelist_option])
+        build_state_matcher(value)
       elsif options.include?(blacklist_option)
         value = options[blacklist_option]
         raise ArgumentError, ":#{blacklist_option} option cannot use matchers; use :#{whitelist_option} instead" if value.is_a?(Matcher)

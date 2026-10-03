@@ -40,6 +40,16 @@ module StateMachines
     # state
     attr_accessor :matcher
 
+    # The name of this state's parent, if it is nested in a composite state
+    attr_reader :parent_name
+
+    # The direct child that should be entered when this composite state is
+    # entered without using its shallow history
+    attr_reader :initial_child
+
+    # The kind of history supported by this composite state
+    attr_reader :history
+
     # Creates a new state within the context of the given machine.
     #
     # Configuration options:
@@ -82,6 +92,11 @@ module StateMachines
       @matcher = if_condition
       @initial = initial == true
       @context = StateContext.new(self)
+      @parent_name = nil
+      @initial_child = nil
+      @history = nil
+      @enter_callbacks = []
+      @exit_callbacks = []
 
       return unless name
 
@@ -108,11 +123,98 @@ module StateMachines
     def initialize_copy(orig) # :nodoc:
       super
       @context = StateContext.new(self)
+      @enter_callbacks = @enter_callbacks.dup
+      @exit_callbacks = @exit_callbacks.dup
     end
 
     def machine=(machine)
       @machine = machine
       @context = StateContext.new(self)
+    end
+
+    def parent_name=(name)
+      if name && name == self.name
+        raise ArgumentError, "State #{name.inspect} cannot be its own parent"
+      end
+
+      @parent_name = name
+    end
+
+    def initial_child=(child_name)
+      raise ArgumentError, "Composite state #{name.inspect} cannot use itself as initial child" if child_name == name
+
+      @initial_child = child_name
+    end
+
+    def history=(mode)
+      mode = :shallow if mode == true
+      raise ArgumentError, "Unsupported history mode #{mode.inspect}; only :shallow is supported" if mode && mode != :shallow
+
+      @history = mode
+    end
+
+    # The parent state, if this state is nested.
+    def parent
+      machine.states[parent_name] if parent_name
+    end
+
+    # All states from the outermost ancestor through this state.
+    def path
+      (parent ? parent.path : []) + [self]
+    end
+
+    # All ancestors of this state, from outermost to immediate parent.
+    def ancestors
+      path[0...-1]
+    end
+
+    # Direct child states in declaration order.
+    def children
+      machine.states.select { |state| state.parent_name == name }
+    end
+
+    # Whether this state has any nested child states.
+    def composite?
+      name && children.any?
+    end
+
+    # Whether this is a state that cannot contain a current object directly.
+    def leaf?
+      !composite?
+    end
+
+    # The nesting depth of this state, starting at zero for a root state.
+    def depth
+      ancestors.length
+    end
+
+    # Whether this state records a shallow history of its active child.
+    def shallow_history?
+      @history == :shallow
+    end
+
+    # Adds a callback invoked when this state is entered.
+    def enter(*callbacks, &block)
+      @enter_callbacks.concat(callbacks)
+      @enter_callbacks << block if block
+      self
+    end
+
+    # Adds a callback invoked when this state is exited.
+    def exit(*callbacks, &block)
+      @exit_callbacks.concat(callbacks)
+      @exit_callbacks << block if block
+      self
+    end
+
+    # Runs enter callbacks in the order they were defined.
+    def run_enter(object, transition)
+      @enter_callbacks.each { |callback| @context.evaluate_method(object, callback, transition) }
+    end
+
+    # Runs exit callbacks in the order they were defined.
+    def run_exit(object, transition)
+      @exit_callbacks.each { |callback| @context.evaluate_method(object, callback, transition) }
     end
 
     # Determines whether there are any states that can be transitioned to from

@@ -153,6 +153,7 @@ module StateMachines
 
         throw :halt unless callback_result
       else
+        each(&:run_state_exits)
         persist
         run_actions(&)
       end

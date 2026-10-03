@@ -249,11 +249,16 @@ module StateMachines
           # Update the configuration for the event(s)
           events.each do |event|
             event.human_name = options[:human_name] if options.include?(:human_name)
+            scope_depth = instance_variable_get(:@state_scope_depth)
+            event.scope_depth = scope_depth if scope_depth
+            @event_definition_depth = scope_depth || 0
 
             # Add any states that may have been referenced within the event
             add_states(event.known_states)
           end
         end
+
+        remove_instance_variable(:@event_definition_depth) if instance_variable_defined?(:@event_definition_depth)
 
         events.length == 1 ? events.first : events
       end

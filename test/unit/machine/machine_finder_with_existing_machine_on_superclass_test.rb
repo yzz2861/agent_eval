@@ -70,11 +70,23 @@ class MachineFinderWithExistingMachineOnSuperclassTest < StateMachinesTest
   end
 
   def test_should_copy_before_callbacks
-    assert_equal @base_machine.callbacks[:before], @machine.callbacks[:before]
+    @base_machine.callbacks[:before].each_with_index do |callback, index|
+      copied_callback = @machine.callbacks[:before][index]
+      refute_same callback, copied_callback
+      refute_same callback.branch, copied_callback.branch
+      assert_equal callback.methods, copied_callback.methods
+      assert_equal @machine, copied_callback.branch.machine
+    end
   end
 
   def test_should_copy_after_transitions
-    assert_equal @base_machine.callbacks[:after], @machine.callbacks[:after]
+    @base_machine.callbacks[:after].each_with_index do |callback, index|
+      copied_callback = @machine.callbacks[:after][index]
+      refute_same callback, copied_callback
+      refute_same callback.branch, copied_callback.branch
+      assert_equal callback.methods, copied_callback.methods
+      assert_equal @machine, copied_callback.branch.machine
+    end
   end
 
   def test_should_use_the_same_integration

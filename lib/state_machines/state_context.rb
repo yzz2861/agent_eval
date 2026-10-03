@@ -59,15 +59,12 @@ module StateMachines
     # The state machine for which this context's state is defined
     attr_reader :machine
 
-    # The state that must be present in an object for this context to be active
-    attr_reader :state
-
     # Creates a new context for the given state
     def initialize(state)
       @state = state
       @machine = state.machine
 
-      state_name = state.name
+      state_name = @state.name
       machine_name = machine.name
       @condition = ->(object) { object.class.state_machine(machine_name).states.matches?(object, state_name) }
     end
@@ -93,8 +90,44 @@ module StateMachines
       raise ArgumentError, 'Must specify :on event' unless options[:on]
       raise ArgumentError, 'Must specify either :to or :from state' unless !options[:to] ^ !options[:from]
 
-      machine.transition(options.merge(options[:to] ? { from: state.name } : { to: state.name }))
+      machine.transition(options.merge(options[:to] ? { from: @state.name } : { to: @state.name }))
     end
+
+    # Defines callbacks invoked when this state is entered.
+    def enter(*callbacks, &block)
+      @state.enter(*callbacks, &block)
+    end
+
+    # Defines callbacks invoked when this state is exited.
+    def exit(*callbacks, &block)
+      @state.exit(*callbacks, &block)
+    end
+
+    # Declares a nested state. A block with no parameters keeps the existing
+    # behavior DSL; a block with one parameter opens the nested state DSL.
+    def state(*names, &block)
+      return @state if names.empty?
+
+      name = names.first
+      options = names.length > 1 && names.last.is_a?(Hash) ? names.pop : {}
+      options = options.merge(parent: @state.name)
+      child = machine.state(name, options)
+      nested_context(child, &block) if block
+      child
+    end
+
+    alias other_states state
+
+    # Defines an event available to this state and its descendants.
+    def event(name, options = {}, &block)
+      previous_scope_depth = machine.instance_variable_get(:@state_scope_depth)
+      machine.instance_variable_set(:@state_scope_depth, @state.depth + 1)
+      machine.event(name, options, &block)
+    ensure
+      machine.instance_variable_set(:@state_scope_depth, previous_scope_depth)
+    end
+
+    alias on event
 
     # Hooks in condition-merging to methods that don't exist in this module
     def method_missing(*args, &)
@@ -129,6 +162,42 @@ module StateMachines
       # Evaluate the method on the owner class with the condition proxied
       # through
       machine.owner_class.send(*args, &)
+    end
+
+    private
+
+    def nested_context(child, &block)
+      if block.arity.zero?
+        child.context(&block)
+      else
+        block.call(NestedStateContext.new(child))
+      end
+    end
+  end
+
+  # DSL used while declaring nested states and their parent-scoped events.
+  class NestedStateContext < StateContext
+    def state(*names, &block)
+      return @state if names.empty?
+
+      name = names.first
+      options = names.length > 1 && names.last.is_a?(Hash) ? names.pop : {}
+      options = options.merge(parent: @state.name)
+      child = machine.state(name, options)
+      nested_context(child, &block) if block
+      child
+    end
+
+    def transition(options)
+      options = options.dup
+      options[:from] = @state.name unless options.key?(:from)
+      machine.transition(options)
+    end
+
+    private
+
+    def nested_context(child, &block)
+      block.call(NestedStateContext.new(child))
     end
   end
 end

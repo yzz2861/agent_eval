@@ -251,6 +251,75 @@ vehicle.fire_events!(:ignite, :enable_alarm)    # => StateMachines:InvalidParall
 
 State machines can coordinate with each other using state guards, allowing transitions to depend on the state of other state machines within the same object. This enables complex system modeling where components are interdependent.
 
+## Nested States and Shallow History
+
+Composite states can declare a single active branch of nested states. Objects
+continue to store only one leaf state value, while predicates for ancestor
+states match any descendant.
+
+```ruby
+class Ticket
+  attr_reader :log
+
+  def initialize
+    @log = []
+    super
+  end
+
+  state_machine initial: :processing do
+    state :processing, initial_child: :dispatching, history: :shallow do |processing|
+      processing.enter  { |ticket, transition| ticket.log("enter processing") }
+      processing.exit   { |ticket, transition| ticket.log("exit processing") }
+
+      processing.event :pause do
+        transition dispatching: :paused
+        transition executing: :paused
+      end
+
+      processing.state :dispatching do |dispatching|
+        dispatching.enter { |ticket, transition| ticket.log("enter dispatching") }
+        dispatching.exit  { |ticket, transition| ticket.log("exit dispatching") }
+
+        dispatching.event :dispatch do
+          transition dispatching: :executing
+        end
+      end
+
+      processing.state :executing do |executing|
+        executing.enter { |ticket, transition| ticket.log("enter executing") }
+        executing.exit  { |ticket, transition| ticket.log("exit executing") }
+      end
+    end
+
+    state :paused
+
+    event :resume do
+      transition paused: :processing, history: true
+    end
+  end
+end
+
+ticket = Ticket.new
+ticket.state_name         # => :dispatching
+ticket.processing?        # => true
+ticket.dispatching?      # => true
+
+ticket.dispatch           # => true
+ticket.state_name         # => :executing
+ticket.pause              # => true
+ticket.state_name         # => :paused
+
+# Shallow history re-enters the last direct child of :processing.
+ticket.resume             # => true
+ticket.state_name         # => :executing
+```
+
+Events declared in a parent state are available to descendants. Declaring the
+same event in a child state refines the event for that child and its nested
+states without changing the parent definition. Cross-level transitions exit
+states leaf-to-root, enter states root-to-leaf, and never exit or enter the
+common ancestor twice.
+
 ## State Guard Options
 
 ### Single State Guards
