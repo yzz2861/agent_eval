@@ -1174,6 +1174,7 @@ module Net   #:nodoc:
       @last_communicated = nil
       @close_on_empty_response = options[:close_on_empty_response]
       @socket  = nil
+      @open_body_stream = nil
       @started = false
       @open_timeout = options[:open_timeout]
       @read_timeout = options[:read_timeout]
@@ -2456,6 +2457,11 @@ module Net   #:nodoc:
           return request(req, body, &block)
         }
       end
+      if @open_body_stream&.open?
+        raise IOError,
+              'previous response body stream is still open; ' \
+              'close it before sending another request'
+      end
       if proxy_user()
         req.proxy_basic_auth proxy_user(), proxy_pass() unless use_ssl?
       end
@@ -2572,6 +2578,12 @@ module Net   #:nodoc:
     def end_transport(req, res)
       @curr_http_version = res.http_version
       @last_communicated = nil
+      if res.body_stream_open?
+        # The connection stays reserved for the response body stream;
+        # the keep-alive decision is deferred until the stream is closed.
+        hold_connection_for_body_stream(req, res)
+        return
+      end
       if @socket.closed?
         debug 'Conn socket closed'
       elsif not res.body and @close_on_empty_response
@@ -2583,6 +2595,26 @@ module Net   #:nodoc:
       else
         debug 'Conn close'
         @socket.close
+      end
+    end
+
+    # Registers the open body stream of +res+ so that no other request can
+    # be sent on this connection until the stream is closed, and defers the
+    # keep-alive decision to that moment.
+    def hold_connection_for_body_stream(req, res)
+      stream = res.body_stream
+      @open_body_stream = stream
+      stream.on_close = proc do |reusable|
+        @open_body_stream = nil
+        if @socket.closed?
+          debug 'Conn socket closed'
+        elsif reusable && !@close_on_empty_response && keep_alive?(req, res)
+          debug 'Conn keep-alive'
+          @last_communicated = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        else
+          debug 'Conn close'
+          @socket.close
+        end
       end
     end
 

@@ -336,9 +336,9 @@ class Net::HTTPResponse
     @body_exist = reqmethodallowbody && self.class.body_permitted?
     begin
       yield
-      self.body   # ensure to read body
+      self.body unless @body_stream&.open?   # ensure to read body
     ensure
-      @socket = nil
+      @socket = nil unless @body_stream&.open?
     end
   end
 
@@ -398,6 +398,57 @@ class Net::HTTPResponse
     @body.force_encoding(enc) if enc
 
     @body
+  end
+
+  # Returns a Net::HTTPResponse::BodyStream for reading the response body
+  # incrementally, instead of buffering it as a single string.
+  #
+  # The stream must be taken while the response is being delivered, that is,
+  # inside the block given to Net::HTTP#request (or one of its wrappers);
+  # it may then be used both inside and after the block:
+  #
+  #   stream = nil
+  #   http.request(req) do |res|
+  #     stream = res.body_stream
+  #   end
+  #   begin
+  #     process(stream.readpartial(16384)) until stream.eof?
+  #   ensure
+  #     stream.close
+  #   end
+  #
+  # Chunked transfer coding and Content-Encoding (gzip/deflate) are decoded
+  # on demand, as the stream is read; the unread remainder of the body is
+  # never buffered in memory.
+  #
+  # While the stream is open, the underlying connection cannot be used for
+  # another request.  Call Net::HTTPResponse::BodyStream#close to release
+  # the connection; closing a stream that was not fully read discards up to
+  # Net::HTTPResponse::BodyStream::DRAIN_LIMIT bytes so that the connection
+  # can be reused, and shuts the connection down when the unread remainder
+  # is larger.
+  #
+  # Raises IOError if the body was already read, or if the response is no
+  # longer being delivered.
+  #
+  def body_stream
+    return @body_stream if @body_stream
+    stream_check
+    if @read
+      raise IOError, "#{self.class}\#body_stream called after body was read"
+    end
+    @read = true
+    @body_stream = BodyStream.new(self, @socket, @body_exist)
+  end
+
+  # Whether the response has a body stream that is still being read.
+  def body_stream_open?  #:nodoc: internal use only
+    @body_stream ? @body_stream.open? : false
+  end
+
+  # Detaches +socket+ from this response once its body stream is closed.
+  def body_stream_detached(socket)  #:nodoc: internal use only
+    @socket = nil if @socket.equal?(socket)
   end
 
   # Returns the string response body;
@@ -757,5 +808,266 @@ class Net::HTTPResponse
 
   end
 
-end
 
+  ##
+  # BodyStream is a read handle for a response body, returned by
+  # Net::HTTPResponse#body_stream.  It serves the decoded body in fragments
+  # through #readpartial, reading from the underlying connection only as
+  # needed.
+  #
+  # While a BodyStream is open, the connection it belongs to cannot start
+  # another request; call #close to release it.  Closing a stream whose body
+  # was not fully read discards up to DRAIN_LIMIT bytes so the connection
+  # can be reused, and shuts the connection down when the unread remainder
+  # is larger.
+  #
+  # Returned fragments are binary (ASCII-8BIT) strings.
+
+  class BodyStream
+
+    ##
+    # The maximum number of decoded body bytes that #close discards in order
+    # to keep the underlying connection reusable; when the unread remainder
+    # of the body is larger, the connection is shut down instead.
+
+    DRAIN_LIMIT = 1024 * 1024 # 1 MiB
+
+    READ_CHUNK = 1024 * 16 #:nodoc: internal use only
+
+    def initialize(response, socket, body_exist) #:nodoc: internal use only
+      @response = response
+      @socket = socket
+      @ignore_eof = response.ignore_eof
+      @out = +''.b
+      @decoder_eof = false
+      @connection_broken = false
+      @closed = false
+      @on_close = nil
+
+      if !body_exist
+        @framing = :empty
+      elsif response.chunked?
+        @framing = :chunked
+        @chunk_remaining = 0
+      elsif !response['transfer-encoding'] &&
+            (length = response.content_length || response.range_length)
+        # Transfer-Encoding overrides Content-Length, so a body that is not
+        # chunk-framed runs until the server closes the connection.
+        # See RFC 9112 Section 6.3.
+        @framing = :length
+        @length_remaining = length
+      else
+        @framing = :close
+      end
+
+      @inflate = nil
+      if Net::HTTP::HAVE_ZLIB && response.decode_content &&
+         !response['content-range']
+        case response['content-encoding']&.downcase
+        when 'deflate', 'gzip', 'x-gzip'
+          response.delete 'content-encoding'
+          @inflate = Zlib::Inflate.new(32 + Zlib::MAX_WBITS)
+        when 'none', 'identity'
+          response.delete 'content-encoding'
+        end
+      end
+    end
+
+    # Reads at most +maxlen+ bytes of the decoded body, blocking until at
+    # least one byte is available, and returns them as a binary string.
+    #
+    # When +outbuf+ is given, the fragment is stored into it and +outbuf+ is
+    # returned: a String is replaced (like IO#readpartial), any other object
+    # is appended to via <tt><<</tt>.  The stream never closes +outbuf+;
+    # closing it (if it is an IO) is the caller's responsibility.
+    #
+    # Raises EOFError when the end of the body is reached, and IOError when
+    # the stream is closed.
+    #
+    def readpartial(maxlen, outbuf = nil)
+      raise ArgumentError, "negative length #{maxlen} given" if maxlen < 0
+      raise IOError, 'closed response body stream' if closed?
+      return +''.b if maxlen.zero?
+
+      begin
+        fill_decoded(maxlen)
+      rescue => exception
+        abort_connection
+        raise
+      end
+
+      raise EOFError, 'end of response body reached' if @out.empty?
+
+      chunk = @out.slice!(0, maxlen)
+      if outbuf
+        if outbuf.respond_to?(:replace)
+          outbuf.replace(chunk)
+        else
+          outbuf << chunk
+        end
+        outbuf
+      else
+        chunk
+      end
+    end
+
+    # Returns true when the whole body has been decoded and no buffered
+    # bytes remain; may read from the connection to find out.  Raises IOError
+    # when the stream is closed.
+    #
+    def eof?
+      raise IOError, 'closed response body stream' if closed?
+      return false unless @out.empty?
+      return true if @decoder_eof
+
+      begin
+        fill_decoded(1)
+      rescue => exception
+        abort_connection
+        raise
+      end
+      @decoder_eof && @out.empty?
+    end
+
+    # Closes the stream and releases the underlying connection.
+    #
+    # When the body was not fully read, up to DRAIN_LIMIT bytes of the
+    # unread remainder are discarded so that the connection can be reused;
+    # when the remainder is larger (or cannot be read), the connection is
+    # shut down instead.  Does nothing when the stream is already closed.
+    #
+    def close
+      return if @closed
+      @closed = true
+      reusable = false
+      begin
+        reusable = drain
+      rescue StandardError
+        # The remainder of the body could not be drained.
+      end
+      begin
+        @socket.close unless reusable || @socket.closed?
+      ensure
+        detach
+        @on_close&.call(reusable)
+      end
+      nil
+    end
+
+    # Returns true if the stream is closed.
+    def closed?
+      @closed
+    end
+
+    # Whether the stream can still serve bytes from the connection.
+    def open?  #:nodoc: internal use only
+      !@closed && !@socket.closed?
+    end
+
+    # Sets the callback invoked with the reusability of the connection when
+    # the stream is closed.
+    def on_close=(callback)  #:nodoc: internal use only
+      @on_close = callback
+    end
+
+    private
+
+    def fill_decoded(maxlen)
+      while @out.bytesize < maxlen && !@decoder_eof
+        raw = read_raw(READ_CHUNK)
+        if raw.nil?
+          finish_decoder
+        elsif @inflate
+          @out << @inflate.inflate(raw)
+        else
+          @out << raw
+        end
+      end
+    end
+
+    def finish_decoder
+      if @inflate
+        @out << @inflate.finish if @inflate.total_in > 0
+        if @response['content-length']
+          @response['content-length'] = @inflate.total_out.to_s
+        end
+      end
+      @decoder_eof = true
+    end
+
+    # Reads up to +maxlen+ bytes of the raw (still content-encoded) body,
+    # or returns nil when the body is exhausted.
+    def read_raw(maxlen)
+      case @framing
+      when :empty
+        nil
+      when :length
+        return nil if @length_remaining <= 0
+        length = [maxlen, @length_remaining].min
+        buffer = @socket.read(length, +''.b, @ignore_eof)
+        @connection_broken = true if buffer.bytesize < length
+        @length_remaining -= buffer.bytesize
+        buffer.empty? ? nil : buffer
+      when :close
+        buffer = @socket.read(maxlen, +''.b, true)
+        buffer.empty? ? nil : buffer
+      when :chunked
+        read_chunk_raw(maxlen)
+      end
+    end
+
+    def read_chunk_raw(maxlen)
+      loop do
+        if @chunk_remaining > 0
+          length = [maxlen, @chunk_remaining].min
+          buffer = @socket.read(length, +''.b, @ignore_eof)
+          @connection_broken = true if buffer.bytesize < length
+          @chunk_remaining -= buffer.bytesize
+          @socket.read(2) if @chunk_remaining <= 0   # CRLF
+          return buffer.empty? ? nil : buffer
+        end
+        line = Net::HTTPResponse.read_line(@socket, MAX_RESPONSE_HEADER_LENGTH).chop
+        hexlen = line.slice(/[0-9a-fA-F]+/) or
+          raise Net::HTTPBadResponse, "wrong chunk size line: #{line}"
+        length = hexlen.hex
+        if length.zero?
+          until Net::HTTPResponse.read_line(@socket, MAX_RESPONSE_HEADER_LENGTH).chop.empty?
+            # none
+          end
+          return nil
+        end
+        @chunk_remaining = length
+      end
+    end
+
+    # Discards the unread remainder of the body and returns whether the
+    # connection is reusable afterwards.
+    def drain
+      drained = 0
+      until @decoder_eof
+        fill_decoded(READ_CHUNK)
+        drained += @out.bytesize
+        @out.clear
+        return false if drained > DRAIN_LIMIT
+      end
+      !@connection_broken
+    end
+
+    def abort_connection
+      return if @closed
+      @closed = true
+      begin
+        @socket.close unless @socket.closed?
+      ensure
+        detach
+        @on_close&.call(false)
+      end
+    end
+
+    def detach
+      @response.body_stream_detached(@socket)
+    end
+
+  end
+
+end

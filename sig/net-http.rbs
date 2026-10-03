@@ -4087,6 +4087,15 @@ module Net
 
     # <!--
     #   rdoc-file=lib/net/http/response.rb
+    #   - body_stream()
+    # -->
+    # Returns a Net::HTTPResponse::BodyStream for reading the response body
+    # incrementally, instead of buffering it as a single string.
+    #
+    def body_stream: () -> HTTPResponse::BodyStream
+
+    # <!--
+    #   rdoc-file=lib/net/http/response.rb
     #   - body()
     # -->
     # Returns the string response body; note that repeated calls for the unmodified
@@ -5600,6 +5609,41 @@ module Net
     CODE_CLASS_TO_OBJ: Hash[untyped, untyped]
 
     CODE_TO_OBJ: Hash[untyped, untyped]
+  end
+
+  # <!--
+  #   rdoc-file=lib/net/http/response.rb
+  #   - class BodyStream
+  # -->
+  # BodyStream is a read handle for a response body, returned by
+  # Net::HTTPResponse#body_stream.  It serves the decoded body in fragments
+  # through #readpartial, reading from the underlying connection only as
+  # needed.
+  #
+  class HTTPResponse::BodyStream
+    # The maximum number of decoded body bytes that #close discards in order
+    # to keep the underlying connection reusable; when the unread remainder
+    # of the body is larger, the connection is shut down instead.
+    DRAIN_LIMIT: Integer
+
+    # Reads at most +maxlen+ bytes of the decoded body, blocking until at
+    # least one byte is available, and returns them as a binary string.
+    #
+    def readpartial: (Integer maxlen) -> String
+                   | (Integer maxlen, String outbuf) -> String
+                   | (Integer maxlen, HTTPResponse::_Dest outbuf) -> untyped
+
+    # Returns true when the whole body has been decoded and no buffered
+    # bytes remain; may read from the connection to find out.
+    #
+    def eof?: () -> bool
+
+    # Closes the stream and releases the underlying connection.
+    #
+    def close: () -> nil
+
+    # Returns true if the stream is closed.
+    def closed?: () -> bool
   end
 
   HTTP::STATUS_CODES: Hash[Integer, String]
