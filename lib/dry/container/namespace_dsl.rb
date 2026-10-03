@@ -37,6 +37,14 @@ module Dry
         super(namespaced(key), *args, &block)
       end
 
+      # Register an alias within the namespace
+      #
+      # The alias key is namespaced, while the target key is used as given,
+      # so it can point to any key in the container.
+      def register_alias(key, target)
+        super(namespaced(key), target)
+      end
+
       def namespace(namespace, &block)
         super(namespaced(namespace), &block)
       end

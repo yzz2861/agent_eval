@@ -269,6 +269,179 @@ RSpec.shared_examples "a container" do
       end
     end
 
+    describe "aliases" do
+      describe "registering and resolving an alias" do
+        before do
+          container.register("notifications.delivery", "delivery")
+          container.register_alias("mailer", "notifications.delivery")
+        end
+
+        it "resolves to the same item as the target key" do
+          expect(container.resolve("mailer")).to eql("delivery")
+          expect(container["mailer"]).to eql("delivery")
+        end
+
+        it "returns self when registering an alias" do
+          expect(container.register_alias("legacy_mailer", "notifications.delivery")).to be(container)
+        end
+
+        it "mixes strings and symbols" do
+          container.register_alias(:symbol_mailer, :"notifications.delivery")
+
+          expect(container.resolve("symbol_mailer")).to eql("delivery")
+        end
+      end
+
+      describe "lazy resolution" do
+        it "does not resolve or copy the target when the alias is registered" do
+          container.register_alias("mailer", "notifications.delivery")
+          container.register("notifications.delivery", "delivery")
+
+          expect(container.resolve("mailer")).to eql("delivery")
+        end
+
+        it "sees decorations applied to the target after aliasing" do
+          container.register("notifications.delivery", "delivery")
+          container.register_alias("mailer", "notifications.delivery")
+
+          container.decorate("notifications.delivery") { |item| "decorated #{item}" }
+
+          expect(container.resolve("mailer")).to eql("decorated delivery")
+        end
+
+        it "shares memoized items between the alias and the target" do
+          container.register("notifications.delivery", memoize: true) { Object.new }
+          container.register_alias("mailer", "notifications.delivery")
+
+          expect(container.resolve("mailer")).to be(container.resolve("notifications.delivery"))
+        end
+      end
+
+      describe "multi-level aliases" do
+        it "follows a chain of aliases to the final target" do
+          container.register("notifications.delivery", "delivery")
+          container.register_alias("legacy_mailer", "notifications.delivery")
+          container.register_alias("mailer", "legacy_mailer")
+
+          expect(container.resolve("mailer")).to eql("delivery")
+        end
+      end
+
+      describe "alias cycles" do
+        it "raises an error reporting the full chain" do
+          container.register_alias("a", "b")
+          container.register_alias("b", "c")
+          container.register_alias("c", "a")
+
+          expect { container.resolve("a") }.to raise_error(
+            Dry::Container::Error,
+            'Alias cycle detected: "a" -> "b" -> "c" -> "a"'
+          )
+        end
+
+        it "detects aliases pointing to themselves" do
+          container.register_alias("a", "a")
+
+          expect { container.resolve("a") }.to raise_error(
+            Dry::Container::Error,
+            'Alias cycle detected: "a" -> "a"'
+          )
+        end
+      end
+
+      describe "registering conflicts" do
+        it "raises an error when an item is already registered with the key" do
+          container.register("mailer", "mailer")
+
+          expect { container.register_alias("mailer", "notifications.delivery") }
+            .to raise_error(Dry::Container::Error, /already an item registered/)
+        end
+
+        it "raises an error when an alias is already registered with the key" do
+          container.register_alias("mailer", "notifications.delivery")
+
+          expect { container.register_alias("mailer", "other") }
+            .to raise_error(Dry::Container::Error, /already an item registered/)
+        end
+
+        it "raises an error when registering an item with an alias key" do
+          container.register_alias("mailer", "notifications.delivery")
+
+          expect { container.register("mailer", "mailer") }
+            .to raise_error(Dry::Container::Error, /already an alias registered/)
+        end
+      end
+
+      describe "within a namespace" do
+        it "namespaces the alias key" do
+          container.register("notifications.delivery", "delivery")
+
+          container.namespace("legacy") do
+            register_alias("mailer", "notifications.delivery")
+          end
+
+          expect(container.resolve("legacy.mailer")).to eql("delivery")
+        end
+      end
+
+      describe "#key?" do
+        it "returns true for aliases" do
+          container.register_alias("mailer", "notifications.delivery")
+
+          expect(container.key?("mailer")).to be(true)
+          expect(container.key?(:mailer)).to be(true)
+        end
+      end
+
+      describe "#keys" do
+        it "includes aliases" do
+          container.register("notifications.delivery", "delivery")
+          container.register_alias("mailer", "notifications.delivery")
+
+          expect(container.keys).to include("mailer", "notifications.delivery")
+        end
+      end
+
+      describe "#each_key" do
+        it "yields aliases" do
+          container.register_alias("mailer", "notifications.delivery")
+
+          expect(container.each_key.to_a).to include("mailer")
+        end
+      end
+
+      describe "#each" do
+        it "yields aliases with their resolved items" do
+          container.register("notifications.delivery", "delivery")
+          container.register_alias("mailer", "notifications.delivery")
+
+          expect(container.each.to_a).to include(["mailer", "delivery"])
+        end
+      end
+
+      describe "#merge" do
+        it "merges aliases from the other container" do
+          other = Dry::Container.new
+          other.register("notifications.delivery", "delivery")
+          other.register_alias("mailer", "notifications.delivery")
+
+          container.merge(other)
+
+          expect(container.resolve("mailer")).to eql("delivery")
+        end
+
+        it "namespaces merged aliases and their targets" do
+          other = Dry::Container.new
+          other.register("notifications.delivery", "delivery")
+          other.register_alias("mailer", "notifications.delivery")
+
+          container.merge(other, namespace: "legacy")
+
+          expect(container.resolve("legacy.mailer")).to eql("delivery")
+        end
+      end
+    end
+
     describe "#merge" do
       let(:key) { :key }
       let(:other) { Dry::Container.new }
@@ -626,6 +799,13 @@ RSpec.shared_examples "a container" do
       expect(container[:item]).to eql("item")
     end
 
+    it "stubs of the target key are visible through aliases" do
+      container.register_alias("mailer", "item")
+      container.stub(:item, "stub")
+
+      expect(container.resolve("mailer")).to eql("stub")
+    end
+
     describe "with block argument" do
       it "executes the block with the given stubs" do
         expect { |b| container.stub(:item, "stub", &b) }.to yield_control
@@ -673,6 +853,15 @@ RSpec.shared_examples "a container" do
         )
     end
 
+    it "prevents registering aliases once frozen" do
+      container.freeze
+      expect { container.register_alias("mailer", "foo") }
+        .to raise_error(
+          FrozenError,
+          /can't modify frozen \S+ \(when attempting to register alias 'mailer'\)/
+        )
+    end
+
     it "returns self back" do
       expect(container.freeze).to be(container)
     end
@@ -683,12 +872,22 @@ RSpec.shared_examples "a container" do
       container.dup.register(:foo, "bar")
       expect(container.key?(:foo)).to be false
     end
+
+    it "returns a copy that doesn't share aliases with the parent" do
+      container.dup.register_alias("mailer", "foo")
+      expect(container.key?("mailer")).to be false
+    end
   end
 
   describe ".clone" do
     it "returns a copy that doesn't share registered keys with the parent" do
       container.clone.register(:foo, "bar")
       expect(container.key?(:foo)).to be false
+    end
+
+    it "returns a copy that doesn't share aliases with the parent" do
+      container.clone.register_alias("mailer", "foo")
+      expect(container.key?("mailer")).to be false
     end
 
     it "re-uses frozen container" do

@@ -5,6 +5,9 @@
   fixed: 
   added:
   - 'Add a warning about deprecation of the gem (via #89) (@solnic)'
+  - 'Add register_alias for registering lazy key aliases: aliases follow chains,
+    report cycles with the full chain, and reflect later decoration, stubbing and
+    memoization of their targets'
   changed: 
 - version: 0.11.0
   summary: 

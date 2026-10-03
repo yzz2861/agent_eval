@@ -97,6 +97,7 @@ module Dry
         hooks_mod = ::Module.new do
           def inherited(subclass)
             subclass.instance_variable_set(:@_container, @_container.dup)
+            subclass.instance_variable_set(:@_aliases, @_aliases.dup)
             super
           end
         end
@@ -106,6 +107,7 @@ module Dry
           extend hooks_mod
 
           @_container = ::Concurrent::Hash.new
+          @_aliases = ::Concurrent::Hash.new
         end
       end
 
@@ -113,6 +115,7 @@ module Dry
       module Initializer
         def initialize(*args, &block)
           @_container = ::Concurrent::Hash.new
+          @_aliases = ::Concurrent::Hash.new
           super
         end
       end
@@ -152,12 +155,52 @@ module Dry
           item = contents
         end
 
+        if _aliases.key?(key.to_s)
+          raise Error, "There is already an alias registered with the key #{key.to_s.inspect}"
+        end
+
         config.registry.call(_container, key, item, options)
 
         self
       rescue FrozenError
         raise FrozenError,
               "can't modify frozen #{self.class} (when attempting to register '#{key}')"
+      end
+
+      # Register an alias for another key in the container
+      #
+      # Aliases are resolved lazily: the aliased item is never copied or
+      # re-registered. Resolving an alias follows the chain of aliases at
+      # resolve time and returns whatever the final key currently resolves
+      # to, so later decoration or stubbing of the target key is visible
+      # through the alias, and memoized items are shared between the alias
+      # and its target.
+      #
+      # @param [Mixed] key
+      #   The alias key to register
+      # @param [Mixed] target
+      #   The key the alias points to (may itself be an alias)
+      #
+      # @raise [Dry::Container::Error]
+      #   If an item or alias is already registered with the given key
+      #
+      # @return [Dry::Container::Mixin] self
+      #
+      # @api public
+      def register_alias(key, target)
+        key = key.to_s
+        target = target.to_s
+
+        if _container.key?(key) || _aliases.key?(key)
+          raise Error, "There is already an item registered with the key #{key.inspect}"
+        end
+
+        _aliases[key] = target
+
+        self
+      rescue FrozenError
+        raise FrozenError,
+              "can't modify frozen #{self.class} (when attempting to register alias '#{key}')"
       end
 
       # Resolve an item from the container
@@ -172,7 +215,11 @@ module Dry
       #
       # @api public
       def resolve(key, &block)
-        config.resolver.call(_container, key, &block)
+        if _aliases.key?(key.to_s)
+          resolve(_resolve_alias(key.to_s), &block)
+        else
+          config.resolver.call(_container, key, &block)
+        end
       end
 
       # Resolve an item from the container
@@ -206,8 +253,13 @@ module Dry
             },
             &block
           )
+          other._aliases.each do |key, target|
+            _aliases[PREFIX_NAMESPACE.call(namespace, key, config)] =
+              PREFIX_NAMESPACE.call(namespace, target, config)
+          end
         else
           _container.merge!(other._container, &block)
+          _aliases.merge!(other._aliases)
         end
 
         self
@@ -222,7 +274,7 @@ module Dry
       #
       # @api public
       def key?(key)
-        config.resolver.key?(_container, key)
+        _aliases.key?(key.to_s) || config.resolver.key?(_container, key)
       end
 
       # An array of registered names for the container
@@ -231,7 +283,7 @@ module Dry
       #
       # @api public
       def keys
-        config.resolver.keys(_container)
+        config.resolver.keys(_container) + _aliases.keys
       end
 
       # Calls block once for each key in container, passing the key as a parameter.
@@ -242,7 +294,13 @@ module Dry
       #
       # @api public
       def each_key(&block)
-        config.resolver.each_key(_container, &block)
+        if block
+          config.resolver.each_key(_container, &block)
+          _aliases.each_key(&block)
+        else
+          return keys.each
+        end
+
         self
       end
 
@@ -259,7 +317,11 @@ module Dry
       #       over not just the registered keys, but to see what was registered would be
       #       very helpful. This is a step toward doing that.
       def each(&block)
-        config.resolver.each(_container, &block)
+        pairs = config.resolver.each(_container).to_a
+        _aliases.each_key do |key|
+          pairs << [key, resolve(key)]
+        end
+        pairs.each(&block)
       end
 
       # Decorates an item from the container with specified decorator
@@ -324,6 +386,7 @@ module Dry
       def freeze
         super
         _container.freeze
+        _aliases.freeze
         self
       end
 
@@ -332,10 +395,39 @@ module Dry
         @_container
       end
 
+      # @private no, really
+      def _aliases
+        @_aliases
+      end
+
+      # Follows a chain of aliases to the final, non-alias key
+      #
+      # @raise [Dry::Container::Error]
+      #   If the aliases form a cycle (the error message reports the full chain)
+      #
+      # @private
+      def _resolve_alias(key)
+        seen = [key]
+        current = key
+
+        while (target = _aliases[current])
+          if seen.include?(target)
+            chain = (seen + [target]).map(&:inspect).join(" -> ")
+            raise Error, "Alias cycle detected: #{chain}"
+          end
+
+          seen << target
+          current = target
+        end
+
+        current
+      end
+
       # @api public
       def dup
         copy = super
         copy.instance_variable_set(:@_container, _container.dup)
+        copy.instance_variable_set(:@_aliases, _aliases.dup)
         copy
       end
 
@@ -344,6 +436,7 @@ module Dry
         copy = super
         unless copy.frozen?
           copy.instance_variable_set(:@_container, _container.dup)
+          copy.instance_variable_set(:@_aliases, _aliases.dup)
         end
         copy
       end
