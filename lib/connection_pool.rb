@@ -37,6 +37,15 @@ end
 # - :size - number of connections to pool, defaults to 5
 # - :timeout - amount of time to wait for a connection if none currently available, defaults to 5 seconds
 # - :auto_reload_after_fork - automatically drop all connections after fork, defaults to true
+# - :checkout_health_check - optional callable invoked with each checked-out connection before it is
+#   handed out. Return a truthy value if the connection is healthy. Connections that fail the check
+#   (or raise) are destroyed and replaced, subject to :max_checkout_replacements. The check runs
+#   outside the pool's internal lock, so slow checks do not block other threads. Defaults to nil.
+# - :max_checkout_replacements - maximum number of unhealthy connections to destroy and replace
+#   during a single checkout before raising ConnectionPool::Error. All attempts share the original
+#   checkout deadline. Defaults to nil (unlimited, bounded by the checkout timeout).
+# - :on_connection_destroy - optional callable invoked with each connection destroyed after a
+#   failed health check, e.g. to close it. Defaults to nil.
 #
 class ConnectionPool
   def self.wrap(**kwargs, &block)
@@ -45,13 +54,17 @@ class ConnectionPool
 
   attr_reader :size
 
-  def initialize(timeout: 5, size: 5, auto_reload_after_fork: true, name: nil, &block)
+  def initialize(timeout: 5, size: 5, auto_reload_after_fork: true, name: nil, checkout_health_check: nil, max_checkout_replacements: nil, on_connection_destroy: nil, &block)
     raise ArgumentError, "Connection pool requires a block" unless block_given?
 
     @size = Integer(size)
     raise ArgumentError, "Connection pool size cannot be negative" if @size.negative?
 
     @timeout = Float(timeout)
+    @checkout_health_check = checkout_health_check
+    @max_checkout_replacements = max_checkout_replacements && Integer(max_checkout_replacements)
+    raise ArgumentError, "max_checkout_replacements cannot be negative" if @max_checkout_replacements&.negative?
+    @on_connection_destroy = on_connection_destroy
     @available = TimedStack.new(size: @size, &block)
     @key = :"pool-#{@available.object_id}"
     @key_count = :"pool-#{@available.object_id}-count"
@@ -116,7 +129,7 @@ class ConnectionPool
       ::Thread.current[@key_count] += 1
       ::Thread.current[@key]
     else
-      conn = @available.pop(timeout:, **kwargs)
+      conn = checkout_fresh_connection(timeout:, **kwargs)
       ::Thread.current[@key] = conn
       ::Thread.current[@key_count] = 1
       ::Thread.current[@key_kwargs] = kwargs
@@ -185,6 +198,58 @@ class ConnectionPool
   # Number of pool entries created and idle in the pool.
   def idle
     @available.idle
+  end
+
+  private
+
+  # Fetches a connection from the stack, running the optional health check
+  # outside the stack's lock. Unhealthy connections are destroyed so their
+  # capacity is immediately returned to the pool, and the checkout retries
+  # until the original deadline is reached.
+  def checkout_fresh_connection(timeout:, **kwargs)
+    return @available.pop(timeout:, **kwargs) unless @checkout_health_check
+
+    deadline = monotonic_time + timeout
+    replacements = 0
+    loop do
+      remaining = deadline - monotonic_time
+      remaining = 0 if remaining.negative?
+      conn = @available.pop(timeout: remaining, **kwargs)
+
+      begin
+        healthy = @checkout_health_check.call(conn)
+      rescue Exception
+        # Capacity must be recovered even when the check itself fails.
+        destroy_unhealthy_connection(conn)
+        raise
+      end
+      return conn if healthy
+
+      destroy_unhealthy_connection(conn)
+      replacements += 1
+      if @max_checkout_replacements && replacements >= @max_checkout_replacements
+        raise ConnectionPool::Error, "Checkout health check failed for #{replacements} connection(s); giving up"
+      end
+      # All attempts share the original checkout deadline. Check it here,
+      # before popping again, because TimedStack#pop always tries to create
+      # a connection once, even with a zero timeout.
+      if monotonic_time >= deadline
+        raise ConnectionPool::TimeoutError, "Waited #{timeout} sec while replacing unhealthy connections"
+      end
+    end
+  end
+
+  def destroy_unhealthy_connection(conn)
+    @available.decrement_created
+    begin
+      @on_connection_destroy&.call(conn)
+    rescue
+      nil
+    end
+  end
+
+  def monotonic_time
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 end
 

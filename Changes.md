@@ -1,5 +1,14 @@
 # connection_pool Changelog
 
+Unreleased
+------
+
+- Add optional `:checkout_health_check` to verify connections before they are
+  handed out. Unhealthy connections are destroyed (with optional
+  `:on_connection_destroy` cleanup) and replaced without holding the pool lock;
+  all attempts share the original checkout deadline and are capped by
+  `:max_checkout_replacements`.
+
 3.0.2
 ------
 

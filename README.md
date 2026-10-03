@@ -50,6 +50,28 @@ This will only modify the timeout for this particular invocation.
 This is useful if you want to fail-fast on certain non-critical
 sections when a resource is not available, or conversely if you are comfortable blocking longer on a particular resource.
 
+## Checkout health checks
+
+You can verify each connection before it is handed out by passing a
+`:checkout_health_check` callable. Connections that fail the check (or raise)
+are destroyed and replaced; all attempts share the original checkout deadline,
+so a pool full of bad connections still fails within `:timeout` seconds.
+The check runs outside the pool's internal lock, so slow checks don't block
+other threads checking connections in or out.
+
+``` ruby
+pool = ConnectionPool.new(size: 5, timeout: 5,
+  checkout_health_check: ->(conn) { conn.ping },
+  max_checkout_replacements: 3,
+  on_connection_destroy: ->(conn) { conn.close }) { Redis.new }
+```
+
+- `:checkout_health_check` must return a truthy value for healthy connections.
+- `:max_checkout_replacements` caps how many unhealthy connections one checkout
+  will destroy and replace before raising `ConnectionPool::Error`. Optional.
+- `:on_connection_destroy` is called with each destroyed connection so you can
+  close it. Optional.
+
 ## Migrating to a Connection Pool
 
 You can use `ConnectionPool::Wrapper` to wrap a single global connection, making it easier to migrate existing connection code over time:
