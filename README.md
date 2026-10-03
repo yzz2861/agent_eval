@@ -247,6 +247,50 @@ vehicle.alarm_state_name                        # => :active
 
 vehicle.fire_events!(:ignite, :enable_alarm)    # => StateMachines:InvalidParallelTransition: Cannot run events in parallel: ignite, enable_alarm
 
+# Joint Transitions Across Objects
+
+Sometimes a change must happen atomically across *multiple* objects -- for
+example, when a task is handed off and both the old and the new owner's
+state must change together.  `StateMachines::JointTransition` performs such
+a coordinated transition for in-memory objects.  Each participant is an
+"object, machine, event" triple, given as a hash or a 3-element array:
+
+```ruby
+StateMachines::JointTransition.perform([
+  { object: order,   machine: :state,  event: :reassign },
+  { object: courier, machine: :status, event: :start_delivery }
+])
+
+StateMachines::JointTransition.perform([
+  [order, Order.state_machines[:state], :reassign],
+  [courier, :status, :start_delivery]
+])
+```
+
+The machine may be referenced by name / attribute or given as a
+`StateMachines::Machine` instance.
+
+Semantics:
+
+* The whole group is validated first: a transition is built for every
+  participant before anything is performed.  If any event cannot transition,
+  nothing runs, failure callbacks fire for the failed participants, and the
+  call returns `false`.
+* All transitions are then performed together (before callbacks, state
+  persistence, actions, after callbacks).  If any action fails or raises,
+  every participant's state attribute is restored to its original value.
+* Listing the same object more than once is rejected with an `ArgumentError`
+  before anything runs.  Concurrent joint transitions that list the same
+  objects in opposite orders cannot deadlock -- participants are always
+  locked in a canonical order.
+
+**Rollback scope:** rollback only restores the *in-memory state attributes*
+of the participants.  It is **not** a database transaction -- any database
+writes (or other side effects) performed by your callbacks or actions are
+outside the rollback guarantee and will not be undone.
+
+The single-object `fire_events` API is unaffected by this interface.
+
 # Coordinated State Management
 
 State machines can coordinate with each other using state guards, allowing transitions to depend on the state of other state machines within the same object. This enables complex system modeling where components are interdependent.

@@ -31,8 +31,7 @@ module StateMachines
       @valid = all?
       reject!(&:!)
 
-      attributes = map(&:attribute).uniq
-      raise ArgumentError, 'Cannot perform multiple transitions in parallel for the same state machine attribute' if attributes.length != length
+      assert_unique_attributes!
 
       StateMachines::OptionsValidator.assert_valid_keys!(options, :actions, :after, :use_transactions, :fiber)
       options = { actions: true, after: true, use_transactions: true }.merge(options)
@@ -88,6 +87,14 @@ module StateMachines
     protected
 
     attr_reader :results # :nodoc:
+
+    # Ensures no two transitions in this collection write to the same state
+    # machine attribute.  Collections that span multiple objects (e.g. joint
+    # transitions) override this to scope uniqueness per object.
+    def assert_unique_attributes!
+      attributes = map(&:attribute).uniq
+      raise ArgumentError, 'Cannot perform multiple transitions in parallel for the same state machine attribute' if attributes.length != length
+    end
 
     private
 
