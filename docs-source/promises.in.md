@@ -249,6 +249,16 @@ Concurrent::Promises.any(branch1, branch2).value!
 (branch1 | branch2).value!
 ```
 
+When several equivalent requests are started and only a few successful results
+are needed, `first_fulfilled_futures` collects them. Each result keeps its
+original input position, and results are ordered by fulfillment acceptance.
+
+```ruby
+copies = 3.times.map { |index| Concurrent::Promises.fulfilled_future(index) }
+Concurrent::Promises.first_fulfilled_futures(2, *copies).value!
+# => [[0, 0], [1, 1]]
+```
+
 ## Blocking methods
 
 In these examples we have used blocking methods like `value` extensively for
@@ -971,4 +981,3 @@ sleep 0.03 #
 origin.resolve
 result.result
 ```
-

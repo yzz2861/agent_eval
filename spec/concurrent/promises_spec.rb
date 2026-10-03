@@ -177,6 +177,125 @@ RSpec.describe 'Concurrent::Promises' do
     end
   end
 
+  describe '.first_fulfilled_futures' do
+    it 'returns accepted results with original positions' do
+      f1 = resolvable_future
+      f2 = resolvable_future
+      f3 = resolvable_future
+
+      first = first_fulfilled_futures(2, f1, f2, f3)
+
+      f2.fulfill :b
+      f3.reject StandardError.new
+
+      expect(first.pending?).to be_truthy
+
+      f1.fulfill :a
+
+      expect(first.value!).to eq [[1, :b], [0, :a]]
+      expect(first.then { |second, first| [second, first] }.value!).to eq([[1, :b], [0, :a]])
+    end
+
+    it 'rejects as soon as failures make success impossible' do
+      f1 = resolvable_future
+      f2 = resolvable_future
+      first = first_fulfilled_futures(2, f1, f2)
+
+      f1.reject StandardError.new
+
+      expect(first.wait(0.1)).to eq true
+      expect(first).to be_rejected
+      expect(first.reason).to be_a Concurrent::Error
+      expect(f2.pending?).to be_truthy
+      f2.fulfill :late
+    end
+
+    it 'counts a repeated future only once using its first position' do
+      shared = resolvable_future
+      other  = resolvable_future
+      first  = first_fulfilled_futures(2, shared, shared, other)
+
+      shared.fulfill :shared
+      other.fulfill :other
+
+      expect(first.value!).to eq [[0, :shared], [2, :other]]
+      expect(first_fulfilled_futures(2, shared, shared).reason).to be_a Concurrent::Error
+    end
+
+    it 'immediately fulfills for zero results' do
+      delayed = delay { :never }
+      first   = first_fulfilled_futures(0, delayed)
+
+      expect(first.value!).to eq []
+      expect(delayed.pending?).to be_truthy
+    end
+
+    it 'processes resolved inputs in input order' do
+      first = first_fulfilled_futures(
+        2,
+        rejected_future(:error),
+        fulfilled_future(:a),
+        fulfilled_future(:b),
+      )
+
+      expect(first.value!).to eq [[1, :a], [2, :b]]
+    end
+
+    it 'treats events as fulfilled candidates' do
+      pending_event = resolvable_event
+      first         = first_fulfilled_futures(2, resolved_event, pending_event)
+
+      pending_event.resolve
+
+      expect(first.value!).to eq [[0, nil], [1, nil]]
+    end
+
+    it 'does not cancel input futures after resolving' do
+      f1 = resolvable_future
+      f2 = resolvable_future
+      first = first_fulfilled_futures(1, f1, f2)
+
+      f1.fulfill :value
+      first.wait!
+
+      expect(f2.pending?).to be_truthy
+      f2.fulfill :still_usable
+      expect(f2.value!).to eq :still_usable
+    end
+
+    it 'fulfilled futures win when resolutions reach the end together' do
+      ready   = Concurrent::CountDownLatch.new(3)
+      release = Queue.new
+      futures = Array.new(3) { resolvable_future }
+      first   = first_fulfilled_futures(2, *futures)
+
+      resolutions = [
+        -> { futures[0].fulfill :a },
+        -> { futures[1].reject StandardError.new },
+        -> { futures[2].fulfill :c },
+      ]
+
+      threads = resolutions.map do |resolution|
+        in_thread do
+          ready.count_down
+          release.pop
+          resolution.call
+        end
+      end
+
+      expect(ready.wait(1)).to eq true
+      3.times { release << true }
+      join_with threads
+
+      expect(first.value!).to contain_exactly [0, :a], [2, :c]
+    end
+
+    it 'rejects invalid counts' do
+      expect { first_fulfilled_futures(-1) }.to raise_error ArgumentError
+      expect { first_fulfilled_futures(1.0) }.to raise_error ArgumentError
+    end
+  end
+
   describe '.zip' do
     it 'waits for all results' do
       a = future { 1 }

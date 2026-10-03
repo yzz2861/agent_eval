@@ -17,6 +17,10 @@ Concurrent::Promises::FactoryMethods.instance_methods(false).sort
 #     :any_resolved_future_on,
 #     :delay,
 #     :delay_on,
+#     :first,
+#     :first_fulfilled_futures,
+#     :first_fulfilled_futures_on,
+#     :first_on,
 #     :fulfilled_future,
 #     :future,
 #     :future_on,
@@ -315,6 +319,16 @@ Instead of zipping only the first one can be taken, if needed.
 Concurrent::Promises.any(branch1, branch2).value!
 # => 1
 (branch1 | branch2).value!               # => 1
+```
+
+When several equivalent requests are started and only a few successful results
+are needed, `first_fulfilled_futures` collects them. Each result keeps its
+original input position, and results are ordered by fulfillment acceptance.
+
+```ruby
+copies = 3.times.map { |index| Concurrent::Promises.fulfilled_future(index) }
+Concurrent::Promises.first_fulfilled_futures(2, *copies).value!
+# => [[0, 0], [1, 1]]
 ```
 
 ## Blocking methods
@@ -1137,4 +1151,3 @@ result.result
 #     nil,
 #     #<Concurrent::CancelledOperationError: Concurrent::CancelledOperationError>]
 ```
-

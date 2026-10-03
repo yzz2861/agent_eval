@@ -315,6 +315,49 @@ module Concurrent
       end
 
       # @!macro promises.shortcut.on
+      # @return [Future]
+      def first_fulfilled_futures(count, *futures_and_or_events)
+        first_fulfilled_futures_on default_executor, count, *futures_and_or_events
+      end
+
+      alias_method :first, :first_fulfilled_futures
+
+      # Creates a new future which is fulfilled after +count+ different futures or events are
+      # fulfilled. Each result is represented as a +[input_index, value]+ pair. The pairs are in
+      # the order in which the fulfillments are accepted, not the order of the inputs. An event's
+      # value is +nil+.
+      #
+      # Repeatedly passing the same future or event counts as only one candidate. The pair uses
+      # the index of its first occurrence. Rejected candidates do not occupy one of the +count+
+      # successful slots. The returned future rejects as soon as the number of already accepted
+      # fulfillments plus the number of candidates still pending is smaller than +count+, without
+      # waiting for the remaining candidates. The input futures and events are never cancelled.
+      #
+      # When +count+ is zero, the returned future is immediately fulfilled with an empty array.
+      # When all inputs are already resolved, they are processed in input order. If a fulfillment
+      # and a rejection that together reach the terminal condition happen concurrently, the result
+      # is determined by whether +count+ fulfillments still exist.
+      #
+      # @!macro promises.param.default_executor
+      # @param [Integer] count the number of different fulfilled candidates required
+      # @param [AbstractEventFuture] futures_and_or_events
+      # @return [Future]
+      # @raise [ArgumentError] when +count+ is negative or not an integer
+      def first_fulfilled_futures_on(default_executor, count, *futures_and_or_events)
+        unless count.is_a?(::Integer) && count >= 0
+          raise ArgumentError, 'count has to be an integer higher than or equal to 0'
+        end
+
+        FirstFulfilledFuturesPromise.new(futures_and_or_events, count, default_executor).future
+      end
+
+      # @!macro promises.shortcut.on
+      # @return [Future]
+      def first_on(default_executor, count, *futures_and_or_events)
+        first_fulfilled_futures_on default_executor, count, *futures_and_or_events
+      end
+
+      # @!macro promises.shortcut.on
       # @return [Event]
       def any_event(*futures_and_or_events)
         any_event_on default_executor, *futures_and_or_events
@@ -330,7 +373,6 @@ module Concurrent
         AnyResolvedEventPromise.new_blocked_by(futures_and_or_events, default_executor).event
       end
 
-      # TODO consider adding first(count, *futures)
       # TODO consider adding zip_by(slice, *futures) processing futures in slices
       # TODO or rather a generic aggregator taking a function
     end
@@ -2096,6 +2138,91 @@ module Concurrent
             # inlined super from BlockedPromise
             countdown.zero?
       end
+    end
+
+    class FirstFulfilledFuturesPromise < BlockedPromise
+
+      def self.new(futures_and_or_events, count, default_executor)
+        unique_futures = {}.compare_by_identity
+        futures_and_or_events.each_with_index do |future, index|
+          unique_futures.fetch(future) { unique_futures[future] = index }
+        end
+
+        blockers        = unique_futures.keys
+        indices         = unique_futures.values
+        immediately     = count.zero? || count > blockers.size
+        delayed         = if immediately
+                            nil
+                          else
+                            blockers.reduce(nil) { |d, f| BlockedPromise.add_delayed d, f.promise.delayed_because }
+                          end
+        promise         = allocate.tap do |obj|
+          obj.send(:initialize, delayed, immediately ? [] : blockers, indices, count, default_executor)
+        end
+        unless immediately
+          blockers.each_with_index do |future, index|
+            future.add_callback_notify_blocked promise, index
+          end
+        end
+        promise
+      end
+
+      private
+
+      def initialize(delayed, blockers, indices, count, default_executor)
+        super(delayed, blockers.size, Future.new(self, default_executor))
+        @Indices   = indices
+        @Count     = count
+        @Remaining = blockers.size
+        @Results   = []
+        @Mutex     = Mutex.new
+
+        if @Count.zero?
+          resolve_with FulfilledArray.new([])
+          @Remaining = 0
+        elsif @Count > @Remaining
+          reject_impossible
+          @Remaining = 0
+        end
+      end
+
+      def on_blocker_resolution(future, index)
+        terminal_state = nil
+
+        @Mutex.synchronize do
+          return if @Remaining.zero?
+
+          @Remaining -= 1
+          state = future.internal_state
+
+          if state.fulfilled?
+            @Results << [@Indices[index], state.value]
+            if @Results.size == @Count
+              terminal_state = FulfilledArray.new(@Results.dup)
+              @Remaining = 0
+            end
+          elsif @Results.size + @Remaining < @Count
+            terminal_state = Rejected.new(
+              Concurrent::Error.new(
+                "cannot fulfill #{@Count} futures, only #{@Results.size + @Remaining} can still succeed"
+              )
+            )
+            @Remaining = 0
+          end
+        end
+
+        resolve_with terminal_state if terminal_state
+      end
+
+      def reject_impossible
+        resolve_with Rejected.new(
+          Concurrent::Error.new(
+            "cannot fulfill #{@Count} futures, only #{@Results.size + @Remaining} can still succeed"
+          )
+        )
+      end
+
+      public :on_blocker_resolution
     end
 
     class DelayPromise < InnerPromise
