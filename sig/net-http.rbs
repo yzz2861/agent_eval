@@ -1030,6 +1030,13 @@ module Net
     #
     def self.new: (String address, ?Integer? port, ?String | :ENV | nil p_addr, ?Integer? p_port, ?String? p_user, ?String? p_pass, ?untyped? p_no_proxy) -> Net::HTTP
 
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Creates a new Net::HTTP object that connects through the Unix domain socket
+    # at +unix_socket_path+ instead of a TCP socket; see [Unix Domain
+    # Sockets](rdoc-ref:Net::HTTP@Unix+Domain+Sockets).
+    #
+    def self.unix: (String address, String unix_socket_path, ?Integer? port) -> Net::HTTP
+
     # <!--
     #   rdoc-file=lib/net/http.rb
     #   - inspect()
@@ -1117,6 +1124,19 @@ module Net
     # initially `nil`.
     #
     attr_accessor local_port: Integer
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the string path of the Unix domain socket used to
+    # establish the connection; initially +nil+, meaning the connection uses a
+    # TCP socket.
+    #
+    attr_accessor unix_socket_path: String?
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Returns +true+ if the connection uses a Unix domain socket, +false+
+    # otherwise; see #unix_socket_path.
+    #
+    def unix_socket?: () -> bool
 
     # <!-- rdoc-file=lib/net/http.rb -->
     # Sets whether to determine the proxy from environment variable

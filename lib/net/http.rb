@@ -336,6 +336,46 @@ module Net   #:nodoc:
   #   uri # => #<URI::HTTPS https://jsonplaceholder.typicode.com/>
   #   Net::HTTP.get(uri)
   #
+  # == Unix Domain Sockets
+  #
+  # An \HTTP object can connect to a server through a
+  # {Unix domain socket}[https://en.wikipedia.org/wiki/Unix_domain_socket]
+  # instead of a \TCP socket.
+  # This is useful for talking to a local service
+  # (such as a reverse proxy or an application server)
+  # that listens on a socket file:
+  #
+  #   http = Net::HTTP.unix('www.example', '/tmp/server.sock')
+  #   http.unix_socket?       # => true
+  #   http.unix_socket_path   # => "/tmp/server.sock"
+  #   http.start do |session|
+  #     session.get('/')
+  #   end
+  #
+  # The given +address+ remains the logical \HTTP host:
+  # it is used for the +Host+ request header,
+  # while the socket file path is used only to establish the connection.
+  # The socket file path never appears in the request target
+  # or in the +Host+ header.
+  #
+  # A Unix socket connection is always direct:
+  # proxy settings, including environment variable '<tt>ENV['http_proxy']</tt>',
+  # are ignored for it.
+  #
+  # Multiple logical hosts may be served through the same socket file;
+  # create one \HTTP object per logical host:
+  #
+  #   Net::HTTP.unix('a.example', '/tmp/server.sock').start do |a|
+  #     a.get('/')
+  #   end
+  #   Net::HTTP.unix('b.example', '/tmp/server.sock').start do |b|
+  #     b.get('/')
+  #   end
+  #
+  # TLS is not supported over a Unix domain socket;
+  # enabling Net::HTTP#use_ssl= together with a Unix socket path
+  # raises ArgumentError when the session is started.
+  #
   # == Proxy Server
   #
   # An \HTTP object can have
@@ -1128,6 +1168,30 @@ module Net   #:nodoc:
       http
     end
 
+    # Creates a new \Net::HTTP object that connects through the Unix
+    # domain socket at +unix_socket_path+ instead of a \TCP socket;
+    # see {Unix Domain Sockets}[rdoc-ref:Net::HTTP@Unix+Domain+Sockets].
+    #
+    # Argument +address+ is the logical \HTTP host,
+    # used for the +Host+ request header;
+    # argument +port+ defaults to Net::HTTP.default_port (80).
+    # Does not open a connection:
+    #
+    #   http = Net::HTTP.unix('www.example', '/tmp/server.sock')
+    #   # => #<Net::HTTP www.example:80 open=false>
+    #   http.unix_socket?     # => true
+    #   http.unix_socket_path # => "/tmp/server.sock"
+    #   http.proxy?           # => false
+    #
+    # The connection is always direct:
+    # no proxy is used, even if environment variable
+    # '<tt>ENV['http_proxy']</tt>' is set.
+    def HTTP.unix(address, unix_socket_path, port = nil)
+      http = new(address, port, nil)
+      http.unix_socket_path = unix_socket_path
+      http
+    end
+
     class << HTTP
       # Allows to set the default configuration that will be used
       # when creating a new connection.
@@ -1167,6 +1231,7 @@ module Net   #:nodoc:
       @address = address
       @port    = (port || HTTP.default_port)
       @ipaddr = nil
+      @unix_socket_path = nil
       @local_host = nil
       @local_port = nil
       @curr_http_version = HTTPVersion
@@ -1278,6 +1343,36 @@ module Net   #:nodoc:
     # Sets or returns the integer local port used to establish the connection;
     # initially +nil+.
     attr_accessor :local_port
+
+    # Sets or returns the string path of the Unix domain socket
+    # used to establish the connection;
+    # initially +nil+, meaning the connection uses a \TCP socket.
+    #
+    # When set, the connection is opened to the socket file at this path,
+    # while #address remains the logical \HTTP host
+    # used for the +Host+ request header;
+    # see {Unix Domain Sockets}[rdoc-ref:Net::HTTP@Unix+Domain+Sockets].
+    #
+    #   http = Net::HTTP.new('www.example')
+    #   http.unix_socket_path = '/tmp/server.sock'
+    #   http.unix_socket? # => true
+    #
+    # The path may not be changed while the session is started.
+    attr_reader :unix_socket_path
+
+    # Sets the Unix domain socket path for the connection;
+    # see #unix_socket_path.
+    def unix_socket_path=(path)
+      raise IOError, "unix_socket_path value changed, but session already started" if started?
+      @unix_socket_path = path
+    end
+
+    # Returns +true+ if the connection uses a Unix domain socket,
+    # +false+ otherwise;
+    # see #unix_socket_path.
+    def unix_socket?
+      !@unix_socket_path.nil?
+    end
 
     # Returns the encoding to use for the response body;
     # see #response_body_encoding=.
@@ -1663,12 +1758,18 @@ module Net   #:nodoc:
 
     def connect
       if use_ssl?
+        if unix_socket?
+          raise ArgumentError, 'TLS (use_ssl) is not supported over a Unix domain socket'
+        end
         # reference early to load OpenSSL before connecting,
         # as OpenSSL may take time to load.
         @ssl_context = OpenSSL::SSL::SSLContext.new
       end
 
-      if proxy? then
+      if unix_socket? then
+        conn_addr = @unix_socket_path
+        conn_port = nil
+      elsif proxy? then
         conn_addr = proxy_address
         conn_port = proxy_port
       else
@@ -1676,17 +1777,26 @@ module Net   #:nodoc:
         conn_port = port
       end
 
-      debug "opening connection to #{conn_addr}:#{conn_port}..."
+      if unix_socket?
+        debug "opening connection to unix:#{conn_addr}..."
+      else
+        debug "opening connection to #{conn_addr}:#{conn_port}..."
+      end
       begin
         s = timeouted_connect(conn_addr, conn_port)
       rescue => e
         if (defined?(IO::TimeoutError) && e.is_a?(IO::TimeoutError)) || e.is_a?(Errno::ETIMEDOUT)  # for compatibility with previous versions
           e = Net::OpenTimeout.new(e)
         end
-        raise e, "Failed to open TCP connection to " +
-          "#{conn_addr}:#{conn_port} (#{e.message})"
+        if unix_socket?
+          raise e, "Failed to open Unix socket connection to " +
+            "#{conn_addr} (#{e.message})"
+        else
+          raise e, "Failed to open TCP connection to " +
+            "#{conn_addr}:#{conn_port} (#{e.message})"
+        end
       end
-      s.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+      s.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1) unless unix_socket?
       debug "opened"
       if use_ssl?
         if proxy?
@@ -1789,7 +1899,11 @@ module Net   #:nodoc:
     private_constant :TCP_SOCKET_NEW_HAS_OPEN_TIMEOUT
 
     def timeouted_connect(conn_addr, conn_port)
-      if TCP_SOCKET_NEW_HAS_OPEN_TIMEOUT
+      if unix_socket?
+        Timeout.timeout(@open_timeout, Net::OpenTimeout) {
+          UNIXSocket.open(conn_addr)
+        }
+      elsif TCP_SOCKET_NEW_HAS_OPEN_TIMEOUT
         TCPSocket.open(conn_addr, conn_port, @local_host, @local_port, open_timeout: @open_timeout)
       else
         Timeout.timeout(@open_timeout, Net::OpenTimeout) {
@@ -1882,7 +1996,12 @@ module Net   #:nodoc:
 
     # Returns +true+ if a proxy server is defined, +false+ otherwise;
     # see {Proxy Server}[rdoc-ref:Net::HTTP@Proxy+Server].
+    #
+    # Always returns +false+ when the connection uses
+    # a Unix domain socket (see #unix_socket_path),
+    # because such a connection is always direct.
     def proxy?
+      return false if unix_socket?
       !!(@proxy_from_env ? proxy_uri : @proxy_address)
     end
 
