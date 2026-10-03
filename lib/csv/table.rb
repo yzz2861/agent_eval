@@ -745,6 +745,155 @@ class CSV
       end
     end
 
+    # == Joining Tables
+    #
+    # #inner_join, #left_join, and #full_join combine rows from two tables
+    # without flattening rows into Hashes, so duplicated headers are retained.
+    #
+    # Use +on+ when the key headers are the same on both sides. Use +left_on+
+    # and +right_on+ together when the key headers differ or when integer
+    # column positions are needed to select one of duplicated headers. Both
+    # options accept an Array for composite keys.
+    #
+    # Result headers are two-element pairs:
+    # - <tt>[:left, header]</tt> for a column from the left table.
+    # - <tt>[:right, header]</tt> for a column from the right table.
+    #
+    # All left columns precede all right columns. Original headers are kept as
+    # the second element of each pair, including join keys and duplicated
+    # headers, so same-named columns remain distinguishable by source.
+    # Retrieve a source-qualified column with its pair header, for example
+    # <tt>joined[[:left, "id"]]</tt>, or by its integer position.
+    #
+    # When a key is repeated, every left row is paired with every matching
+    # right row. Inner and left joins return rows in left-table order; rows
+    # matched to one left row are ordered by right-table position. Full joins
+    # use that order for matched and unmatched left rows, then append
+    # unmatched right rows in right-table order.
+    #
+    # By default, a +nil+ key value never matches another +nil+. Set
+    # +nil_matches_nil+ to +true+ to compare +nil+ as an equal key value.
+    # Joining never mutates either input table.
+
+    # :call-seq:
+    #   table.inner_join(other_table, on:) -> csv_table
+    #   table.inner_join(other_table, left_on:, right_on:) -> csv_table
+    #
+    # Returns a new CSV::Table containing the inner join of +self+ and
+    # +other_table+. Only rows whose keys match are returned.
+    #
+    # See {Joining Tables}[#class-CSV::Table-label-Joining+Tables] for the
+    # result columns, duplicate-key order, and nil-key behavior.
+    #
+    # If both tables have a duplicated +id+ header, all matching pairs are
+    # retained and the original +id+ headers are preserved for both sources:
+    #   left = CSV.parse(<<~CSV, headers: true)
+    #     id,name
+    #     1,A
+    #     1,B
+    #   CSV
+    #   right = CSV.parse(<<~CSV, headers: true)
+    #     id,name
+    #     1,X
+    #     1,Y
+    #   CSV
+    #   left.inner_join(right, on: "id").to_a
+    #   # => [[[:left, "id"], [:left, "name"], [:right, "id"], [:right, "name"]],
+    #   #     ["1", "A", "1", "X"],
+    #   #     ["1", "A", "1", "Y"],
+    #   #     ["1", "B", "1", "X"],
+    #   #     ["1", "B", "1", "Y"]]
+    def inner_join(other_table,
+                   on: nil,
+                   left_on: nil,
+                   right_on: nil,
+                   nil_matches_nil: false)
+      join_table(other_table,
+                 :inner,
+                 on: on,
+                 left_on: left_on,
+                 right_on: right_on,
+                 nil_matches_nil: nil_matches_nil)
+    end
+
+    # :call-seq:
+    #   table.left_join(other_table, on:, nil_matches_nil: false) -> csv_table
+    #   table.left_join(other_table, left_on:, right_on:, nil_matches_nil: false) -> csv_table
+    #
+    # Returns a new CSV::Table containing the left join of +self+ and
+    # +other_table+. Every left row is returned; unmatched rows have +nil+
+    # values for the right columns.
+    #
+    # See {Joining Tables}[#class-CSV::Table-label-Joining+Tables] for the
+    # result columns, duplicate-key order, and nil-key behavior.
+    #
+    # This example also uses a composite key with different header names:
+    #   left = CSV.parse(<<~CSV, headers: true)
+    #     city,date,amount
+    #     NYC,2020-01-01,10
+    #     NYC,2020-01-02,20
+    #   CSV
+    #   right = CSV.parse(<<~CSV, headers: true)
+    #     city,day,note
+    #     NYC,2020-01-01,paid
+    #   CSV
+    #   joined = left.left_join(right,
+    #                           left_on: ["city", "date"],
+    #                           right_on: ["city", "day"])
+    #   joined.to_a.last
+    #   # => ["NYC", "2020-01-02", "20", nil, nil, nil]
+    def left_join(other_table,
+                  on: nil,
+                  left_on: nil,
+                  right_on: nil,
+                  nil_matches_nil: false)
+      join_table(other_table,
+                 :left,
+                 on: on,
+                 left_on: left_on,
+                 right_on: right_on,
+                 nil_matches_nil: nil_matches_nil)
+    end
+
+    # :call-seq:
+    #   table.full_join(other_table, on:, nil_matches_nil: false) -> csv_table
+    #   table.full_join(other_table, left_on:, right_on:, nil_matches_nil: false) -> csv_table
+    #
+    # Returns a new CSV::Table containing the full outer join of +self+ and
+    # +other_table+. Matched rows are returned first in left-row order; right
+    # rows without a match are then appended in right-row order.
+    #
+    # See {Joining Tables}[#class-CSV::Table-label-Joining+Tables] for the
+    # result columns, duplicate-key order, and nil-key behavior.
+    #
+    # By default, +nil+ keys never match:
+    #   left = CSV.parse("id,name\n1,A\n,missing\n", headers: true)
+    #   right = CSV.parse("id,name\n1,X\n,unknown\n", headers: true)
+    #   joined = left.full_join(right, on: "id")
+    #   joined.to_a
+    #   # => [[[:left, "id"], [:left, "name"], [:right, "id"], [:right, "name"]],
+    #   #     ["1", "A", "1", "X"],
+    #   #     [nil, "missing", nil, nil],
+    #   #     [nil, nil, nil, "unknown"]]
+    #
+    # Set +nil_matches_nil+ to +true+ when nil values should be equal:
+    #   left.full_join(right, on: "id", nil_matches_nil: true).to_a
+    #   # => [[[:left, "id"], [:left, "name"], [:right, "id"], [:right, "name"]],
+    #   #     ["1", "A", "1", "X"],
+    #   #     [nil, "missing", nil, "unknown"]]
+    def full_join(other_table,
+                  on: nil,
+                  left_on: nil,
+                  right_on: nil,
+                  nil_matches_nil: false)
+      join_table(other_table,
+                 :full,
+                 on: on,
+                 left_on: left_on,
+                 right_on: right_on,
+                 nil_matches_nil: nil_matches_nil)
+    end
+
     # :call-seq:
     #   table << row_or_array -> self
     #
@@ -1050,6 +1199,162 @@ class CSV
       summary = to_csv(limit: 5)
       inspected << "\n" << summary if summary.encoding.ascii_compatible?
       inspected
+    end
+
+    private
+
+    # :section: Joining Internals
+
+    def join_table(other_table,
+                   join_type,
+                   on:,
+                   left_on:,
+                   right_on:,
+                   nil_matches_nil:)
+      unless other_table.is_a?(CSV::Table)
+        raise ArgumentError, "wrong table type #{other_table.class} (expected CSV::Table)"
+      end
+      unless [true, false].include?(nil_matches_nil)
+        raise ArgumentError, "nil_matches_nil must be true or false"
+      end
+
+      left_key_indexes, right_key_indexes =
+        join_key_indexes(other_table, on, left_on, right_on)
+      left_headers = headers
+      right_headers = other_table.headers
+      result_headers =
+        qualify_join_headers(left_headers, :left) +
+        qualify_join_headers(right_headers, :right)
+
+      left_rows = @table.reject(&:header_row?)
+      right_rows = other_table.table.reject(&:header_row?)
+      right_matches = Hash.new { |hash, key| hash[key] = [] }
+      right_matched = Array.new(right_rows.size, false)
+
+      right_rows.each_with_index do |row, index|
+        key = join_key_values(row, right_key_indexes)
+        next unless nil_matches_nil || !key.include?(nil)
+
+        right_matches[key] << index
+      end
+
+      result_rows = []
+      left_rows.each do |left_row|
+        key = join_key_values(left_row, left_key_indexes)
+        matching_indexes = if nil_matches_nil || !key.include?(nil)
+                             right_matches[key]
+                           else
+                             []
+                           end
+
+        if matching_indexes.empty?
+          next if join_type == :inner
+
+          result_rows << join_row(left_row,
+                                  nil,
+                                  left_headers,
+                                  right_headers,
+                                  result_headers)
+        else
+          matching_indexes.each do |right_index|
+            right_matched[right_index] = true
+            result_rows << join_row(left_row,
+                                    right_rows[right_index],
+                                    left_headers,
+                                    right_headers,
+                                    result_headers)
+          end
+        end
+      end
+
+      if join_type == :full
+        right_rows.each_with_index do |right_row, index|
+          next if right_matched[index]
+
+          result_rows << join_row(nil,
+                                  right_row,
+                                  left_headers,
+                                  right_headers,
+                                  result_headers)
+        end
+      end
+
+      self.class.new(result_rows, headers: result_headers)
+    end
+
+    def join_key_indexes(other_table, on, left_on, right_on)
+      unless on.nil?
+        unless left_on.nil? && right_on.nil?
+          raise ArgumentError, "on cannot be used together with left_on or right_on"
+        end
+
+        keys = Array(on)
+        if keys.empty?
+          raise ArgumentError, "on must not be empty"
+        end
+
+        [
+          keys.map { |key| join_key_index(self, key, "left") },
+          keys.map { |key| join_key_index(other_table, key, "right") },
+        ]
+      else
+        if left_on.nil? || right_on.nil?
+          raise ArgumentError, "left_on and right_on must be given together"
+        end
+
+        left_keys = Array(left_on)
+        right_keys = Array(right_on)
+        if left_keys.empty? || right_keys.empty?
+          raise ArgumentError, "left_on and right_on must not be empty"
+        end
+        if left_keys.size != right_keys.size
+          raise ArgumentError, "left_on and right_on must have the same size"
+        end
+
+        [
+          left_keys.map { |key| join_key_index(self, key, "left") },
+          right_keys.map { |key| join_key_index(other_table, key, "right") },
+        ]
+      end
+    end
+
+    def join_key_index(table, key, side)
+      if key.is_a?(Integer)
+        header_count = table.headers.size
+        index = key < 0 ? key + header_count : key
+        unless index >= 0 && index < header_count
+          raise IndexError, "index #{key} outside of #{side} table headers"
+        end
+
+        index
+      else
+        table.headers.index(key) or
+          raise KeyError, "#{side} join key not found: #{key.inspect}"
+      end
+    end
+
+    def join_key_values(row, indexes)
+      indexes.map { |index| row.field(index) }
+    end
+
+    def qualify_join_headers(headers, source)
+      headers.map { |header| [source, header] }
+    end
+
+    def join_row(left_row,
+                 right_row,
+                 left_headers,
+                 right_headers,
+                 result_headers)
+      values = join_field_values(left_row, left_headers) +
+               join_field_values(right_row, right_headers)
+      Row.new(result_headers, values)
+    end
+
+    def join_field_values(row, column_headers)
+      return Array.new(column_headers.size) if row.nil?
+
+      column_headers.size.times.map { |index| row.field(index) }
     end
   end
 end

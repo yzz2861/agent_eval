@@ -583,6 +583,145 @@ A
     assert_equal(@rows.values_at(0, 2), @table.values_at(0, 2))
   end
 
+  def test_inner_join_with_duplicate_keys
+    left = CSV::Table.new([
+      CSV::Row.new(%w[id name], ["1", "A"]),
+      CSV::Row.new(%w[id name], ["1", "B"]),
+    ])
+    right = CSV::Table.new([
+      CSV::Row.new(%w[id name], ["1", "X"]),
+      CSV::Row.new(%w[id name], ["1", "Y"]),
+    ])
+
+    assert_equal([
+      [[:left, "id"], [:left, "name"], [:right, "id"], [:right, "name"]],
+      ["1", "A", "1", "X"],
+      ["1", "A", "1", "Y"],
+      ["1", "B", "1", "X"],
+      ["1", "B", "1", "Y"],
+    ], left.inner_join(right, on: "id").to_a)
+  end
+
+  def test_left_join_without_right_match
+    left = CSV::Table.new([
+      CSV::Row.new(%w[id name], ["1", "A"]),
+      CSV::Row.new(%w[id name], ["2", "B"]),
+    ])
+    right = CSV::Table.new([
+      CSV::Row.new(%w[id name], ["1", "X"]),
+    ])
+
+    assert_equal([
+      [[:left, "id"], [:left, "name"], [:right, "id"], [:right, "name"]],
+      ["1", "A", "1", "X"],
+      ["2", "B", nil, nil],
+    ], left.left_join(right, on: "id").to_a)
+  end
+
+  def test_full_join_appends_unmatched_right_rows
+    left = CSV::Table.new([
+      CSV::Row.new(%w[id name], ["1", "A"]),
+      CSV::Row.new(%w[id name], ["2", "B"]),
+    ])
+    right = CSV::Table.new([
+      CSV::Row.new(%w[id name], ["1", "X"]),
+      CSV::Row.new(%w[id name], ["3", "Y"]),
+    ])
+
+    assert_equal([
+      [[:left, "id"], [:left, "name"], [:right, "id"], [:right, "name"]],
+      ["1", "A", "1", "X"],
+      ["2", "B", nil, nil],
+      [nil, nil, "3", "Y"],
+    ], left.full_join(right, on: "id").to_a)
+  end
+
+  def test_join_composite_keys_with_different_headers
+    left = CSV::Table.new([
+      CSV::Row.new(%w[city date amount], ["NYC", "2020-01-01", "10"]),
+      CSV::Row.new(%w[city date amount], ["NYC", "2020-01-02", "20"]),
+    ])
+    right = CSV::Table.new([
+      CSV::Row.new(%w[city day note], ["NYC", "2020-01-01", "paid"]),
+      CSV::Row.new(%w[city day note], ["NYC", "2020-01-02", "received"]),
+    ])
+
+    joined = left.inner_join(right,
+                             left_on: ["city", "date"],
+                             right_on: ["city", "day"])
+
+    assert_equal([
+      [[:left, "city"], [:left, "date"], [:left, "amount"],
+       [:right, "city"], [:right, "day"], [:right, "note"]],
+      ["NYC", "2020-01-01", "10", "NYC", "2020-01-01", "paid"],
+      ["NYC", "2020-01-02", "20", "NYC", "2020-01-02", "received"],
+    ], joined.to_a)
+  end
+
+  def test_join_nil_keys_do_not_match_by_default
+    left = CSV::Table.new([
+      CSV::Row.new(%w[id name], [nil, "missing"]),
+    ])
+    right = CSV::Table.new([
+      CSV::Row.new(%w[id name], [nil, "unknown"]),
+    ])
+
+    assert_equal([
+      [[:left, "id"], [:left, "name"], [:right, "id"], [:right, "name"]],
+      [nil, "missing", nil, nil],
+      [nil, nil, nil, "unknown"],
+    ], left.full_join(right, on: "id").to_a)
+  end
+
+  def test_join_nil_keys_match_when_requested
+    left = CSV::Table.new([
+      CSV::Row.new(%w[id name], [nil, "missing"]),
+    ])
+    right = CSV::Table.new([
+      CSV::Row.new(%w[id name], [nil, "unknown"]),
+    ])
+
+    assert_equal([
+      [[:left, "id"], [:left, "name"], [:right, "id"], [:right, "name"]],
+      [nil, "missing", nil, "unknown"],
+    ], left.full_join(right,
+                      on: "id",
+                      nil_matches_nil: true).to_a)
+  end
+
+  def test_join_preserves_duplicated_headers_without_hashing
+    left = CSV::Table.new([
+      CSV::Row.new(%w[id id name], [1, 2, "A"]),
+    ])
+    right = CSV::Table.new([
+      CSV::Row.new(%w[id id name], [2, 3, "X"]),
+    ])
+
+    joined = left.inner_join(right, left_on: [1], right_on: [0])
+
+    assert_equal([
+      [:left, "id"], [:left, "id"], [:left, "name"],
+      [:right, "id"], [:right, "id"], [:right, "name"]
+    ], joined.headers)
+    assert_equal([1, 2, "A", 2, 3, "X"], joined.first.fields)
+  end
+
+  def test_join_does_not_mutate_input_tables
+    left = CSV::Table.new([
+      CSV::Row.new(%w[id name], ["1", "A"]),
+    ])
+    right = CSV::Table.new([
+      CSV::Row.new(%w[id name], ["1", "X"]),
+    ])
+    expected_left = left.to_a
+    expected_right = right.to_a
+
+    left.inner_join(right, on: "id")
+
+    assert_equal(expected_left, left.to_a)
+    assert_equal(expected_right, right.to_a)
+  end
+
   def test_array_delegation
     assert_not_empty(@table, "Table was empty.")
 
