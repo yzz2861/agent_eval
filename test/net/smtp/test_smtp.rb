@@ -105,6 +105,55 @@ module Net
       assert_equal ['p0=123', 'p1=456', 'p2', 'p3=789'], a.parameters
     end
 
+    def test_address_dsn_mail_options
+      a = Net::SMTP::Address.new('foo@example.com', envid: 'order-42', ret: :full)
+      assert_equal 'foo@example.com', a.address
+      assert_equal ['ENVID=order-42', 'RET=FULL'], a.parameters
+      assert_equal({envid: 'ENVID=order-42', ret: 'RET=FULL'}, a.dsn_parameters)
+      assert a.dsn?
+    end
+
+    def test_address_dsn_recipient_options
+      a = Net::SMTP::Address.new('foo@example.com', notify: %i[success failure], orcpt: 'rfc822;foo@example.com')
+      assert_equal ['NOTIFY=SUCCESS,FAILURE', 'ORCPT=rfc822;foo@example.com'], a.parameters
+      assert a.dsn?
+    end
+
+    def test_address_dsn_options_escaped_as_xtext
+      a = Net::SMTP::Address.new('foo@example.com', orcpt: 'rfc822;u+ser=@example.com')
+      assert_equal ['ORCPT=rfc822;u+2Bser+3D@example.com'], a.parameters
+      b = Net::SMTP::Address.new('foo@example.com', envid: 'id héllo')
+      assert_equal ['ENVID=id+20h+C3+A9llo'], b.parameters
+    end
+
+    def test_address_dsn_notify_never
+      a = Net::SMTP::Address.new('foo@example.com', notify: :never)
+      assert_equal ['NOTIFY=NEVER'], a.parameters
+      err = assert_raise(ArgumentError) do
+        Net::SMTP::Address.new('foo@example.com', notify: %i[never success])
+      end
+      assert_include err.message, 'NEVER'
+    end
+
+    def test_address_dsn_invalid_values
+      assert_raise(ArgumentError) { Net::SMTP::Address.new('foo@example.com', ret: :bogus) }
+      assert_raise(ArgumentError) { Net::SMTP::Address.new('foo@example.com', notify: :bogus) }
+      assert_raise(ArgumentError) { Net::SMTP::Address.new('foo@example.com', orcpt: 'foo@example.com') }
+      assert_raise(ArgumentError) { Net::SMTP::Address.new('foo@example.com', orcpt: ';foo@example.com') }
+    end
+
+    def test_address_dsn_rejects_cr_lf
+      assert_raise(ArgumentError) { Net::SMTP::Address.new('foo@example.com', envid: "abc\r\nRSET") }
+      assert_raise(ArgumentError) { Net::SMTP::Address.new('foo@example.com', orcpt: "rfc822;foo@example.com\n") }
+    end
+
+    def test_address_dsn_options_kept_when_wrapped
+      a = Net::SMTP::Address.new('foo@example.com', notify: :success)
+      b = Net::SMTP::Address.new(a, 'SMTPUTF8')
+      assert_equal ['NOTIFY=SUCCESS', 'SMTPUTF8'], b.parameters
+      assert b.dsn?
+    end
+
     def test_auth_plain
       server = FakeServer.start(auth: 'plain')
       smtp = Net::SMTP.start 'localhost', server.port
@@ -618,6 +667,78 @@ module Net
       smtp = Net::SMTP.start 'localhost', server.port
       smtp.mailfrom("rené@example.com")
       assert_equal "MAIL FROM:<rené@example.com> SMTPUTF8\r\n", server.commands.last
+    end
+
+    def test_send_message_with_dsn
+      server = FakeServer.start(dsn: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      from = Net::SMTP::Address.new('from@example.com', envid: 'order-42', ret: :hdrs)
+      to1 = Net::SMTP::Address.new('one@example.com', notify: %i[success failure],
+                                   orcpt: 'rfc822;one@example.com')
+      to2 = Net::SMTP::Address.new('two@example.com', notify: :never)
+      smtp.send_message('message', from, to1, to2)
+      assert_include server.commands, "MAIL FROM:<from@example.com> ENVID=order-42 RET=HDRS\r\n"
+      assert_include server.commands, "RCPT TO:<one@example.com> NOTIFY=SUCCESS,FAILURE ORCPT=rfc822;one@example.com\r\n"
+      assert_include server.commands, "RCPT TO:<two@example.com> NOTIFY=NEVER\r\n"
+      smtp.finish
+    end
+
+    def test_send_message_dsn_unsupported_raises
+      server = FakeServer.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      from = Net::SMTP::Address.new('from@example.com', envid: 'order-42')
+      err = assert_raise(Net::SMTPUnsupportedCommand) do
+        smtp.send_message('message', from, 'to@example.com')
+      end
+      assert_include err.message, 'DSN'
+      assert_not_include server.commands, "MAIL FROM:<from@example.com> ENVID=order-42\r\n"
+      smtp.finish
+    end
+
+    def test_send_message_dsn_unsupported_omit
+      server = FakeServer.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      from = Net::SMTP::Address.new('from@example.com', envid: 'order-42', ret: :full)
+      to = Net::SMTP::Address.new('to@example.com', notify: :success, orcpt: 'rfc822;to@example.com')
+      smtp.send_message('message', from, to, dsn_unsupported: :omit)
+      assert_include server.commands, "MAIL FROM:<from@example.com>\r\n"
+      assert_include server.commands, "RCPT TO:<to@example.com>\r\n"
+      smtp.finish
+    end
+
+    def test_send_message_dsn_not_inherited_by_next_message
+      server = FakeServer.start(dsn: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      from = Net::SMTP::Address.new('from@example.com', envid: 'first', ret: :full)
+      to1 = Net::SMTP::Address.new('one@example.com', notify: :success)
+      to2 = Net::SMTP::Address.new('two@example.com', notify: %i[failure delay],
+                                   orcpt: 'rfc822;two@example.com')
+      smtp.send_message('message', from, to1, to2)
+      smtp.send_message('message', 'from@example.com', 'one@example.com')
+      assert_include server.commands, "MAIL FROM:<from@example.com> ENVID=first RET=FULL\r\n"
+      assert_include server.commands, "RCPT TO:<one@example.com> NOTIFY=SUCCESS\r\n"
+      assert_include server.commands, "RCPT TO:<two@example.com> NOTIFY=FAILURE,DELAY ORCPT=rfc822;two@example.com\r\n"
+      assert_include server.commands, "MAIL FROM:<from@example.com>\r\n"
+      assert_include server.commands, "RCPT TO:<one@example.com>\r\n"
+      smtp.finish
+    end
+
+    def test_mailfrom_rejects_recipient_dsn_options
+      server = FakeServer.start(dsn: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      addr = Net::SMTP::Address.new('from@example.com', notify: :success)
+      err = assert_raise(ArgumentError) { smtp.mailfrom(addr) }
+      assert_include err.message, 'MAIL FROM'
+      smtp.finish
+    end
+
+    def test_rcptto_rejects_sender_dsn_options
+      server = FakeServer.start(dsn: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      addr = Net::SMTP::Address.new('to@example.com', envid: 'order-42')
+      err = assert_raise(ArgumentError) { smtp.rcptto(addr) }
+      assert_include err.message, 'RCPT TO'
+      smtp.finish
     end
 
     def fake_server_start(**kw)

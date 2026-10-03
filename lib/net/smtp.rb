@@ -777,6 +777,28 @@ module Net
     #                         Net::SMTP::Address.new('dest@example.com', notify: :success)
     #     end
     #
+    # === Delivery Status Notifications (DSN)
+    #
+    # If the server advertises the DSN extension
+    # [RFC3461[https://www.rfc-editor.org/rfc/rfc3461.txt]], you can request
+    # delivery status notifications by passing DSN options to
+    # Net::SMTP::Address.  +envid+ and +ret+ are transaction-level options
+    # for the sender address; +notify+ and +orcpt+ are per-recipient
+    # options:
+    #
+    #     Net::SMTP.start('smtp.example.com') do |smtp|
+    #       smtp.send_message msgstr,
+    #                         Net::SMTP::Address.new('from@example.com', envid: 'order-42', ret: :hdrs),
+    #                         Net::SMTP::Address.new('dest@example.com', notify: %i[success failure],
+    #                                                orcpt: 'rfc822;dest@example.com')
+    #     end
+    #
+    # When DSN options are given but the server does not support the DSN
+    # extension, the +dsn_unsupported+ keyword selects the behavior:
+    # +:raise+ (the default) raises Net::SMTPUnsupportedCommand, while
+    # +:omit+ sends the message without the DSN parameters (i.e. without
+    # requesting any notification).
+    #
     # === Errors
     #
     # This method may raise:
@@ -785,15 +807,16 @@ module Net
     # * Net::SMTPSyntaxError
     # * Net::SMTPFatalError
     # * Net::SMTPUnknownError
+    # * Net::SMTPUnsupportedCommand
     # * Net::ReadTimeout
     # * IOError
     #
-    def send_message(msgstr, from_addr, *to_addrs)
+    def send_message(msgstr, from_addr, *to_addrs, dsn_unsupported: :raise)
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      mailfrom from_addr, dsn_unsupported: dsn_unsupported
+      rcptto_list(to_addrs, dsn_unsupported: dsn_unsupported) {data msgstr}
     end
 
     alias send_mail send_message
@@ -820,6 +843,10 @@ module Net
     # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
     # the destination mail address or addresses.
     #
+    # DSN (RFC 3461) options can be passed via Net::SMTP::Address, see
+    # #send_message for details and for the meaning of the
+    # +dsn_unsupported+ keyword.
+    #
     # === Example
     #
     #     Net::SMTP.start('smtp.example.com', 25) do |smtp|
@@ -840,15 +867,16 @@ module Net
     # * Net::SMTPSyntaxError
     # * Net::SMTPFatalError
     # * Net::SMTPUnknownError
+    # * Net::SMTPUnsupportedCommand
     # * Net::ReadTimeout
     # * IOError
     #
-    def open_message_stream(from_addr, *to_addrs, &block)   # :yield: stream
+    def open_message_stream(from_addr, *to_addrs, dsn_unsupported: :raise, &block)   # :yield: stream
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data(&block)}
+      mailfrom from_addr, dsn_unsupported: dsn_unsupported
+      rcptto_list(to_addrs, dsn_unsupported: dsn_unsupported) {data(&block)}
     end
 
     alias ready open_message_stream   # obsolete
@@ -906,27 +934,41 @@ module Net
     end
 
     # +from_addr+ is +String+ or +Net::SMTP::Address+
-    def mailfrom(from_addr)
+    #
+    # If +from_addr+ carries DSN (RFC 3461) options (+envid+ or +ret+)
+    # and the server does not advertise the DSN extension,
+    # +dsn_unsupported+ selects the behavior: +:raise+ (the default)
+    # raises Net::SMTPUnsupportedCommand, while +:omit+ sends the
+    # MAIL FROM command without the DSN parameters.
+    def mailfrom(from_addr, dsn_unsupported: :raise)
       addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
                Address.new(from_addr, "SMTPUTF8")
              else
                Address.new(from_addr)
              end
-      getok((["MAIL FROM:<#{addr.address}>"] + addr.parameters).join(' '))
+      parameters = dsn_checked_parameters(addr, Address::DSN_MAIL_OPTIONS, 'MAIL FROM', dsn_unsupported)
+      getok((["MAIL FROM:<#{addr.address}>"] + parameters).join(' '))
     end
 
-    def rcptto_list(to_addrs)
+    def rcptto_list(to_addrs, dsn_unsupported: :raise)
       raise ArgumentError, 'mail destination not given' if to_addrs.empty?
       to_addrs.flatten.each do |addr|
-        rcptto addr
+        rcptto addr, dsn_unsupported: dsn_unsupported
       end
       yield
     end
 
     # +to_addr+ is +String+ or +Net::SMTP::Address+
-    def rcptto(to_addr)
+    #
+    # If +to_addr+ carries DSN (RFC 3461) options (+notify+ or +orcpt+)
+    # and the server does not advertise the DSN extension,
+    # +dsn_unsupported+ selects the behavior: +:raise+ (the default)
+    # raises Net::SMTPUnsupportedCommand, while +:omit+ sends the
+    # RCPT TO command without the DSN parameters.
+    def rcptto(to_addr, dsn_unsupported: :raise)
       addr = Address.new(to_addr)
-      getok((["RCPT TO:<#{addr.address}>"] + addr.parameters).join(' '))
+      parameters = dsn_checked_parameters(addr, Address::DSN_RCPT_OPTIONS, 'RCPT TO', dsn_unsupported)
+      getok((["RCPT TO:<#{addr.address}>"] + parameters).join(' '))
     end
 
     # This method sends a message.
@@ -995,6 +1037,32 @@ module Net
       # A bare CR or LF is not allowed in RFC5321.
       if /[\r\n]/ =~ line
         raise ArgumentError, "A line must not contain CR or LF"
+      end
+    end
+
+    # Returns the command parameters for +addr+, enforcing the DSN
+    # (RFC 3461) rules: options not valid for the current command are
+    # rejected, and when the server does not advertise the DSN extension
+    # the caller-chosen +policy+ is applied (:raise or :omit) instead of
+    # silently pretending a notification was requested.
+    def dsn_checked_parameters(addr, allowed_options, command, policy)
+      return addr.parameters unless addr.dsn?
+      misplaced = addr.dsn_parameters.keys - allowed_options
+      unless misplaced.empty?
+        raise ArgumentError,
+              "DSN option(s) #{misplaced.map(&:inspect).join(', ')} are not valid for the #{command} command"
+      end
+      unless %i[raise omit].include?(policy)
+        raise ArgumentError, "invalid dsn_unsupported policy: #{policy.inspect} (expected :raise or :omit)"
+      end
+      return addr.parameters if capable?('DSN')
+      case policy
+      when :raise
+        options = addr.dsn_parameters.keys.map {|key| key.to_s.upcase }.join(', ')
+        raise SMTPUnsupportedCommand,
+              "the server does not support the DSN extension (required for #{options})"
+      when :omit
+        addr.parameters - addr.dsn_parameters.values
       end
     end
 
@@ -1129,25 +1197,114 @@ module Net
       attr_reader :address
       # parameters [Array<String>]
       attr_reader :parameters
+      # DSN (RFC 3461) options and their encoded parameters [Hash{Symbol => String}]
+      attr_reader :dsn_parameters
+
+      # DSN options valid on the MAIL FROM command
+      DSN_MAIL_OPTIONS = %i[envid ret].freeze
+      # DSN options valid on the RCPT TO command
+      DSN_RCPT_OPTIONS = %i[notify orcpt].freeze
+      # All recognized DSN options
+      DSN_OPTIONS = (DSN_MAIL_OPTIONS + DSN_RCPT_OPTIONS).freeze
 
       # :call-seq:
       #  initialize(address, parameter, ...)
       #
       # address +String+ or +Net::SMTP::Address+
       # parameter +String+ or +Hash+
+      #
+      # The keyword arguments +envid+, +ret+, +notify+ and +orcpt+ are
+      # DSN (RFC 3461) options.  They are validated and encoded as
+      # required by the protocol:
+      #
+      #   Net::SMTP::Address.new('from@example.com', envid: 'order-42', ret: :hdrs)
+      #   Net::SMTP::Address.new('dest@example.com', notify: %i[success failure],
+      #                          orcpt: 'rfc822;dest@example.com')
+      #
+      # +envid+ and +ret+ are transaction-level options for the sender
+      # address (MAIL FROM); +notify+ and +orcpt+ are per-recipient
+      # options (RCPT TO).  +ret+ must be +:full+ or +:hdrs+.  +notify+
+      # accepts +:success+, +:failure+, +:delay+ or +:never+ (or an Array
+      # of them; +:never+ cannot be combined with other values).
       def initialize(address, *args, **kw_args)
         if address.kind_of? Address
           @address = address.address
           @parameters = address.parameters
+          @dsn_parameters = address.dsn_parameters.dup
         else
           @address = address
           @parameters = []
+          @dsn_parameters = {}
+        end
+        dsn_options = {}
+        DSN_OPTIONS.each do |key|
+          dsn_options[key] = kw_args.delete(key) if kw_args.key?(key)
         end
         @parameters = (parameters + args + [kw_args]).map{|param| Array(param)}.flatten(1).map{|param| Array(param).compact.join('=')}.uniq
+        unless dsn_options.empty?
+          @dsn_parameters.merge!(Address.build_dsn_parameters(**dsn_options))
+          @parameters = (@parameters + @dsn_parameters.values).uniq
+        end
       end
 
       def to_s
         @address
+      end
+
+      # true if this address carries any DSN (RFC 3461) options.
+      def dsn?
+        !@dsn_parameters.empty?
+      end
+
+      # Builds the DSN parameters for the given options, validating and
+      # encoding them as required by RFC 3461.  Returns a Hash of option
+      # key to encoded parameter String.
+      def self.build_dsn_parameters(envid: nil, ret: nil, notify: nil, orcpt: nil)
+        params = {}
+        params[:envid] = "ENVID=#{encode_xtext(envid)}" if envid
+        if ret
+          value = ret.to_s.upcase
+          unless %w[FULL HDRS].include?(value)
+            raise ArgumentError, "invalid DSN RET value: #{ret.inspect} (expected :full or :hdrs)"
+          end
+          params[:ret] = "RET=#{value}"
+        end
+        if notify
+          values = Array(notify).flatten.map {|v| v.to_s.upcase }.uniq
+          invalid = values - %w[SUCCESS FAILURE DELAY NEVER]
+          unless invalid.empty?
+            raise ArgumentError,
+                  "invalid DSN NOTIFY value(s): #{invalid.join(', ')} " \
+                  '(expected :success, :failure, :delay and/or :never)'
+          end
+          if values.include?('NEVER') && values.size > 1
+            raise ArgumentError, 'DSN NOTIFY=NEVER cannot be combined with other notification types'
+          end
+          params[:notify] = "NOTIFY=#{values.join(',')}" unless values.empty?
+        end
+        if orcpt
+          addr_type, separator, original = orcpt.to_s.partition(';')
+          if separator.empty? || original.empty? || !/\A[A-Za-z][A-Za-z0-9-]*\z/.match?(addr_type)
+            raise ArgumentError,
+                  "invalid DSN ORCPT value: #{orcpt.inspect} " \
+                  '(expected "addr-type;address", e.g. "rfc822;user@example.com")'
+          end
+          params[:orcpt] = "ORCPT=#{addr_type};#{encode_xtext(original)}"
+        end
+        params
+      end
+
+      # Encodes +value+ as +xtext+ (RFC 3461 section 4): printable ASCII
+      # characters except "+" and "=" are left as-is, any other byte is
+      # encoded as "+" followed by two uppercase hexadecimal digits.
+      # CR and LF are rejected outright so that no newline can ever make
+      # its way into an SMTP command line.
+      def self.encode_xtext(value)
+        string = value.to_s
+        if /[\r\n]/.match?(string)
+          raise ArgumentError, 'xtext must not contain CR or LF'
+        end
+        string.b.gsub(/[^!-~]|[+=]/) {|char| char.bytes.map {|byte| '+%02X' % byte }.join }
       end
     end
   end   # class SMTP
