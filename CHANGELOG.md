@@ -10,7 +10,7 @@
 
 **Fixes and enhancements:**
 
-- Your contribution here
+- Parse JWT header and payload segments with a strict JSON parser that rejects duplicate members (including keys only equal after unescaping), limits nesting depth, object member count and number lexical length, and validates UTF-8. Parser errors report only the byte position and error category, and signature verification failures never include payload contents. The lenient `JWT::JSON.parse` keeps standard library semantics for non-security callers; token segments always use `JWT::JSON.parse_strict`.
 
 ## [v3.3.0](https://github.com/jwt/ruby-jwt/tree/v3.3.0) (2026-09-11)
 

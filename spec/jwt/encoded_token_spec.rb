@@ -45,7 +45,7 @@ RSpec.describe JWT::EncodedToken do
       let(:encoded_token) { '' }
 
       it 'raises decode error' do
-        expect { token.unverified_payload }.to raise_error(JWT::MalformedTokenError, 'Invalid segment encoding')
+        expect { token.unverified_payload }.to raise_error(JWT::MalformedTokenError, /\AInvalid segment encoding: JSON parsing failed: \w+ at position \d+\z/)
       end
     end
   end
@@ -158,7 +158,7 @@ RSpec.describe JWT::EncodedToken do
       let(:encoded_token) { '' }
 
       it 'raises decode error' do
-        expect { token.header }.to raise_error(JWT::MalformedTokenError, 'Invalid segment encoding')
+        expect { token.header }.to raise_error(JWT::MalformedTokenError, /\AInvalid segment encoding: JSON parsing failed: \w+ at position \d+\z/)
       end
     end
   end

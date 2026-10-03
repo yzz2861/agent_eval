@@ -218,9 +218,11 @@ module JWT
     end
 
     def parse(segment)
-      JWT::JSON.parse(segment)
-    rescue ::JSON::ParserError
-      raise JWT::MalformedTokenError, 'Invalid segment encoding'
+      JWT::JSON.parse_strict(segment)
+    rescue ::JSON::ParserError => e
+      # Only the parser generated message (position and category) is kept,
+      # so a failed verification never reveals segment contents.
+      raise JWT::MalformedTokenError, "Invalid segment encoding: #{e.message}"
     end
 
     def decoded_payload
