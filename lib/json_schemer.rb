@@ -22,6 +22,7 @@ require 'json_schemer/format/email'
 require 'json_schemer/format'
 require 'json_schemer/content'
 require 'json_schemer/errors'
+require 'json_schemer/exact_json'
 require 'json_schemer/cached_resolver'
 require 'json_schemer/ecma_regexp'
 require 'json_schemer/location'
@@ -113,13 +114,23 @@ module JSONSchemer
     raise InvalidFileURI, 'cannot have a host (use `file:///`)' if uri.host && !uri.host.empty?
     path = uri.path
     path = path[1..-1] if path.match?(WINDOWS_URI_PATH_REGEX)
-    JSON.parse(File.read(URI_PARSER.unescape(path)))
+    ExactJSON.parse(File.read(URI_PARSER.unescape(path)))
   end
 
   class << self
     def schema(schema, **options)
       schema = resolve(schema, options)
       Schema.new(schema, **options)
+    end
+
+    def valid_json?(schema, json, **options)
+      schema_options = options.slice(:configuration, :base_uri, :meta_schema, :vocabulary, :format, :formats, :content_encodings, :content_media_types, :keywords, :before_property_validation, :after_property_validation, :insert_property_defaults, :property_default_resolver, :ref_resolver, :regexp_resolver, :output_format, :resolve_enumerators, :access_mode)
+      schema(schema, **schema_options).valid_json?(json, **options)
+    end
+
+    def validate_json(schema, json, **options)
+      schema_options = options.slice(:configuration, :base_uri, :meta_schema, :vocabulary, :format, :formats, :content_encodings, :content_media_types, :keywords, :before_property_validation, :after_property_validation, :insert_property_defaults, :property_default_resolver, :ref_resolver, :regexp_resolver, :output_format, :resolve_enumerators, :access_mode)
+      schema(schema, **schema_options).validate_json(json, **options)
     end
 
     def valid_schema?(schema, **options)
@@ -249,7 +260,7 @@ module JSONSchemer
     def resolve(schema, options)
       case schema
       when String
-        JSON.parse(schema)
+        ExactJSON.parse(schema)
       when Pathname
         base_uri = URI.parse(File.join('file:', URI_PARSER.escape(schema.realpath.to_s)))
         options[:base_uri] = base_uri

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 module JSONSchemer
   class Schema
-    Context = Struct.new(:instance, :dynamic_scope, :adjacent_results, :short_circuit, :access_mode) do
+    Context = Struct.new(:instance, :dynamic_scope, :adjacent_results, :short_circuit, :access_mode, :instance_locations) do
       def original_instance(instance_location)
         Hana::Pointer.parse(Location.resolve(instance_location)).reduce(instance) do |obj, token|
           if obj.is_a?(Array)
@@ -25,7 +25,7 @@ module JSONSchemer
     NOT_KEYWORD_CLASS = Draft202012::Vocab::Applicator::Not
     PROPERTIES_KEYWORD_CLASS = Draft202012::Vocab::Applicator::Properties
 
-    NET_HTTP_REF_RESOLVER = proc { |uri| JSON.parse(Net::HTTP.get(uri)) }
+    NET_HTTP_REF_RESOLVER = proc { |uri| ExactJSON.parse(Net::HTTP.get(uri)) }
     RUBY_REGEXP_RESOLVER = proc { |pattern| Regexp.new(pattern) }
     ECMA_REGEXP_RESOLVER = proc { |pattern| Regexp.new(EcmaRegexp.ruby_equivalent(pattern)) }
 
@@ -105,12 +105,40 @@ module JSONSchemer
       validate(instance, :output_format => 'flag', **options).fetch('valid')
     end
 
+    def valid_json?(json, **options)
+      validate_json(json, :output_format => 'flag', **options).fetch('valid')
+    end
+
     def validate(instance, output_format: @configuration.output_format, resolve_enumerators: @configuration.resolve_enumerators, access_mode: @configuration.access_mode)
       instance_location = Location.root
-      context = Context.new(instance, [], nil, (!insert_property_defaults && output_format == 'flag'), access_mode)
+      context = Context.new(instance, [], nil, (!insert_property_defaults && output_format == 'flag'), access_mode, nil)
       result = validate_instance(deep_stringify_keys(instance), instance_location, root_keyword_location, context)
       if insert_property_defaults && result.insert_property_defaults(context, &property_default_resolver)
         result = validate_instance(deep_stringify_keys(instance), instance_location, root_keyword_location, context)
+      end
+      output = result.output(output_format)
+      resolve_enumerators!(output) if resolve_enumerators
+      output
+    end
+
+    def validate_json(
+      json,
+      output_format: @configuration.output_format,
+      resolve_enumerators: @configuration.resolve_enumerators,
+      access_mode: @configuration.access_mode,
+      max_number_digits: ExactJSON::MAX_NUMBER_DIGITS,
+      max_exponent_absolute: ExactJSON::MAX_EXPONENT_ABSOLUTE
+    )
+      instance, locations = ExactJSON.parse_with_locations(
+        json,
+        :max_number_digits => max_number_digits,
+        :max_exponent_absolute => max_exponent_absolute
+      )
+      instance_location = Location.root
+      context = Context.new(instance, [], nil, (!insert_property_defaults && output_format == 'flag'), access_mode, locations)
+      result = validate_instance(instance, instance_location, root_keyword_location, context)
+      if insert_property_defaults && result.insert_property_defaults(context, &property_default_resolver)
+        result = validate_instance(instance, instance_location, root_keyword_location, context)
       end
       output = result.output(output_format)
       resolve_enumerators!(output) if resolve_enumerators
@@ -136,8 +164,8 @@ module JSONSchemer
       short_circuit = context.short_circuit
 
       begin
-        return result(instance, instance_location, keyword_location, false) if value == false
-        return result(instance, instance_location, keyword_location, true) if value == true || value.empty?
+        return attach_root_instance_location(result(instance, instance_location, keyword_location, false), context) if value == false
+        return attach_root_instance_location(result(instance, instance_location, keyword_location, true), context) if value == true || value.empty?
 
         valid = true
         nested = []
@@ -145,7 +173,11 @@ module JSONSchemer
         parsed.each do |keyword, keyword_instance|
           next unless keyword_result = keyword_instance.validate(instance, instance_location, join_location(keyword_location, keyword), context)
           valid &&= keyword_result.valid
-          return result(instance, instance_location, keyword_location, false) if short_circuit && !valid
+          if short_circuit && !valid
+            result = result(instance, instance_location, keyword_location, false, nested)
+            attach_instance_locations(result, context.instance, context.instance_locations)
+            return result
+          end
           nested << keyword_result
           adjacent_results[keyword_instance.class] = keyword_result
         end
@@ -159,13 +191,17 @@ module JSONSchemer
                 valid &&= custom_keyword_valid
                 type = custom_keyword_result.is_a?(String) ? custom_keyword_result : custom_keyword
                 details = { 'keyword' => custom_keyword, 'result' => custom_keyword_result }
-                nested << result(instance, instance_location, keyword_location, custom_keyword_valid, :type => type, :details => details)
+                custom_result = result(instance, instance_location, keyword_location, custom_keyword_valid, :type => type, :details => details)
+                attach_instance_locations(custom_result, context.instance, context.instance_locations)
+                nested << custom_result
               end
             end
           end
         end
 
-        result(instance, instance_location, keyword_location, valid, nested)
+        result = result(instance, instance_location, keyword_location, valid, nested)
+        attach_instance_locations(result, context.instance, context.instance_locations)
+        result
       ensure
         context.dynamic_scope.pop
         context.adjacent_results = original_adjacent_results
@@ -428,6 +464,36 @@ module JSONSchemer
       else
         output
       end
+    end
+
+    def attach_instance_locations(result, root_instance, locations)
+      return unless locations
+
+      pointer = Location.resolve(result.instance_location)
+      result.instance_source_location = source_location_at(root_instance, locations, pointer)
+      result.nested&.each do |nested|
+        attach_instance_locations(nested, root_instance, locations)
+      end
+    end
+
+    def attach_root_instance_location(result, context)
+      attach_instance_locations(result, context.instance, context.instance_locations)
+      result
+    end
+
+    def source_location_at(root_instance, locations, pointer)
+      return locations[root_instance.object_id]&.source if pointer.empty?
+      value = root_instance
+      info = locations[value.object_id]
+      source_location = info&.source
+      Hana::Pointer.parse(pointer).each do |token|
+        key = value.is_a?(Array) ? token.to_i : token
+        property_location = info&.properties&.fetch(key, nil)
+        value = value.is_a?(Array) ? value.fetch(token.to_i) : value.fetch(token)
+        info = locations[value.object_id] || ExactJSON::LocationInfo.new(property_location, {})
+        source_location = property_location || info&.source
+      end
+      source_location
     end
   end
 end

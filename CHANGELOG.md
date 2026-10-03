@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Add `valid_json?` and `validate_json` entry points with exact JSON numeric semantics, source text positions, and configurable numeric limits
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes

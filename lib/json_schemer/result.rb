@@ -9,7 +9,7 @@ module JSONSchemer
     hash[klass] = klass.name.rpartition('::').last.sub(/\A[[:alpha:]]/, &:downcase)
   end
 
-  Result = Struct.new(:source, :instance, :instance_location, :keyword_location, :valid, :nested, :type, :annotation, :details, :ignore_nested, :nested_key) do
+  Result = Struct.new(:source, :instance, :instance_location, :keyword_location, :valid, :nested, :type, :annotation, :details, :ignore_nested, :nested_key, :instance_source_location) do
     def output(output_format)
       case output_format
       when 'classic'
@@ -87,6 +87,7 @@ module JSONSchemer
         out['error'] = error
         out['x-error'] = true if @x_error
         out['i18n'] = true if @i18n
+        out['instanceSourceLocation'] = instance_source_location.to_h if instance_source_location
       end
       out
     end
@@ -104,6 +105,7 @@ module JSONSchemer
       out['error'] = error
       out['x-error'] = true if @x_error
       out['i18n'] = true if @i18n
+      out['data_location'] = instance_source_location.to_h if instance_source_location
       out['details'] = details if details
       out
     end

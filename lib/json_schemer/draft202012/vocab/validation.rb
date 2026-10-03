@@ -68,7 +68,7 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !value || value.include?(instance))
+            result(instance, instance_location, keyword_location, !value || ExactJSON.include?(value, instance))
           end
         end
 
@@ -78,7 +78,7 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, value == instance)
+            result(instance, instance_location, keyword_location, ExactJSON.equal?(value, instance))
           end
         end
 
@@ -88,7 +88,7 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || BigDecimal(instance.to_s).modulo(value).zero?)
+            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || ExactJSON.multiple?(instance, value))
           end
         end
 
@@ -98,7 +98,7 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || instance <= value)
+            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || ExactJSON.compare?(instance, :<=, value))
           end
         end
 
@@ -108,7 +108,7 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || instance < value)
+            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || ExactJSON.compare?(instance, :<, value))
           end
         end
 
@@ -118,7 +118,7 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || instance >= value)
+            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || ExactJSON.compare?(instance, :>=, value))
           end
         end
 
@@ -128,7 +128,7 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || instance > value)
+            result(instance, instance_location, keyword_location, !instance.is_a?(Numeric) || ExactJSON.compare?(instance, :>, value))
           end
         end
 
@@ -192,7 +192,7 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, _context)
-            result(instance, instance_location, keyword_location, !instance.is_a?(Array) || value == false || instance.size == instance.uniq.size)
+            result(instance, instance_location, keyword_location, !instance.is_a?(Array) || value == false || ExactJSON.unique?(instance))
           end
         end
 

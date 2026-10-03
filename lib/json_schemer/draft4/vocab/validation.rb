@@ -16,7 +16,7 @@ module JSONSchemer
 
           def validate(instance, instance_location, keyword_location, _context)
             maximum = schema.parsed.fetch('maximum').parsed
-            valid = !instance.is_a?(Numeric) || !value || !maximum || instance < maximum
+            valid = !instance.is_a?(Numeric) || !value || ExactJSON.compare?(instance, :<, maximum)
             result(instance, instance_location, keyword_location, valid)
           end
         end
@@ -28,7 +28,7 @@ module JSONSchemer
 
           def validate(instance, instance_location, keyword_location, _context)
             minimum = schema.parsed.fetch('minimum').parsed
-            valid = !instance.is_a?(Numeric) || !value || !minimum || instance > minimum
+            valid = !instance.is_a?(Numeric) || !value || ExactJSON.compare?(instance, :>, minimum)
             result(instance, instance_location, keyword_location, valid)
           end
         end

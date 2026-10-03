@@ -81,6 +81,18 @@ schemer = JSONSchemer.schema(schema)
 schema = '{ "type": "integer" }'
 schemer = JSONSchemer.schema(schema)
 
+# json data string (numeric precision preserved)
+
+schemer = JSONSchemer.schema('multipleOf' => 0.01)
+schemer.valid_json?('8.60') # => true
+schemer.validate_json('8.666', output_format: 'basic', resolve_enumerators: true).fetch('errors').to_a
+# Source positions for invalid instances are included as `instanceSourceLocation`
+# in standard output formats and `data_location` in classic output. Invalid JSON
+# raises `JSONSchemer::InvalidJSON` with `line`, `column`, and `offset`.
+# Numeric input is capped at 1000 significant digits and an exponent absolute
+# value of 1000; override both with `max_number_digits:` and
+# `max_exponent_absolute:`.
+
 # schema validation
 
 JSONSchemer.valid_schema?({ '$id' => 'valid' })
