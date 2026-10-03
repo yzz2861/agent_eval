@@ -403,6 +403,164 @@ module Fugit
         .take_while { |eot| eot.to_t < ned }
     end
 
+    DEFAULT_MIN_INTERVAL_BUDGET = 10_000
+
+    # Verifies consecutive occurrences in the closed window
+    # [time_start, time_end]. Both endpoints count when they are occurrences,
+    # and an adjacent pair is checked only when both occurrences belong to the
+    # window. The interval is elapsed Unix time, so it accounts for DST.
+    #
+    # budget is the maximum number of in-window occurrences that may be
+    # inspected. Exhausting it returns :budget_exhausted, never :passed.
+    #
+    def verify_min_interval(
+      min_interval, time_start, time_end=nil, budget: DEFAULT_MIN_INTERVAL_BUDGET
+    )
+
+      min_interval = parse_verify_duration(min_interval)
+
+      if time_start.is_a?(::Range)
+
+        range = time_start
+
+        fail(
+          ArgumentError.new('cannot verify a range with an exclusive end')
+        ) unless range.exclude_end? == false
+
+        time_start, time_end = range.begin, range.end
+      end
+
+      time_start = ::EtOrbi.make_time(time_start)
+      time_end = ::EtOrbi.make_time(time_end)
+
+      fail(
+        ArgumentError.new('time_end must be at least time_start')
+      ) if time_end.to_i < time_start.to_i
+
+      budget = parse_verify_budget(budget)
+
+      previous = next_time(time_start - 1)
+
+      if previous.to_i > time_end.to_i
+        return MinIntervalCheck.passed(
+          self, min_interval, time_start, time_end)
+      end
+
+      checked = 1
+
+      loop do
+        if checked >= budget
+          return MinIntervalCheck.budget_exhausted(
+            self, min_interval, time_start, time_end, budget, previous, checked)
+        end
+
+        current = next_time(previous)
+
+        break if current.to_i > time_end.to_i
+
+        delta = current.to_i - previous.to_i
+
+        if delta < min_interval
+          return MinIntervalCheck.counterexample(
+            self, min_interval, time_start, time_end, budget,
+            previous, current, delta, checked)
+        end
+
+        previous = current
+        checked += 1
+
+        break if previous.to_i >= time_end.to_i
+      end
+
+      MinIntervalCheck.passed(self, min_interval, time_start, time_end, checked)
+    end
+
+    class MinIntervalCheck
+
+      attr_reader(
+        :cron, :min_interval, :window_start, :window_end, :budget,
+        :checked, :previous_time, :current_time, :interval)
+
+      class << self
+
+        def passed(cron, min, window_start, window_end, checked=0)
+
+          new(
+            :passed, cron, min, window_start, window_end,
+            nil, checked, nil, nil, nil)
+        end
+
+        def counterexample(
+          cron, min, window_start, window_end, budget,
+          previous_time, current_time, interval, checked
+        )
+          new(
+            :counterexample, cron, min, window_start, window_end,
+            budget, checked, previous_time, current_time, interval)
+        end
+
+        def budget_exhausted(
+          cron, min, window_start, window_end, budget, last_time, checked
+        )
+          new(
+            :budget_exhausted, cron, min, window_start, window_end,
+            budget, checked, last_time, nil, nil)
+        end
+      end
+
+      def initialize(
+        status, cron, min_interval, window_start, window_end, budget,
+        checked, previous_time, current_time, interval
+      )
+
+        @status = status
+        @cron = cron
+        @min_interval = min_interval
+        @window_start = window_start
+        @window_end = window_end
+        @budget = budget
+        @checked = checked
+        @previous_time = previous_time
+        @current_time = current_time
+        @interval = interval
+      end
+
+      def status; @status; end
+      def to_sym; status; end
+      def passed?; @status == :passed; end
+      def counterexample?; @status == :counterexample; end
+      def budget_exhausted?; @status == :budget_exhausted; end
+
+      def to_h
+
+        {
+          status: status,
+          min_interval: min_interval,
+          window_start: window_start,
+          window_end: window_end,
+          budget: budget,
+          checked: checked,
+          previous_time: previous_time,
+          current_time: current_time,
+          interval: interval }
+      end
+      alias to_hash to_h
+
+      def to_s
+
+        case status
+        when :passed
+          "passed: checked #{checked} occurrence(s)"
+        when :counterexample
+          "counterexample: #{previous_time} -> #{current_time} " +
+          "(#{interval}s < #{min_interval}s)"
+        else
+          "budget exhausted after #{checked} occurrence(s); " +
+          "last checked occurrence at #{previous_time}"
+        end
+      end
+    end
+
     # Mostly used as a #next_time sanity check.
     # Avoid for "business" use, it's slow.
     #
@@ -525,6 +683,40 @@ module Fugit
     end
 
     protected
+
+    def parse_verify_duration(min_interval)
+
+      min_interval = min_interval.to_sec if min_interval.is_a?(::Fugit::Duration)
+
+      min_interval =
+        if min_interval.is_a?(::Integer)
+          min_interval
+        elsif min_interval.is_a?(::Numeric) && min_interval == min_interval.to_i
+          min_interval.to_i
+        elsif (d = ::Fugit.parse_duration(min_interval))
+          d.to_sec
+        end
+
+      fail ArgumentError.new('min_interval must be positive') \
+        unless min_interval.is_a?(::Integer) && min_interval > 0
+
+      min_interval
+    end
+
+    def parse_verify_budget(budget)
+
+      budget =
+        if budget.is_a?(::Integer)
+          budget
+        elsif budget.is_a?(::Numeric) && budget == budget.to_i
+          budget.to_i
+        end
+
+      fail ArgumentError.new('budget must be positive') \
+        unless budget.is_a?(::Integer) && budget > 0
+
+      budget
+    end
 
     def compact_month_days
 
@@ -985,4 +1177,3 @@ module Fugit
     end
   end
 end
-

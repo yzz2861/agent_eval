@@ -179,6 +179,46 @@ c.within(Time.parse('2024-02-16 12:00')..Time.parse('2024-08-01 12:00'))
     #      '2024-06-10 12:00:00',
     #      '2024-07-08 12:00:00' ]
 
+```
+
+`#verify_min_interval` checks a finite window without replacing exact adjacent
+occurrences by an average frequency. The window is closed (`[start, end]`), so
+occurrences at either endpoint are included. A pair is considered only when
+both adjacent occurrences are inside that window, and its interval is measured
+as elapsed Unix time, which makes DST fall-back gaps shorter than wall-clock
+gaps. It returns `:passed`, `:counterexample`, or `:budget_exhausted`; budget
+exhaustion is inconclusive and must not be treated as a pass.
+
+```ruby
+cron = Fugit.parse_cron('*/30 * * * * * UTC')
+
+result = cron.verify_min_interval(
+  30,
+  Time.parse('2026-10-03 00:00:00 UTC'),
+  Time.parse('2027-10-03 00:00:00 UTC'),
+  budget: 1_100_000)
+
+result.status              # => :passed
+result.checked             # => number of occurrences checked in the window
+
+bad = Fugit.parse_cron('0,29 * * * * * UTC')
+result = bad.verify_min_interval(
+  30,
+  Time.parse('2026-10-03 00:00:00 UTC'),
+  Time.parse('2027-10-03 00:00:00 UTC'))
+
+result.status              # => :counterexample
+result.previous_time       # => the first of two real adjacent occurrences
+result.current_time        # => the second one
+result.interval            # => 29
+```
+
+`examples/min_interval_checker.rb` is a small configuration checker. It parses
+configuration, performs the bounded check, rejects counterexamples and
+inconclusive budget exhaustion, and does not start a scheduler.
+
+```ruby
+
 p c.brute_frequency  # => [ 604800, 604800, 53 ]
                      #    [ delta min, delta max, occurrence count ]
 p c.rough_frequency  # => 7 * 24 * 3600 (7d rough frequency)
@@ -713,4 +753,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-

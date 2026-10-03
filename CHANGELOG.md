@@ -2,6 +2,10 @@
 # CHANGELOG.md
 
 
+## unreleased
+
+* Add bounded `Fugit::Cron#verify_min_interval` for closed finite windows
+
 ## fugit 1.14.0 released 2026-09-14
 
 * Reject input when length > 256
@@ -362,4 +366,3 @@
 ## fugit 0.9.0  released 2017-01-03
 
 * Initial release
-

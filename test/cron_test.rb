@@ -1794,6 +1794,163 @@ group Fugit::Cron do
     end
   end
 
+  group '#verify_min_interval' do
+
+    verify = lambda do |cron, min, from, to, budget=nil|
+
+      c = Fugit.parse_cron(cron)
+
+      if budget
+        c.verify_min_interval(
+          min, Time.parse(from), Time.parse(to), budget: budget)
+      else
+        c.verify_min_interval(min, Time.parse(from), Time.parse(to))
+      end
+    end
+
+    test 'passes a dense cron whose adjacent occurrences are 30 seconds apart' do
+
+      r = verify.call(
+        '*/30 * * * * * UTC', 30,
+        '2026-10-03 00:00:00 UTC', '2026-10-06 00:00:00 UTC')
+
+      assert(r.status, :passed)
+      assert(r.passed?, true)
+      assert(r.checked, 8641)
+      assert(r.previous_time, nil)
+    end
+
+    test 'finds a dense cron counterexample with both real occurrences' do
+
+      r = verify.call(
+        '0,29 * * * * * UTC', 30,
+        '2026-10-03 00:00:00 UTC', '2026-10-06 00:00:00 UTC')
+
+      assert(r.status, :counterexample)
+      assert(r.counterexample?, true)
+      assert(r.interval, 29)
+      assert(Fugit.time_to_plain_s(r.previous_time, false), '2026-10-03 00:00:00')
+      assert(Fugit.time_to_plain_s(r.current_time, false), '2026-10-03 00:00:29')
+    end
+
+    test 'includes both ends of the verification window' do
+
+      r = verify.call(
+        '0 0 * * * UTC', 30,
+        '2026-10-03 00:00:00 UTC', '2026-10-04 00:00:00 UTC')
+
+      assert(r.status, :passed)
+      assert(r.checked, 2)
+    end
+
+    test 'accepts a closed range but rejects a range excluding its end' do
+
+      c = Fugit.parse_cron('0 0 * * * UTC')
+      range = Time.parse('2026-10-03 00:00:00 UTC')..
+        Time.parse('2026-10-04 00:00:00 UTC')
+
+      assert(c.verify_min_interval(30, range).status, :passed)
+
+      assert_error(
+        lambda {
+          c.verify_min_interval(
+            30,
+            Time.parse('2026-10-03 00:00:00 UTC')...
+              Time.parse('2026-10-04 00:00:00 UTC'))
+        },
+        ArgumentError,
+        'cannot verify a range with an exclusive end')
+    end
+
+    test 'rejects invalid arguments before scanning the window' do
+
+      c = Fugit.parse_cron('0 0 * * * UTC')
+
+      assert_error(
+        lambda {
+          c.verify_min_interval(
+            0,
+            Time.parse('2026-10-03 00:00:00 UTC'),
+            Time.parse('2026-10-04 00:00:00 UTC'))
+        },
+        ArgumentError,
+        'min_interval must be positive')
+
+      assert_error(
+        lambda {
+          c.verify_min_interval(
+            30,
+            Time.parse('2026-10-04 00:00:00 UTC'),
+            Time.parse('2026-10-03 00:00:00 UTC'))
+        },
+        ArgumentError,
+        'time_end must be at least time_start')
+
+      assert_error(
+        lambda {
+          c.verify_min_interval(
+            30,
+            Time.parse('2026-10-03 00:00:00 UTC'),
+            Time.parse('2026-10-04 00:00:00 UTC'),
+            budget: 0)
+        },
+        ArgumentError,
+        'budget must be positive')
+    end
+
+    test 'returns budget exhausted instead of passing for a dense cron' do
+
+      r = verify.call(
+        '*/30 * * * * * UTC', 30,
+        '2026-10-03 00:00:00 UTC', '2026-10-06 00:00:00 UTC', 10)
+
+      assert(r.status, :budget_exhausted)
+      assert(r.budget_exhausted?, true)
+      assert(r.passed?, false)
+      assert(r.checked, 10)
+      assert(r.budget, 10)
+      assert(
+        Fugit.time_to_plain_s(r.previous_time, false),
+        '2026-10-03 00:04:30')
+    end
+
+    test 'passes an extremely sparse cron that has no occurrence in the window' do
+
+      r = verify.call(
+        '0 0 29 2 * UTC', 30,
+        '2026-01-01 00:00:00 UTC', '2027-12-31 23:59:59 UTC')
+
+      assert(r.status, :passed)
+      assert(r.checked, 0)
+    end
+
+    test 'passes a sparse month-end cron whose adjacent occurrences are wide' do
+
+      r = verify.call(
+        '0 0 L * * UTC', 30,
+        '2026-01-01 00:00:00 UTC', '2026-02-28 23:59:59 UTC', 100)
+
+      assert(r.status, :passed)
+      assert(r.checked, 2)
+    end
+
+    test 'measures DST fall back on the Unix timeline and returns a counterexample' do
+
+      r = verify.call(
+        '0,31 0,59 1 * * * America/New_York', 30,
+        '2026-11-01 00:00:00 UTC', '2026-11-02 00:00:00 UTC')
+
+      assert(r.status, :counterexample)
+      assert(r.interval, 29)
+      assert(
+        r.previous_time.to_s,
+        '2026-11-01 05:59:31 Z')
+      assert(
+        r.current_time.to_s,
+        '2026-11-01 06:00:00 Z')
+    end
+  end
+
   group 'the module % extension' do
 
     # mostly about 2025-09-26 gh-114
@@ -1974,4 +2131,3 @@ group Fugit do
     end
   end
 end
-

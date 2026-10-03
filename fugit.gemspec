@@ -33,7 +33,8 @@ Time tools for flor and the floraison project. Cron parsing and occurrence compu
   s.files = Dir[
     '{README,CHANGELOG,CREDITS,LICENSE}.{md,txt}',
     #'Makefile',
-    'lib/**/*.rb', #'spec/**/*.rb', 'test/**/*.rb',
+    'lib/**/*.rb',
+    'examples/**/*.rb',
     "#{s.name}.gemspec",
   ]
 
@@ -51,4 +52,3 @@ Time tools for flor and the floraison project. Cron parsing and occurrence compu
 
   s.require_path = 'lib'
 end
-
