@@ -59,6 +59,7 @@ require 'json_schemer/openapi30/meta'
 require 'json_schemer/openapi30/vocab/base'
 require 'json_schemer/openapi30/vocab'
 require 'json_schemer/openapi'
+require 'json_schemer/explanation'
 require 'json_schemer/configuration'
 require 'json_schemer/resources'
 require 'json_schemer/schema'
@@ -124,12 +125,12 @@ module JSONSchemer
 
     def valid_schema?(schema, **options)
       schema = resolve(schema, options)
-      meta_schema(schema, options).valid?(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode))
+      meta_schema(schema, options).valid?(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode, :explanation_limit))
     end
 
     def validate_schema(schema, **options)
       schema = resolve(schema, options)
-      meta_schema(schema, options).validate(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode))
+      meta_schema(schema, options).validate(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode, :explanation_limit))
     end
 
     def draft202012

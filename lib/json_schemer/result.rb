@@ -10,10 +10,12 @@ module JSONSchemer
   end
 
   Result = Struct.new(:source, :instance, :instance_location, :keyword_location, :valid, :nested, :type, :annotation, :details, :ignore_nested, :nested_key) do
-    def output(output_format)
+    def output(output_format, explanation_limit: nil)
       case output_format
       when 'classic'
         classic
+      when 'explained'
+        Explanation.build(self, :limit => explanation_limit)
       when 'flag'
         flag
       when 'basic'

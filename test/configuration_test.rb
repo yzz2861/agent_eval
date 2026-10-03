@@ -197,6 +197,14 @@ class ConfigurationTest < Minitest::Test
     )
   end
 
+  def test_explanation_limit
+    run_configuration_test(
+      :explanation_limit,
+      default: 10,
+      test: 3
+    )
+  end
+
   def test_configuration_option_and_override
     configuration = JSONSchemer::Configuration.new
     configuration.format = false

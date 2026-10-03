@@ -234,14 +234,20 @@ JSONSchemer.schema(
   end,
 
   # output formatting (https://json-schema.org/draft/2020-12/json-schema-core.html#section-12)
-  # 'classic'/'flag'/'basic'/'detailed'/'verbose'
+  # 'classic'/'flag'/'basic'/'detailed'/'verbose'/'explained'
   # default: 'classic'
   output_format: 'basic',
 
   # validate `readOnly`/`writeOnly` keywords (https://spec.openapis.org/oas/v3.0.3#fixed-fields-19)
   # 'read'/'write'/nil
   # default: nil
-  access_mode: 'read'
+  access_mode: 'read',
+
+  # maximum number of leaf errors and failed branches shown per node in
+  # 'explained' output (omitted entries are counted; set to false to disable)
+  # Integer/false
+  # default: 10
+  explanation_limit: 10
 )
 ```
 
@@ -259,7 +265,61 @@ end
 JSONSchemer.configuration.insert_property_defaults = true
 ```
 
-## Custom Error Messages
+## Explained Output
+
+The optional `explained` output format produces a structured explanation of a failed validation. It preserves the `anyOf`/`oneOf`/`allOf` branch tree, merges identical leaf errors, and distinguishes "all branches failed" from "multiple `oneOf` branches matched" — useful when a client would otherwise see dozens of flat errors.
+
+```ruby
+schemer = JSONSchemer.schema({
+  'oneOf' => [
+    { 'type' => 'string' },
+    { 'type' => 'string', 'minLength' => 2 },
+    { 'type' => 'integer' }
+  ]
+})
+
+schemer.validate('abc', :output_format => 'explained')
+# => {"valid"=>false,
+#     "explanation"=>{
+#       "message"=>"value at root does not match schema",
+#       "instanceLocation"=>"",
+#       "schemaLocation"=>"",
+#       "errors"=>[{
+#         "message"=>"value at root does not match exactly one `oneOf` schema",
+#         "keyword"=>"oneOf",
+#         "instanceLocation"=>"",
+#         "schemaLocation"=>"/oneOf",
+#         "reason"=>"multiple_branches_matched",
+#         "matchedBranches"=>[0, 1],
+#         "branches"=>[
+#           {"branch"=>0, "valid"=>true, "instanceLocation"=>"", "schemaLocation"=>"/oneOf/0"},
+#           {"branch"=>1, "valid"=>true, "instanceLocation"=>"", "schemaLocation"=>"/oneOf/1"},
+#           {"branch"=>2, "valid"=>false, ..., "errors"=>[{...}]}
+#         ],
+#         "errors"=>[{
+#           "message"=>"value at root is not an integer",
+#           "keyword"=>"type",
+#           "instanceLocation"=>"",
+#           "schemaLocation"=>"/oneOf/2/type",
+#           "type"=>"integer",
+#           "branchIndices"=>[2]
+#         }]
+#       }]
+#     }}
+```
+
+Every node keeps its schema and instance locations (`schemaLocation`/`instanceLocation`). Combinator nodes additionally carry:
+
+- `reason`: `no_branch_matched` (`anyOf`/`oneOf` — all branches failed), `multiple_branches_matched` (`oneOf` — more than one branch matched), or `not_all_branches_matched` (`allOf`)
+- `matchedBranches`: indices of matched `oneOf` branches (always complete, never truncated)
+- `branches`: the branch tree; each branch keeps its original index, validity, and nested errors
+- `errors`: leaf errors collected from all failed branches with identical leaves merged (`count`, `schemaLocations`, `branchIndices`)
+
+`not` and `if`/`then`/`else` nodes carry accurate reasons too: `forbidden_schema_matched`, `if_matched_then_failed`, and `if_not_matched_else_failed`.
+
+The number of leaf errors and failed branches shown per node is capped by `explanation_limit` (default: `10`; set to `false` for no limit). Omitted entries are always counted via `omittedErrors`/`omittedBranches`, and matched branches are never hidden, so truncation cannot make the failure reason look like its opposite.
+
++## Custom Error Messages
 
 Error messages can be customized using the `x-error` keyword and/or [I18n](https://github.com/ruby-i18n/i18n) translations. `x-error` takes precedence if both are defined.
 

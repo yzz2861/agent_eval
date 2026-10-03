@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- Add optional `explained` output format that preserves the `anyOf`/`oneOf`/`allOf` branch tree, merges identical leaf errors, and distinguishes "all branches failed" from "multiple `oneOf` branches matched", with a configurable `explanation_limit` that counts omitted entries
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes
