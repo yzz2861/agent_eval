@@ -880,6 +880,33 @@ You can use as much as `.with_()` as you want.
     WITH an_alias AS (SELECT * FROM "customers") SELECT * FROM an_alias
 
 
+VALUES as a Relation
+""""""""""""""""""""
+
+``ValuesRelation`` wraps a ``VALUES`` table value constructor so a handful of ad-hoc rows can be used like a table
+in ``FROM``, ``JOIN`` or ``WITH`` clauses without creating a temporary table. Columns can be named explicitly (they
+default to ``column1``, ``column2``, ...) and the relation can be aliased; its fields are used to build subsequent
+conditions. All rows must have the same width and column names must be unique.
+
+.. code-block:: python
+
+    from pypika import Query, ValuesRelation
+
+    v = ValuesRelation([(1, 'a'), (2, 'b')], columns=['id', 'name'], alias='v')
+
+    q = Query.from_(v).select(v.id, v.name).where(v.id == 1)
+
+.. code-block:: sql
+
+    SELECT "v"."id","v"."name" FROM (VALUES (1,'a'),(2,'b')) "v"("id","name") WHERE "v"."id"=1
+
+The generated SQL adapts to the dialect: PostgreSQL renders the column name list after the alias, SQLite omits it
+(SQLite does not support column aliases on tables), and SQL Server wraps the ``VALUES`` clause in a ``SELECT`` when
+it is used as a CTE body.
+
+Note that ``pypika.terms.Values`` serves a different purpose: it renders ``VALUES(field)`` for ``INSERT`` statements.
+
+
 Inserting Data
 ^^^^^^^^^^^^^^
 

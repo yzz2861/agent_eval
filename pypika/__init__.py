@@ -73,6 +73,7 @@ from pypika.queries import (
     Query,
     Schema,
     Table,
+    ValuesRelation,
 )
 from pypika.queries import (
     make_columns as Columns,
@@ -142,6 +143,7 @@ __all__ = (
     'Query',
     'Schema',
     'Table',
+    'ValuesRelation',
     'Column',
     'Database',
     'Tables',

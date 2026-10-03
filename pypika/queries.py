@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from copy import copy
 from functools import reduce
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
@@ -275,6 +275,94 @@ def make_tables(*names: tuple[str, str] | str, **kwargs: Any) -> list[Table]:
             )
         tables.append(t)
     return tables
+
+
+class ValuesRelation(Selectable):
+    """
+    A ``VALUES`` table value constructor that can be used as a relation in ``FROM``, ``JOIN`` and ``WITH`` clauses.
+
+    This is distinct from ``pypika.terms.Values``, which renders ``VALUES(field)`` for use in ``INSERT``
+    statements. Rows are rendered on every call to ``get_sql``, so parameter values passed via the
+    ``parameter`` keyword argument are collected in the order in which they appear in the final SQL and repeated
+    compilations do not accumulate stale parameters.
+    """
+
+    def __init__(
+        self,
+        rows: Iterable[Iterable[Any]],
+        columns: Iterable[str] | None = None,
+        alias: str | None = None,
+    ) -> None:
+        super().__init__(alias)
+
+        self._rows = [tuple(row) for row in rows]
+        if not self._rows:
+            if columns is None:
+                raise ValueError("Cannot infer columns from empty rows; provide 'columns' or at least one row.")
+            raise ValueError("ValuesRelation requires at least one row of values.")
+
+        width = len(self._rows[0])
+        if width == 0:
+            raise ValueError("ValuesRelation rows must contain at least one value.")
+        if any(len(row) != width for row in self._rows):
+            raise ValueError("All rows of a ValuesRelation must have the same width.")
+
+        if columns is None:
+            self._columns = ["column%d" % (index + 1) for index in range(width)]
+        else:
+            self._columns = [str(column) for column in columns]
+            if len(self._columns) != width:
+                raise ValueError("The number of columns does not match the width of the rows.")
+            if len(set(self._columns)) != len(self._columns):
+                raise ValueError("ValuesRelation column names must be unique.")
+
+        self._values = [
+            [value if isinstance(value, Term) else ValueWrapper(value) for value in row] for row in self._rows
+        ]
+
+    @property
+    def columns(self) -> list[str]:
+        return list(self._columns)
+
+    def get_column_names_sql(self, **kwargs: Any) -> str:
+        quote_char = kwargs.get("quote_char")
+        return ",".join(format_quotes(column, quote_char) for column in self._columns)
+
+    def _values_sql(self, **kwargs: Any) -> str:
+        return "VALUES " + ",".join(
+            "({})".format(",".join(value.get_sql(**kwargs) for value in row)) for row in self._values
+        )
+
+    def _alias_sql(self, with_columns: bool, alias: str | None = None, **kwargs: Any) -> str:
+        alias = self.alias if alias is None else alias
+        if not alias:
+            return ""
+        sql = "{_as}{alias}".format(
+            _as=" AS " if kwargs.get("as_keyword") else " ",
+            alias=format_quotes(alias, kwargs.get("alias_quote_char") or kwargs.get("quote_char")),
+        )
+        if with_columns:
+            sql += "({})".format(self.get_column_names_sql(**kwargs))
+        return sql
+
+    def get_sql(self, subquery: bool = False, with_alias: bool = False, **kwargs: Any) -> str:
+        dialect = kwargs.get("dialect")
+        values_sql = self._values_sql(**kwargs)
+
+        if not with_alias:
+            if dialect == Dialects.MSSQL:
+                # T-SQL does not allow a bare VALUES clause as a CTE body, so wrap it in a SELECT
+                return "SELECT * FROM ({values}){alias}".format(
+                    values=values_sql,
+                    alias=self._alias_sql(with_columns=True, alias=self.alias or "v", **kwargs),
+                )
+            return values_sql
+
+        if dialect == Dialects.SQLLITE:
+            # SQLite does not support column name lists in table aliases
+            return "({values}){alias}".format(values=values_sql, alias=self._alias_sql(with_columns=False, **kwargs))
+
+        return "({values}){alias}".format(values=values_sql, alias=self._alias_sql(with_columns=True, **kwargs))
 
 
 class Column:
@@ -1399,10 +1487,13 @@ class QueryBuilder(Selectable, Term):
         return querystring
 
     def _with_sql(self, **kwargs: Any) -> str:
-        return "WITH " + ",".join(
-            clause.name + " AS (" + clause.get_sql(subquery=False, with_alias=False, **kwargs) + ") "
-            for clause in self._with
-        )
+        statements = []
+        for clause in self._with:
+            name = clause.name
+            if isinstance(clause.query, ValuesRelation):
+                name += "({})".format(clause.query.get_column_names_sql(**kwargs))
+            statements.append(name + " AS (" + clause.get_sql(subquery=False, with_alias=False, **kwargs) + ") ")
+        return "WITH " + ",".join(statements)
 
     def _distinct_sql(self, **kwargs: Any) -> str:
         distinct = 'DISTINCT ' if self._distinct else ''
