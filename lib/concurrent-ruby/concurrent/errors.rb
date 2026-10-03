@@ -19,6 +19,11 @@ module Concurrent
   # receiver's current state
   IllegalOperationError = Class.new(Error)
 
+  # Raised when a Concurrent::Map#compute_if_absent_concurrently
+  # computation block recursively requests the key it is currently
+  # computing.
+  RecursiveComputationError = Class.new(Error)
+
   # Raised when an object's methods are called when it has not been
   # properly initialized.
   InitializationError = Class.new(Error)

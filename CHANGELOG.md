@@ -1,5 +1,11 @@
 ## Current
 
+concurrent-ruby:
+
+* Add `Concurrent::Map#compute_if_absent_concurrently`, which computes the value outside of the
+  map's internal locks: concurrent callers for the same key share a single computation while
+  reads and writes of other keys are never blocked
+
 ## Release v1.3.8 (19 July 2026)
 
 concurrent-ruby:

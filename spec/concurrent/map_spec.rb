@@ -176,6 +176,204 @@ module Concurrent
       end
     end
 
+    describe '#compute_if_absent_concurrently' do
+      it 'common' do
+        with_or_without_default_proc do
+          expect_size_change(2) do
+            expect(1).to eq @cache.compute_if_absent_concurrently(:a) { 1 }
+            expect(1).to eq @cache.compute_if_absent_concurrently(:a) { 2 }
+            expect(1).to eq @cache[:a]
+
+            expect(nil).to  eq @cache.compute_if_absent_concurrently(:b) {}
+            expect(true).to eq @cache.key?(:b)
+          end
+        end
+      end
+
+      it 'does not call default_proc' do
+        map = Concurrent::Map.new { |h, k| :default_value }
+        expect(1).to eq map.compute_if_absent_concurrently(:a) { 1 }
+        expect(1).to eq map[:a]
+      end
+
+      it 'shares a single computation between concurrent callers of the same key' do
+        compute_started = Concurrent::CountDownLatch.new(1)
+        finish_compute  = Concurrent::CountDownLatch.new(1)
+        compute_count   = 0
+
+        computer = in_thread do
+          @cache.compute_if_absent_concurrently(:a) do
+            compute_count += 1
+            compute_started.count_down
+            finish_compute.wait
+            1
+          end
+        end
+        compute_started.wait
+
+        waiters = Array.new(5) { in_thread { @cache.compute_if_absent_concurrently(:a) { fail 'computation was not shared' } } }
+        sleep(0.1)
+        finish_compute.count_down
+
+        expect(1).to eq computer.value
+        waiters.each { |waiter| expect(1).to eq waiter.value }
+        expect(1).to eq compute_count
+      end
+
+      it 'computes each key only once under concurrency' do
+        compute_count = 0
+        count_lock    = Mutex.new
+        threads       = Array.new(8) do
+          in_thread do
+            50.times do |i|
+              key = i % 5
+              value = @cache.compute_if_absent_concurrently(key) do
+                count_lock.synchronize { compute_count += 1 }
+                key
+              end
+              expect(key).to eq value
+            end
+          end
+        end
+        threads.each(&:join)
+        expect(5).to eq compute_count
+      end
+
+      it 'does not block reads and writes of other keys while computing' do
+        compute_started = Concurrent::CountDownLatch.new(1)
+        finish_compute  = Concurrent::CountDownLatch.new(1)
+
+        computer = in_thread do
+          @cache.compute_if_absent_concurrently(:a) do
+            compute_started.count_down
+            finish_compute.wait
+            1
+          end
+        end
+        compute_started.wait
+
+        @cache[:b] = 2
+        expect(2).to eq @cache[:b]
+        expect(3).to eq @cache.compute_if_absent(:c) { 3 }
+        expect(4).to eq @cache.compute_if_absent_concurrently(:d) { 4 }
+
+        finish_compute.count_down
+        expect(1).to eq computer.value
+        expect(1).to eq @cache[:a]
+      end
+
+      it 'does not store the computed value when the key is deleted during computation' do
+        compute_started = Concurrent::CountDownLatch.new(1)
+        finish_compute  = Concurrent::CountDownLatch.new(1)
+
+        computer = in_thread do
+          @cache.compute_if_absent_concurrently(:a) do
+            compute_started.count_down
+            finish_compute.wait
+            1
+          end
+        end
+        compute_started.wait
+        @cache.delete(:a)
+        finish_compute.count_down
+
+        expect(nil).to eq computer.value
+        expect(false).to eq @cache.key?(:a)
+      end
+
+      it 'does not store the computed value when the map is cleared during computation' do
+        compute_started = Concurrent::CountDownLatch.new(1)
+        finish_compute  = Concurrent::CountDownLatch.new(1)
+
+        @cache[:b] = 2
+        computer = in_thread do
+          @cache.compute_if_absent_concurrently(:a) do
+            compute_started.count_down
+            finish_compute.wait
+            1
+          end
+        end
+        compute_started.wait
+        @cache.clear
+        finish_compute.count_down
+
+        expect(nil).to eq computer.value
+        expect(true).to eq @cache.empty?
+      end
+
+      it 'never overwrites a value assigned during computation' do
+        compute_started = Concurrent::CountDownLatch.new(1)
+        finish_compute  = Concurrent::CountDownLatch.new(1)
+
+        computer = in_thread do
+          @cache.compute_if_absent_concurrently(:a) do
+            compute_started.count_down
+            finish_compute.wait
+            1
+          end
+        end
+        compute_started.wait
+        waiter = in_thread { @cache.compute_if_absent_concurrently(:a) { fail } }
+        sleep(0.1)
+        @cache[:a] = :direct
+        finish_compute.count_down
+
+        expect(:direct).to eq computer.value
+        expect(:direct).to eq waiter.value
+        expect(:direct).to eq @cache[:a]
+      end
+
+      it 'propagates a block error to all callers and recomputes on the next call' do
+        compute_started = Concurrent::CountDownLatch.new(1)
+        finish_compute  = Concurrent::CountDownLatch.new(1)
+
+        computer = in_thread do
+          begin
+            @cache.compute_if_absent_concurrently(:a) do
+              compute_started.count_down
+              finish_compute.wait
+              raise ArgumentError, 'boom'
+            end
+          rescue => e
+            e
+          end
+        end
+        compute_started.wait
+        waiter = in_thread do
+          begin
+            @cache.compute_if_absent_concurrently(:a) { 1 }
+          rescue => e
+            e
+          end
+        end
+        sleep(0.1)
+        finish_compute.count_down
+
+        expect(computer.value).to be_a(ArgumentError)
+        expect(waiter.value).to be_a(ArgumentError)
+        expect(false).to eq @cache.key?(:a)
+        expect(2).to eq @cache.compute_if_absent_concurrently(:a) { 2 }
+      end
+
+      it 'raises RecursiveComputationError on a recursive request for the same key' do
+        expect do
+          @cache.compute_if_absent_concurrently(:a) do
+            @cache.compute_if_absent_concurrently(:a) { 1 }
+          end
+        end.to raise_error(Concurrent::RecursiveComputationError)
+        expect(false).to eq @cache.key?(:a)
+        expect(1).to eq @cache.compute_if_absent_concurrently(:a) { 1 }
+      end
+
+      it 'allows computing a different key from within the block' do
+        result = @cache.compute_if_absent_concurrently(:a) do
+          @cache.compute_if_absent_concurrently(:b) { 1 } + 1
+        end
+        expect(2).to eq result
+        expect(1).to eq @cache[:b]
+      end
+    end
+
     describe '#compute_if_present' do
       it 'common' do
         with_or_without_default_proc do

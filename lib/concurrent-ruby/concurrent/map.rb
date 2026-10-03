@@ -1,6 +1,7 @@
 require 'thread'
 require 'concurrent/constants'
 require 'concurrent/utility/engine'
+require 'concurrent/errors'
 
 module Concurrent
   # @!visibility private
@@ -139,6 +140,7 @@ module Concurrent
 
         super(options)
         @default_proc = default_proc
+        initialize_pending_computation_state
       end
 
       # Get a value with key
@@ -157,6 +159,87 @@ module Concurrent
           value
         end
       end
+    end
+
+    if defined?(Collection::NonConcurrentMapBackend) and self < Collection::NonConcurrentMapBackend
+
+      # @param [Hash, nil] options options to set the :initial_capacity or :load_factor. Ignored on some Rubies.
+      # @param [Proc] default_proc Optional block to compute the default value if the key is not set, like `Hash#default_proc`
+      def initialize(options = nil, &default_proc)
+        super
+        initialize_pending_computation_state
+      end
+    end
+
+    # @!visibility private
+    #
+    # Bookkeeping for an in-flight #compute_if_absent_concurrently call.
+    # All state is only accessed while holding the map's
+    # @pending_computations_lock.
+    class PendingComputation
+      attr_reader :owner_thread
+      attr_accessor :result, :error
+
+      def initialize(owner_thread)
+        @owner_thread = owner_thread
+        @done         = false
+        @invalidated  = false
+        @condition    = ::ConditionVariable.new
+      end
+
+      def done?
+        @done
+      end
+
+      def invalidated?
+        @invalidated
+      end
+
+      def invalidate!
+        @invalidated = true
+      end
+
+      def complete!(result, error)
+        @result = result
+        @error  = error
+        @done   = true
+        @condition.broadcast
+      end
+
+      def wait_completion(mutex)
+        @condition.wait(mutex) until @done
+      end
+    end
+    private_constant :PendingComputation
+
+    # Set a value with key. A pending #compute_if_absent_concurrently
+    # computation for the key is invalidated first, so that its result can
+    # never overwrite the value set here.
+    # @param [Object] key
+    # @param [Object] value
+    # @return [Object] the new value
+    def []=(key, value)
+      invalidate_pending_computation(key)
+      super
+    end
+
+    # Delete key and its value. A pending #compute_if_absent_concurrently
+    # computation for the key is invalidated first, so that its result can
+    # never resurrect the deleted key.
+    # @param [Object] key
+    # @return [Object, nil] old value or nil when the key was absent
+    def delete(key)
+      invalidate_pending_computation(key)
+      super
+    end
+
+    # Remove all key-value pairs. All pending
+    # #compute_if_absent_concurrently computations are invalidated first,
+    # so that their results can never resurrect deleted keys.
+    # @return [self]
+    def clear
+      invalidate_all_pending_computations
+      super
     end
 
     alias_method :get, :[]
@@ -220,6 +303,69 @@ module Concurrent
       end
       computed ? nil : result
     end unless method_defined?(:put_if_absent)
+
+    # Compute and store a new value for key if the key is absent, running
+    # the block outside of the map's internal locks. Unlike
+    # +compute_if_absent+ (which computes while holding the map's write
+    # lock, and can therefore block operations on unrelated keys), this
+    # method never blocks reads or writes of other keys while the block is
+    # running.
+    #
+    # Concurrent calls for the same key share a single computation: the
+    # first caller runs the block while the other callers wait, and every
+    # caller receives the stored value. Calls for different keys are fully
+    # independent.
+    #
+    # The publication of the computed value is atomic with respect to
+    # #[]=, #delete and #clear: if any of them targets the key while the
+    # block is running, the computed value is discarded instead of being
+    # stored, so a stale computation can never overwrite a newer value or
+    # resurrect a deleted key. Every caller of a discarded computation
+    # receives the value stored for the key when the computation finishes,
+    # or nil if the key is absent at that moment.
+    #
+    # If the block raises, nothing is stored, the exception is re-raised
+    # in the computing caller and propagated to every waiting caller, and
+    # a later call for the same key starts a fresh computation.
+    #
+    # The block must not recursively request the same key through this
+    # method; doing so raises Concurrent::RecursiveComputationError.
+    #
+    # @param [Object] key
+    # @yield new value for the key, computed outside of the map's locks
+    # @yieldreturn [Object] new value
+    # @return [Object] the value stored for the key, or nil if the key was
+    #   removed while the value was being computed
+    def compute_if_absent_concurrently(key)
+      if NULL != (value = get_or_default(key, NULL))
+        return value
+      end
+
+      computing = false
+      entry     = @pending_computations_lock.synchronize do
+        if NULL != (value = get_or_default(key, NULL))
+          return value
+        elsif (pending = @pending_computations[key])
+          if pending.owner_thread.equal?(::Thread.current)
+            raise RecursiveComputationError,
+                  "recursive compute_if_absent_concurrently call for key #{key.inspect}"
+          end
+          pending
+        else
+          computing = true
+          @pending_computations[key] = PendingComputation.new(::Thread.current)
+        end
+      end
+
+      if computing
+        run_shared_computation(key, entry) { yield }
+      else
+        @pending_computations_lock.synchronize do
+          entry.wait_completion(@pending_computations_lock)
+        end
+        deliver_shared_computation(key, entry)
+      end
+    end
 
     # Is the value stored in the map. Iterates over all values.
     # @param [Object] value
@@ -330,12 +476,78 @@ module Concurrent
 
     def initialize_copy(other)
       super
+      initialize_pending_computation_state
       populate_from(other)
     end
 
     def populate_from(hash)
       hash.each_pair { |k, v| self[k] = v }
       self
+    end
+
+    # @!visibility private
+    def initialize_pending_computation_state
+      @pending_computations      = {}
+      @pending_computations_lock = ::Mutex.new
+    end
+
+    # @!visibility private
+    def invalidate_pending_computation(key)
+      @pending_computations_lock.synchronize do
+        if (entry = @pending_computations[key])
+          entry.invalidate!
+        end
+      end
+    end
+
+    # @!visibility private
+    def invalidate_all_pending_computations
+      @pending_computations_lock.synchronize do
+        @pending_computations.each_value { |entry| entry.invalidate! }
+      end
+    end
+
+    # Runs the block of compute_if_absent_concurrently outside of any lock
+    # and publishes its result. Waiting callers are always unblocked, even
+    # if the block raises or the computing thread is killed.
+    # @!visibility private
+    def run_shared_computation(key, entry)
+      finished = false
+      result   = nil
+      error    = nil
+      begin
+        result   = yield
+        finished = true
+      rescue ::Exception => e
+        error    = e
+        finished = true
+      ensure
+        # the block neither returned nor raised (e.g. the thread was
+        # killed): make sure waiting callers are not blocked forever
+        error = Error.new('compute_if_absent_concurrently block did not finish') unless finished
+        complete_shared_computation(key, entry, error, result)
+      end
+
+      raise error if error
+      deliver_shared_computation(key, entry)
+    end
+
+    # @!visibility private
+    def complete_shared_computation(key, entry, error, result)
+      @pending_computations_lock.synchronize do
+        # the invalidation check and the store are done under the same
+        # lock that #[]=, #delete and #clear use to invalidate, so a
+        # discarded computation can never overwrite a newer value
+        stored = error.nil? && !entry.invalidated? ? compute_if_absent(key) { result } : nil
+        entry.complete!(stored, error)
+        @pending_computations.delete(key)
+      end
+    end
+
+    # @!visibility private
+    def deliver_shared_computation(key, entry)
+      raise entry.error if entry.error
+      entry.invalidated? ? get_or_default(key, nil) : entry.result
     end
 
     def validate_options_hash!(options)
