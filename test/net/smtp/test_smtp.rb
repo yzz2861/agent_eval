@@ -2,6 +2,7 @@
 
 require 'net/smtp'
 require 'test/unit'
+require 'stringio'
 
 module Net
   class TestSMTP < Test::Unit::TestCase
@@ -620,6 +621,100 @@ module Net
       assert_equal "MAIL FROM:<rené@example.com> SMTPUTF8\r\n", server.commands.last
     end
 
+    def test_send_message_with_io_uses_bdat
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      message = "From: from@example.com\r\n\r\nfirst \x00 line\r\n.\r\nlast\r\n".b
+      res = smtp.send_message(StringIO.new(message), 'from@example.com', 'to@example.com')
+      assert_equal '250', res.status
+      assert_equal message, server.body.b
+      assert_equal ["BDAT #{message.bytesize} LAST\r\n"], server.commands.grep(/\ABDAT /)
+      assert_not_include server.commands, "DATA\r\n"
+    end
+
+    def test_bdat_chunk_boundaries
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom 'from@example.com'
+      smtp.rcptto 'to@example.com'
+      message = ("a" * 25 + "\x00\r\n.\r\n" + "b" * 7).b
+      res = smtp.bdat(StringIO.new(message), chunk_size: 10)
+      assert_equal '250', res.status
+      assert_equal message, server.body.b
+      bdat_commands = server.commands.grep(/\ABDAT /)
+      assert_equal [10, 10, 10, 8], bdat_commands.map { |c| c[/\ABDAT (\d+)/, 1].to_i }
+      assert_equal [10, 10, 10, 8], server.chunks.map(&:bytesize)
+      assert_equal message, server.chunks.join.b
+      assert_match(/\ABDAT 8 LAST\r\n\z/, bdat_commands.last)
+    end
+
+    def test_bdat_short_reads
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom 'from@example.com'
+      smtp.rcptto 'to@example.com'
+      message = ("x" * 10 + "\x00").b
+      res = smtp.bdat(ShortReadIO.new(message, 3), chunk_size: 10)
+      assert_equal '250', res.status
+      assert_equal [3, 3, 3, 2], server.commands.grep(/\ABDAT /).map { |c| c[/\ABDAT (\d+)/, 1].to_i }
+      assert_equal [3, 3, 3, 2], server.chunks.map(&:bytesize)
+      assert_equal message, server.body.b
+    end
+
+    def test_bdat_empty_message
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom 'from@example.com'
+      smtp.rcptto 'to@example.com'
+      res = smtp.bdat(StringIO.new(''), chunk_size: 10)
+      assert_equal '250', res.status
+      assert_equal ["BDAT 0 LAST\r\n"], server.commands.grep(/\ABDAT /)
+      assert_equal '', server.body
+    end
+
+    def test_bdat_chunk_rejected
+      server = FakeServer.start(chunking: true)
+      server.bdat_reply = "451 4.3.0 Temporary failure\r\n"
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom 'from@example.com'
+      smtp.rcptto 'to@example.com'
+      assert_raise(Net::SMTPServerBusy) do
+        smtp.bdat(StringIO.new('x' * 30), chunk_size: 10)
+      end
+      assert_equal 1, server.commands.grep(/\ABDAT /).size
+    end
+
+    def test_bdat_disconnect_before_final_reply
+      server = FakeServer.start(chunking: true)
+      server.bdat_disconnect_on_last = true
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_raise(EOFError) do
+        smtp.send_message(StringIO.new('hello'), 'from@example.com', 'to@example.com')
+      end
+      assert_equal 'hello', server.body
+    end
+
+    def test_bdat_unsupported_without_chunking
+      server = FakeServer.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_raise(Net::SMTPUnsupportedCommand) do
+        smtp.send_message(StringIO.new('hello'), 'from@example.com', 'to@example.com')
+      end
+      assert_not_include server.commands.map(&:chomp), 'DATA'
+      assert_empty server.commands.grep(/\ABDAT /)
+    end
+
+    class ShortReadIO
+      def initialize(str, max)
+        @io = StringIO.new(str)
+        @max = max
+      end
+
+      def readpartial(len)
+        @io.readpartial([len, @max].min)
+      end
+    end
+
     def fake_server_start(**kw)
       server = FakeServer.new
       server.start(**kw)
@@ -650,6 +745,11 @@ module Net
     attr_reader :port
     attr_reader :commands
     attr_reader :body
+    attr_reader :chunks
+    # Reply sent for each BDAT chunk (and for the LAST chunk).
+    attr_accessor :bdat_reply
+    # When true, the connection is closed without replying to BDAT ... LAST.
+    attr_accessor :bdat_disconnect_on_last
 
     def starttls_started?
       !!@starttls_started
@@ -658,6 +758,9 @@ module Net
     def start(**capabilities)
       @commands = []
       @body = +''
+      @chunks = []
+      @bdat_reply = "250 2.0.0 Ok\r\n"
+      @bdat_disconnect_on_last = false
       @capa = capabilities
       @tls = @capa.delete(:tls)
       @servers = Socket.tcp_server_sockets('localhost', 0)
@@ -784,6 +887,18 @@ module Net
       @sock.puts "250 2.0.0 Ok\r\n"
     end
 
+    def bdat(size, last)
+      chunk = size.zero? ? +'' : @sock.read(size)
+      @chunks.push chunk
+      @body.concat chunk
+      if last && @bdat_disconnect_on_last
+        @sock.close
+        return :disconnect
+      end
+      @sock.puts @bdat_reply
+      nil
+    end
+
     def quit
       @sock.puts "221 2.0.0 Bye\r\n"
       @sock.close
@@ -806,6 +921,8 @@ module Net
           rcpt($')
         when "DATA"
           data
+        when /\ABDAT (\d+)( LAST)?\z/
+          break if bdat($1.to_i, !$2.nil?) == :disconnect
         when "RSET"
           rset
         when "QUIT"

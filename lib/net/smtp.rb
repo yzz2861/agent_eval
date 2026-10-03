@@ -758,6 +758,12 @@ module Net
     # binary message with this method. +msgstr+ should include both
     # the message headers and body.
     #
+    # +msgstr+ may also be an IO-like object (anything responding to
+    # +readpartial+ or +read+); in that case the message is sent with the
+    # BDAT command (see #bdat) and its bytes are transferred as-is, without
+    # any conversion.  This requires the server to support the CHUNKING
+    # extension, otherwise Net::SMTPUnsupportedCommand is raised.
+    #
     # +from_addr+ is a String or Net::SMTP::Address representing the source mail address.
     #
     # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
@@ -793,7 +799,13 @@ module Net
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
       mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      rcptto_list(to_addrs) {
+        if msgstr.is_a?(String) || !msgstr.respond_to?(:read)
+          data msgstr
+        else
+          bdat msgstr
+        end
+      }
     end
 
     alias send_mail send_message
@@ -979,6 +991,66 @@ module Net
       res
     end
 
+    # Default size in bytes of the chunks sent by #bdat.
+    DEFAULT_BDAT_CHUNK_SIZE = 4096
+
+    # This method sends a message read from +io+ using the BDAT command
+    # (the CHUNKING extension, RFC 3030).
+    #
+    # The message is read from +io+ and sent in chunks of at most
+    # +chunk_size+ bytes.  The size announced with each BDAT command is the
+    # actual number of bytes read, so short reads from +io+ simply produce
+    # smaller chunks.  The bytes are sent as-is: unlike #data, no CR LF
+    # conversion or dot-stuffing is performed, which makes this method
+    # suitable for messages containing binary content.  An empty +io+ is
+    # sent as a single zero-length "BDAT 0 LAST" chunk.
+    #
+    # The last chunk is sent with the LAST parameter, and the server's
+    # final Response is returned to the caller.  If the server rejects a
+    # chunk, an SMTPError is raised and no further chunks are sent.  If the
+    # connection is lost before the final reply, an exception is raised and
+    # the delivery status of the message is left unknown.
+    #
+    # This method requires the server to support the CHUNKING extension;
+    # it never falls back to the DATA command.
+    #
+    # === Errors
+    #
+    # This method may raise:
+    #
+    # * Net::SMTPUnsupportedCommand
+    # * Net::SMTPServerBusy
+    # * Net::SMTPSyntaxError
+    # * Net::SMTPFatalError
+    # * Net::SMTPUnknownError
+    # * Net::ReadTimeout
+    # * EOFError, IOError
+    #
+    def bdat(io, chunk_size: DEFAULT_BDAT_CHUNK_SIZE)
+      unless capable?('CHUNKING')
+        raise SMTPUnsupportedCommand, 'server does not support the CHUNKING extension'
+      end
+      critical {
+        res = nil
+        chunk = bdat_read_chunk(io, chunk_size)
+        if chunk.nil?
+          res = get_response('BDAT 0 LAST')
+        else
+          loop do
+            nxt = bdat_read_chunk(io, chunk_size)
+            if nxt.nil?
+              res = bdat_send_chunk(chunk, last: true)
+              break
+            end
+            check_response bdat_send_chunk(chunk, last: false)
+            chunk = nxt
+          end
+        end
+        check_response res
+        res
+      }
+    end
+
     def quit
       getok('QUIT')
     end
@@ -995,6 +1067,27 @@ module Net
       # A bare CR or LF is not allowed in RFC5321.
       if /[\r\n]/ =~ line
         raise ArgumentError, "A line must not contain CR or LF"
+      end
+    end
+
+    def bdat_send_chunk(chunk, last:)
+      cmd = "BDAT #{chunk.bytesize}#{' LAST' if last}"
+      validate_line cmd
+      @socket.writeline cmd
+      @socket.write chunk
+      recv_response()
+    end
+
+    def bdat_read_chunk(io, chunk_size)
+      if io.respond_to?(:readpartial)
+        begin
+          io.readpartial(chunk_size)
+        rescue EOFError
+          nil
+        end
+      else
+        chunk = io.read(chunk_size)
+        chunk unless chunk.nil? || chunk.empty?
       end
     end
 
