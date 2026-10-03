@@ -88,6 +88,15 @@ module I18n
           throw(:exception, I18n::MissingTranslation.new(locale, format, options))
         end
 
+        def localize_range(locale, start_object, end_object = nil, format = :default, options = EMPTY_HASH)
+          backends.each do |backend|
+            catch(:exception) do
+              result = backend.localize_range(locale, start_object, end_object, format, options) and return result
+            end
+          end
+          throw(:exception, I18n::MissingTranslation.new(locale, format, options))
+        end
+
         protected
           def init_translations
             backends.each do |backend|

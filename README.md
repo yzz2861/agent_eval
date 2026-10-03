@@ -54,6 +54,43 @@ I18n.locale = :de
 I18n.t(:test) # => "Dies ist ein Test"
 ```
 
+### Date and time ranges
+
+`I18n.localize_range` renders two dates or times with the locale's compact
+range patterns instead of joining two fully formatted values. The pattern is
+chosen from the most significant calendar field the format actually displays
+on which the two ends differ; the order of the ends is always checked on
+their real instants. Either two objects or a single `Range` is accepted:
+
+```ruby
+I18n.localize_range(Date.new(2008, 5, 10), Date.new(2008, 5, 12)) # => "10 – 12 May 2008"
+I18n.localize_range(Time.utc(2008, 5, 10, 6)..Time.utc(2008, 5, 10, 18), format: :short)
+```
+
+Range patterns live below `date.ranges` / `time.ranges`, keyed by format name
+and by `same_day`, `same_month`, `different_month` and `different_year`. Each
+pattern is a `[start, end]` pair of `strftime` strings; an empty end string
+suppresses the separator. The separator comes from
+`date.range_separator` / `time.range_separator` and defaults to `" – "`. When
+no matching pattern is configured, two complete dates are rendered.
+
+```yml
+de:
+  date:
+    range_separator: " – "
+    ranges:
+      default:
+        same_day:        ["%d.%m.%Y", ""]
+        same_month:      ["%d", "%d.%m.%Y"]
+        different_month: ["%d.%m", "%d.%m.%Y"]
+        different_year:  ["%d.%m.%Y", "%d.%m.%Y"]
+```
+
+Ends carrying different offsets are never interpreted against the system time
+zone: pass an explicit `time_zone:` (an offset in seconds, an offset string
+such as `"+09:00"`, or a zone object responding to `utc_to_local`), otherwise
+an `ArgumentError` is raised.
+
 ### Fiber-safe config updates
 
 `Fiber[]` values are inherited by child fibers.

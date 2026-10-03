@@ -372,6 +372,24 @@ module I18n
     end
     alias :l :localize
 
+    # Localizes a date or time range using the locale's compact range
+    # patterns (+date.ranges+/+time.ranges+), e.g. "10–12 May 2008". Pass
+    # either two objects or a single Range:
+    #
+    #     I18n.localize_range(date1, date2)
+    #     I18n.localize_range(time1..time2, format: :short)
+    #
+    # Ends with different offsets require an explicit <tt>:time_zone</tt>
+    # (offset or zone object); the system time zone is never assumed.
+    def localize_range(start_object, end_object = nil, locale: nil, format: nil, **options)
+      locale ||= config.locale
+      raise Disabled.new('l') if locale == false
+      enforce_available_locales!(locale)
+
+      format ||= :default
+      config.backend.localize_range(locale, start_object, end_object, format, options)
+    end
+
     # Executes block with given I18n.locale set.
     def with_locale(tmp_locale = nil)
       if tmp_locale == nil

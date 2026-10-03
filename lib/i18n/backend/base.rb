@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'date'
 require 'yaml'
 require 'json'
 
@@ -90,6 +91,59 @@ module I18n
 
         format = translate_localization_format(locale, object, format, options)
         object.strftime(format)
+      end
+
+      # Localizes a date/time range. Unlike joining two separately localized
+      # values with a dash, this uses locale-specific compact range patterns
+      # (see <tt>date.ranges</tt>/<tt>time.ranges</tt>). The most significant
+      # *displayed* calendar field on which the two ends differ decides which
+      # pattern is used (+same_day+, +same_month+, +different_month+ or
+      # +different_year+), while the start/end ordering is always checked on
+      # the actual instants.
+      #
+      # When the two ends carry different offsets they are projected into the
+      # zone given by <tt>:time_zone</tt>, or into the start end zone when it
+      # is omitted; the system time zone is never guessed. Locales without a
+      # matching range pattern fall back to two fully localized dates.
+      def localize_range(locale, start_object, end_object = nil, format = :default, options = EMPTY_HASH)
+        if start_object.is_a?(::Range)
+          range = start_object
+          start_object = range.begin
+          end_object = range.end
+        end
+
+        unless start_object.respond_to?(:strftime) && end_object.respond_to?(:strftime)
+          raise ArgumentError, "Objects must be Date, DateTime or Time objects. #{start_object.inspect} and #{end_object.inspect} given."
+        end
+
+        type = start_object.respond_to?(:sec) ? 'time' : 'date'
+
+        start_datetime, end_datetime, projected = ordered_range_datetimes(start_object, end_object, options[:time_zone])
+        start_render = projected ? start_datetime : start_object
+        end_render = projected ? end_datetime : end_object
+
+        if Symbol === format
+          key = format
+          lookup_options = options.merge(:raise => true, :object => start_object, :locale => locale)
+          base_format = I18n.t(:"#{type}.formats.#{key}", **lookup_options)
+          range_formats = translate_range_entry(locale, :"#{type}.ranges.#{key}", start_object, lookup_options)
+        else
+          base_format = format
+          range_formats = nil
+        end
+
+        variant = range_variant(base_format, start_datetime, end_datetime)
+        parts = range_formats && range_formats[variant]
+
+        unless parts.is_a?(::Array) && parts.size == 2 && parts.all? { |part| part.is_a?(::String) }
+          return localize_full_range(locale,
+            start_render, end_render, format, options)
+        end
+
+        separator = range_separator(locale, type, format, options)
+        start_part = render_range_part(locale, start_render, parts[0], options)
+        end_part = render_range_part(locale, end_render, parts[1], options)
+        end_part.empty? ? start_part : start_part << separator << end_part
       end
 
       # Returns an array of locales for which translations are available
@@ -303,6 +357,112 @@ module I18n
           end
         rescue MissingTranslationData => e
           e.message
+        end
+
+        DEFAULT_RANGE_SEPARATOR = " \u2013 "
+
+        RANGE_FORMAT_FIELD_YEAR   = /(?<!%)%(?:[-_^0-9# +:]*(?:E|O)?)?[YGg]/.freeze
+        RANGE_FORMAT_FIELD_MONTH  = /(?<!%)%(?:[-_^0-9# +:]*(?:E|O)?)?[mBbh]/.freeze
+        RANGE_FORMAT_FIELD_DAY    = /(?<!%)%(?:[-_^0-9# +:]*(?:E|O)?)?[dejUVW]/.freeze
+
+        # Returns the most significant calendar field that is both displayed
+        # by +format+ and different between the two ends.
+        def range_variant(format, start_datetime, end_datetime)
+          format = format.to_s
+          if RANGE_FORMAT_FIELD_YEAR.match?(format) && start_datetime.year != end_datetime.year
+            :different_year
+          elsif RANGE_FORMAT_FIELD_MONTH.match?(format) &&
+              (start_datetime.year != end_datetime.year || start_datetime.mon != end_datetime.mon)
+            :different_month
+          elsif RANGE_FORMAT_FIELD_DAY.match?(format) &&
+              (start_datetime.year != end_datetime.year || start_datetime.mon != end_datetime.mon || start_datetime.day != end_datetime.day)
+            :same_month
+          else
+            :same_day
+          end
+        end
+
+        # Compares the actual instants (independently of their offsets) and
+        # returns both ends projected into one explicit zone. The third return
+        # value indicates whether the original objects had to be converted.
+        def ordered_range_datetimes(start_object, end_object, time_zone)
+          start_datetime = to_range_datetime(start_object)
+          end_datetime = to_range_datetime(end_object)
+
+          if start_datetime > end_datetime
+            raise ArgumentError, "Range start object must be earlier than or equal to the end object. #{start_object.inspect} and #{end_object.inspect} given."
+          end
+
+          if time_zone
+            offset = range_zone_offset(time_zone, start_datetime)
+            projected = true
+          elsif start_datetime.offset == end_datetime.offset
+            offset = start_datetime.offset
+            projected = false
+          else
+            raise ArgumentError, "Range ends use different time zones (#{format_range_offset(start_datetime)} and #{format_range_offset(end_datetime)}); pass :time_zone to choose the zone to render the range in."
+          end
+
+          [start_datetime.new_offset(offset), end_datetime.new_offset(offset), projected]
+        end
+
+        def to_range_datetime(object)
+          object.is_a?(::DateTime) ? object : object.to_datetime
+        end
+
+        def range_zone_offset(time_zone, reference_datetime)
+          case time_zone
+          when ::Numeric
+            Rational(time_zone, 86_400)
+          when ::String
+            ::DateTime.now.new_offset(time_zone).offset
+          when ::DateTime
+            time_zone.offset
+          else
+            if time_zone.respond_to?(:utc_to_local)
+              local = time_zone.utc_to_local(reference_datetime.new_offset(0).to_time)
+              Rational(local.utc_offset, 86_400)
+            else
+              raise ArgumentError, "Unsupported :time_zone #{time_zone.inspect}. Pass an offset (Integer/String), a DateTime or a time zone object."
+            end
+          end
+        end
+
+        def format_range_offset(datetime)
+          datetime.strftime('%z')
+        end
+
+        def render_range_part(locale, datetime, part_format, options)
+          format = translate_localization_format(locale, datetime, part_format, options)
+          datetime.strftime(format)
+        end
+
+        def range_separator(locale, type, format, options)
+          separator = catch(:exception) do
+            I18n.t!(:"#{type}.range_separator", **options.merge(:locale => locale, :throw => true))
+          end
+          separator = nil if separator.is_a?(MissingTranslation)
+          separator = nil unless separator.is_a?(::String)
+          separator || DEFAULT_RANGE_SEPARATOR
+        end
+
+        def localize_full_range(locale, start_object, end_object, format, options)
+          type = start_object.respond_to?(:sec) ? 'time' : 'date'
+          separator = range_separator(locale, type, format, options)
+          start_format = localize_range_part(locale, start_object, format, options)
+          end_format = localize_range_part(locale, end_object, format, options)
+          start_format << separator << end_format
+        end
+
+        def localize_range_part(locale, object, format, options)
+          localize(locale, object, format, options.except(:time_zone))
+        end
+
+        def translate_range_entry(locale, key, object, options)
+          entry = catch(:exception) do
+            I18n.t!(key, **options.merge(:locale => locale, :throw => true, :raise => nil, :object => object))
+          end
+          entry unless entry.is_a?(MissingTranslation)
         end
 
         def pluralization_key(entry, count)
