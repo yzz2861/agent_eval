@@ -57,6 +57,7 @@ Contents:
    peewee/framework_integration
    peewee/interactive
    peewee/query_builder
+   peewee/query_description
    peewee/query_library
    peewee/api
    peewee/sqlite
