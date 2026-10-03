@@ -73,6 +73,7 @@ PydanticErrorCodes = Literal[
     'validate-call-type',
     'unpack-typed-dict',
     'overlapping-unpack-typed-dict',
+    'projection-config',
     'invalid-self-type',
     'validate-by-alias-and-name-false',
 ]

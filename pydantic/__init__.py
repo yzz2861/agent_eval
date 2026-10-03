@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     )
     from .json_schema import WithJsonSchema
     from .main import *
+    from .model_projection import ModelProjection, depends_on, derive_model
     from .networks import *
     from .type_adapter import TypeAdapter
     from .types import *
@@ -115,6 +116,9 @@ __all__ = (
     # fields
     'Field',
     'computed_field',
+    'depends_on',
+    'derive_model',
+    'ModelProjection',
     'PrivateAttr',
     # alias
     'AliasChoices',
@@ -294,6 +298,9 @@ _dynamic_imports: 'dict[str, tuple[str, str]]' = {
     # main
     'BaseModel': (__spec__.parent, '.main'),
     'create_model': (__spec__.parent, '.main'),
+    'ModelProjection': (__spec__.parent, '.model_projection'),
+    'depends_on': (__spec__.parent, '.model_projection'),
+    'derive_model': (__spec__.parent, '.model_projection'),
     # network
     'AnyUrl': (__spec__.parent, '.networks'),
     'AnyHttpUrl': (__spec__.parent, '.networks'),
