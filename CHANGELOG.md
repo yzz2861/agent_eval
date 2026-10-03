@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- New `Writer` monad that pairs a value with an accumulated, structured log. The log type is configurable via inheritable `log_empty` and `log_combine` settings (array append by default), and the API includes `Writer.pure`, `Writer.tell`, `#fmap`, `#bind`, `#listen`, and `#censor`.
+
 ### Changed
 
 ### Deprecated
