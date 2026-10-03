@@ -16,6 +16,23 @@ from urllib.parse import unquote
 
 from ._internal import _dt_as_utc
 from ._internal import _plain_int
+from ._structured_fields import BareItem as BareItem
+from ._structured_fields import Dictionary as SFDictionary
+from ._structured_fields import is_inner_list as is_inner_list
+from ._structured_fields import is_item as is_item
+from ._structured_fields import Item as Item
+from ._structured_fields import ListMember as SFListMember
+from ._structured_fields import parse_dictionary
+from ._structured_fields import parse_item
+from ._structured_fields import parse_list
+from ._structured_fields import serialize_dictionary
+from ._structured_fields import serialize_item
+from ._structured_fields import serialize_list
+from ._structured_fields import StructuredFieldParseError as StructuredFieldParseError
+from ._structured_fields import (
+    StructuredFieldSerializeError as StructuredFieldSerializeError,
+)
+from ._structured_fields import Token as Token
 
 if t.TYPE_CHECKING:
     from _typeshed.wsgi import WSGIEnvironment
@@ -447,6 +464,130 @@ def parse_list_header(value: str) -> list[str]:
         for item in (item.strip(" \t") for item in items)
         if item
     ]
+
+
+# region RFC 8941 Structured Fields
+#
+# These functions parse and serialize the item, list, and dictionary field
+# types defined in RFC 8941. Unlike parse_list_header and parse_dict_header,
+# they distinguish the RFC's bare item types, including tokens, quoted strings,
+# byte sequences, booleans, bounded integers, and exact decimals, and never
+# fall back to naive comma splitting.
+
+
+def parse_structured_item(value: str) -> Item:
+    """Parse an RFC 8941 structured field item, including parameters.
+
+    The result is a ``(value, parameters)`` tuple. ``value`` is an ``int``,
+    ``decimal.Decimal``, ``str``, :class:`Token`, ``bytes``, or ``bool``. A
+    token is represented by :class:`Token` rather than a plain string so that
+    it is not confused with a quoted string.
+
+    This is the reverse of :func:`serialize_structured_item`.
+
+    :param value: The header value to parse.
+    :raises StructuredFieldParseError: If the value is not a valid item. The
+        error's ``position`` attribute is the zero-based position of the
+        invalid input.
+
+    .. versionadded:: 3.2
+    """
+    return parse_item(value)
+
+
+def parse_structured_list(value: str) -> list[SFListMember]:
+    """Parse an RFC 8941 structured field list, including inner lists and
+    parameters.
+
+    Each member is an item ``(value, parameters)`` tuple or an inner list
+    ``(members, parameters)`` tuple. An empty value parses to an empty list.
+
+    This is the reverse of :func:`serialize_structured_list`.
+
+    :param value: The header value to parse.
+    :raises StructuredFieldParseError: If the value is not a valid list.
+
+    .. versionadded:: 3.2
+    """
+    return parse_list(value)
+
+
+def parse_structured_dictionary(
+    value: str,
+) -> SFDictionary:
+    """Parse an RFC 8941 structured field dictionary, including parameters.
+
+    Each value is an item tuple or inner list tuple. A bare member name such
+    as ``foo`` parses to the boolean true item ``(True, {})``. Duplicate
+    dictionary keys and duplicate parameter names are parse errors. An empty
+    value parses to an empty dictionary.
+
+    This is the reverse of :func:`serialize_structured_dictionary`.
+
+    :param value: The header value to parse.
+    :raises StructuredFieldParseError: If the value is not a valid dictionary.
+
+    .. versionadded:: 3.2
+    """
+    return parse_dictionary(value)
+
+
+def serialize_structured_item(item: Item | BareItem) -> str:
+    """Serialize an RFC 8941 structured field item to its canonical form.
+
+    An item is a bare value or a ``(value, parameters)`` tuple. Parameters
+    are emitted in mapping order. ``True`` parameters are emitted as bare
+    names; decimals must be ``decimal.Decimal`` so they are not confused with
+    integers or lossy floats.
+
+    This is the reverse of :func:`parse_structured_item`.
+
+    :param item: The item to serialize.
+    :raises StructuredFieldSerializeError: If the item cannot be serialized.
+
+    .. versionadded:: 3.2
+    """
+    return serialize_item(item)
+
+
+def serialize_structured_list(
+    members: cabc.Iterable[SFListMember | BareItem],
+) -> str:
+    """Serialize RFC 8941 structured field list members to canonical form.
+
+    Members may be bare values, item tuples, or inner list tuples. They are
+    emitted in iteration order.
+
+    This is the reverse of :func:`parse_structured_list`.
+
+    :param members: The list members to serialize.
+    :raises StructuredFieldSerializeError: If a member cannot be serialized.
+
+    .. versionadded:: 3.2
+    """
+    return serialize_list(members)
+
+
+def serialize_structured_dictionary(
+    members: cabc.Mapping[str, t.Any],
+) -> str:
+    """Serialize RFC 8941 structured field dictionary members to canonical form.
+
+    Values may be bare values, item tuples, or inner list tuples. The boolean
+    ``True`` is emitted as a bare member name. Members are emitted in mapping
+    order and parameters in each parameter mapping's order.
+
+    This is the reverse of :func:`parse_structured_dictionary`.
+
+    :param members: The dictionary members to serialize.
+    :raises StructuredFieldSerializeError: If a member cannot be serialized.
+
+    .. versionadded:: 3.2
+    """
+    return serialize_dictionary(members)
+
+
+# endregion
 
 
 def parse_dict_header(value: str) -> dict[str, str | None]:

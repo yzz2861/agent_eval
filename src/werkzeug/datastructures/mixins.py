@@ -204,6 +204,15 @@ class ImmutableHeadersMixin:
     def setlist(self, key: t.Any, values: t.Any) -> t.NoReturn:
         _immutable_error(self)
 
+    def set_item(self, key: t.Any, value: t.Any, /, **kwargs: t.Any) -> t.NoReturn:
+        _immutable_error(self)
+
+    def set_list(self, key: t.Any, values: t.Any) -> t.NoReturn:
+        _immutable_error(self)
+
+    def set_dictionary(self, key: t.Any, values: t.Any) -> t.NoReturn:
+        _immutable_error(self)
+
     def add(self, key: t.Any, value: t.Any, /, **kwargs: t.Any) -> t.NoReturn:
         _immutable_error(self)
 

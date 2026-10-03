@@ -227,6 +227,17 @@ Version 3.2.0
 -   ``SharedDataMiddleware`` uses ``send_file``. ``cache_timeout`` is not set by
     default, enabling conditional caching. `` The ``cache`` and
     ``fallback_mimetype`` parameters are deprecated. :issue:`3291`
+-   Added support for parsing and serializing :rfc:`8941` structured fields.
+    ``werkzeug.http`` has ``parse_structured_item``,
+    ``parse_structured_list``, ``parse_structured_dictionary`` and the
+    matching ``serialize_structured_*`` functions, along with a ``Token``
+    bare item type and ``StructuredFieldParseError`` and
+    ``StructuredFieldSerializeError`` exceptions. ``Headers`` has matching
+    ``get_item``/``set_item``, ``get_list``/``set_list``, and
+    ``get_dictionary``/``set_dictionary`` methods. Decimals use
+    ``decimal.Decimal`` for exact values, inner lists and ordered parameters
+    are supported, duplicate dictionary and parameter keys are errors, and
+    multiple header lines are combined according to the field type.
 
 
 Version 3.1.9

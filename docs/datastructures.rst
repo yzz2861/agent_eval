@@ -24,6 +24,18 @@ HTTP Headers
 
 .. autoclass:: EnvironHeaders
 
+Structured Fields (RFC 8941)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`Headers` can read and write the :rfc:`8941` item, list, and
+dictionary structured field types. ``get_item``, ``get_list``, and
+``get_dictionary`` parse one or more header lines, and ``set_item``,
+``set_list``, and ``set_dictionary`` serialize and replace them. Multiple
+lines are combined by concatenating list or dictionary members; item fields
+may only appear once. Invalid input raises
+``werkzeug.http.StructuredFieldParseError`` with a ``position`` attribute.
+See :mod:`werkzeug.http` for the matching standalone functions.
+
 
 Structured Headers
 ------------------

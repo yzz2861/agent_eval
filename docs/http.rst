@@ -59,6 +59,36 @@ by :rfc:`2616`, Werkzeug implements some custom data structures that are
 
 .. autofunction:: parse_content_range_header
 
+Structured Fields
+=================
+
+These functions parse and serialize the item, list, and dictionary field
+types defined in :rfc:`8941`. Unlike :func:`parse_list_header` and
+:func:`parse_dict_header`, they distinguish the field's bare item types:
+integers, exact decimals represented with :class:`decimal.Decimal`, quoted
+strings, :class:`Token`, byte sequences, and booleans. They also handle inner
+lists and ordered parameters. Invalid input raises
+:class:`StructuredFieldParseError` with a ``position`` attribute; the parsers
+never fall back to splitting on commas.
+
+.. autoclass:: Token
+
+.. autoclass:: StructuredFieldParseError
+
+.. autoclass:: StructuredFieldSerializeError
+
+.. autofunction:: parse_structured_item
+
+.. autofunction:: parse_structured_list
+
+.. autofunction:: parse_structured_dictionary
+
+.. autofunction:: serialize_structured_item
+
+.. autofunction:: serialize_structured_list
+
+.. autofunction:: serialize_structured_dictionary
+
 Header Utilities
 ================
 

@@ -5,8 +5,16 @@ import re
 import typing as t
 
 from .._internal import _missing
+from .._structured_fields import is_item
+from .._structured_fields import StructuredFieldParseError
 from ..exceptions import BadRequestKeyError
 from ..http import dump_options_header
+from ..http import parse_dictionary
+from ..http import parse_item
+from ..http import parse_list
+from ..http import serialize_dictionary
+from ..http import serialize_item
+from ..http import serialize_list
 from .mixins import ImmutableHeadersMixin
 from .structures import iter_multi_items
 from .structures import MultiDict
@@ -212,6 +220,128 @@ class Headers:
         :meth:`~wsgiref.headers.Headers.get_all` method.
         """
         return self.getlist(name)
+
+    def get_item(self, key: str, default: T | None = None) -> tuple[t.Any, t.Any] | T:
+        """Get a single RFC 8941 structured item field.
+
+        See :func:`~werkzeug.http.parse_structured_item`. Multiple header
+        lines with the same name are an error because an item field is not
+        allowed to be combined.
+
+        :param key: The header name to look up.
+        :param default: The value to return if the header is not present.
+
+        .. versionadded:: 3.2
+        """
+        values = self.getlist(key)
+
+        if not values:
+            return default  # type: ignore[return-value]
+
+        if len(values) > 1:
+            # Item fields cannot be combined across lines per RFC 8941.
+            raise StructuredFieldParseError(
+                "Multiple header lines are not valid for an item field", 0
+            )
+
+        return parse_item(values[0])
+
+    def get_list(self, key: str) -> list[t.Any]:
+        """Get an RFC 8941 structured list field.
+
+        See :func:`~werkzeug.http.parse_structured_list`. Multiple header
+        lines with the same name are combined as list members before parsing.
+        Inner lists and item parameters are preserved.
+
+        .. versionadded:: 3.2
+        """
+        values = self.getlist(key)
+
+        if len(values) <= 1:
+            return parse_list(values[0]) if values else []
+
+        members: list[t.Any] = []
+
+        # RFC 8941 list fields can be split over multiple header lines by
+        # concatenating their members in order.
+        for value in values:
+            members.extend(parse_list(value))
+
+        return members
+
+    def get_dictionary(self, key: str) -> dict[str, t.Any]:
+        """Get an RFC 8941 structured dictionary field.
+
+        See :func:`~werkzeug.http.parse_structured_dictionary`. Multiple
+        header lines with the same name are combined as dictionary members
+        before parsing. Duplicate member names across the lines are a parse
+        error.
+
+        .. versionadded:: 3.2
+        """
+        values = self.getlist(key)
+
+        if len(values) <= 1:
+            return parse_dictionary(values[0]) if values else {}
+
+        result: dict[str, t.Any] = {}
+
+        # RFC 8941 dictionary fields can be split over multiple header lines
+        # by combining their members. A member name appearing more than once
+        # is a parse error.
+        for value in values:
+            for member_name, member in parse_dictionary(value).items():
+                if member_name in result:
+                    raise StructuredFieldParseError(
+                        f"Duplicate dictionary key {member_name!r}", 0
+                    )
+
+                result[member_name] = member
+
+        return result
+
+    def set_item(self, key: str, value: t.Any, /, **parameters: t.Any) -> None:
+        """Set a single RFC 8941 structured item field.
+
+        See :func:`~werkzeug.http.serialize_structured_item`. Any existing
+        header lines with the same name are replaced. Decimals must be
+        :class:`decimal.Decimal`; keywords are added as parameters.
+
+        .. versionadded:: 3.2
+        """
+        if is_item(value) and parameters:
+            raise TypeError(
+                "Cannot pass an item tuple together with keyword parameters."
+            )
+
+        if parameters:
+            item: tuple[t.Any, t.Any] = (value, parameters)
+        else:
+            item = value
+
+        self.set(key, serialize_item(item))
+
+    def set_list(self, key: str, values: cabc.Iterable[t.Any]) -> None:
+        """Set an RFC 8941 structured list field.
+
+        See :func:`~werkzeug.http.serialize_structured_list`. Any existing
+        header lines with the same name are replaced with a single
+        canonical line.
+
+        .. versionadded:: 3.2
+        """
+        self.set(key, serialize_list(values))
+
+    def set_dictionary(self, key: str, values: cabc.Mapping[str, t.Any]) -> None:
+        """Set an RFC 8941 structured dictionary field.
+
+        See :func:`~werkzeug.http.serialize_structured_dictionary`. Any
+        existing header lines with the same name are replaced with a single
+        canonical line.
+
+        .. versionadded:: 3.2
+        """
+        self.set(key, serialize_dictionary(values))
 
     def items(self, lower: bool = False) -> t.Iterable[tuple[str, str]]:
         for key, value in self:
