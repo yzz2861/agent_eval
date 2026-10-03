@@ -64,7 +64,12 @@ module JSONSchemer
           end
 
           def validate(instance, instance_location, keyword_location, context)
-            ref_schema.validate_instance(instance, instance_location, keyword_location, context)
+            context.budget.enter_ref!
+            begin
+              ref_schema.validate_instance(instance, instance_location, keyword_location, context)
+            ensure
+              context.budget.exit_ref!
+            end
           end
         end
 
@@ -105,7 +110,12 @@ module JSONSchemer
               end
             end
 
-            schema.validate_instance(instance, instance_location, keyword_location, context)
+            context.budget.enter_ref!
+            begin
+              schema.validate_instance(instance, instance_location, keyword_location, context)
+            ensure
+              context.budget.exit_ref!
+            end
           end
         end
 

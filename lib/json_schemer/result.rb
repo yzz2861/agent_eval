@@ -10,18 +10,18 @@ module JSONSchemer
   end
 
   Result = Struct.new(:source, :instance, :instance_location, :keyword_location, :valid, :nested, :type, :annotation, :details, :ignore_nested, :nested_key) do
-    def output(output_format)
+    def output(output_format, budget)
       case output_format
       when 'classic'
-        classic
+        classic(budget)
       when 'flag'
         flag
       when 'basic'
-        basic
+        basic(budget)
       when 'detailed'
-        detailed
+        detailed(budget)
       when 'verbose'
-        verbose
+        verbose(budget)
       else
         raise UnknownOutputFormat, output_format
       end
@@ -112,20 +112,25 @@ module JSONSchemer
       { 'valid' => valid }
     end
 
-    def basic
+    def basic(budget)
       out = to_output_unit
+      budget.record_error! unless valid
       if nested&.any?
         out[nested_key] = Enumerator.new do |yielder|
           results = [self]
           while result = results.pop
             if result.ignore_nested || !result.nested&.any?
+              budget.record_error! unless result.valid
               yielder << result.to_output_unit
             else
               previous_results_size = results.size
               result.nested.reverse_each do |nested_result|
                 results << nested_result if nested_result.valid == valid
               end
-              yielder << result.to_output_unit unless (results.size - previous_results_size) == 1
+              unless (results.size - previous_results_size) == 1
+                budget.record_error! unless result.valid
+                yielder << result.to_output_unit
+              end
             end
           end
         end
@@ -133,45 +138,54 @@ module JSONSchemer
       out
     end
 
-    def detailed
-      return to_output_unit if ignore_nested || !nested&.any?
+    def detailed(budget)
+      if ignore_nested || !nested&.any?
+        budget.record_error! unless valid
+        return to_output_unit
+      end
       matching_results = nested.select { |nested_result| nested_result.valid == valid }
       if matching_results.size == 1
-        matching_results.first.detailed
+        matching_results.first.detailed(budget)
       else
         out = to_output_unit
+        budget.record_error! unless valid
         if matching_results.any?
           out[nested_key] = Enumerator.new do |yielder|
-            matching_results.each { |nested_result| yielder << nested_result.detailed }
+            matching_results.each { |nested_result| yielder << nested_result.detailed(budget) }
           end
         end
         out
       end
     end
 
-    def verbose
+    def verbose(budget)
       out = to_output_unit
+      budget.record_error! unless valid
       if nested&.any?
         out[nested_key] = Enumerator.new do |yielder|
-          nested.each { |nested_result| yielder << nested_result.verbose }
+          nested.each { |nested_result| yielder << nested_result.verbose(budget) }
         end
       end
       out
     end
 
-    def classic
+    def classic(budget)
       Enumerator.new do |yielder|
         unless valid
           results = [self]
           while result = results.pop
             if result.ignore_nested || !result.nested&.any?
+              budget.record_error!
               yielder << result.to_classic
             else
               previous_results_size = results.size
               result.nested.reverse_each do |nested_result|
                 results << nested_result if nested_result.valid == valid
               end
-              yielder << result.to_classic if (results.size - previous_results_size) == 0
+              if (results.size - previous_results_size) == 0
+                budget.record_error!
+                yielder << result.to_classic
+              end
             end
           end
         end

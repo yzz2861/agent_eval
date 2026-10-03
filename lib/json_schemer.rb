@@ -25,6 +25,7 @@ require 'json_schemer/errors'
 require 'json_schemer/cached_resolver'
 require 'json_schemer/ecma_regexp'
 require 'json_schemer/location'
+require 'json_schemer/budget'
 require 'json_schemer/result'
 require 'json_schemer/output'
 require 'json_schemer/keyword'
@@ -76,6 +77,9 @@ module JSONSchemer
   class InvalidRegexpResolution < StandardError; end
   class InvalidFileURI < StandardError; end
   class InvalidEcmaRegexp < StandardError; end
+  class ValidationIncomplete < StandardError; end
+  class BudgetExceeded < ValidationIncomplete; end
+  class ValidationCancelled < ValidationIncomplete; end
 
   VOCABULARIES = {
     'https://json-schema.org/draft/2020-12/vocab/core' => Draft202012::Vocab::CORE,
@@ -124,12 +128,12 @@ module JSONSchemer
 
     def valid_schema?(schema, **options)
       schema = resolve(schema, options)
-      meta_schema(schema, options).valid?(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode))
+      meta_schema(schema, options).valid?(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode, :budget, :max_keyword_evaluations, :max_ref_depth, :max_errors))
     end
 
     def validate_schema(schema, **options)
       schema = resolve(schema, options)
-      meta_schema(schema, options).validate(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode))
+      meta_schema(schema, options).validate(schema, **options.slice(:output_format, :resolve_enumerators, :access_mode, :budget, :max_keyword_evaluations, :max_ref_depth, :max_errors))
     end
 
     def draft202012
@@ -271,7 +275,7 @@ module JSONSchemer
         meta_schema = schema['$schema'] || schema[:'$schema']
         parseable_schema['$schema'] = meta_schema if meta_schema.is_a?(String)
       end
-      schema(parseable_schema, **options).meta_schema
+      schema(parseable_schema, **options.except(:budget, :max_keyword_evaluations, :max_ref_depth, :max_errors)).meta_schema
     end
   end
 

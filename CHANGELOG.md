@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- Add per-validation execution budgets (`max_keyword_evaluations`, `max_ref_depth`, `max_errors`) and cancellation (`JSONSchemer::Budget`) to bound work done by untrusted schemas; exceeding a budget raises `JSONSchemer::BudgetExceeded` and cancellation raises `JSONSchemer::ValidationCancelled` (both `JSONSchemer::ValidationIncomplete`)
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes

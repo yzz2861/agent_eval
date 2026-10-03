@@ -259,6 +259,31 @@ end
 JSONSchemer.configuration.insert_property_defaults = true
 ```
 
+## Validation Budgets
+
+Untrusted schemas can force excessive work through combinatorial keywords and references. A validation budget limits how much work a single `validate`/`valid?` call can do. Budgets are per validation: reusing a schema always starts with a fresh budget unless you explicitly pass your own.
+
+Exhausting a budget means the validation could not be completed, so a `JSONSchemer::BudgetExceeded` error is raised instead of returning a (possibly wrong) valid/invalid result. `JSONSchemer::BudgetExceeded` and `JSONSchemer::ValidationCancelled` both inherit from `JSONSchemer::ValidationIncomplete`.
+
+```ruby
+schemer = JSONSchemer.schema(schema)
+
+# limit keyword evaluations, reference expansion depth, and output errors
+schemer.valid?(data, max_keyword_evaluations: 1000, max_ref_depth: 20, max_errors: 100)
+# raises JSONSchemer::BudgetExceeded when a limit is exceeded
+
+# share an explicit budget to inspect counters or cancel validation
+budget = JSONSchemer::Budget.new(max_keyword_evaluations: 1000)
+schemer.validate(data, budget: budget)
+budget.keyword_evaluations
+
+# cancel from another thread or a validation hook
+budget.cancel!
+# raises JSONSchemer::ValidationCancelled
+```
+
+The budget is shared by everything a validation triggers: subschemas, `anyOf`/`oneOf`/`allOf` branches, and references. It also applies to lazily enumerated output, so `max_errors` (and cancellation) is enforced while consuming the enumerators returned by `validate`.
+
 ## Custom Error Messages
 
 Error messages can be customized using the `x-error` keyword and/or [I18n](https://github.com/ruby-i18n/i18n) translations. `x-error` takes precedence if both are defined.
