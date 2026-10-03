@@ -48,7 +48,7 @@ class ConnectionPool(RequestInterface):
     def __init__(
         self,
         ssl_context: ssl.SSLContext | None = None,
-        proxy: Proxy | None = None,
+        proxy: Proxy | typing.Sequence[Proxy] | None = None,
         max_connections: int | None = 10,
         max_keepalive_connections: int | None = None,
         keepalive_expiry: float | None = None,
@@ -67,6 +67,9 @@ class ConnectionPool(RequestInterface):
             ssl_context: An SSL context to use for verifying connections.
                 If not specified, the default `httpcore.default_ssl_context()`
                 will be used.
+            proxy: A `Proxy` instance to route requests through, or a
+                sequence of `Proxy` instances to tunnel through several
+                HTTP proxies in turn, using a chain of CONNECT requests.
             max_connections: The maximum number of concurrent HTTP connections that
                 the pool should allow. Any attempt to send a request on a pool that
                 would exceed this amount will block until a connection is available.
@@ -90,7 +93,14 @@ class ConnectionPool(RequestInterface):
              in the TCP socket when the connection was established.
         """
         self._ssl_context = ssl_context
-        self._proxy = proxy
+        if proxy is None:
+            self._proxy_chain: tuple[Proxy, ...] | None = None
+        elif isinstance(proxy, Proxy):
+            self._proxy_chain = (proxy,)
+        else:
+            self._proxy_chain = tuple(proxy)
+            if not self._proxy_chain:
+                raise ValueError("Proxy chains require at least one proxy.")
         self._max_connections = (
             sys.maxsize if max_connections is None else max_connections
         )
@@ -126,13 +136,35 @@ class ConnectionPool(RequestInterface):
         self._optional_thread_lock = ThreadLock()
 
     def create_connection(self, origin: Origin) -> ConnectionInterface:
-        if self._proxy is not None:
-            if self._proxy.url.scheme in (b"socks5", b"socks5h"):
+        if self._proxy_chain is not None:
+            proxy_chain = self._proxy_chain
+            proxy = proxy_chain[0]
+            if proxy.url.scheme in (b"socks5", b"socks5h"):
+                if len(proxy_chain) > 1:
+                    raise ValueError("SOCKS proxies cannot be used in a proxy chain.")
                 from .socks_proxy import Socks5Connection
 
                 return Socks5Connection(
-                    proxy_origin=self._proxy.url.origin,
-                    proxy_auth=self._proxy.auth,
+                    proxy_origin=proxy.url.origin,
+                    proxy_auth=proxy.auth,
+                    remote_origin=origin,
+                    ssl_context=self._ssl_context,
+                    keepalive_expiry=self._keepalive_expiry,
+                    http1=self._http1,
+                    http2=self._http2,
+                    network_backend=self._network_backend,
+                )
+            elif len(proxy_chain) > 1:
+                from .http_proxy import ChainTunnelHTTPConnection
+
+                for hop in proxy_chain:
+                    if hop.url.scheme not in (b"http", b"https"):
+                        raise ValueError(
+                            "Proxy chain hops must use either "
+                            "'http://' or 'https://' URLs."
+                        )
+                return ChainTunnelHTTPConnection(
+                    proxy_chain=proxy_chain,
                     remote_origin=origin,
                     ssl_context=self._ssl_context,
                     keepalive_expiry=self._keepalive_expiry,
@@ -144,9 +176,9 @@ class ConnectionPool(RequestInterface):
                 from .http_proxy import ForwardHTTPConnection
 
                 return ForwardHTTPConnection(
-                    proxy_origin=self._proxy.url.origin,
-                    proxy_headers=self._proxy.headers,
-                    proxy_ssl_context=self._proxy.ssl_context,
+                    proxy_origin=proxy.url.origin,
+                    proxy_headers=proxy.headers,
+                    proxy_ssl_context=proxy.ssl_context,
                     remote_origin=origin,
                     keepalive_expiry=self._keepalive_expiry,
                     network_backend=self._network_backend,
@@ -154,9 +186,9 @@ class ConnectionPool(RequestInterface):
             from .http_proxy import TunnelHTTPConnection
 
             return TunnelHTTPConnection(
-                proxy_origin=self._proxy.url.origin,
-                proxy_headers=self._proxy.headers,
-                proxy_ssl_context=self._proxy.ssl_context,
+                proxy_origin=proxy.url.origin,
+                proxy_headers=proxy.headers,
+                proxy_ssl_context=proxy.ssl_context,
                 remote_origin=origin,
                 ssl_context=self._ssl_context,
                 keepalive_expiry=self._keepalive_expiry,

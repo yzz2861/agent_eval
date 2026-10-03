@@ -84,6 +84,35 @@ pool = httpcore.ConnectionPool(proxy=proxy)
 
 If you use proxies, keep in mind that the `httpcore` package only supports proxies to HTTP/1.1 servers.
 
+## Proxy chains
+
+Requests can also be tunnelled through several HTTP proxies in turn, by
+passing a list of `Proxy` instances. A `CONNECT` request is issued to each
+proxy in the chain in order, and each hop may use either `http` or `https`:
+
+```python
+import httpcore
+
+proxy_chain = [
+    httpcore.Proxy(
+        url="https://outer.example.com:8443/",
+        auth=("<outer-username>", "<outer-password>"),
+        ssl_context=outer_ssl_context,
+    ),
+    httpcore.Proxy(
+        url="http://inner.example.com:8080/",
+        auth=("<inner-username>", "<inner-password>"),
+    ),
+]
+pool = httpcore.ConnectionPool(proxy=proxy_chain)
+r = pool.request("GET", "https://www.example.com/")
+```
+
+Each hop in the chain uses its own SSL context, server hostname, and
+`Proxy-Authorization` header. Credentials for one hop are never sent to any
+other hop, or to the final server. Connections are reused for subsequent
+requests to the same origin without re-establishing the tunnel.
+
 ## SOCKS proxy support
 
 The `httpcore` package also supports proxies using the SOCKS5 protocol.

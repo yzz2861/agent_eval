@@ -33,12 +33,13 @@ class TLSinTLSStream(NetworkStream):  # pragma: no cover
 
     def __init__(
         self,
-        sock: socket.socket,
+        sock: socket.socket | TLSinTLSStream,
         ssl_context: ssl.SSLContext,
         server_hostname: str | None = None,
         timeout: float | None = None,
     ):
         self._sock = sock
+        self._timeout = timeout
         self._incoming = ssl.MemoryBIO()
         self._outgoing = ssl.MemoryBIO()
 
@@ -48,8 +49,24 @@ class TLSinTLSStream(NetworkStream):  # pragma: no cover
             server_hostname=server_hostname,
         )
 
-        self._sock.settimeout(timeout)
+        self._set_timeout(timeout)
         self._perform_io(self.ssl_obj.do_handshake)
+
+    def _set_timeout(self, timeout: float | None) -> None:
+        self._timeout = timeout
+        if not isinstance(self._sock, TLSinTLSStream):
+            self._sock.settimeout(timeout)
+
+    def _sock_sendall(self, data: bytes) -> None:
+        if isinstance(self._sock, TLSinTLSStream):
+            self._sock.write(data, timeout=self._timeout)
+        else:
+            self._sock.sendall(data)
+
+    def _sock_recv(self, max_bytes: int) -> bytes:
+        if isinstance(self._sock, TLSinTLSStream):
+            return self._sock.read(max_bytes, timeout=self._timeout)
+        return self._sock.recv(max_bytes)
 
     def _perform_io(
         self,
@@ -64,10 +81,10 @@ class TLSinTLSStream(NetworkStream):  # pragma: no cover
             except (ssl.SSLWantReadError, ssl.SSLWantWriteError) as e:
                 errno = e.errno
 
-            self._sock.sendall(self._outgoing.read())
+            self._sock_sendall(self._outgoing.read())
 
             if errno == ssl.SSL_ERROR_WANT_READ:
-                buf = self._sock.recv(self.TLS_RECORD_SIZE)
+                buf = self._sock_recv(self.TLS_RECORD_SIZE)
 
                 if buf:
                     self._incoming.write(buf)
@@ -79,7 +96,7 @@ class TLSinTLSStream(NetworkStream):  # pragma: no cover
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
         exc_map: ExceptionMapping = {socket.timeout: ReadTimeout, OSError: ReadError}
         with map_exceptions(exc_map):
-            self._sock.settimeout(timeout)
+            self._set_timeout(timeout)
             return typing.cast(
                 bytes, self._perform_io(functools.partial(self.ssl_obj.read, max_bytes))
             )
@@ -87,7 +104,7 @@ class TLSinTLSStream(NetworkStream):  # pragma: no cover
     def write(self, buffer: bytes, timeout: float | None = None) -> None:
         exc_map: ExceptionMapping = {socket.timeout: WriteTimeout, OSError: WriteError}
         with map_exceptions(exc_map):
-            self._sock.settimeout(timeout)
+            self._set_timeout(timeout)
             while buffer:
                 nsent = self._perform_io(functools.partial(self.ssl_obj.write, buffer))
                 buffer = buffer[nsent:]
@@ -101,11 +118,15 @@ class TLSinTLSStream(NetworkStream):  # pragma: no cover
         server_hostname: str | None = None,
         timeout: float | None = None,
     ) -> NetworkStream:
-        raise NotImplementedError()
+        # Support TLS-in-TLS-in-TLS, as required when tunnelling
+        # through multiple HTTPS proxies.
+        return TLSinTLSStream(self, ssl_context, server_hostname, timeout)
 
     def get_extra_info(self, info: str) -> typing.Any:
         if info == "ssl_object":
             return self.ssl_obj
+        if isinstance(self._sock, TLSinTLSStream):
+            return self._sock.get_extra_info(info)
         if info == "client_addr":
             return self._sock.getsockname()
         if info == "server_addr":

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import logging
 import ssl
 import typing
 
-from .._backends.base import SOCKET_OPTION, NetworkBackend
-from .._exceptions import ProxyError
+from .._backends.base import SOCKET_OPTION, NetworkBackend, NetworkStream
+from .._exceptions import ConnectError, ConnectTimeout, ProxyError
 from .._models import (
     URL,
     Origin,
+    Proxy,
     Request,
     Response,
     enforce_bytes,
@@ -341,6 +343,223 @@ class TunnelHTTPConnection(ConnectionInterface):
 
                 self._connected = True
         return self._connection.handle_request(request)
+
+    def can_handle_request(self, origin: Origin) -> bool:
+        return origin == self._remote_origin
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def info(self) -> str:
+        return self._connection.info()
+
+    def is_available(self) -> bool:
+        return self._connection.is_available()
+
+    def has_expired(self) -> bool:
+        return self._connection.has_expired()
+
+    def is_idle(self) -> bool:
+        return self._connection.is_idle()
+
+    def is_closed(self) -> bool:
+        return self._connection.is_closed()
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} [{self.info()}]>"
+
+
+class ChainTunnelHTTPConnection(ConnectionInterface):
+    """
+    A connection that tunnels through a sequence of HTTP proxies,
+    issuing a CONNECT request to each proxy in turn.
+
+    Each hop in the chain may use either HTTP or HTTPS, and has its
+    own TLS configuration, server hostname, and proxy headers. Proxy
+    credentials for one hop are never sent to any other hop, or to the
+    final origin.
+    """
+
+    def __init__(
+        self,
+        proxy_chain: typing.Sequence[Proxy],
+        remote_origin: Origin,
+        ssl_context: ssl.SSLContext | None = None,
+        keepalive_expiry: float | None = None,
+        http1: bool = True,
+        http2: bool = False,
+        network_backend: NetworkBackend | None = None,
+        socket_options: typing.Iterable[SOCKET_OPTION] | None = None,
+    ) -> None:
+        first_proxy_origin = proxy_chain[0].url.origin
+        self._connection: ConnectionInterface = HTTPConnection(
+            origin=first_proxy_origin,
+            keepalive_expiry=keepalive_expiry,
+            network_backend=network_backend,
+            socket_options=socket_options,
+            ssl_context=proxy_chain[0].ssl_context,
+        )
+        self._proxy_chain = list(proxy_chain)
+        self._remote_origin = remote_origin
+        self._ssl_context = ssl_context
+        self._keepalive_expiry = keepalive_expiry
+        self._http1 = http1
+        self._http2 = http2
+        self._connect_lock = Lock()
+        self._connected = False
+
+    def handle_request(self, request: Request) -> Response:
+        timeouts = request.extensions.get("timeout", {})
+        timeout = timeouts.get("connect", None)
+
+        with self._connect_lock:
+            if not self._connected:
+                self._connect(request, timeout)
+        return self._connection.handle_request(request)
+
+    def _connect(self, request: Request, timeout: float | None) -> None:
+        stream: NetworkStream | None = None
+        try:
+            for index, proxy in enumerate(self._proxy_chain):
+                hop = index + 1
+                proxy_origin = proxy.url.origin
+                is_final_hop = hop == len(self._proxy_chain)
+                target_origin = (
+                    self._remote_origin
+                    if is_final_hop
+                    else self._proxy_chain[hop].url.origin
+                )
+                target = b"%b:%d" % (target_origin.host, target_origin.port)
+
+                connect_url = URL(
+                    scheme=proxy_origin.scheme,
+                    host=proxy_origin.host,
+                    port=proxy_origin.port,
+                    target=target,
+                )
+                connect_headers = merge_headers(
+                    [(b"Host", target), (b"Accept", b"*/*")], proxy.headers
+                )
+                connect_request = Request(
+                    method=b"CONNECT",
+                    url=connect_url,
+                    headers=connect_headers,
+                    extensions=request.extensions,
+                )
+                try:
+                    connect_response = self._connection.handle_request(
+                        connect_request
+                    )
+                except (ConnectError, ConnectTimeout) as exc:
+                    raise ProxyError(
+                        f"Proxy chain failed at hop {hop} ({proxy_origin}) "
+                        f"while connecting to proxy: {exc}"
+                    ) from exc
+                except Exception as exc:
+                    raise ProxyError(
+                        f"Proxy chain failed at hop {hop} ({proxy_origin}) "
+                        f"during CONNECT exchange: {exc}"
+                    ) from exc
+
+                if connect_response.status < 200 or connect_response.status > 299:
+                    reason_bytes = connect_response.extensions.get("reason_phrase", b"")
+                    reason_str = reason_bytes.decode("ascii", errors="ignore")
+                    msg = "%d %s" % (connect_response.status, reason_str)
+                    raise ProxyError(
+                        f"Proxy chain failed at hop {hop} ({proxy_origin}) "
+                        f"during CONNECT exchange: {msg}"
+                    )
+
+                stream = connect_response.extensions["network_stream"]
+
+                if is_final_hop:
+                    break
+
+                # The tunnel now extends as far as the next proxy in the
+                # chain. If that proxy uses HTTPS then the stream is
+                # upgraded to TLS, verifying against the SSL context and
+                # server hostname of that hop only.
+                next_proxy_origin = self._proxy_chain[hop].url.origin
+                if next_proxy_origin.scheme == b"https":
+                    proxy_ssl_context = (
+                        default_ssl_context()
+                        if self._proxy_chain[hop].ssl_context is None
+                        else self._proxy_chain[hop].ssl_context
+                    )
+                    proxy_ssl_context.set_alpn_protocols(["http/1.1"])
+                    kwargs = {
+                        "ssl_context": proxy_ssl_context,
+                        "server_hostname": next_proxy_origin.host.decode("ascii"),
+                        "timeout": timeout,
+                    }
+                    try:
+                        with Trace("start_tls", logger, request, kwargs) as trace:
+                            stream = stream.start_tls(**kwargs)
+                            trace.return_value = stream
+                    except Exception as exc:
+                        raise ProxyError(
+                            f"Proxy chain failed at hop {hop + 1} "
+                            f"({next_proxy_origin}) during TLS handshake: {exc}"
+                        ) from exc
+
+                self._connection = HTTP11Connection(
+                    origin=next_proxy_origin,
+                    stream=stream,
+                    keepalive_expiry=self._keepalive_expiry,
+                )
+
+            # The tunnel now extends all the way to the remote origin.
+            # Upgrade the stream to TLS unless the origin is plain HTTP.
+            assert stream is not None
+            if self._remote_origin.scheme in (b"https", b"wss"):
+                ssl_context = (
+                    default_ssl_context()
+                    if self._ssl_context is None
+                    else self._ssl_context
+                )
+                alpn_protocols = ["http/1.1", "h2"] if self._http2 else ["http/1.1"]
+                ssl_context.set_alpn_protocols(alpn_protocols)
+
+                kwargs = {
+                    "ssl_context": ssl_context,
+                    "server_hostname": self._remote_origin.host.decode("ascii"),
+                    "timeout": timeout,
+                }
+                with Trace("start_tls", logger, request, kwargs) as trace:
+                    stream = stream.start_tls(**kwargs)
+                    trace.return_value = stream
+
+            # Determine if we should be using HTTP/1.1 or HTTP/2
+            ssl_object = stream.get_extra_info("ssl_object")
+            http2_negotiated = (
+                ssl_object is not None and ssl_object.selected_alpn_protocol() == "h2"
+            )
+
+            # Create the HTTP/1.1 or HTTP/2 connection
+            if http2_negotiated or (self._http2 and not self._http1):
+                from .http2 import HTTP2Connection
+
+                self._connection = HTTP2Connection(
+                    origin=self._remote_origin,
+                    stream=stream,
+                    keepalive_expiry=self._keepalive_expiry,
+                )
+            else:
+                self._connection = HTTP11Connection(
+                    origin=self._remote_origin,
+                    stream=stream,
+                    keepalive_expiry=self._keepalive_expiry,
+                )
+
+            self._connected = True
+        except BaseException:
+            # Ensure that any partially established tunnel is closed.
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
+            with contextlib.suppress(Exception):
+                self._connection.close()
+            raise
 
     def can_handle_request(self, origin: Origin) -> bool:
         return origin == self._remote_origin

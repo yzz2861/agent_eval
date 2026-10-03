@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+- Add support for sequential HTTP proxy chains, tunnelling requests through
+  two or more HTTP or HTTPS proxies using `ConnectionPool(proxy=[...])`.
 - Fix `max_keepalive_connections` not being properly handled. (#1000)
 
 ## Version 1.0.9 (April 24th, 2025)
