@@ -401,22 +401,55 @@ Async-enabled machines automatically generate async versions of event methods:
 ```ruby
 drone = AutonomousDrone.new
 
-# Within an Async context
+# Within an Async context (runs on an Async task) or a plain thread
+# (runs on a background thread) - both return a TransitionHandle
 Async do
-  # Async event firing - returns Async::Task
-  task = drone.launch_async
-  result = task.wait  # => true
+  # Async event firing - returns a TransitionHandle
+  handle = drone.launch_async
+  result = handle.wait  # => #<StateMachines::AsyncMode::TransitionResult success>
+  result.outcome        # => :success
 
   # Bang methods for strict error handling
-  drone.power_up_async!  # => Async::Task (raises on failure)
+  drone.power_up_async!  # => TransitionHandle (raises on failure when awaited)
 
-  # Generic async event firing
-  drone.fire_event_async(:teleport)  # => Async::Task
+  # Generic async event firing (waits and returns the TransitionResult)
+  drone.fire_event_async(:teleport)  # => #<TransitionResult success>
 end
-
-# Outside Async context - raises error
-drone.launch_async  # => RuntimeError: launch_async must be called within an Async context
 ```
+
+## Cancellable Transition Handles
+
+Every async event method returns a `TransitionHandle`: a queryable, awaitable
+handle with a cooperative `cancel`. Cancelling works only *before* the
+executor claims the handle - once claimed, `cancel` returns `false` and the
+transition completes normally. Cancellation never kills threads or Async
+tasks, and never tries to roll back side effects that already happened.
+
+```ruby
+handle = drone.launch_async
+
+# Query the lifecycle state
+handle.pending?    # => true (scheduled, not yet claimed)
+handle.claimed?    # => false
+handle.status      # => :pending / :claimed / :completed / :cancelled
+
+# Cancel before the transition starts: its guard, action, and transition
+# callbacks will never run
+handle.cancel      # => true (false once the executor claimed it)
+
+# Wait for the completion result
+result = handle.wait
+result.outcome          # => :success / :guard_rejected / :action_failed / :cancelled
+result.success?         # => false
+result.cancelled?       # => true
+```
+
+The completion result distinguishes all four outcomes:
+
+* `:success` - the guard passed and the action succeeded
+* `:guard_rejected` - no transition matched; the guard rejected the event
+* `:action_failed` - the guard passed but the action or callbacks failed
+* `:cancelled` - cancelled before the executor claimed the handle
 
 ## Thread Safety
 

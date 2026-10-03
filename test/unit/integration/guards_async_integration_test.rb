@@ -134,13 +134,13 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       @station.complete_loading_async.wait # Complete current loading first
       result = @station.start_loading_async.wait
 
-      refute result, 'Should not be able to start loading when life support is offline'
+      assert_equal :guard_rejected, result.outcome, 'Should not be able to start loading when life support is offline'
 
       # Emergency stop should NOT work (life support is offline, so guard prevents it)
       # The guard says "unless life_support is offline", so when it IS offline, emergency_stop is blocked
       result = @station.emergency_stop_async.wait
 
-      refute result, 'Emergency stop should not work when life support is offline (guard protection)'
+      assert_equal :guard_rejected, result.outcome, 'Emergency stop should not work when life support is offline (guard protection)'
 
       # Critical alert should trigger
       result = @station.critical_alert_async.wait
@@ -164,7 +164,7 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       # Start unloading (should fail - bay is closed)
       result = @station.start_unloading_async.wait
 
-      refute result, 'Should not be able to unload when bay is closed'
+      assert_equal :guard_rejected, result.outcome, 'Should not be able to unload when bay is closed'
 
       # Open bay again
       @station.open_bay_async.wait
@@ -208,7 +208,7 @@ class GuardsAsyncIntegrationTest < Minitest::Test
       # Async operation should respect sync machine state
       result = @station.open_bay_async.wait
 
-      refute result, 'Async machine should respect sync machine guard'
+      assert_equal :guard_rejected, result.outcome, 'Async machine should respect sync machine guard'
 
       # Restore life support (sync)
       @station.restore!

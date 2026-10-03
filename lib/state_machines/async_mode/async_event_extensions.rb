@@ -12,18 +12,12 @@ module StateMachines
         if scope == :instance && method !~ /_async[!]?$/ && machine.async_mode_enabled?
           qualified_name = method.to_s
 
-          # Create async version that returns a task
+          # Create async version that returns a cancellable TransitionHandle
           machine.define_helper(scope, "#{qualified_name}_async") do |machine, object, *method_args, **kwargs|
             # Find the machine that has this event
             target_machine = object.class.state_machines.values.find { |m| m.events[name] }
 
-            unless defined?(::Async::Task) && ::Async::Task.current?
-              raise RuntimeError, "#{qualified_name}_async must be called within an Async context"
-            end
-
-            Async do
-              target_machine.events[name].fire(object, *method_args, **kwargs)
-            end
+            StateMachines::AsyncMode::TransitionHandle.schedule(object, target_machine, name, method_args, kwargs)
           end
 
           # Create async bang version that raises exceptions when awaited
@@ -31,14 +25,7 @@ module StateMachines
             # Find the machine that has this event
             target_machine = object.class.state_machines.values.find { |m| m.events[name] }
 
-            unless defined?(::Async::Task) && ::Async::Task.current?
-              raise RuntimeError, "#{qualified_name}_async! must be called within an Async context"
-            end
-
-            Async do
-              # Use fire method which will raise exceptions on invalid transitions
-              target_machine.events[name].fire(object, *method_args, **kwargs) || raise(StateMachines::InvalidTransition.new(object, target_machine, name))
-            end
+            StateMachines::AsyncMode::TransitionHandle.schedule(object, target_machine, name, method_args, kwargs, raise_on_failure: true)
           end
         end
 

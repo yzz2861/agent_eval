@@ -99,7 +99,7 @@ class SpaceShipAsyncModeTest < Minitest::Test
       # Wait for all launches to complete
       results = launch_tasks.map(&:wait)
 
-      assert_equal [true, true, true], results
+      assert_equal %i[success success success], results.map(&:outcome)
 
       # All ships should be flying
       ships.each do |ship|
@@ -113,7 +113,7 @@ class SpaceShipAsyncModeTest < Minitest::Test
 
       shield_results = shield_tasks.map(&:wait)
 
-      assert_equal [true, true, true], shield_results
+      assert_equal %i[success success success], shield_results.map(&:outcome)
 
       # All shields should be up
       ships.each do |ship|

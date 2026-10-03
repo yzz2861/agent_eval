@@ -29,6 +29,7 @@ require 'concurrent-ruby'
 
 # Load all async mode components
 require_relative 'async_mode/thread_safe_state'
+require_relative 'async_mode/transition_handle'
 require_relative 'async_mode/async_events'
 require_relative 'async_mode/async_event_extensions'
 require_relative 'async_mode/async_machine'
