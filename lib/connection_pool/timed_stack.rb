@@ -25,27 +25,38 @@ class ConnectionPool::TimedStack
   def initialize(size: 0, &block)
     @create_block = block
     @created = 0
+    @creating = 0
     @que = []
     @max = size
     @mutex = Thread::Mutex.new
     @resource = Thread::ConditionVariable.new
     @shutdown_block = nil
+    @disconnect_block = proc {}
   end
 
   ##
   # Returns +obj+ to the stack. Additional kwargs are ignored in TimedStack but may be
   # used by subclasses that extend TimedStack.
   def push(obj, **kwargs)
+    shutdown_block = nil
+    disconnect_block = nil
+
     @mutex.synchronize do
       if @shutdown_block
-        @created -= 1 unless @created == 0
-        @shutdown_block.call(obj)
+        decrement_created_count
+        shutdown_block = @shutdown_block
+      elsif created_above_target?
+        decrement_created_count
+        disconnect_block = @disconnect_block
       else
         store_connection obj, **kwargs
       end
 
       @resource.broadcast
     end
+
+    shutdown_block.call(obj) if shutdown_block
+    disconnect_block.call(obj) if disconnect_block
   end
   alias_method :<<, :push
 
@@ -61,27 +72,54 @@ class ConnectionPool::TimedStack
   # Other options may be used by subclasses that extend TimedStack.
   def pop(timeout: 0.5, exception: ConnectionPool::TimeoutError, **kwargs)
     deadline = current_time + timeout
-    @mutex.synchronize do
-      loop do
-        raise ConnectionPool::PoolShuttingDownError if @shutdown_block
-        if (conn = try_fetch_connection(**kwargs))
-          return conn
-        end
+    loop do
+      conn, creating = reserve_for_pop(deadline, timeout, exception, **kwargs)
+      return conn unless creating
 
-        connection = try_create(**kwargs)
-        return connection if connection
-
-        to_wait = deadline - current_time
-        if to_wait <= 0
-          if exception
-            raise exception, "Waited #{timeout} sec, #{length}/#{@max} available"
-          else
-            return nil
-          end
+      begin
+        object = try_create(**kwargs)
+      rescue
+        @mutex.synchronize do
+          @creating -= 1
+          @resource.broadcast
         end
-        @resource.wait(@mutex, to_wait)
+        raise
       end
+
+      shutdown_block, excess_connection = commit_created_connection
+
+      if shutdown_block
+        shutdown_block.call(object)
+        next
+      end
+
+      if excess_connection
+        @disconnect_block.call(object)
+        next
+      end
+
+      return object
     end
+  end
+
+  ##
+  # Changes the maximum number of connections. Idle connections beyond the new
+  # size are removed immediately. Checked-out connections are removed when they
+  # are returned.
+  def resize(size, &block)
+    size = Integer(size)
+    raise ArgumentError, "size cannot be negative" if size.negative?
+
+    @mutex.synchronize do
+      raise ConnectionPool::PoolShuttingDownError if @shutdown_block
+
+      @max = size
+      @disconnect_block = block || proc {}
+      @resource.broadcast
+    end
+
+    trim_excess_connections
+    size
   end
 
   ##
@@ -95,8 +133,12 @@ class ConnectionPool::TimedStack
     @mutex.synchronize do
       @shutdown_block = block
       @resource.broadcast
+      wait_for_connections_being_created
+    end
 
-      shutdown_connections
+    shutdown_connections
+
+    @mutex.synchronize do
       @shutdown_block = nil if reload
     end
   end
@@ -123,34 +165,155 @@ class ConnectionPool::TimedStack
   ##
   # Returns +true+ if there are no available connections.
   def empty?
-    (@created - @que.length) >= @max
+    @mutex.synchronize { current_length.zero? }
   end
 
   ##
   # The number of connections available on the stack.
   def length
-    @max - @created + @que.length
+    @mutex.synchronize { current_length }
   end
 
   ##
   # The number of connections created and available on the stack.
   def idle
-    @que.length
+    @mutex.synchronize { @que.length }
+  end
+
+  # Number of connections currently checked out.
+  def checked_out
+    @mutex.synchronize { checked_out_count }
+  end
+  alias_method :checked_out_count, :checked_out
+
+  # Number of existing or in-progress connections that exceed the configured size.
+  def pending_reaping
+    @mutex.synchronize { pending_reaping_count }
+  end
+  alias_method :pending_reaping_count, :pending_reaping
+  alias_method :pending_reclamation_count, :pending_reaping
+
+  def target_size
+    @mutex.synchronize { @max }
+  end
+
+  def stats
+    @mutex.synchronize do
+      {
+        target_size: @max,
+        checked_out: checked_out_count,
+        pending_reaping: pending_reaping_count
+      }
+    end
   end
 
   ##
   # Reduce the created count
   def decrement_created
     @mutex.synchronize do
-      @created -= 1 unless @created == 0
+      decrement_created_count
       @resource.broadcast
     end
   end
 
   private
 
+  def reserve_for_pop(deadline, timeout, exception, **kwargs)
+    @mutex.synchronize do
+      loop do
+        raise ConnectionPool::PoolShuttingDownError if @shutdown_block
+
+        conn = try_fetch_connection(**kwargs)
+        return [conn, false] if conn
+
+        return [nil, true] if reserve_creation
+
+        to_wait = deadline - current_time
+        if to_wait <= 0
+          if exception
+            raise exception, "Waited #{timeout} sec, #{current_length}/#{@max} available"
+          else
+            return [nil, false]
+          end
+        end
+
+        @resource.wait(@mutex, to_wait)
+      end
+    end
+  end
+
+  def commit_created_connection
+    @mutex.synchronize do
+      @creating -= 1
+      @created += 1
+
+      if @shutdown_block
+        decrement_created_count
+        @resource.broadcast
+        @shutdown_block
+      elsif @created > @max
+        decrement_created_count
+        @resource.broadcast
+        [nil, true]
+      else
+        @resource.broadcast
+        [nil, false]
+      end
+    end
+  end
+
   def current_time
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  def current_length
+    checkout_capacity = @max - checked_out_count - @creating
+
+    [checkout_capacity, 0].max
+  end
+
+  def checked_out_count
+    @created - @que.length
+  end
+
+  def pending_reaping_count
+    [@created + @creating - @max, 0].max
+  end
+
+  def reserve_creation
+    return false if @creating.positive?
+    return false if checked_out_count + @creating >= @max
+
+    @creating += 1
+    true
+  end
+
+  def decrement_created_count
+    @created -= 1 unless @created.zero?
+  end
+
+  def created_above_target?
+    @created > @max
+  end
+
+  def wait_for_connections_being_created
+    @resource.wait(@mutex) while @creating.positive?
+  end
+
+  def trim_excess_connections
+    while (conn = next_excess_connection)
+      @disconnect_block.call(conn)
+    end
+  end
+
+  def next_excess_connection
+    @mutex.synchronize do
+      return nil unless created_above_target?
+      return nil if @que.empty?
+
+      decrement_created_count
+      try_fetch_connection
+    end
   end
 
   ##
@@ -184,9 +347,18 @@ class ConnectionPool::TimedStack
   #
   # This method must shut down all connections on the stack.
   def shutdown_connections(**kwargs)
-    while (conn = try_fetch_connection(**kwargs))
-      @created -= 1 unless @created == 0
+    while (conn = reserve_shutdown_connection(**kwargs))
       @shutdown_block.call(conn)
+    end
+  end
+
+  def reserve_shutdown_connection(**kwargs)
+    @mutex.synchronize do
+      return nil unless @shutdown_block
+
+      conn = try_fetch_connection(**kwargs)
+      decrement_created_count if conn
+      conn
     end
   end
 
@@ -199,7 +371,6 @@ class ConnectionPool::TimedStack
     return unless idle_connections?(idle_seconds)
 
     @created -= 1 unless @created == 0
-
     # Most active elements are at the tail of the array.
     # Most idle will be at the head so `shift` rather than `pop`.
     @que.shift.first
@@ -227,13 +398,11 @@ class ConnectionPool::TimedStack
   ##
   # This is an extension point for TimedStack and is called with a mutex.
   #
-  # This method must create a connection if and only if the total number of
-  # connections allowed has not been met.
+  # This extension point creates a connection after capacity has been reserved.
+  # Unlike older versions, it is called outside the mutex so shutdown and resize
+  # can make progress while a slow connection factory is running.
   def try_create(**_kwargs)
-    unless @created == @max
-      object = @create_block.call
-      @created += 1
-      object
-    end
+    @create_block.call
   end
+  alias_method :create_connection, :try_create
 end

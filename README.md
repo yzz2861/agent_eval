@@ -100,6 +100,20 @@ cp.with { |conn| conn.get('some-count') }
 
 Like `shutdown`, `reload` will block until all connections are checked in and closed.
 
+## Resizing
+
+You can change a pool's size while it is running:
+
+```ruby
+cp = ConnectionPool.new(size: 5) { Redis.new }
+cp.resize(10, &:close)
+```
+
+Growing wakes waiting checkouts immediately so they can use the new capacity.
+Shrinking closes idle connections above the target size immediately.
+Checked-out connections above the target size remain usable until they are
+returned, and the given block is called when they are checked in.
+
 ## Reap
 
 You can call `reap` periodically on the ConnectionPool instance to close connections that were created but have not been used for a certain amount of time. This can be useful in environments where connections are expensive.
@@ -145,14 +159,24 @@ cp = ConnectionPool.new(size: 10) { Redis.new }
 cp.size # => 10
 cp.available # => 10
 cp.idle # => 0
+cp.checked_out # => 0
+cp.pending_reaping # => 0
+cp.stats
+# => { target_size: 10, checked_out: 0, pending_reaping: 0 }
 
 cp.with do |conn|
   cp.size # => 10
   cp.available # => 9
   cp.idle # => 0
+  cp.checked_out # => 1
+  cp.pending_reaping # => 0
 end
 
 cp.idle # => 1
+
+cp.resize(5, &:close)
+cp.stats
+# => { target_size: 5, checked_out: 0, pending_reaping: 0 }
 ```
 
 ## Upgrading from ConnectionPool 2

@@ -38,27 +38,32 @@ end
 # - :timeout - amount of time to wait for a connection if none currently available, defaults to 5 seconds
 # - :auto_reload_after_fork - automatically drop all connections after fork, defaults to true
 #
+# Call #resize to change the size at runtime.
+#
 class ConnectionPool
   def self.wrap(**kwargs, &block)
     Wrapper.new(**kwargs, &block)
   end
 
-  attr_reader :size
-
   def initialize(timeout: 5, size: 5, auto_reload_after_fork: true, name: nil, &block)
     raise ArgumentError, "Connection pool requires a block" unless block_given?
 
-    @size = Integer(size)
-    raise ArgumentError, "Connection pool size cannot be negative" if @size.negative?
+    size = Integer(size)
+    raise ArgumentError, "Connection pool size cannot be negative" if size.negative?
 
     @timeout = Float(timeout)
-    @available = TimedStack.new(size: @size, &block)
+    @available = TimedStack.new(size: size, &block)
     @key = :"pool-#{@available.object_id}"
     @key_count = :"pool-#{@available.object_id}-count"
     @key_kwargs = :"pool-#{@available.object_id}-kwargs"
     @discard_key = :"pool-#{@available.object_id}-discard"
     INSTANCES[self] = self if auto_reload_after_fork && INSTANCES
   end
+
+  def size
+    @available.target_size
+  end
+  alias_method :target_size, :size
 
   def with(**kwargs)
     # We need to manage exception handling manually here in order
@@ -171,6 +176,14 @@ class ConnectionPool
     @available.shutdown(reload: true, &block)
   end
 
+  ##
+  # Changes the pool size at runtime. Idle connections above the new size are
+  # passed to +block+ immediately. Checked-out connections are passed to
+  # +block+ when they are checked in.
+  def resize(size, &block)
+    @available.resize(size, &block)
+  end
+
   ## Reaps idle connections that have been idle for over +idle_seconds+.
   # +idle_seconds+ defaults to 60.
   def reap(idle_seconds: 60, &block)
@@ -185,6 +198,29 @@ class ConnectionPool
   # Number of pool entries created and idle in the pool.
   def idle
     @available.idle
+  end
+
+  # Number of connections currently checked out.
+  def checked_out
+    @available.checked_out
+  end
+  alias_method :checked_out_count, :checked_out
+  alias_method :borrowed_count, :checked_out
+
+  # Number of checked-out connections that will be removed when returned.
+  def pending_reaping
+    @available.pending_reaping
+  end
+  alias_method :pending_reaping_count, :pending_reaping
+  alias_method :pending_reclamation_count, :pending_reaping
+  alias_method :to_be_reclaimed_count, :pending_reaping
+
+  def stats
+    {
+      target_size: size,
+      checked_out: checked_out,
+      pending_reaping: pending_reaping
+    }
   end
 end
 

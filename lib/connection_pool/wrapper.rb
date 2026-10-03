@@ -1,6 +1,17 @@
 class ConnectionPool
   class Wrapper < ::BasicObject
-    METHODS = [:with, :pool_shutdown, :pool_size, :pool_available, :wrapped_pool]
+    METHODS = [
+      :with,
+      :pool_shutdown,
+      :pool_resize,
+      :pool_size,
+      :pool_available,
+      :pool_idle,
+      :pool_checked_out,
+      :pool_pending_reaping,
+      :pool_stats,
+      :wrapped_pool
+    ]
 
     def initialize(**options, &block)
       @pool = options.fetch(:pool) { ::ConnectionPool.new(**options, &block) }
@@ -18,12 +29,32 @@ class ConnectionPool
       @pool.shutdown(&block)
     end
 
+    def pool_resize(size, &block)
+      @pool.resize(size, &block)
+    end
+
     def pool_size
       @pool.size
     end
 
     def pool_available
       @pool.available
+    end
+
+    def pool_idle
+      @pool.idle
+    end
+
+    def pool_checked_out
+      @pool.checked_out
+    end
+
+    def pool_pending_reaping
+      @pool.pending_reaping
+    end
+
+    def pool_stats
+      @pool.stats
     end
 
     def respond_to?(id, *args, **kwargs)
