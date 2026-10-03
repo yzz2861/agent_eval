@@ -152,6 +152,15 @@ IceCube::Schedule.from_hash(hash)
 
 ical = schedule.to_ical
 IceCube::Schedule.from_ical(ical)
+
+# Preserve unrecognized X- properties and parameters while still editing
+# recognized RRULE parts.
+schedule = IceCube::Schedule.from_ical(ical, preserve: true)
+schedule.to_ical(preserve: true)
+
+# A schedule parsed with preserve: true remains in preservation mode for
+# subsequent exports; pass preserve: false for IceCube's compact output.
+schedule.to_ical(preserve: false)
 ```
 
 ---

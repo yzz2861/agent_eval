@@ -12,6 +12,8 @@ module IceCube
     attr_reader :end_time
     deprecated_alias :end_date, :end_time
 
+    attr_accessor :ical_preserve, :ical_layout
+
     # Create a new schedule
     def initialize(start_time = nil, options = {})
       self.start_time = start_time || TimeUtil.now
@@ -19,6 +21,8 @@ module IceCube
       self.end_time = options[:end_time] if options[:end_time]
       @all_recurrence_rules = []
       @all_exception_rules = []
+      @ical_preserve = false
+      @ical_layout = []
       yield self if block_given?
     end
 
@@ -322,7 +326,11 @@ module IceCube
     end
 
     # Serialize this schedule to_ical
-    def to_ical(force_utc = false)
+    def to_ical(*args, preserve: nil)
+      force_utc = args.first == true
+      preserve = ical_preserve if preserve.nil?
+      return to_preserved_ical(force_utc) if preserve == true
+
       pieces = []
       pieces << "DTSTART#{IcalBuilder.ical_format(start_time, force_utc)}"
       pieces.concat recurrence_rules.map { |r| "RRULE:#{r.to_ical}" }
@@ -331,6 +339,69 @@ module IceCube
       pieces.concat exception_times.map { |t| "EXDATE#{IcalBuilder.ical_format(t, force_utc)}" }
       pieces << "DTEND#{IcalBuilder.ical_format(end_time, force_utc)}" if end_time
       pieces.join("\n")
+    end
+
+    def to_preserved_ical(force_utc = false)
+      state = {
+        rrules: [], exrules: [], rtimes: [], extimes: [],
+        dtstart: false, dtend: false
+      }
+      lines = []
+      extras_inserted = false
+
+      insert_extras = lambda do
+        next if extras_inserted
+        lines.concat(preserved_extra_ical_lines(state, force_utc))
+        extras_inserted = true
+      end
+
+      Array(ical_layout).each do |entry|
+        if entry.is_a?(IcalContentLine)
+          name = entry.name.upcase
+          if name == "END" && !extras_inserted && ["VEVENT", "VCALENDAR"].include?(entry.value.upcase)
+            insert_extras.call
+          end
+          lines << entry.to_s
+          next
+        end
+
+        type, original_line, object = entry
+        case type
+        when :dtstart
+          lines << IcalBuilder.ical_time_line("DTSTART", start_time, force_utc, original_line.params)
+          state[:dtstart] = true
+        when :dtend
+          if end_time
+            lines << IcalBuilder.ical_time_line("DTEND", end_time, force_utc, original_line.params)
+            state[:dtend] = true
+          end
+        when :rrule
+          if recurrence_rules.include?(object)
+            lines << IcalBuilder.ical_rule_line(original_line, object)
+            state[:rrules] << object
+          end
+        when :exrule
+          if exception_rules.include?(object)
+            lines << IcalBuilder.ical_rule_line(original_line, object)
+            state[:exrules] << object
+          end
+        when :rdate
+          object.each do |time|
+            next unless recurrence_times.include?(time) && !state[:rtimes].include?(time)
+            lines << IcalBuilder.ical_time_line("RDATE", time, force_utc, original_line.params)
+            state[:rtimes] << time
+          end
+        when :exdate
+          object.each do |time|
+            next unless exception_times.include?(time) && !state[:extimes].include?(time)
+            lines << IcalBuilder.ical_time_line("EXDATE", time, force_utc, original_line.params)
+            state[:extimes] << time
+          end
+        end
+      end
+
+      insert_extras.call
+      IcalBuilder.fold_lines(lines)
     end
 
     # Load the schedule from ical
@@ -407,6 +478,29 @@ module IceCube
     end
 
     private
+
+    def preserved_extra_ical_lines(state, force_utc)
+      lines = []
+      unless state[:dtstart]
+        lines << "DTSTART#{IcalBuilder.ical_format(start_time, force_utc)}"
+      end
+      recurrence_rules.reject { |rule| state[:rrules].include?(rule) }.each do |rule|
+        lines << "RRULE:#{rule.to_ical}"
+      end
+      exception_rules.reject { |rule| state[:exrules].include?(rule) }.each do |rule|
+        lines << "EXRULE:#{rule.to_ical}"
+      end
+      recurrence_times_without_start_time.reject { |time| state[:rtimes].include?(time) }.each do |time|
+        lines << "RDATE#{IcalBuilder.ical_format(time, force_utc)}"
+      end
+      exception_times.reject { |time| state[:extimes].include?(time) }.each do |time|
+        lines << "EXDATE#{IcalBuilder.ical_format(time, force_utc)}"
+      end
+      if end_time && !state[:dtend]
+        lines << "DTEND#{IcalBuilder.ical_format(end_time, force_utc)}"
+      end
+      lines
+    end
 
     # Reset all rules for another run
     def reset

@@ -90,17 +90,27 @@ module IceCube
           validation.build_hash(builder)
         end
       end
-      builder.to_hash
+      hash = builder.to_hash
+      unless ical_params.empty?
+        hash[:ical_params] = ical_params.map { |param| param.to_h.compact }
+      end
+      unless ical_components.empty?
+        hash[:ical_components] = ical_components.map { |component| component.to_h }
+      end
+      hash
     end
 
-    def to_ical
+    def to_ical(preserve = false)
       builder = IcalBuilder.new
       @validations.each_value do |validations|
         validations.each do |validation|
           validation.build_ical(builder)
         end
       end
-      builder.to_s
+      ical = builder.to_s
+      return ical unless preserve
+      components = ical_components.map(&:to_s)
+      ([ical] + components).join(";")
     end
 
     # Get the collection that contains validations of a certain type

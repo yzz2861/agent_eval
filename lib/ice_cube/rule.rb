@@ -9,6 +9,14 @@ module IceCube
 
     attr_reader :uses
 
+    def ical_params
+      @ical_params ||= []
+    end
+
+    def ical_components
+      @ical_components ||= []
+    end
+
     def reset
     end
 
@@ -26,13 +34,13 @@ module IceCube
       to_hash.hash
     end
 
-    def to_ical
+    def to_ical(preserve = false)
       raise MethodNotImplemented, "Expected to be overridden by subclasses"
     end
 
     # Convert from ical string and create a rule
-    def self.from_ical(ical)
-      IceCube::IcalParser.rule_from_ical(ical)
+    def self.from_ical(ical, preserve: false)
+      IceCube::IcalParser.rule_from_ical(ical, nil, preserve)
     end
 
     # Yaml implementation
@@ -81,6 +89,8 @@ module IceCube
         rule.interval(hash[:interval] || 1, TimeUtil.wday_to_sym(hash[:week_start] || 0)) if rule.is_a? WeeklyRule
         rule.until(TimeUtil.deserialize_time(hash[:until])) if hash[:until]
         rule.count(hash[:count]) if hash[:count]
+        rule.ical_params.replace(Array(hash[:ical_params]).map { |param| normalize_ical_param(param) })
+        rule.ical_components.replace(Array(hash[:ical_components]).map { |component| normalize_ical_component(component) })
 
         hash[:validations]&.each do |name, args|
           apply_validation(rule, name, args)
@@ -90,6 +100,21 @@ module IceCube
       end
 
       private
+
+      def normalize_ical_param(param)
+        return param if param.is_a?(IcalContentLine::Parameter)
+        IcalContentLine::Parameter.new(
+          name: param[:name],
+          value: param[:value],
+          quoted: param[:quoted] || false,
+          raw_value: param[:raw_value]
+        )
+      end
+
+      def normalize_ical_component(component)
+        return component if component.is_a?(IcalContentLine::Component)
+        IcalContentLine::Component.new(name: component[:name], value: component[:value])
+      end
 
       def apply_validation(rule, name, args)
         name = name.to_sym
