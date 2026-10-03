@@ -188,6 +188,50 @@ module Dry
         resolve(key)
       end
 
+      # Create a read-only view containing only the given keys or namespaces
+      #
+      # @param [Array<String, Symbol>] keys
+      #   Exact full keys that may be resolved through the view
+      # @param [Array<String, Symbol>] namespaces
+      #   Namespaces whose descendants may be resolved through the view
+      #
+      # @return [Dry::Container::ReadOnlyView]
+      #
+      # @see Dry::Container::ReadOnlyView
+      #
+      # @api public
+      def read_only_view(keys: [], key: nil, namespaces: [], namespace: nil)
+        ::Dry::Container::ReadOnlyView.new(
+          self,
+          keys: keys,
+          key: key,
+          namespaces: namespaces,
+          namespace: namespace
+        )
+      end
+
+      # @see #read_only_view
+      # @api public
+      def resolver_view(keys: [], key: nil, namespaces: [], namespace: nil)
+        read_only_view(
+          keys: keys,
+          key: key,
+          namespaces: namespaces,
+          namespace: namespace
+        )
+      end
+
+      # @see #read_only_view
+      # @api public
+      def view(keys: [], key: nil, namespaces: [], namespace: nil)
+        read_only_view(
+          keys: keys,
+          key: key,
+          namespaces: namespaces,
+          namespace: namespace
+        )
+      end
+
       # Merge in the items of the other container
       #
       # @param [Dry::Container] other

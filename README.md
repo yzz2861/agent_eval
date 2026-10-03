@@ -20,3 +20,33 @@ This library officially supports the following Ruby versions:
 ## License
 
 See `LICENSE` file.
+
+## Restricted read-only views
+
+Use a view when handing a container to third-party code that should resolve only
+explicitly approved keys. The allowlist is supplied when the view is created:
+
+```ruby
+container.register("billing.gateway", gateway)
+container.register("database.admin_url", admin_url)
+container.register("signing.key", signing_key)
+
+billing_view = container.read_only_view(namespaces: "billing")
+one_key_view = container.read_only_view(keys: "billing.gateway")
+```
+
+`resolve`, `key?`, `keys`, and `each` apply the same visibility rules. The `[]`
+alias delegates to `resolve`, so it cannot bypass the view. Namespaces are scoped
+with the container separator: a `"billing"` namespace exposes `"billing.gateway"`
+but not `"billing_admin_url"`.
+
+Unauthorized requests raise a normal `KeyError` with the same behavior for keys
+that do and do not exist in the source container. Error messages therefore do not
+reveal whether a hidden key is registered, and suggestions are limited to keys the
+view is allowed to expose.
+
+The view is read-only, but it is not an arbitrary-Ruby sandbox. Resolving an item
+runs that item's registered factory. If an accessible factory closes over the
+original container, mutates shared state, or returns a broader capability, the
+view cannot contain that code. Keep such factories out of the accessible keys and
+namespaces, and freeze or fully construct source containers before sharing views.
