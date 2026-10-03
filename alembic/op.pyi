@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any
 from typing import Awaitable
+from typing import Collection
 from typing import Callable
 from typing import Iterator
 from typing import Literal
@@ -1121,6 +1122,39 @@ def drop_table_comment(
         :paramref:`.Operations.alter_column.comment`
 
     """
+
+def create_view(
+    view_name: str,
+    view_sql: Executable | str,
+    *,
+    schema: str | None = None,
+    materialized: bool = False,
+    temporary: bool = False,
+    or_replace: bool = False,
+    **kw: Any,
+) -> None: ...
+
+
+def drop_view(
+    view_name: str,
+    *,
+    schema: str | None = None,
+    materialized: bool = False,
+    **kw: Any,
+) -> None: ...
+
+
+def replace_view(
+    view_name: str,
+    view_sql: Executable | str,
+    *,
+    schema: str | None = None,
+    materialized: bool = False,
+    temporary: bool = False,
+    dependent_views: Collection[Any] = (),
+    **kw: Any,
+) -> None: ...
+
 
 def execute(
     sqltext: Executable | str,

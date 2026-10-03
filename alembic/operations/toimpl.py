@@ -256,3 +256,41 @@ def execute_sql(
     operations.migration_context.impl.execute(
         operation.sqltext, execution_options=operation.execution_options
     )
+
+
+@Operations.implementation_for(ops.CreateViewOp)
+def create_view(
+    operations: "Operations", operation: "ops.CreateViewOp"
+) -> None:
+    from ..views import view_definition_text
+
+    view_sql = operation.view_sql
+    if not isinstance(view_sql, str):
+        view_sql = view_definition_text(
+            view_sql, dialect=operations.impl.dialect
+        )
+    operations.impl.create_view(
+        operation.view_name,
+        view_sql,
+        schema=operation.schema,
+        materialized=operation.materialized,
+        temporary=operation.temporary,
+        or_replace=operation.or_replace,
+    )
+
+
+@Operations.implementation_for(ops.DropViewOp)
+def drop_view(operations: "Operations", operation: "ops.DropViewOp") -> None:
+    operations.impl.drop_view(
+        operation.view_name,
+        schema=operation.schema,
+        materialized=operation.materialized,
+    )
+
+
+@Operations.implementation_for(ops.ReplaceViewOp)
+def replace_view(
+    operations: "Operations", operation: "ops.ReplaceViewOp"
+) -> None:
+    for sub_op in operation.ops:
+        operations.invoke(sub_op)

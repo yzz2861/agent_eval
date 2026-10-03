@@ -1211,4 +1211,54 @@ def _execute_sql(autogen_context: AutogenContext, op: ops.ExecuteSQLOp) -> str:
     )
 
 
+@renderers.dispatch_for(ops.CreateViewOp)
+def _create_view(autogen_context, op):
+    if isinstance(op.view_sql, str):
+        sqltext = repr(op.view_sql)
+    else:
+        sqltext = _render_potential_expr(
+            op.view_sql, autogen_context, wrap_in_element=False
+        )
+    sa_prefix = _sqlalchemy_autogenerate_prefix(autogen_context)
+    args = [
+        "    %s," % _render_view_name(op.view_name, sa_prefix),
+        "    %s," % sqltext,
+    ]
+    args.extend(
+        "    %s=True," % key if value is True else "    %s=%r," % (key, value)
+        for key, value in (
+            ("schema", op.schema),
+            ("materialized", op.materialized or None),
+            ("temporary", op.temporary or None),
+            ("or_replace", op.or_replace or None),
+        )
+        if value is not None
+    )
+    args[-1] = args[-1].rstrip(",")
+    return "%screate_view(\n%s\n)" % (
+        _alembic_autogenerate_prefix(autogen_context),
+        "\n".join(args),
+    )
+
+
+@renderers.dispatch_for(ops.DropViewOp)
+def _drop_view(autogen_context, op):
+    sa_prefix = _sqlalchemy_autogenerate_prefix(autogen_context)
+    args = ["    %s" % _render_view_name(op.view_name, sa_prefix)]
+    if op.schema is not None:
+        args.append("    schema=%s" % _render_view_name(op.schema, sa_prefix))
+    if op.materialized:
+        args.append("    materialized=True")
+    return "%sdrop_view(\n%s\n)" % (
+        _alembic_autogenerate_prefix(autogen_context),
+        ",\n".join(args),
+    )
+
+
+def _render_view_name(name, sa_prefix):
+    if isinstance(name, quoted_name):
+        return "%squoted_name(%r, quote=True)" % (sa_prefix, str(name))
+    return repr(name)
+
+
 renderers = default_renderers.branch()

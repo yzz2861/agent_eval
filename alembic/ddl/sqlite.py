@@ -71,6 +71,34 @@ class SQLiteImpl(DefaultImpl):
         else:
             return False
 
+    def create_view(
+        self,
+        view_name: str,
+        view_sql: str,
+        *,
+        schema: str | None = None,
+        materialized: bool = False,
+        temporary: bool = False,
+        or_replace: bool = False,
+    ) -> None:
+        if or_replace:
+            raise NotImplementedError(
+                "SQLite does not support CREATE OR REPLACE VIEW; use a "
+                "drop and recreate sequence (see Operations.replace_view)"
+            )
+        if materialized:
+            raise NotImplementedError(
+                "SQLite does not support materialized views"
+            )
+        super().create_view(
+            view_name,
+            view_sql,
+            schema=schema,
+            materialized=materialized,
+            temporary=temporary,
+            or_replace=or_replace,
+        )
+
     def add_constraint(self, const: Constraint, **kw: Any):
         # attempt to distinguish between an
         # auto-gen constraint and an explicit one

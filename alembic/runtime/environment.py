@@ -429,6 +429,7 @@ class EnvironmentContext(util.ModuleClsProxy):
         process_revision_directives: None | (
             ProcessRevisionDirectiveFn
         ) = None,
+        compare_views: bool = True,
         compare_type: bool | CompareType = True,
         compare_server_default: bool | CompareServerDefault = False,
         render_item: RenderItemFn | None = None,
@@ -566,6 +567,10 @@ class EnvironmentContext(util.ModuleClsProxy):
          what is locally available on the target
          :class:`~sqlalchemy.engine.Connection`
          to produce candidate upgrade/downgrade operations.
+        :param compare_views: Indicate if SQL views declared on the
+        :class:`~sqlalchemy.schema.MetaData` via :class:`~alembic.views.View`
+        should be compared during autogenerate.  Defaults to True.
+
         :param compare_type: Indicates type comparison behavior during
          an autogenerate
          operation.  Defaults to ``True`` turning on type comparison, which

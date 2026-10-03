@@ -156,6 +156,7 @@ def configure(
             None,
         ]
     ) = None,
+    compare_views: bool = True,
     compare_type: (
         bool
         | Callable[

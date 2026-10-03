@@ -408,3 +408,87 @@ def add_column(
         text += " " + const
 
     return text
+
+
+class _ViewDDL(DDLElement):
+    """Common base for name-keyed view DDL constructs.
+
+    The view body is supplied as an already compiled SQL string.
+    """
+
+    def __init__(
+        self,
+        view_name: quoted_name | str,
+        view_sql: str,
+        *,
+        schema: quoted_name | str | None = None,
+        materialized: bool = False,
+        temporary: bool = False,
+    ) -> None:
+        self.view_name = view_name
+        self.view_sql = view_sql
+        self.schema = schema
+        self.materialized = materialized
+        self.temporary = temporary
+
+    def _qualified_name(self, compiler: DDLCompiler) -> str:
+        return format_table_name(  # type: ignore[return-value]
+            compiler, self.view_name, self.schema
+        )
+
+
+class CreateView(_ViewDDL):
+    """Represent a CREATE VIEW statement.
+
+    .. versionadded:: 1.21
+    """
+
+    def __init__(
+        self,
+        view_name: quoted_name | str,
+        view_sql: str,
+        *,
+        schema: quoted_name | str | None = None,
+        materialized: bool = False,
+        temporary: bool = False,
+        or_replace: bool = False,
+    ) -> None:
+        super().__init__(
+            view_name,
+            view_sql,
+            schema=schema,
+            materialized=materialized,
+            temporary=temporary,
+        )
+        self.or_replace = or_replace
+
+
+class DropView(_ViewDDL):
+    """Represent a DROP VIEW statement.
+
+    .. versionadded:: 1.21
+    """
+
+
+@compiles(CreateView)
+def visit_create_view(
+    element: CreateView, compiler: DDLCompiler, **kw: Any
+) -> str:
+    replace = " OR REPLACE" if element.or_replace else ""
+    kind = "MATERIALIZED VIEW" if element.materialized else "VIEW"
+    temporary = " TEMPORARY" if element.temporary else ""
+    return "CREATE%s%s %s %s AS %s" % (
+        replace,
+        temporary,
+        kind,
+        element._qualified_name(compiler),
+        element.view_sql.strip(),
+    )
+
+
+@compiles(DropView)
+def visit_drop_view(
+    element: DropView, compiler: DDLCompiler, **kw: Any
+) -> str:
+    kind = "MATERIALIZED VIEW" if element.materialized else "VIEW"
+    return "DROP %s %s" % (kind, element._qualified_name(compiler))

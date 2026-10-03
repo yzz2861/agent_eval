@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import MutableMapping
 from collections.abc import Sequence
@@ -2667,6 +2668,180 @@ class ExecuteSQLOp(MigrateOperation):
         return ("execute", self.sqltext)
 
 
+@Operations.register_operation("create_view")
+class CreateViewOp(MigrateOperation):
+    """Represent a create view operation.
+
+    .. versionadded:: 1.21
+    """
+
+    def __init__(
+        self,
+        view_name: str,
+        view_sql: Executable | str,
+        *,
+        schema: str | None = None,
+        materialized: bool = False,
+        temporary: bool = False,
+        or_replace: bool = False,
+        depends_on: Collection[tuple[str | None, str]] | None = None,
+        _view: Any = None,
+    ) -> None:
+        self.view_name = view_name
+        self.view_sql = view_sql
+        self.schema = schema
+        self.materialized = materialized
+        self.temporary = temporary
+        self.or_replace = or_replace
+        self.depends_on = list(depends_on) if depends_on else []
+        self.view = _view
+
+    @classmethod
+    def from_view(cls, view: Any, *, dialect: Any = None) -> CreateViewOp:
+        from ..views import View
+        from ..views import view_definition_text
+
+        assert isinstance(view, View)
+        return cls(
+            view.name,
+            view_definition_text(view.selectable, dialect=dialect),
+            schema=view.schema,
+            materialized=view.materialized,
+            temporary=view.temporary,
+            depends_on=sorted(view.dependencies(dialect)),
+            _view=view,
+        )
+
+    def reverse(self) -> DropViewOp:
+        return DropViewOp(
+            self.view_name,
+            schema=self.schema,
+            materialized=self.materialized,
+        )
+
+    def to_diff_tuple(self) -> tuple[Any, ...]:
+        return ("add_view", self.schema, self.view_name)
+
+    @classmethod
+    def create_view(
+        cls,
+        operations: Operations,
+        view_name: str,
+        view_sql: Executable | str,
+        *,
+        schema: str | None = None,
+        materialized: bool = False,
+        temporary: bool = False,
+        or_replace: bool = False,
+        **kw: Any,
+    ) -> None:
+        r"""Issue a CREATE VIEW instruction.
+
+        e.g.::
+
+            op.create_view(
+                "active_accounts",
+                "SELECT id, name FROM account WHERE active = 1",
+            )
+
+        :param view_name: the name of the view.
+        :param view_sql: the SELECT statement defining the view.  May be
+         a plain SQL string or a SQLAlchemy selectable construct.
+        :param schema: Optional schema name.
+        :param materialized: if True, emit CREATE MATERIALIZED VIEW.
+        :param temporary: if True, emit CREATE TEMPORARY VIEW.
+        :param or_replace: if True, emit CREATE OR REPLACE VIEW where
+         supported.  Not supported by SQLite; use
+         :meth:`.Operations.replace_view` for a portable plan.
+
+        .. versionadded:: 1.21
+        """
+
+        operations.invoke(
+            cls(
+                view_name,
+                view_sql,
+                schema=schema,
+                materialized=materialized,
+                temporary=temporary,
+                or_replace=or_replace,
+            )
+        )
+
+
+@Operations.register_operation("drop_view")
+class DropViewOp(MigrateOperation):
+    """Represent a drop view operation.
+
+    .. versionadded:: 1.21
+    """
+
+    def __init__(
+        self,
+        view_name: str,
+        *,
+        schema: str | None = None,
+        materialized: bool = False,
+        old_view_sql: Executable | str | None = None,
+        old_temporary: bool = False,
+        old_depends_on: Collection[tuple[str | None, str]] | None = None,
+        _as_replace: bool = False,
+        _view: Any = None,
+    ) -> None:
+        self.view_name = view_name
+        self.schema = schema
+        self.materialized = materialized
+        self.old_view_sql = old_view_sql
+        self.old_temporary = old_temporary
+        self.old_depends_on = list(old_depends_on) if old_depends_on else []
+        self._as_replace = _as_replace
+        self.view = _view
+
+    def reverse(self) -> CreateViewOp:
+        if self.old_view_sql is None:
+            raise NotImplementedError(
+                "DropViewOp for %r has no view definition to restore; "
+                "obtain the drop operation from autogenerate or provide "
+                "old_view_sql" % (self.view_name,)
+            )
+        return CreateViewOp(
+            self.view_name,
+            self.old_view_sql,
+            schema=self.schema,
+            materialized=self.materialized,
+            temporary=self.old_temporary,
+            depends_on=list(self.old_depends_on),
+        )
+
+    def to_diff_tuple(self) -> tuple[Any, ...]:
+        if self._as_replace:
+            return ("replace_view", self.schema, self.view_name)
+        return ("remove_view", self.schema, self.view_name)
+
+    @classmethod
+    def drop_view(
+        cls,
+        operations: Operations,
+        view_name: str,
+        *,
+        schema: str | None = None,
+        materialized: bool = False,
+        **kw: Any,
+    ) -> None:
+        """Issue a DROP VIEW instruction.
+
+        :param view_name: the name of the view.
+        :param schema: Optional schema name.
+        :param materialized: if True, emit DROP MATERIALIZED VIEW.
+
+        .. versionadded:: 1.21
+        """
+
+        operations.invoke(
+            cls(view_name, schema=schema, materialized=materialized)
+        )
+
+
 class OpContainer(MigrateOperation):
     """Represent a sequence of operations operation."""
 
@@ -2710,6 +2885,141 @@ class ModifyTableOps(OpContainer):
             ops=list(reversed([op.reverse() for op in self.ops])),
             schema=self.schema,
         )
+
+
+@Operations.register_operation("replace_view")
+class ReplaceViewOp(OpContainer):
+    """Plan replacing one or more view definitions.
+
+    The plan drops each changed view together with the other declared
+    views that depend on it (in dependency order), then recreates them
+    with their current definitions (in dependency order).  This is the
+    portable sequence used by autogenerate and by
+    :meth:`.Operations.replace_view`.
+
+    .. versionadded:: 1.21
+    """
+
+    def __init__(
+        self,
+        drop_ops: Sequence[DropViewOp] = (),
+        create_ops: Sequence[CreateViewOp] = (),
+    ) -> None:
+        super().__init__(list(drop_ops) + list(create_ops))
+        self.drop_ops = list(drop_ops)
+        self.create_ops = list(create_ops)
+
+    def reverse(self) -> ReplaceViewOp:
+        reversed_ops = list(reversed([op.reverse() for op in self.ops]))
+        return ReplaceViewOp(
+            [op for op in reversed_ops if isinstance(op, DropViewOp)],
+            [op for op in reversed_ops if isinstance(op, CreateViewOp)],
+        )
+
+    @classmethod
+    def replace_view(
+        cls,
+        operations: Operations,
+        view_name: str,
+        view_sql: Executable | str,
+        *,
+        schema: str | None = None,
+        materialized: bool = False,
+        temporary: bool = False,
+        dependent_views: Collection[Any] = (),
+        **kw: Any,
+    ) -> None:
+        r"""Replace a view and rebuild the views that depend on it.
+
+        Emits the portable sequence required by databases (such as
+        SQLite) that do not support CREATE OR REPLACE VIEW: dependent
+        views are dropped first, then the changed view and its
+        dependents are recreated in dependency order.  Existing view
+        definitions are reflected from the database so that a
+        downgrade restores the previous definitions.
+
+        e.g.::
+
+            op.replace_view(
+                "active_accounts",
+                "SELECT id, name FROM account WHERE active = 1 AND x > 0",
+                dependent_views=[
+                    View(
+                        "account_summary",
+                        "SELECT name, count(*) c FROM active_accounts "
+                        "GROUP BY name",
+                    ),
+                ],
+            )
+
+        :param view_name: name of the view being changed.
+        :param view_sql: the new SELECT statement.
+        :param schema: optional schema name.
+        :param materialized: when True the view is materialized.
+        :param temporary: when True the view is temporary.
+        :param dependent_views: :class:`.View` objects, or
+         "(name, select_sql[, schema])" tuples, for views that depend
+         on the changed view and must be rebuilt.
+
+        .. versionadded:: 1.21
+        """
+
+        from .. import views as view_support
+
+        from sqlalchemy import inspect
+
+        bind = operations.get_bind()
+        inspector = inspect(bind)
+        dialect = operations.impl.dialect
+
+        target = view_support.View(
+            view_name,
+            view_sql,
+            schema=schema,
+            materialized=materialized,
+            temporary=temporary,
+        )
+        new_views: dict[tuple[str | None, str], Any] = {target.key: target}
+        for dependent in dependent_views:
+            if isinstance(dependent, view_support.View):
+                dview = dependent
+            else:
+                dname = dependent[0]
+                dsql = dependent[1]
+                dschema = dependent[2] if len(dependent) > 2 else schema
+                dview = view_support.View(dname, dsql, schema=dschema)
+            if dview.key in new_views:
+                raise ValueError("duplicate view %r" % (dview.key,))
+            new_views[dview.key] = dview
+
+        new_deps = {
+            key: new_views[key].dependencies(dialect) for key in new_views
+        }
+        drop_order = view_support.reverse_topological_sort(new_views, new_deps)
+        create_order = view_support.topological_sort(new_views, new_deps)
+
+        drop_ops: list[DropViewOp] = []
+        for key in drop_order:
+            view = new_views[key]
+            old_sql = inspector.get_view_definition(key[1], schema=key[0])
+            old_body = view_support._strip_create_view_prefix(old_sql)
+            drop_ops.append(
+                DropViewOp(
+                    key[1],
+                    schema=key[0],
+                    materialized=view.materialized,
+                    old_view_sql=old_body,
+                    old_temporary=view.temporary,
+                    old_depends_on=sorted(view.dependencies(dialect)),
+                    _as_replace=True,
+                )
+            )
+        create_ops = [
+            CreateViewOp.from_view(new_views[key], dialect=dialect)
+            for key in create_order
+        ]
+        for sub_op in cls(drop_ops, create_ops).ops:
+            operations.invoke(sub_op)
 
 
 class UpgradeOps(OpContainer):

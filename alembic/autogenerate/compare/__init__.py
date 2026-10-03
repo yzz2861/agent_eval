@@ -9,6 +9,7 @@ from . import schema
 from . import server_defaults
 from . import tables
 from . import types
+from . import views
 from ... import util
 from ...ext import checkconstraint_byname
 from ...runtime.plugins import Plugin
@@ -53,6 +54,7 @@ def _produce_net_changes(
 
 Plugin.setup_plugin_from_module(schema, "alembic.autogenerate.schemas")
 Plugin.setup_plugin_from_module(tables, "alembic.autogenerate.tables")
+Plugin.setup_plugin_from_module(views, "alembic.autogenerate.views")
 Plugin.setup_plugin_from_module(types, "alembic.autogenerate.types")
 Plugin.setup_plugin_from_module(
     constraints, "alembic.autogenerate.constraints"

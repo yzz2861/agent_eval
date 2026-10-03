@@ -459,6 +459,53 @@ class DefaultImpl(metaclass=ImplMeta):
             table, self.connection, checkfirst=False, _ddl_runner=self
         )
 
+    def create_view(
+        self,
+        view_name: str,
+        view_sql: str,
+        *,
+        schema: str | None = None,
+        materialized: bool = False,
+        temporary: bool = False,
+        or_replace: bool = False,
+    ) -> None:
+        """Emit a CREATE VIEW statement.
+
+        .. versionadded:: 1.21
+        """
+
+        self._exec(
+            base.CreateView(
+                view_name,
+                view_sql,
+                schema=schema,
+                materialized=materialized,
+                temporary=temporary,
+                or_replace=or_replace,
+            )
+        )
+
+    def drop_view(
+        self,
+        view_name: str,
+        *,
+        schema: str | None = None,
+        materialized: bool = False,
+    ) -> None:
+        """Emit a DROP VIEW statement.
+
+        .. versionadded:: 1.21
+        """
+
+        self._exec(
+            base.DropView(
+                view_name,
+                "",
+                schema=schema,
+                materialized=materialized,
+            )
+        )
+
     def create_index(self, index: Index, **kw: Any) -> None:
         self._exec(schema.CreateIndex(index, **kw))
 
