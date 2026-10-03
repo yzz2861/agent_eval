@@ -160,7 +160,10 @@ module Concurrent
     DEFAULT_VALIDATOR = ->(value) { true }
     private_constant :DEFAULT_VALIDATOR
 
-    Job = Struct.new(:action, :args, :executor, :caller)
+  # The +counted+ attribute is true while the job occupies a slot against
+  # the agent's +max_pending+ limit. It is set to false when the slot is
+  # released (on termination or when discarded by +restart+).
+  Job = Struct.new(:action, :args, :executor, :caller, :counted)
     private_constant :Job
 
     # Raised during action processing or any other time in an Agent's lifecycle.
@@ -182,6 +185,10 @@ module Concurrent
 
     # The error mode this Agent is operating in. See {#initialize} for details.
     attr_reader :error_mode
+
+    # The maximum number of pending (queued or in-progress) actions this
+    # Agent will accept, or +nil+ when unbounded (the default).
+    attr_reader :max_pending
 
     # Create a new `Agent` with the given initial value and options.
     #
@@ -211,6 +218,9 @@ module Concurrent
     # held until {#restart} is called. The {#value} method will still work,
     # returning the value of the Agent before the error.
     #
+    # @option opts [Integer, nil] :max_pending the maximum number of
+    #   pending (queued or in-progress) actions; when the limit is reached,
+    #   new dispatches are rejected; +nil+ (the default) means unbounded
     # @param [Object] initial the initial value
     # @param [Hash] opts the configuration options
     #
@@ -242,6 +252,13 @@ module Concurrent
     end
 
     alias_method :reason, :error
+
+    # The number of pending (queued or in-progress) actions.
+    #
+    # @return [Integer] the number of pending (incomplete) actions
+    def pending_count
+      synchronize { @pending_count }
+    end
 
     # @!macro agent_send
     #
