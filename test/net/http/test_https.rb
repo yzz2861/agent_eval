@@ -53,6 +53,27 @@ class TestNetHTTPS < Test::Unit::TestCase
     }
   end
 
+  def test_resolved_address_keeps_logical_hostname_for_tls
+    checked = []
+    http = Net::HTTP.new(HOST, config("port"))
+    http.resolver = lambda do |host, port, role:|
+      assert_equal HOST, host
+      assert_equal :destination, role
+      [Addrinfo.tcp("127.0.0.1", port)]
+    end
+    http.address_gate = lambda do |address, role|
+      checked << [address.ip_address, address.ip_port, role]
+      true
+    end
+    http.use_ssl = true
+    http.cert_store = TEST_STORE
+
+    http.request_get("/") do |response|
+      assert_equal($test_net_http_data, response.body)
+    end
+    assert_equal [["127.0.0.1", config("port"), :destination]], checked
+  end
+
   def test_get_SNI_proxy
     TCPServer.open(HOST_IP, 0) {|serv|
       _, port, _, _ = serv.addr

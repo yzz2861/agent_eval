@@ -7,6 +7,9 @@ module Net
   class HTTPHeaderSyntaxError < StandardError
   end
 
+  class HTTPAddressNotAllowed < StandardError
+  end
+
   # <!-- rdoc-file=lib/net/http.rb -->
   # Class Net::HTTP provides a rich library that implements the client in a
   # client-server model that uses the HTTP request-response protocol. For
@@ -1180,6 +1183,16 @@ module Net
     # The IP address may not be set if the session has been started.
     #
     attr_accessor ipaddr: String?
+
+    attr_accessor resolver: untyped
+
+    attr_accessor address_gate: untyped
+
+    def allowed_address: () -> untyped
+
+    def allowed_address?: () -> untyped
+
+    def allowed_address=: (untyped) -> void
 
     # <!-- rdoc-file=lib/net/http.rb -->
     # Sets or returns the numeric (Integer or Float) number of seconds to wait for a

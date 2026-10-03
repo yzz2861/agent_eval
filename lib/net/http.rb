@@ -30,6 +30,7 @@ module Net   #:nodoc:
   # :stopdoc:
   class HTTPBadResponse < StandardError; end
   class HTTPHeaderSyntaxError < StandardError; end
+  class HTTPAddressNotAllowed < StandardError; end
   # :startdoc:
 
   # \Class \Net::HTTP provides a rich library that implements the client
@@ -664,6 +665,14 @@ module Net   #:nodoc:
   #   Sets the minimum SSL version.
   # - {#peer_cert}[rdoc-ref:Net::HTTP#peer_cert]:
   #   Returns the X509 certificate chain for the session's socket peer.
+  # - {:address_gate}[rdoc-ref:Net::HTTP#address_gate]:
+  #   Returns the callback used to authorize resolved addresses.
+  # - {#address_gate=}[rdoc-ref:Net::HTTP#address_gate=]:
+  #   Sets the callback used to authorize resolved addresses.
+  # - {:resolver}[rdoc-ref:Net::HTTP#resolver]:
+  #   Returns the custom resolver.
+  # - {#resolver=}[rdoc-ref:Net::HTTP#resolver=]:
+  #   Sets the custom resolver.
   # - {:ssl_version}[rdoc-ref:Net::HTTP#ssl_version]:
   #   Returns the SSL version.
   # - {:ssl_version=}[rdoc-ref:Net::HTTP#ssl_version=]:
@@ -1029,6 +1038,7 @@ module Net   #:nodoc:
     # - #cert
     # - #cert_store
     # - #ciphers
+    # - #address_gate
     # - #close_on_empty_response
     # - +ipaddr+ (calls #ipaddr=)
     # - #keep_alive_timeout
@@ -1037,6 +1047,7 @@ module Net   #:nodoc:
     # - #read_timeout
     # - #ssl_timeout
     # - #ssl_version
+    # - #resolver
     # - +use_ssl+ (calls #use_ssl=)
     # - #verify_callback
     # - #verify_depth
@@ -1167,6 +1178,8 @@ module Net   #:nodoc:
       @address = address
       @port    = (port || HTTP.default_port)
       @ipaddr = nil
+      @resolver = nil
+      @address_gate = nil
       @local_host = nil
       @local_port = nil
       @curr_http_version = HTTPVersion
@@ -1366,6 +1379,37 @@ module Net   #:nodoc:
       raise IOError, "ipaddr value changed, but session already started" if started?
       @ipaddr = addr
     end
+
+    # Returns the resolver used to resolve host names before connecting, or +nil+.
+    attr_reader :resolver
+
+    # Sets the resolver used to resolve host names before connecting.
+    #
+    # The resolver may be a callable receiving the logical host name and
+    # port, or an object responding to #getaddresses. It returns an
+    # enumerable of IP address strings or TCP Addrinfo objects. Every
+    # candidate is passed to #address_gate immediately before TCP dialing.
+    def resolver=(resolver)
+      @resolver = resolver
+    end
+
+    # Returns the callback used to authorize candidate addresses, or +nil+.
+    attr_reader :address_gate
+
+    # Sets the callback used to authorize candidate addresses before connecting.
+    #
+    # The callback receives a concrete TCP Addrinfo and +role+, which is
+    # <tt>:destination</tt> for a direct connection or <tt>:proxy</tt> for
+    # the TCP connection to an HTTP proxy. A truthy result permits dialing
+    # that candidate. With a proxy, Net::HTTP checks only the proxy
+    # connection; it cannot inspect or guarantee the proxy's destination.
+    def address_gate=(callback)
+      @address_gate = callback
+    end
+
+    alias allowed_address address_gate
+    alias allowed_address? address_gate
+    alias allowed_address= address_gate=
 
     # Sets or returns the numeric (\Integer or \Float) number of seconds
     # to wait for a connection to open;
@@ -1671,14 +1715,22 @@ module Net   #:nodoc:
       if proxy? then
         conn_addr = proxy_address
         conn_port = proxy_port
+        conn_role = :proxy
       else
-        conn_addr = conn_address
+        conn_addr = @resolver ? address : conn_address
         conn_port = port
+        conn_role = :destination
       end
 
       debug "opening connection to #{conn_addr}:#{conn_port}..."
       begin
-        s = timeouted_connect(conn_addr, conn_port)
+        if @resolver || @address_gate
+          s = timeouted_connect_with_address_hooks(conn_addr, conn_port, conn_role)
+        else
+          s = timeouted_connect(conn_addr, conn_port)
+        end
+      rescue HTTPAddressNotAllowed
+        raise
       rescue => e
         if (defined?(IO::TimeoutError) && e.is_a?(IO::TimeoutError)) || e.is_a?(Errno::ETIMEDOUT)  # for compatibility with previous versions
           e = Net::OpenTimeout.new(e)
@@ -1788,7 +1840,42 @@ module Net   #:nodoc:
     end
     private_constant :TCP_SOCKET_NEW_HAS_OPEN_TIMEOUT
 
+    addrinfo_connect_parameters = Addrinfo.instance_method(:connect).parameters
+    ADDRINFO_CONNECT_HAS_TIMEOUT = addrinfo_connect_parameters.include?([:key, :timeout])
+    private_constant :ADDRINFO_CONNECT_HAS_TIMEOUT
+
+    def timeouted_connect_with_address_hooks(conn_addr, conn_port, role)
+      candidates = resolve_candidate_addresses(conn_addr, conn_port, role)
+      last_error = nil
+
+      candidates.each do |address|
+        next unless address_allowed?(address, role)
+
+        begin
+          return connect_to_candidate(address, @open_timeout)
+        rescue SystemCallError, Net::OpenTimeout, Timeout::Error => error
+          last_error = error
+        end
+      end
+
+      if last_error.nil?
+        raise HTTPAddressNotAllowed,
+              "no candidate address was allowed for #{conn_addr}:#{conn_port}"
+      end
+      raise last_error
+    end
+    private :timeouted_connect_with_address_hooks
+
     def timeouted_connect(conn_addr, conn_port)
+      if @resolver || @address_gate
+        timeouted_connect_with_address_hooks(conn_addr, conn_port, :destination)
+      else
+        timeouted_connect_without_address_hooks(conn_addr, conn_port)
+      end
+    end
+    private :timeouted_connect
+
+    def timeouted_connect_without_address_hooks(conn_addr, conn_port)
       if TCP_SOCKET_NEW_HAS_OPEN_TIMEOUT
         TCPSocket.open(conn_addr, conn_port, @local_host, @local_port, open_timeout: @open_timeout)
       else
@@ -1798,6 +1885,117 @@ module Net   #:nodoc:
       end
     end
     private :timeouted_connect
+
+    if ADDRINFO_CONNECT_HAS_TIMEOUT
+      def connect_to_candidate(address, timeout)
+        if @local_host || @local_port
+          address.connect_from(@local_host, @local_port, timeout: timeout)
+        else
+          address.connect(timeout: timeout)
+        end
+      end
+    else
+      def connect_to_candidate(address, timeout)
+        if timeout
+          Timeout.timeout(timeout, Net::OpenTimeout) do
+            if @local_host || @local_port
+              address.connect_from(@local_host, @local_port)
+            else
+              address.connect
+            end
+          end
+        elsif @local_host || @local_port
+          address.connect_from(@local_host, @local_port)
+        else
+          address.connect
+        end
+      end
+    end
+    private :connect_to_candidate
+
+    def resolve_candidate_addresses(host, port, role)
+      if @resolver
+        addresses = resolve_with_configured_resolver(host, port, role)
+        Array(addresses).flat_map do |address|
+          if address.is_a?(Addrinfo)
+            candidate = trusted_candidate_address(address)
+            [validate_candidate_address(candidate, port)]
+          else
+            Addrinfo.getaddrinfo(address.to_s, port, nil, :STREAM, 0, Socket::AI_NUMERICHOST)
+          end
+        end
+      else
+        numeric = host.match?(Resolv::IPv4::Regex) || host.match?(Resolv::IPv6::Regex)
+        flags = numeric ? Socket::AI_NUMERICHOST : 0
+        Addrinfo.getaddrinfo(host, port, nil, :STREAM, 0, flags)
+      end
+    end
+    private :resolve_candidate_addresses
+
+    def resolve_with_configured_resolver(host, port, role)
+      if @resolver.respond_to?(:call)
+        invoke_connect_callback(@resolver, host, port, role: role)
+      elsif @resolver.respond_to?(:getaddresses)
+        @resolver.getaddresses(host)
+      else
+        raise NoMethodError, "resolver must respond to #call or #getaddresses"
+      end
+    end
+    private :resolve_with_configured_resolver
+
+    def validate_candidate_address(address, port)
+      unless address.ip? && address.socktype == Socket::SOCK_STREAM &&
+             address.protocol == Socket::IPPROTO_TCP && address.ip_port == port
+        raise ArgumentError, "resolver returned an invalid TCP address: #{address.inspect}"
+      end
+      address
+    end
+    private :validate_candidate_address
+
+    def trusted_candidate_address(address)
+      candidate = Addrinfo.new(
+        address.to_sockaddr.dup,
+        address.pfamily,
+        Socket::SOCK_STREAM,
+        Socket::IPPROTO_TCP
+      )
+      unless candidate.ip? && candidate.socktype == Socket::SOCK_STREAM &&
+             candidate.protocol == Socket::IPPROTO_TCP
+        raise ArgumentError, "resolver returned an invalid TCP address: #{address.inspect}"
+      end
+      candidate
+    end
+    private :trusted_candidate_address
+
+    def address_allowed?(address, role)
+      return true unless @address_gate
+      invoke_connect_callback(@address_gate, address, role: role)
+    end
+    private :address_allowed?
+
+    def invoke_connect_callback(callback, *arguments, role:)
+      positional, keywords = callback_parameters(callback)
+      positional_arguments = positional == Float::INFINITY ? arguments : arguments.first(positional)
+
+      if keywords.include?(:role)
+        callback.call(*positional_arguments, role: role)
+      else
+        callback.call(*positional_arguments)
+      end
+    end
+    private :invoke_connect_callback
+
+    def callback_parameters(callback)
+      parameters = callback.is_a?(Proc) ? callback.parameters : callback.method(:call).parameters
+      positional = parameters.count { |type, _| [:req, :opt].include?(type) }
+      positional = ::Float::INFINITY if parameters.any? { |type, _| type == :rest }
+      accepts_role_keyword = parameters.any? do |type, name|
+        type == :keyrest || ((type == :key || type == :keyreq) && name == :role)
+      end
+      keywords = accepts_role_keyword ? [:role] : []
+      [positional, keywords]
+    end
+    private :callback_parameters
 
     def on_connect
     end

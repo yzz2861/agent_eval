@@ -5,6 +5,31 @@ require 'net/http'
 require 'stringio'
 require_relative 'utils'
 
+module SocketConnectRecorder
+  def connect(address)
+    record_connect_attempt(address)
+    super
+  end
+
+  def connect_nonblock(address, exception: true)
+    record_connect_attempt(address)
+    super
+  end
+
+  private
+
+  def record_connect_attempt(address)
+    attempts = Thread.current[:net_http_connect_attempts]
+    return unless attempts && address.respond_to?(:ip_address)
+    if address.ip_address == Thread.current[:net_http_forbidden_connect]
+      raise "forbidden candidate was dialed: #{address.ip_address}"
+    end
+    attempts << address.ip_address unless attempts.last == address.ip_address
+  end
+end
+
+Socket.prepend(SocketConnectRecorder) unless Socket.ancestors.include?(SocketConnectRecorder)
+
 class TestNetHTTP < Test::Unit::TestCase
 
   def test_class_Proxy
@@ -84,6 +109,154 @@ class TestNetHTTP < Test::Unit::TestCase
     addr_port = http.__send__ :addr_port
     assert_equal '[2001:db8::1]:80', addr_port
 
+  end
+
+  def test_address_gate_allows_only_resolved_candidate
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.addr[1]
+    blocked = "192.0.2.1"
+    allowed = "127.0.0.1"
+    resolved = []
+    checked = []
+    peer_ip = nil
+
+    server_thread = Thread.new do
+      client = server.accept
+      peer_ip = client.peeraddr[3]
+      client.gets("\r\n\r\n")
+      client.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+      client.close
+    end
+
+    http = Net::HTTP.new("destination.example", port)
+    http.open_timeout = 5
+    http.resolver = lambda do |host, resolver_port, role:|
+      assert_equal "destination.example", host
+      assert_equal port, resolver_port
+      assert_equal :destination, role
+      resolved << host
+      [blocked, allowed]
+    end
+    http.address_gate = lambda do |address, role|
+      assert_kind_of Addrinfo, address
+      assert_equal :destination, role
+      checked << [address.ip_address, role]
+      address.ip_address == "127.0.0.1"
+    end
+
+    Thread.current[:net_http_connect_attempts] = []
+    Thread.current[:net_http_forbidden_connect] = blocked
+    begin
+      response = http.get("/")
+    ensure
+      attempted = Thread.current[:net_http_connect_attempts]
+      Thread.current[:net_http_connect_attempts] = nil
+      Thread.current[:net_http_forbidden_connect] = nil
+    end
+    server_thread.join
+    server.close
+
+    assert_equal "ok", response.body
+    assert_equal "127.0.0.1", peer_ip
+    assert_equal ["destination.example"], resolved
+    assert_equal [[blocked, :destination], ["127.0.0.1", :destination]], checked
+    assert_equal ["127.0.0.1"], attempted
+  end
+
+  def test_address_gate_rejects_candidate_without_dialing
+    http = Net::HTTP.new("destination.example", 80)
+    http.resolver = proc { ["192.0.2.1"] }
+    checked = []
+    http.address_gate = proc do |address|
+      assert_kind_of Addrinfo, address
+      checked << address.ip_address
+      false
+    end
+
+    assert_raise(Net::HTTPAddressNotAllowed) { http.start }
+    assert_equal ["192.0.2.1"], checked
+  end
+
+  def test_resolver_snapshots_addrinfo_before_gate
+    http = Net::HTTP.new("destination.example", 80)
+    http.open_timeout = nil
+    http.resolver = proc { [Addrinfo.tcp("192.0.2.1", 80)] }
+    checked = []
+    http.address_gate = proc do |address|
+      checked << [address.class, address.ip_address, address.ip_port]
+      false
+    end
+
+    assert_raise(Net::HTTPAddressNotAllowed) { http.start }
+    assert_equal [[Addrinfo, "192.0.2.1", 80]], checked
+  end
+
+  def test_resolver_rejects_addrinfo_with_mismatched_port
+    http = Net::HTTP.new("destination.example", 80)
+    http.resolver = proc { [Addrinfo.tcp("192.0.2.1", 81)] }
+
+    assert_raise(ArgumentError) { http.start }
+  end
+
+  def test_address_gate_accepts_one_argument_callback
+    checked = []
+    http = Net::HTTP.new("destination.example", 80)
+    http.resolver = proc { ["192.0.2.1"] }
+    http.address_gate = proc { |address| checked << address.ip_address; false }
+
+    assert_raise(Net::HTTPAddressNotAllowed) { http.start }
+    assert_equal ["192.0.2.1"], checked
+  end
+
+  def test_resolver_object_uses_getaddresses
+    resolver = Object.new
+    def resolver.getaddresses(host)
+      raise unless host == "destination.example"
+      ["192.0.2.1"]
+    end
+    http = Net::HTTP.new("destination.example", 80)
+    http.resolver = resolver
+    http.address_gate = proc { false }
+
+    assert_raise(Net::HTTPAddressNotAllowed) { http.start }
+  end
+
+  def test_address_gate_checks_proxy_not_destination
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.addr[1]
+    resolved = []
+    checked = []
+
+    server_thread = Thread.new do
+      client = server.accept
+      request = client.gets("\r\n\r\n")
+      client.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+      client.close
+      request
+    end
+
+    http = Net::HTTP.new("destination.example", port, "proxy.example", port)
+    http.open_timeout = 5
+    http.max_retries = 0
+    http.resolver = lambda do |host, resolver_port, role:|
+      resolved << [host, role]
+      assert_equal :proxy, role
+      [Addrinfo.tcp("127.0.0.1", resolver_port)]
+    end
+    http.address_gate = lambda do |address, role|
+      checked << [address.ip_address, role]
+      role == :proxy && address.ip_address == "127.0.0.1"
+    end
+
+    response = http.get("/")
+    request = server_thread.value
+    server.close
+
+    assert_equal "ok", response.body
+    assert_equal [["proxy.example", :proxy]], resolved
+    assert_equal [["127.0.0.1", :proxy]], checked
+    assert_match("GET http://destination.example:#{port}/ HTTP/1.1\r\n", request)
+    assert_match("Host: destination.example:#{port}\r\n", request)
   end
 
   def test_edit_path
@@ -1236,6 +1409,28 @@ class TestNetHTTPKeepAlive < Test::Unit::TestCase
       assert_kind_of Net::HTTPResponse, res
       assert_kind_of String, res.body
     }
+  end
+
+  def test_reconnect_rechecks_resolved_addresses
+    resolved = []
+    checked = []
+    http = Net::HTTP.new("destination.example", config("port"))
+    http.resolver = lambda do |host, port, role:|
+      resolved << [host, role]
+      [Addrinfo.tcp("127.0.0.1", port)]
+    end
+    http.address_gate = lambda do |address, role|
+      checked << [address.ip_address, role]
+      true
+    end
+
+    http.get("/")
+    http.instance_variable_get(:@socket).close
+    http.get("/")
+    http.finish
+
+    assert_equal [["destination.example", :destination]] * 2, resolved
+    assert_equal [["127.0.0.1", :destination]] * 2, checked
   end
 
   def test_server_closed_connection_auto_reconnect
