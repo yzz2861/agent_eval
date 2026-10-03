@@ -1,3 +1,17 @@
+## Unreleased
+
+- Add support for the `SameSite` cookie attribute.  It is parsed from
+  `Set-Cookie` headers, persisted via YAML/`to_h`, and emitted by
+  `HTTP::Cookie#set_cookie_value`.  `SameSite=None` cookies without
+  the `Secure` attribute are rejected.
+- Add `HTTP::Cookie.schemeful_site` and `HTTP::Cookie::RequestContext`,
+  and `HTTP::CookieJar#cookies_for` / `#each_for` which select cookies
+  for a request described by a top-level site, request method,
+  top-level navigation flag and redirect chain, enforcing `SameSite`
+  with schemeful-site comparison.  The URI-only `HTTP::CookieJar#cookies`
+  / `#each` remain in a compatibility mode that does not enforce
+  `SameSite`.
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

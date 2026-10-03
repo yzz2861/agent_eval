@@ -114,6 +114,27 @@ class HTTP::CookieJar
     each(url).sort
   end
 
+  # Gets an array of cookies that should be sent with a request to
+  # `uri` in the given request context, sorted by the path and
+  # creation time.  Unlike #cookies, the SameSite attribute of each
+  # cookie is enforced.
+  #
+  # The request context may be given either as an
+  # HTTP::Cookie::RequestContext or as keyword arguments for
+  # HTTP::Cookie::RequestContext.new, namely `:method`,
+  # `:top_level_site` (mandatory), `:top_level_navigation` and
+  # `:redirect_chain`.  For example:
+  #
+  #     jar.cookies_for('https://example.com/form',
+  #       :method => 'POST',
+  #       :top_level_site => 'https://example.com/',
+  #       :top_level_navigation => true)
+  #
+  # The access time of each cookie selected is updated.
+  def cookies_for(uri, context = nil, **kwargs)
+    each_for(uri, context, **kwargs).sort
+  end
+
   # Tests if the jar is empty.  If `url` is given, tests if there is
   # no cookie for the URL.
   def empty?(url = nil)
@@ -133,6 +154,11 @@ class HTTP::CookieJar
   # should be good to send to the given URI,
   # i.e. cookie.valid_for_uri?(uri) evaluates to true.
   #
+  # Note that this method (and #cookies) runs in a compatibility
+  # mode: since no request context is available, the SameSite
+  # attribute is not enforced at all rather than guessed.  Use
+  # #each_for / #cookies_for to get SameSite enforcement.
+  #
   # If (and only if) the `uri` option is given, last access time of
   # each cookie is updated to the current time.
   def each(uri = nil, &block) # :yield: cookie
@@ -147,6 +173,30 @@ class HTTP::CookieJar
     self
   end
   include Enumerable
+
+  # Iterates over cookies that should be sent with a request to
+  # `uri` in the given request context, in no particular order.
+  # Every cookie yielded satisfies
+  # `cookie.valid_for_request?(uri, context)`, which enforces the
+  # SameSite attribute.
+  #
+  # See #cookies_for for how the request context is specified.
+  #
+  # The access time of each cookie yielded is updated to the current
+  # time.
+  def each_for(uri, context = nil, **kwargs) # :yield: cookie
+    block_given? or return enum_for(__method__, uri, context, **kwargs)
+
+    context ||= HTTP::Cookie::RequestContext.new(**kwargs)
+
+    uri = HTTP::Cookie::URIParser.parse(uri)
+    return self unless URI::HTTP === uri && uri.host
+
+    @store.each(uri) { |cookie|
+      yield cookie if cookie.valid_for_request?(uri, context)
+    }
+    self
+  end
 
   # Parses a Set-Cookie field value `set_cookie` assuming that it is
   # sent from a source URL/URI `origin`, and adds the cookies parsed

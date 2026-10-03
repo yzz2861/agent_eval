@@ -30,11 +30,14 @@ class HTTP::Cookie
   PERSISTENT_PROPERTIES = %w[
     name        value
     domain      for_domain  path
-    secure      httponly
+    secure      httponly  samesite
     expires     max_age
     created_at  accessed_at
   ]
   # :startdoc:
+
+  # SameSite attribute values supported, in normalized (symbol) form.
+  SAMESITE_VALUES = %i[strict lax none].freeze
 
   # The cookie name.  It may not be nil or empty.
   #
@@ -133,6 +136,7 @@ class HTTP::Cookie
   def initialize(*args)
     @name = @origin = @domain = @path =
       @expires = @max_age = nil
+    @samesite = nil
     @for_domain = @secure = @httponly = false
     @session = true
     @created_at = @accessed_at = Time.now
@@ -182,6 +186,8 @@ class HTTP::Cookie
         @httponly = val
       when :secure, :secure?
         @secure = val
+      when :samesite, :samesite?
+        self.samesite = val
       when Symbol
         setter = :"#{key}="
         if respond_to?(setter)
@@ -312,6 +318,8 @@ class HTTP::Cookie
                 cookie.secure = avalue
               when 'httponly'
                 cookie.httponly = avalue
+              when 'samesite'
+                cookie.samesite = avalue
               end
             rescue => e
               logger.warn("Couldn't parse #{aname} '#{avalue}': #{e}") if logger
@@ -319,6 +327,12 @@ class HTTP::Cookie
           }
 
           cookie.origin = origin
+
+          if cookie.samesite_none? && !cookie.secure?
+            # RFC 6265bis: SameSite=None cookies must be Secure.
+            logger.warn("SameSite=None cookie without Secure rejected: #{name}") if logger
+            next
+          end
 
           cookie.acceptable? or next
 
@@ -344,6 +358,27 @@ class HTTP::Cookie
           hash[name] ||= value
         }
       }
+    end
+
+    # Computes the schemeful site of a given URI/URL, that is the
+    # combination of its scheme and its registrable domain (eTLD+1),
+    # or its host when it has no registrable domain (e.g. an IP
+    # address).  Two URIs are considered same-site when their
+    # schemeful sites are equal, which notably makes the scheme part
+    # of the comparison: http://example.com/ and
+    # https://example.com/ are _not_ same-site.
+    #
+    # Returns a string of the form "scheme://domain", e.g.
+    # "https://example.com".
+    def schemeful_site(uri)
+      uri = HTTP::Cookie::URIParser.parse(uri)
+      scheme = uri.scheme
+      host = uri.host
+      if scheme.nil? || host.nil?
+        raise ArgumentError, "cannot determine the schemeful site of #{uri.inspect}"
+      end
+      domain = DomainName.new(host)
+      "#{scheme.downcase}://#{domain.domain || domain.hostname}"
     end
   end
 
@@ -479,6 +514,48 @@ class HTTP::Cookie
   attr_accessor :httponly
   alias httponly? httponly
 
+  # The SameSite attribute value as a symbol: +:strict+, +:lax+ or
+  # +:none+, or nil if the cookie has no SameSite attribute.
+  #
+  # The setter accepts a symbol or a string-like, case insensitive,
+  # and normalizes it to one of the symbols above.  Assigning nil
+  # clears the attribute.  Any other value raises ArgumentError.
+  #
+  # Note that a cookie with SameSite=None is only acceptable when it
+  # is also Secure (see #acceptable?).
+  attr_reader :samesite
+
+  # See #samesite.
+  def samesite= value
+    case value
+    when nil
+      @samesite = nil
+    when Symbol, String
+      normalized = value.to_s.downcase.to_sym
+      unless SAMESITE_VALUES.include?(normalized)
+        raise ArgumentError, "invalid SameSite value: #{value.inspect}"
+      end
+      @samesite = normalized
+    else
+      raise TypeError, "#{value.class} is not a String or Symbol"
+    end
+  end
+
+  # Tests if the SameSite attribute value is Strict.
+  def samesite_strict?
+    @samesite == :strict
+  end
+
+  # Tests if the SameSite attribute value is Lax.
+  def samesite_lax?
+    @samesite == :lax
+  end
+
+  # Tests if the SameSite attribute value is None.
+  def samesite_none?
+    @samesite == :none
+  end
+
   # The session flag. (the opposite of persistent-flag)
   #
   # A cookie with this flag on should be hidden from a client script.
@@ -577,6 +654,9 @@ class HTTP::Cookie
       raise "domain is missing"
     when @path.nil?
       raise "path is missing"
+    when samesite_none? && !secure?
+      # RFC 6265bis: a SameSite=None cookie must also be Secure.
+      false
     when @origin.nil?
       true
     else
@@ -594,6 +674,36 @@ class HTTP::Cookie
     # RFC 6265 5.4
     return false if secure? && !(URI::HTTPS === uri)
     acceptable_from_uri?(uri) && HTTP::Cookie.path_match?(@path, uri.path)
+  end
+
+  # Tests if it is OK to send this cookie to a given `uri` in the
+  # request context described by `context`, an
+  # HTTP::Cookie::RequestContext.  In addition to the checks
+  # performed by #valid_for_uri?, the SameSite attribute is
+  # enforced:
+  #
+  # Strict
+  # : The cookie is only sent when the request is same-site, i.e.
+  #   the schemeful site of `uri` matches the top-level site and
+  #   every site in the redirect chain.
+  #
+  # Lax
+  # : The cookie is sent when the request is same-site, or when it
+  #   is a top-level navigation with a safe method (GET or HEAD).
+  #
+  # None or unset
+  # : No SameSite restriction applies.
+  def valid_for_request?(uri, context)
+    return false unless valid_for_uri?(uri)
+    case @samesite
+    when :strict
+      context.same_site?(uri)
+    when :lax
+      context.same_site?(uri) ||
+        (context.top_level_navigation? && context.safe_method?)
+    else
+      true
+    end
   end
 
   # Returns a string for use in the Cookie header, i.e. `name=value`
@@ -633,6 +743,9 @@ class HTTP::Cookie
     end
     if @secure
       string << "; Secure"
+    end
+    if @samesite
+      string << "; SameSite=#{@samesite.to_s.capitalize}"
     end
     string
   end
@@ -693,3 +806,4 @@ class HTTP::Cookie
     self.expires = expires if self.max_age.nil?
   end
 end
+require 'http/cookie/request_context'

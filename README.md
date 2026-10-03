@@ -121,6 +121,30 @@ Or install it yourself as:
     header['Set-Cookie'] = cookie2.set_cookie_value
 
 
+    ########################
+    # SameSite example
+    ########################
+
+    # The SameSite attribute is parsed, persisted and emitted like any
+    # other attribute.  A SameSite=None cookie without Secure is
+    # rejected on parse and on HTTP::CookieJar#add.
+    jar.parse('sid=1; SameSite=Lax; Path=/', uri)
+
+    # To enforce SameSite when selecting cookies, describe the request
+    # with HTTP::CookieJar#cookies_for.  The top-level site is compared
+    # as a schemeful site (scheme + registrable domain), and the
+    # redirect chain is taken into account.
+    cookies = jar.cookies_for(uri,
+      method: 'GET',
+      top_level_site: 'https://example.org/',
+      top_level_navigation: true,
+      redirect_chain: [])
+    header['Cookie'] = HTTP::Cookie.cookie_value(cookies)
+
+    # HTTP::CookieJar#cookies(uri) remains a compatibility mode that
+    # does not enforce SameSite rather than guessing a context.
+
+
 ## Incompatibilities with Mechanize::Cookie/CookieJar
 
 There are several incompatibilities between

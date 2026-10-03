@@ -1185,6 +1185,7 @@ class TestHTTPCookie < Test::Unit::TestCase
         name: 'Foo',
         path: '/',
         secure: cookie.secure?,
+        samesite: nil,
         value: 'Bar',
       }
 
@@ -1204,6 +1205,7 @@ class TestHTTPCookie < Test::Unit::TestCase
         name: 'Foo',
         path: '/',
         secure: cookie.secure?,
+        samesite: nil,
         value: 'Bar',
       }
 
