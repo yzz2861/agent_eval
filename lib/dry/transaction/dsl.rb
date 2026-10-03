@@ -28,7 +28,7 @@ module Dry
       def define_dsl
         module_exec(@step_adapters) do |step_adapters|
           step_adapters.each do |adapter_name, adapter|
-            define_method(adapter_name) do |step_name, with: nil, **options|
+            define_method(adapter_name) do |step_name, with: nil, resumable: false, **options|
               operation_name = with
 
               steps << Step.new(
@@ -36,7 +36,8 @@ module Dry
                 name: step_name,
                 operation_name: operation_name,
                 operation: nil, # operations are resolved only when transactions are instantiated
-                options: options
+                options: options,
+                resumable: resumable
               )
             end
           end

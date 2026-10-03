@@ -22,12 +22,14 @@ module Dry
       attr_reader :operation_name
       attr_reader :call_args
 
-      def initialize(adapter:, name:, operation_name:, options:, operation: nil, call_args: [])
+      def initialize(adapter:, name:, operation_name:, options:, operation: nil, call_args: [],
+                     resumable: false)
         @adapter = StepAdapter[adapter, operation,
           {**options, step_name: name, operation_name: operation_name}]
         @name = name
         @operation_name = operation_name
         @call_args = call_args
+        @resumable = resumable
       end
       # rubocop:enable Metrics/ParameterLists
 
@@ -43,8 +45,15 @@ module Dry
           operation_name: operation_name,
           operation: new_operation,
           options: adapter.options,
-          call_args: new_call_args
+          call_args: new_call_args,
+          resumable: resumable?
         )
+      end
+
+      # Whether a checkpoint may be formed before this step, allowing the
+      # transaction to be resumed from it after the process exits.
+      def resumable?
+        @resumable
       end
 
       def call(input, continue = RETURN)

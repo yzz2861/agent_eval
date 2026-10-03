@@ -26,16 +26,81 @@ module Dry
       def call(input = nil, &block)
         assert_step_arity
 
-        result = stack.(Success(input))
+        match_result(stack.(Success(input)), &block)
+      end
 
-        if block
-          ResultMatcher.(result, &block)
-        else
-          result.or { |step_failure|
-            # Unwrap the value from the StepFailure and return it directly
-            Failure(step_failure.value)
-          }
+      # Runs the transaction, emitting checkpoints for resumable steps.
+      #
+      # @param input the transaction input
+      # @param on_checkpoint [#call] callback invoked with a Checkpoint
+      #   immediately before each resumable step runs. The caller is
+      #   responsible for persisting the checkpoint's plain data
+      #   (Checkpoint#to_h) so the transaction can later be resumed. On
+      #   overall success the caller should discard any stored checkpoint.
+      def call_with_checkpoints(input = nil, on_checkpoint:, &block)
+        assert_step_arity
+
+        match_result(
+          run_steps(steps, Success(input), on_checkpoint: on_checkpoint),
+          &block
+        )
+      end
+
+      # Resumes a transaction from a previously persisted checkpoint.
+      #
+      # The checkpoint's definition version and input integrity are verified
+      # before anything runs, and the step it names must still exist and be
+      # declared resumable --- the resume position is never guessed from a
+      # step's position in the definition.
+      #
+      # @param checkpoint_data [Hash] plain data previously obtained from
+      #   Checkpoint#to_h
+      # @param on_checkpoint [#call, nil] optional callback for checkpoints
+      #   formed while running the remaining steps
+      #
+      # @return [ResumeResult] wraps the transaction result. The resumed-from
+      #   step was never confirmed complete and may already have produced
+      #   external side effects, so the caller must adjudicate the outcome
+      #   (see ResumeResult#requires_adjudication?).
+      #
+      # @raise [CorruptCheckpointError] if the data is malformed or tampered
+      # @raise [DefinitionVersionMismatchError] if the transaction definition
+      #   changed since the checkpoint was recorded
+      # @raise [UnknownCheckpointStepError] if the named step does not exist
+      # @raise [NonResumableStepError] if the named step is not resumable
+      def resume(checkpoint_data, on_checkpoint: nil)
+        checkpoint = Checkpoint.from_h(checkpoint_data)
+
+        unless checkpoint.version == definition_version
+          raise DefinitionVersionMismatchError
         end
+
+        resume_index = steps.index { |step| step.name == checkpoint.step_name }
+        raise UnknownCheckpointStepError, checkpoint.step_name unless resume_index
+
+        resume_step = steps[resume_index]
+        raise NonResumableStepError, checkpoint.step_name unless resume_step.resumable?
+
+        assert_step_arity
+
+        result = run_steps(steps[resume_index..], Success(checkpoint.input),
+          on_checkpoint: on_checkpoint)
+
+        ResumeResult.new(
+          result.or { |step_failure| Failure(step_failure.value) },
+          resumed_step: resume_step.name
+        )
+      end
+
+      # A fingerprint of the transaction definition (step names, operation
+      # names and resumable declarations). Recorded in every checkpoint and
+      # verified on resume.
+      def definition_version
+        @definition_version ||= Digest::SHA256.hexdigest(
+          steps.map { |step|
+            "#{step.name}:#{step.operation_name}:#{step.resumable?}"
+          }.join("|")
+        )[0, 16]
       end
 
       def subscribe(listeners)
@@ -67,6 +132,45 @@ module Dry
       end
 
       private
+
+      def match_result(result, &block)
+        if block
+          ResultMatcher.(result, &block)
+        else
+          result.or { |step_failure|
+            # Unwrap the value from the StepFailure and return it directly
+            Failure(step_failure.value)
+          }
+        end
+      end
+
+      def run_steps(steps, input, on_checkpoint: nil)
+        if on_checkpoint
+          Stack.new(with_checkpoints(steps, on_checkpoint)).(input)
+        elsif steps.equal?(self.steps)
+          stack.(input)
+        else
+          Stack.new(steps).(input)
+        end
+      end
+
+      # Emits a checkpoint on entry to each resumable step (except the first
+      # step of the run, whose input the caller already holds).
+      def with_checkpoints(steps, on_checkpoint)
+        steps.each_with_index.map { |step, index|
+          if index > 0 && step.resumable?
+            CheckpointEmitter.new(step, ->(value) {
+              on_checkpoint.(Checkpoint.new(
+                step_name: step.name,
+                version: definition_version,
+                input: value
+              ))
+            })
+          else
+            step
+          end
+        }
+      end
 
       def respond_to_missing?(name, _include_private = false)
         steps.any? { |step| step.name == name }
