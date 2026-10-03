@@ -627,7 +627,18 @@ RSpec.describe JWT do
     let(:key_finder) { instance_double('::JWT::X5cKeyFinder') }
 
     before do
-      expect(JWT::X5cKeyFinder).to receive(:new).with(root_certificates, nil).and_return(key_finder)
+      expect(JWT::X5cKeyFinder).to receive(:new).with(
+        root_certificates,
+        nil,
+        eku: nil,
+        allow_missing_eku: nil,
+        allow_mismatched_eku: nil,
+        digital_signature: nil,
+        allow_missing_key_usage: nil,
+        allow_mismatched_key_usage: nil,
+        max_chain_depth: nil,
+        verification_time: nil
+      ).and_return(key_finder)
       expect(key_finder).to receive(:from).and_return(rsa_public)
     end
     let(:encoded_token) { JWT.encode(payload, rsa_private, alg) }

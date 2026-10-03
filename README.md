@@ -639,11 +639,31 @@ crls = crl_uris.map do |uri|
 end
 
 begin
-  JWT.decode(token, nil, true, { x5c: { root_certificates: root_certificates, crls: crls } })
+  JWT.decode(token, nil, true, {
+    x5c: {
+      root_certificates: root_certificates,
+      crls: crls,
+      eku: ['1.3.6.1.5.5.7.3.2'], # clientAuth
+      digital_signature: true,
+      max_chain_depth: 2,
+      verification_time: Time.now
+    }
+  })
 rescue JWT::TokenError
   # Handle error, e.g. x5c header certificate revoked or expired
 end
 ```
+
+The `x5c` header only supplies untrusted certificates, so the signing certificate must chain to one of the `root_certificates` supplied by the caller. A root certificate that merely appears in the header is not trusted.
+
+Leaf certificate policies are independently configurable:
+
+- `eku` requires one of the given extended key usage OIDs (short names such as `clientAuth` are accepted).
+- `allow_missing_eku` allows a leaf without an EKU extension, while `allow_mismatched_eku` allows an extension that does not contain an accepted OID.
+- `digital_signature: true` requires the leaf key usage extension to permit digital signatures.
+- `allow_missing_key_usage` and `allow_mismatched_key_usage` configure missing and non-matching key usage extensions separately.
+- `max_chain_depth` limits the number of intermediate certificates; a trusted root supplied in the header is not counted.
+- `verification_time` (alias `time`) makes certificate and CRL validation deterministic.
 
 ## JSON Web Key (JWK)
 

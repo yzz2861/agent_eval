@@ -34,6 +34,36 @@ module JWT
   # verification cannot be used, as opposed to a signature that does not match.
   class VerificationKeyError < VerificationError; end
 
+  # The CertificateError class is raised when certificate processing fails.
+  class CertificateError < VerificationError; end
+
+  # Raised when an X.509 certificate chain is structurally invalid.
+  class InvalidCertificateChainError < CertificateError; end
+
+  # Raised when X.509 certificates are not ordered from leaf to issuer.
+  class CertificateChainOrderError < InvalidCertificateChainError; end
+
+  # Raised when an X.509 certificate chain contains the same certificate twice.
+  class DuplicateCertificateError < InvalidCertificateChainError; end
+
+  # Raised when an intermediate certificate is outside its validity period.
+  class ExpiredIntermediateCertificateError < CertificateError; end
+
+  # Raised when a certificate contains an unsupported critical extension.
+  class UnsupportedCriticalExtensionError < CertificateError; end
+
+  # Raised when a leaf certificate does not contain the required EKU extension.
+  class MissingEkuError < CertificateError; end
+
+  # Raised when a leaf certificate EKU extension does not match the required EKU.
+  class InvalidEkuError < CertificateError; end
+
+  # Raised when a leaf certificate does not contain a key usage extension.
+  class MissingKeyUsageError < CertificateError; end
+
+  # Raised when a leaf certificate key usage does not allow digital signature.
+  class InvalidKeyUsageError < CertificateError; end
+
   # The IncorrectAlgorithm class is raised when the JWT algorithm is incorrect.
   class IncorrectAlgorithm < SignatureError; end
 

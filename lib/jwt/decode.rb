@@ -75,7 +75,18 @@ module JWT
 
       return unless (x5c_options = @options[:x5c])
 
-      @key = X5cKeyFinder.new(x5c_options[:root_certificates], x5c_options[:crls]).from(token.header['x5c'])
+      @key = X5cKeyFinder.new(
+        x5c_options[:root_certificates],
+        x5c_options[:crls],
+        eku: x5c_options[:eku],
+        allow_missing_eku: x5c_options[:allow_missing_eku],
+        allow_mismatched_eku: x5c_options[:allow_mismatched_eku],
+        digital_signature: x5c_options[:digital_signature],
+        allow_missing_key_usage: x5c_options[:allow_missing_key_usage],
+        allow_mismatched_key_usage: x5c_options[:allow_mismatched_key_usage],
+        max_chain_depth: x5c_options[:max_chain_depth],
+        verification_time: x5c_options[:verification_time].nil? ? x5c_options[:time] : x5c_options[:verification_time]
+      ).from(token.header['x5c'])
     end
 
     def allowed_and_valid_algorithms

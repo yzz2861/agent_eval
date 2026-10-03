@@ -6,6 +6,7 @@
 
 **Features:**
 
+- Add configurable leaf EKU, digital signature key usage, maximum chain depth, and fixed verification time policies for x5c certificate chain verification
 - Your contribution here
 
 **Fixes and enhancements:**
