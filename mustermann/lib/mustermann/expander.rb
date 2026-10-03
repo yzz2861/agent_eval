@@ -25,7 +25,7 @@ module Mustermann
       raise ArgumentError, "Illegal value %p for additional_values" % additional_values unless ADDITIONAL_VALUES.include? additional_values
 
       @patterns          = []
-      @api_expander      = AST::Expander.new
+      @api_expander      = AST::Expander.new(normalization: options[:normalization])
       @additional_values = additional_values
       @options           = Mustermann.dedup(options)
       @caster            = Caster.new

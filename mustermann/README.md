@@ -775,6 +775,58 @@ Mustermann.new('a b', uri_decode: false) === 'a b'   # => true
 Mustermann.new('a b', uri_decode: false) === 'a%20b' # => false
 ```
 
+<a name="-available-options--normalization"></a>
+### `normalization`
+
+Supported by all pattern types.
+Default value: `nil` (disabled)
+
+Different clients send the same visual path in different Unicode forms: some use a
+precomposed character, others a base character followed by combining marks (NFC vs NFD).
+With `normalization:` set to a normalization form, Mustermann treats these forms as
+equivalent when matching.
+
+``` ruby
+nfd = "e\u0301" # e + combining acute accent
+nfc = "\u00e9" # precomposed é
+
+pattern = Mustermann.new("/caf#{nfc}/:id", normalization: :nfc)
+pattern === "/caf#{nfc}/42" # => true
+pattern === "/caf#{nfd}/42" # => true
+
+# percent-encoded multi-byte characters are covered as well
+pattern === "/caf%C3%A9/42"   # => true (NFC encoded)
+pattern === "/cafe%CC%81/42" # => true (NFD encoded)
+```
+
+Only the matching is normalized — the original string and captures are preserved:
+
+``` ruby
+match = pattern.match("/cafe%CC%81/42")
+match.string                    # => "/cafe%CC%81/42" (exactly as sent)
+match.params                    # => {"id" => "42"}
+match.normalized_params         # captures in the chosen normalization form
+```
+
+Reverse expansion produces the canonical form:
+
+``` ruby
+pattern.expand(id: 42) # => "/caf%C3%A9/42"
+Mustermann::Expander.new("/users/:name", normalization: :nfc).
+  expand(name: nfd)     # => "/users/%C3%A9"
+```
+
+Patterns are still matched case-sensitively, and regular expression syntax is not
+touched. Strings with invalid (or unsupported) encoding raise a `Mustermann::NormalizeError`
+instead of silently failing to match:
+
+``` ruby
+pattern.match("/%FF") # raises Mustermann::NormalizeError
+```
+
+The only supported form at the moment is `:nfc`. Passing `nil` or `false` disables
+normalization; unknown forms raise an `ArgumentError`.
+
 <a name="-available-options--ignore_unknown_options"></a>
 ### `ignore_unknown_options`
 

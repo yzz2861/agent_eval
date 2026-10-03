@@ -11,8 +11,25 @@ module Mustermann
     class Expander < Translator
       raises ExpandError
 
+      # @param normalization [Symbol, nil] Unicode normalization form to apply
+      #   to literal segments and expansion values (e.g. +:nfc+)
+      def initialize(normalization: nil)
+        @normalization = normalization
+        super()
+      end
+
       translate Array do |*args, **options|
-        inject(t.pattern) do |pattern, element|
+        # Group adjacent literal characters forming a Unicode cluster (e.g.
+        # "e" + U+0301 in an NFD pattern) so they escape and normalize together.
+        grouped = each_with_object([]) do |element, list|
+          if element.is_a?(:char) && list.last&.is_a?(Node) && list.last.type == :char &&
+             Mustermann::Unicode.attaches?(list.last.payload, element.payload)
+            list[-1] = Node[:char].new(list.last.payload + element.payload)
+          else
+            list << element
+          end
+        end
+        grouped.inject(t.pattern) do |pattern, element|
           t.add_to(pattern, t(element, *args, **options))
         end
       end
@@ -124,6 +141,8 @@ module Mustermann
       # @!visibility private
       def escape(string, *args, **options)
         return super unless string.respond_to?(:=~)
+
+        string = Mustermann::Unicode.normalize(string, @normalization) if @normalization && string.is_a?(String)
 
         # URI::Parser is pretty slow, let's not send every string to it, even if it's unnecessary
         string =~ /\A\w*\Z/ ? string : super

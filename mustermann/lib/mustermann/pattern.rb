@@ -59,8 +59,8 @@ module Mustermann
       @map.fetch([string, options]) { super(string, **options) { options } }
     end
 
-    supported_options :uri_decode, :ignore_unknown_options
-    attr_reader :uri_decode
+    supported_options :uri_decode, :ignore_unknown_options, :normalization
+    attr_reader :uri_decode, :normalization
 
     # options hash passed to new (with unsupported options removed)
     # @!visibility private
@@ -72,10 +72,65 @@ module Mustermann
     # @raise [Mustermann::Error] if the pattern can't be generated from the string
     # @see file:README.md#Types_and_Options "Types and Options" in the README
     # @see Mustermann.new
-    def initialize(string, uri_decode: true, **options)
-      @uri_decode = uri_decode
-      @string     = Mustermann.dedup(string)
-      @options    = Mustermann.dedup(yield) if block_given?
+    def initialize(string, uri_decode: true, normalization: nil, **options)
+      normalization = normalize_form(normalization)
+      @uri_decode    = uri_decode
+      @normalization = normalization
+      @string        = Mustermann.dedup(string)
+      @options       = Mustermann.dedup(yield) if block_given?
+    end
+
+    # @return [Boolean] whether Unicode normalization is applied when matching
+    def normalize?
+      !!@normalization
+    end
+
+    # Normalizes a capture value (or an array of capture values) according to
+    # the pattern's Unicode normalization settings. URI decoding is applied
+    # first since captures may contain percent-encoded bytes.
+    #
+    # @param value [String, Array, nil] the captured value
+    # @return [String, Array, nil] the normalized value
+    # @raise [Mustermann::NormalizeError] if the value is not validly encoded
+    # @api private
+    def normalize_value(value)
+      return value unless value
+      if value.is_a? Array
+        value.map { |entry| normalize_value(entry) }
+      elsif value.is_a?(String)
+        Mustermann::Unicode.normalize(unescape(value), @normalization)
+      else
+        value
+      end
+    end
+
+    # Normalizes and validates a string before it is matched against.
+    # When {#normalize?} is false the string is returned untouched.
+    #
+    # @param [String] string the string to validate
+    # @return [String] the original string
+    # @raise [Mustermann::NormalizeError] if the string cannot be normalized
+    #   (e.g. because it contains invalid percent-encoded bytes)
+    # @!visibility private
+    def check_encoding(string)
+      return string unless @normalization
+      # Fast path: valid raw UTF-8 strings without percent signs cannot hide
+      # invalid percent-decoded bytes; normalizing them cannot raise.
+      return string if string.encoding == Encoding::UTF_8 && string.valid_encoding? && !string.include?('%')
+      decoded = @uri_decode ? unescape(string) : string
+      return string if decoded.valid_encoding? && decoded.encoding == Encoding::UTF_8
+      Mustermann::Unicode.normalize(decoded, @normalization)
+    end
+
+    # @param [Symbol, nil, false] form requested normalization form
+    # @return [Symbol, nil] the normalized form, or nil if normalization is disabled
+    # @raise [ArgumentError] if the form is not supported
+    def normalize_form(form)
+      return nil if form.nil? || form == false
+      form = form.to_sym
+      return form if Mustermann::Unicode.supported?(form)
+      raise ArgumentError, "unsupported Unicode normalization form %p (supported forms: %s)" %
+        [form, Mustermann::Unicode::SUPPORTED_FORMS.map(&:inspect).join(", ")]
     end
 
     # @return [String] the string representation of the pattern
@@ -191,6 +246,22 @@ module Mustermann
     # @param [String] string the string to match against
     # @return [Hash{String: String, Array<String>}, nil] Sinatra style params if pattern matches.
     def params(string = nil) = match(string)&.params
+
+    # Like {#params}, but values are Unicode normalized (e.g. NFC) instead of
+    # being returned in the exact form they appeared in the matched string.
+    #
+    # @example
+    #   pattern = Mustermann.new('/:name', normalization: :nfc)
+    #   match = pattern.match("/e\u0301") # NFD form of é
+    #   match.params['name']             # => "e\u0301" (as sent)
+    #   pattern.normalized_params("/e\u0301")['name'] # => "\u00e9" (NFC form)
+    #
+    # @param [String] string the string to match against
+    # @return [Hash{String: String, Array<String>}, nil]
+    # @raise [Mustermann::NormalizeError] if the string contains invalid encoding
+    def normalized_params(string = nil)
+      match(string)&.normalized_params
+    end
 
     # @note This method is only implemented by certain subclasses.
     #
@@ -387,7 +458,7 @@ module Mustermann
       !params.any? { |k, v| v.is_a?(Array) || always_array?(k) || (v.respond_to?(:include?) && v.include?('%')) }
     end
 
-    private :unescape, :map_param, :respond_to_special?
+    private :unescape, :map_param, :respond_to_special?, :normalize_form, :check_encoding
     private_constant :ALWAYS_ARRAY
   end
 end

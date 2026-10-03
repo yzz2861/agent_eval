@@ -62,21 +62,40 @@ module Mustermann
     # @see (see Mustermann::Pattern#match)
     def match(string) = cache_match(@match_cache, @regexp, string)
 
+    # Defined explicitly (instead of delegating to the regexp) so that strings
+    # which cannot be Unicode normalized raise a clear error instead of
+    # silently failing to match.
+    # @param (see Mustermann::Pattern#===)
+    # @return (see Mustermann::Pattern#===)
+    def ===(string)
+      check_encoding(string)
+      @regexp === string
+    end
+
+    # @param (see Mustermann::Pattern#=~)
+    # @return (see Mustermann::Pattern#=~)
+    def =~(string)
+      check_encoding(string)
+      @regexp =~ string ? 0 : nil
+    end
+
     # Extracts params directly from the regexp without allocating a Match object or
     # populating the match cache — significant GC savings when called in hot loops.
     # @param (see Mustermann::Pattern#params)
     # @return (see Mustermann::Pattern#params)
     def params(string = nil)
+      check_encoding(string)
       return unless md = @regexp.match(string)
       build_params(md)
     end
 
     extend Forwardable
-    def_delegators :regexp, :===, :=~, :names
+    def_delegators :regexp, :names
 
     private
 
     def cache_match(cache, regexp, string)
+      check_encoding(string)
       if cache
         return cache[string] if cache.key?(string)
         cache[string] = build_match(regexp, string)

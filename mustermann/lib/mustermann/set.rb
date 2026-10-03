@@ -437,7 +437,9 @@ module Mustermann
     end
 
     def build_matcher
-      factory = use_trie? ? Trie : Linear
+      # The trie walks raw static characters and therefore cannot see Unicode
+      # normalization variants; fall back to linear matching when enabled.
+      factory = (use_trie? && !@options[:normalization]) ? Trie : Linear
       matcher = factory.new(self, @mapping.keys)
       matcher = StrictOrder.new(matcher) if strict_order?
       matcher = Cache.new(matcher) if use_cache?

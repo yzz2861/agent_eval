@@ -19,6 +19,19 @@ module Mustermann
     # @return [Hash] the named captures hash, usually identical to {#params}
     attr_reader :named_captures
 
+    # Captures normalized via the pattern's Unicode normalization settings.
+    # Computed lazily since normal behavior keeps the original captures untouched.
+    # @return [Hash, nil]
+    def normalized_params
+      return params unless pattern.respond_to?(:normalize?) && pattern.normalize?
+      @normalized_params ||= params.transform_values { |value| pattern.normalize_value(value) }
+    end
+
+    # @return [Array] captures normalized via the pattern's Unicode normalization settings
+    def normalized_captures
+      normalized_params.values
+    end
+
     # @return [String] the post match string
     attr_reader :post_match
 

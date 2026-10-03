@@ -6,6 +6,10 @@ Mustermann follows [Semantic Versioning 2.0](http://semver.org/). Anything docum
 
 ### Mustermann 4.0.1
 
+#### New features
+
+* Added a per-pattern `normalization:` option for Unicode normalization-insensitive matching. `normalization: :nfc` makes composed and decomposed path forms (e.g. `"\u00e9"` and `"e\u0301"`, including their percent-encoded variants) match the same route, while the original string and captures remain available. Use `Match#normalized_params` (or `Pattern#normalized_params`) for normalized capture values; expansion produces the canonical form. Invalid encodings raise `Mustermann::NormalizeError`.
+
 #### Performance improvements
 
 * Reduce memory usage by deduplicating internal data structures. This is especially effective when using large `Mustermann::Set` objects. [#159](https://github.com/sinatra/mustermann/issues/159) [#160](https://github.com/sinatra/mustermann/pull/160) [@byroot](https://github.com/byroot)

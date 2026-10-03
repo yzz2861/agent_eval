@@ -29,14 +29,51 @@ module Mustermann
       # into siblings; each element's atomicity comes solely from its own context.
       translate(Array) do |atomic: false, **options|
         greedy = options.fetch(:greedy, true)
-        each_with_index.map do |element, index|
+        translated = each_with_index.map do |element, index|
           next_sibling = self[index + 1]
           atomic = greedy &&
             element.is_a?(:capture) &&
             !element.is_a?(:splat) &&
             next_sibling&.is_a?(:separator) &&
             next_sibling.payload == '/'
-          t(element, **options, atomic: atomic)
+          [element, t(element, **options, atomic: atomic)]
+        end
+
+        options[:normalization] ? t.merge_normalized_literals(translated, **options) : translated.map(&:last).join
+      end
+
+      # When Unicode normalization is enabled, adjacent literal characters that
+      # form a grapheme cluster under NFC (e.g. "e" + U+0301 from an NFD pattern
+      # string) have to be compiled together so the composed form also matches.
+      # The AST itself is left untouched.
+      # @!visibility private
+      def merge_normalized_literals(translated, **options)
+        buffer = +''
+        chunks = []
+
+        flush = lambda do
+          return if buffer.empty?
+          chunks << encode_literal(buffer, **options)
+          buffer.clear
+        end
+
+        translated.each do |element, source|
+          if element.is_a?(:char)
+            buffer << element.payload
+          else
+            flush.call
+            chunks << source
+          end
+        end
+        flush.call
+        chunks.join
+      end
+
+      # Compiles a run of literal characters, honoring NFC canonical clusters.
+      # @!visibility private
+      def encode_literal(string, normalization:, **options)
+        Mustermann::Unicode.canonical_clusters(string).map do |cluster|
+          encoded(cluster, normalization:, **options)
         end.join
       end
 
@@ -131,7 +168,8 @@ module Mustermann
         end
 
         def from_string(string, **options)
-          Regexp.new(string.chars.map { |c| t.encoded(c, **options) }.join)
+          return Regexp.new(string.chars.map { |c| t.encoded(c, **options) }.join) unless options[:normalization]
+          Regexp.new(t.encode_literal(string, **options))
         end
 
         def from_nil(**options)
@@ -207,15 +245,28 @@ module Mustermann
         end
       end
 
-      # @return [Array<String>] all raw string representations of the character (literal + URI-encoded variants)
+      # @return [Array<String>] all raw string representations of the character
+      #   (literal, URI-encoded variants and, if requested, other Unicode
+      #   normalization forms)
       # @!visibility private
-      def self.char_representations(char, uri_decode: true, space_matches_plus: true)
+      def self.char_representations(char, uri_decode: true, space_matches_plus: true, normalization: nil)
         if char == ' ' and space_matches_plus
-          @space_and_plus ||= char_representations(' ', space_matches_plus: false) +
-                              char_representations('+', space_matches_plus: false)
+          @space_and_plus ||= {}
+          @space_and_plus[normalization] ||= char_representations(' ', space_matches_plus: false, normalization:) +
+                                           char_representations('+', space_matches_plus: false, normalization:)
+        elsif normalization
+          @normalized_representations ||= {}
+          @normalized_representations[[char, uri_decode, normalization]] ||=
+            Mustermann::Unicode.representations(char, normalization, uri_decode:).flat_map do |representation|
+              [representation,
+               representation.gsub(/%[0-9a-f]{2}/i, &:upcase),
+               representation.gsub(/%[0-9a-f]{2}/i, &:downcase)]
+            end.uniq
         else
           @char_representations ||= {}
-          @char_representations[char] ||= begin
+          @char_representations[uri_decode] ||= {}
+          @char_representations[uri_decode][char] ||= begin
+            return [char] unless uri_decode
             escaped = URI_PARSER.escape(char, /./)
             [char, escaped.upcase, escaped.downcase].uniq
           end
@@ -224,12 +275,15 @@ module Mustermann
 
       # @return [String] Regular expression for matching the given character in all representations
       # @!visibility private
-      def encoded(char, uri_decode: true, space_matches_plus: true, **options)
-        return Regexp.escape(char) unless uri_decode
+      def encoded(char, uri_decode: true, space_matches_plus: true, normalization: nil, **options)
+        return Regexp.escape(char) unless uri_decode or normalization
 
-        '(?:%s)' % self.class.char_representations(char, uri_decode:, space_matches_plus:).map { |c|
-          Regexp.escape(c)
-        }.join('|')
+        representations = self.class.char_representations(
+          char, uri_decode:, space_matches_plus:, normalization:
+        )
+        representations = representations.uniq
+        return Regexp.escape(char) if representations == [char]
+        '(?:%s)' % representations.map { |c| Regexp.escape(c) }.join('|')
       end
 
       # Compiles an AST to a regular expression.
@@ -252,6 +306,5 @@ module Mustermann
       end
     end
 
-    private_constant :Compiler
   end
 end

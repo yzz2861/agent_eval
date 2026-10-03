@@ -37,6 +37,7 @@ module Mustermann
 
       def params(string = nil)
         return super unless @fast_match
+        check_encoding(string)
         return unless md = @regexp.match(string)
         result = md.named_captures
         result.transform_values! { |v| v.include?('%') ? unescape(v) : v } if string.include?('%')
