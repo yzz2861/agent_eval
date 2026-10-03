@@ -521,7 +521,8 @@ module Net
   #   <em>Requires the +NAMESPACE+ or +IMAP4rev2+ capability.</em>
   # - #status: Returns mailbox information, e.g. message count, unseen message
   #   count, +UIDVALIDITY+ and +UIDNEXT+.
-  # - #append: Appends a message to the end of a mailbox.
+  # - #append, #multiappend: Append one or more messages to the end of a
+  #   mailbox.
   # - #idle: Allows the server to send updates to the client, without the client
   #   needing to poll using #noop.
   #   <em>Requires the +IDLE+ or +IMAP4rev2+ capability.</em>
@@ -610,6 +611,9 @@ module Net
   #   +BINARY.SIZE+ items.  See FetchData#binary and FetchData#binary_size.
   # - Updates #append to allow binary messages containing +NULL+ bytes.
   #
+  # ==== RFC3502: +MULTIAPPEND+
+  # - #multiappend: Appends multiple messages in a single atomic command.
+  #
   # ==== RFC3691: +UNSELECT+
   # Folded into IMAP4rev2[https://www.rfc-editor.org/rfc/rfc9051] and also included
   # above with {Core IMAP commands}[rdoc-ref:Net::IMAP@Core+IMAP+commands].
@@ -627,7 +631,7 @@ module Net
   # above with {Core IMAP commands}[rdoc-ref:Net::IMAP@Core+IMAP+commands].
   # - #uid_expunge: Restricts #expunge to only remove the specified UIDs.
   # - Updates #select, #examine with the +UIDNOTSTICKY+ ResponseCode
-  # - Updates #append with the +APPENDUID+ ResponseCode
+  # - Updates #append and #multiappend with the +APPENDUID+ ResponseCode
   # - Updates #copy, #move with the +COPYUID+ ResponseCode
   #
   # ==== RFC4731: +ESEARCH+
@@ -857,6 +861,10 @@ module Net
   #   Nerenberg, L., "IMAP4 Binary Content Extension", RFC 3516,
   #   DOI 10.17487/RFC3516, April 2003,
   #   <https://www.rfc-editor.org/info/rfc3516>.
+  # [MULTIAPPEND[https://www.rfc-editor.org/rfc/rfc3502]]::
+  #   Crispin, M., "Internet Message Access Protocol (IMAP) - MULTIAPPEND
+  #   Extension", RFC 3502, DOI 10.17487/RFC3502, March 2003,
+  #   <https://www.rfc-editor.org/info/rfc3502>.
   # [ACL[https://www.rfc-editor.org/rfc/rfc4314]]::
   #   Melnikov, A., "IMAP4 Access Control List (ACL) Extension", RFC 4314,
   #   DOI 10.17487/RFC4314, December 2005,
@@ -2288,9 +2296,6 @@ module Net
     # This will report the UIDVALIDITY of the destination mailbox and the
     # assigned UID of the appended message.
     #
-    #--
-    # TODO: add MULTIAPPEND support
-    #++
     def append(mailbox, message, flags = nil, date_time = nil)
       message = StringFormatter.literal_or_literal8(message, name: "message")
       args = []
@@ -2298,6 +2303,90 @@ module Net
       args.push(date_time) if date_time
       args.push(message)
       send_command("APPEND", mailbox, *args)
+    end
+
+    # :call-seq:
+    #   multiappend(mailbox, messages) -> array of integers or nil
+    #
+    # Sends a {MULTIAPPEND command [RFC3502 §4]}[https://www.rfc-editor.org/rfc/rfc3502.html#section-4]
+    # to append multiple messages to the end of +mailbox+ in a single atomic
+    # request.  Each entry in +messages+ may be a String, a Net::IMAP::Literal,
+    # or an array entry, ordered like the optional arguments to #append:
+    #
+    #   message
+    # [flags, message]
+    # [flags, date_time, message]
+    # [date_time, message]
+    #
+    # For example:
+    #
+    #   imap.multiappend("inbox", [
+    #     "Subject: first\r\n\r\nfirst\r\n",
+    #     [[:Seen], first_time, first_message],
+    #     [[], second_time, second_message]
+    #   ])
+    #
+    # When the server supports +UIDPLUS+ or +IMAP4rev2+, the assigned UIDs are
+    # returned in the same order as +messages+.  Returns +nil+ when the server
+    # completes the command without an +APPENDUID+ response code, for example
+    # when the destination mailbox reports +UIDNOTSTICKY+.
+    #
+    # This method never falls back to sending multiple #append requests.  If
+    # the cached server capabilities do not include +MULTIAPPEND+, the command
+    # is not sent and an ArgumentError is raised.
+    #
+    # Synchronizing literals are sent only after the server requests a
+    # continuation.  If the server rejects a message before that point, no
+    # later message data is sent.  Non-synchronizing literals are sent only
+    # when the server advertises support for them.
+    #
+    # ==== Capabilities
+    #
+    # The server's capabilities must include +MULTIAPPEND+
+    # [RFC3502[https://www.rfc-editor.org/rfc/rfc3502.html]].
+    #
+    # Binary messages require +BINARY+
+    # [RFC3516[https://www.rfc-editor.org/rfc/rfc3516.html]].
+    #
+    # The +APPENDUID+ response code requires +UIDPLUS+
+    # [RFC4315[https://www.rfc-editor.org/rfc/rfc4315.html]] or +IMAP4rev2+
+    # [RFC9051[https://www.rfc-editor.org/rfc/rfc9051.html]].
+    def multiappend(mailbox, messages)
+      unless messages.is_a?(Array)
+        raise ArgumentError, "expected messages to be an Array, got #{messages.class}"
+      end
+      unless mailbox.respond_to?(:to_str)
+        raise ArgumentError, "expected mailbox to be a String, got #{mailbox.class}"
+      end
+      if messages.empty?
+        raise ArgumentError, "messages must not be empty"
+      end
+      messages = messages.map { multiappend_message(_1) }
+
+      args = messages.flat_map do |flags, date_time, message|
+        segment = []
+        segment.push(flags)     unless flags.nil?
+        segment.push(date_time) unless date_time.nil?
+        segment.push(message)
+        segment
+      end
+      unless capabilities_cached? && capable?("MULTIAPPEND")
+        raise ArgumentError,
+              "MULTIAPPEND capability is not advertised by the server"
+      end
+      response = send_command("MULTIAPPEND", mailbox, *args)
+      append_uid = response.data.code&.data
+      return unless append_uid in AppendUIDData
+
+      assigned_uids_data = append_uid.assigned_uids
+      assigned_uid_count = assigned_uids_data.count_with_duplicates
+      if assigned_uid_count != messages.length
+        raise InvalidResponseError,
+              "APPENDUID returned #{assigned_uid_count} UIDs for " \
+              "#{messages.length} appended messages"
+      end
+      assigned_uids = assigned_uids_data.each_ordered_number.to_a
+      assigned_uids
     end
 
     # Sends a {CHECK command [IMAP4rev1 §6.4.1]}[https://www.rfc-editor.org/rfc/rfc3501#section-6.4.1]
@@ -3856,6 +3945,67 @@ module Net
       if (response = @tagged_responses[command.tag])&.name&.casecmp?("OK")
         raise InvalidTaggedResponseError.new(:incomplete, command:, response:)
       end
+    end
+
+    def multiappend_message(message)
+      return [nil, nil, multiappend_literal(message)] if
+        multiappend_literal?(message)
+
+      unless message.is_a?(Array) && (1..3).cover?(message.length)
+        raise ArgumentError,
+              "expected message to be a String or a 1..3 element Array, " \
+              "got #{message.class}"
+      end
+
+      flags = date_time = nil
+      literal = message.last
+      if message.length >= 2
+        if message[0].is_a?(Array)
+          flags = message[0]
+        elsif multiappend_date_time?(message[0])
+          date_time = message[0]
+        elsif !message[0].nil?
+          raise ArgumentError,
+                "expected flags or date_time, got #{message[0].class}"
+        end
+        if message.length == 3 && !message[1].nil? &&
+           !multiappend_date_time?(message[1])
+          raise ArgumentError,
+                "expected date_time, got #{message[1].class}"
+        end
+        date_time = message[1] if message.length == 3 && !message[1].nil?
+      end
+      multiappend_validate_flags(flags)
+      unless date_time.nil? || multiappend_date_time?(date_time)
+        raise ArgumentError,
+              "expected date_time to be Time or DateTime, got #{date_time.class}"
+      end
+      [flags, date_time, multiappend_literal(literal)]
+    end
+
+    def multiappend_literal?(message)
+      message.is_a?(String) || message.is_a?(Literal) || message.is_a?(Literal8)
+    end
+
+    def multiappend_literal(message)
+      StringFormatter.literal_or_literal8(message, name: "message")
+    rescue TypeError
+      raise ArgumentError, "expected message to be a String, got #{message.class}"
+    end
+
+    def multiappend_date_time?(date_time)
+      date_time.is_a?(Time) || date_time.is_a?(DateTime)
+    end
+
+    def multiappend_validate_flags(flags)
+      return if flags.nil?
+      unless flags.is_a?(Array)
+        raise ArgumentError, "expected flags to be an Array, got #{flags.class}"
+      end
+      if flags.any? { !_1.is_a?(Symbol) && !_1.respond_to?(:to_str) }
+        raise ArgumentError, "flags must be Symbols or Strings"
+      end
+      validate_data(flags)
     end
 
     def get_tagged_response(tag, cmd, timeout = nil)
