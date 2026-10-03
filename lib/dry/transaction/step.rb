@@ -81,7 +81,7 @@ module Dry
       end
 
       def arity
-        adapter.operation.arity
+        adapter.input_arity
       end
 
       def operation

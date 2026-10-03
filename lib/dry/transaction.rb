@@ -47,6 +47,8 @@ module Dry
   #   exception is raised, which will be caught and returned as a `Failure`.
   # * `tee`   --- ignore the output of the operation and pass through its original
   #   input as a `Success`
+  # * `fold`  --- lazily reduce an enumerator starting with `initial:`, invoking the
+  #   operation with the accumulator, current element, and index for each input
   #
   # [dry-monads]: https://rubygems.org/gems/dry-monads
   #

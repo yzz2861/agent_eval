@@ -39,6 +39,16 @@ module Dry
         @yields
       end
 
+      def input_arity
+        adapter_object = @adapter.receiver if @adapter.respond_to?(:receiver)
+
+        if adapter_object.respond_to?(:input_arity)
+          adapter_object.input_arity
+        else
+          operation.arity
+        end
+      end
+
       def call(args, &block)
         adapter.(operation, options, args, &block)
       end
