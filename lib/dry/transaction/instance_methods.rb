@@ -12,12 +12,31 @@ module Dry
       attr_reader :operations
       attr_reader :listeners
       attr_reader :stack
+      attr_reader :recoveries
 
       def initialize(steps: self.class.steps, listeners: nil, **operations)
-        @steps = steps.map { |step|
-          operation = resolve_operation(step, **operations)
-          step.with(operation: operation)
+        recovery_definitions = self.class.respond_to?(:recoveries) ? self.class.recoveries : []
+        assert_valid_recoveries(steps, recovery_definitions)
+
+        @recoveries = recovery_definitions.map do |recovery|
+          recovery.with(
+            operation: resolve_operation(recovery, **operations),
+            context: self
+          )
+        end
+
+        resolved_steps = steps.map { |step|
+          step.with(operation: resolve_operation(step, **operations))
         }
+        @steps = Array.new(resolved_steps.length)
+
+        resolved_steps.each_with_index do |step, index|
+          step_recoveries = @recoveries.select { |recovery| recovery.step_name == step.name }
+
+          @steps[index] = step.with(
+            recoveries: build_step_recoveries(step_recoveries, index, resolved_steps.length - index - 1)
+          )
+        end
         @operations = operations
         @stack = Stack.new(@steps)
         subscribe(listeners) unless listeners.nil?
@@ -43,12 +62,10 @@ module Dry
 
         if listeners.is_a?(Hash)
           listeners.each do |step_name, listener|
-            steps.detect { |step| step.name == step_name }.subscribe(listener)
+            operation_callables.detect { |callable| callable.name == step_name }&.subscribe(listener)
           end
         else
-          steps.each do |step|
-            step.subscribe(listeners)
-          end
+          operation_callables.each { |callable| callable.subscribe(listeners) }
         end
       end
 
@@ -57,7 +74,10 @@ module Dry
 
         new_steps = steps.map { |step|
           if step_args[step.name]
-            step.with(call_args: step_args[step.name])
+            step.with(
+              call_args: step_args[step.name],
+              recoveries: step.recoveries
+            )
           else
             step
           end
@@ -67,6 +87,36 @@ module Dry
       end
 
       private
+
+      def operation_callables
+        steps + recoveries
+      end
+
+      def build_step_recoveries(recoveries, index, suffix_size)
+        suffix_start = index + 1
+
+        recoveries.map do |recovery|
+          recovery.with(continue: -> result {
+            suffix = steps[suffix_start, suffix_size]
+            Stack.continue(suffix).(result)
+          })
+        end
+      end
+
+      def assert_valid_recoveries(steps, definitions)
+        step_names = steps.map(&:name)
+
+        definitions.each do |recovery|
+          unless step_names.include?(recovery.step_name)
+            raise ArgumentError, "+:#{recovery.step_name}+ is not a valid step name"
+          end
+        end
+
+        used_names = (step_names + definitions.map(&:name)).tally.select { |_, count| count > 1 }.keys
+        unless used_names.empty?
+          raise ArgumentError, "+#{used_names.first}+ is already used by a step"
+        end
+      end
 
       def respond_to_missing?(name, _include_private = false)
         steps.any? { |step| step.name == name }
@@ -86,8 +136,12 @@ module Dry
       end
 
       def resolve_operation(step, **operations)
-        if step.internal? && operations[step.name]
+        if step.is_a?(Recovery) && step.operation
+          step.operation
+        elsif operations[step.name] && step.internal?
           operations[step.name]
+        elsif step.respond_to?(:operation) && step.operation
+          step.operation
         elsif methods.include?(step.name) || private_methods.include?(step.name)
           method(step.name)
         elsif operations[step.name].respond_to?(:call)

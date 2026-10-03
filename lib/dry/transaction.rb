@@ -48,6 +48,15 @@ module Dry
   # * `tee`   --- ignore the output of the operation and pass through its original
   #   input as a `Success`
   #
+  # Failed steps can declare a recovery operation:
+  #
+  #   step :reserve
+  #   recover :presell, from: :reserve, failure: InventoryFailure
+  #
+  # When reserve returns a matching Failure, the recovery operation receives
+  # the failure value and original step input. Successful recovery resumes with
+  # the steps following reserve. Unmatched failures are returned unchanged.
+  #
   # [dry-monads]: https://rubygems.org/gems/dry-monads
   #
   # @example

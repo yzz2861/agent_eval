@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "dry/transaction/step"
+require "dry/transaction/recovery"
 require "dry/transaction/dsl"
 require "dry/transaction/instance_methods"
 require "dry/transaction/operation_resolver"

@@ -7,20 +7,23 @@ module Dry
       RETURN = -> x { x }
 
       def initialize(steps)
-        @stack = compile(steps)
+        @stack = self.class.continue(steps)
       end
 
       def call(m)
         @stack.(m)
       end
 
-      private
+      def self.continue(steps)
+        compile(steps)
+      end
 
-      def compile(steps)
+      def self.compile(steps)
         steps.reverse.reduce(RETURN) do |next_step, step|
           proc { |m| m.bind { |value| step.(value, next_step) } }
         end
       end
+      private_class_method :compile
     end
   end
 end
