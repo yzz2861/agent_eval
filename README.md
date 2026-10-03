@@ -593,6 +593,44 @@ JWT::Claims.verify_payload!({"exp" => Time.now.to_i - 10}, exp: { leeway: 11})
 JWT::Claims.verify_payload!({"exp" => Time.now.to_i + 10, "sub" => "subject"}, :exp, sub: "subject")
 ```
 
+### Temporal claim relations
+
+Beyond checking `exp`, `nbf` and `iat` individually, the gem can verify how the temporal claims relate to each other. The checks are composable: any subset can be enabled, missing claims are ignored unless a relation is marked `required: true`, and every relation is evaluated against the same injected point in time. Claim values must be finite `Numeric` values (fractional seconds are supported; strings, `Infinity` and `NaN` fail the relation).
+
+The available relations are:
+
+| Relation | Meaning (bounds are inclusive) |
+| --- | --- |
+| `iat_before_nbf` | `iat <= nbf + leeway` |
+| `nbf_before_exp` | `nbf <= exp + leeway` |
+| `iat_before_exp` | `iat <= exp + leeway` |
+| `max_lifetime` | `exp - iat <= max + leeway` |
+| `max_validity` | `exp - nbf <= max + leeway` |
+| `max_future_iat` | `iat <= now + leeway` (maximum issuer clock drift) |
+
+The `order: true` shortcut enables all three ordering relations. A relation-level `leeway` overrides the global one for that relation (they are never added together):
+
+```ruby
+# During decode
+JWT.decode(token, hmac_secret, true, {
+  algorithm: 'HS256',
+  verify_time_relations: {
+    order: true,
+    max_lifetime: { max: 3600, leeway: 5, required: true },
+    max_future_iat: { leeway: 10 },
+    now: -> { Time.now }
+  }
+})
+
+# Standalone
+JWT::Claims.verify_payload!(payload, time_relations: {
+  order: { required: true },
+  max_validity: { max: 600 }
+})
+```
+
+When a relation does not hold, `JWT::InvalidTimeRelation` is raised and `#relation` names the failing relation.
+
 ### Finding a Key
 
 To dynamically find the key for verifying the JWT signature, pass a block to the decode block. The block receives headers and the original payload as parameters. It should return with the key to verify the signature that was used to sign the JWT.

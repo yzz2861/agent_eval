@@ -19,7 +19,8 @@ module JWT
         verify_jti: ->(options) { Claims::JwtId.new(validator: options[:verify_jti]) },
         verify_aud: ->(options) { options[:aud] && Claims::Audience.new(expected_audience: options[:aud]) },
         verify_sub: ->(options) { options[:sub] && Claims::Subject.new(expected_subject: options[:sub]) },
-        required_claims: ->(options) { Claims::Required.new(required_claims: options[:required_claims]) }
+        required_claims: ->(options) { Claims::Required.new(required_claims: options[:required_claims]) },
+        verify_time_relations: ->(options) { Claims::TimeRelations.from_options(decode_option(options)) }
       }.freeze
 
       private_constant(:VERIFIERS)
@@ -33,6 +34,15 @@ module JWT
             verifier_builder&.call(options)&.verify!(context: VerificationContext.new(payload: payload))
           end
           nil
+        end
+
+        # @api private
+        def decode_option(options)
+          value = options[:verify_time_relations]
+          return nil if value.nil? || value == false
+          return { time_relations: {} } if value == true
+
+          { time_relations: value }
         end
       end
     end

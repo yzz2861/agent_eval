@@ -18,6 +18,8 @@ module JWT
       #   @return [Boolean] whether to verify the audience claim.
       # @!attribute [rw] verify_sub
       #   @return [Boolean] whether to verify the subject claim.
+      # @!attribute [rw] verify_time_relations
+      #   @return [Boolean, Hash] whether to verify the relationships between the temporal claims (iat, nbf, exp). A hash configures the relations, see JWT::Claims::TimeRelations.
       # @!attribute [rw] leeway
       #   @return [Integer] the leeway in seconds for time-based claims.
       # @!attribute [rw] algorithms
@@ -34,6 +36,7 @@ module JWT
                     :verify_jti,
                     :verify_aud,
                     :verify_sub,
+                    :verify_time_relations,
                     :leeway,
                     :algorithms,
                     :required_claims,
@@ -48,6 +51,7 @@ module JWT
         @verify_jti = false
         @verify_aud = false
         @verify_sub = false
+        @verify_time_relations = false
         @leeway = 0
         @algorithms = ['HS256']
         @required_claims = []
@@ -64,6 +68,7 @@ module JWT
           verify_jti: verify_jti,
           verify_aud: verify_aud,
           verify_sub: verify_sub,
+          verify_time_relations: verify_time_relations,
           leeway: leeway,
           algorithms: algorithms,
           required_claims: required_claims,

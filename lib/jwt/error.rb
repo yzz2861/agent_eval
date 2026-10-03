@@ -55,6 +55,23 @@ module JWT
   # The InvalidIatError class is raised when the JWT issued at (iat) claim is invalid.
   class InvalidIatError < ClaimValidationError; end
 
+  # The InvalidTimeRelation class is raised when a relationship between the
+  # temporal claims (iat, nbf, exp) does not hold. The name of the failed
+  # relation is available from #relation.
+  class InvalidTimeRelation < ClaimValidationError
+    # @return [Symbol, nil] the name of the relation that failed, e.g. +:iat_before_exp+.
+    attr_reader :relation
+
+    # Initializes a new InvalidTimeRelation.
+    #
+    # @param message [String] the error message.
+    # @param relation [Symbol, nil] the name of the relation that failed.
+    def initialize(message = nil, relation: nil)
+      @relation = relation
+      super(message)
+    end
+  end
+
   # The InvalidAudError class is raised when the JWT audience (aud) claim is invalid.
   class InvalidAudError < ClaimValidationError; end
 
