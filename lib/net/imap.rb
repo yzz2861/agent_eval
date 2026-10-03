@@ -15,6 +15,7 @@
 
 require "socket"
 require "monitor"
+require "zlib"
 require 'net/protocol'
 begin
   require "openssl"
@@ -393,6 +394,7 @@ module Net
   #   <em>Requires the +STARTTLS+ capability.</em>
   #
   #   <em>*NOTE:* Connecting to the implicit TLS port should be preferred.</em>
+  # - #compress: Enables COMPRESS=DEFLATE for subsequent protocol traffic.
   # - #logout: Tells the server to end the session.  Enters the +logout+ state.
   # - #logout!: Calls #logout then #disconnect, converting most errors into
   #   warnings.
@@ -410,6 +412,7 @@ module Net
   # - #tls_socket?: Returns +true+ after TLS negotiation has started.
   #
   #   <em>*NOTE:* This does _NOT_ indicate a secure TLS connection.</em>
+  # - #compressed?: Returns whether COMPRESS=DEFLATE is active.
   # - #ssl_ctx: Returns the {SSLContext}[https://docs.ruby-lang.org/en/master/OpenSSL/SSL/SSLContext.html]
   #   after attempting to start TLS.
   #
@@ -638,6 +641,9 @@ module Net
   # Folded into IMAP4rev2[https://www.rfc-editor.org/rfc/rfc9051].
   # - Updates #authenticate with the option to send an initial response.
   #
+  # ==== RFC4978: COMPRESS=DEFLATE
+  # - #compress: Enables raw DEFLATE compression in both directions.
+  #
   # ==== RFC5161: +ENABLE+
   # Folded into IMAP4rev2[https://www.rfc-editor.org/rfc/rfc9051] and also included
   # above with {Core IMAP commands}[rdoc-ref:Net::IMAP@Core+IMAP+commands].
@@ -853,6 +859,10 @@ module Net
   # [ID[https://www.rfc-editor.org/rfc/rfc2971]]::
   #   Showalter, T., "IMAP4 ID extension", RFC 2971, DOI 10.17487/RFC2971,
   #   October 2000, <https://www.rfc-editor.org/info/rfc2971>.
+  # [COMPRESS=DEFLATE[https://www.rfc-editor.org/rfc/rfc4978]]::
+  #   Gulbrandsen, A., "The IMAP COMPRESS Extension", RFC 4978,
+  #   DOI 10.17487/RFC4978, August 2007,
+  #   <https://www.rfc-editor.org/info/rfc4978>.
   # [BINARY[https://www.rfc-editor.org/rfc/rfc3516]]::
   #   Nerenberg, L., "IMAP4 Binary Content Extension", RFC 3516,
   #   DOI 10.17487/RFC3516, April 2003,
@@ -949,6 +959,9 @@ module Net
     dir = File.expand_path("imap", __dir__)
     autoload :ConnectionState,        "#{dir}/connection_state"
     autoload :ResponseReader,         "#{dir}/response_reader"
+    autoload :BufferedIO,             "#{dir}/buffered_io"
+    autoload :DeflateIO,              "#{dir}/deflate_io"
+    autoload :InflateIO,              "#{dir}/deflate_io"
     autoload :SASL,                   "#{dir}/sasl"
     autoload :SASLAdapter,            "#{dir}/sasl_adapter"
     autoload :SequenceSet,            "#{dir}/sequence_set"
@@ -1270,10 +1283,14 @@ module Net
       @continuation_request_exception = nil
       @idle_done_cond = nil
       @logout_command_tag = nil
+      @compressor = nil
+      @compressed = false
 
       # Connection
       @sock = tcp_socket(@host, @port)
-      @reader = ResponseReader.new(self, @sock)
+      @read_io = BufferedIO.new(@sock)
+      @write_io = @read_io
+      @reader = ResponseReader.new(self, @read_io)
       start_tls_session if ssl_ctx
       start_imap_connection
     end
@@ -1344,6 +1361,11 @@ module Net
     # See #tls_verified?
     def tls_socket?; @sock.kind_of?(OpenSSL::SSL::SSLSocket) end
 
+    # Returns +true+ when the connection is using IMAP COMPRESS=DEFLATE.
+    def compressed?
+      synchronize { @compressed }
+    end
+
     # Disconnects from the server.
     #
     # Waits for receiver thread to close before returning, except when called
@@ -1365,6 +1387,7 @@ module Net
       end
       @sock.close
       @receiver_thread.join(timeout) unless mon_owned? || in_receiver_thread
+      stop_compression_session unless mon_owned? || in_receiver_thread
       raise e if e
     ensure
       # Try again after shutting down the receiver thread.  With no reciever
@@ -1637,6 +1660,37 @@ module Net
       end
       ok
     end
+
+    # Sends a {COMPRESS command [RFC4978]}[https://www.rfc-editor.org/rfc/rfc4978]
+    # to enable compression for all subsequent protocol data in both
+    # directions.
+    #
+    # The only supported +algorithm+ is +DEFLATE+.  The protocol stream is not
+    # switched until after the server's tagged +OK+ response has been received.
+    # Any compressed response data buffered while that response was being read
+    # is retained and decompressed.
+    #
+    # ==== Capability
+    # Clients should not call #compress unless the server advertises the
+    # +COMPRESS=DEFLATE+ capability.
+    def compress(algorithm = "DEFLATE")
+      unless algorithm.to_s.upcase == "DEFLATE"
+        raise ArgumentError, "unsupported compression algorithm: %p" % [algorithm]
+      end
+      synchronize do
+        if @compressed
+          raise Error, "COMPRESS=DEFLATE has already been enabled"
+        end
+        tag = generate_tag
+        send_command("COMPRESS", Atom["DEFLATE"], tag: tag) do |resp|
+          next unless resp.is_a?(TaggedResponse) && resp.tag == tag
+          next unless resp.name.casecmp?("OK")
+          start_compression_session
+        end
+      end
+    end
+
+    alias compress_deflate compress
 
     # :call-seq:
     #   authenticate(mechanism, *, sasl_ir: config.sasl_ir, registry: Net::IMAP::SASL.authenticators, **, &) -> ok_resp
@@ -3728,6 +3782,7 @@ module Net
           # released and reacquired between rescue and ensure clauses.
           @exception ||= exception
           @sock.close
+          stop_compression_session
         end
         state_logout!
         @receiver_thread_terminating = true
@@ -3825,10 +3880,10 @@ module Net
       end
     end
 
-    def send_command(cmd, *args, &block)
+    def send_command(cmd, *args, tag: nil, &block)
       args.each do validate_data _1 end
       synchronize do
-        tag = generate_tag
+        tag ||= generate_tag
         command = Command[tag:, name: cmd]
         put_string(tag + " " + cmd)
         args.each do |i|
@@ -3924,7 +3979,7 @@ module Net
     end
 
     def put_string(str)
-      @sock.print(str)
+      @write_io.print(str)
       if config.debug?
         if @debug_output_bol
           $stderr.print("C: ")
@@ -4151,12 +4206,40 @@ module Net
       end
     end
 
+    def start_compression_session
+      inflater_io = InflateIO.new(@read_io)
+      begin
+        @compressor = DeflateIO.new(@write_io)
+        @write_io = @compressor
+        @reader.replace_input(inflater_io)
+        @compressed = true
+      rescue Exception
+        inflater_io.close
+        raise
+      end
+    rescue Exception
+      stop_compression_session
+      raise
+    end
+
+    def stop_compression_session
+      @compressed = false
+      if @compressor
+        compressor = @compressor
+        @compressor = nil
+        @write_io = @read_io
+        compressor.close
+      end
+    end
+
     def start_tls_session
       raise "SSL extension not installed" unless defined?(OpenSSL::SSL)
       raise "already using SSL" if @sock.kind_of?(OpenSSL::SSL::SSLSocket)
       raise "cannot start TLS without SSLContext" unless ssl_ctx
       @sock = OpenSSL::SSL::SSLSocket.new(@sock, ssl_ctx)
-      @reader = ResponseReader.new(self, @sock)
+      @read_io = BufferedIO.new(@sock)
+      @write_io = @read_io
+      @reader = ResponseReader.new(self, @read_io)
       @sock.sync_close = true
       @sock.hostname = @host if @sock.respond_to? :hostname=
       ssl_socket_connect(@sock, open_timeout)

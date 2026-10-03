@@ -8,12 +8,17 @@ module Net
 
       attr_reader :client
 
-      def initialize(client, sock)
-        @client, @sock = client, sock
+      def initialize(client, io)
+        @client, @sock = client, io
         # cached config
         @max_response_size = nil
         # response buffer state
         @buff = @literal_size = nil
+      end
+
+      def replace_input(io)
+        @sock.close if @sock.is_a?(InflateIO)
+        @sock = io
       end
 
       def read_response_buffer

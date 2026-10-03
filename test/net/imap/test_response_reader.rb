@@ -5,6 +5,21 @@ require "stringio"
 require "test/unit"
 
 class ResponseReaderTest < Net::IMAP::TestCase
+  test "buffered io preserves data across response boundaries" do
+    io = Net::IMAP::BufferedIO.new(StringIO.new("first\r\nsecond\r\n"))
+    assert_equal "first\r\n", io.gets("\r\n")
+    assert_equal "second\r\n", io.gets("\r\n")
+    assert_nil io.gets("\r\n")
+  end
+
+  test "buffered io splits oversized lines and literals" do
+    io = Net::IMAP::BufferedIO.new(StringIO.new("abcdefg{12}\r\nliteral"))
+    assert_equal "abc", io.gets("\r\n", 3)
+    assert_equal "defg", io.gets("\r\n", 4)
+    assert_equal "{12}\r\n", io.gets("\r\n", 8)
+    assert_equal "lit", io.read(3)
+    assert_equal "eral", io.read(5)
+  end
 
   class FakeClient
     def config = @config ||= Net::IMAP.config.new
