@@ -758,6 +758,40 @@ jwk_hash = jwk.export
 thumbprint_as_the_kid = jwk_hash[:kid]
 ```
 
+## Selective Disclosure (SD-JWT style)
+
+`JWT::SDJWT` lets an issuer hide selected claims behind salted digests, so the
+holder can later reveal only a subset of them to a verifier. Only sha-256 is
+supported and disclosures use an explicit encoding:
+`base64url(JSON[salt, name, value])` for object properties and
+`base64url(JSON[salt, value])` for array elements.
+
+```ruby
+# 1. Issuer: hide object properties and array elements behind digests
+issued = JWT::SDJWT.issue(
+  { 'sub' => 'user-42', 'email' => 'alice@example.com', 'roles' => %w[admin editor] },
+  'secret',
+  algorithm: 'HS256',
+  disclose: [[:email], [:roles, 1]],
+  random: ->(n) { SecureRandom.random_bytes(n) } # injectable, defaults to SecureRandom
+)
+
+# 2. Holder: present the token with only the disclosures to reveal
+presentation = issued.presentation([issued.disclosures.first])
+
+# 3. Verifier: verify the signature and reconstruct the provable claims
+claims = JWT::SDJWT.verify(presentation, 'secret', algorithm: 'HS256')
+# => { 'sub' => 'user-42', 'email' => 'alice@example.com', 'roles' => ['admin'] }
+```
+
+Undisclosed claims stay hidden: the verifier only sees plaintext claims plus
+the ones proven by the presented disclosures. Duplicate digests, orphaned
+disclosures, disclosures colliding with plaintext claims and nested
+disclosures are all rejected or resolved explicitly. Plain `JWT.decode` never
+resolves digests; use `JWT::SDJWT.verify` to reconstruct claims.
+
+See `examples/sdjwt_selective_disclosure.rb` for a full offline walkthrough.
+
 ## Development and testing
 
 The tests are written with rspec. [Appraisal](https://github.com/thoughtbot/appraisal) is used to ensure compatibility with 3rd party dependencies providing cryptographic features.
