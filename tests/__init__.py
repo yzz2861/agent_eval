@@ -21,6 +21,8 @@ from . import model_sql
 MODULES.append(model_sql)
 from . import prefetch_tests
 MODULES.append(prefetch_tests)
+from . import query_description
+MODULES.append(query_description)
 from . import results
 MODULES.append(results)
 from . import schema

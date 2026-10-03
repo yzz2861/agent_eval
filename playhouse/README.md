@@ -26,6 +26,11 @@ The `playhouse` namespace contains numerous extensions to Peewee. These include 
 
 ### High-level libraries
 
+* Query descriptions (`playhouse.query_description`)
+    * Save select queries as versioned JSON documents without pickle or SQL
+    * Resolve models and fields through stable, application-registered identifiers
+    * Store literal values separately from expressions
+    * Restore shared subqueries, joins, aliases, recursive CTEs and whitelisted functions
 * [Extra fields](http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#extra-fields)
     * Compressed field
     * PickleField
