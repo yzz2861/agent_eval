@@ -1,5 +1,18 @@
 # News
 
+## Unreleased
+
+### Improvements
+
+  * Added `CSV::SpreadsheetSafe`: an explicit, opt-in export strategy
+    that protects generated CSV from formula injection when opened in
+    spreadsheet applications.  The caller declares which fields are
+    numeric and which are untrusted text; dangerous text (including
+    text hidden behind leading whitespace or control characters) is
+    escaped, legitimate negative Numeric values are left untouched,
+    and every transformation is reported as a field-level record.
+    The default behavior of `CSV.generate` is unchanged.
+
 ## 3.3.6 - 2026-07-27
 
 ### Improvements
