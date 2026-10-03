@@ -97,6 +97,22 @@ module StateMachines
     end
   end
 
+  # A deferred event could not be added because the object's queue was full
+  class DeferredEventQueueFull < Error
+    # The event that could not be deferred
+    attr_reader :event
+
+    # The state machine that owns the queue
+    attr_reader :machine
+
+    def initialize(object, machine, event) # :nodoc:
+      @machine = machine
+      @event = event
+
+      super(object, "Cannot defer event #{event.inspect}: the #{machine.name.inspect} queue is full")
+    end
+  end
+
   # A set of transition failed to run in parallel
   class InvalidParallelTransition < Error
     # The set of events that failed the transition(s)

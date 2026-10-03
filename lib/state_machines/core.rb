@@ -6,6 +6,7 @@
 # * A set of initializers for setting state_machine defaults based on the current
 #   running environment (such as within Rails)
 require 'state_machines/error'
+require 'state_machines/deferred_event_queue'
 
 require 'state_machines/extensions'
 

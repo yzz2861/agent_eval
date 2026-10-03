@@ -41,6 +41,8 @@ module StateMachines
     # * <tt>:use_transactions</tt> - Whether transactions should be used when
     #   firing events.  Default is true unless otherwise specified by the
     #   configured integration.
+    # * <tt>:deferred_event_queue_size</tt> - Maximum number of events stored
+    #   per object while waiting for a deferred state change. Default is 10.
     #
     # This also expects a block which will be used to actually configure the
     # states, events and transitions for the state machine.  *Note* that this

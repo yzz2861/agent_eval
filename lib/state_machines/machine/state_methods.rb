@@ -80,6 +80,8 @@ module StateMachines
       # * <tt>:human_name</tt> - The human-readable version of this state's name.
       #   By default, this is either defined by the integration or stringifies the
       #   name and converts underscores to spaces.
+      # * <tt>:defer</tt> - One or more events to defer while the object is in
+      #   the state(s).
       #
       # == Customizing the stored value
       #
@@ -336,7 +338,7 @@ module StateMachines
       # options hash which contains at least <tt>:if</tt> condition support.
       def state(*names, &)
         options = names.last.is_a?(Hash) ? names.pop : {}
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name, :defer)
 
         # Store the context so that it can be used for / matched against any state
         # that gets added
@@ -361,6 +363,9 @@ module StateMachines
             state.human_name = options[:human_name] if options.include?(:human_name)
             state.cache = options[:cache] if options.include?(:cache)
             state.matcher = options[:if] if options.include?(:if)
+            if options.include?(:defer)
+              state.deferred_events.concat(Array(options[:defer]).map(&:to_sym)).uniq!
+            end
           end
         end
 

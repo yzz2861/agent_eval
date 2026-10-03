@@ -247,6 +247,50 @@ vehicle.alarm_state_name                        # => :active
 
 vehicle.fire_events!(:ignite, :enable_alarm)    # => StateMachines:InvalidParallelTransition: Cannot run events in parallel: ignite, enable_alarm
 
+### Deferred events
+
+Events can be declared as deferred in particular states. They are stored on the
+receiving object in FIFO order, including their arguments, and processed after
+the current transition's callbacks finish. Events triggered from inside a
+callback use the same serialization rule.
+
+```ruby
+class Document
+  state_machine initial: :idle, deferred_event_queue_size: 2 do
+    event :start_upload do
+      transition idle: :uploading
+    end
+
+    event :finish_upload do
+      transition uploading: :ready
+    end
+
+    event :publish do
+      transition ready: :published
+    end
+
+    state :uploading, defer: :publish
+  end
+end
+
+document = Document.new
+document.start_upload
+document.publish(version: 3) # => true; queued while uploading
+document.finish_upload       # processes publish after finish_upload callbacks
+document.published?          # => true
+```
+
+The queue is per object and per state machine. Its default capacity is 10; use
+`:deferred_event_queue_size` to customize it. When it is full, non-bang events
+return `false`, while bang events raise `StateMachines::DeferredEventQueueFull`.
+
+After a state change, only the queued head event is reconsidered. If it is
+still deferred or cannot transition, processing stops and it remains queued,
+avoiding a busy loop. A failed non-bang transition runs its failure callbacks and
+stays at the head; an exception from a callback propagates (without retrying in
+that same drain) and leaves the event and its arguments queued. Duping an object
+duplicates its queues, so the copy and the original never share entries.
+
 # Coordinated State Management
 
 State machines can coordinate with each other using state guards, allowing transitions to depend on the state of other state machines within the same object. This enables complex system modeling where components are interdependent.

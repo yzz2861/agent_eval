@@ -146,5 +146,13 @@ module StateMachines
     def initialize_state_machines(options = {}, &) # :nodoc:
       self.class.state_machines.initialize_states(self, options, &)
     end
+
+    def initialize_copy(*) # :nodoc:
+      super
+
+      if (queues = instance_variable_get(:@_state_machine_deferred_event_queues))
+        instance_variable_set(:@_state_machine_deferred_event_queues, queues.transform_values(&:dup))
+      end
+    end
   end
 end

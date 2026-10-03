@@ -166,15 +166,123 @@ module StateMachines
     # Any additional arguments are passed to the StateMachines::Transition#perform
     # instance method.
     def fire(object, *event_args)
+      result = dispatch(object, event_args, false)
+      result == :deferred_event_queue_full ? false : result
+    end
+
+    # Same as #fire, but raises when an immediate transition or deferral fails.
+    def fire!(object, *event_args)
+      dispatch(object, event_args, true)
+    end
+
+    def deferred_event_queue(object)
+      deferred_event_queues(object).fetch(machine.name) do
+        deferred_event_queues(object)[machine.name] = DeferredEventQueue.new(machine.deferred_event_queue_size)
+      end
+    end
+
+    def existing_deferred_event_queue(object)
+      deferred_event_queues(object)[machine.name]
+    end
+
+    def deferred_event_queues(object)
+      object.instance_variable_set(:@_state_machine_deferred_event_queues, {}) unless object.instance_variable_defined?(:@_state_machine_deferred_event_queues)
+      object.instance_variable_get(:@_state_machine_deferred_event_queues)
+    end
+
+    private
+
+    def dispatch(object, event_args, bang)
       machine.reset(object)
 
-      if (transition = transition_for(object, {}, *event_args))
-        transition.perform(*event_args)
+      queue = existing_deferred_event_queue(object)
+      transition_args = event_args
+      state = machine.states.match!(object)
+
+      active_entry = queue && queue.active_event == name
+      inside_callback = queue && !queue.performing_event.nil?
+      deferred_by_state = !inside_callback && !active_entry && state.deferred_events.include?(name)
+      queued_callback_event = inside_callback && !active_entry
+      should_defer = deferred_by_state || queued_callback_event
+
+      if should_defer
+        queue ||= deferred_event_queue(object)
+        deferred = queue.add(name, transition_args, bang, callback: inside_callback)
+        raise DeferredEventQueueFull.new(object, machine, name) if bang && !deferred
+        return :deferred_event_queue_full unless deferred
+      elsif (transition = transition_for(object, {}, *transition_args))
+        return perform_transition(object, transition, transition_args, queue, bang, active_entry)
       else
-        on_failure(object, *event_args)
+        return handle_invalid(object, transition_args, bang)
+      end
+
+      true
+    end
+
+    def perform_transition(object, transition, transition_args, queue, bang, active_entry = false)
+      queue ||= deferred_event_queue(object)
+      outer_performing_event = queue.performing_event
+      queue.performing_event = name
+      result = transition.perform(*transition_args)
+    rescue StandardError
+      queue.performing_event = outer_performing_event
+      raise
+    else
+      queue.performing_event = outer_performing_event
+
+      if result
+        queue.draining || active_entry ? result : drain_deferred_events(object, queue)
+      elsif bang
+        raise InvalidTransition.new(object, machine, name)
+      else
         false
       end
     end
+
+    def drain_deferred_events(object, queue)
+      return true unless queue.any?
+
+      while queue.any?
+        queue.draining = true
+        entry = queue.shift
+        event = machine.events.fetch(entry.event_name)
+        state = machine.states.match!(object)
+        queue.active_event = entry.event_name
+        if !entry.callback && state.deferred_events.include?(entry.event_name)
+          queue.unshift(entry)
+          return false
+        end
+
+        method_name = entry.bang ? (event.qualified_name.to_s + '!').to_sym : event.qualified_name
+        result = object.public_send(method_name, *entry.args)
+        queue.active_event = nil
+
+        unless result
+          queue.unshift(entry)
+          return false
+        end
+      end
+
+      true
+    rescue StandardError
+      queue.unshift(entry) if entry
+      raise
+    ensure
+      queue.draining = false
+      queue.active_event = nil
+    end
+
+    def handle_invalid(object, transition_args, bang)
+      if bang
+        on_failure(object, *transition_args)
+        raise InvalidTransition.new(object, machine, name)
+      end
+
+      on_failure(object, *transition_args)
+      false
+    end
+
+    public
 
     # Marks the object as invalid and runs any failure callbacks associated with
     # this event.  This should get called anytime this event fails to transition.
@@ -235,12 +343,23 @@ module StateMachines
 
       # Fires the event
       machine.define_helper(:instance, qualified_name) do |machine, object, *args, **kwargs|
-        machine.event(name).fire(object, *args, **kwargs)
+        result = machine.event(name).fire(object, *args, **kwargs)
+        result == :deferred_event_queue_full ? false : result
       end
 
-      # Fires the event, raising an exception if it fails
+      # Fires the event via the non-bang object method so overrides run.
       machine.define_helper(:instance, "#{qualified_name}!") do |machine, object, *args, **kwargs|
-        object.send(qualified_name, *args, **kwargs) || raise(StateMachines::InvalidTransition.new(object, machine, name))
+        event = machine.event(name)
+        queue = event.send(:existing_deferred_event_queue, object)
+        queue.last_add_failed = false if queue
+        result = object.send(qualified_name, *args, **kwargs)
+
+        if queue && queue.last_add_failed
+          queue.last_add_failed = false
+          raise StateMachines::DeferredEventQueueFull.new(object, machine, name)
+        end
+
+        result || raise(StateMachines::InvalidTransition.new(object, machine, name))
       end
     end
   end
