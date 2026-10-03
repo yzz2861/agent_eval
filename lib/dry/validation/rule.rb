@@ -13,17 +13,48 @@ module Dry
     #
     # @api public
     class Rule < Function
-      include ::Dry::Equalizer(:keys, :block, inspect: false)
+      include ::Dry::Equalizer(:keys, :block, :name, :depends_on, inspect: false)
 
       # @!attribute [r] keys
       #   @return [Array<Symbol, String, Hash>]
       #   @api private
       option :keys
 
+      # @!attribute [r] name
+      #   @return [Symbol, String, nil] Optional name that other rules can depend on
+      #   @api private
+      option :name, optional: true
+
+      # @!attribute [r] depends_on
+      #   @return [Array<Symbol, String>, Symbol, String, nil] Names of prerequisite rules
+      #   @api private
+      option :depends_on, optional: true
+
       # @!attribute [r] macros
       #   @return [Array<Symbol>]
       #   @api private
       option :macros, default: proc { EMPTY_ARRAY.dup }
+
+      # @api private
+      def initialize(*, name: nil, depends_on: EMPTY_ARRAY, **, &block)
+        super
+        @name = name&.to_sym
+        @depends_on = Array(depends_on).flatten.map(&:to_sym).uniq.freeze
+      end
+
+      # Return the rule's name, if it has one
+      #
+      # @return [Symbol, nil]
+      #
+      # @api public
+      attr_reader :name
+
+      # Return names of rules that must pass before this rule is applied
+      #
+      # @return [Array<Symbol>]
+      #
+      # @api public
+      attr_reader :depends_on
 
       # Evaluate the rule within the provided context
       #

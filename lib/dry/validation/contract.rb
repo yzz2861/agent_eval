@@ -75,6 +75,11 @@ module Dry
       #   @api private
       option :rules, default: -> { self.class.rules }
 
+      # @!attribute [r] rule_graph
+      #   @return [RuleGraph] Validated, dependency-ordered graph of rules
+      #   @api private
+      option :rule_graph, default: -> { RuleGraph.new(rules) }
+
       # @!attribute [r] message_resolver
       #   @return [Messages::Resolver]
       #   @api private
@@ -98,14 +103,11 @@ module Dry
         end
 
         Result.new(schema.(input), context_map) do |result|
-          rules.each do |rule|
-            next if rule.keys.any? { |key| error?(result, key) }
+          statuses = EMPTY_HASH.dup
 
-            rule_result = rule.(self, result)
-
-            rule_result.failures.each do |failure|
-              result.add_error(message_resolver.(**failure))
-            end
+          rule_graph.call.each do |rule|
+            status = apply_rule(rule, result, statuses)
+            statuses[rule.name] = status if rule.name
           end
         end
       end
@@ -121,6 +123,43 @@ module Dry
       end
 
       private
+
+      # Apply a single rule and return its status (+:passed+, +:failed+ or +:skipped+)
+      #
+      # @return [Symbol]
+      #
+      # @api private
+      def apply_rule(rule, result, statuses)
+        schema_failure = rule.keys.any? { |key| error?(result, key) }
+        unmet = rule.depends_on.filter_map {
+          |dep| [dep, statuses[dep]] unless statuses[dep].equal?(:passed)
+        }.to_h
+
+        return skip_rule(rule, result, schema_failure, unmet) if schema_failure || !unmet.empty?
+
+        evaluator = rule.(self, result)
+
+        evaluator.failures.each do |failure|
+          result.add_error(message_resolver.(**failure))
+        end
+
+        status = evaluator.failures.empty? ? :passed : :failed
+        result.add_rule_result(RuleResult.new(name: rule.name, status: status)) if rule.name
+        status
+      end
+
+      # @api private
+      def skip_rule(rule, result, schema_failure, unmet)
+        result.add_rule_result(
+          RuleResult.skipped(
+            rule.name,
+            schema_error: schema_failure,
+            unmet_dependencies: unmet
+          )
+        ) if rule.name
+
+        :skipped
+      end
 
       # @api private
       def error?(result, spec)

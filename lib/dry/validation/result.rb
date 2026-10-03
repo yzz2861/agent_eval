@@ -30,6 +30,16 @@ module Dry
       # @api public
       attr_reader :context
 
+      # Results of applying named rules
+      #
+      # Keys are rule names and values are {RuleResult} objects describing
+      # whether each rule passed, failed, or was skipped, and why.
+      #
+      # @return [Hash{Symbol => RuleResult}]
+      #
+      # @api public
+      attr_reader :rule_results
+
       # Result from contract's schema
       #
       # @return [Dry::Schema::Result]
@@ -52,6 +62,7 @@ module Dry
         @context = context
         @options = options
         @errors = initialize_errors
+        @rule_results = EMPTY_HASH.dup
       end
 
       # Return values wrapper with the input processed by schema
@@ -148,6 +159,18 @@ module Dry
         self
       end
 
+      # Record the outcome of a named rule
+      #
+      # @param [RuleResult] rule_result
+      #
+      # @return [self]
+      #
+      # @api private
+      def add_rule_result(rule_result)
+        @rule_results[rule_result.name] = rule_result
+        self
+      end
+
       # Read a value under provided key
       #
       # @param [Symbol] key
@@ -192,6 +215,7 @@ module Dry
       #
       # @api private
       def freeze
+        @rule_results.freeze
         values.freeze
         errors.freeze
         super

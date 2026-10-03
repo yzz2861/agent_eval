@@ -8,6 +8,10 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 ## [Unreleased]
 
 
+### Added
+
+- Rules can now be named with `rule(name:)` and declare prerequisite rules with `depends_on:`. A dependent rule is skipped when a prerequisite fails or is itself skipped, and each named rule's `:passed`, `:failed` or `:skipped` outcome is available through `Result#rule_results` together with the skip reason. Missing rule references and dependency cycles are raised when the contract is instantiated.
+
 ## [1.11.1] - 2025-01-21
 
 

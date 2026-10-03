@@ -39,5 +39,22 @@ module Dry
         super("#{klass} cannot be instantiated without a schema defined")
       end
     end
+
+    # Error raised when a named rule is declared more than once in a contract
+    DuplicateRuleNameError = ::Class.new(::StandardError)
+
+    # Error raised when a rule depends on another rule that was never defined
+    MissingRuleError = ::Class.new(::StandardError) do
+      # @api private
+      def initialize(missing_name, dependent_name)
+        super(
+          "rule #{dependent_name} depends on #{missing_name.inspect}, " \
+          "but no rule named #{missing_name.inspect} is defined"
+        )
+      end
+    end
+
+    # Error raised when rule dependencies form a cycle
+    CircularDependencyError = ::Class.new(::StandardError)
   end
 end

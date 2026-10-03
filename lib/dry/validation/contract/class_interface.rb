@@ -90,13 +90,29 @@ module Dry
         #     failure('please provide a valid street address') if valid_street?(values[:street])
         #   end
         #
+        # @example naming a rule and declaring prerequisites
+        #   rule(:account_id, name: :account_open?) do
+        #     key.failure('account is closed') unless account_open?(value)
+        #   end
+        #
+        #   rule(:account_id, name: :has_credit?, depends_on: :account_open?) do
+        #     key.failure('account is out of credit') unless has_credit?(value)
+        #   end
+        #
+        # When +:account_open?+ fails, +:has_credit?+ is skipped instead of
+        # being applied, and the skip is reported in the result.
+        #
         # @return [Rule]
         #
         # @api public
-        def rule(*keys, &block)
+        def rule(*keys, **rule_options, &block)
+          options = rule_options.slice(*RULE_OPTIONS)
+          key_hash = rule_options.except(*RULE_OPTIONS)
+          keys << key_hash unless key_hash.empty?
+
           ensure_valid_keys(*keys) if __schema__
 
-          Rule.new(keys: keys, block: block).tap do |rule|
+          Rule.new(keys: keys, **options, block: block).tap do |rule|
             rules << rule
           end
         end
@@ -145,6 +161,12 @@ module Dry
         end
 
         private
+
+        # Keyword arguments of {#rule} that configure the rule itself rather
+        # than naming schema keys
+        #
+        # @api private
+        RULE_OPTIONS = %i[name depends_on].freeze
 
         # @api private
         def ensure_valid_keys(*keys)
