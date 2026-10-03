@@ -78,7 +78,13 @@ module Fugit
       hou: { a: 'h', r: 'h', i: 'H', s: 3600, I: true, l: 'hour' },
       min: { a: 'm', r: 'm', i: 'M', s: 60, I: true, l: 'minute' },
       sec: { a: 's', r: 's', i: 'S', s: 1, I: true, l: 'second' }
-        }.freeze
+      }.freeze
+
+    MONTH_END_POLICIES = {
+      clamp: %i[ clamp clip cap last_day snap end_of_month ].freeze,
+      roll: %i[ roll roll_forward roll_over overflow forward ].freeze,
+      reject: %i[ reject raise error fail strict ].freeze,
+    }.freeze
 
     #INFLA_KEYS, NON_INFLA_KEYS = KEYS
     #  .partition { |k, v| v[:I] }
@@ -172,7 +178,7 @@ module Fugit
           h
         }
 
-      self.class.allocate.init(@original, {}, params)
+      self.class.allocate.init(@original, @options.dup, params)
     end
 
     # Round float seconds to 9 decimals when deflating
@@ -212,36 +218,22 @@ module Fugit
 
       h[:sec] = s.is_a?(Integer) ? s : s.round(SECOND_ROUND)
 
-      self.class.allocate.init(@original, {}, h)
+      self.class.allocate.init(@original, @options.dup, h)
     end
 
     def opposite
 
       params = @h.inject({}) { |h, (k, v)| h[k] = -v; h }
 
-      self.class.allocate.init(nil, {}, params)
+      self.class.allocate.init(nil, @options.dup, params)
     end
 
     alias -@ opposite
 
-    def add_numeric(n)
-
-      h = @h.dup
-      h[:sec] = (h[:sec] || 0) + n.to_i
-
-      self.class.allocate.init(nil,{}, h)
-    end
-
-    def add_duration(d)
-
-      params = d.h.inject(@h.dup) { |h, (k, v)| h[k] = (h[k] || 0) + v; h }
-
-      self.class.allocate.init(nil, {}, params)
-    end
-
-    def add_to_time(t)
+    def add_to_time(t, opts=nil)
 
       t = ::EtOrbi.make_time(t)
+      policy = month_end_policy(opts)
 
       INFLA_KEYS.each do |k, a|
 
@@ -253,44 +245,33 @@ module Fugit
       NON_INFLA_KEYS.each do |k, a|
 
         v = @h[k]; next unless v
-        at = [ t.year, t.month, t.day, t.hour, t.min, t.sec ]
 
-        at[a[:x]] += v
-
-        if at[1] > 12
-          n, m = at[1] / 12, at[1] % 12
-          at[0], at[1] = at[0] + n, m
-        elsif at[1] < 1
-          n, m = (-at[1]) / 12 + 1, (11+at[1]) % 12 + 1
-          at[0], at[1] = at[0] - n, m
-        end
-
-        t = ::EtOrbi.make_time(at, t.zone)
+        t = add_calendar_unit(t, k, v, policy)
       end
 
       t
     end
 
-    def add(a)
+    def add(a, opts=nil)
 
       case a
-      when Numeric then add_numeric(a)
-      when Fugit::Duration then add_duration(a)
-      when String then add_duration(self.class.parse(a))
-      when ::Time, ::EtOrbi::EoTime then add_to_time(a)
+      when Numeric then add_numeric(a, opts)
+      when Fugit::Duration then add_duration(a, opts)
+      when String then add_duration(self.class.parse(a), opts)
+      when ::Time, ::EtOrbi::EoTime then add_to_time(a, opts)
       else fail ArgumentError.new(
         "cannot add #{a.class} instance to a Fugit::Duration")
       end
     end
     alias + add
 
-    def subtract(a)
+    def subtract(a, opts=nil)
 
       case a
-      when Numeric then add_numeric(-a)
-      when Fugit::Duration then add_duration(-a)
-      when String then add_duration(-self.class.parse(a))
-      when ::Time, ::EtOrbi::EoTime then opposite.add_to_time(a)
+      when Numeric then add_numeric(-a, opts)
+      when Fugit::Duration then add_duration(-a, opts)
+      when String then add_duration(-self.class.parse(a), opts)
+      when ::Time, ::EtOrbi::EoTime then opposite.add_to_time(a, opts)
       else fail ArgumentError.new(
         "cannot subtract #{a.class} instance to a Fugit::Duration")
       end
@@ -308,9 +289,9 @@ module Fugit
       @h.hash
     end
 
-    def next_time(from=::EtOrbi::EoTime.now)
+    def next_time(from=::EtOrbi::EoTime.now, opts=nil)
 
-      add(from)
+      add(from, opts)
     end
 
     # Returns a copy of this duration, omitting its seconds.
@@ -321,17 +302,33 @@ module Fugit
       h.delete(:sec)
       h[:min] = 0 if h.empty?
 
-      self.class.allocate.init(nil, { literal: true }, h)
+      self.class.allocate.init(nil, @options.merge(literal: true), h)
     end
 
     protected
 
+    def add_numeric(n, opts=nil)
+
+      h = @h.dup
+      h[:sec] = (h[:sec] || 0) + n.to_i
+
+      self.class.allocate.init(nil, duration_options(opts), h)
+    end
+
+    def add_duration(d, opts=nil)
+
+      params = d.h.inject(@h.dup) { |h, (k, v)| h[k] = (h[k] || 0) + v; h }
+
+      self.class.allocate.init(nil, duration_options(opts), params)
+    end
+
     def init(original, options, h)
 
       @original = original
-      @options = options
+      literal = options && options[:literal]
+      @options = normalize_options(options)
 
-      if options[:literal]
+      if literal
         @h = h
       else
         @h = h.reject { |k, v| v == 0 }
@@ -339,6 +336,109 @@ module Fugit
       end
 
       self
+    end
+
+    private
+
+    def normalize_options(options)
+
+      options = (options || {}).dup
+
+      if options.key?(:end_of_month) && ! options.key?(:month_end)
+        options[:month_end] = options.delete(:end_of_month)
+      end
+
+      if options.key?(:month_end)
+        options[:month_end] = resolve_month_end_policy(options[:month_end])
+      end
+
+      options
+    end
+
+    def resolve_month_end_policy(policy)
+
+      return :clamp if policy == true
+      return :roll if policy == false
+
+      p = policy.to_s.downcase.to_sym
+
+      MONTH_END_POLICIES.each do |canonical, aliases|
+        return canonical if aliases.include?(p)
+      end
+
+      fail ArgumentError.new(
+        "unknown month_end policy #{policy.inspect}, expected " +
+        ':clamp, :roll, or :reject')
+    end
+
+    def month_end_policy(opts=nil)
+
+      opts = normalize_options(opts)
+
+      opts[:month_end] || @options[:month_end] || :roll
+    end
+
+    def duration_options(opts=nil)
+
+      normalize_options(@options.merge(opts || {}))
+    end
+
+    def add_calendar_unit(t, key, value, policy)
+
+      integer_value = value.to_i
+
+      if value != integer_value
+        return add_calendar_unit_legacy(t, key, value)
+      end
+
+      first_day = ::Date.new(t.year, t.month, 1)
+      shift = key == :yea ? integer_value * 12 : integer_value
+      first_day = first_day >> shift
+
+      days_in_month = (first_day.next_month - first_day).to_i
+      day = t.day
+
+      if day > days_in_month
+        case policy
+        when :clamp then day = days_in_month
+        when :reject
+          direction = value < 0 ? 'subtract' : 'add'
+          unit = key == :yea ? 'year' : 'month'
+          preposition = value < 0 ? 'from' : 'to'
+          plural = 's' if integer_value.abs != 1
+          fail ArgumentError.new(
+            "cannot #{direction} #{integer_value.abs} #{unit}#{plural} " +
+            "#{preposition} #{t.strftime('%Y-%m-%d')}: day #{day} does not " +
+            "exist in #{first_day.strftime('%Y-%m')} " +
+            '(month_end: :reject)')
+        else
+          day = day
+        end
+      end
+
+      date = first_day + (day - 1)
+
+      ::EtOrbi.make_time(
+        [ date.year, date.month, date.day, t.hour, t.min, t.sec ],
+        t.zone)
+    end
+
+    def add_calendar_unit_legacy(t, key, value)
+
+      at = [ t.year, t.month, t.day, t.hour, t.min, t.sec ]
+      index = key == :yea ? 0 : 1
+
+      at[index] += value
+
+      if at[1] > 12
+        n, m = at[1] / 12, at[1] % 12
+        at[0], at[1] = at[0] + n, m
+      elsif at[1] < 1
+        n, m = (-at[1]) / 12 + 1, (11 + at[1]) % 12 + 1
+        at[0], at[1] = at[0] - n, m
+      end
+
+      ::EtOrbi.make_time(at, t.zone)
     end
 
     module Parser include Raabro
@@ -420,4 +520,3 @@ module Fugit
     end
   end
 end
-

@@ -20,6 +20,20 @@ class Probatio::Context
   def jruby?; !! RUBY_PLATFORM.match(/java/); end
   def windows?; Gem.win_platform?; end
 
+  def fugit_local_s(t)
+
+    offset = t.utc_offset
+    sign = offset < 0 ? '-' : '+'
+    offset = offset.abs
+
+    t.strftime('%Y-%m-%d %H:%M:%S') +
+      format(' %s%02d%02d', sign, offset / 3600, (offset % 3600) / 60)
+  end
+
+  def fugit_parse_time(s)
+
+    ::EtOrbi::EoTime.parse(s)
+  end
 
   def in_zone(zone_name, &block)
 
@@ -116,4 +130,3 @@ class Time
     end
   end
 end
-

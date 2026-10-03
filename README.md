@@ -646,6 +646,81 @@ p d.to_plain_s  # => "2Y2M1D5h3600s"
 p Fugit::Duration.parse('1y2M1d4h').to_sec # => 36820800
 ```
 
+### Calendar arithmetic and month ends
+
+Weeks, days, hours, minutes, and seconds are exact elapsed time. They are
+applied first. Years are then applied as their own step, followed by months as
+their own step. No month is ever converted to 30 (or any other number of)
+seconds for calendar arithmetic.
+
+When a year or month lands on a day that does not exist, `month_end:` chooses
+what happens:
+
+- `:roll` (default, for compatibility): keep the overflow and move forward.
+- `:clamp`: use the last valid day of the target month.
+- `:reject`: raise `ArgumentError`.
+
+The option may be set when parsing the duration or passed directly to `#add` /
+`#subtract`; the call-time option wins.
+
+```ruby
+t = EtOrbi.parse('2016-01-31 12:00:00 UTC')
+
+Fugit::Duration.parse('1M').add(t)
+  # => 2016-03-02 12:00:00 UTC
+
+Fugit::Duration.parse('1M', month_end: :clamp).add(t)
+  # => 2016-02-29 12:00:00 UTC
+
+Fugit::Duration.parse('1M', month_end: :roll).add(t)
+  # => 2016-03-02 12:00:00 UTC
+
+Fugit::Duration.parse('1M', month_end: :reject).add(t)
+  # ArgumentError: cannot add 1 month to 2016-01-31: day 31 does not exist
+  # in 2016-02 (month_end: :reject)
+
+Fugit::Duration.parse('-1M', month_end: :reject)
+  .add(EtOrbi.parse('2020-03-31 12:00:00 UTC'))
+  # ArgumentError: cannot subtract 1 month from 2020-03-31: day 31 does
+  # not exist in 2020-02 (month_end: :reject)
+```
+
+Leap days follow the same rule:
+
+```ruby
+t = EtOrbi.parse('2020-02-29 12:00:00 UTC')
+
+Fugit::Duration.parse('1Y', month_end: :clamp).add(t)
+  # => 2021-02-28 12:00:00 UTC
+Fugit::Duration.parse('1Y', month_end: :roll).add(t)
+  # => 2021-03-01 12:00:00 UTC
+```
+
+Calendar units preserve local wall-clock time. Around DST they can therefore
+produce a different UTC offset, or raise `TZInfo::PeriodNotFound` /
+`TZInfo::AmbiguousTime` when the resulting local time does not exist or is
+ambiguous. Exact days remain exact 24-hour elapsed periods, so adding one day
+to `2016-03-12 12:00:00 America/New_York` returns
+`2016-03-13 13:00:00 -0400`.
+
+These operations are not generally reversible:
+
+```ruby
+d = Fugit::Duration.parse('1M', month_end: :clamp)
+t = EtOrbi.parse('2016-01-31 12:00:00 UTC')
+t1 = d.add(t)             # => 2016-02-29 12:00:00 UTC
+(-d).add(t1)              # => 2016-01-29 12:00:00 UTC
+
+d = Fugit::Duration.parse('1M', month_end: :roll)
+t1 = d.add(t)             # => 2016-03-02 12:00:00 UTC
+(-d).add(t1)              # => 2016-02-02 12:00:00 UTC
+
+d = Fugit::Duration.parse('1M1d', month_end: :clamp)
+t = EtOrbi.parse('2020-01-30 12:00:00 UTC')
+t1 = d.add(t)             # => 2020-02-29 12:00:00 UTC (day first, then month)
+(-d).add(t1)              # => 2020-01-28 12:00:00 UTC
+```
+
 There is a `#deflate` method
 
 ```ruby
@@ -713,4 +788,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-

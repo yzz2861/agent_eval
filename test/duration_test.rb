@@ -445,6 +445,171 @@ group Fugit::Duration do
 
       assert t1.zone.canonical_identifier, 'UTC'
     end
+
+    group 'month_end:' do
+
+      [
+        [ '1M', '2016-01-31 12:00:00 UTC', nil,
+          '2016-03-02 12:00:00 +0000' ],
+        [ '1M', '2016-01-31 12:00:00 UTC', :clamp,
+          '2016-02-29 12:00:00 +0000' ],
+        [ '1M', '2016-01-31 12:00:00 UTC', :roll,
+          '2016-03-02 12:00:00 +0000' ],
+        [ '-1M', '2020-03-31 12:00:00 UTC', :clamp,
+          '2020-02-29 12:00:00 +0000' ],
+        [ '-1M', '2020-03-31 12:00:00 UTC', :roll,
+          '2020-03-02 12:00:00 +0000' ],
+        [ '1Y', '2020-02-29 12:00:00 UTC', :clamp,
+          '2021-02-28 12:00:00 +0000' ],
+        [ '1Y', '2020-02-29 12:00:00 UTC', :roll,
+          '2021-03-01 12:00:00 +0000' ],
+        [ '-1Y', '2024-02-29 12:00:00 UTC', :clamp,
+          '2023-02-28 12:00:00 +0000' ],
+        [ '-1Y', '2024-02-29 12:00:00 UTC', :roll,
+          '2023-03-01 12:00:00 +0000' ],
+        [ '1M1d', '2020-01-30 12:00:00 UTC', :clamp,
+          '2020-02-29 12:00:00 +0000' ],
+        [ '1Y1M', '2020-02-29 12:00:00 UTC', :clamp,
+          '2021-03-28 12:00:00 +0000' ],
+      ].each do |duration, source, policy, target|
+
+        test "applies #{policy.inspect} to #{duration} at #{source}" do
+
+          d =
+            policy ?
+            Fugit::Duration.parse(duration, month_end: policy) :
+            Fugit::Duration.parse(duration)
+
+          assert fugit_local_s(d.add(fugit_parse_time(source))), target
+        end
+      end
+
+      test 'accepts the policy at call time and overrides parse time' do
+
+        d = Fugit::Duration.parse('1M', month_end: :clamp)
+        t = fugit_parse_time('2016-01-31 12:00:00 UTC')
+
+        assert(
+          fugit_local_s(d.add(t, month_end: :roll)),
+          '2016-03-02 12:00:00 +0000')
+      end
+
+      test 'keeps the policy when negating a duration' do
+
+        d = -Fugit::Duration.parse('1M', month_end: :clamp)
+        t = fugit_parse_time('2020-03-31 12:00:00 UTC')
+
+        assert fugit_local_s(d.add(t)), '2020-02-29 12:00:00 +0000'
+      end
+
+      test 'rejects nonexistent target dates' do
+
+        d = Fugit::Duration.parse('1M', month_end: :reject)
+        t = fugit_parse_time('2016-01-31 12:00:00 UTC')
+
+        assert_error(
+          lambda { d.add(t) },
+          ArgumentError,
+          'cannot add 1 month to 2016-01-31: day 31 does not exist ' +
+          'in 2016-02 (month_end: :reject)')
+      end
+
+      test 'rejects nonexistent negative target dates' do
+
+        d = Fugit::Duration.parse('-1M', month_end: :reject)
+        t = fugit_parse_time('2020-03-31 12:00:00 UTC')
+
+        assert_error(
+          lambda { d.add(t) },
+          ArgumentError,
+          'cannot subtract 1 month from 2020-03-31: day 31 does not ' +
+          'exist in 2020-02 (month_end: :reject)')
+      end
+
+      test 'rejects unknown policies' do
+
+        assert_error(
+          lambda { Fugit::Duration.parse('1M', month_end: :nope) },
+          ArgumentError,
+          'unknown month_end policy :nope, expected :clamp, :roll, ' +
+          'or :reject')
+      end
+
+      test 'accepts end_of_month as an alias option' do
+
+        d = Fugit::Duration.parse('1M', end_of_month: :clamp)
+        t = fugit_parse_time('2016-01-31 12:00:00 UTC')
+
+        assert(
+          fugit_local_s(d.add(t)),
+          '2016-02-29 12:00:00 +0000')
+      end
+
+      test 'applies fixed days as 24 hours across spring DST' do
+
+        d = Fugit::Duration.parse('1d', month_end: :clamp)
+        t = fugit_parse_time('2016-03-12 12:00:00 America/New_York')
+
+        assert fugit_local_s(d.add(t)), '2016-03-13 13:00:00 -0400'
+      end
+
+      test 'keeps calendar wall time across spring DST and raises when missing' do
+
+        d = Fugit::Duration.parse('1M', month_end: :clamp)
+        t = fugit_parse_time('2016-02-13 02:30:00 America/New_York')
+
+        assert_error(
+          lambda { d.add(t) },
+          TZInfo::PeriodNotFound,
+          '2016-03-13 02:30:00 is an invalid local time.')
+      end
+
+      test 'raises when calendar wall time is ambiguous after fall DST' do
+
+        d = Fugit::Duration.parse('1M', month_end: :clamp)
+        t = fugit_parse_time('2016-10-06 01:30:00 America/New_York')
+
+        assert_error(
+          lambda { d.add(t) },
+          TZInfo::AmbiguousTime,
+          '2016-11-06 01:30:00 is an ambiguous local time.')
+      end
+
+      test 'does not assume adding and subtracting clamps back to the day' do
+
+        t = fugit_parse_time('2016-01-31 12:00:00 UTC')
+        d = Fugit::Duration.parse('1M', month_end: :clamp)
+
+        t1 = d.add(t)
+        t2 = (-d).add(t1)
+
+        assert fugit_local_s(t1), '2016-02-29 12:00:00 +0000'
+        assert fugit_local_s(t2), '2016-01-29 12:00:00 +0000'
+      end
+
+      test 'does not assume adding and subtracting a roll back to the day' do
+
+        t = fugit_parse_time('2016-01-31 12:00:00 UTC')
+        d = Fugit::Duration.parse('1M', month_end: :roll)
+
+        t1 = d.add(t)
+        t2 = (-d).add(t1)
+
+        assert fugit_local_s(t1), '2016-03-02 12:00:00 +0000'
+        assert fugit_local_s(t2), '2016-02-02 12:00:00 +0000'
+      end
+
+      test 'does not assume mixed calendar arithmetic reverses directly' do
+
+        t = fugit_parse_time('2020-01-30 12:00:00 UTC')
+        d = Fugit::Duration.parse('1M1d', month_end: :clamp)
+
+        assert fugit_local_s(d.add(t)), '2020-02-29 12:00:00 +0000'
+        assert(
+          fugit_local_s((-d).add(d.add(t))),
+          '2020-01-28 12:00:00 +0000')
+      end
+    end
   end
 
   group '#subtract' do
@@ -689,4 +854,3 @@ group Fugit::Duration do
     end
   end
 end
-
