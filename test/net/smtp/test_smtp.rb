@@ -20,6 +20,7 @@ module Net
 
     def teardown
       FakeServer.stop_all
+      FakeLmtpServer.stop_all
     end
 
     def test_critical
@@ -251,6 +252,79 @@ module Net
       err = assert_raise(Net::SMTPUnknownError) { smtp.data('message') }
       assert_equal "could not get 3xx (250: 250 OK\n)", err.message
       assert_equal "250", err.response.status
+    end
+
+    def test_lmtp_send_message_per_recipient_results
+      server = FakeLmtpServer.start(
+        rcpt_replies: ['250 2.1.5 Ok', '250 2.1.5 Ok', '250 2.1.5 Ok'],
+        data_replies: ['250 2.0.0 Ok: delivered',
+                       '450 4.2.1 Mailbox busy, try again later',
+                       '550 5.1.1 User unknown'])
+      smtp = Net::SMTP.start 'localhost', server.port, lmtp: true
+      results = smtp.send_message("Subject: test\r\n\r\nbody\r\n",
+                                  'from@example.com',
+                                  ['ok@example.com', 'busy@example.com', 'gone@example.com'])
+      assert_equal 3, results.size
+      assert_equal ['ok@example.com', 'busy@example.com', 'gone@example.com'],
+                   results.map(&:address)
+      assert results[0].success?
+      assert_equal '250', results[0].response.status
+      assert results[1].failure?
+      assert_equal '450', results[1].response.status
+      assert results[2].failure?
+      assert_equal '550', results[2].response.status
+      assert_include server.commands, "LHLO localhost\r\n"
+      assert_not_include server.commands, "EHLO localhost\r\n"
+      smtp.finish
+    end
+
+    def test_lmtp_rcpt_rejected_recipient_occupies_no_data_reply
+      server = FakeLmtpServer.start(
+        rcpt_replies: ['250 2.1.5 Ok', '550 5.1.1 User unknown', '250 2.1.5 Ok'],
+        data_replies: ['250 2.0.0 Ok: delivered', '250 2.0.0 Ok: delivered'])
+      smtp = Net::SMTP.start 'localhost', server.port, lmtp: true
+      results = smtp.send_message("Subject: test\r\n\r\nbody\r\n",
+                                  'from@example.com',
+                                  ['a@example.com', 'b@example.com', 'c@example.com'])
+      assert_equal 3, results.size
+      assert results[0].success?
+      assert results[1].failure?
+      assert_equal '550', results[1].response.status
+      assert results[2].success?
+      smtp.finish
+    end
+
+    def test_lmtp_disconnect_mid_reply_keeps_confirmed_and_marks_unknown
+      server = FakeLmtpServer.start(
+        rcpt_replies: ['250 2.1.5 Ok', '250 2.1.5 Ok', '250 2.1.5 Ok'],
+        data_replies: ['250 2.0.0 Ok: delivered'],
+        close_after_data: true)
+      smtp = Net::SMTP.start 'localhost', server.port, lmtp: true
+      results = smtp.send_message("Subject: test\r\n\r\nbody\r\n",
+                                  'from@example.com',
+                                  ['a@example.com', 'b@example.com', 'c@example.com'])
+      assert_equal 3, results.size
+      assert results[0].success?
+      assert results[1].unknown?
+      assert_nil results[1].response
+      assert results[2].unknown?
+      assert_nil results[2].response
+      assert_nothing_raised { smtp.finish }
+    end
+
+    def test_lmtp_all_recipients_rejected
+      server = FakeLmtpServer.start(
+        rcpt_replies: ['550 5.1.1 User unknown', '550 5.1.1 User unknown'],
+        data_replies: [])
+      smtp = Net::SMTP.start 'localhost', server.port, lmtp: true
+      results = smtp.send_message("Subject: test\r\n\r\nbody\r\n",
+                                  'from@example.com',
+                                  ['a@example.com', 'b@example.com'])
+      assert_equal 2, results.size
+      assert results.all?(&:failure?)
+      assert_not_include server.commands, "DATA\r\n"
+      assert_include server.commands, "RSET\r\n"
+      smtp.finish
     end
 
     def test_crlf_injection
@@ -816,6 +890,82 @@ module Net
         end
       end
     rescue Errno::ECONNRESET, Errno::ECONNABORTED
+      nil
+    end
+  end
+
+  class FakeLmtpServer
+    @servers = []
+
+    def self.start(**kw)
+      server = self.new
+      @servers.push server
+      server.start(**kw)
+      server
+    end
+
+    def self.stop_all
+      while (s = @servers.shift)
+        s.stop
+      end
+    end
+
+    attr_reader :port
+    attr_reader :commands
+
+    def start(rcpt_replies: [], data_replies: [], close_after_data: false)
+      @commands = []
+      @rcpt_replies = rcpt_replies
+      @data_replies = data_replies
+      @close_after_data = close_after_data
+      @server = TCPServer.new('localhost', 0)
+      @port = @server.addr[1]
+      @server_thread = Thread.start do
+        Thread.current.abort_on_exception = true
+        serve
+      end
+    end
+
+    def stop
+      @server_thread&.kill
+      @server_thread&.join
+      @server&.close
+    end
+
+    private
+
+    def serve
+      sock = @server.accept
+      sock.puts "220 ready\r\n"
+      rcpt_count = 0
+      while (line = sock.gets)
+        @commands.push line
+        case line.chomp
+        when /\ALHLO /
+          sock.puts "250-servername\r\n250 PIPELINING\r\n"
+        when /\AMAIL FROM:/
+          sock.puts "250 2.1.0 Ok\r\n"
+        when /\ARCPT TO:/
+          sock.puts "#{@rcpt_replies[rcpt_count]}\r\n"
+          rcpt_count += 1
+        when "DATA"
+          sock.puts "354 End data with <CR><LF>.<CR><LF>\r\n"
+          while (body_line = sock.gets)
+            break if body_line.chomp == '.'
+          end
+          @data_replies.each do |reply|
+            sock.puts "#{reply}\r\n"
+          end
+          sock.close if @close_after_data
+        when "RSET"
+          sock.puts "250 2.0.0 Ok\r\n"
+        when "QUIT"
+          sock.puts "221 2.0.0 Bye\r\n"
+          sock.close
+          break
+        end
+      end
+    rescue Errno::ECONNRESET, Errno::ECONNABORTED, Errno::EPIPE, IOError
       nil
     end
   end

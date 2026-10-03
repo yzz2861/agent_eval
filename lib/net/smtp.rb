@@ -187,6 +187,34 @@ module Net
   # The +LOGIN+ and +CRAM-MD5+ mechanisms are still available for backwards
   # compatibility, but are deprecated and should be avoided.
   #
+  # === LMTP
+  #
+  # This library also supports \LMTP, the Local Mail Transfer Protocol
+  # [RFC2033[https://www.rfc-editor.org/rfc/rfc2033.html]], which is often
+  # used for final delivery to a local message store.  Pass +lmtp: true+
+  # to Net::SMTP.new or Net::SMTP.start to use \LMTP instead of \SMTP:
+  #
+  #     Net::SMTP.start('your.lmtp.server', 24, lmtp: true) do |lmtp|
+  #       results = lmtp.send_message msgstr,
+  #                                   'from@example.com',
+  #                                   ['dest@example.com', 'dest2@example.com']
+  #       results.each do |result|
+  #         if result.success?
+  #           puts "#{result.address}: delivered"
+  #         elsif result.unknown?
+  #           puts "#{result.address}: unknown"
+  #         else
+  #           puts "#{result.address}: #{result.response.message}"
+  #         end
+  #       end
+  #     end
+  #
+  # In \LMTP mode the session is started with the +LHLO+ command, and the
+  # server returns one reply per accepted recipient after the message data.
+  # #send_message and #open_message_stream therefore return an Array of
+  # Net::SMTP::DeliveryResult, one for each recipient, instead of a single
+  # Net::SMTP::Response.
+  #
   class SMTP < Protocol
     VERSION = "0.5.2"
 
@@ -207,6 +235,11 @@ module Net
 
     class << self
       alias default_ssl_port default_tls_port
+    end
+
+    # The default LMTP port number, 24.
+    def SMTP.default_lmtp_port
+      24
     end
 
     def SMTP.default_ssl_context(ssl_context_params = nil)
@@ -237,13 +270,19 @@ module Net
     # <tt>tls_verify: true</tt> is equivalent to <tt>ssl_context_params: {
     # verify_mode: OpenSSL::SSL::VERIFY_PEER }</tt>.
     #
+    # If +lmtp+ is true, use \LMTP (RFC 2033) instead of \SMTP: the session
+    # is started with the +LHLO+ command and message delivery returns
+    # per-recipient results.  The default is false.  When +lmtp+ is true
+    # and +port+ is not given, the port defaults to port 24.
+    #
     # This method does not open the TCP connection.  You can use
     # SMTP.start instead of SMTP.new if you want to do everything
     # at once.  Otherwise, follow SMTP.new with SMTP#start.
     #
-    def initialize(address, port = nil, tls: false, starttls: :auto, tls_verify: true, tls_hostname: nil, ssl_context_params: nil)
+    def initialize(address, port = nil, tls: false, starttls: :auto, tls_verify: true, tls_hostname: nil, ssl_context_params: nil, lmtp: false)
       @address = address
-      @port = (port || SMTP.default_port)
+      @lmtp = lmtp
+      @port = (port || (@lmtp ? SMTP.default_lmtp_port : SMTP.default_port))
       @esmtp = true
       @capabilities = nil
       @socket = nil
@@ -286,6 +325,14 @@ module Net
 
     # +true+ if the SMTP object uses ESMTP (which it does by default).
     alias esmtp? esmtp
+
+    # +true+ if this object uses \LMTP (RFC 2033) instead of \SMTP.
+    # In \LMTP mode the session is started with the +LHLO+ command
+    # and the server returns one reply per accepted recipient after the
+    # message data.
+    def lmtp?
+      @lmtp
+    end
 
     # true if server advertises STARTTLS.
     # You cannot get valid value before opening SMTP session.
@@ -505,6 +552,8 @@ module Net
     # <tt>tls_verify: true</tt> is equivalent to <tt>ssl_context_params: {
     # verify_mode: OpenSSL::SSL::VERIFY_PEER }</tt>.
     #
+    # If +lmtp+ is true, use \LMTP instead of \SMTP; see Net::SMTP.new.
+    #
     # The remaining arguments are used for \SMTP authentication, if required or
     # desired.
     #
@@ -536,13 +585,14 @@ module Net
                    user: nil, secret: nil, password: nil, authtype: nil,
                    tls: false, starttls: :auto,
                    tls_verify: true, tls_hostname: nil, ssl_context_params: nil,
+                   lmtp: false,
                    &block)
       raise ArgumentError, "wrong number of arguments (given #{args.size + 2}, expected 1..6)" if args.size > 4
       helo ||= args[0] || 'localhost'
       user ||= args[1]
       secret ||= password || args[2]
       authtype ||= args[3]
-      new(address, port, tls: tls, starttls: starttls, tls_verify: tls_verify, tls_hostname: tls_hostname, ssl_context_params: ssl_context_params).start(helo: helo, user: user, secret: secret, authtype: authtype, &block)
+      new(address, port, tls: tls, starttls: starttls, tls_verify: tls_verify, tls_hostname: tls_hostname, ssl_context_params: ssl_context_params, lmtp: lmtp).start(helo: helo, user: user, secret: secret, authtype: authtype, &block)
     end
 
     # +true+ if the \SMTP session has been started.
@@ -714,10 +764,14 @@ module Net
     end
 
     def do_helo(helo_domain)
-      res = @esmtp ? ehlo(helo_domain) : helo(helo_domain)
+      res = if lmtp?
+              lhlo(helo_domain)
+            else
+              @esmtp ? ehlo(helo_domain) : helo(helo_domain)
+            end
       @capabilities = res.capabilities
     rescue SMTPError
-      if @esmtp
+      if !lmtp? && @esmtp
         @esmtp = false
         @error_occurred = false
         retry
@@ -763,6 +817,10 @@ module Net
     # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
     # the destination mail address or addresses.
     #
+    # In \LMTP mode (see Net::SMTP.new), this method returns an Array of
+    # Net::SMTP::DeliveryResult, one for each recipient, reporting the final
+    # delivery result of each recipient.
+    #
     # === Example
     #
     #     Net::SMTP.start('smtp.example.com') do |smtp|
@@ -793,7 +851,11 @@ module Net
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
       mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      if lmtp?
+        lmtp_deliver(to_addrs, msgstr)
+      else
+        rcptto_list(to_addrs) {data msgstr}
+      end
     end
 
     alias send_mail send_message
@@ -812,6 +874,10 @@ module Net
     # If a single CR ("\r") or LF ("\n") is found in the message,
     # it is converted to the CR LF pair.  You cannot send a binary
     # message with this method.
+    #
+    # In \LMTP mode (see Net::SMTP.new), this method returns an Array of
+    # Net::SMTP::DeliveryResult, one for each recipient, reporting the final
+    # delivery result of each recipient.
     #
     # === Parameters
     #
@@ -848,7 +914,11 @@ module Net
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
       mailfrom from_addr
-      rcptto_list(to_addrs) {data(&block)}
+      if lmtp?
+        lmtp_deliver(to_addrs, nil, &block)
+      else
+        rcptto_list(to_addrs) {data(&block)}
+      end
     end
 
     alias ready open_message_stream   # obsolete
@@ -905,6 +975,10 @@ module Net
       getok("EHLO #{domain}")
     end
 
+    def lhlo(domain)
+      getok("LHLO #{domain}")
+    end
+
     # +from_addr+ is +String+ or +Net::SMTP::Address+
     def mailfrom(from_addr)
       addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
@@ -953,26 +1027,8 @@ module Net
     #   }
     #
     def data(msgstr = nil, &block)   #:yield: stream
-      if msgstr and block
-        raise ArgumentError, "message and block are exclusive"
-      end
-      unless msgstr or block
-        raise ArgumentError, "message or block is required"
-      end
       res = critical {
-        check_continue get_response('DATA')
-        socket_sync_bak = @socket.io.sync
-        begin
-          @socket.io.sync = false
-          if msgstr
-            @socket.write_message msgstr
-          else
-            @socket.write_message_by_block(&block)
-          end
-        ensure
-          @socket.io.flush
-          @socket.io.sync = socket_sync_bak
-        end
+        data_send(msgstr, &block)
         recv_response()
       }
       check_response res
@@ -1016,6 +1072,66 @@ module Net
         break unless line[3,1] == '-'   # "210-PIPELINING"
       end
       Response.parse(buf)
+    end
+
+    def data_send(msgstr, &block)
+      if msgstr and block
+        raise ArgumentError, "message and block are exclusive"
+      end
+      unless msgstr or block
+        raise ArgumentError, "message or block is required"
+      end
+      check_continue get_response('DATA')
+      socket_sync_bak = @socket.io.sync
+      begin
+        @socket.io.sync = false
+        if msgstr
+          @socket.write_message msgstr
+        else
+          @socket.write_message_by_block(&block)
+        end
+      ensure
+        @socket.io.flush
+        @socket.io.sync = socket_sync_bak
+      end
+    end
+
+    # Delivers a message over \LMTP and returns an Array of
+    # Net::SMTP::DeliveryResult, one for each recipient in +to_addrs+.
+    # Recipients rejected at RCPT time are recorded with their rejection
+    # response and do not consume a reply after DATA.  If the connection
+    # is lost while reading the post-DATA replies, recipients whose reply
+    # was already received keep their result and the remaining recipients
+    # are marked as unknown.
+    def lmtp_deliver(to_addrs, msgstr = nil, &block)
+      raise ArgumentError, 'mail destination not given' if to_addrs.empty?
+      results = to_addrs.map { |addr| DeliveryResult.new(addr) }
+      accepted = []
+      to_addrs.each_with_index do |addr, i|
+        begin
+          rcptto addr
+          accepted << i
+        rescue SMTPError => e
+          results[i] = DeliveryResult.new(addr, e.response)
+        end
+      end
+      if accepted.empty?
+        rset
+        return results
+      end
+      critical {
+        data_send(msgstr, &block)
+        accepted.each do |i|
+          begin
+            res = recv_response
+            results[i] = DeliveryResult.new(to_addrs[i], res)
+          rescue EOFError, IOError, SystemCallError
+            @error_occurred = true
+            break
+          end
+        end
+      }
+      results
     end
 
     def critical
@@ -1116,6 +1232,41 @@ module Net
         when /\A5/  then SMTPFatalError
         else             SMTPUnknownError
         end
+      end
+    end
+
+    # The delivery result for a single recipient of an \LMTP transaction.
+    # Instances of this class are created by the SMTP class in \LMTP mode;
+    # they should not be directly created by the user.
+    class DeliveryResult
+      # Creates a new instance of DeliveryResult.  +response+ is nil when
+      # the final result is unknown, e.g. the connection was lost before
+      # the server sent its reply for this recipient.
+      def initialize(address, response = nil)
+        @address = address
+        @response = response
+      end
+
+      # The recipient address this result belongs to
+      attr_reader :address
+
+      # The Net::SMTP::Response received for this recipient, or nil when
+      # the result is unknown
+      attr_reader :response
+
+      # true if the server accepted delivery for this recipient
+      def success?
+        !@response.nil? && @response.success?
+      end
+
+      # true if the server rejected delivery for this recipient
+      def failure?
+        !@response.nil? && !@response.success?
+      end
+
+      # true if no final reply was received for this recipient
+      def unknown?
+        @response.nil?
       end
     end
 
