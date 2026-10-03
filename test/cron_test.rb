@@ -409,7 +409,7 @@ group Fugit::Cron do
           t = Time.parse('2015-11-01 00:14:00')
 
           points =
-            5.times
+            6.times
               .collect {
                 t = c.next_time(t)
                 t.to_zs + ' // ' + t.to_t.to_s }
@@ -418,12 +418,14 @@ group Fugit::Cron do
           assert(points, %{
             2015-11-01 00:15:00 America/Los_Angeles // 2015-11-01 00:15:00 -0700
             2015-11-01 01:15:00 America/Los_Angeles // 2015-11-01 01:15:00 -0700
+            2015-11-01 01:15:00 America/Los_Angeles // 2015-11-01 01:15:00 -0800
             2015-11-01 02:15:00 America/Los_Angeles // 2015-11-01 02:15:00 -0800
             2015-11-01 03:15:00 America/Los_Angeles // 2015-11-01 03:15:00 -0800
             2015-11-01 04:15:00 America/Los_Angeles // 2015-11-01 04:15:00 -0800
           }.strip.split("\n").collect(&:strip).join("\n"))
 
-          assert(c.brute_frequency(2015).occurrences, 8759)
+          # the fold hour is walked over once by the hourly cursor
+          assert(c.brute_frequency(2015).occurrences, 8760)
         end
       end
 
@@ -444,11 +446,12 @@ group Fugit::Cron do
           assert(points, %{
             2018-11-03 01:59:00 America/New_York // 2018-11-03 01:59:00 -0400
             2018-11-04 01:59:00 America/New_York // 2018-11-04 01:59:00 -0400
+            2018-11-04 01:59:00 America/New_York // 2018-11-04 01:59:00 -0500
             2018-11-05 01:59:00 America/New_York // 2018-11-05 01:59:00 -0500
-            2018-11-06 01:59:00 America/New_York // 2018-11-06 01:59:00 -0500
           }.strip.split("\n").collect(&:strip).join("\n"))
 
-          assert(c.brute_frequency(2018).occurrences, 365)
+          # the fold day yields the local time twice (EDT then EST)
+          assert(c.brute_frequency(2018).occurrences, 366)
         end
       end
 
@@ -532,7 +535,9 @@ group Fugit::Cron do
               .strip.split("\n").map(&:strip)
               .reject { |l| l[0, 1] == '#' }.join("\n"))
 
-          assert c.brute_frequency(2021).occurrences, 8759
+          # the midnight gap removes the 00:00 point for one day but it
+          # is already unreachable; the remaining hours total 8760
+          assert c.brute_frequency(2021).occurrences, 8760
         end
       end
 
@@ -1974,4 +1979,3 @@ group Fugit do
     end
   end
 end
-

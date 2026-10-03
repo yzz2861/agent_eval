@@ -17,10 +17,28 @@ module Fugit
     MAXDAYS = [
       nil, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 ].freeze
 
+    # How to deal with a local time that occurs twice ("fold", the clock
+    # is set back when transitioning out of DST):
+    #
+    #   :early  # only the first (earliest UTC) occurrence
+    #   :late   # only the second (latest UTC) occurrence
+    #   :both   # the two occurrences, one after the other (default)
+    #
+    FOLD_STRATEGIES = %i[ early late both ].freeze
+
+    # How to deal with a local time that does not occur ("gap", the clock
+    # is set forward when transitioning into DST):
+    #
+    #   :skip    # do not occur that day (default)
+    #   :adjust  # occur that many seconds later, after the gap
+    #
+    GAP_STRATEGIES = %i[ skip adjust ].freeze
+
     attr_reader(
       :original, :zone)
     attr_reader(
-      :seconds, :minutes, :hours, :monthdays, :months, :weekdays, :timezone)
+      :seconds, :minutes, :hours, :monthdays, :months, :weekdays, :timezone,
+      :fold, :gap)
 
     class << self
 
@@ -272,17 +290,14 @@ module Fugit
     def next_time(from=::EtOrbi::EoTime.now)
 
       from = ::EtOrbi.make_time(from)
-      sfrom = from.strftime('%F|%T')
       ifrom = from.to_i
 
       i = 0
       t = TimeCursor.new(self, from.translate(@timezone))
-        #
-        # the translation occurs in the timezone of
-        # this Fugit::Cron instance
-
-      zfrom = t.time.strftime('%z|%Z')
-
+      # the translation occurs in the timezone of
+      # this Fugit::Cron instance
+      result =
+        catch(:dst_hit) do
       loop do
 
         fail RuntimeError.new(
@@ -296,24 +311,22 @@ module Fugit
         (ifrom == t.to_i) && (t.inc(1); next)
         month_match?(t) || (t.inc_month; next)
         day_match?(t) || (t.inc_day; next)
+
+        handle_dst_transition(t, :next, from, ifrom)
+
         hour_match?(t) || (t.inc_hour; next)
         min_match?(t) || (t.inc_min; next)
         sec_match?(t) || (t.inc_sec; next)
 
-        tt = t.time
-        st = tt.strftime('%F|%T')
-        zt = tt.strftime('%z|%Z')
-          #
-        if st == sfrom && zt != zfrom
-          from, sfrom, zfrom, ifrom = tt, st, zt, t.to_i
-          next
+        next unless resolve_fold(t, :next, @dst_day_info, ifrom) do |eot|
+          return eot.translate(from.zone)
         end
-          #
-          # when transitioning out of DST, this prevents #next_time from
-          # yielding the same literal time twice in a row, see gh-6
 
         break
       end
+
+      end
+      return result if result
 
       t.time.translate(from.zone)
         #
@@ -324,10 +337,12 @@ module Fugit
     def previous_time(from=::EtOrbi::EoTime.now)
 
       from = ::EtOrbi.make_time(from)
+      ito = (from - 1).to_i
 
       i = 0
       t = TimeCursor.new(self, (from - 1).translate(@timezone))
-
+      result =
+        catch(:dst_hit) do
       loop do
 
         fail RuntimeError.new(
@@ -338,13 +353,25 @@ module Fugit
 
 #tt = t.time;
 #puts "  #{tt.strftime('%F %T %:z %A')} #{tt.rweek} #{tt.rweek % 4}"
+        (ito == t.to_i) && (t.dec(1); next)
         month_match?(t) || (t.dec_month; next)
         day_match?(t) || (t.dec_day; next)
+
+        handle_dst_transition(t, :previous, from, ito)
+
         hour_match?(t) || (t.dec_hour; next)
         min_match?(t) || (t.dec_min; next)
         sec_match?(t) || (t.dec_sec; next)
+
+        next unless resolve_fold(t, :previous, @dst_day_info, ito) do |eot|
+          return eot.translate(from.zone)
+        end
+
         break
       end
+
+      end
+      return result if result
 
       t.time.translate(from.zone)
     end
@@ -584,7 +611,8 @@ module Fugit
         determine_monthdays(h[:dom], opts) &&
         determine_months(h[:mon], opts) &&
         determine_weekdays(h[:dow], opts) &&
-        determine_timezone(h[:tz])
+        determine_timezone(h[:tz]) &&
+        determine_strategies(opts)
 
       return nil unless valid
       return nil unless compact_month_days
@@ -757,6 +785,355 @@ module Fugit
       @zone, @timezone = z
 
       true
+    end
+
+    def determine_strategies(opts)
+
+      @fold = determine_strategy(opts, :fold, FOLD_STRATEGIES, :both)
+      @gap = determine_strategy(opts, :gap, GAP_STRATEGIES, :skip)
+
+      @fold && @gap
+    end
+
+    def determine_strategy(opts, key, valid, default)
+
+      v = opts.fetch(key, default)
+      v = v.to_s.downcase.to_sym if v.is_a?(::String)
+
+      fail(ArgumentError.new(
+        "unknown #{key} strategy #{v.inspect}, " +
+        "valid values are: #{valid.collect(&:inspect).join(', ')}"
+      )) unless valid.include?(v)
+
+      v
+    end
+
+    # Returns the selected occurrence when the cursor local time sits on a
+    # fold (ambiguous local time), yields nothing when the cursor should
+    # move past the fold.
+    #
+    # Returns true if the cursor local time is a regular, unique, time.
+    #
+    def resolve_fold(cursor, direction, info=nil, bound=nil)
+
+      # a fold (ambiguous local time) only happens on a backward transition
+      return true if info.nil? || (info[2] - info[1]) >= 0
+
+      eot = cursor.time
+      periods = local_periods(eot)
+
+      return true if periods.length < 2
+
+      instants = fold_instants(eot, periods)
+
+      instant =
+        case @fold
+        when :early
+          instants.first
+        when :late
+          instants.last
+        else # :both
+          b = bound || (direction == :next ? eot.to_i - 1 : eot.to_i + 1)
+          if direction == :next
+            instants.find { |i| i.to_i > b } || instants.first
+          else
+            instants.reverse.find { |i| i.to_i <= b } || instants.last
+          end
+        end
+
+      return true unless instant
+
+      cur_i = eot.to_i
+      ins_i = instant.to_i
+
+      within_bound =
+        bound.nil? ||
+        (direction == :next ? ins_i > bound : ins_i <= bound)
+
+      if cur_i == ins_i
+
+        if within_bound || @fold == :both
+          true # cursor on the selected occurrence, it is the answer
+        else
+          # the selected occurrence is the search seed itself, skip it
+          nudge_past_fold(cursor, instants, direction)
+          false
+        end
+      else
+
+        # cursor on the other (unselected) occurrence
+        if within_bound
+          nudge_fold(cursor, instants, direction)
+          yield(instant)
+        else
+          nudge_past_fold(cursor, instants, direction)
+        end
+
+        false
+      end
+    end
+
+    # After the selected occurrence was returned, place the cursor just
+    # beyond the whole fold window so the following sweep leaves the day.
+    #
+    def nudge_past_fold(cursor, instants, direction)
+
+      if direction == :next
+        cursor.inc(instants.last.to_f - cursor.time.to_f + 1)
+      else
+        cursor.dec(cursor.time.to_f - instants.first.to_f + 1)
+      end
+    end
+
+    # The cursor stands on the fold occurrence that was *not* selected;
+    # yield the selected one and seed the cursor just past it, ready for
+    # the following sweep.
+    #
+    def nudge_fold(cursor, instants, direction)
+
+      if direction == :next
+        target = @fold == :late ? instants.last : instants.first
+        cursor.inc(target.to_f - cursor.time.to_f + 1)
+      else
+        target = @fold == :early ? instants.first : instants.last
+        cursor.dec(cursor.time.to_f - target.to_f + 1)
+      end
+    end
+
+    # Takes care of the cron occurrences whose local time falls in a gap
+    # (:gap => :adjust) and of the second fold occurrence that a plain
+    # forward/backward walk over instants cannot reach (:fold => :both
+    # or :late / :early).
+    #
+    def handle_dst_transition(cursor, direction, from, bound)
+
+      t = cursor.time
+
+      dk = t.year * 512 + t.month * 32 + t.day
+      if dk != @dst_day_key
+        @dst_day_key = dk
+        z = t.zone
+        @dst_day_info =
+          if z.respond_to?(:transitions_up_to)
+            transition_info(t) || begin
+              d = ::Date.new(t.year, t.month, t.day) - 1
+              transition_info(t, d.year, d.month, d.day)
+            end
+          else
+            nil
+          end
+      end
+
+      return unless @dst_day_info
+
+      resolve_dst_transition(cursor, direction, @dst_day_info) do |eot|
+        next if direction == :next ? eot.to_i <= bound : eot.to_i > bound
+        throw(:dst_hit, eot.translate(from.zone))
+      end
+    end
+
+    def resolve_dst_transition(cursor, direction, info)
+
+      t = cursor.time
+
+      at, prev_offset, new_offset = info
+      gap_size = new_offset - prev_offset
+
+      if gap_size > 0
+
+        start_sod = sod_of_local_day(at.utc, prev_offset)
+        end_sod = start_sod + gap_size
+
+        if direction == :next
+
+          if t.to_f < at.to_f + gap_size
+            # cursor sits before or inside the gap; :skip relies on the
+            # cursor arithmetic which jumps the gap itself
+            return unless @gap == :adjust
+            # wall seconds-of-day of the cursor, measured against the
+            # pre-gap offset (the gap is interpreted in that offset)
+            lower = sod_of_local_day(t.utc, prev_offset)
+            slot = cron_slot_in(start_sod, end_sod) { |s| s > lower }
+          else
+            return
+          end
+        else
+
+          adjusted_top = at.to_f + (end_sod - start_sod - 1) + gap_size
+
+          if t.to_f > at.to_f
+            return unless @gap == :adjust
+            # wall seconds-of-day of the cursor, measured against the
+            # post-gap offset (the adjusted occurrence lives after it)
+            upper =
+              if t.to_f < at.to_f + gap_size
+                start_sod
+              elsif t.to_i > adjusted_top.to_i
+                DAY_S
+              else
+                sod_of_local_day(t.utc, new_offset)
+              end
+            slot =
+              cron_slot_in(start_sod, end_sod, :reverse) { |s| s < upper }
+            unless slot
+              cursor.dec(t.to_f - at.to_f) if @gap == :skip
+              return
+            end
+          else
+            return
+          end
+        end
+        return unless slot
+
+        instant =
+          ::EtOrbi::EoTime.new(
+            at.to_f + (slot - start_sod) + gap_size, t.zone)
+
+        yield(instant)
+
+      elsif gap_size < 0
+
+        fold_size = -gap_size
+        end_sod = sod_of_local_day(at.utc, new_offset)
+        start_sod = end_sod - fold_size
+
+        if direction == :next
+
+          return unless @fold == :both
+          return if t.to_f < at.to_f
+          return if t.to_f >= at.to_f + fold_size
+
+          lower = sod_of_local_day(t.utc, t.utc_offset)
+          slot = cron_slot_in(start_sod, end_sod) { |s| s > lower }
+        else
+
+          return unless @fold == :both
+          return if t.to_f > at.to_f + fold_size
+          return if t.to_f <= at.to_f
+
+          lower = sod_of_local_day(t.utc, t.utc_offset)
+          slot =
+            cron_slot_in(start_sod, end_sod, :reverse) { |s| s < lower }
+        end
+        return unless slot
+
+        instant =
+          if direction == :next
+            ::EtOrbi::EoTime.new(
+              at.to_f + (slot - start_sod) + fold_size, t.zone)
+          else
+            ::EtOrbi::EoTime.new(
+              at.to_f + (slot - start_sod), t.zone)
+          end
+
+        yield(instant) unless instant.to_i == t.to_i
+      end
+    end
+
+    # [ transition_at_eot, previous_utc_offset, new_utc_offset ] for the
+    # DST transition that happens on the calendar day of the given EoTime,
+    # nil if the zone has no transitions or if the transition crosses
+    # midnight (rare, historical zones).
+    #
+    def transition_info(eot, wy=nil, wm=nil, wd=nil)
+
+      z = eot.zone
+      return nil unless z.respond_to?(:transitions_up_to)
+
+      @transition_info_cache ||= {}
+      wy ||= eot.year; wm ||= eot.month; wd ||= eot.day
+      cache_key = [ z.object_id, wy, wm, wd ]
+      return @transition_info_cache[cache_key] if
+        @transition_info_cache.key?(cache_key)
+
+      from = ::Time.utc(wy, wm, wd) - 48 * 3600
+      to = from + 96 * 3600
+
+      info =
+        if tr = z.transitions_up_to(to, from)
+          .find do |t|
+            l = ::Time.at(t.at.value + t.previous_offset.utc_total_offset).utc
+            l.year == wy && l.month == wm && l.day == wd
+          end
+          [ ::EtOrbi::EoTime.new(tr.at.to_i, z),
+            tr.previous_offset.utc_total_offset,
+            tr.offset.utc_total_offset ]
+        end
+
+      @transition_info_cache[cache_key] = info
+      # bounded: a #next_time/#previous_time sweep only touches a handful
+      # of calendar days
+      @transition_info_cache.shift if @transition_info_cache.length > 8
+
+      info
+    end
+
+    def local_periods(eot)
+
+      z = eot.zone
+      return [] unless z.respond_to?(:periods_for_local)
+
+      l = ::Time.utc(eot.year, eot.month, eot.day, eot.hour, eot.min, eot.sec)
+      z.periods_for_local(
+        l)
+    end
+
+    def fold_instants(eot, periods)
+
+      periods.collect do |p|
+        ::EtOrbi::EoTime.new(
+          ::Time.utc(eot.year, eot.month, eot.day).to_i -
+            p.utc_total_offset +
+            eot.hour * 3600 + eot.min * 60 + eot.sec,
+          eot.zone)
+      end.sort_by(&:to_f)
+    end
+
+    # Seconds-of-day of the given UTC "wall" Time as seen with the given
+    # offset (clamps transitions that cross midnight).
+    #
+    def sod_of_local_day(wall_utc, offset)
+
+      s = wall_utc.hour * 3600 + wall_utc.min * 60 + wall_utc.sec + offset
+
+      [[ s, 0 ].max, DAY_S - 1].min
+    end
+
+    # The first (or last) cron slot, as a seconds-of-day value, that falls
+    # within the given wall-time half-open interval and for which the block
+    # predicate is true.
+    #
+    # DST gaps/folds only span a few hours, iterating the interval avoids
+    # building the full slot array (up to 86400 entries for seconds crons).
+    #
+    def cron_slot_in(from_sod, to_sod, order=:forward)
+
+      h0 = (from_sod / 3600).to_i
+      h1 = ((to_sod - 1) / 3600).to_i
+
+      hs = (h0..h1).select { |h| @hours.nil? || @hours.include?(h) }
+      hs = hs.reverse if order == :reverse
+
+      hs.each do |h|
+
+        ms = @minutes || (0..59).to_a
+        ss = @seconds || [ 0 ]
+
+        ms = ms.reverse if order == :reverse
+        ss = ss.reverse if order == :reverse
+
+        ms.each do |m|
+          ss.each do |s|
+
+            sod = h * 3600 + m * 60 + s
+
+            next if sod < from_sod || sod >= to_sod
+            return sod if yield(sod)
+          end
+        end
+      end
+
+      nil
     end
 
     def weekdays_to_cron_s
@@ -985,4 +1362,3 @@ module Fugit
     end
   end
 end
-
