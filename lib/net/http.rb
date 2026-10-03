@@ -2450,6 +2450,8 @@ module Net   #:nodoc:
     #   #<Net::HTTPOK 200 OK readbody=false>
     #
     def request(req, body = nil, &block)  # :yield: +response+
+      raise IOError, 'previous response body has not been closed' if
+        @deferred_body_stream_response
       unless started?
         start {
           req['connection'] ||= 'close'
@@ -2514,12 +2516,25 @@ module Net   #:nodoc:
 
           res
         }
-        res.reading_body(@socket, req.response_body_permitted?) {
+        res.body_stream_close_callback = lambda do |reason|
+          response_body_stream_closed(req, res, reason)
+        end
+        res.body_stream_open_callback = lambda do
+          @deferred_body_stream_response = res
+        end
+        res.reading_body(@socket, req.response_body_permitted?) do
           if block_given?
             count = max_retries # Don't restart in the middle of a download
             yield res
           end
-        }
+        end
+        if res.body_stream_active?
+          @deferred_body_stream_response = res
+        elsif res.body_stream? && res.body_stream_transport_finished?
+          # end_transport ran from the stream close callback.
+        else
+          end_transport req, res
+        end
       rescue Net::OpenTimeout
         raise
       rescue Net::ReadTimeout, IOError, EOFError,
@@ -2538,7 +2553,6 @@ module Net   #:nodoc:
         raise
       end
 
-      end_transport req, res
       res
     rescue => exception
       debug "Conn close because of error #{exception}"
@@ -2574,7 +2588,7 @@ module Net   #:nodoc:
       @last_communicated = nil
       if @socket.closed?
         debug 'Conn socket closed'
-      elsif not res.body and @close_on_empty_response
+      elsif !res.body_stream? && !res.body && @close_on_empty_response
         debug 'Conn close'
         @socket.close
       elsif keep_alive?(req, res)
@@ -2584,6 +2598,14 @@ module Net   #:nodoc:
         debug 'Conn close'
         @socket.close
       end
+    end
+
+    def response_body_stream_closed(req, res, reason)
+      return unless @deferred_body_stream_response == res
+      @deferred_body_stream_response = nil
+      @socket.close if @socket && reason == :aborted
+      end_transport(req, res)
+      res.body_stream_transport_finished!
     end
 
     def keep_alive?(req, res)

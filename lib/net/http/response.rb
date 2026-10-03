@@ -136,6 +136,10 @@ class Net::HTTPResponse
   # The maximum total size in bytes of the response header.
   MAX_RESPONSE_HEADER_LENGTH = 1024 * 1024 # 1 MiB
 
+  # Maximum number of body bytes drained before reusing a connection after
+  # an explicitly closed response body.
+  MAX_BODY_STREAM_DRAIN = 64 * 1024
+
   # The maximum number of informational (1xx) responses accepted before the
   # final response.
   MAX_INFORMATIONAL_RESPONSES = 100
@@ -220,6 +224,10 @@ class Net::HTTPResponse
     @decode_content = false
     @body_encoding = false
     @ignore_eof = true
+    @body_stream = nil
+    @body_stream_close_callback = nil
+    @body_stream_open_callback = nil
+    @body_stream_transport_finished = false
   end
 
   # The HTTP version supported by the server.
@@ -336,10 +344,62 @@ class Net::HTTPResponse
     @body_exist = reqmethodallowbody && self.class.body_permitted?
     begin
       yield
-      self.body   # ensure to read body
+      if @body_stream
+        nil # The caller owns the stream and must close it.
+      else
+        self.body   # ensure to read body
+      end
     ensure
       @socket = nil
     end
+  end
+
+  attr_writer :body_stream_close_callback # :nodoc: internal use only
+  attr_writer :body_stream_open_callback # :nodoc: internal use only
+
+  # Returns an IO-like, read-only handle for the response body.
+  #
+  # The handle reads the body on demand and transparently removes HTTP chunk
+  # framing.  Content-Encoding is decoded when the response was requested with
+  # automatic content decoding enabled.
+  #
+  # Call readpartial for readpartial-style input.  The handle must be closed
+  # before the same connection can be used for another request.  Closing it
+  # does not close caller-owned IO objects.
+  def body_stream
+    stream_check
+    raise IOError, 'body has already been read' if @read
+    @body_stream ||= begin
+      stream = if @body_exist
+        BodyStream.new(self, @socket)
+      else
+        EmptyBodyStream.new
+      end
+      stream.on_close = @body_stream_close_callback
+      stream
+    end
+    @body_stream_open_callback&.call
+    @body_stream
+  end
+
+  def body_stream? # :nodoc: internal use only
+    !!@body_stream
+  end
+
+  def body_stream_active? # :nodoc: internal use only
+    @body_stream && !@body_stream.closed?
+  end
+
+  def body_stream_close_reason # :nodoc: internal use only
+    @body_stream&.close_reason
+  end
+
+  def body_stream_transport_finished? # :nodoc: internal use only
+    @body_stream_transport_finished
+  end
+
+  def body_stream_transport_finished! # :nodoc: internal use only
+    @body_stream_transport_finished = true
   end
 
   # Gets the entity body returned by the remote HTTP server.
@@ -375,6 +435,7 @@ class Net::HTTPResponse
       raise IOError, "#{self.class}\#read_body called twice" if dest or block
       return @body
     end
+    raise IOError, 'body has already been opened as a stream' if @body_stream
     to = procdest(dest, block)
     stream_check
     if @body_exist
@@ -666,6 +727,29 @@ class Net::HTTPResponse
     raise IOError, 'attempt to read body out of block' if @socket.nil? || @socket.closed?
   end
 
+  def body_stream_decoding? # :nodoc: internal use only
+    Net::HTTP::HAVE_ZLIB &&
+      @decode_content &&
+      self['content-range'].nil? &&
+      decoded_body_encoding
+  end
+
+  def decoded_body_encoding # :nodoc: internal use only
+    case self['content-encoding']&.downcase
+    when 'deflate', 'gzip', 'x-gzip'
+      true
+    when 'none', 'identity', nil
+      false
+    else
+      false
+    end
+  end
+
+  def body_stream_finished(bytes_inflated) # :nodoc: internal use only
+    delete 'content-encoding'
+    self['content-length'] = bytes_inflated.to_s if self['content-length']
+  end
+
   def procdest(dest, block)
     raise ArgumentError, 'both arg and block given for HTTP method' if
       dest and block
@@ -673,6 +757,482 @@ class Net::HTTPResponse
       Net::ReadAdapter.new(block)
     else
       dest || +''
+    end
+  end
+
+  class EmptyBodyStream # :nodoc: internal use only
+    attr_accessor :on_close
+
+    def initialize
+      @closed = false
+      @close_reason = nil
+    end
+
+    def readpartial(maxlen, buf = nil)
+      close
+      buf.replace(+'') if buf
+      nil
+    end
+
+    def eof?
+      true
+    end
+
+    def close
+      return nil if @closed
+      @closed = true
+      @close_reason = :eof
+      on_close&.call(:eof)
+      nil
+    end
+
+    def closed?
+      @closed
+    end
+
+    attr_reader :close_reason
+  end
+
+  class BodyStream # :nodoc: internal use only
+    READ_SIZE = 1024
+    private_constant :READ_SIZE
+
+    attr_accessor :on_close
+
+    def initialize(response, socket)
+      @response = response
+      @socket = socket
+      @source = BodySource.new(response, socket)
+      if response.send(:body_stream_decoding?)
+        case response['content-encoding']&.downcase
+        when 'gzip', 'x-gzip'
+          finish_callback = response.method(:body_stream_finished)
+          @decoder = StreamingGzipReader.new(@source, &finish_callback)
+        else
+          @decoder = StreamingInflater.new(@source)
+        end
+      else
+        @decoder = nil
+      end
+      @eof = false
+      @closed = false
+      @close_reason = nil
+    end
+
+    def readpartial(maxlen, buf = nil)
+      check_open
+      validate_maxlen(maxlen)
+      if @eof
+        buf.replace(+'') if buf
+        return nil
+      end
+      chunk = read_decoded_partial(maxlen)
+      if chunk.nil? || chunk.empty?
+        @eof = true
+        finish_decoder
+        if buf
+          buf.replace(+'')
+        end
+        nil
+      else
+        chunk.force_encoding(Encoding::ASCII_8BIT)
+        if buf
+          buf.replace(chunk)
+        else
+          chunk
+        end
+      end
+    end
+
+    def eof?
+      return true if @closed
+      return @eof if @eof
+      @eof = reader.eof?
+      finish_decoder if @eof
+      @eof
+    end
+
+    def close
+      return nil if @closed
+      status = drain_remaining
+      @close_reason = status
+      @closed = true
+      on_close&.call(status)
+      nil
+    rescue StandardError
+      on_close&.call(:aborted)
+      raise
+    end
+
+    def closed?
+      @closed
+    end
+
+    attr_reader :close_reason
+
+    private
+
+    def check_open
+      raise IOError, 'closed stream' if @closed
+    end
+
+    def validate_maxlen(maxlen)
+      unless maxlen.is_a?(Integer) && maxlen > 0
+        raise ArgumentError, "non-positive length given"
+      end
+    end
+
+    def reader
+      @decoder || @source
+    end
+
+    def read_decoded_partial(maxlen)
+      reader.readpartial(maxlen)
+    end
+
+    def drain_remaining
+      return :eof if @eof
+
+      drained = 0
+      while drained <= MAX_BODY_STREAM_DRAIN && !reader.eof?
+        chunk = reader.readpartial(READ_SIZE)
+        drained += chunk.bytesize
+      end
+
+      if drained <= MAX_BODY_STREAM_DRAIN
+        finish_decoder
+        :drained
+      else
+        :aborted
+      end
+    rescue EOFError, Zlib::Error
+      :aborted
+    end
+
+    def finish_decoder
+      return unless @decoder
+      bytes = @decoder.finish
+      @response.send(:body_stream_finished, bytes)
+      @decoder = nil
+    end
+  end
+
+  class BodySource # :nodoc: internal use only
+    def initialize(response, socket)
+      @response = response
+      @socket = socket
+      if response.chunked?
+        @mode = :chunked
+        @remaining = 0
+        @trailer = false
+        @chunk_consumed = false
+      elsif response['transfer-encoding']
+        @mode = :unknown_transfer_encoding
+        @remaining = nil
+      elsif response.content_length
+        @mode = :length
+        @remaining = response.content_length
+      elsif response.range_length
+        @mode = :length
+        @remaining = response.range_length
+      else
+        @mode = :eof
+        @remaining = nil
+      end
+    end
+
+    def readpartial(maxlen, buf = nil)
+      chunk = read_source_partial(maxlen)
+      if buf
+        if chunk
+          buf.replace(chunk)
+        else
+          buf.replace(+'')
+        end
+      end
+      chunk
+    end
+
+    def eof?
+      read_byte_for_eof.nil?
+    end
+
+    def remaining
+      @mode == :length ? @remaining : nil
+    end
+
+    def read_byte_for_eof
+      case @mode
+      when :length
+        return nil if @remaining.zero?
+      when :chunked
+        return nil if @trailer
+        if @remaining.zero? && next_chunk_empty?
+          return nil
+        end
+      else
+        return nil if socket_eof?
+      end
+      true
+    end
+
+    private
+
+    def read_source_partial(maxlen)
+      case @mode
+      when :length
+        return nil if @remaining.zero?
+        size = [maxlen, @remaining].min
+        chunk = read_socket(size, @response.ignore_eof)
+        @remaining = chunk.bytesize < size ? 0 : @remaining - chunk.bytesize
+        chunk
+      when :chunked
+        read_chunked_partial(maxlen)
+      when :eof
+        read_socket_partial
+      else
+        read_socket_partial
+      end
+    end
+
+    def read_chunked_partial(maxlen)
+      until @trailer || @remaining.positive?
+        if @chunk_consumed
+          read_chunk_terminator
+          @chunk_consumed = false
+        end
+        line = Net::HTTPResponse.read_line(@socket, Net::HTTPResponse::MAX_RESPONSE_HEADER_LENGTH).chop
+        hexlen = line.slice(/[0-9a-fA-F]+/) or
+          raise Net::HTTPBadResponse, "wrong chunk size line: #{line}"
+        @remaining = hexlen.hex
+        if @remaining.zero?
+          read_trailer
+          return nil
+        end
+      end
+
+      return nil if @trailer
+
+      size = [maxlen, @remaining].min
+      chunk = read_socket(size)
+      @remaining -= chunk.bytesize
+      @chunk_consumed = @remaining.zero?
+      chunk
+    end
+
+    def read_chunk_terminator
+      terminator = @socket.read(2)
+      raise Net::HTTPBadResponse, 'wrong chunk terminator' unless terminator == "\r\n"
+    end
+
+    def read_trailer
+      until Net::HTTPResponse.read_line(@socket, Net::HTTPResponse::MAX_RESPONSE_HEADER_LENGTH).chop.empty?
+      end
+      @trailer = true
+      @chunk_consumed = false
+    end
+
+    def read_socket(size, ignore_eof = false)
+      chunk = @socket.read(size, +'', ignore_eof)
+      raise EOFError, 'end of file reached' if chunk.bytesize != size
+      chunk
+    rescue EOFError
+      raise unless ignore_eof
+      chunk
+    end
+
+    def read_socket_partial
+      @socket.send(:rbuf_consume_all) || begin
+        @socket.send(:rbuf_fill)
+        @socket.send(:rbuf_consume_all)
+      end
+    rescue EOFError
+      nil
+    end
+
+    def socket_eof?
+      return false if @socket.send(:rbuf_size).positive?
+      @socket.eof?
+    end
+
+    def socket_io
+      @socket.io
+    end
+
+    def next_chunk_empty?
+      until @remaining.positive?
+        if @chunk_consumed
+          read_chunk_terminator
+          @chunk_consumed = false
+        end
+        line = Net::HTTPResponse.read_line(@socket, Net::HTTPResponse::MAX_RESPONSE_HEADER_LENGTH).chop
+        hexlen = line.slice(/[0-9a-fA-F]+/) or
+          raise Net::HTTPBadResponse, "wrong chunk size line: #{line}"
+        @remaining = hexlen.hex
+        if @remaining.zero?
+          read_trailer
+          return true
+        end
+      end
+      false
+    end
+  end
+
+  class StreamingInflater # :nodoc: internal use only
+    READ_SIZE = 1024
+    private_constant :READ_SIZE
+
+    def initialize(source)
+      @source = source
+      @inflate = Zlib::Inflate.new
+      @pending = +''
+      @inflated = +''
+      @source_eof = false
+      @stream_end = false
+      @finished = false
+    end
+
+    def readpartial(maxlen, buf = nil)
+      fill_pending(maxlen)
+      chunk = consume_pending(maxlen)
+      if buf
+        if chunk
+          buf.replace(chunk)
+        else
+          buf.replace(+'')
+        end
+      end
+      chunk
+    end
+
+    def eof?
+      fill_pending(1)
+      @pending.empty? && (@source_eof || @stream_end)
+    end
+
+    def finish
+      return @inflate.total_out if @finished
+      until @source.eof?
+        @source.readpartial(READ_SIZE)
+      end
+      @inflate.finish
+      @finished = true
+      @inflate.total_out
+    end
+
+    private
+
+    def fill_pending(limit = 1)
+      return unless @pending.empty?
+      until @stream_end
+        compressed = @source.readpartial(1)
+        if compressed.nil?
+          @source_eof = true
+          @pending = @inflate.finish
+          @finished = true
+          break
+        end
+        @inflate.inflate(compressed) do |chunk|
+          @inflated << chunk
+          @pending << chunk
+        end
+        if @inflate.stream_end?
+          @pending = @inflated
+        end
+        @stream_end = true if @inflate.stream_end?
+      end
+    end
+
+    def consume_pending(maxlen)
+      return nil if @pending.empty? && (@source_eof || @stream_end)
+      if @pending.bytesize <= maxlen
+        chunk = @pending
+      else
+        chunk = @pending.byteslice(0, maxlen)
+      end
+      remaining_size = @pending.bytesize - maxlen
+      remaining = remaining_size.positive? ? @pending.byteslice(maxlen, remaining_size) : +''
+      @pending = remaining
+      chunk
+    end
+
+  end
+
+  class StreamingGzipReader
+    def initialize(source, &on_finish)
+      @source = source
+      @reader = nil
+      @finished = false
+      @bytes_inflated = 0
+      @on_finish = on_finish
+    end
+
+    def readpartial(maxlen, buf = nil)
+      chunk = reader.readpartial(maxlen)
+      @bytes_inflated += chunk.bytesize
+      if buf
+        buf.replace(chunk)
+      else
+        chunk
+      end
+    rescue EOFError
+      buf&.replace(+'')
+      nil
+    end
+
+    def eof?
+      finished = reader.eof?
+      finish if finished
+      finished
+    end
+
+    def finish
+      return @bytes_inflated if @finished
+      reader.finish
+      @finished = true
+      @on_finish.call(@bytes_inflated)
+      @bytes_inflated
+    end
+
+    private
+
+    def reader
+      @reader ||= Zlib::GzipReader.new(GzipSourceIO.new(@source))
+    end
+
+    class GzipSourceIO
+      def initialize(source)
+        @source = source
+      end
+
+      def readpartial(maxlen, buf = nil)
+        @source.readpartial(maxlen, buf || +'')
+      end
+
+      def read(len, buf = nil, _ignore_eof = false)
+        chunk = +''
+        until chunk.bytesize == len
+          part = @source.readpartial(len - chunk.bytesize)
+          break if part.nil?
+          chunk << part
+        end
+        if buf
+          buf.replace(chunk)
+        else
+          chunk
+        end
+      end
+
+      def eof?
+        @source.eof?
+      end
+
+      def close
+      end
+
+      def to_io
+        @source.send(:socket_io)
+      end
     end
   end
 
@@ -758,4 +1318,3 @@ class Net::HTTPResponse
   end
 
 end
-

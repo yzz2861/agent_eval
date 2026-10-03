@@ -4049,6 +4049,14 @@ module Net
       def <<: (String) -> void
     end
 
+    interface _ResponseBodyStream
+      def readpartial: (Integer maxlen) -> String?
+                  | (Integer maxlen, String buf) -> String?
+      def eof?: () -> bool
+      def close: () -> nil
+      def closed?: () -> bool
+    end
+
     # <!--
     #   rdoc-file=lib/net/http/response.rb
     #   - read_body(dest = nil, &block)
@@ -4084,6 +4092,9 @@ module Net
     def read_body: () -> String
                  | (_Dest dest) -> String
                  | () { (String) -> void } -> String
+
+    # Returns a streaming, read-only handle for the response body.
+    def body_stream: () -> _ResponseBodyStream
 
     # <!--
     #   rdoc-file=lib/net/http/response.rb

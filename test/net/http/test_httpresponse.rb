@@ -113,6 +113,169 @@ EOS
     assert_equal 'hello', body
   end
 
+  def test_body_stream_content_length
+    io = dummy_io(<<EOS)
+HTTP/1.1 200 OK
+Content-Length: 5
+
+hello
+EOS
+    res = Net::HTTPResponse.read_new(io)
+
+    chunks = []
+    res.reading_body io, true do
+      stream = res.body_stream
+      assert_not_predicate stream, :eof?
+      buf = +''
+      until stream.eof?
+        chunk = stream.readpartial(2, buf)
+        assert_same buf, chunk
+        chunks << chunk.dup
+      end
+      assert_nil stream.readpartial(2)
+      stream.close
+      assert_predicate stream, :closed?
+    end
+
+    assert_equal %w[he ll o], chunks
+  end
+
+  def test_body_stream_chunked
+    io = dummy_io(<<EOS)
+HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+
+5
+hello
+6
+ world
+0
+X-Trailer: yes
+
+EOS
+    res = Net::HTTPResponse.read_new(io)
+
+    body = nil
+    res.reading_body io, true do
+      stream = res.body_stream
+      body = +''
+      until stream.eof?
+        body << stream.readpartial(3)
+      end
+      stream.close
+    end
+
+    assert_equal 'hello world', body
+  end
+
+  def test_body_stream_gzip
+    compressed = Zlib.gzip('hello')
+    raw = "HTTP/1.1 200 OK\r\n" \
+      "Content-Encoding: gzip\r\n" \
+      "Content-Length: #{compressed.bytesize}\r\n\r\n" \
+      "#{compressed}"
+    io = Net::BufferedIO.new(StringIO.new(raw))
+    res = Net::HTTPResponse.read_new(io)
+    res.decode_content = true
+
+    chunks = nil
+    res.reading_body io, true do
+      stream = res.body_stream
+      chunks = 3.times.map { stream.readpartial(2) }
+      assert stream.eof?
+      stream.close
+    end
+
+    assert_equal %w[he ll o], chunks
+    assert_nil res['content-encoding']
+    assert_equal '5', res['content-length']
+  end
+
+  def test_body_stream_deflate
+    compressed = +"x\x9C\xCBH\xCD\xC9\xC9\a\x00\x06,\x02\x15"
+    compressed.force_encoding(Encoding::BINARY)
+    raw = "HTTP/1.1 200 OK\r\n" \
+      "Content-Encoding: deflate\r\n" \
+      "Content-Length: #{compressed.bytesize}\r\n\r\n" \
+      "#{compressed}"
+    io = Net::BufferedIO.new(StringIO.new(raw))
+    res = Net::HTTPResponse.read_new(io)
+    res.decode_content = true
+
+    body = nil
+    res.reading_body io, true do
+      stream = res.body_stream
+      body = +''
+      until stream.eof?
+        body << stream.readpartial(2)
+      end
+      stream.close
+    end
+
+    assert_equal 'hello', body
+    assert_nil res['content-encoding']
+    assert_equal '5', res['content-length']
+  end
+
+  def test_body_stream_close_drains_within_limit
+    io = dummy_io(<<EOS)
+HTTP/1.1 200 OK
+Content-Length: 5
+
+hello
+EOS
+    res = Net::HTTPResponse.read_new(io)
+    reasons = []
+
+    res.reading_body io, true do
+      res.body_stream_close_callback = proc {|reason| reasons << reason }
+      stream = res.body_stream
+      assert_equal 'he', stream.readpartial(2)
+      stream.close
+      assert_equal [:drained], reasons
+    end
+  end
+
+  def test_body_stream_close_aborts_when_limit_exceeded
+    limit = Net::HTTPResponse::MAX_BODY_STREAM_DRAIN
+    io = Net::BufferedIO.new(StringIO.new(
+      "HTTP/1.1 200 OK\r\nContent-Length: #{limit + 1}\r\n\r\n" \
+      "#{'a' * (limit + 1)}"
+    ))
+    res = Net::HTTPResponse.read_new(io)
+    reasons = []
+
+    res.reading_body io, true do
+      res.body_stream_close_callback = proc {|reason| reasons << reason }
+      stream = res.body_stream
+      stream.close
+      assert_equal [:aborted], reasons
+    end
+  end
+
+  def test_body_stream_does_not_close_caller_buffer
+    io = dummy_io(<<EOS)
+HTTP/1.1 200 OK
+Content-Length: 5
+
+hello
+EOS
+    res = Net::HTTPResponse.read_new(io)
+    destination = Object.new
+    def destination.replace(value)
+      @value = value
+    end
+    destination.define_singleton_method(:close) { raise 'destination closed' }
+
+    res.reading_body io, true do
+      stream = res.body_stream
+      stream.readpartial(2, destination)
+      stream.close
+    end
+
+    assert_equal 'he', destination.instance_variable_get(:@value)
+  end
+
   def test_read_body_chunked_is_final_transfer_coding
     io = dummy_io(<<EOS)
 HTTP/1.1 200 OK

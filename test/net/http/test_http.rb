@@ -7,6 +7,108 @@ require_relative 'utils'
 
 class TestNetHTTP < Test::Unit::TestCase
 
+  def with_raw_http_connections(first_response, second_response, reconnect: false)
+    first_client_socket, first_server_socket = Socket.pair(:UNIX, :STREAM)
+    if reconnect
+      second_client_socket, second_server_socket = Socket.pair(:UNIX, :STREAM)
+    else
+      second_client_socket, second_server_socket = first_client_socket, first_server_socket
+    end
+    received = Queue.new
+    thread = Thread.new do
+      sockets = {first: first_server_socket, second: second_server_socket}
+      responses = {first: first_response, second: second_response}
+      [:first, :second].each do |name|
+        socket = sockets[name]
+        request_line = socket.gets
+        break if request_line.nil?
+        received << request_line
+        loop do
+          line = socket.readline
+          break if line == "\r\n"
+        end
+        socket.write(responses[name])
+      end
+      first_server_socket.close unless first_server_socket.closed?
+      second_server_socket.close unless second_server_socket.closed?
+    end
+
+    http = Net::HTTP.new('127.0.0.1', 80)
+    socket = Net::BufferedIO.new(first_client_socket, read_timeout: 1, write_timeout: 1)
+    http.instance_variable_set(:@socket, socket)
+    http.instance_variable_set(:@started, true)
+    http.instance_variable_set(:@curr_http_version, '1.1')
+    if reconnect
+      http.define_singleton_method(:connect) do
+        @socket = Net::BufferedIO.new(second_client_socket, read_timeout: 1, write_timeout: 1)
+        @last_communicated = nil
+      end
+    end
+    begin
+      yield http, received
+    ensure
+      http.finish if http.started?
+      thread.join
+      [first_client_socket, first_server_socket].each do |socket|
+        socket.close unless socket.closed?
+      end
+      if reconnect
+        [second_client_socket, second_server_socket].each do |socket|
+          socket.close unless socket.closed?
+        end
+      end
+    end
+  end
+
+  def raw_response(body)
+    "HTTP/1.1 200 OK\r\n" \
+      "Content-Length: #{body.bytesize}\r\n" \
+      "Connection: keep-alive\r\n\r\n" \
+      "#{body}"
+  end
+
+  def test_body_stream_keeps_connection_until_closed
+    with_raw_http_connections(raw_response('hello'), raw_response('world')) do |http, received|
+      stream = nil
+      req = Net::HTTP::Get.new('/first')
+      req['Connection'] = 'keep-alive'
+      http.request(req) do |res|
+        stream = res.body_stream
+        assert_equal 'he', stream.readpartial(2)
+      end
+
+      blocked_req = Net::HTTP::Get.new('/second')
+      blocked_req['Connection'] = 'keep-alive'
+      assert_raise(IOError) do
+        http.request(blocked_req)
+      end
+      assert_equal 1, received.size
+
+      stream.close
+      second_req = Net::HTTP::Get.new('/second')
+      second_req['Connection'] = 'keep-alive'
+      assert_equal 'world', http.request(second_req).body
+      assert_equal ["GET /first HTTP/1.1\r\n", "GET /second HTTP/1.1\r\n"], 2.times.map { received.pop }
+    end
+  end
+
+  def test_body_stream_early_close_drains_and_reuses_connection
+    with_raw_http_connections(raw_response('hello'), raw_response('world')) do |http, received|
+      req = Net::HTTP::Get.new('/first')
+      req['Connection'] = 'keep-alive'
+      http.request(req) do |res|
+        stream = res.body_stream
+        assert_equal 'he', stream.readpartial(2)
+        stream.close
+      end
+
+      second_req = Net::HTTP::Get.new('/second')
+      second_req['Connection'] = 'keep-alive'
+      assert_equal 'world', http.request(second_req).body
+      assert_equal 2, received.size
+    end
+  end
+
   def test_class_Proxy
     no_proxy_class = Net::HTTP.Proxy nil
 
