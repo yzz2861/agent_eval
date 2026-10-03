@@ -143,6 +143,16 @@ module StateMachines
 
     protected
 
+    # Duplicates per-object state machine data (currently the bounded queues
+    # of deferred events) so that a copied object never shares a queue with
+    # the source.  Pending events and their arguments are copied in order.
+    def initialize_copy(source) # :nodoc:
+      super
+      self.class.state_machines.each do |_name, machine|
+        machine.dup_deferred_event_queue(source, self)
+      end
+    end
+
     def initialize_state_machines(options = {}, &) # :nodoc:
       self.class.state_machines.initialize_states(self, options, &)
     end

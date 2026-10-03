@@ -15,7 +15,7 @@ module StateMachines
                        end
         
         # Validate options including integration-specific options
-        valid_keys = [:attribute, :initial, :initialize, :action, :plural, :namespace, :integration, :messages, :use_transactions, :async]
+        valid_keys = [:attribute, :initial, :initialize, :action, :plural, :namespace, :integration, :messages, :use_transactions, :async, :deferred_queue_size]
         valid_keys += @integration.integration_options if @integration
         StateMachines::OptionsValidator.assert_valid_keys!(options, valid_keys)
 
@@ -40,6 +40,7 @@ module StateMachines
         @initialize_state = options[:initialize]
         @action_hook_defined = false
         @async_requested = options[:async]
+        @deferred_queue_size = configure_deferred_queue_size(options[:deferred_queue_size])
 
         self.owner_class = owner_class
 
@@ -53,6 +54,8 @@ module StateMachines
 
         # Evaluate DSL
         instance_eval(&) if block_given?
+
+        validate_deferred_event_names!
 
         # Configure async mode if requested, after owner_class is set and DSL is evaluated
         configure_async_mode!(true) if @async_requested
@@ -73,6 +76,8 @@ module StateMachines
         @callbacks = { before: @callbacks[:before].dup, after: @callbacks[:after].dup, failure: @callbacks[:failure].dup }
         @async_requested = orig.instance_variable_get(:@async_requested)
         @async_mode_enabled = orig.instance_variable_get(:@async_mode_enabled)
+        @deferred_queue_size = orig.deferred_queue_size
+        @deferred_queue_ivar = nil
       end
 
       # Sets the class which is the owner of this state machine.  Any methods
@@ -122,6 +127,34 @@ module StateMachines
       # Gets the attribute name for the given machine scope.
       def attribute(name = :state)
         name == :state ? @attribute : :"#{self.name}_#{name}"
+      end
+
+      private
+
+      # Normalizes the per-object deferred event queue capacity.  Defaults to
+      # DeferredEvents::DEFAULT_DEFERRED_QUEUE_SIZE and must be a positive
+      # integer.
+      def configure_deferred_queue_size(value)
+        size = value.nil? ? DeferredEvents::DEFAULT_DEFERRED_QUEUE_SIZE : value
+        unless size.is_a?(Integer) && size >= 1
+          raise ArgumentError, ":deferred_queue_size must be a positive integer (got #{value.inspect})"
+        end
+
+        size
+      end
+
+      # Ensures every event referenced through a state's +defer+ option is
+      # actually defined for the machine.  This runs after the whole DSL has
+      # been evaluated so events may be declared in any order.
+      def validate_deferred_event_names!
+        states.each do |state|
+          state.deferred_events.each do |event_name|
+            next if events[event_name, :name]
+
+            raise ArgumentError,
+                  "Cannot defer unknown event #{event_name.inspect} in state #{state.name.inspect} for #{name.inspect}"
+          end
+        end
       end
     end
   end

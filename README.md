@@ -317,6 +317,84 @@ class StarshipBridge
 end
 ```
 
+## Deferred Events
+
+Sometimes an event arrives while the object is in a state that cannot process it yet, but the event
+must not be dropped. A typical example is receiving `publish` while an object is still `uploading`:
+the event has to wait until the upload finishes, then run automatically.
+
+States declare the events they defer with the `defer` option (a single event name, an array of
+names, or `all`-style matching is not used). While the object is in such a state, a deferred event
+and its arguments are stored in the object's own bounded FIFO queue instead of raising or being
+discarded.
+
+```ruby
+class Document
+  state_machine initial: :idle do
+    state :uploading, defer: :publish   # publish is queued while uploading
+    state :ready
+    state :published
+
+    event :start_upload  { transition idle: :uploading }
+    event :upload_done   { transition uploading: :ready }
+    event :publish       { transition ready: :published }
+  end
+end
+
+doc = Document.new
+doc.start_upload
+doc.publish                 # stored, returns true; state is still "uploading"
+doc.upload_done             # state becomes ready, the queued publish is consumed
+doc.state                   # => "published"
+```
+
+### Processing rules
+
+* **Serialized consumption.** The next event is consumed only after the current transition and
+  *all* of its callbacks have finished. Events fired from inside a callback follow the same rule and
+  are appended to the queue rather than re-entering the running transition.
+* **Recheck after state changes.** Once a transition completes, the queue is re-examined and every
+  entry gets one attempt in FIFO order. An entry that is still not executable stays queued and is
+  retried only after a *later* state change; entries never spin in place within one drain pass.
+* **Arguments are preserved.** Positional arguments passed to the deferred event are replayed
+  unchanged (e.g. `doc.publish(:urgent)`).
+
+### Queue capacity
+
+The queue is finite. The default capacity is
+`StateMachines::Machine::DeferredEvents::DEFAULT_DEFERRED_QUEUE_SIZE` (10) and can be configured per
+machine:
+
+```ruby
+state_machine initial: :idle, deferred_queue_size: 50 do
+  state :uploading, defer: :publish
+  # ...
+end
+```
+
+When a deferred event would exceed the capacity, `StateMachines::DeferredEventQueue::QueueFull` is
+raised at the call site and the incoming event is *not* stored (the queue is left unchanged). Use a
+larger capacity or rescue the error to apply your own back-pressure/drop policy. A non-positive or
+non-integer size raises `ArgumentError` when the machine is defined.
+
+### Failures
+
+* A queued non-bang event that still cannot transition when attempted behaves like a normal non-bang
+  event: it returns `false`, runs failure callbacks, and remains queued for a later retry.
+* A queued bang event (`publish!`) is always attempted during a drain and raises
+  `StateMachines::InvalidTransition` if no transition is available; the attempted entry is removed.
+* If a callback raises while the queue is being drained, the exception propagates and entries that
+  had not been attempted yet remain in the queue for a later state change.
+
+### Per-object / per-machine queues and copying
+
+Every object owns one queue *per state machine*; two objects never share a queue, and two machines
+defined on the same object (e.g. `state` and `status`) are drained independently when their own
+attribute changes.
+
+Copying an object (`dup`/`clone`) produces an independent copy of each queue, including its pending
+events and arguments; draining the copy does not affect the source and vice versa.
+
 ## Error Handling
 
 A state guard must be a non-empty Hash of state machine name => state name; anything else raises

@@ -165,15 +165,36 @@ module StateMachines
     #
     # Any additional arguments are passed to the StateMachines::Transition#perform
     # instance method.
-    def fire(object, *event_args)
+    def fire(object, *event_args, **kwargs)
       machine.reset(object)
 
-      if (transition = transition_for(object, {}, *event_args))
-        transition.perform(*event_args)
+      queue = machine.deferred_event_queue(object)
+      state = machine.states.match(object)
+      bang = machine.bang_event_call?(object, name)
+      event_args << kwargs unless kwargs.empty?
+      entry = DeferredEvent.new(name: name, args: event_args, bang: bang)
+
+      # While another transition (and its callbacks) is still running on this
+      # object, or while the deferred queue is being drained, events are never
+      # processed synchronously: they are recorded and consumed only once the
+      # current transition has completely finished.
+      if queue.busy? || state&.defers_event?(name)
+        machine.enqueue_deferred_event(object, entry)
+        true
       else
-        on_failure(object, *event_args)
-        false
+        perform_fire(object, entry)
       end
+    end
+
+    # Fires an event that was previously stored in an object's deferred event
+    # queue.  Returns the result of the transition (or false when it failed).
+    # Raises StateMachines::InvalidTransition for events originally fired with
+    # the bang helper.
+    def fire_queued_event(object, entry)
+      result = perform_fire(object, entry)
+      raise StateMachines::InvalidTransition.new(object, machine, name) if entry.bang && !result
+
+      result
     end
 
     # Marks the object as invalid and runs any failure callbacks associated with
@@ -217,6 +238,22 @@ module StateMachines
       "#<#{self.class} name=#{name.inspect} transitions=[#{transitions}]>"
     end
 
+    private
+
+    # Actually attempts the transition for the given (immediate or queued)
+    # event, draining deferred events once a state-changing transition has
+    # fully completed (including all of its callbacks).
+    def perform_fire(object, entry)
+      event_args = entry.args
+
+      if (transition = transition_for(object, {}, *event_args))
+        transition.perform(*event_args)
+      else
+        on_failure(object, *event_args)
+        false
+      end
+    end
+
     protected
 
     # Add the various instance methods that can transition the object using
@@ -240,7 +277,10 @@ module StateMachines
 
       # Fires the event, raising an exception if it fails
       machine.define_helper(:instance, "#{qualified_name}!") do |machine, object, *args, **kwargs|
-        object.send(qualified_name, *args, **kwargs) || raise(StateMachines::InvalidTransition.new(object, machine, name))
+        machine.with_bang_event(object, name) do
+          object.send(qualified_name, *args, **kwargs) ||
+            raise(StateMachines::InvalidTransition.new(object, machine, name))
+        end
       end
     end
   end

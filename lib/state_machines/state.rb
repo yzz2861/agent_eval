@@ -40,6 +40,22 @@ module StateMachines
     # state
     attr_accessor :matcher
 
+    # The list of events that are deferred (queued on the target object)
+    # while the object is in this state and retried after the state changes
+    attr_reader :deferred_events
+
+    # Whether the given event is configured to be deferred in this state
+    def defers_event?(event_name)
+      @deferred_events.include?(event_name.to_sym)
+    end
+
+    # Adds events to the list deferred in this state.  This is used by the
+    # machine's +state+ DSL helper and merges with any previously configured
+    # events instead of replacing them.
+    def configure_deferred_events(value)
+      @deferred_events |= Array(value).flatten.map(&:to_sym)
+    end
+
     # Creates a new state within the context of the given machine.
     #
     # Configuration options:
@@ -53,20 +69,21 @@ module StateMachines
     #   (e.g. :value => lambda {Time.now}, :if => lambda {|state| !state.nil?}).
     #   By default, the configured value is matched.
     # * <tt>:human_name</tt> - The human-readable version of this state's name
-    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, **extra_options) # :nodoc:
+    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, defer: nil, **extra_options) # :nodoc:
       # Handle both old hash style and new kwargs style for backward compatibility
       case options
       in Hash
         # Old style: initialize(machine, name, {initial: true, value: 'foo'})
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name, :defer)
         initial = options.fetch(:initial, false)
         value = options.include?(:value) ? options[:value] : :__not_provided__
         cache = options[:cache]
         if_condition = options[:if]
         human_name = options[:human_name]
+        defer = options[:defer]
       in nil
         # New style: initialize(machine, name, initial: true, value: 'foo')
-        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name) unless extra_options.empty?
+        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name, :defer) unless extra_options.empty?
         if_condition = binding.local_variable_get(:if) # 'if' is a keyword, need special handling
       else
         # Handle unexpected options
@@ -82,6 +99,7 @@ module StateMachines
       @matcher = if_condition
       @initial = initial == true
       @context = StateContext.new(self)
+      @deferred_events = Array(defer).flatten.map(&:to_sym)
 
       return unless name
 
@@ -108,6 +126,7 @@ module StateMachines
     def initialize_copy(orig) # :nodoc:
       super
       @context = StateContext.new(self)
+      @deferred_events = @deferred_events.dup
     end
 
     def machine=(machine)

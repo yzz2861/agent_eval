@@ -9,6 +9,7 @@ require_relative 'machine/helper_generators'
 require_relative 'machine/action_hooks'
 require_relative 'machine/scoping'
 require_relative 'machine/configuration'
+require_relative 'machine/deferred_events'
 require_relative 'machine/state_methods'
 require_relative 'machine/event_methods'
 require_relative 'machine/callbacks'
@@ -426,6 +427,7 @@ module StateMachines
     include HelperGenerators
     include ActionHooks
     include Scoping
+    include DeferredEvents
     include Configuration
     include StateMethods
     include EventMethods

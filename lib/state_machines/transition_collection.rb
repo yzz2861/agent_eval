@@ -71,9 +71,19 @@ module StateMachines
 
           run_actions
         else
-          within_transaction do
-            catch(:halt) { run_callbacks(&) }
-            rollback unless success?
+          begin_deferred_tracking!
+          batch_failed = false
+          begin
+            within_transaction do
+              catch(:halt) { run_callbacks(&) }
+              rollback unless success?
+            end
+          rescue StandardError
+            batch_failed = true
+            raise
+          ensure
+            end_deferred_tracking!
+            drain_deferred_events! unless batch_failed
           end
         end
       end
@@ -96,6 +106,34 @@ module StateMachines
     # marked as invalid.
     def valid?
       @valid
+    end
+
+    # Marks every involved machine's per-object queue as busy for the whole
+    # duration of the batch (before callbacks through after callbacks).  Any
+    # event fired during this time is recorded rather than run inline.
+    def begin_deferred_tracking!
+      @deferred_queues = map(&:machine).uniq.map do |machine|
+        machine.deferred_event_queue(object).tap(&:begin_transition!)
+      end
+    end
+
+    # Ends transition tracking for the batch, recording which queue belonged
+    # to the outermost collection.
+    def end_deferred_tracking!
+      @deferred_outer = {}
+      @deferred_queues.each do |queue|
+        @deferred_outer[queue] = queue.end_transition!
+      end
+    end
+
+    # Drains deferred events on the machines whose state actually changed,
+    # after every callback of the outermost transition has finished.
+    def drain_deferred_events!
+      changed_machines = select { |transition| transition.result != false && !transition.loopback? }.map(&:machine).uniq
+      changed_machines.each do |machine|
+        queue = machine.deferred_event_queue(object)
+        machine.drain_deferred_events(object) if @deferred_outer[queue] || queue.draining?
+      end
     end
 
     # Did each transition perform successfully?  This will only be true if the
