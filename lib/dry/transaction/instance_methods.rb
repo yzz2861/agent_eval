@@ -24,9 +24,7 @@ module Dry
       end
 
       def call(input = nil, &block)
-        assert_step_arity
-
-        result = stack.(Success(input))
+        result = run_transaction(input)
 
         if block
           ResultMatcher.(result, &block)
@@ -36,6 +34,16 @@ module Dry
             Failure(step_failure.value)
           }
         end
+      end
+
+      # Returns a callable that runs this transaction and preserves the
+      # full StepFailure (including its step path), for use when this
+      # transaction is nested as a step operation within another
+      # transaction.
+      #
+      # @api private
+      def as_step_operation
+        method(:run_transaction)
       end
 
       def subscribe(listeners)
@@ -68,6 +76,12 @@ module Dry
 
       private
 
+      def run_transaction(input)
+        assert_step_arity
+
+        stack.(Success(input))
+      end
+
       def respond_to_missing?(name, _include_private = false)
         steps.any? { |step| step.name == name }
       end
@@ -86,17 +100,22 @@ module Dry
       end
 
       def resolve_operation(step, **operations)
-        if step.internal? && operations[step.name]
-          operations[step.name]
-        elsif methods.include?(step.name) || private_methods.include?(step.name)
-          method(step.name)
-        elsif operations[step.name].respond_to?(:call)
-          operations[step.name]
-        elsif operations[step.name]
-          raise InvalidStepError, step.name
-        else
-          raise MissingStepError, step.name
-        end
+        operation =
+          if step.internal? && operations[step.name]
+            operations[step.name]
+          elsif methods.include?(step.name) || private_methods.include?(step.name)
+            method(step.name)
+          elsif operations[step.name].respond_to?(:call)
+            operations[step.name]
+          elsif operations[step.name]
+            raise InvalidStepError, step.name
+          else
+            raise MissingStepError, step.name
+          end
+
+        # Keep the nested transaction's own StepFailure (with its step
+        # path) instead of its unwrapped failure value
+        operation.is_a?(InstanceMethods) ? operation.as_step_operation : operation
       end
 
       def assert_valid_step_args(step_args)

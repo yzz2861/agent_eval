@@ -7,6 +7,13 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ## [Unreleased]
 
+### Added
+
+- Failures from nested transactions now carry the full step path. `Dry::Transaction::StepFailure#path`
+  returns the step names from the outermost step down to the one that failed (e.g.
+  `[:process, :validate]`), and the result matcher accepts an exact path (`m.failure([:process, :validate])`)
+  or a step name at any level of the path (`m.failure(:validate)`)
+
 
 ## [0.16.0] - 2024-01-17
 
