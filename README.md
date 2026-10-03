@@ -144,6 +144,59 @@ schemer.bundle
 #       "http://example.com/schema/two"=>{"minimum"=>11, "$id"=>"http://example.com/schema/two", "$schema"=>"https://json-schema.org/draft/2020-12/schema"}}}
 ```
 
+## Streaming Validation
+
+Large JSON documents can be validated as a stream of events instead of a
+fully parsed document, so memory usage stays flat regardless of document
+size:
+
+    validator = JSONSchemer.stream(
+      'type' => 'array',
+      'items' => { 'type' => 'integer' },
+      'contains' => { 'const' => 42 }
+    )
+
+    events = [
+      [:array_start],
+      [:scalar, 1],
+      [:scalar, 42],
+      [:container_end],
+      [:document_end]
+    ]
+
+    validator.valid?(events)
+    # => true
+
+    result = validator.validate(events)
+    result.valid?             # => true (false unless the document end marker was seen)
+    result.completed?         # => true (event stream fully consumed and balanced)
+    result.schema_errors      # => [] schema mismatches with full JSON pointers
+    result.structural_errors  # => [] malformed event input, reported separately
+
+The event vocabulary is:
+
+- [:object_start] / [:array_start] - open a container
+- [:key, 'name'] - object key (string)
+- [:scalar, value] - nil, true, false, Numeric, or String
+- [:container_end] - close the innermost object or array
+- [:document_end] - end of the document (required; the document is never
+  considered valid before it arrives)
+
+Any enumerable (or enumerator) of events works as a source. If the source
+responds to close, it is closed after validation - including when valid?
+stops early at the first error.
+
+Only keywords that can be guaranteed in a single streaming pass are
+supported; anything else raises JSONSchemer::Stream::UnsupportedKeyword
+when the validator is prepared:
+
+- type, enum, const
+- properties, required, additionalProperties, minProperties, maxProperties
+- items (single schema, not tuple form), minItems, maxItems
+- contains, minContains, maxContains
+- minimum, maximum, exclusiveMinimum, exclusiveMaximum, multipleOf
+- minLength, maxLength, pattern
+
 ## Options
 
 ```ruby

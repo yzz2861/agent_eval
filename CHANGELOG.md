@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Add streaming, event-driven validation via JSONSchemer.stream: validates large documents from a sequence of events (object/array start, key, scalar, container end, document end) with constant memory, full JSON Pointers in errors, fail-fast source closing, and a prepare-time check that rejects keywords which cannot be guaranteed in a single streaming pass
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes

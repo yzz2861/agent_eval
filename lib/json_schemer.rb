@@ -26,6 +26,7 @@ require 'json_schemer/cached_resolver'
 require 'json_schemer/ecma_regexp'
 require 'json_schemer/location'
 require 'json_schemer/result'
+require 'json_schemer/stream'
 require 'json_schemer/output'
 require 'json_schemer/keyword'
 require 'json_schemer/draft202012/meta'
@@ -120,6 +121,10 @@ module JSONSchemer
     def schema(schema, **options)
       schema = resolve(schema, options)
       Schema.new(schema, **options)
+    end
+
+    def stream(schema)
+      Stream::Validator.new(schema)
     end
 
     def valid_schema?(schema, **options)
