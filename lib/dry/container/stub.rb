@@ -3,13 +3,6 @@
 module Dry
   class Container
     module Stub
-      # Overrides resolve to look into stubbed keys first
-      #
-      # @api public
-      def resolve(key)
-        _stubs.fetch(key.to_s) { super }
-      end
-
       # Add a stub to the container
       def stub(key, value, &block)
         unless key?(key)

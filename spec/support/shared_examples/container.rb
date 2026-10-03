@@ -250,6 +250,108 @@ RSpec.shared_examples "a container" do
       end
     end
 
+    describe "#register_alias" do
+      it "registers a reference instead of storing a resolved item" do
+        target = Object.new
+        container.register(:delivery, target)
+        container.register_alias(:mailer, :delivery)
+
+        expect(container._container["mailer"]).to be_a(Dry::Container::Item::Alias)
+        expect(container.resolve(:mailer)).to be(target)
+      end
+
+      it "supports the alias register option" do
+        container.register(:delivery, "delivered")
+        container.register(:mailer, alias: :delivery)
+
+        expect(container.resolve(:mailer)).to eq("delivered")
+      end
+
+      it "resolves a target registered after the alias" do
+        container.register_alias(:mailer, :delivery)
+        container.register(:delivery, "delivered")
+
+        expect(container.resolve(:mailer)).to eq("delivered")
+      end
+
+      it "follows aliases through multiple keys" do
+        container.register(:delivery, "delivered")
+        container.register_alias(:mailer, :delivery)
+        container.register_alias(:legacy_mailer, :mailer)
+
+        expect(container.resolve(:legacy_mailer)).to eq("delivered")
+      end
+
+      it "supports namespaced aliases and targets" do
+        container.namespace("notifications") do
+          register("delivery", "delivered")
+          register_alias("mailer", "delivery")
+        end
+
+        expect(container.resolve("notifications.mailer")).to eq("delivered")
+      end
+
+      it "rewrites alias targets when merging with a namespace" do
+        other = Dry::Container.new
+        other.register(:delivery, "delivered")
+        other.register_alias(:mailer, :delivery)
+
+        container.merge(other, namespace: "notifications")
+
+        expect(container.resolve("notifications.mailer")).to eq("delivered")
+      end
+
+      it "reports the complete chain when aliases form a cycle" do
+        container.register_alias(:a, :b)
+        container.register_alias(:b, :c)
+        container.register_alias(:c, :a)
+
+        expect { container.resolve(:a) }
+          .to raise_error(Dry::Container::Error, "circular alias dependency detected: a -> b -> c -> a")
+      end
+
+      it "sees decoration applied to the target after alias registration" do
+        container.register(:delivery, "message")
+        container.register_alias(:mailer, :delivery)
+        container.decorate(:delivery) { |message| "decorated #{message}" }
+
+        expect(container.resolve(:mailer)).to eq("decorated message")
+      end
+
+      it "shares a memoized target across alias and direct resolution" do
+        resolved_times = 0
+        container.register(:delivery, memoize: true) { resolved_times += 1 }
+        container.register_alias(:mailer, :delivery)
+
+        expect(container.resolve(:mailer)).to be(container.resolve(:delivery))
+        expect(resolved_times).to be(1)
+      end
+
+      it "does not allow registering the same alias key twice" do
+        container.register(:delivery, "delivered")
+        container.register_alias(:mailer, :delivery)
+
+        expect { container.register_alias(:mailer, :delivery) }
+          .to raise_error(Dry::Container::Error)
+      end
+
+      context "when stubbing is enabled" do
+        before do
+          container.enable_stubs!
+          container.register(:delivery, "delivered")
+          container.register_alias(:mailer, :delivery)
+        end
+
+        after { container.unstub }
+
+        it "sees a stub applied to the target" do
+          container.stub(:delivery, "stubbed")
+
+          expect(container.resolve(:mailer)).to eq("stubbed")
+        end
+      end
+    end
+
     describe "resolving with a key that has not been registered" do
       it do
         expect(container.key?(:item)).to be false
@@ -671,6 +773,16 @@ RSpec.shared_examples "a container" do
           FrozenError,
           /can't modify frozen \S+ \(when attempting to register 'baz'\)/
         )
+    end
+
+    it "does not allow registering an alias after freezing" do
+      container.register(:target, "value")
+      container.freeze
+
+      expect { container.register_alias(:alias, :target) }
+        .to raise_error(FrozenError, /register alias 'alias'/)
+      expect { container.register(:other_alias, alias: :target) }
+        .to raise_error(FrozenError, /when attempting to register 'other_alias'/)
     end
 
     it "returns self back" do

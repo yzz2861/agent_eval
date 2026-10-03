@@ -145,6 +145,10 @@ module Dry
       #
       # @api public
       def register(key, contents = nil, options = EMPTY_HASH, &block)
+        if contents.is_a?(::Hash) && contents.key?(:alias)
+          return register_alias(key, contents[:alias])
+        end
+
         if block_given?
           item = block
           options = contents if contents.is_a?(::Hash)
@@ -160,6 +164,25 @@ module Dry
               "can't modify frozen #{self.class} (when attempting to register '#{key}')"
       end
 
+      # Register an alias for another item
+      #
+      # @param [Mixed] key
+      #   The alias key
+      # @param [Mixed] target
+      #   The key this alias resolves through
+      #
+      # @return [Dry::Container::Mixin] self
+      #
+      # @api public
+      def register_alias(key, target)
+        config.registry.call(_container, key, target, alias: true)
+
+        self
+      rescue FrozenError
+        raise FrozenError,
+              "can't modify frozen #{self.class} (when attempting to register alias '#{key}')"
+      end
+
       # Resolve an item from the container
       #
       # @param [Mixed] key
@@ -172,7 +195,19 @@ module Dry
       #
       # @api public
       def resolve(key, &block)
-        config.resolver.call(_container, key, &block)
+        resolver = config.resolver
+
+        if respond_to?(:_stubs, true) && resolver_accepts_stubs?(resolver)
+          resolver.call(_container, key, stubs: _stubs, &block)
+        else
+          resolver.call(_container, key, &block)
+        end
+      end
+
+      private def resolver_accepts_stubs?(resolver)
+        resolver.method(:call).parameters.any? do |type, name|
+          type == :keyrest || (type == :key && name == :stubs)
+        end
       end
 
       # Resolve an item from the container
@@ -202,6 +237,7 @@ module Dry
         if namespace
           _container.merge!(
             other._container.each_with_object(::Concurrent::Hash.new) { |(key, item), hsh|
+              item = item.prefixed(namespace, config) if item.is_a?(Item::Alias)
               hsh[PREFIX_NAMESPACE.call(namespace, key, config)] = item
             },
             &block

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "dry/container/item/alias"
+
 module Dry
   class Container
     # Default resolver for resolving items from container
@@ -23,16 +25,46 @@ module Dry
       # @return [Mixed]
       #
       # @api public
-      def call(container, key)
-        item = container.fetch(key.to_s) do
+      def call(container, key, stubs: nil, &block)
+        resolve_alias(container, key.to_s, [], stubs, &block)
+      end
+
+      private def resolve_alias(container, key, chain, stubs, &block)
+        key = key.to_s
+        requested_key = chain.first || key
+
+        return stubs[key] if stubs&.key?(key)
+
+        if chain.include?(key)
+          cycle = chain + [key]
+          raise Error, "circular alias dependency detected: #{cycle.join(" -> ")}"
+        end
+
+        item = container.fetch(key) do
           if block_given?
-            return yield(key)
+            return yield(requested_key)
           else
-            raise KeyError.new(%(key not found: "#{key}"), key: key.to_s, receiver: container)
+            raise KeyError.new(
+                    %(key not found: "#{requested_key}"),
+                    key: requested_key,
+                    receiver: container
+                  )
           end
         end
 
-        item.call
+        if item.is_a?(Item::Alias)
+          value = resolve_alias(
+            container,
+            item.target,
+            chain + [key],
+            stubs,
+            &block
+          )
+
+          item.decorators.reduce(value) { |result, decorator| decorator.call(result) }
+        else
+          item.call
+        end
       end
 
       # Check whether an items is registered under the given key
@@ -81,7 +113,10 @@ module Dry
       #       to iterate over not just the registered keys, but to see what was
       #       registered would be very helpful. This is a step toward doing that.
       def each(container, &block)
-        container.map { |key, value| [key, value.call] }.each(&block)
+        container.map { |key, value|
+          value = value.is_a?(Item::Alias) ? call(container, key) : value.call
+          [key, value]
+        }.each(&block)
       end
     end
   end

@@ -24,6 +24,8 @@ module Dry
       # @param [Hash] options
       # @option options [Symbol] :call
       #   Whether the item should be called when resolved
+      # @option options [Boolean] :alias
+      #   Whether the item is an alias for another registration
       #
       # @raise [Dry::Container::Error]
       #   If an item is already registered with the given key

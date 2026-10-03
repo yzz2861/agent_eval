@@ -34,7 +34,19 @@ module Dry
       end
 
       def register(key, *args, &block)
+        contents = args.first
+
+        if contents.is_a?(::Hash) && contents.key?(:alias)
+          options = contents.dup
+          options[:alias] = namespaced(options[:alias])
+          return super(namespaced(key), options)
+        end
+
         super(namespaced(key), *args, &block)
+      end
+
+      def register_alias(key, target)
+        super(namespaced(key), namespaced(target))
       end
 
       def namespace(namespace, &block)

@@ -2,6 +2,7 @@
 
 require "dry/container/item/memoizable"
 require "dry/container/item/callable"
+require "dry/container/item/alias"
 
 module Dry
   class Container
@@ -18,7 +19,13 @@ module Dry
         #
         # @return [Dry::Container::Item::Base]
         def call(item, options = {})
-          options[:memoize] ? Memoizable.new(item, options) : Callable.new(item, options)
+          if options[:alias]
+            Alias.new(item, options)
+          elsif options[:memoize]
+            Memoizable.new(item, options)
+          else
+            Callable.new(item, options)
+          end
         end
       end
     end
