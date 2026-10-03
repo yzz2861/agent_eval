@@ -7,6 +7,15 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ## [Unreleased]
 
+### Added
+
+- Rules can be named and can declare dependencies on other rules. A rule is
+  skipped when any of its dependencies did not pass, and
+  `Result#rule_results` exposes the outcome (:passed, :failed or :skipped)
+  of every rule along with the reason a skipped rule was not executed.
+  Invalid definitions (duplicate names, unknown dependencies, cycles) are
+  raised before any rule is executed.
+
 
 ## [1.11.1] - 2025-01-21
 

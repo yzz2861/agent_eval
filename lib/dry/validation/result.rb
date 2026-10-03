@@ -44,6 +44,16 @@ module Dry
       # @api private
       attr_reader :options
 
+      # Outcomes of the contract's rules, in execution order
+      #
+      # Every rule produces exactly one outcome, so rules that were not
+      # executed can be inspected along with the reason why.
+      #
+      # @return [Array<RuleResult>]
+      #
+      # @api public
+      attr_reader :rule_results
+
       # Initialize a new result
       #
       # @api private
@@ -52,6 +62,7 @@ module Dry
         @context = context
         @options = options
         @errors = initialize_errors
+        @rule_results = EMPTY_ARRAY.dup
       end
 
       # Return values wrapper with the input processed by schema
@@ -148,6 +159,25 @@ module Dry
         self
       end
 
+      # Record the outcome of a rule
+      #
+      # @api private
+      def add_rule_result(rule_result)
+        @rule_results << rule_result
+        self
+      end
+
+      # Return the outcome of a named rule
+      #
+      # @param [Symbol, String] name
+      #
+      # @return [RuleResult, nil]
+      #
+      # @api public
+      def rule_result(name)
+        rule_results.find { |outcome| outcome.name == name.to_sym }
+      end
+
       # Read a value under provided key
       #
       # @param [Symbol] key
@@ -194,6 +224,7 @@ module Dry
       def freeze
         values.freeze
         errors.freeze
+        rule_results.freeze
         super
       end
 

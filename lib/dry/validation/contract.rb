@@ -98,15 +98,7 @@ module Dry
         end
 
         Result.new(schema.(input), context_map) do |result|
-          rules.each do |rule|
-            next if rule.keys.any? { |key| error?(result, key) }
-
-            rule_result = rule.(self, result)
-
-            rule_result.failures.each do |failure|
-              result.add_error(message_resolver.(**failure))
-            end
-          end
+          apply_rules(result)
         end
       end
       # rubocop: enable Metrics/AbcSize
@@ -121,6 +113,59 @@ module Dry
       end
 
       private
+
+      # Apply rules in dependency order and record their outcomes
+      #
+      # A rule is skipped when its keys did not pass schema checks or when
+      # any of its dependencies did not pass. Skipping a rule never prevents
+      # unrelated rules from running.
+      #
+      # @api private
+      def apply_rules(result)
+        outcomes = {}
+
+        sorted_rules.each do |rule|
+          unmet = rule.depends_on.reject { |name| outcomes[name] == RuleResult::PASSED }
+
+          if unmet.any?
+            reason = {type: RuleResult::UNMET_DEPENDENCIES, dependencies: unmet}
+            record_rule_result(result, outcomes, rule, RuleResult::SKIPPED, reason: reason)
+            next
+          end
+
+          if rule.keys.any? { |key| error?(result, key) }
+            reason = {type: RuleResult::SCHEMA_ERROR, keys: rule.keys}
+            record_rule_result(result, outcomes, rule, RuleResult::SKIPPED, reason: reason)
+            next
+          end
+
+          rule_result = rule.(self, result)
+
+          rule_result.failures.each do |failure|
+            result.add_error(message_resolver.(**failure))
+          end
+
+          status = rule_result.failures.empty? ? RuleResult::PASSED : RuleResult::FAILED
+          record_rule_result(result, outcomes, rule, status)
+        end
+      end
+
+      # @api private
+      def record_rule_result(result, outcomes, rule, status, reason: nil)
+        outcomes[rule.name] = status if rule.name
+        result.add_rule_result(RuleResult.new(rule, status: status, reason: reason&.freeze))
+      end
+
+      # Rules validated and ordered so that dependencies run first
+      #
+      # @raise [DuplicateRuleNameError]
+      # @raise [UnknownRuleDependencyError]
+      # @raise [CyclicRuleDependencyError]
+      #
+      # @api private
+      def sorted_rules
+        @sorted_rules ||= RuleGraph.new(rules).sort
+      end
 
       # @api private
       def error?(result, spec)

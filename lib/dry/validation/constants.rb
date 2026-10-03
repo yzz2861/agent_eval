@@ -32,6 +32,15 @@ module Dry
     # Error raised when trying to define a schema in a contract class that already has a schema
     DuplicateSchemaError = ::Class.new(::StandardError)
 
+    # Error raised when more than one rule is defined with the same name
+    DuplicateRuleNameError = ::Class.new(::StandardError)
+
+    # Error raised when a rule declares a dependency on a rule name that is not defined
+    UnknownRuleDependencyError = ::Class.new(::StandardError)
+
+    # Error raised when rule dependencies form a cycle
+    CyclicRuleDependencyError = ::Class.new(::StandardError)
+
     # Error raised during initialization of a contract that has no schema defined
     SchemaMissingError = ::Class.new(::StandardError) do
       # @api private

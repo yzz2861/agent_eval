@@ -90,6 +90,15 @@ module Dry
         #     failure('please provide a valid street address') if valid_street?(values[:street])
         #   end
         #
+        # @example naming rules and declaring dependencies
+        #   rule(:account).named(:account_active) do
+        #     key.failure('must be active') unless active?(value)
+        #   end
+        #
+        #   rule(:quota).depends_on(:account_active) do
+        #     key.failure('quota exceeded') if over_quota?(value)
+        #   end
+        #
         # @return [Rule]
         #
         # @api public
