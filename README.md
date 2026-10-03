@@ -84,8 +84,36 @@ This keeps inherited state safe and lets updates happen by replacing config obje
 * Cache
 * Pluralization: lambda pluralizers stored as translation data
 * Locale fallbacks, RFC4647 compliant (optionally: RFC4646 locale validation)
+* Pseudolocalization for testing fixed-width layouts
 * [Gettext support](https://github.com/ruby-i18n/i18n/wiki/Gettext)
 * Translation metadata
+
+### Pseudolocalization
+
+Use the built-in pseudo backend to expand and replace characters in translatable
+text while leaving interpolation placeholders, width-bearing format strings and
+escaped percent signs untouched:
+
+```ruby
+I18n.backend = I18n::Backend::Pseudo.new(
+  pseudo_locale: :pseudo,
+  pseudo_base_locale: :en,
+  expansion_ratio: 0.3,
+  random_seed: 1,
+  html: false
+)
+```
+
+The same module can be composed into another backend:
+
+```ruby
+class Backend < I18n::Backend::Simple
+  include I18n::Backend::Pseudolocalization
+end
+```
+
+Pass `html: true` per lookup, or enable it on the backend, to preserve HTML tags,
+attributes and entities while pseudolocalizing text nodes.
 
 ## Alternative Backend
 
