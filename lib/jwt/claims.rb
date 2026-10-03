@@ -11,6 +11,7 @@ require_relative 'claims/not_before'
 require_relative 'claims/numeric'
 require_relative 'claims/required'
 require_relative 'claims/subject'
+require_relative 'claims/timing'
 require_relative 'claims/verifier'
 
 module JWT
@@ -27,6 +28,7 @@ module JWT
   # sub
   # required
   # numeric
+  # timing
   module Claims
     # Represents a claim verification error
     Error = Struct.new(:message, keyword_init: true)

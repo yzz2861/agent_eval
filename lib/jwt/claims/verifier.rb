@@ -14,7 +14,8 @@ module JWT
         sub: ->(options) { Claims::Subject.new(expected_subject: options[:sub]) },
         crit: ->(options) { Claims::Crit.new(expected_crits: options[:crit]) },
         required: ->(options) { Claims::Required.new(required_claims: options[:required]) },
-        numeric: ->(*)        { Claims::Numeric.new }
+        numeric: ->(*)        { Claims::Numeric.new },
+        timing:  ->(options) { Claims::Timing.new(**(options[:timing].is_a?(Hash) ? options[:timing] : {})) }
       }.freeze
 
       private_constant(:VERIFIERS)

@@ -593,6 +593,23 @@ JWT::Claims.verify_payload!({"exp" => Time.now.to_i - 10}, exp: { leeway: 11})
 JWT::Claims.verify_payload!({"exp" => Time.now.to_i + 10, "sub" => "subject"}, :exp, sub: "subject")
 ```
 
+### Timing relations between claims
+
+In addition to verifying the `exp`, `nbf` and `iat` claims individually, the `timing` claim verifier checks composable relations between the temporal claims:
+
+```ruby
+JWT::Claims.verify_payload!(payload, timing: {
+  max_lifetime: 3600,        # exp - iat must not exceed one hour
+  max_future_iat: 60,        # iat must not be more than 60 seconds in the future
+  order: [:iat, :nbf, :exp], # iat must not be after nbf, nbf not after exp
+  required: [:iat, :exp],    # missing claims raise JWT::MissingRequiredClaim (otherwise relations involving them are skipped)
+  leeway: 10,                # clock drift tolerated when comparing iat against the current time (applied once, only to that relation)
+  now: Time.now              # the moment all relations are evaluated against (injectable for testing)
+})
+```
+
+Claim values may be numeric or numeric strings, fractional seconds are honoured and non-finite values are rejected with `JWT::InvalidPayload`. A violated relation raises `JWT::InvalidTimingError` with a message naming the failed relation, e.g. `Invalid timing relation iat <= exp: iat 1001.0 is after exp 1000.0`.
+
 ### Finding a Key
 
 To dynamically find the key for verifying the JWT signature, pass a block to the decode block. The block receives headers and the original payload as parameters. It should return with the key to verify the signature that was used to sign the JWT.

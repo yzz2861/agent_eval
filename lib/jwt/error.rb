@@ -73,6 +73,10 @@ module JWT
   # The MissingRequiredClaim class is raised when a required claim is missing from the JWT.
   class MissingRequiredClaim < ClaimValidationError; end
 
+  # The InvalidTimingError class is raised when a relation between the temporal
+  # claims (iat, nbf, exp) of the JWT is violated.
+  class InvalidTimingError < ClaimValidationError; end
+
   # The JWKError class is raised when there is an error with the JSON Web Key (JWK).
   class JWKError < DecodeError; end
 

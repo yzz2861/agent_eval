@@ -7,6 +7,7 @@
 **Features:**
 
 - Your contribution here
+- Add a composable `timing` claim verifier for relations between the temporal claims (`iat`, `nbf`, `exp`): maximum token lifetime, maximum future `iat` skew and claim ordering, evaluated against a single injectable current time
 
 **Fixes and enhancements:**
 
