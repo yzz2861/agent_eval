@@ -40,6 +40,17 @@ module StateMachines
     # state
     attr_accessor :matcher
 
+    # The amount of time (in seconds) an object may remain in this state
+    # before the timeout event is fired.  May be a numeric value or a lambda
+    # block / method name that gets evaluated *once* when the state is entered.
+    # Requires a timeout scheduler to be configured on the machine.  Default
+    # is nil (no timeout).
+    attr_reader :timeout
+
+    # The event to fire when this state's timeout elapses.  Default is
+    # :timeout.
+    attr_accessor :timeout_event
+
     # Creates a new state within the context of the given machine.
     #
     # Configuration options:
@@ -53,20 +64,22 @@ module StateMachines
     #   (e.g. :value => lambda {Time.now}, :if => lambda {|state| !state.nil?}).
     #   By default, the configured value is matched.
     # * <tt>:human_name</tt> - The human-readable version of this state's name
-    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, **extra_options) # :nodoc:
+    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, timeout: nil, timeout_event: nil, **extra_options) # :nodoc:
       # Handle both old hash style and new kwargs style for backward compatibility
       case options
       in Hash
         # Old style: initialize(machine, name, {initial: true, value: 'foo'})
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name, :timeout, :timeout_event)
         initial = options.fetch(:initial, false)
         value = options.include?(:value) ? options[:value] : :__not_provided__
         cache = options[:cache]
         if_condition = options[:if]
         human_name = options[:human_name]
+        timeout = options[:timeout] if options.include?(:timeout)
+        timeout_event = options[:timeout_event] if options.include?(:timeout_event)
       in nil
         # New style: initialize(machine, name, initial: true, value: 'foo')
-        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name) unless extra_options.empty?
+        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name, :timeout, :timeout_event) unless extra_options.empty?
         if_condition = binding.local_variable_get(:if) # 'if' is a keyword, need special handling
       else
         # Handle unexpected options
@@ -82,6 +95,8 @@ module StateMachines
       @matcher = if_condition
       @initial = initial == true
       @context = StateContext.new(self)
+      @timeout_event = timeout_event
+      self.timeout = timeout if timeout
 
       return unless name
 
@@ -113,6 +128,14 @@ module StateMachines
     def machine=(machine)
       @machine = machine
       @context = StateContext.new(self)
+      machine.send(:enable_timeout_tracking!) if @timeout
+    end
+
+    # Sets the timeout for this state and enables timeout tracking on the
+    # owning machine
+    def timeout=(duration)
+      @timeout = duration
+      machine.send(:enable_timeout_tracking!) if duration
     end
 
     # Determines whether there are any states that can be transitioned to from

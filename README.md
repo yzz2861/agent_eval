@@ -341,6 +341,78 @@ StarshipBridge.new.can_red_alert?
 # => ArgumentError: State 'nonexistent_state' is not defined in state machine 'shields'
 ```
 
+## State Timeouts
+
+A state can declare how long an object may remain in it before a timeout event
+is fired automatically:
+
+```ruby
+class Order
+  state_machine initial: :pending, timeout_scheduler: MyScheduler.new do
+    event :start_payment do
+      transition pending: :awaiting_payment
+    end
+
+    event :timeout do
+      transition awaiting_payment: :expired
+    end
+
+    state :awaiting_payment, timeout: 300
+  end
+end
+```
+
+The timeout duration can also be computed dynamically; it is evaluated exactly
+once when the state is entered:
+
+```ruby
+state :awaiting_payment, timeout: ->(order) { order.payment_window }
+state :awaiting_payment, timeout: :payment_window # or a method name
+```
+
+By default the `:timeout` event is fired; use `:timeout_event` to customize it:
+
+```ruby
+state :awaiting_payment, timeout: 300, timeout_event: :expire
+```
+
+### Schedulers
+
+This library does not start background threads or maintain persistent queues.
+Instead, the application provides a scheduler that responds to
+`schedule(delay_in_seconds, &block)` and returns a handle:
+
+```ruby
+class MyScheduler
+  def schedule(delay, &block)
+    # e.g. enqueue a job that runs the block in +delay+ seconds
+  end
+
+  def cancel(handle)
+    # optional: cancel a previously scheduled timeout
+  end
+end
+```
+
+The scheduler can be set via the `:timeout_scheduler` machine option or
+`machine.timeout_scheduler = ...`. Pending timeouts are cancelled through the
+returned handle if it responds to `cancel`, otherwise through
+`scheduler.cancel(handle)` if the scheduler supports it.
+
+### Semantics
+
+* Successfully transitioning into a state with a timeout arms the timer;
+  leaving the state cancels it.  (Initial-state assignment is not a
+  transition and does not arm the timer.)
+* Re-entering the same state (including loopback transitions) cancels the
+  previous timer and arms a fresh one -- stale callbacks are always discarded.
+* If a manual event races with the timeout, exactly one transition succeeds:
+  whichever fires second finds no valid transition (or a stale registration)
+  and has no effect.
+* If the scheduler raises while arming a timeout, the error is re-raised to
+  the caller of the event and no timeout is left pending
+  (`machine.state_timeout_pending?(object)` returns `false`).
+
 # Asynchronous State Machines
 
 State machines can operate asynchronously for high-performance applications. This is ideal for I/O-bound tasks, such as in web servers or other concurrent environments, where you don't want a long-running state transition (like one involving a network call) to block the entire thread.

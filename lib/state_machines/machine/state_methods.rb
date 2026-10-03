@@ -80,6 +80,12 @@ module StateMachines
       # * <tt>:human_name</tt> - The human-readable version of this state's name.
       #   By default, this is either defined by the integration or stringifies the
       #   name and converts underscores to spaces.
+      # * <tt>:timeout</tt> - The number of seconds an object may remain in this
+      #   state before the timeout event is fired.  May be a numeric value or a
+      #   lambda block / method name evaluated once when the state is entered.
+      #   Requires a +timeout_scheduler+ to be configured on the machine.
+      # * <tt>:timeout_event</tt> - The event to fire when the timeout elapses.
+      #   Default is :timeout.
       #
       # == Customizing the stored value
       #
@@ -336,7 +342,7 @@ module StateMachines
       # options hash which contains at least <tt>:if</tt> condition support.
       def state(*names, &)
         options = names.last.is_a?(Hash) ? names.pop : {}
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name, :timeout, :timeout_event)
 
         # Store the context so that it can be used for / matched against any state
         # that gets added
@@ -361,6 +367,8 @@ module StateMachines
             state.human_name = options[:human_name] if options.include?(:human_name)
             state.cache = options[:cache] if options.include?(:cache)
             state.matcher = options[:if] if options.include?(:if)
+            state.timeout = options[:timeout] if options.include?(:timeout)
+            state.timeout_event = options[:timeout_event] if options.include?(:timeout_event)
           end
         end
 
