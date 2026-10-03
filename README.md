@@ -241,7 +241,18 @@ JSONSchemer.schema(
   # validate `readOnly`/`writeOnly` keywords (https://spec.openapis.org/oas/v3.0.3#fixed-fields-19)
   # 'read'/'write'/nil
   # default: nil
-  access_mode: 'read'
+  access_mode: 'read',
+
+  # check that instance data belongs to the JSON data domain before schema
+  # evaluation: objects with string keys, arrays, strings, finite numbers,
+  # true/false/nil. Raises JSONSchemer::InvalidJSONData (with reason, path,
+  # and offending_type readers) for circular references, non-string keys,
+  # NaN/infinite numbers, and non-JSON objects. Shared subobjects are allowed;
+  # only cycles along the current traversal path are rejected. The check never
+  # mutates the input and never calls to_json/to_hash on foreign objects.
+  # true/false/{ max_depth:, max_nodes: }
+  # default: false
+  strict_json_data: true
 )
 ```
 
