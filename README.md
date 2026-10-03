@@ -83,6 +83,7 @@ This keeps inherited state safe and lets updates happen by replacing config obje
 
 * Cache
 * Pluralization: lambda pluralizers stored as translation data
+* Variants: explicit `__select__` markers for grammatical choice dimensions (e.g. tone, person), combinable with pluralization and locale fallbacks
 * Locale fallbacks, RFC4647 compliant (optionally: RFC4646 locale validation)
 * [Gettext support](https://github.com/ruby-i18n/i18n/wiki/Gettext)
 * Translation metadata

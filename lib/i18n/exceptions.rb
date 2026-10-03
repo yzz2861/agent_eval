@@ -95,6 +95,23 @@ module I18n
     end
   end
 
+  class MissingVariantOption < ArgumentError
+    attr_reader :locale, :dimension, :value, :path
+    def initialize(locale, dimension, value, path)
+      @locale, @dimension, @value, @path = locale, dimension, value, path
+      super(message)
+    end
+
+    def message
+      reason = if value.nil?
+        "no #{dimension.inspect} option was given"
+      else
+        "#{dimension.inspect} => #{value.inspect} does not match any branch"
+      end
+      "missing variant at #{path.join('.')}: #{reason} and no __default__ branch is defined"
+    end
+  end
+
   class MissingInterpolationArgument < ArgumentError
     attr_reader :key, :values, :string
     def initialize(key, values, string)

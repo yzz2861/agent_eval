@@ -47,7 +47,7 @@ module I18n
         end
 
         entry = entry.dup if entry.is_a?(String)
-        entry = pluralize(locale, entry, count) if count
+        entry = select(locale, key, entry, options)
 
         if entry.nil? && !subtrees?
           throw(:exception, I18n::MissingTranslation.new(locale, key, options))
@@ -186,6 +186,20 @@ module I18n
           key = pluralization_key(entry, count)
           raise InvalidPluralizationData.new(entry, count, key) unless entry.has_key?(key)
           entry[key]
+        end
+
+        # Selects the final translation from a structured entry. The base
+        # implementation only resolves pluralization hashes (when a :count
+        # option is given) and returns any other entry unchanged. Backends
+        # can overwrite this method to support additional, explicitly marked
+        # selection structures, e.g. grammatical variants. See
+        # I18n::Backend::Variants.
+        def select(locale, key, entry, options)
+          if (count = options[:count])
+            pluralize(locale, entry, count)
+          else
+            entry
+          end
         end
 
         # Interpolates values into a given subject.
