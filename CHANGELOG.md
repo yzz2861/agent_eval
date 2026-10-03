@@ -1,5 +1,9 @@
 ## Current
 
+concurrent-ruby:
+
+* New `StampedLock` class: a read/write lock with optimistic reads via versioned stamps
+
 ## Release v1.3.8 (19 July 2026)
 
 concurrent-ruby:
