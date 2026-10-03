@@ -19,6 +19,7 @@ module IceCube
       self.end_time = options[:end_time] if options[:end_time]
       @all_recurrence_rules = []
       @all_exception_rules = []
+      @adjustments = []
       yield self if block_given?
     end
 
@@ -88,6 +89,36 @@ module IceCube
     def remove_exception_rule(rule)
       res = @all_exception_rules.delete(rule)
       res.nil? ? [] : [res]
+    end
+
+    # Add an adjustment ("edit this and following") that takes effect from
+    # the adjustment's anchor - an occurrence's start time on the original
+    # recurrence axis - onward. Adjustments are kept ordered by anchor and
+    # form consecutive segments; an adjustment replaces any existing one
+    # anchored at the same time.
+    def add_adjustment(adjustment)
+      return if adjustment.nil?
+      @adjustments.delete_if { |a| a.anchor == adjustment.anchor }
+      @adjustments << adjustment
+      @adjustments.sort_by!(&:anchor)
+      adjustment
+    end
+
+    # Convenience for building and adding an adjustment in one call
+    def adjust_following(anchor, start_offset: 0, duration: nil)
+      add_adjustment ScheduleAdjustment.new(anchor, start_offset: start_offset, duration: duration)
+    end
+
+    # Get the adjustments, ordered by anchor
+    def adjustments
+      @adjustments.dup
+    end
+
+    # Remove the adjustment anchored at the given original recurrence time
+    def remove_adjustment(anchor)
+      anchor = TimeUtil.ensure_time(anchor)
+      removed = @adjustments.reject! { |a| a.anchor == anchor }
+      removed&.first
     end
 
     # Get the recurrence rules
@@ -365,6 +396,7 @@ module IceCube
       data[:extimes] = exception_times.map do |et|
         TimeUtil.serialize_time(et)
       end
+      data[:adjustments] = @adjustments.map(&:to_hash) if @adjustments.any?
       data
     end
     alias_method :to_h, :to_hash
@@ -387,7 +419,8 @@ module IceCube
       [
         TimeUtil.hash(start_time), duration,
         *@all_recurrence_rules.map(&:hash).sort!,
-        *@all_exception_rules.map(&:hash).sort!
+        *@all_exception_rules.map(&:hash).sort!,
+        *@adjustments.map(&:hash).sort!
       ].hash
     end
 
@@ -417,12 +450,21 @@ module IceCube
     # Find all of the occurrences for the schedule between opening_time
     # and closing_time
     # Iteration is unrolled in pairs to skip duplicate times in end of DST
-    def enumerate_occurrences(opening_time, closing_time = nil, options = {})
+    def enumerate_occurrences(opening_time, closing_time = nil, options = {}, &block)
       opening_time = TimeUtil.match_zone(opening_time, start_time)
       closing_time = TimeUtil.match_zone(closing_time, start_time)
       opening_time += TimeUtil.subsec(start_time) - TimeUtil.subsec(opening_time)
       opening_time = start_time if opening_time < start_time
       spans = options[:spans] == true && duration != 0
+      if @adjustments.any?
+        return enumerate_adjusted_occurrences(opening_time, closing_time, options, &block)
+      end
+      enumerate_original_occurrences(opening_time, closing_time, spans, &block)
+    end
+
+    # Enumerate occurrences on the original recurrence axis, before any
+    # adjustments are applied
+    def enumerate_original_occurrences(opening_time, closing_time, spans, &block)
       Enumerator.new do |yielder|
         reset
         t1 = full_required? ? start_time : opening_time
@@ -432,10 +474,66 @@ module IceCube
           break unless (t0 = next_time(t1, closing_time))
           break if closing_time && t0 > closing_time
           if spans ? (t0.end_time > opening_time) : (t0 >= opening_time)
-            yielder << (block_given? ? yield(t0) : t0)
+            yielder << (block ? block.call(t0) : t0)
           end
           t1 = t0 + 1
         end
+      end
+    end
+
+    # Enumerate occurrences with "edit this and following" adjustments
+    # applied. Enumeration still happens on the original recurrence axis
+    # (so COUNT, UNTIL and exception rules are interpreted there); each
+    # occurrence is then mapped through the adjustment segment covering
+    # its original start time. The query window is expanded by the segment
+    # offsets so shifted occurrences are found without enumerating the
+    # whole series.
+    def enumerate_adjusted_occurrences(opening_time, closing_time, options, &block)
+      offsets = @adjustments.map(&:start_offset)
+      original_opening = opening_time - [offsets.max, 0].max
+      original_opening = start_time if original_opening < start_time
+      original_closing = closing_time - [offsets.min, 0].min if closing_time
+      durations = @adjustments.map { |a| a.duration || duration }
+      durations << duration
+      spans = options[:spans] == true && durations.max != 0
+      if spans
+        original_opening -= durations.max
+        original_opening = start_time if original_opening < start_time
+      end
+      Enumerator.new do |yielder|
+        enumerate_original_occurrences(original_opening, original_closing, false).each do |occurrence|
+          adjusted = apply_adjustment(occurrence)
+          next if closing_time && adjusted.start_time > closing_time
+          in_window = spans ? (adjusted.end_time > opening_time) : (adjusted.start_time >= opening_time)
+          yielder << (block ? block.call(adjusted) : adjusted) if in_window
+        end
+      end
+    end
+
+    # Map an occurrence from the original recurrence axis through the
+    # adjustment segment covering its original start time. Explicit
+    # recurrence times (e.g. individually rescheduled instances) are
+    # returned unchanged.
+    def apply_adjustment(occurrence)
+      adjustment = adjustment_for(occurrence.start_time)
+      return occurrence unless adjustment
+      return occurrence if explicit_recurrence_time?(occurrence.start_time)
+      adjustment.apply(occurrence, duration)
+    end
+
+    # The latest adjustment whose anchor is not after the given original
+    # recurrence time, or nil when the time precedes every anchor
+    def adjustment_for(original_time)
+      @adjustments.reverse_each do |adjustment|
+        return adjustment if adjustment.anchor <= original_time
+      end
+      nil
+    end
+
+    # Whether the time was added explicitly via #add_recurrence_time
+    def explicit_recurrence_time?(time)
+      @all_recurrence_rules.any? do |rule|
+        rule.is_a?(SingleOccurrenceRule) && rule.time == time
       end
     end
 

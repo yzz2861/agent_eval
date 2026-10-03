@@ -156,6 +156,54 @@ IceCube::Schedule.from_ical(ical)
 
 ---
 
+## Editing "this and following" occurrences
+
+Calendar apps often need "edit this and all future events": shift every
+occurrence from a chosen one onward, without rewriting the recurrence rule
+or enumerating (possibly infinite) future instances. Schedule adjustments
+do exactly that, stored as a finite anchor + offset pair:
+
+``` ruby
+schedule = IceCube::Schedule.new(Time.utc(2026, 1, 5, 9), duration: 3600) do |s|
+  s.add_recurrence_rule IceCube::Rule.daily
+end
+
+# from the Jan 7 occurrence onward: start 2 hours later, run 90 minutes
+schedule.adjust_following(Time.utc(2026, 1, 7, 9), start_offset: 2 * 3600, duration: 5400)
+
+schedule.first(3).map(&:to_s)
+# ["2026-01-05 09:00:00 UTC - 2026-01-05 10:00:00 UTC",
+#  "2026-01-06 09:00:00 UTC - 2026-01-06 10:00:00 UTC",
+#  "2026-01-07 11:00:00 UTC - 2026-01-07 12:30:00 UTC"]
+```
+
+The anchor is an occurrence's start time on the *original* recurrence axis,
+and everything keeps being interpreted on that axis:
+
+* COUNT and UNTIL still bound the original occurrence times, so the series
+  keeps its length and its end regardless of the shift.
+* Exception times/rules cancel original occurrences, so a cancelled
+  instance stays cancelled no matter where segments move it.
+* Occurrences before the first anchor are never affected.
+* Explicit recurrence times (added with +add_recurrence_time+, e.g. an
+  instance that was individually rescheduled) are exempt from adjustments -
+  they already represent a concrete, user-chosen time.
+
+Multiple adjustments form consecutive segments, applied in anchor order;
+each occurrence uses the latest adjustment anchored at or before its
+original time. Adding another adjustment at an existing anchor replaces it.
+
+``` ruby
+schedule.adjust_following(Time.utc(2026, 1, 12, 9), start_offset: -3600)
+schedule.adjustments          # both adjustments, ordered by anchor
+schedule.remove_adjustment(Time.utc(2026, 1, 7, 9))
+```
+
+Adjustments serialize with the schedule via +to_hash+/+from_hash+ and
++to_yaml+/+from_yaml+ (they are not part of the iCalendar output).
+
+---
+
 ## Using your words
 
 ice_cube can provide ical or string representations of individual rules, or the

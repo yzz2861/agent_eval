@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [UNRELEASED]
 ### Added
+- Support for "edit this and following" schedule adjustments via Schedule#adjust_following / Schedule#add_adjustment and IceCube::ScheduleAdjustment. Adjustments shift start times and optionally unify the duration of all occurrences from an anchored original recurrence time onward, without enumerating future instances; COUNT, UNTIL and exception rules keep being interpreted on the original recurrence axis.
 - Support for BYSETPOS with all rule frequencies (yearly, monthly, weekly, daily, hourly, minutely, secondly). ([#449](https://github.com/ice-cube-ruby/ice_cube/pull/449)) by [@nehresma](https://github.com/nehresma) and [@NicolasMarlier](https://github.com/NicolasMarlier)
 
 ### Changed
