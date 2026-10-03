@@ -45,6 +45,15 @@ module Dry
       # @api private
       def >(other) = compose(other, Implication)
 
+      # Build a discriminated union.
+      #
+      # @return [DiscriminatedUnion]
+      #
+      # @api public
+      def discriminated_union(...)
+        Types::DiscriminatedUnion.build(...)
+      end
+
       # Turn a type into an optional type
       #
       # @return [Sum]

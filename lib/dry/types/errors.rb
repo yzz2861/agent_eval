@@ -109,6 +109,66 @@ module Dry
       end
     end
 
+    class DiscriminatorError < CoercionError; end
+
+    class MissingTagError < DiscriminatorError
+      # @return [Array<Symbol, String>]
+      attr_reader :path
+
+      # @param [Array<Symbol, String>] path
+      def initialize(path)
+        @path = path
+        super("tag #{path.inspect} is missing in Hash input")
+      end
+    end
+
+    class TagValueError < DiscriminatorError
+      # @return [Array<Symbol, String>]
+      attr_reader :path
+
+      # @return [Object]
+      attr_reader :tag
+
+      # @param [String] message
+      # @param [Array<Symbol, String>] path
+      # @param [Object] tag
+      def initialize(message, path, tag)
+        @path = path
+        @tag = tag
+        super(message)
+      end
+    end
+
+    class UnknownTagError < TagValueError
+      # @return [Array<Object>]
+      attr_reader :known_tags
+
+      # @param [Array<Symbol, String>] path
+      # @param [Object] tag
+      # @param [Array<Object>] known_tags
+      def initialize(path, tag, known_tags)
+        @known_tags = known_tags
+        super(
+          "unknown tag #{tag.inspect} at #{path.inspect}; " \
+          "expected one of #{known_tags.inspect}",
+          path,
+          tag
+        )
+      end
+    end
+
+    class InvalidTagError < TagValueError
+      # @param [Array<Symbol, String>] path
+      # @param [Object] tag
+      def initialize(path, tag)
+        super(
+          "#{tag.inspect} (#{tag.class}) has invalid type for tag #{path.inspect}",
+          path,
+          tag
+        )
+      end
+    end
+
     class ConstraintError < CoercionError
       # @return [String, #to_s]
       attr_reader :result

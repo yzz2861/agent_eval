@@ -32,6 +32,7 @@ module Dry
           Implication,
           Implication::Constrained
         ] => :visit_composition,
+        DiscriminatedUnion => :visit_discriminated_union,
         Any.class => :visit_any
       }.flat_map { |k, v| Array(k).map { |kk| [kk, v] } }.to_h
 
@@ -103,6 +104,14 @@ module Dry
         klass = composition.class
         @composition_printers[klass] = Composition.new(self, klass)
         @composition_printers[klass].visit(composition, &)
+      end
+
+      def visit_discriminated_union(type)
+        branches = type.branches.map do |tag, branch|
+          visit(branch) { |branch_str| "#{tag.inspect} => #{branch_str}" }
+        end.join(", ")
+
+        yield "DiscriminatedUnion<#{type.tag_path.inspect} {#{branches}}>"
       end
 
       def visit_sum_constructors(sum)

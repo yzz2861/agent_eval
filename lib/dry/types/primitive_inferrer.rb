@@ -45,6 +45,9 @@ module Dry
         end
 
         # @api private
+        def visit_discriminated_union(_node) = ::Hash
+
+        # @api private
         def visit_constrained(node) = visit(node[0])
 
         # @api private

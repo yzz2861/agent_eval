@@ -63,6 +63,16 @@ module Dry
         types.map { |type| visit(type) }.reduce(:|).meta(meta)
       end
 
+      def visit_discriminated_union(node)
+        tag_path, branch_nodes, options, meta = node
+        transform = compile_tag_transform(options.fetch(:tag_transform, nil))
+        branches = branch_nodes.map { |tag, branch_ast| [tag, visit(branch_ast)] }
+
+        DiscriminatedUnion
+          .new(tag_path, branches, tag_transform: transform)
+          .meta(meta)
+      end
+
       def visit_array(node)
         member, meta = node
         member = visit(member) unless member.is_a?(::Class)
@@ -131,6 +141,19 @@ module Dry
           target.method(method)
         else
           raise ::ArgumentError, "Cannot build callable from #{fn.inspect}"
+        end
+      end
+
+      def compile_tag_transform(node)
+        return nil if node.nil?
+
+        case node
+        in [:method, name]
+          name
+        in [:callable, callable]
+          callable
+        else
+          raise ::ArgumentError, "Cannot compile tag transform from #{node.inspect}"
         end
       end
     end

@@ -118,6 +118,48 @@ module Dry
         Nominal(::Hash).map(key_type, value_type)
       end
 
+      # Build a discriminated union.
+      #
+      # @return [DiscriminatedUnion]
+      def DiscriminatedUnion(
+        tag_or_path = Undefined,
+        branches = nil,
+        **options,
+        &transform_block
+      )
+        tag = options.fetch(:tag, Undefined)
+        path = options.delete(:path)
+        tag_transform = options.delete(:tag_transform)
+
+        if branches.nil? && options.any?
+          if Undefined.equal?(tag_or_path)
+            return Types::DiscriminatedUnion.build(
+              branches: options,
+              tag: tag,
+              path: path,
+              tag_transform: tag_transform,
+              &transform_block
+            )
+          end
+
+          return Types::DiscriminatedUnion.build(
+            tag_or_path,
+            options,
+            tag_transform: tag_transform,
+            &transform_block
+          )
+        end
+
+        Types::DiscriminatedUnion.build(
+          tag_or_path,
+          branches,
+          tag: tag,
+          path: path,
+          tag_transform: tag_transform,
+          &transform_block
+        )
+      end
+
       # Builds a constrained nominal type accepting any value that
       # responds to given methods
       #

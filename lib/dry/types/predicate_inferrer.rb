@@ -108,6 +108,7 @@ module Dry
           HASH
         end
         alias_method :visit_schema, :visit_hash
+        alias_method :visit_discriminated_union, :visit_hash
 
         # @api private
         def visit_array(_)
