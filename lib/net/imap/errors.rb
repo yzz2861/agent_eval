@@ -275,6 +275,66 @@ module Net
     class ByeResponseError < ResponseError
     end
 
+    # Error raised when Net::IMAP#uid_move_fallback cannot complete its
+    # emulated <tt>COPY + STORE + UID EXPUNGE</tt> move sequence.
+    #
+    # The emulated move is _not_ atomic across commands: when this error is
+    # raised, some stages may have already completed on the server.  Inspect
+    # #completed_stages and #copyuid to learn what has already
+    # happened---most importantly, whether the messages were already copied
+    # to the destination mailbox---so the caller can recover without copying
+    # them again.  The original error is available as #cause.
+    class MoveFallbackError < Error
+      # The stages of an emulated move, in order of execution.
+      STAGES = %i[copy store expunge].freeze
+
+      # The stage during which the move was aborted: +:copy+, +:store+, or
+      # +:expunge+.
+      attr_reader :stage
+
+      # The stages that completed successfully before the move was aborted.
+      attr_reader :completed_stages
+
+      # The CopyUIDData returned by the copy stage, or +nil+ when the copy
+      # did not complete or the server sent no +COPYUID+ response code.
+      attr_reader :copyuid
+
+      # The UIDs of the source messages that were being moved.
+      attr_reader :source_uids
+
+      # The destination mailbox.
+      attr_reader :mailbox
+
+      def initialize(message = nil, stage:, completed_stages: [], copyuid: nil,
+                     source_uids: nil, mailbox: nil)
+        @stage            = stage
+        @completed_stages = completed_stages.freeze
+        @copyuid          = copyuid
+        @source_uids      = source_uids
+        @mailbox          = mailbox
+        super(message || default_message)
+      end
+
+      # Whether the copy stage completed before the move was aborted.  When
+      # true, the messages already exist in the destination mailbox and must
+      # not be copied again.
+      def copied? = completed_stages.include?(:copy)
+
+      # A hash mapping each source UID to its newly assigned destination UID,
+      # or +nil+ when #copyuid is unavailable.  See CopyUIDData#uid_mapping.
+      def uid_mapping = copyuid&.uid_mapping
+
+      private
+
+      def default_message
+        msg = +"fallback move aborted during #{stage} stage"
+        unless completed_stages.empty?
+          msg << " (completed: #{completed_stages.join(', ')})"
+        end
+        msg
+      end
+    end
+
     # Error raised when the server sends an invalid response.
     #
     # This is different from UnknownResponseError: the response has been

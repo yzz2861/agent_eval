@@ -151,7 +151,10 @@ module Net
   #   search_result = imap.uid_search(["SINCE", since, "BEFORE", before])
   #   imap.uid_move(search_result, destination)
   #
-  # When atomic +MOVE+ is not supported, the messages can be copied and deleted.
+  # When atomic +MOVE+ is not supported, the messages can be copied and
+  # deleted.  See #uid_move_fallback, which encapsulates the safe +UIDPLUS+
+  # fallback below and never degrades to #expunge.
+  #
   # \IMAP message deletion requires two steps: set <tt>\Deleted</tt> flag to
   # mark a message for deletion, then expunge the <tt>\Deleted</tt> messages.
   #
@@ -3123,6 +3126,66 @@ module Net
       copy_internal("UID MOVE", set, mailbox)
     end
 
+    # :call-seq:
+    #   uid_move_fallback(set, mailbox) -> CopyUIDData or nil
+    #
+    # Moves the messages identified by the UIDs in +set+ to the end of the
+    # destination +mailbox+, using the safest mechanism the server supports.
+    # Returns the CopyUIDData that maps source UIDs to destination UIDs, or
+    # +nil+ when the server sends no +COPYUID+ response code.
+    #
+    # When the server supports +IMAP4rev2+ or +MOVE+
+    # [RFC6851[https://www.rfc-editor.org/rfc/rfc6851]], this simply delegates
+    # to #uid_move, which the server executes atomically.
+    #
+    # When the server supports only +UIDPLUS+
+    # [RFC4315[https://www.rfc-editor.org/rfc/rfc4315.html]], the move is
+    # emulated with three separate commands:
+    # 1. #uid_copy --- copies the messages to +mailbox+
+    # 2. #uid_store --- adds the <tt>\Deleted</tt> flag to the source messages
+    # 3. #uid_expunge --- expunges <em>only</em> the copied source UIDs
+    #
+    # Because #uid_expunge is targeted at the copied UIDs, messages that were
+    # already marked <tt>\Deleted</tt> by other sessions are never removed.
+    # This method will _never_ degrade to #expunge, which would expunge
+    # _every_ <tt>\Deleted</tt> message in the mailbox.  When the server
+    # supports neither +MOVE+ nor +UIDPLUS+, Net::IMAP::Error is raised and
+    # no command is sent.
+    #
+    # <em>*WARNING:* The emulated move is *not* atomic across commands.</em>
+    # If a command fails after the copy completed, the messages exist in both
+    # mailboxes.  MoveFallbackError is raised with MoveFallbackError#stage,
+    # MoveFallbackError#completed_stages, and MoveFallbackError#copyuid (the
+    # source-to-destination UID mapping), so the caller can finish or undo
+    # the move without copying the messages again.  The original error is
+    # preserved as MoveFallbackError#cause.
+    #
+    # ==== Mailbox selection guards
+    #
+    # The UID set is only valid for the mailbox session in which it was
+    # selected.  Before each destructive stage (+STORE+ and +UID EXPUNGE+),
+    # the move is aborted with MoveFallbackError when the mailbox selection
+    # has been closed or changed, or when the mailbox's +UIDVALIDITY+ no
+    # longer matches the value captured when the move started.
+    #
+    # *NOTE:* Net::IMAP does not track the name of the selected mailbox, so
+    # re-selecting a different mailbox that happens to report the same
+    # +UIDVALIDITY+ cannot be detected.
+    #
+    # Related: #uid_move, #uid_copy, #uid_store, #uid_expunge
+    def uid_move_fallback(set, mailbox)
+      if capable?(:IMAP4rev2) || capable?(:MOVE)
+        clear_responses("COPYUID")
+        move_fallback_copyuid(uid_move(set, mailbox))
+      elsif capable?(:UIDPLUS)
+        uid_move_fallback_with_uidplus(set, mailbox)
+      else
+        msg = "cannot safely move messages: " \
+              "the server supports neither MOVE nor UIDPLUS"
+        raise Error, msg
+      end
+    end
+
     # Sends a {SORT command [RFC5256 §3]}[https://www.rfc-editor.org/rfc/rfc5256#section-3]
     # to search a mailbox for messages that match +search_keys+ and return an
     # array of message sequence numbers, sorted by +sort_keys+.
@@ -4092,6 +4155,68 @@ module Net
 
     def copy_internal(cmd, set, mailbox)
       send_command(cmd, SequenceSet.new(set), mailbox)
+    end
+
+    # Emulates #uid_move on servers that support UIDPLUS but not MOVE, using
+    # UID COPY, UID STORE, and UID EXPUNGE.  Returns CopyUIDData or nil.
+    def uid_move_fallback_with_uidplus(set, mailbox)
+      connection_state.selected? or
+        raise Error, "uid_move_fallback requires a selected mailbox"
+      uidvalidity = responses("UIDVALIDITY", &:last)
+      completed   = []
+      copyuid     = nil
+      begin
+        clear_responses("COPYUID")
+        copyuid = move_fallback_copyuid(uid_copy(set, mailbox))
+        completed << :copy
+        move_fallback_guard!(uidvalidity, :store, completed, copyuid,
+                             set, mailbox)
+        uid_store(set, "+FLAGS", [:Deleted])
+        completed << :store
+        move_fallback_guard!(uidvalidity, :expunge, completed, copyuid,
+                             set, mailbox)
+        uid_expunge(set)
+      rescue MoveFallbackError
+        raise
+      rescue Exception
+        raise MoveFallbackError.new(
+          stage:            MoveFallbackError::STAGES.find { !completed.include?(_1) },
+          completed_stages: completed,
+          copyuid:          copyuid,
+          source_uids:      set,
+          mailbox:          mailbox,
+        )
+      end
+      copyuid
+    end
+
+    # Aborts an emulated move when the mailbox selection was closed or
+    # changed, or when UIDVALIDITY no longer matches the value captured when
+    # the move started.
+    def move_fallback_guard!(uidvalidity, stage, completed, copyuid,
+                             set, mailbox)
+      problem =
+        if !connection_state.selected?
+          "mailbox selection was closed or changed"
+        elsif uidvalidity && responses("UIDVALIDITY", &:last) != uidvalidity
+          "UIDVALIDITY no longer matches the selected mailbox"
+        end
+      problem and raise MoveFallbackError.new(
+        "aborting fallback move: #{problem}",
+        stage:            stage,
+        completed_stages: completed,
+        copyuid:          copyuid,
+        source_uids:      set,
+        mailbox:          mailbox,
+      )
+    end
+
+    # Extracts CopyUIDData from a tagged response's COPYUID response code, or
+    # from an untagged COPYUID response code recorded in #responses.
+    def move_fallback_copyuid(tagged_response)
+      code = tagged_response.data.code
+      return code.data if code&.name == "COPYUID"
+      responses("COPYUID", &:last)
     end
 
     def sort_internal(cmd, sort_keys, search_keys, charset)
