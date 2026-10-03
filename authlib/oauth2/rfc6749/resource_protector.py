@@ -82,6 +82,9 @@ class TokenValidator:
         """
         raise NotImplementedError()
 
+    def validate_request_credential(self, request, token_string):
+        """Validate scheme-specific credentials before loading the token."""
+
 
 class ResourceProtector:
     def __init__(self):
@@ -143,6 +146,7 @@ class ResourceProtector:
         """Validate the request and return a token."""
         validator, token_string = self.parse_request_authorization(request)
         validator.validate_request(request)
+        validator.validate_request_credential(request, token_string)
         token = validator.authenticate_token(token_string)
         validator.validate_token(token, scopes, request, **kwargs)
         return token
