@@ -475,7 +475,7 @@ module Net
     # Requires +QUOTA+ [RFC2087[https://www.rfc-editor.org/rfc/rfc2087]]
     # or <tt>QUOTA=RES-STORAGE</tt>
     # [RFC9208[https://www.rfc-editor.org/rfc/rfc9208]] capability.
-    class MailboxQuota < Struct.new(:mailbox, :usage, :quota)
+    class MailboxQuota < Struct.new(:mailbox, :resources)
       ##
       # :method: mailbox
       # :call-seq: mailbox -> string
@@ -490,17 +490,45 @@ module Net
       alias quota_root mailbox
 
       ##
-      # :method: usage
-      # :call-seq: usage -> Integer
+      # :method: resources
+      # :call-seq: resources -> hash
       #
-      # Current storage usage of the mailbox.
+      # A hash mapping each resource name, as sent by the server, to a
+      # two-element array of its current usage and its limit.
+      #
+      # Resource names are case-insensitive and are stored verbatim, so
+      # resource types that are unknown to Net::IMAP are preserved as well.
+      # Values are the raw numeric strings sent by the server; they are not
+      # interpreted (e.g. converted to bytes), because the units differ per
+      # resource type.
+      #
+      # When the quota root has no resource limits, the hash is empty.
 
-      ##
-      # :method: quota
-      # :call-seq: quota -> Integer
+      # The current usage of the +STORAGE+ resource, or +nil+ when the
+      # +STORAGE+ resource is not present.
       #
-      # Storage limit imposed on the mailbox.
+      # *NOTE:* This is a convenience accessor for the +STORAGE+ resource in
+      # #resources, for compatibility with earlier versions of Net::IMAP which
+      # only supported the +STORAGE+ resource type.
+      def usage
+        storage_resource&.first
+      end
+
+      # The limit of the +STORAGE+ resource, or +nil+ when the +STORAGE+
+      # resource is not present.
       #
+      # *NOTE:* This is a convenience accessor for the +STORAGE+ resource in
+      # #resources, for compatibility with earlier versions of Net::IMAP which
+      # only supported the +STORAGE+ resource type.
+      def quota
+        storage_resource&.last
+      end
+
+      private
+
+      def storage_resource
+        resources&.find { |name, _| name.casecmp?("STORAGE") }&.last
+      end
     end
 
     # MailboxQuotaRoot represents the data of an untagged +QUOTAROOT+ response.

@@ -1422,26 +1422,20 @@ module Net
         mailbox = astring
         match(T_SPACE)
         match(T_LPAR)
-        token = lookahead
-        case token.symbol
-        when T_RPAR
-          shift_token
-          data = MailboxQuota.new(mailbox, nil, nil)
-          return UntaggedResponse.new(name, data, @str)
-        when T_ATOM
-          shift_token
+        resources = {}
+        while lookahead.symbol == T_ATOM
+          resource = match(T_ATOM).value
           match(T_SPACE)
-          token = match(T_NUMBER)
-          usage = token.value
+          usage = match(T_NUMBER).value
           match(T_SPACE)
-          token = match(T_NUMBER)
-          quota = token.value
-          match(T_RPAR)
-          data = MailboxQuota.new(mailbox, usage, quota)
-          return UntaggedResponse.new(name, data, @str)
-        else
-          parse_error("unexpected token %s", token.symbol)
+          limit = match(T_NUMBER).value
+          # When a resource is listed more than once, the last triple wins.
+          resources[resource] = [usage, limit]
+          match(T_SPACE) if lookahead.symbol == T_SPACE
         end
+        match(T_RPAR)
+        data = MailboxQuota.new(mailbox, resources)
+        return UntaggedResponse.new(name, data, @str)
       end
 
       def quotaroot_response

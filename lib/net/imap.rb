@@ -581,7 +581,6 @@ module Net
   #   and +SPECIAL-USE+.</em>
   #
   # ==== RFC2087: +QUOTA+
-  # +NOTE:+ Only the +STORAGE+ quota resource type is currently supported.
   # - Obsoleted by <tt>QUOTA=RES-*</tt> [RFC9208[https://www.rfc-editor.org/rfc/rfc9208]],
   #   although the commands are backward compatible.
   # - #getquota: returns the resource usage and limits for a quota root
@@ -709,7 +708,6 @@ module Net
   # - Updates #status with support for the +MAILBOXID+ status attribute.
   #
   # ==== RFC9208: <tt>QUOTA=RES-*</tt>
-  # +NOTE:+ Only the +STORAGE+ quota resource type is currently supported.
   # - Obsoletes the +QUOTA+ [RFC2087[https://www.rfc-editor.org/rfc/rfc2087]]
   #   extension and provides strict semantics for different resource types.
   # - #getquota: returns the resource usage and limits for a quota root
@@ -2056,9 +2054,8 @@ module Net
     # to both admin and user.  If this mailbox exists, it returns an array
     # containing objects of type MailboxQuotaRoot and MailboxQuota.
     #
-    # *NOTE:* Currently, Net::IMAP only supports +QUOTA+ responses with a single
-    # resource type.  This is usually +STORAGE+, but you may need to verify this
-    # with UntaggedResponse#raw_data.
+    # Each MailboxQuota contains a MailboxQuota#resources hash with the usage
+    # and limit of every resource type reported by the server.
     #
     # Related: #getquota, #setquota, MailboxQuotaRoot, MailboxQuota
     #
@@ -2085,9 +2082,8 @@ module Net
     # The names of quota roots that are applicable to a particular mailbox can
     # be discovered with #getquotaroot.
     #
-    # *NOTE:* Currently, Net::IMAP only supports +QUOTA+ responses with a single
-    # resource type.  This is usually +STORAGE+, but you may need to verify this
-    # with UntaggedResponse#raw_data.
+    # Each MailboxQuota contains a MailboxQuota#resources hash with the usage
+    # and limit of every resource type reported by the server.
     #
     # Related: #getquotaroot, #setquota, MailboxQuota
     #
@@ -2105,17 +2101,26 @@ module Net
     end
 
     # Sends a {SETQUOTA command [RFC2087 §4.1]}[https://www.rfc-editor.org/rfc/rfc2087#section-4.1]
-    # along with the specified +quota_root+ and +storage_limit+.  If
-    # +storage_limit+ is +nil+, resource limits are unset for that quota root.
-    # If +storage_limit+ is a number, it sets the +STORAGE+ resource limit.
+    # along with the specified +quota_root+ and resource limits.  If
+    # +storage_limit+ is +nil+ and no +resource_limits+ are given, resource
+    # limits are unset for that quota root.  If +storage_limit+ is a number,
+    # it sets the +STORAGE+ resource limit.
     #
     #   imap.setquota "#user/alice", 100
     #   imap.getquota "#user/alice"
-    #   # => [#<struct Net::IMAP::MailboxQuota mailbox="#user/alice" usage=54 quota=100>]
+    #   # => [#<struct Net::IMAP::MailboxQuota
+    #   #      mailbox="#user/alice",
+    #   #      resources={"STORAGE"=>["54", "100"]}>]
+    #
+    # Additional resource limits (for servers supporting
+    # <tt>QUOTA=RES-*</tt> [RFC9208[https://www.rfc-editor.org/rfc/rfc9208]])
+    # can be set with +resource_limits+ keywords, mapping each resource name
+    # to its limit.  Resource names are converted to strings and upcased.
+    #
+    #   imap.setquota "#user/alice", 100, message: 1000
+    #   imap.setquota "#user/alice", nil, "MESSAGE" => 1000
     #
     # Typically one needs to be logged in as a server admin for this to work.
-    #
-    # *NOTE:* Currently, Net::IMAP only supports setting +STORAGE+ quota limits.
     #
     # Related: #getquota, #getquotaroot
     #
@@ -2125,11 +2130,18 @@ module Net
     # capability, or a capability prefixed with <tt>QUOTA=RES-*</tt>
     # {[RFC9208]}[https://www.rfc-editor.org/rfc/rfc9208] for each supported
     # resource type.
-    def setquota(quota_root, storage_limit)
-      if storage_limit.nil?
-        list = []
-      else
-        list = ["STORAGE", NumValidator.coerce_number64(storage_limit)]
+    def setquota(quota_root, storage_limit = nil, **resource_limits)
+      list = []
+      unless storage_limit.nil?
+        list.push("STORAGE", NumValidator.coerce_number64(storage_limit))
+      end
+      resource_limits.each do |resource, limit|
+        resource = resource.to_s.upcase
+        if resource == "STORAGE" && !storage_limit.nil?
+          raise ArgumentError,
+                "STORAGE limit given both as storage_limit and resource_limits"
+        end
+        list.push(resource, NumValidator.coerce_number64(limit))
       end
       send_command("SETQUOTA", quota_root, list)
     end
