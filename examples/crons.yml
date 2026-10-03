@@ -1,0 +1,18 @@
+# Sample config for examples/min_interval_check.rb
+#
+# ruby -Ilib examples/min_interval_check.rb examples/crons.yml
+
+- name: cache-warmer
+  cron: "*/30 * * * * *"        # every 30s: passes (30s is not < 30s)
+
+- name: metrics-flush
+  cron: "*/10 * * * * *"        # every 10s: rejected, 10s < 30s
+
+- name: nightly-report
+  cron: "0 3 * * * America/New_York"
+
+- name: feb29-only
+  cron: "0 0 29 2 *"            # extremely sparse: passes
+
+- name: month-end
+  cron: "0 0 31 * *"            # 31st of the month: passes

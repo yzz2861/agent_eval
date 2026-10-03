@@ -189,6 +189,47 @@ p c.match?('2017-08-06')              # => true
 p c.match?('2017-08-06 12:00')        # => false
 ```
 
+
+### verifying a minimum trigger interval
+
+`Fugit::Cron#verify_min_interval(from, to, min_interval, budget:)` checks
+that, within the finite window `[from, to)`, no two adjacent trigger times
+are less than `min_interval` seconds apart. Useful as a config-time gate
+("no cron may fire more than once every 30 seconds over the next year")
+without starting a scheduler.
+
+The window is left-closed, right-open: a trigger falling exactly on `from`
+is checked, a trigger falling exactly on `to` is not. Intervals are
+measured between UTC epochs, so DST folds (repeated wall times) and
+spring-forward gaps are accounted for correctly. The check enumerates real
+trigger times; it does not rely on any average or rough frequency.
+
+```ruby
+c = Fugit::Cron.parse('*/10 * * * * *')
+
+v = c.verify_min_interval(Time.now, Time.now + 365 * 24 * 3600, 30)
+
+v.status   # => :violation
+v.pair     # => [ EoTime, EoTime ] the two adjacent triggers that are
+           #    too close
+v.delta    # => 10 (seconds)
+v.checked  # => 2 (triggers examined before the verdict)
+
+c2 = Fugit::Cron.parse('0 0 29 2 *') # Feb 29th, extremely sparse
+v2 = c2.verify_min_interval(Time.now, Time.now + 365 * 24 * 3600, 30)
+v2.status  # => :ok
+
+v.ok?               # true only when status is :ok
+v.violation?        # a counterexample was found
+v.budget_exceeded?  # the examination budget ran out, NOT a pass
+```
+
+The third status, `:budget_exceeded`, is returned when the number of
+trigger examinations exceeds `budget` (default
+`Fugit::Cron::MIN_INTERVAL_BUDGET`) before the whole window could be
+checked. It must not be treated as a pass.
+
+See `examples/min_interval_check.rb` for a small config-file checker.
 Example of cron strings understood by fugit:
 ```ruby
 '5 0 * * *'         # 5 minutes after midnight, every day

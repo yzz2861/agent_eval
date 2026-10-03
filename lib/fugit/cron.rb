@@ -403,6 +403,212 @@ module Fugit
         .take_while { |eot| eot.to_t < ned }
     end
 
+    # The result of a Fugit::Cron#verify_min_interval call.
+    #
+    # #status is one of:
+    #
+    #   :ok              :: every pair of adjacent triggers in the window
+    #                       is at least min_interval seconds apart
+    #   :violation       :: a counterexample was found, #pair holds the two
+    #                       adjacent trigger times (EoTime) and #delta their
+    #                       distance in seconds
+    #   :budget_exceeded :: the examination budget ran out before the whole
+    #                       window could be checked; this is NOT a pass
+    #
+    class MinIntervalVerdict
+
+      attr_reader :status, :pair, :delta, :checked, :budget
+
+      def initialize(status, checked, budget, pair=nil, delta=nil)
+
+        @status = status
+        @checked = checked
+        @budget = budget
+        @pair = pair
+        @delta = delta
+      end
+
+      def ok?; @status == :ok; end
+      def violation?; @status == :violation; end
+      def budget_exceeded?; @status == :budget_exceeded; end
+
+      def to_s
+
+        case @status
+        when :ok
+          "ok (#{@checked} trigger(s) checked)"
+        when :violation
+          "violation (#{@delta}s between #{@pair[0].strftime('%F %T %z')} and #{@pair[1].strftime('%F %T %z')})"
+        else
+          "budget_exceeded (#{@checked} trigger(s) checked, budget #{@budget})"
+        end
+      end
+    end
+
+    MIN_INTERVAL_BUDGET = 1_000_000
+      #
+      # Default cap on the number of trigger instants examined by
+      # #verify_min_interval
+
+    # Verifies that, within the finite window [from, to), no two adjacent
+    # trigger times of this cron are less than +min_interval+ seconds
+    # apart.
+    #
+    # Window inclusion rule: a trigger t is considered if and only if
+    # from <= t < to (left-closed, right-open). A trigger falling exactly
+    # on +from+ is checked, a trigger falling exactly on +to+ is not.
+    # Triggers outside the window (including the last trigger before
+    # +from+) are ignored.
+    #
+    # Intervals are measured between UTC epochs (Time#to_i), not between
+    # wall clock readings. Around a DST fold the same wall time may occur
+    # twice; two such triggers are one hour (3600s) apart, not zero.
+    # Conversely a spring-forward gap shows up as a larger interval,
+    # never as a smaller one.
+    #
+    # +min_interval+ is a number of seconds (a Fugit::Duration works too).
+    #
+    # +budget+ caps the number of trigger instants examined. When the
+    # budget runs out before the window is fully checked, the verdict is
+    # :budget_exceeded, which must NOT be treated as a pass. Note that
+    # the check enumerates real trigger times (via #next_time around DST
+    # transitions, via direct calendar expansion on regular days); it
+    # does not rely on any average/rough frequency.
+    #
+    # Returns a MinIntervalVerdict.
+    #
+    def verify_min_interval(from, to, min_interval, budget: MIN_INTERVAL_BUDGET)
+
+      from = ::EtOrbi.make_time(from)
+      to = ::EtOrbi.make_time(to)
+
+      min_interval = min_interval.to_sec \
+        if defined?(Fugit::Duration) && min_interval.is_a?(Fugit::Duration)
+
+      fail ArgumentError, "'to' must be after 'from'" unless to.to_i > from.to_i
+      fail ArgumentError, 'min_interval must be positive' unless min_interval > 0
+      fail ArgumentError, 'budget must be positive' unless budget > 0
+
+      from_i = from.to_i
+      to_i = to.to_i
+
+      tz = @timezone || from.zone
+        #
+        # triggers are computed in the cron timezone, or in the
+        # timezone of +from+ when the cron has none
+
+      hours = @hours || (0..23).to_a
+      minutes = @minutes || (0..59).to_a
+      seconds = @seconds || (0..59).to_a
+
+      checked = 0
+      prev = nil # epoch of the previous in-window trigger
+
+      ok = -> { MinIntervalVerdict.new(:ok, checked, budget) }
+      over = -> { MinIntervalVerdict.new(:budget_exceeded, checked, budget) }
+      viol = ->(e) {
+        MinIntervalVerdict.new(
+          :violation, checked, budget,
+          [ ::EtOrbi::EoTime.new(prev, tz), ::EtOrbi::EoTime.new(e, tz) ],
+          e - prev) }
+
+      y, m, d =
+        begin
+          t = ::EtOrbi::EoTime.new(from_i, tz)
+          [ t.year, t.month, t.day ]
+        end
+
+      catch(:done) do
+
+        loop do
+
+          utc_mid = ::Time.utc(y, m, d).to_i
+          lo = utc_mid - 14 * 3600
+            #
+            # local midnight for (y, m, d) lies in
+            # [utc_mid - 14h, utc_mid + 12h] for any tz offset
+
+          break if lo >= to_i # no trigger of this day can be < to
+
+          ymd = y * 10000 + m * 100 + d
+
+          hi = utc_mid + 86400 + 14 * 3600
+
+          if tz.transitions_up_to(::Time.at(hi).utc, ::Time.at(lo).utc).empty?
+            #
+            # regular day, constant UTC offset: expand the trigger
+            # times arithmetically instead of calling #next_time
+            # for each of them
+
+            offset = tz.period_for_utc(::Time.at(utc_mid).utc).utc_total_offset
+            midnight_i = utc_mid - offset
+
+            cursor =
+              TimeCursor.new(self, ::EtOrbi::EoTime.new(midnight_i + 43200, tz))
+
+            if month_match?(cursor) && day_match?(cursor)
+
+              hours.each do |h|
+                minutes.each do |mi|
+                  seconds.each do |s|
+
+                    e = midnight_i + h * 3600 + mi * 60 + s
+
+                    throw(:done, ok.call) if e >= to_i
+                    next if e < from_i
+                    next if prev && e <= prev
+                      #
+                      # already yielded by the slow path of an
+                      # earlier transition day
+
+                    throw(:done, over.call) if checked >= budget
+                    checked += 1
+                    throw(:done, viol.call(e)) if prev && e - prev < min_interval
+
+                    prev = e
+                  end
+                end
+              end
+            end
+
+          else
+            #
+            # DST (or other offset) transition on that local day:
+            # walk the real trigger times one by one
+
+            cur = ::EtOrbi::EoTime.new(prev || from_i - 1, tz)
+
+            loop do
+
+              throw(:done, over.call) if checked >= budget
+
+              t = next_time(cur)
+              e = t.to_i
+
+              throw(:done, ok.call) if e >= to_i
+
+              checked += 1
+              throw(:done, viol.call(e)) if prev && e - prev < min_interval
+
+              prev = e
+              cur = t
+
+              lt = ::EtOrbi::EoTime.new(e, tz)
+              break if lt.year * 10000 + lt.month * 100 + lt.day > ymd
+                #
+                # the trigger belongs to a later day; it has been
+                # accounted for, that later day will skip it
+            end
+          end
+
+          nd = ::Time.utc(y, m, d) + 86400
+          y, m, d = nd.year, nd.month, nd.day
+        end
+
+        ok.call
+      end
+    end
+
     # Mostly used as a #next_time sanity check.
     # Avoid for "business" use, it's slow.
     #
