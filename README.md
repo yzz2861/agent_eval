@@ -50,6 +50,32 @@ This will only modify the timeout for this particular invocation.
 This is useful if you want to fail-fast on certain non-critical
 sections when a resource is not available, or conversely if you are comfortable blocking longer on a particular resource.
 
+## Cancelling a checkout
+
+If the caller's work is aborted upstream (e.g. the request was cancelled),
+a blocked checkout does not need to wait for the pool timeout.
+Pass a `ConnectionPool::CancellationToken` to `with` or `checkout` and
+cancel it from another thread; the waiting checkout wakes up immediately and
+raises `ConnectionPool::CancelledError`:
+
+``` ruby
+token = ConnectionPool::CancellationToken.new
+
+Thread.new do
+  $memcached.with(cancel_token: token) do |conn|
+    conn.get('some-count')
+  end
+end
+
+# when the request is aborted:
+token.cancel!
+```
+
+One token can be shared by many checkouts to cancel a whole batch at once.
+Cancellation only affects threads still waiting for a connection; once a
+connection has been checked out it stays checked out and is returned to the
+pool by the normal `checkin`/`with` flow.
+
 ## Migrating to a Connection Pool
 
 You can use `ConnectionPool::Wrapper` to wrap a single global connection, making it easier to migrate existing connection code over time:

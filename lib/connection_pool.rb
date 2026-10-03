@@ -7,6 +7,80 @@ class ConnectionPool
   class PoolShuttingDownError < ::ConnectionPool::Error; end
 
   class TimeoutError < ::Timeout::Error; end
+
+  # Raised when a checkout is interrupted by a ConnectionPool::CancellationToken.
+  class CancelledError < ::ConnectionPool::Error; end
+
+  # A CancellationToken allows a caller to cancel a checkout that is still
+  # waiting for a connection to become available. Cancelling a token wakes
+  # up any waiters immediately (instead of letting them run into the pool
+  # timeout) and raises ConnectionPool::CancelledError in the waiting thread.
+  #
+  # Cancellation only affects threads still waiting for a connection. Once a
+  # connection has been checked out, the token has no effect: it will never
+  # return or discard a connection that is in use by the caller.
+  #
+  # A single token may be shared by any number of checkouts, so one call to
+  # #cancel! can abort a whole batch of pending checkouts.
+  #
+  #    token = ConnectionPool::CancellationToken.new
+  #    pool.with(cancel_token: token) { |conn| ... }
+  #    token.cancel! # from another thread, e.g. when the request is aborted
+  class CancellationToken
+    def initialize
+      @mutex = Thread::Mutex.new
+      @cancelled = false
+      @listeners = []
+    end
+
+    # Cancels the token. All currently registered listeners are invoked
+    # exactly once, and any future checkout using this token raises
+    # ConnectionPool::CancelledError.
+    def cancel!
+      listeners = @mutex.synchronize do
+        @cancelled = true
+        @listeners.tap { @listeners = [] }
+      end
+      listeners.each(&:call)
+      true
+    end
+
+    def cancelled?
+      @mutex.synchronize { @cancelled }
+    end
+
+    def raise_if_cancelled!
+      raise ConnectionPool::CancelledError, "connection checkout was cancelled" if cancelled?
+    end
+
+    # Registers +listener+ (or the given block) to be called when the token
+    # is cancelled. Listeners are called synchronously from #cancel!, so they
+    # must be fast and must not block on user code. If the token is already
+    # cancelled the listener is called immediately. Returns the listener so
+    # it can be passed to #unregister.
+    def register(listener = nil, &block)
+      listener ||= block
+      raise ArgumentError, "register requires a listener" unless listener
+
+      run_now = @mutex.synchronize do
+        if @cancelled
+          true
+        else
+          @listeners << listener
+          false
+        end
+      end
+      listener.call if run_now
+      listener
+    end
+
+    # Removes a previously registered listener. Safe to call after the token
+    # has been cancelled.
+    def unregister(listener)
+      @mutex.synchronize { @listeners.delete(listener) }
+      nil
+    end
+  end
 end
 
 # Generic connection pool class for sharing a limited number of objects or network connections
@@ -111,12 +185,14 @@ class ConnectionPool
     ::Thread.current[@discard_key] = block || proc { |conn| conn }
   end
 
-  def checkout(timeout: @timeout, **kwargs)
+  def checkout(timeout: @timeout, cancel_token: nil, **kwargs)
     if ::Thread.current[@key]
+      # This thread already holds a connection: nested checkouts reuse it
+      # and never wait, so the cancel token does not apply here.
       ::Thread.current[@key_count] += 1
       ::Thread.current[@key]
     else
-      conn = @available.pop(timeout:, **kwargs)
+      conn = @available.pop(timeout:, cancel_token:, **kwargs)
       ::Thread.current[@key] = conn
       ::Thread.current[@key_count] = 1
       ::Thread.current[@key_kwargs] = kwargs

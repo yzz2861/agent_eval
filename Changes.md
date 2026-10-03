@@ -1,5 +1,14 @@
 # connection_pool Changelog
 
+Unreleased
+------
+
+- Add `ConnectionPool::CancellationToken` and a `:cancel_token` option for
+  `ConnectionPool#checkout`/`#with` and `ConnectionPool::TimedStack#pop`.
+  Cancelling the token wakes a waiting checkout immediately and raises
+  `ConnectionPool::CancelledError` instead of waiting for the pool timeout.
+  Cancellation never affects a connection that has already been checked out.
+
 3.0.2
 ------
 

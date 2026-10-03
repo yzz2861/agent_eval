@@ -57,29 +57,52 @@ class ConnectionPool::TimedStack
   # @option options [Float] :timeout (0.5) Wait this many seconds for an available entry
   # @option options [Class] :exception (ConnectionPool::TimeoutError) Exception class to raise
   #   if an entry was not available within the timeout period. Use `exception: false` to return nil.
+  # @option options [ConnectionPool::CancellationToken] :cancel_token (nil) Token that can
+  #   cancel the wait. When cancelled, the waiter is woken immediately and
+  #   ConnectionPool::CancelledError is raised instead of waiting for the timeout.
+  #   Cancellation only applies while waiting; once a connection has been
+  #   fetched or created it is returned to the caller as usual.
   #
   # Other options may be used by subclasses that extend TimedStack.
-  def pop(timeout: 0.5, exception: ConnectionPool::TimeoutError, **kwargs)
+  def pop(timeout: 0.5, exception: ConnectionPool::TimeoutError, cancel_token: nil, **kwargs)
     deadline = current_time + timeout
     @mutex.synchronize do
-      loop do
-        raise ConnectionPool::PoolShuttingDownError if @shutdown_block
-        if (conn = try_fetch_connection(**kwargs))
-          return conn
+      listener = nil
+      if cancel_token
+        cancel_token.raise_if_cancelled!
+        # Wake this waiter as soon as the token is cancelled. The broadcast
+        # must happen under our mutex, otherwise the wakeup could be lost
+        # between the cancelled? check and ConditionVariable#wait. That
+        # mutex may be held by a thread blocked in connection creation, so
+        # the broadcast runs on a helper thread to keep CancellationToken#cancel!
+        # from blocking behind user code.
+        listener = cancel_token.register do
+          Thread.new { @mutex.synchronize { @resource.broadcast } }
         end
-
-        connection = try_create(**kwargs)
-        return connection if connection
-
-        to_wait = deadline - current_time
-        if to_wait <= 0
-          if exception
-            raise exception, "Waited #{timeout} sec, #{length}/#{@max} available"
-          else
-            return nil
+      end
+      begin
+        loop do
+          raise ConnectionPool::PoolShuttingDownError if @shutdown_block
+          cancel_token&.raise_if_cancelled!
+          if (conn = try_fetch_connection(**kwargs))
+            return conn
           end
+
+          connection = try_create(**kwargs)
+          return connection if connection
+
+          to_wait = deadline - current_time
+          if to_wait <= 0
+            if exception
+              raise exception, "Waited #{timeout} sec, #{length}/#{@max} available"
+            else
+              return nil
+            end
+          end
+          @resource.wait(@mutex, to_wait)
         end
-        @resource.wait(@mutex, to_wait)
+      ensure
+        cancel_token&.unregister(listener) if listener
       end
     end
   end
