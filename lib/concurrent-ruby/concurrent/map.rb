@@ -38,6 +38,83 @@ module Concurrent
   # `Concurrent::Map` instead of `Concurrent::Hash` for your concurrency-safe hash needs.
   class Map < Collection::MapImplementation
 
+    class RecursiveComputeError < ThreadError
+    end
+
+    class OutsideLockComputation
+      attr_reader :owner
+
+      def initialize(owner)
+        @owner = owner
+        @mutex = Mutex.new
+        @condition = ConditionVariable.new
+        @state = :running
+        @value = nil
+      end
+
+      def join
+        value = @mutex.synchronize do
+          @condition.wait(@mutex) while @state == :running
+          raise ThreadError, 'computation cancelled' if @state == :cancelled
+          raise @error if @state == :error
+          @value
+        end
+        value
+      end
+
+      def complete(value)
+        finish(:complete, value: value)
+      end
+
+      def fail(error)
+        finish(:error, error: error)
+      end
+
+      def cancel
+        finish(:cancelled)
+      end
+
+      def invalidate!
+        @mutex.synchronize { @state = :invalidated if @state == :running }
+      end
+
+      def invalidated?
+        @mutex.synchronize { @state == :invalidated }
+      end
+
+      private
+
+      def finish(state, value: nil, error: nil)
+        @mutex.synchronize do
+          unless @state == :complete || @state == :error
+            @state = state
+            @value = value
+            @error = error
+            @condition.broadcast
+          end
+        end
+      end
+    end
+
+    private_constant :OutsideLockComputation
+
+    class OutsideLockComputationResult
+      def initialize(computation, found)
+        @computation = computation
+        @found = found
+      end
+
+      def found?
+        @found
+      end
+
+      def computation
+        @computation
+      end
+    end
+
+    private_constant :OutsideLockComputationResult
+
     # @!macro map.atomic_method
     #   This method is atomic.
 
@@ -59,6 +136,24 @@ module Concurrent
     #   @yieldreturn [Object] new value
     #   @return [Object] new value or current value
     #   @!macro map.atomic_method_with_block
+
+    # Compute and store a value when the key is absent without holding the
+    # map's write lock while the block runs. Concurrent calls for the same key
+    # share one block invocation.
+    #
+    # A direct assignment, +delete+, or +clear+ that starts while a computation
+    # is running invalidates that computation's publication. A computation
+    # therefore cannot overwrite a value written after it started. Calls sharing
+    # the computation still return its value, or raise the exception raised by
+    # the block.
+    #
+    # Operations for other keys are not blocked by a running computation.
+    # Recursively calling this method for the same key from its block raises
+    # {RecursiveComputeError}.
+    #
+    # @param [Object] key
+    # @yield new value
+    # @return [Object] the computed, stored, or currently available value
 
     # @!method compute_if_present(key)
     #   Compute and store new value for key if the key is present.
@@ -125,22 +220,8 @@ module Concurrent
     #   @return [true, false] true if deleted
     #   @!macro map.atomic_method
 
-    # NonConcurrentMapBackend handles default_proc natively
+    # NonConcurrentMapBackend handles reads with a default_proc natively
     unless defined?(Collection::NonConcurrentMapBackend) and self < Collection::NonConcurrentMapBackend
-
-      # @param [Hash, nil] options options to set the :initial_capacity or :load_factor. Ignored on some Rubies.
-      # @param [Proc] default_proc Optional block to compute the default value if the key is not set, like `Hash#default_proc`
-      def initialize(options = nil, &default_proc)
-        if options.kind_of?(::Hash)
-          validate_options_hash!(options)
-        else
-          options = nil
-        end
-
-        super(options)
-        @default_proc = default_proc
-      end
-
       # Get a value with key
       # @param [Object] key
       # @return [Object] the value
@@ -157,6 +238,80 @@ module Concurrent
           value
         end
       end
+    end
+
+    def initialize(options = nil, &default_proc)
+      options = nil unless options.kind_of?(::Hash)
+      validate_options_hash!(options) if options
+      super(options)
+      @default_proc = default_proc
+      @outside_lock_registry = {mutex: Mutex.new, computations: {}}
+    end
+
+    alias_method :backend_get, :[]
+    alias_method :backend_put, :[]=
+
+    def [](key)
+      computation = outside_lock_computation(key)
+      if computation
+        raise RecursiveComputeError, 'recursive computation of same key' if computation.owner == Thread.current
+        computation.join
+      else
+        backend_get(key)
+      end
+    end
+
+    def delete(key)
+      invalidate_outside_lock_computation(key) { super }
+    end
+
+    def delete_pair(key, value)
+      registry = outside_lock_registry
+      registry[:mutex].synchronize do
+        result = super
+        registry[:computations][key]&.invalidate! if result
+        result
+      end
+    end
+
+    def clear
+      invalidate_all_outside_lock_computations { super }
+    end
+
+    def compute(key)
+      mark_outside_lock_computation_invalidated(key)
+      super
+    end
+
+    def compute_if_present(key)
+      mark_outside_lock_computation_invalidated(key)
+      super
+    end
+
+    def merge_pair(key, value)
+      mark_outside_lock_computation_invalidated(key)
+      super
+    end
+
+    def get_and_set(key, value)
+      invalidate_outside_lock_computation(key) { super }
+    end
+
+    def []=(key, value)
+      invalidate_outside_lock_computation(key) { backend_put(key, value) }
+    end
+
+    def replace_pair(key, old_value, new_value)
+      registry = outside_lock_registry
+      registry[:mutex].synchronize do
+        result = super
+        registry[:computations][key]&.invalidate!
+        result
+      end
+    end
+
+    def replace_if_exists(key, new_value)
+      invalidate_outside_lock_computation(key) { super }
     end
 
     alias_method :get, :[]
@@ -220,6 +375,30 @@ module Concurrent
       end
       computed ? nil : result
     end unless method_defined?(:put_if_absent)
+
+    def compute_if_absent_outside_lock(key)
+      existing_value = get_or_default(key, NULL)
+      return existing_value if NULL != existing_value
+
+      computation_result = begin_outside_lock_computation(key)
+      if computation_result.found?
+        computation_result.computation.join
+      else
+        new_computation = computation_result.computation
+        begin
+          value = yield
+          publish_outside_lock_computation(key, new_computation, value)
+          new_computation.complete(value)
+          value
+        rescue Exception => error
+          new_computation.fail(error)
+          raise
+        ensure
+          new_computation.cancel
+          end_outside_lock_computation(key, new_computation)
+        end
+      end
+    end
 
     # Is the value stored in the map. Iterates over all values.
     # @param [Object] value
@@ -330,7 +509,68 @@ module Concurrent
 
     def initialize_copy(other)
       super
+      @outside_lock_registry = {mutex: Mutex.new, computations: {}}
       populate_from(other)
+    end
+
+    def begin_outside_lock_computation(key)
+      registry = outside_lock_registry
+      registry[:mutex].synchronize do
+        computation = registry[:computations][key]
+        raise RecursiveComputeError, 'recursive computation of same key' if computation&.owner == Thread.current
+        return OutsideLockComputationResult.new(computation, true) if computation
+
+        if NULL != (existing_value = get_or_default(key, NULL))
+          return existing_value
+        end
+
+        computation = OutsideLockComputation.new(Thread.current)
+        registry[:computations][key] = computation
+        OutsideLockComputationResult.new(computation, false)
+      end
+    end
+
+    def end_outside_lock_computation(key, computation)
+      registry = outside_lock_registry
+      registry[:mutex].synchronize do
+        registry[:computations].delete(key) if registry[:computations][key].equal?(computation)
+      end
+    end
+
+    def publish_outside_lock_computation(key, computation, value)
+      outside_lock_registry[:mutex].synchronize do
+        return if computation.invalidated?
+        put_if_absent(key, value)
+      end
+    end
+
+    def outside_lock_computation(key)
+      outside_lock_registry[:mutex].synchronize { outside_lock_registry[:computations][key] }
+    end
+
+    def invalidate_outside_lock_computation(key)
+      registry = outside_lock_registry
+      registry[:mutex].synchronize do
+        registry[:computations][key]&.invalidate!
+        yield
+      end
+    end
+
+    def mark_outside_lock_computation_invalidated(key)
+      registry = outside_lock_registry
+      registry[:mutex].synchronize { registry[:computations][key]&.invalidate! }
+    end
+
+    def invalidate_all_outside_lock_computations
+      registry = outside_lock_registry
+      registry[:mutex].synchronize do
+        registry[:computations].each_value(&:invalidate!)
+        yield
+      end
+    end
+
+    def outside_lock_registry
+      @outside_lock_registry
     end
 
     def populate_from(hash)

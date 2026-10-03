@@ -90,6 +90,23 @@ module Concurrent
           expect(map[3]).to eq 6
           expect(map.keys).to eq [3]
         end
+
+        it 'computes outside the lock in a Ractor' do
+          ractor = Ractor.new do
+            inner_map = Concurrent::Map.new
+            inner_map.compute_if_absent_outside_lock(3) { 6 }
+            inner_map
+          end
+
+          map = if ractor.respond_to?(:take)
+            ractor.take
+          else
+            ractor.value
+          end
+
+          expect(map[3]).to eq 6
+          expect(map.keys).to eq [3]
+        end
       end
 
       it 'common' do
@@ -173,6 +190,182 @@ module Concurrent
            late_put_if_absent_threads +
            getter_threads).each(&:join)
         end
+      end
+    end
+
+    describe '#compute_if_absent_outside_lock' do
+      it 'stores nil values and returns an existing value without recomputing' do
+        expect(nil).to eq @cache.compute_if_absent_outside_lock(:a) { nil }
+        expect(true).to eq @cache.key?(:a)
+        @cache[:a] = :old
+        expect(:old).to eq @cache.compute_if_absent_outside_lock(:a) { fail }
+      end
+
+      it 'shares one computation for concurrent requests of the same key' do
+        waiters_count = 5
+        computations = Queue.new
+        block_started = Concurrent::CountDownLatch.new(1)
+        release_waiters = Concurrent::CountDownLatch.new(1)
+        release = Concurrent::CountDownLatch.new(1)
+
+        owner = in_thread do
+          @cache.compute_if_absent_outside_lock(:a) do
+            computations << true
+            block_started.count_down
+            release_waiters.wait
+            release.wait
+            :slow
+          end
+        end
+
+        waiters = Array.new(waiters_count) do
+          in_thread do
+            result = @cache.compute_if_absent_outside_lock(:a) do
+              fail 'only one computation is allowed'
+            end
+            result
+          end
+        end
+
+        expect(block_started.wait(5)).to eq true
+        sleep(0.1)
+        release_waiters.count_down
+        release.count_down
+        join_with([owner] + waiters)
+
+        expect(1).to eq computations.size
+        expect([:slow]).to eq waiters.map(&:value).uniq
+        expect(:slow).to eq owner.value
+        expect(:slow).to eq @cache[:a]
+      end
+
+      it 'does not block reads or writes for other keys' do
+        started = Concurrent::CountDownLatch.new(1)
+        release = Concurrent::CountDownLatch.new(1)
+
+        computer = in_thread do
+          @cache.compute_if_absent_outside_lock(:slow) do
+            started.count_down
+            release.wait
+            :slow
+          end
+        end
+
+        expect(started.wait(5)).to eq true
+        @cache[:other] = :ready
+        expect(:ready).to eq @cache[:other]
+        release.count_down
+        expect(computer.value).to eq :slow
+      end
+
+      it 'raises the same error in the computing thread and all waiting threads' do
+        error = RuntimeError.new('boom')
+        waiters_count = 3
+        block_started = Concurrent::CountDownLatch.new(1)
+        release_waiters = Concurrent::CountDownLatch.new(1)
+        release = Concurrent::CountDownLatch.new(1)
+        errors = Queue.new
+
+        owner = in_thread do
+          @cache.compute_if_absent_outside_lock(:a) do
+            block_started.count_down
+            release_waiters.wait
+            release.wait
+            raise error
+          end
+        rescue RuntimeError => raised_error
+          errors << raised_error
+        end
+
+        waiters = Array.new(waiters_count) do
+          in_thread do
+            @cache.compute_if_absent_outside_lock(:a) { fail }
+          rescue RuntimeError => raised_error
+            errors << raised_error
+          end
+        end
+
+        expect(block_started.wait(5)).to eq true
+        sleep(0.1)
+        release_waiters.count_down
+        release.count_down
+        join_with([owner] + waiters)
+
+        raised_errors = Array.new(waiters_count + 1) { errors.pop }
+        expect([error]).to eq raised_errors.uniq
+        expect(:recomputed).to eq @cache.compute_if_absent_outside_lock(:a) { :recomputed }
+      end
+
+      it 'raises immediately for recursive requests of the same computing key' do
+        expect do
+          @cache.compute_if_absent_outside_lock(:a) do
+            @cache.compute_if_absent_outside_lock(:a) { :nested }
+          end
+        end.to raise_error(ThreadError)
+      end
+
+      it 'does not let delete replace a newer value with an expired computation' do
+        started = Concurrent::CountDownLatch.new(1)
+        release = Concurrent::CountDownLatch.new(1)
+
+        computer = in_thread do
+          @cache.compute_if_absent_outside_lock(:a) do
+            started.count_down
+            release.wait
+            :slow
+          end
+        end
+
+        expect(started.wait(5)).to eq true
+        expect(nil).to eq @cache.delete(:a)
+        @cache[:a] = :new
+        release.count_down
+
+        expect(computer.value).to eq :slow
+        expect(:new).to eq @cache[:a]
+      end
+
+      it 'does not let clear replace newer values with expired computations' do
+        started = Concurrent::CountDownLatch.new(1)
+        release = Concurrent::CountDownLatch.new(1)
+
+        computer = in_thread do
+          @cache.compute_if_absent_outside_lock(:a) do
+            started.count_down
+            release.wait
+            :slow
+          end
+        end
+
+        expect(started.wait(5)).to eq true
+        @cache[:other] = :keep
+        @cache.clear
+        @cache[:a] = :new
+        release.count_down
+
+        expect(computer.value).to eq :slow
+        expect(:new).to eq @cache[:a]
+        expect(false).to eq @cache.key?(:other)
+      end
+
+      it 'does not let a direct assignment be overwritten by an expired computation' do
+        started = Concurrent::CountDownLatch.new(1)
+        release = Concurrent::CountDownLatch.new(1)
+
+        computer = in_thread do
+          @cache.compute_if_absent_outside_lock(:a) do
+            started.count_down
+            release.wait
+            :slow
+          end
+        end
+
+        expect(started.wait(5)).to eq true
+        expect(:new).to eq(@cache[:a] = :new)
+        release.count_down
+
+        expect(computer.value).to eq :slow
+        expect(:new).to eq @cache[:a]
       end
     end
 
