@@ -706,6 +706,86 @@ module TestHTTPCookieJar
       assert_equal('Foo1 Foo2', @jar.cookies(surl).map { |c| c.name }.sort.join(' ') )
     end
 
+    def samesite_cookie(name, same_site, secure = false)
+      HTTP::Cookie.new(cookie_values(
+          :name => name, :value => '1',
+          :domain => 'shop.example.com',
+          :origin => 'https://shop.example.com/',
+          :secure => secure, :same_site => same_site))
+    end
+
+    def add_samesite_cookies
+      @jar.add(samesite_cookie('strict_c', :strict))
+      @jar.add(samesite_cookie('lax_c',    :lax))
+      @jar.add(samesite_cookie('none_c',   :none, true))
+      @jar.add(samesite_cookie('plain_c',  nil))
+    end
+
+    def test_samesite_none_without_secure_is_rejected
+      assert_equal true, @jar.empty?
+      @jar.parse('n=1; SameSite=None', 'https://shop.example.com/')
+      assert_equal true, @jar.empty?
+      @jar.parse('n=1; SameSite=None; Secure', 'https://shop.example.com/')
+      assert_equal false, @jar.empty?
+    end
+
+    def test_samesite_request_context_table
+      add_samesite_cookies
+
+      url = 'https://shop.example.com/'
+      cross = 'https://evil.example.org/'
+      [
+        # [description, context (nil = URI only), expected cookie names]
+        ['compatibility mode: URI only, no context guessed',
+          nil, %w[strict_c lax_c none_c plain_c]],
+        ['same-site POST',
+          { :method => 'POST', :top_level_url => url },
+          %w[strict_c lax_c none_c plain_c]],
+        ['cross-site POST',
+          { :method => 'POST', :top_level_url => cross },
+          %w[none_c plain_c]],
+        ['cross-site top-level safe navigation',
+          { :method => 'GET', :top_level_url => cross,
+            :top_level_navigation => true },
+          %w[lax_c none_c plain_c]],
+        ['cross-site top-level unsafe navigation',
+          { :method => 'POST', :top_level_url => cross,
+            :top_level_navigation => true },
+          %w[none_c plain_c]],
+        ['same-site but different scheme (schemeful)',
+          { :method => 'GET', :top_level_url => 'http://shop.example.com/' },
+          %w[none_c plain_c]],
+        ['cross-site redirect in the chain',
+          { :method => 'GET', :top_level_url => url,
+            :redirect_chain => ['https://ads.example.net/'] },
+          %w[none_c plain_c]],
+        ['same-site redirect chain',
+          { :method => 'GET', :top_level_url => url,
+            :redirect_chain => ['https://www.shop.example.com/'] },
+          %w[strict_c lax_c none_c plain_c]],
+        ['partial context does not guess a permissive top-level site',
+          { :method => 'GET' },
+          %w[none_c plain_c]],
+      ].each do |desc, context, expected|
+        actual = context.nil? ? @jar.cookies(url) : @jar.cookies(url, **context)
+        assert_equal expected.sort, actual.map(&:name).sort, desc
+      end
+    end
+
+    def test_samesite_yaml_roundtrip
+      add_samesite_cookies
+
+      Dir.mktmpdir do |dir|
+        file = File.join(dir, 'cookies.yml')
+        @jar.save(file, :session => true)
+        @jar2.load(file)
+      end
+
+      actual = @jar2.cookies('https://shop.example.com/').sort_by(&:name)
+      assert_equal %w[lax_c none_c plain_c strict_c], actual.map(&:name)
+      assert_equal [:lax, :none, nil, :strict], actual.map(&:same_site)
+    end
+
     def test_delete
       cookie1 = HTTP::Cookie.new(cookie_values)
       cookie2 = HTTP::Cookie.new(:name => 'Foo', :value => '',

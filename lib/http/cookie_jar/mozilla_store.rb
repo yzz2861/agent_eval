@@ -9,7 +9,13 @@ class HTTP::CookieJar
   # stored persistently in the SQLite3 database.
   class MozillaStore < AbstractStore
     # :stopdoc:
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
+
+    # Mapping between the SameSite attribute value of a cookie and the
+    # integer stored in the sameSite column.  0 means the attribute is
+    # not set.
+    SAMESITE_TO_INT = { nil => 0, :lax => 1, :strict => 2, :none => 3 }.freeze
+    INT_TO_SAMESITE = SAMESITE_TO_INT.map { |k, v| [v, k] }.to_h.freeze
 
     def default_options
       {
@@ -27,6 +33,7 @@ class HTTP::CookieJar
       expiry creationTime lastAccessed
       isSecure isHttpOnly
       appId inBrowserElement
+      sameSite
     ]
 
     SQL = {}
@@ -230,6 +237,7 @@ class HTTP::CookieJar
                      isHttpOnly INTEGER,
                      appId INTEGER DEFAULT 0,
                      inBrowserElement INTEGER DEFAULT 0,
+                     sameSite INTEGER DEFAULT 0,
                      CONSTRAINT moz_uniqueid UNIQUE (name, host, path, originAttributes)
                    )
       SQL
@@ -336,6 +344,10 @@ class HTTP::CookieJar
           SQL
           @logger.info("Upgraded database to schema version %d" % schema_version) if @logger
           self.schema_version += 1
+        when 7
+          @db.execute("ALTER TABLE moz_cookies ADD sameSite INTEGER DEFAULT 0")
+          @logger.info("Upgraded database to schema version %d" % schema_version) if @logger
+          self.schema_version += 1
         else
           break
         end
@@ -369,6 +381,7 @@ class HTTP::CookieJar
           :isHttpOnly => cookie.httponly? ? 1 : 0,
           :appId => @app_id,
           :inBrowserElement => @in_browser_element ? 1 : 0,
+          :sameSite => SAMESITE_TO_INT[cookie.same_site],
         })
       cleanup if (@gc_index += 1) >= @gc_threshold
 
@@ -486,6 +499,7 @@ class HTTP::CookieJar
               attrs[:created_at]  = deserialize_usectime(row['creationTime'])
               attrs[:secure]      = secure
               attrs[:httponly]    = row['isHttpOnly'] != 0
+              attrs[:same_site]   = INT_TO_SAMESITE[row['sameSite']]
             })
 
           if cookie.valid_for_uri?(uri)
@@ -514,6 +528,7 @@ class HTTP::CookieJar
               attrs[:created_at]  = deserialize_usectime(row['creationTime'])
               attrs[:secure]      = row['isSecure'] != 0
               attrs[:httponly]    = row['isHttpOnly'] != 0
+              attrs[:same_site]   = INT_TO_SAMESITE[row['sameSite']]
             })
 
           yield cookie

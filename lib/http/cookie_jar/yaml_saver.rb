@@ -73,7 +73,7 @@ class HTTP::CookieJar::YAMLSaver < HTTP::CookieJar::AbstractSaver
   end
 
   def load_yaml(yaml)
-    YAML.safe_load(yaml, :permitted_classes => %w[Time HTTP::Cookie Mechanize::Cookie DomainName], :aliases => true)
+    YAML.safe_load(yaml, :permitted_classes => %w[Time HTTP::Cookie Mechanize::Cookie DomainName Symbol], :aliases => true)
   rescue NoMethodError # ruby < 2.0, no safe_load
     YAML.load(yaml)
   end

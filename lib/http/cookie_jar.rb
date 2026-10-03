@@ -110,8 +110,13 @@ class HTTP::CookieJar
   # Gets an array of cookies sorted by the path and creation time.  If
   # `url` is given, only ones that should be sent to the URL/URI are
   # selected, with the access time of each of them updated.
-  def cookies(url = nil)
-    each(url).sort
+  #
+  # When `url` is given, the SameSite attribute of each cookie can
+  # be taken into account by passing a request context; see #each for
+  # the available keywords.  If no context keyword is given, no
+  # SameSite based filtering is performed (compatibility mode).
+  def cookies(url = nil, **context)
+    each(url, **context).sort
   end
 
   # Tests if the jar is empty.  If `url` is given, tests if there is
@@ -135,15 +140,54 @@ class HTTP::CookieJar
   #
   # If (and only if) the `uri` option is given, last access time of
   # each cookie is updated to the current time.
-  def each(uri = nil, &block) # :yield: cookie
-    block_given? or return enum_for(__method__, uri)
+  #
+  # When `uri` is given, the SameSite attribute of each cookie can
+  # be taken into account by describing the request with the following
+  # option keywords:
+  #
+  # :top_level_url
+  # : The URL of the top-level document the request is issued for.
+  #
+  # :method
+  # : The HTTP method of the request. (default: "GET")
+  #
+  # :top_level_navigation
+  # : Whether the request is a top-level navigation. (default: false)
+  #
+  # :redirect_chain
+  # : An array of URLs that the request has been redirected through.
+  #
+  # See HTTP::Cookie#same_site_acceptable? for how the context is
+  # interpreted.  If none of the keywords is given, no SameSite based
+  # filtering is performed (compatibility mode); a permissive context
+  # is never guessed on behalf of the caller.
+  def each(uri = nil, method: nil, top_level_url: nil,
+           top_level_navigation: nil, redirect_chain: nil, &block) # :yield: cookie
+    block_given? or return enum_for(__method__, uri,
+      method: method, top_level_url: top_level_url,
+      top_level_navigation: top_level_navigation,
+      redirect_chain: redirect_chain)
 
     if uri
       uri = HTTP::Cookie::URIParser.parse(uri)
       return self unless URI::HTTP === uri && uri.host
     end
 
-    @store.each(uri, &block)
+    if uri.nil? ||
+        (method.nil? && top_level_url.nil? &&
+         top_level_navigation.nil? && redirect_chain.nil?)
+      @store.each(uri, &block)
+    else
+      context = {
+        :method => method || 'GET',
+        :top_level_url => top_level_url,
+        :top_level_navigation => top_level_navigation || false,
+        :redirect_chain => redirect_chain,
+      }
+      @store.each(uri) { |cookie|
+        yield cookie if cookie.same_site_acceptable?(uri, **context)
+      }
+    end
     self
   end
   include Enumerable

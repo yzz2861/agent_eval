@@ -1,3 +1,16 @@
+## Unreleased
+
+- Add support for the SameSite cookie attribute.  `HTTP::Cookie` parses
+  and serializes SameSite=Strict/Lax/None, persists it in the YAML and
+  Mozilla (cookies.sqlite) stores, and rejects SameSite=None cookies
+  without the Secure attribute.  `HTTP::CookieJar#cookies` and `#each`
+  accept an optional request context (`top_level_url`, `method`,
+  `top_level_navigation` and `redirect_chain`) to filter cookies by
+  the SameSite attribute using schemeful same-site computation; calling
+  them with a URI only keeps the previous behavior (no SameSite based
+  filtering).
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

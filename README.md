@@ -32,6 +32,13 @@ The following is an incomplete list of its features:
   serialization, maximizing the interoperability with other
   implementations.
 
+* It understands the SameSite cookie attribute (Strict, Lax and
+  None), and can filter cookies for a request described by a
+  browser-like context (top-level site, HTTP method, top-level
+  navigation and redirect chain) using schemeful same-site
+  computation.  SameSite=None cookies without the Secure attribute
+  are rejected.
+
 * It supports the cookies.sqlite format adopted by Mozilla Firefox for
   backend store database which can be shared among multiple program
   instances.
@@ -97,6 +104,24 @@ Or install it yourself as:
 
     # Set the Cookie header value, where uri is the destination URI
     header["Cookie"] = HTTP::Cookie.cookie_value(jar.cookies(uri))
+
+
+    ########################
+    # SameSite-aware selection
+    ########################
+
+    # Select cookies for a request described by a browser-like
+    # context.  The SameSite attribute of each cookie is taken into
+    # account using schemeful same-site computation.
+    cookies = jar.cookies(uri,
+                          top_level_url: 'https://shop.example.com/',
+                          method: 'POST',
+                          top_level_navigation: false,
+                          redirect_chain: ['https://shop.example.com/cart'])
+    header["Cookie"] = HTTP::Cookie.cookie_value(cookies)
+
+    # Calling jar.cookies(uri) without any context keyword keeps the
+    # traditional behavior and performs no SameSite based filtering.
 
 
     ########################

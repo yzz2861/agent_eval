@@ -1169,6 +1169,136 @@ class TestHTTPCookie < Test::Unit::TestCase
     assert_equal true,  HTTP::Cookie.path_match?('/admin', '/admin/index')
   end
 
+  def test_parse_samesite
+    url = URI.parse('https://example.com/')
+
+    [
+      ['a=1; SameSite=Strict',       :strict],
+      ['a=1; SameSite=Lax',          :lax],
+      ['a=1; SameSite=None; Secure', :none],
+      ['a=1; samesite=lax',          :lax],
+      ['a=1; SameSite=STRICT',       :strict],
+      ['a=1',                        nil],
+      ['a=1; SameSite=Bogus',        nil],
+      ['a=1; SameSite',              nil],
+    ].each do |set_cookie, expected|
+      cookies = HTTP::Cookie.parse(set_cookie, url)
+      assert_equal 1, cookies.size, set_cookie
+      assert_equal expected, cookies[0].same_site, set_cookie
+    end
+  end
+
+  def test_parse_samesite_none_requires_secure
+    url = URI.parse('https://example.com/')
+
+    # SameSite=None without Secure must be rejected
+    assert_equal [], HTTP::Cookie.parse('a=1; SameSite=None', url)
+    assert_equal [], HTTP::Cookie.parse('a=1; SameSite=None',
+      URI.parse('http://example.com/'))
+    assert_equal 1, HTTP::Cookie.parse('a=1; SameSite=None; Secure', url).size
+  end
+
+  def test_samesite_accessor
+    cookie = HTTP::Cookie.new('a', '1', :domain => 'example.com', :path => '/')
+    assert_nil cookie.same_site
+
+    cookie.same_site = 'Lax'
+    assert_equal :lax, cookie.same_site
+    cookie.same_site = :strict
+    assert_equal :strict, cookie.same_site
+    cookie.same_site = 'NONE'
+    assert_equal :none, cookie.same_site
+    cookie.same_site = nil
+    assert_nil cookie.same_site
+
+    assert_raises(ArgumentError) { cookie.same_site = 'bogus' }
+    assert_raises(TypeError) { cookie.same_site = 42 }
+  end
+
+  def test_samesite_none_acceptable_only_with_secure
+    base = { :name => 'a', :value => '1',
+             :domain => 'example.com', :path => '/',
+             :origin => 'https://example.com/' }
+
+    assert_equal false, HTTP::Cookie.new(base.merge(:same_site => :none)).acceptable?
+    assert_equal true,  HTTP::Cookie.new(base.merge(:same_site => :none, :secure => true)).acceptable?
+    assert_equal true,  HTTP::Cookie.new(base.merge(:same_site => :strict)).acceptable?
+  end
+
+  def test_schemeful_site
+    [
+      ['https://www.example.com/path?q=1', 'https://example.com'],
+      ['http://example.com:8080/',         'http://example.com'],
+      ['https://a.b.example.co.jp/',       'https://example.co.jp'],
+      ['https://127.0.0.1:4443/',          'https://127.0.0.1'],
+      ['ftp://example.com/',               nil],
+    ].each do |url, expected|
+      assert_equal expected, HTTP::Cookie.schemeful_site(url), url
+    end
+  end
+
+  def test_same_site_acceptable?
+    url = 'https://shop.example.com/'
+    strict = HTTP::Cookie.new('s', '1', :domain => 'shop.example.com',
+      :path => '/', :same_site => :strict)
+    lax = HTTP::Cookie.new('l', '1', :domain => 'shop.example.com',
+      :path => '/', :same_site => :lax)
+    none = HTTP::Cookie.new('n', '1', :domain => 'shop.example.com',
+      :path => '/', :same_site => :none, :secure => true)
+    plain = HTTP::Cookie.new('p', '1', :domain => 'shop.example.com',
+      :path => '/')
+
+    cross = 'https://evil.example.org/'
+    [
+      # [description, cookie, context, expected]
+      ['no SameSite attribute is always allowed', plain,
+        { :top_level_url => cross, :method => 'POST' }, true],
+      ['SameSite=None is always allowed', none,
+        { :top_level_url => cross, :method => 'POST' }, true],
+      ['same-site POST', strict,
+        { :top_level_url => url, :method => 'POST' }, true],
+      ['cross-site POST', strict,
+        { :top_level_url => cross, :method => 'POST' }, false],
+      ['cross-site POST (lax)', lax,
+        { :top_level_url => cross, :method => 'POST' }, false],
+      ['cross-site top-level safe navigation', lax,
+        { :top_level_url => cross, :method => 'GET',
+          :top_level_navigation => true }, true],
+      ['cross-site top-level safe navigation (strict)', strict,
+        { :top_level_url => cross, :method => 'GET',
+          :top_level_navigation => true }, false],
+      ['cross-site top-level unsafe navigation', lax,
+        { :top_level_url => cross, :method => 'POST',
+          :top_level_navigation => true }, false],
+      ['same-site but different scheme', strict,
+        { :top_level_url => 'http://shop.example.com/', :method => 'GET' }, false],
+      ['same-site but different scheme (lax)', lax,
+        { :top_level_url => 'http://shop.example.com/', :method => 'GET' }, false],
+      ['cross-site redirect in the chain', strict,
+        { :top_level_url => url, :method => 'GET',
+          :redirect_chain => ['https://ads.example.net/'] }, false],
+      ['same-site redirect chain', strict,
+        { :top_level_url => url, :method => 'GET',
+          :redirect_chain => ['https://www.shop.example.com/'] }, true],
+      ['no top-level site means cross-site', lax,
+        { :method => 'GET' }, false],
+    ].each do |desc, cookie, context, expected|
+      assert_equal expected, cookie.same_site_acceptable?(url, **context), desc
+    end
+  end
+
+  def test_set_cookie_value_samesite
+    cookie = HTTP::Cookie.new('a', '1', :domain => 'example.com',
+      :path => '/', :same_site => :lax)
+    assert_match(/; SameSite=Lax\z/, cookie.set_cookie_value)
+
+    cookie.same_site = :strict
+    assert_match(/; SameSite=Strict\z/, cookie.set_cookie_value)
+
+    cookie.same_site = nil
+    assert_no_match(/SameSite/, cookie.set_cookie_value)
+  end
+
   def test_to_h
     now = Time.now
 
@@ -1184,6 +1314,7 @@ class TestHTTPCookie < Test::Unit::TestCase
         max_age: 3600,
         name: 'Foo',
         path: '/',
+        same_site: nil,
         secure: cookie.secure?,
         value: 'Bar',
       }
@@ -1203,6 +1334,7 @@ class TestHTTPCookie < Test::Unit::TestCase
         max_age: nil,
         name: 'Foo',
         path: '/',
+        same_site: nil,
         secure: cookie.secure?,
         value: 'Bar',
       }
