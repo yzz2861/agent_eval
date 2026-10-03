@@ -32,6 +32,20 @@ module JWT
         SecurityUtils.secure_compare(signature, OpenSSL::HMAC.digest(digest.new, verification_key, data))
       end
 
+      # @api private
+      def stream_signer(signing_key:)
+        validate_key!(signing_key) { |message| raise_sign_error!(message) }
+
+        StreamSigner.new(digest: digest.new, key: signing_key)
+      end
+
+      # @api private
+      def stream_verifier(signature:, verification_key:)
+        validate_key!(verification_key) { |message| raise_verify_error!(message) }
+
+        StreamVerifier.new(digest: digest.new, key: verification_key, signature: signature)
+      end
+
       register_algorithm(new('HS256', OpenSSL::Digest::SHA256))
       register_algorithm(new('HS384', OpenSSL::Digest::SHA384))
       register_algorithm(new('HS512', OpenSSL::Digest::SHA512))
@@ -89,6 +103,43 @@ module JWT
           a.bytesize == b.bytesize && fixed_length_secure_compare(a, b)
         end
         module_function :secure_compare
+      end
+
+      # Incremental HMAC signer. The keyed digest is updated chunk by chunk and
+      # finalized only once, so the whole signing input is never buffered.
+      # @api private
+      class StreamSigner
+        def initialize(digest:, key:)
+          @hmac = OpenSSL::HMAC.new(key, digest)
+        end
+
+        def update(chunk)
+          @hmac.update(chunk)
+          self
+        end
+
+        def sign
+          @hmac.digest
+        end
+      end
+
+      # Incremental HMAC verifier. The expected signature is compared in
+      # constant time against the digest finalized after the last chunk.
+      # @api private
+      class StreamVerifier
+        def initialize(digest:, key:, signature:)
+          @signature = signature
+          @hmac = OpenSSL::HMAC.new(key, digest)
+        end
+
+        def update(chunk)
+          @hmac.update(chunk)
+          self
+        end
+
+        def valid?
+          SecurityUtils.secure_compare(@signature, @hmac.digest)
+        end
       end
     end
   end

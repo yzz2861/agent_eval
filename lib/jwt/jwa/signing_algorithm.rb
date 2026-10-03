@@ -34,6 +34,19 @@ module JWT
         raise_verify_error!('Algorithm implementation is missing the verify method')
       end
 
+      # Returns an object able to build the signature by receiving the signing
+      # input incrementally (#update followed by #sign). Algorithms that cannot
+      # sign incrementally must raise instead of buffering the whole input.
+      def stream_signer(*)
+        raise ::JWT::StreamingNotSupported, "Algorithm '#{alg}' does not support streaming signing"
+      end
+
+      # Streaming counterpart of {#verify}. The returned object consumes the
+      # signing input incrementally and verifies the signature with #valid?.
+      def stream_verifier(*)
+        raise ::JWT::StreamingNotSupported, "Algorithm '#{alg}' does not support streaming verification"
+      end
+
       def raise_verify_error!(message)
         raise(VerificationKeyError.new(message).tap { |e| e.set_backtrace(caller(1)) })
       end

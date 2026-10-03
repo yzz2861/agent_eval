@@ -78,4 +78,13 @@ module JWT
 
   # Raised when a JWK uses a key type (kty) that this library does not support.
   class UnsupportedKeyType < JWKError; end
+
+  # Base class for errors raised by the streaming detached JWS entry points.
+  class StreamingError < DecodeError; end
+
+  # Raised when an algorithm cannot process the body incrementally.
+  class StreamingNotSupported < IncorrectAlgorithm; end
+
+  # Raised when reading from a streaming body source fails.
+  class StreamReadError < StreamingError; end
 end

@@ -10,6 +10,7 @@ require 'jwt/error'
 require 'jwt/jwk'
 require 'jwt/claims'
 require 'jwt/encoded_token'
+require 'jwt/streaming'
 require 'jwt/token'
 
 # JSON Web Token implementation

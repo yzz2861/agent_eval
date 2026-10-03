@@ -325,6 +325,73 @@ encoded_token.verify_signature!(algorithm: 'HS256', key: "secret")
 encoded_token.payload # => {"pay"=>"load"}
 ```
 
+### Streaming detached JWS (large bodies)
+
+For large detached payloads (files, uploads, pipes) the body does not have to
+be loaded into memory. `JWT::Streaming` signs and verifies the body straight
+from any object responding to `#read(length)`, consuming it in fixed-size
+chunks. Incremental signing is currently supported for `HS256` and `RS256`
+(together with the other HMAC and RSA PKCS#1 variants); algorithms that cannot
+be computed incrementally raise `JWT::StreamingNotSupported` instead of
+silently buffering the whole body.
+
+The default payload form is the usual base64url encoded JWS payload. Because
+the encoded payload is also produced incrementally it is streamed to a
+`payload_io` (any object responding to `#write`) or yielded to a block while
+the signature is computed:
+
+```ruby
+File.open('large.bin', 'rb') do |body|
+  File.open('large.bin.b64', 'wb') do |encoded_payload|
+    result = JWT::Streaming.sign(
+      body,
+      key: rsa_private_key,
+      algorithm: 'RS256',
+      payload_io: encoded_payload,
+      chunk_size: 64 * 1024
+    )
+    result.jws       # detached JWS of the form "header..signature"
+    result.stats.max_read_length # 65536, the largest single body read
+  end
+end
+
+# Verification hashes the file again, chunk by chunk:
+File.open('large.bin', 'rb') do |body|
+  result = JWT::Streaming.verify(jws, body, key: rsa_public_key, algorithm: 'RS256')
+  result.valid? # true
+end
+```
+
+The returned stats (`JWT::Streaming::Stats`) expose `reads`, `bytes_read` and
+`max_read_length`, useful for asserting that a source honoured the requested
+chunk size. The signature is independent of the chunk size and of where chunk
+boundaries fall; an empty body reads zero chunks and is still signed. The
+source is consumed in a single forward pass and is never rewound, so
+non-rewindable streams (sockets, pipes, request bodies) are supported. A
+failure while reading the body raises `JWT::StreamReadError`.
+
+`JWT::EncodedToken#verify_detached_signature!` provides the same entry point
+on an existing token:
+
+```ruby
+encoded_token = JWT::EncodedToken.new(jws) # header..signature, empty payload
+File.open('large.bin', 'rb') do |body|
+  encoded_token.verify_detached_signature!(body, algorithm: 'RS256', key: rsa_public_key)
+end
+```
+
+The RFC 7797 unencoded payload form (`b64: false`) is supported as well. The
+raw body bytes are signed directly, the `b64: false` header parameter is added
+and `b64` is included in the `crit` header parameter list; no encoded payload
+sink is used:
+
+```ruby
+File.open('large.bin', 'rb') do |body|
+  result = JWT::Streaming.sign(body, key: secret, b64: false)
+  result.header # {"alg"=>"HS256", "b64"=>false, "crit"=>["b64"]}
+end
+```
+
 ## Claims
 
 JSON Web Token defines some reserved claim names and defines how they should be

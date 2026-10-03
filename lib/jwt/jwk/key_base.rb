@@ -50,6 +50,14 @@ module JWT
         jwa.sign(**kwargs, signing_key: signing_key)
       end
 
+      def stream_signer(**kwargs)
+        jwa.stream_signer(**kwargs, signing_key: signing_key)
+      end
+
+      def stream_verifier(**kwargs)
+        jwa.stream_verifier(**kwargs, verification_key: verify_key)
+      end
+
       alias eql? ==
 
       def <=>(other)

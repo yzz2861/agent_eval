@@ -100,6 +100,36 @@ module JWT
       [encoded_header, encoded_payload].join('.')
     end
 
+    # Verifies the signature of a detached JWS against a body read from an IO-like object.
+    #
+    # The body is consumed incrementally in chunks and never fully loaded into memory.
+    # The token must be in detached form (an empty payload segment); use
+    # {#encoded_payload=} for an in-memory detached payload instead.
+    #
+    # @param body_io [#read] the raw payload bytes, read in chunks.
+    # @param algorithm [String, Array<String>] the algorithm(s) allowed for verification.
+    # @param key [Object, Array<Object>] the key(s) to use for verification.
+    # @param chunk_size [Integer] maximum bytes read per `#read` call.
+    # @return [JWT::Streaming::Stats] statistics of the body read.
+    # @raise [JWT::MalformedTokenError] if the token is not a detached JWS.
+    # @raise [JWT::VerificationError] if the signature verification fails.
+    # @raise [JWT::StreamingNotSupported] if the algorithm cannot verify incrementally.
+    def verify_detached_signature!(body_io, algorithm:, key:, chunk_size: JWT::Streaming::DEFAULT_CHUNK_SIZE)
+      raise JWT::MalformedTokenError, 'Token is not a detached JWS' unless encoded_payload == ''
+
+      result = JWT::Streaming.verifier_for(
+        jws: jwt,
+        algorithms: Array(algorithm),
+        keys: Array(key),
+        chunk_size: chunk_size
+      ).call(body_io)
+
+      raise JWT::VerificationError, 'Signature verification failed' unless result.valid?
+
+      @signature_verified = true
+      result.stats
+    end
+
     # Verifies the token signature and claims.
     # By default it verifies the 'exp' claim.
     #

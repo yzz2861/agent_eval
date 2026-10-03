@@ -6,7 +6,7 @@
 
 **Features:**
 
-- Your contribution here
+- Add `JWT::Streaming` and `JWT::EncodedToken#verify_detached_signature!` to sign and verify detached JWS bodies directly from an IO in chunks, supporting `HS256`/`RS256` for both base64url and RFC 7797 `b64: false` payloads without buffering the whole body; non-incremental algorithms raise `JWT::StreamingNotSupported`
 
 **Fixes and enhancements:**
 

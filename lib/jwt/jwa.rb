@@ -46,6 +46,17 @@ module JWT
       end
 
       # @api private
+      def create_stream_signer(algorithm:, key:)
+        if key.is_a?(JWK::KeyBase)
+          validate_jwk_algorithms!(key, algorithm, EncodeError)
+
+          return key.stream_signer
+        end
+
+        resolve(algorithm).stream_signer(signing_key: key)
+      end
+
+      # @api private
       def create_verifiers(algorithms:, keys:, preferred_algorithm:)
         jwks, other_keys = keys.partition { |key| key.is_a?(JWK::KeyBase) }
 

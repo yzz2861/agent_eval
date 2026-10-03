@@ -2,6 +2,7 @@
 
 RSpec.describe JWT::JWA::Rsa do
   let(:rsa_key) { test_pkey('rsa-2048-private.pem') }
+  let(:rsa_public) { test_pkey('rsa-2048-public.pem') }
   let(:data) { 'test data' }
   let(:rsa_instance) { described_class.new('RS256') }
 
@@ -73,6 +74,15 @@ RSpec.describe JWT::JWA::Rsa do
         expect do
           rsa_instance.verify(data: data, signature: signature, verification_key: 'not_a_key')
         end.to raise_error(JWT::VerificationKeyError, 'The given key is a String. It has to be an OpenSSL::PKey::RSA instance')
+      end
+    end
+
+    context 'when OpenSSL raises while verifying' do
+      it 'raises a JWT::VerificationError' do
+        allow(rsa_public).to receive(:verify).and_raise(OpenSSL::PKey::PKeyError, 'boom')
+        expect do
+          rsa_instance.verify(data: data, signature: signature, verification_key: rsa_public)
+        end.to raise_error(JWT::VerificationError, 'Signature verification raised')
       end
     end
   end
