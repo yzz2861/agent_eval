@@ -163,6 +163,18 @@ module Concurrent
     Job = Struct.new(:action, :args, :executor, :caller)
     private_constant :Job
 
+    # The possible outcomes of a non-blocking submission made through one of
+    # the `#try_send` methods.
+    #
+    # * `:accepted` - the action was enqueued and occupies one pending slot
+    #   until it reaches a terminal state (success or error)
+    # * `:full` - the Agent is healthy but the configured
+    #   {#max_pending_actions} limit has been reached; the action was rejected
+    #   and nothing was enqueued
+    # * `:failed` - the Agent is {#failed?}; the action was rejected and
+    #   nothing was enqueued
+    SUBMIT_STATES = [:accepted, :full, :failed].freeze
+
     # Raised during action processing or any other time in an Agent's lifecycle.
     class Error < StandardError
       def initialize(message = nil)
@@ -182,6 +194,23 @@ module Concurrent
 
     # The error mode this Agent is operating in. See {#initialize} for details.
     attr_reader :error_mode
+
+    # The maximum number of actions that may be outstanding (enqueued but not
+    # yet terminated, including the action currently running) at any time, or
+    # `nil` when the Agent places no limit on the number of pending actions.
+    # See {#initialize} for details.
+    attr_reader :max_pending_actions
+
+    # The number of actions currently occupying a pending slot: the action
+    # currently being processed, if any, plus every action waiting in the
+    # queue. Await markers inserted by {#await} and friends are never counted.
+    # The count decreases only once an action reaches a terminal state, never
+    # merely because the action was dequeued for processing.
+    #
+    # @return [Integer] the number of outstanding actions
+    def pending_action_count
+      synchronize { @pending_count }
+    end
 
     # Create a new `Agent` with the given initial value and options.
     #
@@ -217,6 +246,12 @@ module Concurrent
     # @option opts [Symbol] :error_mode either `:continue` or `:fail`
     # @option opts [nil, Proc] :error_handler the (optional) error handler
     # @option opts [nil, Proc] :validator the (optional) validation procedure
+    # @option opts [nil, Integer] :max_pending_actions the maximum number of
+    #   outstanding (not yet terminated) actions. `nil` (the default) or zero
+    #   means no limit and preserves the unbounded behavior. A positive integer
+    #   bounds the queue; submissions made while the limit is reached are
+    #   rejected by the `#try_send` methods with `:full`. The capacity is
+    #   released only when an action terminates, in either error mode.
     def initialize(initial, opts = {})
       super()
       synchronize { ns_initialize(initial, opts) }
@@ -319,6 +354,41 @@ module Concurrent
     def send_via!(executor, *args, &action)
       raise Error.new unless send_via(executor, *args, &action)
       true
+    end
+
+    # @!macro agent_try_send
+    #
+    #   Non-blocking variant of the corresponding `#send` method. Never raises
+    #   because the Agent is {#failed?} or has reached its capacity; instead it
+    #   reports the outcome of the submission so the caller can apply
+    #   back-pressure.
+    #
+    #   @return [Symbol] one of {SUBMIT_STATES}: `:accepted` when the action
+    #     was enqueued, `:full` when the Agent is healthy but the
+    #     {#max_pending_actions} limit has been reached, and `:failed` when the
+    #     Agent is {#failed?}
+    #
+    #   @raise [ArgumentError] when no action block is given
+    #
+    #   @see #send
+    def try_send(*args, &action)
+      enqueue_action_job(action, args, Concurrent.global_fast_executor, nonblocking: true)
+    end
+
+    # @!macro agent_try_send
+    #   @see #send_off
+    def try_send_off(*args, &action)
+      enqueue_action_job(action, args, Concurrent.global_io_executor, nonblocking: true)
+    end
+
+    alias_method :try_post, :try_send_off
+
+    # @!macro agent_try_send
+    #   @param [Concurrent::ExecutorService] executor the executor on which the
+    #     action is to be dispatched
+    #   @see #send_via
+    def try_send_via(executor, *args, &action)
+      enqueue_action_job(action, args, executor, nonblocking: true)
     end
 
     # Dispatches an action to the Agent and returns immediately. Subsequently,
@@ -428,8 +498,15 @@ module Concurrent
         raise ValidationError unless ns_validate(new_value)
         @current.value = new_value
         @error.value   = nil
-        @queue.clear if clear_actions
-        ns_post_next_job unless @queue.empty?
+        if clear_actions
+          # the held actions never run, so their reserved slots are released;
+          # await markers (from await calls made while failed) never occupied
+          # a slot and must not be subtracted
+          removed = @queue.count { |job| job.action != AWAIT_ACTION }
+          @queue.clear
+          @pending_count -= removed
+        end
+        ns_schedule_next unless @processing || @queue.empty?
       end
       true
     end
@@ -504,13 +581,29 @@ module Concurrent
       @caller        = Concurrent::ThreadLocalVar.new(nil)
       @queue         = []
 
+      @max_pending_actions = opts[:max_pending_actions]
+      if @max_pending_actions
+        unless @max_pending_actions.is_a?(::Integer) && @max_pending_actions >= 0
+          raise ArgumentError.new('max_pending_actions must be a non-negative integer or nil')
+        end
+        @max_pending_actions = nil if @max_pending_actions.zero?
+      end
+      # number of accepted actions that have not yet reached a terminal state
+      @pending_count = 0
+      # whether an execute_next_job dispatch is currently in flight; only one
+      # job is ever scheduled at a time so capacity accounting stays exact
+      @processing = false
+      # whether a dispatched task is actually executing its action; a newly
+      # dispatched task waits for this to clear before it starts
+      @busy = false
+
       self.observers = Collection::CopyOnNotifyObserverSet.new
     end
 
-    def enqueue_action_job(action, args, executor)
+    def enqueue_action_job(action, args, executor, nonblocking: false)
       raise ArgumentError.new('no action given') unless action
       job = Job.new(action, args, executor, @caller.value || Thread.current.object_id)
-      synchronize { ns_enqueue_job(job) }
+      synchronize { ns_enqueue_job(job, nil, nonblocking) }
     end
 
     def enqueue_await_job(latch)
@@ -518,7 +611,7 @@ module Concurrent
         if (index = ns_find_last_job_for_thread)
           job = Job.new(AWAIT_ACTION, [latch], Concurrent.global_immediate_executor,
                         Thread.current.object_id)
-          ns_enqueue_job(job, index+1)
+          ns_enqueue_job(job, index+1, false)
         else
           latch.count_down
           true
@@ -526,45 +619,88 @@ module Concurrent
       end
     end
 
-    def ns_enqueue_job(job, index = nil)
-      # a non-nil index means this is an await job
-      return false if index.nil? && failed?
+    def ns_enqueue_job(job, index = nil, nonblocking = false)
+      # a non-nil index means this is an await marker, which never occupies a
+      # pending slot and is allowed even while the Agent is failed
+      is_await = !index.nil?
+      unless is_await
+        return nonblocking ? :failed : false if failed?
+        if @max_pending_actions && @pending_count >= @max_pending_actions
+          return nonblocking ? :full : false
+        end
+      end
+
       index ||= @queue.length
       @queue.insert(index, job)
-      # if this is the only job, post to executor
-      ns_post_next_job if @queue.length == 1
-      true
+      @pending_count += 1 unless is_await
+      ns_schedule_next
+      nonblocking ? :accepted : true
     end
 
-    def ns_post_next_job
+    # Posts a worker task unless one is already dispatched. All mutations
+    # happen under the monitor so an enqueue racing a completed action can
+    # never lose the follow-up dispatch.
+    def ns_schedule_next
+      return if @processing
+      return if @queue.empty?
+      @processing = true
       @queue.first.executor.post { execute_next_job }
     end
 
     def execute_next_job
-      job       = synchronize { @queue.first }
-      old_value = @current.value
-
-      @caller.value = job.caller # for nested actions
-      new_value     = job.action.call(old_value, *job.args)
-      @caller.value = nil
-
-      return if new_value == AWAIT_FLAG
-
-      if ns_validate(new_value)
-        @current.value = new_value
-        observers.notify_observers(Time.now, old_value, new_value)
-      else
-        handle_error(ValidationError.new)
-      end
-    rescue => error
-      handle_error(error)
-    ensure
-      synchronize do
-        @queue.shift
-        unless failed? || @queue.empty?
-          ns_post_next_job
+      job = old_value = executor = nil
+      # This worker drains the queue serially. At any moment at most one job is
+      # executing; a job is only dequeued after it has terminated, which keeps
+      # the pending capacity exact.
+      loop do
+        job, old_value, executor = synchronize do
+          if @queue.empty? || failed?
+            @processing = false
+            [nil, nil, nil]
+          else
+            current = @queue.first
+            [current, @current.value, current.executor]
+          end
         end
+        break unless job
+
+        is_action = job.action != AWAIT_ACTION
+        new_value = begin
+          @caller.value = job.caller # for nested actions
+          job.action.call(old_value, *job.args)
+        rescue => error
+          handle_error(error)
+          nil
+        ensure
+          @caller.value = nil
+        end
+
+        unless new_value.nil? && (failed? || is_action)
+          if new_value == AWAIT_FLAG
+            # await marker: no state change, no capacity held
+          elsif ns_validate(new_value)
+            @current.value = new_value
+            observers.notify_observers(Time.now, old_value, new_value)
+          else
+            handle_error(ValidationError.new)
+          end
+        end
+
+        synchronize do
+          @queue.shift if @queue.first.equal?(job)
+          @pending_count -= 1 if is_action
+          if failed? || @queue.empty?
+            @processing = false
+          end
+        end
+        break if failed?
       end
+
+      # Arm a follow-up worker if new jobs appeared in the gap between our last
+      # decision (queue empty/failed) and releasing the lock. Re-check under
+      # the monitor so such a racing enqueue is never lost.
+      synchronize { ns_schedule_next unless failed? }
+    end
     end
 
     def ns_validate(value)

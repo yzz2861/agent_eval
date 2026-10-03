@@ -1211,7 +1211,303 @@ module Concurrent
         observable.send_via(immediate) { 42 }
       end
 
-      it_behaves_like :observable
+     it_behaves_like :observable
+    end
+    
+    context 'pending action capacity' do
+
+      it 'exposes the configured limit' do
+        subject = Agent.new(0, max_pending_actions: 3)
+        expect(subject.max_pending_actions).to eq 3
+      end
+
+      it 'exposes nil when no limit is given' do
+        subject = Agent.new(0)
+        expect(subject.max_pending_actions).to be nil
+        expect(subject.pending_action_count).to eq 0
+      end
+
+      it 'treats zero as unlimited for backward compatibility' do
+        subject = Agent.new(0, max_pending_actions: 0)
+        expect(subject.max_pending_actions).to be nil
+      end
+
+      it 'raises when the limit is not a non-negative integer' do
+        expect { Agent.new(0, max_pending_actions: -1) }.to raise_error(ArgumentError)
+        expect { Agent.new(0, max_pending_actions: 'x') }.to raise_error(ArgumentError)
+      end
+
+      specify 'the running action occupies a slot until it terminates' do
+        started = Concurrent::CountDownLatch.new
+        release = Concurrent::CountDownLatch.new
+        subject = Agent.new(0, max_pending_actions: 2)
+
+        subject.send_via(executor) { started.count_down; release.wait; 1 }
+        started.wait(1)
+        expect(subject.pending_action_count).to eq 1
+
+        release.count_down
+        expect(subject.await_for(1)).to eq true
+        expect(subject.pending_action_count).to eq 0
+      end
+
+      specify 'accepted actions are counted while waiting in the queue' do
+        release = Concurrent::CountDownLatch.new
+        subject = Agent.new(0, max_pending_actions: 3)
+
+        subject.send_via(executor) { release.wait; 1 }
+        subject.send_via(executor) { 2 }
+        subject.send_via(executor) { 3 }
+        20.times { break if subject.pending_action_count == 3; sleep(0.02) }
+        expect(subject.pending_action_count).to eq 3
+
+        release.count_down
+        expect(subject.await_for(1)).to eq true
+        expect(subject.pending_action_count).to eq 0
+        expect(subject.value).to eq 3
+      end
+    end
+
+    context 'non-blocking submission' do
+
+      specify '#try_send_via returns :accepted and runs the action' do
+        subject = Agent.new(0, max_pending_actions: 1)
+        expect(subject.try_send_via(immediate) { 42 }).to eq :accepted
+        expect(subject.value).to eq 42
+      end
+
+      specify '#try_send returns :accepted on an unlimited agent' do
+        subject = Agent.new(0)
+        expect(subject.try_send { 42 }).to eq :accepted
+        expect(subject.await_for(1)).to eq true
+        expect(subject.value).to eq 42
+      end
+
+      specify '#try_send_off and #try_post return :accepted' do
+        subject = Agent.new(0)
+        expect(subject.try_send_off { 42 }).to eq :accepted
+        expect(subject.try_post { 43 }).to eq :accepted
+        expect(subject.await_for(1)).to eq true
+        expect(subject.value).to eq 43
+      end
+
+      specify 'the blocking methods return false when full without enqueuing' do
+        release = Concurrent::CountDownLatch.new
+        subject = Agent.new(0, max_pending_actions: 1)
+
+        subject.send_via(executor) { release.wait; 1 }
+        20.times { break if subject.pending_action_count == 1; sleep(0.02) }
+
+        expect(subject.send_via(executor) { 2 }).to be false
+        expect(subject.send { 3 }).to be false
+        expect(subject.send_off { 4 }).to be false
+        expect(subject.pending_action_count).to eq 1
+
+        release.count_down
+        expect(subject.await_for(1)).to eq true
+        expect(subject.value).to eq 1
+      end
+
+      specify 'the bang methods raise Agent::Error when full' do
+        release = Concurrent::CountDownLatch.new
+        subject = Agent.new(0, max_pending_actions: 1)
+
+        subject.send_via(executor) { release.wait; 1 }
+        20.times { break if subject.pending_action_count == 1; sleep(0.02) }
+
+        expect { subject.send_via!(executor) { 2 } }.to raise_error(Agent::Error)
+        expect { subject.send! { 3 } }.to raise_error(Agent::Error)
+        expect { subject.send_off! { 4 } }.to raise_error(Agent::Error)
+
+        release.count_down
+        expect(subject.await_for(1)).to eq true
+      end
+
+      specify '#try_* returns :full when the limit is reached' do
+        release = Concurrent::CountDownLatch.new
+        subject = Agent.new(0, max_pending_actions: 2)
+
+        expect(subject.try_send_via(executor) { release.wait; 1 }).to eq :accepted
+        expect(subject.try_send_via(executor) { 2 }).to eq :accepted
+        20.times { break if subject.pending_action_count == 2; sleep(0.02) }
+
+        expect(subject.try_send_via(executor) { 3 }).to eq :full
+        expect(subject.try_send { 3 }).to eq :full
+        expect(subject.try_send_off { 3 }).to eq :full
+        expect(subject.pending_action_count).to eq 2
+
+        release.count_down
+        expect(subject.await_for(1)).to eq true
+        expect(subject.value).to eq 2
+      end
+
+      specify 'a freed slot allows new submissions again' do
+        release = Concurrent::CountDownLatch.new
+        subject = Agent.new(0, max_pending_actions: 1)
+
+        subject.try_send_via(executor) { release.wait; 1 }
+        20.times { break if subject.pending_action_count == 1; sleep(0.02) }
+        expect(subject.try_send_via(executor) { 2 }).to eq :full
+
+        release.count_down
+        20.times { break if subject.pending_action_count.zero?; sleep(0.02) }
+        expect(subject.try_send_via(immediate) { 2 }).to eq :accepted
+        expect(subject.value).to eq 2
+      end
+
+      specify '#try_* returns :failed after a failure in :fail mode' do
+        subject = Agent.new(0, error_mode: :fail)
+        subject.send_via(immediate) { raise StandardError }
+
+        expect(subject.try_send { 1 }).to eq :failed
+        expect(subject.try_send_off { 1 }).to eq :failed
+        expect(subject.try_send_via(immediate) { 1 }).to eq :failed
+      end
+
+      specify '#try_* accepts work again after a restart' do
+        subject = Agent.new(0, error_mode: :fail)
+        subject.send_via(immediate) { raise StandardError }
+        subject.restart(0)
+
+        expect(subject.try_send_via(immediate) { 42 }).to eq :accepted
+        expect(subject.value).to eq 42
+      end
+
+      specify '#try_* raises ArgumentError when no block is given' do
+        subject = Agent.new(0)
+        expect { subject.try_send_via(immediate) }.to raise_error(ArgumentError)
+      end
+    end
+
+    context 'capacity and error modes' do
+
+      specify 'capacity is released when an action raises in :continue mode' do
+        release = Concurrent::CountDownLatch.new
+        subject = Agent.new(0, error_mode: :continue, max_pending_actions: 1)
+        subject.try_send_via(executor) { release.wait; raise StandardError }
+        20.times { break if subject.pending_action_count == 1; sleep(0.02) }
+        expect(subject.try_send { 1 }).to eq :full
+
+        release.count_down
+        20.times { break if subject.pending_action_count.zero?; sleep(0.02) }
+        expect(subject.try_send_via(immediate) { 42 }).to eq :accepted
+        expect(subject.value).to eq 42
+      end
+
+      specify 'capacity is released for the failed action in :fail mode' do
+        release = Concurrent::CountDownLatch.new
+        subject = Agent.new(0, error_mode: :fail, max_pending_actions: 1)
+        subject.send_via(executor) { release.wait; raise StandardError }
+        20.times { break if subject.pending_action_count == 1; sleep(0.02) }
+
+        release.count_down
+        20.times { break if subject.failed?; sleep(0.02) }
+        expect(subject.pending_action_count).to eq 0
+
+        expect(subject.try_send_via(immediate) { 1 }).to eq :failed
+
+        subject.restart(0)
+        expect(subject.try_send_via(immediate) { 42 }).to eq :accepted
+        expect(subject.value).to eq 42
+      end
+
+      specify 'validation failure releases the slot in :continue mode' do
+        validator = ->(value) { value != 99 }
+        subject   = Agent.new(0, error_mode: :continue,
+                                 max_pending_actions: 1,
+                                 validator: validator)
+
+        subject.try_send_via(immediate) { 99 }
+        expect(subject.pending_action_count).to eq 0
+        expect(subject.try_send_via(immediate) { 42 }).to eq :accepted
+        expect(subject.value).to eq 42
+      end
+
+      specify 'held actions keep their slots until a non-clearing restart runs them' do
+        fail_latch = Concurrent::CountDownLatch.new
+        subject    = Agent.new(0, error_mode: :fail, max_pending_actions: 5)
+
+        subject.send_via(executor) { fail_latch.wait; raise StandardError }
+        subject.send_via(executor) { 42 }
+        fail_latch.count_down
+        20.times { break if subject.failed?; sleep(0.02) }
+
+        expect(subject.pending_action_count).to eq 1
+        subject.restart(42)
+        expect(subject.await_for(1)).to eq true
+        expect(subject.pending_action_count).to eq 0
+      end
+
+      specify 'restart with :clear_actions releases the held slots' do
+        fail_latch = Concurrent::CountDownLatch.new
+        subject    = Agent.new(0, error_mode: :fail, max_pending_actions: 3)
+
+        subject.send_via(executor) { fail_latch.wait; raise StandardError }
+        subject.send_via(executor) { 41 }
+        subject.send_via(executor) { 42 }
+        fail_latch.count_down
+        20.times { break if subject.failed?; sleep(0.02) }
+
+        expect(subject.pending_action_count).to eq 2
+        subject.restart(40, clear_actions: true)
+        expect(subject.pending_action_count).to eq 0
+        expect(subject.try_send_via(immediate) { 43 }).to eq :accepted
+        expect(subject.value).to eq 43
+      end
+    end
+
+    context 'nested capacity' do
+
+      specify 'an action submitting to a full self gets :full without deadlocking' do
+        result  = nil
+        release = Concurrent::CountDownLatch.new
+        subject = Agent.new(0, max_pending_actions: 1)
+
+        subject.send_via(executor, subject) do |value, this|
+          release.wait
+          result = this.try_send_via(executor) { value + 1 }
+          value + 100
+        end
+
+        20.times { break if subject.pending_action_count == 1; sleep(0.02) }
+        release.count_down
+        expect(subject.await_for(1)).to eq true
+        expect(result).to eq :full
+        expect(subject.value).to eq 100
+        expect(subject.pending_action_count).to eq 0
+      end
+
+      specify 'a nested submission at capacity 2 is accepted and runs later' do
+        subject = Agent.new(0, max_pending_actions: 2)
+        pool    = Concurrent::FixedThreadPool.new(2)
+        nested_latch = Concurrent::CountDownLatch.new
+
+        subject.send_via(pool, subject) do |value, this|
+          result = this.try_send_via(pool) do |v|
+            nested_latch.count_down
+            v + 1
+          end
+          expect(result).to eq :accepted
+          value + 10
+        end
+
+        expect(nested_latch.wait(2)).to eq true
+        20.times { break if subject.value == 11; sleep(0.02) }
+        expect(subject.value).to eq 11
+        expect(subject.await_for(2)).to eq true
+      ensure
+        pool&.shutdown
+      end
+
+      specify 'nested submissions on an unlimited agent are unaffected' do
+        subject = Agent.new(0)
+        subject.send_via(executor, subject) do |value, this|
+          5.times { |i| this.send_via(executor) { |v| v + i + 1 } }
+          value
+        end
+        expect(subject.await_for(2)).to eq true
+        expect(subject.value).to eq 15
+      end
     end
   end
 end
