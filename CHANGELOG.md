@@ -9,6 +9,9 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Added `ResultT`, a `Task<Result>` wrapper with `from_result`, `from_task`/`lift`, and `Success`-focused `fmap`/`bind`.
+  Business `Failure` values short-circuit while rejected tasks preserve their exception channel.
+
 ### Changed
 
 ### Deprecated
