@@ -1,3 +1,12 @@
+## Unreleased
+
+- Add `HTTP::Cookie.parse_with_diagnostics` for accepted cookies and
+  structured issues with byte ranges, categories, and recovery actions.
+- Add configurable strict categories while sharing the same parsing
+  process as the lenient parser.
+- Continue parsing later cookies after malformed quoted or concatenated
+  Set-Cookie records.
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

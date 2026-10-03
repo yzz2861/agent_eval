@@ -24,6 +24,122 @@ class HTTP::Cookie
   # least)
   MAX_COOKIES_TOTAL = 3000
 
+  # Diagnostic issue categories emitted by .parse_with_diagnostics.
+  DIAGNOSTIC_CATEGORIES = %i[
+    missing_name_value_pair
+    empty_cookie_name
+    invalid_cookie_name
+    invalid_cookie_value
+    cookie_too_long
+    unacceptable_cookie
+    unterminated_quote
+    invalid_escape
+    empty_attribute
+    malformed_header
+    unknown_attribute
+    duplicate_attribute
+    invalid_expires
+    expires_missing_seconds
+    invalid_max_age
+    invalid_domain
+    invalid_path
+  ].freeze
+
+  # A structured diagnostic for one part of a Set-Cookie header.
+  class ParseIssue
+    attr_reader :category, :byte_range, :action, :attribute,
+                :cookie_index, :cookie_name, :message
+
+    def initialize(category:, byte_range:, action:, attribute: nil,
+                   cookie_index: nil, cookie_name: nil, message: nil)
+      @category = category
+      @byte_range = byte_range
+      @action = action
+      @attribute = attribute
+      @cookie_index = cookie_index
+      @cookie_name = cookie_name
+      @message = message || default_message
+    end
+
+    def to_h
+      {
+        category: category,
+        byte_range: byte_range,
+        action: action,
+        attribute: attribute,
+        cookie_index: cookie_index,
+        cookie_name: cookie_name,
+        message: message,
+      }.reject { |_, value| value.nil? }
+    end
+
+    private
+
+    def default_message
+      case category
+      when :missing_name_value_pair
+        "cookie definition lacks a name-value pair"
+      when :empty_cookie_name
+        "cookie name is empty"
+      when :invalid_cookie_name
+        "cookie name contains an invalid character"
+      when :invalid_cookie_value
+        "cookie value contains a control character"
+      when :cookie_too_long
+        "cookie definition is too long"
+      when :unacceptable_cookie
+        "cookie is not acceptable for its origin"
+      when :unterminated_quote
+        "quoted value is not terminated"
+      when :invalid_escape
+        "invalid escape sequence in quoted value"
+      when :empty_attribute
+        "empty attribute was ignored"
+      when :malformed_header
+        "unexpected character was ignored"
+      when :unknown_attribute
+        "unknown attribute was ignored"
+      when :duplicate_attribute
+        "duplicate attribute was superseded"
+      when :invalid_expires
+        "invalid Expires attribute was ignored"
+      when :expires_missing_seconds
+        "missing seconds in Expires time defaulted to zero"
+      when :invalid_max_age
+        "invalid Max-Age attribute was ignored"
+      when :invalid_domain
+        "invalid Domain attribute was ignored"
+      when :invalid_path
+        "invalid Path attribute was ignored"
+      else
+        category.to_s.tr('_', ' ')
+      end
+    end
+  end
+
+  # The result of .parse_with_diagnostics.
+  class ParseResult
+    attr_reader :cookies, :issues
+
+    def initialize(cookies, issues)
+      @cookies = cookies
+      @issues = issues
+    end
+
+    def to_a
+      cookies
+    end
+
+    def each(&block)
+      cookies.each(&block)
+    end
+
+    def size
+      cookies.size
+    end
+    alias length size
+  end
+
   # :stopdoc:
   UNIX_EPOCH = Time.at(0)
 
@@ -274,60 +390,180 @@ class HTTP::Cookie
     #   cookie definitions containing double-quotes just as naturally
     #   expected.
     def parse(set_cookie, origin, options = nil, &block)
-      if options
-        logger = options[:logger]
-        created_at = options[:created_at]
-      end
-      origin = HTTP::Cookie::URIParser.parse(origin)
+      parse_set_cookie(set_cookie, origin, options || {}).tap { |result|
+        result.each(&block) if block_given?
+      }.to_a
+    end
 
-      [].tap { |cookies|
-        Scanner.new(set_cookie, logger).scan_set_cookie { |name, value, attrs|
-          break if name.nil? || name.empty?
+    # Diagnostically parses a Set-Cookie header value and returns a
+    # ParseResult containing accepted cookies and structured issues.
+    #
+    # Each issue contains:
+    #
+    # * +byte_range+ - the `[offset, length]` range in the original
+    #   header value, counted in bytes
+    # * +category+ - the stable machine-readable issue category
+    # * +action+ - the recovery action taken by the parser
+    # * +attribute+ - the affected attribute name, if applicable
+    # * +cookie_index+ / +cookie_name+ - the attempted cookie record
+    #
+    # Cookie values are intentionally not copied into issue objects or
+    # diagnostic messages.
+    #
+    # Pass +strict: true+ to reject every recoverable issue, or pass an
+    # array of categories such as +strict: [:unknown_attribute]+ to
+    # upgrade only those categories to rejection. Strict and lenient
+    # parsing use the same scanner and cookie construction process.
+    #
+    # +:created_at+ sets the creation time used for +Max-Age+; +:logger+
+    # remains compatible with .parse.
+    def parse_with_diagnostics(set_cookie, origin, options = nil)
+      options = options ? options.dup : {}
+      strict = options.delete(:strict)
+      strict_categories = strict_categories(strict)
+      parse_set_cookie(set_cookie, origin, options, strict_categories)
+    end
 
-          begin
-            cookie = new(name, value)
-          rescue => e
-            logger.warn("Invalid name or value: #{e}") if logger
-            next
-          end
-          cookie.created_at = created_at if created_at
-          attrs.each { |aname, avalue|
-            begin
-              case aname
-              when 'domain'
-                cookie.for_domain = true
-                # The following may negate @for_domain if the value is
-                # an eTLD or IP address, hence this order.
-                cookie.domain = avalue
-              when 'path'
-                cookie.path = avalue
-              when 'expires'
-                # RFC 6265 4.1.2.2
-                # The Max-Age attribute has precedence over the Expires
-                # attribute.
-                cookie.expires = avalue unless cookie.max_age
-              when 'max-age'
-                cookie.max_age = avalue
-              when 'secure'
-                cookie.secure = avalue
-              when 'httponly'
-                cookie.httponly = avalue
-              end
-            rescue => e
-              logger.warn("Couldn't parse #{aname} '#{avalue}': #{e}") if logger
-            end
-          }
+    private
 
-          cookie.origin = origin
+    def strict_categories(value)
+      categories =
+        case value
+        when nil, false
+          []
+        when true
+          DIAGNOSTIC_CATEGORIES
+        when Symbol, String
+          [value]
+        when Array
+          value
+        else
+          raise TypeError, "strict must be true, a Symbol, or an Array"
+        end
 
-          cookie.acceptable? or next
-
-          yield cookie if block_given?
-
-          cookies << cookie
-        }
+      categories.map { |category|
+        category = category.to_sym if category.is_a?(String)
+        unless DIAGNOSTIC_CATEGORIES.include?(category)
+          raise ArgumentError, "unknown diagnostic category: #{category.inspect}"
+        end
+        category
       }
     end
+
+    def recovery_action(category, strict_categories)
+      strict_categories.include?(category) ? :reject : :ignore
+    end
+
+    def build_parse_issue(issue, cookie_index, cookie_name)
+      ParseIssue.new(
+        category: issue[:category],
+        byte_range: issue[:byte_range],
+        action: issue[:action],
+        attribute: issue[:attribute],
+        cookie_index: cookie_index,
+        cookie_name: cookie_name
+      )
+    end
+
+    def parse_set_cookie(set_cookie, origin, options, strict_categories = [])
+      logger = options[:logger]
+      created_at = options[:created_at]
+      origin = URIParser.parse(origin)
+      cookies = []
+      issues = []
+
+      scanner = Scanner.new(set_cookie, logger,
+                            strict_categories: strict_categories)
+      scanner.each_set_cookie_record.with_index do |record, cookie_index|
+        record_issues = record[:issues].map {
+          build_parse_issue(_1, cookie_index, record[:name])
+        }
+        issues.concat(record_issues)
+
+        if record_issues.any? { |issue| issue.action == :reject }
+          next
+        end
+
+        cookie = new(record[:name], record[:value])
+        cookie.created_at = created_at if created_at
+
+        rejected = false
+        record[:attrs].each { |attr|
+          aname = attr[:name]
+          avalue = attr[:value]
+
+          begin
+            case aname
+            when 'domain'
+              cookie.for_domain = true
+              # The following may negate @for_domain if the value is
+              # an eTLD or IP address, hence this order.
+              cookie.domain = avalue
+            when 'path'
+              cookie.path = avalue
+            when 'expires'
+              # RFC 6265 4.1.2.2
+              # The Max-Age attribute has precedence over the Expires
+              # attribute.
+              cookie.expires = avalue unless cookie.max_age
+            when 'max-age'
+              cookie.max_age = avalue
+            when 'secure'
+              cookie.secure = avalue
+            when 'httponly'
+              cookie.httponly = avalue
+            end
+          rescue => e
+            category =
+              case aname
+              when 'domain'
+                :invalid_domain
+              when 'path'
+                :invalid_path
+              when 'expires'
+                :invalid_expires
+              when 'max-age'
+                :invalid_max_age
+              else
+                :unknown_attribute
+              end
+            action = recovery_action(category, strict_categories)
+            logger.warn("Couldn't parse #{aname}: #{e}") if logger
+            issue = ParseIssue.new(
+              category: category,
+              byte_range: attr[:value_range],
+              action: action,
+              attribute: aname,
+              cookie_index: cookie_index,
+              cookie_name: record[:name]
+            )
+            issues << issue
+            rejected = true if issue.action == :reject
+          end
+        }
+
+        next if rejected
+
+        cookie.origin = origin
+
+        unless cookie.acceptable?
+          issues << ParseIssue.new(
+            category: :unacceptable_cookie,
+            byte_range: record[:range],
+            action: :reject,
+            cookie_index: cookie_index,
+            cookie_name: record[:name]
+          )
+          next
+        end
+
+        cookies << cookie
+      end
+
+      ParseResult.new(cookies, issues)
+    end
+
+    public
 
     # Takes an array of cookies and returns a string for use in the
     # Cookie header, like "name1=value2; name2=value2".

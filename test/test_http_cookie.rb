@@ -180,6 +180,114 @@ class TestHTTPCookie < Test::Unit::TestCase
     assert_equal nil, cookies.first.max_age
   end
 
+  def test_parse_with_diagnostics
+    set_cookie = 'a=1; Path=/; Version=1, b=2'
+    result = HTTP::Cookie.parse_with_diagnostics(set_cookie, URI('http://example.test/'))
+
+    assert_kind_of HTTP::Cookie::ParseResult, result
+    assert_equal %w[a b], result.cookies.map(&:name)
+    assert_equal 1, result.issues.size
+
+    issue = result.issues.first
+    assert_equal :unknown_attribute, issue.category
+    assert_equal [13, 7], issue.byte_range
+    assert_equal :ignore, issue.action
+    assert_equal 'version', issue.attribute
+    assert_equal 0, issue.cookie_index
+    assert_equal 'a', issue.cookie_name
+    assert_not_match(/1/, issue.message)
+  end
+
+  def test_parse_with_diagnostics_keeps_commas_in_expires
+    set_cookie = 'a=1; Expires=Sun, 06 Nov 2011 00:11:18 GMT; Path=/, b=2'
+    result = HTTP::Cookie.parse_with_diagnostics(set_cookie, URI('http://example.test/'))
+
+    assert_equal %w[a b], result.cookies.map(&:name)
+    assert_equal Time.at(1_320_538_278), result.cookies.first.expires
+    assert_equal [], result.issues
+  end
+
+  def test_parse_with_diagnostics_keeps_cookies_after_bad_record
+    set_cookie = 'broken, a=1; Max-Age=soon; Path=/, b=2'
+    result = HTTP::Cookie.parse_with_diagnostics(set_cookie, URI('http://example.test/'))
+
+    assert_equal %w[a b], result.cookies.map(&:name)
+    categories = result.issues.group_by(&:cookie_index).transform_values { |issues|
+      issues.map(&:category)
+    }
+    assert_equal [:missing_name_value_pair], categories[0]
+    assert_equal [:invalid_max_age], categories[1]
+    assert_nil categories[2]
+  end
+
+  def test_parse_with_diagnostics_handles_quoted_values
+    set_cookie = 'a="x, y=z"; comment="v; w=q", b="unterminated; x=1, c="other; Path=/"'
+    result = HTTP::Cookie.parse_with_diagnostics(set_cookie, URI('http://example.test/'))
+
+    assert_equal %w[a b c], result.cookies.map(&:name)
+    assert_equal 'x, y=z', result.cookies[0].value
+    assert_equal 'unterminated', result.cookies[1].value
+    assert_equal 'other; Path=/', result.cookies[2].value
+
+    issue = result.issues.find { |item| item.category == :unterminated_quote }
+    assert_equal 1, issue.cookie_index
+    assert_equal :accept_partial, issue.action
+    assert_equal [32, 13], issue.byte_range
+  end
+
+  def test_parse_with_diagnostics_reports_duplicate_attribute
+    set_cookie = 'a=1; Path=/; Path=/other, b=2'
+    result = HTTP::Cookie.parse_with_diagnostics(set_cookie, URI('http://example.test/'))
+
+    assert_equal %w[a b], result.cookies.map(&:name)
+    assert_equal '/other', result.cookies.first.path
+
+    issue = result.issues.first
+    assert_equal :duplicate_attribute, issue.category
+    assert_equal :overwrite, issue.action
+    assert_equal [13, 4], issue.byte_range
+    assert_equal 'path', issue.attribute
+  end
+
+  def test_parse_with_diagnostics_strict_categories
+    set_cookie = 'a=1; Path=/; Version=1, b=2'
+    result = HTTP::Cookie.parse_with_diagnostics(
+      set_cookie, URI('http://example.test/'), strict: [:unknown_attribute]
+    )
+
+    assert_equal ['b'], result.cookies.map(&:name)
+    assert_equal :reject, result.issues.first.action
+  end
+
+  def test_parse_with_diagnostics_strict_rejects_recoverable_issues
+    set_cookie = 'a=1; Path=/; Version=1, b="unterminated; x=1'
+    result = HTTP::Cookie.parse_with_diagnostics(
+      set_cookie, URI('http://example.test/'), strict: true
+    )
+
+    assert_equal [], result.cookies
+    assert_equal [:unknown_attribute, :unterminated_quote, :unknown_attribute],
+                 result.issues.map(&:category)
+    assert(result.issues.all? { |issue| issue.action == :reject })
+  end
+
+  def test_parse_with_diagnostics_uses_byte_offsets
+    set_cookie = 'é=1; Version=1'
+    result = HTTP::Cookie.parse_with_diagnostics(set_cookie, URI('http://example.test/'))
+
+    assert_equal 'é', result.cookies.first.name
+    assert_equal [6, 7], result.issues.first.byte_range
+    assert_equal 'Version', set_cookie.byteslice(*result.issues.first.byte_range)
+  end
+
+  def test_parse_remains_array_and_compatible
+    set_cookie = 'a=1; Version=1, broken, b=2'
+    cookies = HTTP::Cookie.parse(set_cookie, URI('http://example.test/'))
+
+    assert_kind_of Array, cookies
+    assert_equal %w[a b], cookies.map(&:name)
+  end
+
   def test_parse_date_fail
     url = URI.parse('http://localhost/')
 

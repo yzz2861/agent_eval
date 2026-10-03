@@ -121,6 +121,31 @@ Or install it yourself as:
     header['Set-Cookie'] = cookie2.set_cookie_value
 
 
+### Diagnostic Set-Cookie parsing
+
+Use `HTTP::Cookie.parse_with_diagnostics` when importing a
+concatenated `Set-Cookie` header and you need to know why a cookie was
+not accepted.  It returns accepted cookies and structured issues without
+changing the array returned by `HTTP::Cookie.parse`.
+
+    result = HTTP::Cookie.parse_with_diagnostics(set_cookie, uri)
+    result.cookies # accepted HTTP::Cookie objects
+    result.issues  # byte range, category, and recovery action
+
+Each issue identifies a `[byte_offset, byte_length]` range in the
+original header and the recovery action taken.  Issue objects do not
+copy cookie values.
+
+    # Reject cookies that use an unknown attribute, while still
+    # recovering other issues and parsing later cookies.
+    result = HTTP::Cookie.parse_with_diagnostics(
+      set_cookie, uri, strict: [:unknown_attribute]
+    )
+
+    # Treat every recoverable issue as a rejection.
+    result = HTTP::Cookie.parse_with_diagnostics(set_cookie, uri, strict: true)
+
+
 ## Incompatibilities with Mechanize::Cookie/CookieJar
 
 There are several incompatibilities between
