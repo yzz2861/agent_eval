@@ -1,0 +1,7 @@
+en:
+  greeting: Hello from two
+  nested:
+    b: two b
+  tree: two replaced tree
+fr:
+  only_in_two: deux

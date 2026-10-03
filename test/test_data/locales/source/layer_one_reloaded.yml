@@ -1,0 +1,4 @@
+en:
+  greeting: Hello from one reloaded
+  nested:
+    a: one a reloaded

@@ -1,0 +1,7 @@
+en:
+  greeting: Hello from one
+  nested:
+    a: one a
+    b: one b
+  tree:
+    leaf: one leaf

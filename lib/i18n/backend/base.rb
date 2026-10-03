@@ -238,15 +238,25 @@ module I18n
         # data to the existing translations. Raises I18n::UnknownFileType
         # for all other file extensions.
         def load_file(filename)
+          data, keys_symbolized = parse_file(filename)
+          data.each { |locale, d| store_translations(locale, d || {}, skip_symbolize_keys: keys_symbolized) }
+
+          data
+        end
+
+        # Parses a single translations file by delegating to #load_rb or
+        # #load_yml depending on the file extension, without storing anything.
+        # Returns the translation data and whether its keys were already
+        # symbolized. Raises I18n::UnknownFileType for unknown file
+        # extensions and I18n::InvalidLocaleData for invalid content.
+        def parse_file(filename)
           type = File.extname(filename).tr('.', '').downcase
           raise UnknownFileType.new(type, filename) unless respond_to?(:"load_#{type}", true)
           data, keys_symbolized = send(:"load_#{type}", filename)
           unless data.is_a?(Hash)
             raise InvalidLocaleData.new(filename, 'expects it to return a hash, but does not')
           end
-          data.each { |locale, d| store_translations(locale, d || {}, skip_symbolize_keys: keys_symbolized) }
-
-          data
+          [data, keys_symbolized]
         end
 
         # Loads a plain Ruby translations file. eval'ing the file must yield
