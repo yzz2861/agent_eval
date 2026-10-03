@@ -6,6 +6,27 @@ require "dry/transaction/stack"
 module Dry
   module Transaction
     module InstanceMethods
+      # @api private
+      NESTING_DEPTH_KEY = :__dry_transaction_nesting_depth__
+
+      # Returns true when called from within another transaction's execution,
+      # i.e. the transaction is being used as a nested (sub-)transaction.
+      #
+      # @api private
+      def self.nested_call?
+        Thread.current[NESTING_DEPTH_KEY].to_i.positive?
+      end
+
+      # Tracks transaction execution so nested transactions can be detected.
+      #
+      # @api private
+      def self.track_nesting
+        Thread.current[NESTING_DEPTH_KEY] = Thread.current[NESTING_DEPTH_KEY].to_i + 1
+        yield
+      ensure
+        Thread.current[NESTING_DEPTH_KEY] = Thread.current[NESTING_DEPTH_KEY].to_i - 1
+      end
+
       include Dry::Monads[:result]
 
       attr_reader :steps
@@ -26,14 +47,21 @@ module Dry
       def call(input = nil, &block)
         assert_step_arity
 
-        result = stack.(Success(input))
+        top_level = !InstanceMethods.nested_call?
+        result = InstanceMethods.track_nesting { stack.(Success(input)) }
 
         if block
           ResultMatcher.(result, &block)
-        else
+        elsif top_level
           result.or { |step_failure|
             # Unwrap the value from the StepFailure and return it directly
             Failure(step_failure.value)
+          }
+        else
+          result.or { |step_failure|
+            # Keep the StepFailure (with its step path) so the enclosing
+            # transaction's step can attribute the failure to its full path
+            Failure(step_failure.nested)
           }
         end
       end
