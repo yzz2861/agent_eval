@@ -1,3 +1,20 @@
+## 1.2.0.beta (unreleased)
+
+- Add an optional browser-style secure cookie reception policy.
+  `HTTP::CookieJar.new(:policy => :browser)` (aliased as
+  `:browser_secure`) enforces the `__Secure-`/`__Host-` name prefix
+  constraints of RFC 6265bis (secure origin, Secure attribute, and
+  for `__Host-` a host-only cookie with `Path=/`) and prevents a
+  cookie received from a non-secure origin from shadowing an
+  existing Secure cookie with the same name and an overlapping
+  domain (the host-only flag is compared) and path.  The check
+  applies to expiring/deletion requests as well, while a legitimate
+  update sent over HTTPS still replaces the old value.  Rejection
+  reasons are reported as symbols via
+  `HTTP::CookieJar::Policy::BrowserSecure#reject_add_reason` and
+  logged when a `:logger` is given.  The default `:lenient` policy
+  preserves the historical behavior.
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

@@ -10,7 +10,7 @@ end
 
 class HTTP::CookieJar
 
-  attr_reader :store
+  attr_reader :store, :policy, :logger
 
   def get_impl(base, value, *args)
     case value
@@ -49,17 +49,46 @@ class HTTP::CookieJar
   # specified store class.  For example, the `:mozilla`
   # (HTTP::CookieJar::MozillaStore) store class requires a `:filename`
   # option.  See individual store classes for details.
+  #
+  # :policy
+  # : The cookie reception policy to enforce. (default: `:lenient`)
+  #
+  #     - `:lenient` (default): the historical permissive policy;
+  #       every acceptable cookie is stored, regardless of the
+  #       security of the origin.
+  #     - `:browser` (or `:browser_secure`): a browser-style secure
+  #       policy that enforces the `__Secure-`/`__Host-` name prefix
+  #       constraints and keeps a cookie received from a non-secure
+  #       origin from shadowing an existing Secure cookie of the same
+  #       name with an overlapping domain and path.  See
+  #       HTTP::CookieJar::Policy for details.  A custom policy
+  #       object responding to `#reject_add_reason` and
+  #       `#reject_delete_reason` is also accepted.
+  #
+  # :logger
+  # : Logger object useful for debugging.  When a cookie is rejected
+  # by the reception policy a warning is logged.
   def initialize(options = nil)
     opthash = {
       :store => :hash,
+      :policy => :lenient,
+      :logger => nil,
     }
     opthash.update(options) if options
+    begin
+      @policy = Policy.implementation(opthash[:policy])
+    rescue IndexError => e
+      raise ArgumentError, e.message
+    end
+    @logger = opthash[:logger]
     @store = get_impl(AbstractStore, opthash[:store], opthash)
   end
 
   # The copy constructor.  Not all backend store classes support cloning.
   def initialize_copy(other)
     @store = other.instance_eval { @store.dup }
+    @policy = other.policy
+    @logger = other.logger
   end
 
   # Adds a cookie to the jar if it is acceptable, and returns self in
@@ -85,13 +114,14 @@ class HTTP::CookieJar
   #       # HTTP::Cookie
   #       jar.origin = origin
   #       jar.add(cookie)     # acceptance check is performed
+  #
+  # Under the `:browser` reception policy a cookie that violates a
+  # name prefix constraint or would shadow an existing Secure cookie
+  # from a non-secure origin is silently ignored (a warning is logged
+  # if a logger is configured); use
+  # HTTP::CookieJar::Policy#reject_add_reason to learn the reason.
   def add(cookie)
-    @store.add(cookie) if
-      begin
-        cookie.acceptable?
-      rescue RuntimeError => e
-        raise ArgumentError, e.message
-      end
+    add_and_accepted?(cookie)
     self
   end
   alias << add
@@ -102,8 +132,13 @@ class HTTP::CookieJar
   # How the `for_domain` flag value affects the set of deleted cookies
   # depends on the store used.  See individual store classes for that
   # matter.
+  #
+  # Under the `:browser` reception policy a deletion request from a
+  # non-secure origin that would remove an existing Secure cookie of
+  # the same name with an overlapping domain and path is rejected,
+  # just like an overwrite would be.
   def delete(cookie)
-    @store.delete(cookie)
+    accept_for_storage(:delete, cookie)
     self
   end
 
@@ -150,8 +185,9 @@ class HTTP::CookieJar
 
   # Parses a Set-Cookie field value `set_cookie` assuming that it is
   # sent from a source URL/URI `origin`, and adds the cookies parsed
-  # as valid and considered acceptable to the jar.  Returns an array
-  # of cookies that have been added.
+  # as valid and considered acceptable (including by the configured
+  # reception #policy) to the jar.  Returns an array of the cookies
+  # that have actually been added.
   #
   # If a block is given, it is called for each cookie and the cookie
   # is added only if the block returns a true value.
@@ -164,17 +200,15 @@ class HTTP::CookieJar
   #
   # See HTTP::Cookie.parse for available options.
   def parse(set_cookie, origin, options = nil) # :yield: cookie
-    if block_given?
-      HTTP::Cookie.parse(set_cookie, origin, options).tap { |cookies|
-        cookies.select! { |cookie|
-          yield(cookie) && add(cookie)
-        }
+    HTTP::Cookie.parse(set_cookie, origin, options).tap { |cookies|
+      cookies.select! { |cookie|
+        if block_given?
+          yield(cookie) && add_and_accepted?(cookie)
+        else
+          add_and_accepted?(cookie)
+        end
       }
-    else
-      HTTP::Cookie.parse(set_cookie, origin, options) { |cookie|
-        add(cookie)
-      }
-    end
+    }
   end
 
   # call-seq:
@@ -324,7 +358,36 @@ class HTTP::CookieJar
     @store.cleanup session
     self
   end
+
+  private
+
+  # Returns true if +cookie+ passes the acceptance check and the
+  # reception policy, in which case it is handed over to the backing
+  # store.
+  def add_and_accepted?(cookie)
+    begin
+      cookie.acceptable?
+    rescue RuntimeError => e
+      raise ArgumentError, e.message
+    end && accept_for_storage(:add, cookie)
+  end
+
+  # Runs the reception policy for the given +action+ (:add or
+  # :delete) and delegates to the backing store when the cookie is
+  # allowed.
+  def accept_for_storage(action, cookie)
+    check = "reject_#{action}_reason"
+    if reason = @policy.public_send(check, self, cookie)
+      @logger.warn(
+        "Cookie \"#{cookie.name}\" rejected: #{Policy.reason_message(reason)}"
+      ) if @logger
+      false
+    else
+      @store.public_send(action, cookie)
+    end
+  end
 end
 
 require 'http/cookie_jar/abstract_store'
 require 'http/cookie_jar/abstract_saver'
+require 'http/cookie_jar/policy'

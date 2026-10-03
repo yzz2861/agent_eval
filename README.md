@@ -39,6 +39,12 @@ The following is an incomplete list of its features:
 * It is relatively easy to add a new serialization format or a backend
   store because of its modular API.
 
+* An optional browser-style secure reception policy enforces the
+  `__Secure-`/`__Host-` cookie name prefix constraints and prevents
+  non-secure (HTTP) origins from overwriting or deleting a Secure
+  cookie ("cookie shadowing"), while the default policy keeps the
+  historical, lenient behavior.
+
 ## Installation
 
 Add this line to your application's `Gemfile`:
@@ -97,6 +103,42 @@ Or install it yourself as:
 
     # Set the Cookie header value, where uri is the destination URI
     header["Cookie"] = HTTP::Cookie.cookie_value(jar.cookies(uri))
+
+
+    ########################
+    # Browser-secure reception policy
+    ########################
+
+    # The default policy is :lenient and behaves as it always has.
+    # Pass policy: :browser (a.k.a. :browser_secure) to enforce the
+    # browser-style rules for cookies received from a response:
+    #
+    # * A cookie whose name starts with "__Secure-" must be set from
+    #   an HTTPS origin and carry the Secure attribute.
+    # * A cookie whose name starts with "__Host-" must be set from an
+    #   HTTPS origin, carry Secure, have no Domain attribute (it is
+    #   host-only) and Path=/.
+    # * A cookie from a non-secure origin cannot shadow an existing
+    #   Secure cookie of the same name whose domain (with the
+    #   host-only flag taken into account) and path overlap; this
+    #   applies to expiring cookies as well.  Legitimate updates sent
+    #   over HTTPS still replace the old value.
+
+    require 'logger'
+    jar = HTTP::CookieJar.new(policy: :browser,
+                              logger: Logger.new($stderr))
+
+    jar.parse('SID=v1; Path=/; Secure', 'https://example.com/')
+
+    # Ignored: this would shadow the Secure cookie from an insecure
+    # origin.  The rejection reason is available programmatically:
+    HTTP::CookieJar::Policy::BrowserSecure.reject_add_reason(
+      jar, HTTP::Cookie.parse('SID=evil; Path=/',
+                              'http://example.com/').first)
+    #=> :insecure_shadow_of_secure
+
+    # Accepted: the Secure value can still be updated over HTTPS.
+    jar.parse('SID=v2; Path=/; Secure', 'https://example.com/')
 
 
     ########################
