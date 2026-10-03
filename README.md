@@ -245,6 +245,40 @@ JSONSchemer.schema(
 )
 ```
 
+## Custom Vocabularies
+
+Custom keyword behavior is scoped to a JSON Schema vocabulary. Pass an instance-level registry to `schema` to map vocabulary URIs to keyword classes. The active dialect's `$vocabulary` declaration determines which registered implementations are used; required unregistered vocabularies raise at schema preparation time, while optional unregistered vocabularies are ignored.
+
+```ruby
+class EvenKeyword < JSONSchemer::Keyword
+  def validate(instance, instance_location, keyword_location, _context)
+    valid = instance.even?
+    result(instance, instance_location, keyword_location, valid, annotation: value)
+  end
+end
+
+vocabulary_uri = 'https://example.com/vocab/internal'
+dialect_uri = 'https://example.com/dialect/internal'
+vocabularies = { vocabulary_uri => { 'x-even' => EvenKeyword } }
+meta_schema = {
+  '$id' => dialect_uri,
+  '$schema' => 'https://json-schema.org/draft/2020-12/schema',
+  '$vocabulary' => {
+    'https://json-schema.org/draft/2020-12/vocab/core' => true,
+    'https://json-schema.org/draft/2020-12/vocab/validation' => true,
+    vocabulary_uri => true
+  }
+}
+
+schemer = JSONSchemer.schema(
+  { 'x-even' => true },
+  meta_schema: JSONSchemer.schema(meta_schema, vocabularies: vocabularies),
+  vocabularies: vocabularies
+)
+
+schemer.valid?(2) # => true
+```
+
 ## Global Configuration
 
 Configuration options can be set globally by modifying `JSONSchemer.configuration`. Global options are applied to any new schemas at creation time (global configuration changes are not reflected in existing schemas). They can be overridden with the regular keyword arguments described [above](#options).

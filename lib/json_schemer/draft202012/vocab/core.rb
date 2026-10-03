@@ -17,8 +17,8 @@ module JSONSchemer
         class Vocabulary < Keyword
           def parse
             value.each_with_object({}) do |(vocabulary, required), out|
-              if VOCABULARIES.key?(vocabulary)
-                out[vocabulary] = VOCABULARIES.fetch(vocabulary)
+              if schema.vocabularies.key?(vocabulary)
+                out[vocabulary] = schema.vocabularies.fetch(vocabulary)
               elsif required
                 raise UnknownVocabulary, vocabulary
               end
@@ -26,7 +26,9 @@ module JSONSchemer
               schema.keywords = vocabularies.sort_by do |vocabulary, _keywords|
                 VOCABULARY_ORDER.fetch(vocabulary, Float::INFINITY)
               end.each_with_object({}) do |(_vocabulary, keywords), out|
-                out.merge!(keywords)
+                keywords.each do |keyword, keyword_class|
+                  out[keyword] = keyword_class
+                end
               end
               schema.keyword_order = schema.keywords.transform_values.with_index { |_keyword_class, index| index }
             end

@@ -59,6 +59,7 @@ require 'json_schemer/openapi30/meta'
 require 'json_schemer/openapi30/vocab/base'
 require 'json_schemer/openapi30/vocab'
 require 'json_schemer/openapi'
+require 'json_schemer/vocabularies'
 require 'json_schemer/configuration'
 require 'json_schemer/resources'
 require 'json_schemer/schema'
@@ -68,6 +69,7 @@ module JSONSchemer
   class UnknownRef < StandardError; end
   class UnknownFormat < StandardError; end
   class UnknownVocabulary < StandardError; end
+  class InvalidVocabulary < StandardError; end
   class UnknownContentEncoding < StandardError; end
   class UnknownContentMediaType < StandardError; end
   class UnknownOutputFormat < StandardError; end

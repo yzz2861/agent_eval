@@ -69,6 +69,14 @@ class ConfigurationTest < Minitest::Test
     )
   end
 
+  def test_vocabularies
+    run_configuration_test(
+      :vocabularies,
+      default: {},
+      test: { 'https://example.com/vocab' => { 'x-custom' => Class.new(JSONSchemer::Keyword) } }
+    )
+  end
+
   def test_format
     run_configuration_test(
       :format,

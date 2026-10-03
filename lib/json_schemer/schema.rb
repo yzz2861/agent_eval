@@ -47,6 +47,7 @@ module JSONSchemer
     attr_reader :value, :parent, :root, :configuration, :parsed
     def_delegators :@configuration, :vocabulary, :format, :formats, :content_encodings, :content_media_types, :before_property_validation, :after_property_validation, :insert_property_defaults
     def_delegator :@configuration, :keywords, :custom_keywords
+    def_delegator :@configuration, :vocabularies
 
     def initialize(
       value,
@@ -57,6 +58,7 @@ module JSONSchemer
       base_uri: configuration.base_uri,
       meta_schema: configuration.meta_schema,
       vocabulary: configuration.vocabulary,
+      vocabularies: configuration.vocabularies,
       format: configuration.format,
       formats: configuration.formats,
       content_encodings: configuration.content_encodings,
@@ -83,6 +85,7 @@ module JSONSchemer
         :base_uri => base_uri,
         :meta_schema => meta_schema,
         :vocabulary => vocabulary,
+        :vocabularies => Vocabularies.normalize(vocabularies),
         :format => format,
         :formats => formats,
         :content_encodings => content_encodings,
