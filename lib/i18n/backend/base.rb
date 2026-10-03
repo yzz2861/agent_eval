@@ -8,6 +8,11 @@ module I18n
     module Base
       include I18n::Backend::Transliterator
 
+      VARIANT_DIMENSION_KEY = :_variant
+      VARIANT_MARKER_KEY = :_variants
+      VARIANT_DEFAULT_KEY = :_default
+      private_constant :VARIANT_DIMENSION_KEY, :VARIANT_MARKER_KEY, :VARIANT_DEFAULT_KEY
+
       # Accepts a list of paths to translation files. Loads translations from
       # plain Ruby (*.rb), YAML files (*.yml), or JSON files (*.json). See #load_rb, #load_yml, and #load_json
       # for details.
@@ -47,7 +52,7 @@ module I18n
         end
 
         entry = entry.dup if entry.is_a?(String)
-        entry = pluralize(locale, entry, count) if count
+        entry = resolve_grammatical_alternatives(locale, key, entry, options)
 
         if entry.nil? && !subtrees?
           throw(:exception, I18n::MissingTranslation.new(locale, key, options))
@@ -186,6 +191,100 @@ module I18n
           key = pluralization_key(entry, count)
           raise InvalidPluralizationData.new(entry, count, key) unless entry.has_key?(key)
           entry[key]
+        end
+
+        def resolve_grammatical_alternatives(locale, key, entry, options)
+          path = translation_path(locale, key, options)
+          plural_allowed = true
+
+          if entry.is_a?(Hash)
+            while entry.is_a?(Hash)
+              if variant?(entry)
+                entry, path = select_variant(entry, options, path)
+                entry = resolve_entry(locale, key, entry, options) if entry.is_a?(Symbol) || entry.is_a?(Proc)
+                entry = entry.dup if entry.is_a?(String)
+                plural_allowed = true
+              elsif options[:count] && plural_allowed
+                plural_entry = entry
+                entry = pluralize(locale, entry, options[:count])
+                plural_key = plural_entry.keys.find { |key| key != :attributes && plural_entry[key].equal?(entry) } ||
+                  pluralization_key(plural_entry, options[:count])
+                path += [plural_key]
+                plural_allowed = false
+              else
+                break
+              end
+            end
+          elsif options[:count]
+            entry = pluralize(locale, entry, options[:count])
+          end
+
+          entry
+        end
+
+        def select_variant(entry, options, path)
+          choices = entry[VARIANT_MARKER_KEY]
+          unless choices.is_a?(Hash)
+            variant = entry[VARIANT_DIMENSION_KEY]
+            raise InvalidVariantData.new(entry, variant, path + [VARIANT_DIMENSION_KEY])
+          end
+
+          if entry.key?(VARIANT_DIMENSION_KEY)
+            variant = entry[VARIANT_DIMENSION_KEY]
+            unless variant.is_a?(Symbol) || variant.is_a?(String)
+              raise InvalidVariantData.new(entry, variant, path + [VARIANT_DIMENSION_KEY])
+            end
+            variant = variant.to_s.to_sym
+            branches = choices
+          else
+            variant = choices.keys.find { |key| key != VARIANT_DEFAULT_KEY && options.key?(key) }
+            if variant.nil? && choices.key?(VARIANT_DEFAULT_KEY)
+              return [choices[VARIANT_DEFAULT_KEY], path + [VARIANT_MARKER_KEY, VARIANT_DEFAULT_KEY]]
+            end
+            variant ||= choices.keys.find { |key| key != VARIANT_DEFAULT_KEY }
+            raise InvalidVariantData.new(entry, variant, path + [VARIANT_MARKER_KEY]) unless variant
+            variant = variant.to_s.to_sym
+            branches = choices[variant]
+            path += [VARIANT_MARKER_KEY, variant]
+          end
+
+          selected_path = entry.key?(VARIANT_DIMENSION_KEY) ? path + [variant] : path
+          selected, selected_key = select_variant_branch(variant, branches, options, selected_path)
+          [selected, selected_path + [selected_key]]
+        end
+
+        def select_variant_branch(variant, choices, options, path)
+          unless choices.is_a?(Hash)
+            raise InvalidVariantData.new({ VARIANT_MARKER_KEY => choices }, variant, path)
+          end
+
+          if options.key?(variant)
+            key = variant_key_for(options, variant)
+            if choices.key?(key)
+              [choices[key], key]
+            elsif choices.key?(VARIANT_DEFAULT_KEY)
+              [choices[VARIANT_DEFAULT_KEY], VARIANT_DEFAULT_KEY]
+            else
+              raise InvalidVariantData.new({ VARIANT_MARKER_KEY => choices }, variant, path + [key])
+            end
+          elsif choices.key?(VARIANT_DEFAULT_KEY)
+            [choices[VARIANT_DEFAULT_KEY], VARIANT_DEFAULT_KEY]
+          else
+            raise InvalidVariantData.new({ VARIANT_MARKER_KEY => choices }, variant, path + [VARIANT_DEFAULT_KEY])
+          end
+        end
+
+        def variant?(entry)
+          entry.is_a?(Hash) && entry.key?(VARIANT_MARKER_KEY)
+        end
+
+        def variant_key_for(options, variant)
+          value = options[variant]
+          value.nil? ? VARIANT_DEFAULT_KEY : value.to_s.to_sym
+        end
+
+        def translation_path(locale, key, options)
+          I18n.normalize_keys(locale, key, options[:scope], options[:separator])
         end
 
         # Interpolates values into a given subject.

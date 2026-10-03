@@ -179,6 +179,32 @@ module I18n
     # be interpolated to the pluralized translation:
     #   I18n.t :foo, :count => 1 # => '1 foo'
     #
+    # *VARIANTS*
+    #
+    # Translation data can explicitly declare grammatical or stylistic choices.
+    # A variant node contains a +:_variants+ key, so an ordinary nested hash is
+    # still treated as a namespace.
+    #
+    # Use +:_variant+ to declare the option that selects a branch and +:_default+
+    # to provide the branch used when the option is missing or has no match:
+    #   # translation data
+    #   # :invitation => {
+    #   #   :_variant => :tone,
+    #   #   :_variants => {
+    #   #     :formal => { :one => 'Dear %{name}, %{count} invitation',
+    #   #                  :other => 'Dear %{name}, %{count} invitations' },
+    #   #     :_default => { :one => 'Hello %{name}, %{count} invitation',
+    #   #                   :other => 'Hello %{name}, %{count} invitations' }
+    #   #   }
+    #   # }
+    #
+    #   I18n.t :invitation, :count => 2, :name => 'Ada', :tone => :formal
+    #   # => 'Dear Ada, 2 invitations'
+    #
+    # Variant and plural nodes can be nested in either order. Missing data for
+    # an explicitly marked variant raises <tt>I18n::InvalidVariantData</tt> with
+    # the full translation path.
+    #
     # *DEFAULTS*
     #
     # This returns the translation for <tt>:foo</tt> or <tt>default</tt> if no translation was found:

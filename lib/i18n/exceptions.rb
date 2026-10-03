@@ -95,6 +95,15 @@ module I18n
     end
   end
 
+  class InvalidVariantData < ArgumentError
+    attr_reader :entry, :variant, :path
+
+    def initialize(entry, variant, path)
+      @entry, @variant, @path = entry, variant, Array(path)
+      super "translation data #{entry.inspect} requires a valid :#{variant} value. No matching variant or _default branch was found at #{@path.map(&:to_s).join('.')}."
+    end
+  end
+
   class MissingInterpolationArgument < ArgumentError
     attr_reader :key, :values, :string
     def initialize(key, values, string)

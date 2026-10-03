@@ -75,6 +75,7 @@ This keeps inherited state safe and lets updates happen by replacing config obje
 * Flexible defaults
 * Bulk lookup
 * Lambdas as translation data
+* Explicit grammatical variants with defaults
 * Custom key/scope separator
 * Custom exception handlers
 * Extensible architecture with a swappable backend
