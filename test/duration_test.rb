@@ -427,7 +427,172 @@ group Fugit::Duration do
         ArgumentError, 'cannot add FalseClass instance to a Fugit::Duration')
       assert_error(
         lambda { d + x },
-        ArgumentError, 'cannot add FalseClass instance to a Fugit::Duration')
+        ArgumentError,
+        'cannot add FalseClass instance to a Fugit::Duration')
+    end
+
+    group 'end of month policy' do
+
+      [
+        [ '1M', '2020-01-31 12:00:00 UTC', :clamp,
+          '2020-02-29 12:00:00 Z' ],
+        [ '-1M', '2020-03-31 12:00:00 UTC', :clamp,
+          '2020-02-29 12:00:00 Z' ],
+        [ '1y', '2020-02-29 12:00:00 UTC', :clamp,
+          '2021-02-28 12:00:00 Z' ],
+        [ '-1y', '2020-02-29 12:00:00 UTC', :clamp,
+          '2019-02-28 12:00:00 Z' ],
+        [ '1M', '2020-01-31 12:00:00 UTC', :roll,
+          '2020-03-02 12:00:00 Z' ],
+        [ '-1M', '2020-03-31 12:00:00 UTC', :roll,
+          '2020-03-02 12:00:00 Z' ],
+        [ '1y', '2020-02-29 12:00:00 UTC', :roll,
+          '2021-03-01 12:00:00 Z' ],
+        [ '-1y', '2020-02-29 12:00:00 UTC', :roll,
+          '2019-03-01 12:00:00 Z' ],
+        [ '1M-1d', '2020-01-31 12:00:00 UTC', :clamp,
+          '2020-02-29 12:00:00 Z' ],
+        [ '1d1M', '2020-01-31 12:00:00 UTC', :clamp,
+          '2020-03-01 12:00:00 Z' ],
+        [ '1M-1d', '2020-01-31 12:00:00 UTC', :roll,
+          '2020-03-01 12:00:00 Z' ],
+        [ '1y1d', '2020-02-29 12:00:00 UTC', :roll,
+          '2021-03-01 12:00:00 Z' ],
+        [ '1y1M', '2020-02-29 12:00:00 UTC', :roll,
+          '2021-04-01 12:00:00 Z' ],
+        [ '1y1M', '2020-02-29 12:00:00 UTC', :clamp,
+          '2021-03-28 12:00:00 Z' ],
+        [ '1y1M1d', '2020-02-29 12:00:00 UTC', :clamp,
+          '2021-04-01 12:00:00 Z' ],
+        [ '13M', '2020-02-29 12:00:00 UTC', :clamp,
+          '2021-03-29 12:00:00 Z' ],
+        [ '13M', '2020-02-29 12:00:00 UTC', :reject,
+          '2021-03-29 12:00:00 Z' ],
+      ].each do |ds, ts, policy, target|
+
+        test "applies #{policy} to #{ds} from #{ts}" do
+
+          t = Fugit.parse(ds).add(
+            ::EtOrbi::EoTime.parse(ts), end_of_month: policy)
+
+          assert t.to_s, target
+        end
+      end
+
+    test 'rolls by default to preserve historical arithmetic' do
+
+      t = Fugit.parse('1M').add(::EtOrbi::EoTime.parse('2020-01-31 12:00 UTC'))
+
+      assert t.to_s, '2020-03-02 12:00:00 Z'
+    end
+
+    test 'applies the policy when subtracting a time' do
+
+      t = Fugit.parse('1M').subtract(
+        ::EtOrbi::EoTime.parse('2020-03-31 12:00 UTC'),
+        end_of_month: :clamp)
+
+      assert t.to_s, '2020-02-29 12:00:00 Z'
+    end
+
+    test 'rejects an impossible month end after a month shift' do
+
+      assert_error(
+        lambda {
+          Fugit.parse('1M').add(
+            ::EtOrbi::EoTime.parse('2020-01-31 12:00 UTC'),
+            end_of_month: :reject)
+        },
+        ArgumentError,
+        '2020-01-31 does not exist after shifting 1 month: ' +
+        '2020-02-31 is not a valid date')
+    end
+
+    test 'rejects an impossible month end after a year shift' do
+
+      assert_error(
+        lambda {
+          Fugit.parse('1y').add(
+            ::EtOrbi::EoTime.parse('2020-02-29 12:00 UTC'),
+            end_of_month: :reject)
+        },
+        ArgumentError,
+        '2020-02-29 does not exist after shifting 1 year: ' +
+        '2021-02-29 is not a valid date')
+    end
+
+    test 'rejects an unknown month-end policy' do
+
+      assert_error(
+        lambda {
+          Fugit.parse('1M').add(
+            ::EtOrbi::EoTime.parse('2020-01-31 12:00 UTC'),
+            end_of_month: :nope)
+        },
+        ArgumentError,
+        'unknown month-end policy :nope, expected :clamp, :roll, ' +
+        'or :reject')
+    end
+
+    [
+      [ '1M', '2020-01-31 12:00 UTC', '2020-02-29 12:00 UTC',
+        '2020-01-29 12:00 UTC' ],
+      [ '1y', '2020-02-29 12:00 UTC', '2021-02-28 12:00 UTC',
+        '2020-02-28 12:00 UTC' ],
+      [ '1M', '2020-01-31 12:00 UTC', '2020-03-02 12:00 UTC',
+        '2020-02-02 12:00 UTC' ],
+    ].each do |ds, from, forward, back|
+
+      test "does not guarantee reversibility for #{ds}" do
+
+        d = Fugit.parse(ds)
+        t0 = ::EtOrbi::EoTime.parse(from)
+        policy = forward.include?('-03-') ? :roll : :clamp
+        t1 = d.add(t0, end_of_month: policy)
+        t2 = (-d).add(t1, end_of_month: policy)
+
+        assert t1.to_s, ::EtOrbi::EoTime.parse(forward).to_s
+        assert t2.to_s, ::EtOrbi::EoTime.parse(back).to_s
+      end
+    end
+
+    test 'fixed days cross a spring-forward DST transition as elapsed time' do
+
+      t = Fugit.parse('1d').add(
+        ::EtOrbi::EoTime.parse('2021-03-13 12:00:00 America/New_York'))
+
+      assert t.to_s, '2021-03-14 13:00:00 -0400'
+      assert t.zone.canonical_identifier, 'America/New_York'
+    end
+
+    test 'calendar months preserve wall clock time across a DST boundary' do
+
+      t = Fugit.parse('1M').add(
+        ::EtOrbi::EoTime.parse('2021-02-14 12:00:00 America/New_York'))
+
+      assert t.to_s, '2021-03-14 12:00:00 -0400'
+      assert t.zone.canonical_identifier, 'America/New_York'
+    end
+
+    test 'reports a nonexistent local time after a calendar month shift' do
+
+      assert_error(
+        lambda {
+          Fugit.parse('1M').add(
+            ::EtOrbi::EoTime.parse('2021-02-14 02:30:00 America/New_York'))
+        },
+        ::TZInfo::PeriodNotFound)
+    end
+
+    test 'reports an ambiguous local time after a calendar month shift' do
+
+      assert_error(
+        lambda {
+          Fugit.parse('1M').add(
+            ::EtOrbi::EoTime.parse('2021-10-07 01:30:00 America/New_York'))
+        },
+        ::TZInfo::AmbiguousTime)
+    end
     end
 
     test 'preserves the zone of an EoTime instance (local)' do
@@ -614,6 +779,15 @@ group Fugit::Duration do
 
   group '#next_time' do
 
+    test 'accepts duration application options' do
+
+      t = Fugit.parse('1M').next_time(
+        ::EtOrbi::EoTime.parse('2020-01-31 12:00 UTC'),
+        end_of_month: :clamp)
+
+      assert t.to_s, '2020-02-29 12:00:00 Z'
+    end
+
     test 'returns now + this duration if no argument' do
 
       t0 = Time.parse('2024-03-01 12:00')
@@ -689,4 +863,3 @@ group Fugit::Duration do
     end
   end
 end
-

@@ -7,6 +7,7 @@ module Fugit
 end
 
 require 'time'
+require 'date'
 require 'stringio'
 
 require 'raabro'
@@ -18,4 +19,3 @@ require 'fugit/duration'
 require 'fugit/nat'
 require 'fugit/at'
 require 'fugit/parse'
-

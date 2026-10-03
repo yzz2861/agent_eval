@@ -92,6 +92,17 @@ module Fugit
       kes.select { |_, v| v[:I] }.freeze,
       kes.select { |_, v| ! v[:I] }.freeze
 
+    MONTH_END_POLICIES = {
+      clamp: :clamp,
+      clip: :clamp,
+      last_day: :clamp,
+      roll: :roll,
+      roll_forward: :roll,
+      reject: :reject,
+      raise: :reject,
+      strict: :reject,
+    }.freeze
+
     def _to_s(key)
 
       KEYS.inject([ StringIO.new, '+' ]) { |(s, sign), (k, a)|
@@ -239,8 +250,9 @@ module Fugit
       self.class.allocate.init(nil, {}, params)
     end
 
-    def add_to_time(t)
+    def add_to_time(t, options={})
 
+      month_end = month_end_policy(options)
       t = ::EtOrbi.make_time(t)
 
       INFLA_KEYS.each do |k, a|
@@ -253,44 +265,33 @@ module Fugit
       NON_INFLA_KEYS.each do |k, a|
 
         v = @h[k]; next unless v
-        at = [ t.year, t.month, t.day, t.hour, t.min, t.sec ]
 
-        at[a[:x]] += v
-
-        if at[1] > 12
-          n, m = at[1] / 12, at[1] % 12
-          at[0], at[1] = at[0] + n, m
-        elsif at[1] < 1
-          n, m = (-at[1]) / 12 + 1, (11+at[1]) % 12 + 1
-          at[0], at[1] = at[0] - n, m
-        end
-
-        t = ::EtOrbi.make_time(at, t.zone)
+        t = shift_calendar_field(t, k, a, v, month_end)
       end
 
       t
     end
 
-    def add(a)
+    def add(a, options={})
 
       case a
       when Numeric then add_numeric(a)
       when Fugit::Duration then add_duration(a)
       when String then add_duration(self.class.parse(a))
-      when ::Time, ::EtOrbi::EoTime then add_to_time(a)
+      when ::Time, ::EtOrbi::EoTime then add_to_time(a, options)
       else fail ArgumentError.new(
         "cannot add #{a.class} instance to a Fugit::Duration")
       end
     end
     alias + add
 
-    def subtract(a)
+    def subtract(a, options={})
 
       case a
       when Numeric then add_numeric(-a)
       when Fugit::Duration then add_duration(-a)
       when String then add_duration(-self.class.parse(a))
-      when ::Time, ::EtOrbi::EoTime then opposite.add_to_time(a)
+      when ::Time, ::EtOrbi::EoTime then opposite.add_to_time(a, options)
       else fail ArgumentError.new(
         "cannot subtract #{a.class} instance to a Fugit::Duration")
       end
@@ -308,9 +309,9 @@ module Fugit
       @h.hash
     end
 
-    def next_time(from=::EtOrbi::EoTime.now)
+    def next_time(from=::EtOrbi::EoTime.now, options={})
 
-      add(from)
+      add(from, options)
     end
 
     # Returns a copy of this duration, omitting its seconds.
@@ -325,6 +326,70 @@ module Fugit
     end
 
     protected
+
+    def month_end_policy(options)
+
+      value = options.fetch(:end_of_month, :roll)
+      policy = MONTH_END_POLICIES[value]
+
+      return policy if policy
+
+      fail ArgumentError.new(
+        "unknown month-end policy #{value.inspect}, expected :clamp, " +
+        ":roll, or :reject")
+    end
+
+    def shift_calendar_field(t, key, info, value, policy)
+
+      unless value.is_a?(Integer)
+        return shift_calendar_field_legacy(t, info, value)
+      end
+
+      year = t.year
+      month = t.month
+      day = t.day
+
+      if key == :yea
+        year += value
+      else
+        year, month = (year * 12 + month - 1 + value).divmod(12)
+        month += 1
+      end
+
+      last_day = (::Date.new(year, month, 1) >> 1).prev_day.day
+
+      if day > last_day
+        case policy
+        when :clamp
+          day = last_day
+        when :reject
+          fail ArgumentError.new(
+            "#{t.strftime('%F')} does not exist after shifting #{value} " +
+            "#{info[:l]}#{value.abs == 1 ? '' : 's'}: " +
+            "#{year}-%02d-%02d is not a valid date" % [ month, day ])
+        end
+      end
+
+      ::EtOrbi.make_time(
+        [ year, month, day, t.hour, t.min, t.sec ], t.zone)
+    end
+
+    def shift_calendar_field_legacy(t, info, value)
+
+      at = [ t.year, t.month, t.day, t.hour, t.min, t.sec ]
+
+      at[info[:x]] += value
+
+      if at[1] > 12
+        n, m = at[1] / 12, at[1] % 12
+        at[0], at[1] = at[0] + n, m
+      elsif at[1] < 1
+        n, m = (-at[1]) / 12 + 1, (11+at[1]) % 12 + 1
+        at[0], at[1] = at[0] - n, m
+      end
+
+      ::EtOrbi.make_time(at, t.zone)
+    end
 
     def init(original, options, h)
 
@@ -420,4 +485,3 @@ module Fugit
     end
   end
 end
-

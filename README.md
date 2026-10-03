@@ -646,6 +646,103 @@ p d.to_plain_s  # => "2Y2M1D5h3600s"
 p Fugit::Duration.parse('1y2M1d4h').to_sec # => 36820800
 ```
 
+When a duration is applied to a time, weeks, days, hours, minutes, and seconds
+are elapsed-time units. They are applied first as actual seconds (a day is
+always 86,400 seconds, even on a DST transition day). Years are applied next,
+then months; the textual order of the parsed units does not change that order.
+Months and years are never converted to average seconds.
+
+Adding a month or year can produce a date that does not exist. Callers choose
+what happens with `end_of_month:`:
+
+* `:clamp` (also `:clip` or `:last_day`): use the last valid day of the target
+  month.
+* `:roll` (also `:roll_forward`): keep the same day number and roll into the
+  following month. This is the historical and default behavior.
+* `:reject` (also `:raise` or `:strict`): raise `ArgumentError`.
+
+```ruby
+t = EtOrbi::EoTime.parse('2020-01-31 12:00:00 UTC')
+
+Fugit.parse('1M').add(t, end_of_month: :clamp).to_s
+  # => "2020-02-29 12:00:00 Z"
+Fugit.parse('1M').add(t, end_of_month: :roll).to_s
+  # => "2020-03-02 12:00:00 Z"
+Fugit.parse('1M').add(t) # no option: same as :roll
+  # => "2020-03-02 12:00:00 Z"
+Fugit.parse('1M').add(t, end_of_month: :reject)
+  # ArgumentError: 2020-01-31 does not exist after shifting 1 month:
+  #              2020-02-31 is not a valid date
+
+t = EtOrbi::EoTime.parse('2020-02-29 12:00:00 UTC')
+Fugit.parse('1y').add(t, end_of_month: :reject)
+  # ArgumentError: 2020-02-29 does not exist after shifting 1 year:
+  #              2021-02-29 is not a valid date
+Fugit.parse('-1y').add(t, end_of_month: :clamp).to_s
+  # => "2019-02-28 12:00:00 Z"
+
+t = EtOrbi::EoTime.parse('2020-03-31 12:00:00 UTC')
+Fugit.parse('-1M').add(t, end_of_month: :clamp).to_s
+  # => "2020-02-29 12:00:00 Z"
+Fugit.parse('-1M').add(t).to_s
+  # => "2020-03-02 12:00:00 Z"
+```
+
+Calendar arithmetic is not reversible after an invalid date is normalized.
+
+```ruby
+t = EtOrbi::EoTime.parse('2020-01-31 12:00:00 UTC')
+t1 = Fugit.parse('1M').add(t, end_of_month: :clamp)
+t2 = Fugit.parse('-1M').add(t1, end_of_month: :clamp)
+t1.to_s # => "2020-02-29 12:00:00 Z"
+t2.to_s # => "2020-01-29 12:00:00 Z"
+
+t1 = Fugit.parse('1M').add(t, end_of_month: :roll)
+t2 = Fugit.parse('-1M').add(t1, end_of_month: :roll)
+t1.to_s # => "2020-03-02 12:00:00 Z"
+t2.to_s # => "2020-02-02 12:00:00 Z"
+
+t = EtOrbi::EoTime.parse('2020-02-29 12:00:00 UTC')
+t1 = Fugit.parse('1y').add(t, end_of_month: :clamp)
+t2 = Fugit.parse('-1y').add(t1, end_of_month: :clamp)
+t1.to_s # => "2021-02-28 12:00:00 Z"
+t2.to_s # => "2020-02-28 12:00:00 Z"
+```
+
+The fixed-unit-first rule is visible when a day and a month cross a boundary.
+`1y1M1d` first adds one elapsed day, then one year, then one month:
+
+```ruby
+t = EtOrbi::EoTime.parse('2020-02-29 12:00:00 UTC')
+Fugit.parse('1y1M1d').add(t, end_of_month: :clamp).to_s
+  # => "2021-04-01 12:00:00 Z"
+Fugit.parse('1y1M').add(t, end_of_month: :clamp).to_s
+  # => "2021-03-28 12:00:00 Z"
+
+# 1y1M is not collapsed into 13 total months; years and months run separately.
+Fugit.parse('13M').add(t, end_of_month: :clamp).to_s
+  # => "2021-03-29 12:00:00 Z"
+Fugit.parse('13M').add(t, end_of_month: :reject).to_s
+  # => "2021-03-29 12:00:00 Z"
+```
+
+DST is also honored. Elapsed days can change the displayed wall-clock hour,
+while year/month shifts preserve the requested wall-clock fields:
+
+```ruby
+t = EtOrbi::EoTime.parse('2021-03-13 12:00:00 America/New_York')
+Fugit.parse('1d').add(t).to_s
+  # => "2021-03-14 13:00:00 -0400"
+
+t = EtOrbi::EoTime.parse('2021-02-14 12:00:00 America/New_York')
+Fugit.parse('1M').add(t).to_s
+  # => "2021-03-14 12:00:00 -0400"
+```
+
+If a year/month shift lands on a local time that does not exist (a spring
+forward gap) or is ambiguous (a fall-back repetition), `TZInfo::PeriodNotFound`
+or `TZInfo::AmbiguousTime` is raised.
+
 There is a `#deflate` method
 
 ```ruby
@@ -713,4 +810,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
