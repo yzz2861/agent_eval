@@ -76,6 +76,12 @@ module Dry
         !external?
       end
 
+      # Whether this step was declared with +resumable: true+, allowing
+      # checkpoints to be formed around it.
+      def resumable?
+        !!adapter.options[:resumable]
+      end
+
       def external?
         !!operation_name
       end

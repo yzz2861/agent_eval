@@ -7,6 +7,18 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ## [Unreleased]
 
+### Added
+
+- Optional checkpointing for resumable transactions: steps declared with
+  `resumable: true` emit plain-data checkpoint records (step identity,
+  definition version, and next-step input) to a caller-supplied checkpointer
+  via `transaction.call(input, checkpointer)`. After a restart,
+  `transaction.resume(checkpoint_data)` verifies the step identity,
+  definition version, and input integrity before continuing. It returns
+  `Checkpoint::Resumed`, `Checkpoint::Ambiguous` (the checkpointed step's
+  completion was never confirmed, so exactly-once execution cannot be
+  claimed and the caller must adjudicate), or `Checkpoint::VersionMismatch`
+  (the transaction definition changed since the checkpoint was written)
 
 ## [0.16.0] - 2024-01-17
 

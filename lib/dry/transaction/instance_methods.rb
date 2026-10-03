@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "dry/transaction/checkpoint"
 require "dry/transaction/result_matcher"
 require "dry/transaction/stack"
 
@@ -23,10 +24,18 @@ module Dry
         subscribe(listeners) unless listeners.nil?
       end
 
-      def call(input = nil, &block)
+      # Runs the transaction.
+      #
+      # @param input [Object] the input for the first step
+      # @param checkpointer [#save, nil] optional checkpointer; when given,
+      #   steps declared with +resumable: true+ emit plain-data checkpoint
+      #   records via +checkpointer.save(hash)+. The caller is responsible for
+      #   persisting these records. (Positional to remain compatible with
+      #   callers passing a Hash as +input+.)
+      def call(input = nil, checkpointer = nil, &block)
         assert_step_arity
 
-        result = stack.(Success(input))
+        result = run_steps(steps, Success(input), checkpointer)
 
         if block
           ResultMatcher.(result, &block)
@@ -36,6 +45,62 @@ module Dry
             Failure(step_failure.value)
           }
         end
+      end
+
+      # Resumes a transaction from a caller-persisted checkpoint record.
+      #
+      # The record's step identity, definition version, and input integrity
+      # are all verified before anything runs; the position to resume from is
+      # never guessed from a step index alone.
+      #
+      # @param checkpoint_data [Hash] plain data previously emitted by a
+      #   checkpointer (see #call)
+      # @param checkpointer [#save, nil] optional checkpointer for the
+      #   remaining resumable steps
+      #
+      # @return [Checkpoint::Resumed] the transaction continued from the step
+      #   after the checkpointed one and ran to completion
+      # @return [Checkpoint::Ambiguous] the checkpointed step started but its
+      #   completion was never confirmed; it may already have produced
+      #   external side effects, so the caller must adjudicate
+      # @return [Checkpoint::VersionMismatch] the checkpoint was written by a
+      #   different version of the transaction definition
+      #
+      # @raise [CorruptedCheckpointError] if the data fails validation
+      # @raise [UnresumableCheckpointError] if the checkpoint references a
+      #   step that is missing or not declared resumable
+      def resume(checkpoint_data, checkpointer = nil)
+        assert_step_arity
+
+        record = Checkpoint::Record.load(checkpoint_data)
+
+        unless record.version == checkpoint_version
+          return Checkpoint::VersionMismatch.new(
+            checkpoint_version: record.version,
+            current_version: checkpoint_version
+          )
+        end
+
+        step = steps.detect { |s| s.name.to_s == record.step_name }
+
+        unless step&.resumable?
+          raise UnresumableCheckpointError, record.step_name
+        end
+
+        if record.started?
+          return Checkpoint::Ambiguous.new(step_name: step.name, input: record.input)
+        end
+
+        remaining_steps = steps[(steps.index(step) + 1)..]
+        result = run_steps(remaining_steps, Success(record.input), checkpointer)
+
+        Checkpoint::Resumed.new(result.or { |step_failure| Failure(step_failure.value) })
+      end
+
+      # A stable fingerprint of the transaction's step definitions. Checkpoint
+      # records store this version so resumes can detect definition changes.
+      def checkpoint_version
+        @checkpoint_version ||= Checkpoint.definition_version(steps)
       end
 
       def subscribe(listeners)
@@ -67,6 +132,16 @@ module Dry
       end
 
       private
+
+      def run_steps(steps_to_run, input, checkpointer)
+        if checkpointer
+          Stack.new(steps_to_run, checkpointer: checkpointer, version: checkpoint_version).(input)
+        elsif steps_to_run.equal?(steps)
+          stack.(input)
+        else
+          Stack.new(steps_to_run).(input)
+        end
+      end
 
       def respond_to_missing?(name, _include_private = false)
         steps.any? { |step| step.name == name }
