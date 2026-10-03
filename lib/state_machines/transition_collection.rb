@@ -63,6 +63,8 @@ module StateMachines
       reset
 
       if valid?
+        each { |transition| transition.send(:snapshot_history) }
+
         if use_event_attributes? && !block_given?
           each do |transition|
             transition.transient = true

@@ -40,6 +40,7 @@ module StateMachines
         @initialize_state = options[:initialize]
         @action_hook_defined = false
         @async_requested = options[:async]
+        @state_histories = {}
 
         self.owner_class = owner_class
 
@@ -71,6 +72,8 @@ module StateMachines
         @states = @states.dup
         @states.machine = self
         @callbacks = { before: @callbacks[:before].dup, after: @callbacks[:after].dup, failure: @callbacks[:failure].dup }
+        @callbacks.each_value { |callbacks| callbacks.each { |callback| callback.branch.machine = self } }
+        @state_histories = @state_histories.transform_values(&:dup)
         @async_requested = orig.instance_variable_get(:@async_requested)
         @async_mode_enabled = orig.instance_variable_get(:@async_mode_enabled)
       end

@@ -10,8 +10,7 @@ module StateMachines
     include MatcherHelpers
 
     # The state machine for which this event is defined
-    attr_accessor :machine
-
+    attr_reader :machine
     # The name of the event
     attr_reader :name
 
@@ -69,6 +68,12 @@ module StateMachines
       super
       @branches = @branches.dup
       @known_states = @known_states.dup
+      @branches.each { |branch| branch.machine = @machine }
+    end
+
+    def machine=(machine)
+      @machine = machine
+      @branches.each { |branch| branch.machine = machine }
     end
 
     # Transforms the event name into a more human-readable format, such as
@@ -80,7 +85,12 @@ module StateMachines
     # Evaluates the given block within the context of this event.  This simply
     # provides a DSL-like syntax for defining transitions.
     def context(&)
-      instance_eval(&)
+      previous_context_state = machine.instance_variable_get(:@event_context_state)
+      begin
+        instance_eval(&)
+      ensure
+        machine.instance_variable_set(:@event_context_state, previous_context_state)
+      end
     end
 
     # Creates a new transition that determines what to change the current state
@@ -102,11 +112,17 @@ module StateMachines
     def transition(options)
       raise ArgumentError, 'Must specify as least one transition requirement' if options.empty?
 
+      context_state = machine.instance_variable_get(:@event_context_state)
+      if context_state && !options.key?(:from) && !options.key?(:except_from) && options.key?(:to)
+        options = options.merge(from: context_state.name)
+      end
+
       # Only a certain subset of explicit options are allowed for transition
       # requirements
       StateMachines::OptionsValidator.assert_valid_keys!(options, :from, :to, :except_from, :except_to, :if, :unless, :if_state, :unless_state, :if_all_states, :unless_all_states, :if_any_state, :unless_any_state) if (options.keys - %i[from to on except_from except_to except_on if unless if_state unless_state if_all_states unless_all_states if_any_state unless_any_state]).empty?
 
       branches << branch = Branch.new(options.merge(on: name))
+      branch.machine = machine
       @known_states |= branch.known_states
       branch
     end
@@ -139,24 +155,33 @@ module StateMachines
       StateMachines::OptionsValidator.assert_valid_keys!(requirements, :from, :to, :guard)
       requirements[:from] = machine.states.match!(object).name unless (custom_from_state = requirements.include?(:from))
 
+      matching_branch = nil
+      matching_match = nil
+
       branches.each do |branch|
         next unless (match = branch.match(object, requirements, event_args))
 
-        # Branch allows for the transition to occur
-        from = requirements[:from]
-        to = if match[:to].is_a?(LoopbackMatcher)
-               from
-             else
-               values = requirements.include?(:to) ? [requirements[:to]].flatten : [from] | machine.states.map { |state| state.name }
-
-               match[:to].filter(values).first
-             end
-
-        return Transition.new(object, machine, name, from, to, !custom_from_state)
+        if matching_branch.nil? || (branch_specificity(match, requirements) <=> branch_specificity(matching_match, requirements)).positive?
+          matching_branch = branch
+          matching_match = match
+        end
       end
 
-      # No transition matched
-      nil
+      return unless matching_branch
+
+      from = requirements[:from]
+      to = if matching_match[:to].is_a?(LoopbackMatcher)
+             from
+           else
+             values = requirements.include?(:to) ? [requirements[:to]].flatten : [from] | machine.states.map { |state| state.name }
+
+             matching_match[:to].filter(values).first
+           end
+
+      target_state = machine.states.fetch(to)
+      target_state = machine.leaf_state_for(object, target_state) if target_state.composite?
+
+      Transition.new(object, machine, name, from, target_state.name, !custom_from_state)
     end
 
     # Attempts to perform the next available transition on the given object.
@@ -218,6 +243,15 @@ module StateMachines
     end
 
     protected
+
+    def branch_specificity(match, requirements)
+      %i[from to].map do |direction|
+        matcher = match[direction]
+        next 0 unless matcher.is_a?(WhitelistMatcher)
+
+        matcher.values.map { |state_name| machine.state_path_length(state_name, state_name) }.max || 0
+      end
+    end
 
     # Add the various instance methods that can transition the object using
     # the current event

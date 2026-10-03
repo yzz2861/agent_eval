@@ -27,6 +27,9 @@ module StateMachines
     # The requirement for verifying the event being matched
     attr_reader :event_requirement
 
+    # The machine that owns this branch
+    attr_accessor :machine
+
     # One or more requirements for verifying the states being matched.  All
     # requirements contain a mapping of {:from => matcher, :to => matcher}.
     attr_reader :state_requirements
@@ -39,6 +42,7 @@ module StateMachines
 
     # Creates a new branch
     def initialize(options = {}) # :nodoc:
+      @machine = nil
       # Build conditionals
       @if_condition = options.delete(:if)
       @unless_condition = options.delete(:unless)
@@ -144,9 +148,20 @@ module StateMachines
     def match(object, query = {}, event_args = [])
       StateMachines::OptionsValidator.assert_valid_keys!(query, :from, :to, :on, :guard)
 
-      return unless (match = match_query(query)) && matches_conditions?(object, query, event_args)
+      previous_machine = Thread.current[:state_machines_match_machine]
+      Thread.current[:state_machines_match_machine] = machine
+      begin
+        return unless (match = match_query(query)) && matches_conditions?(object, query, event_args)
+      ensure
+        Thread.current[:state_machines_match_machine] = previous_machine
+      end
 
       match
+    end
+
+    def initialize_copy(orig) # :nodoc:
+      super
+      @state_requirements = @state_requirements.map(&:dup)
     end
 
     def draw(graph, event, valid_states, io = $stdout)

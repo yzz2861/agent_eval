@@ -60,7 +60,6 @@ module StateMachines
     attr_reader :machine
 
     # The state that must be present in an object for this context to be active
-    attr_reader :state
 
     # Creates a new context for the given state
     def initialize(state)
@@ -95,6 +94,38 @@ module StateMachines
 
       machine.transition(options.merge(options[:to] ? { from: state.name } : { to: state.name }))
     end
+
+    def state(*names, &block)
+      return @state if names.empty? && block.nil?
+
+      options = names.last.is_a?(Hash) ? names.pop : {}
+      machine.state(*names, **options, parent: state, &block)
+    end
+
+    def event(*names, &block)
+      events = machine.event(*names)
+      if block
+        machine.instance_variable_set(:@event_context_state, state)
+        begin
+          Array(events).each { |event| event.context(&block) }
+        ensure
+          machine.instance_variable_set(:@event_context_state, nil)
+        end
+      end
+      events
+    end
+
+    def on_enter(*methods, &block)
+      state.on_enter(*methods, &block)
+    end
+
+    alias enter on_enter
+
+    def on_exit(*methods, &block)
+      state.on_exit(*methods, &block)
+    end
+
+    alias exit on_exit
 
     # Hooks in condition-merging to methods that don't exist in this module
     def method_missing(*args, &)

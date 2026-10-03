@@ -56,6 +56,7 @@ module StateMachines
       #   directly to the object
       def initialize_state(object, options = {})
         state = initial_state(object)
+        state = leaf_state_for(object, state) if state
         return unless state && (options[:force] || initialize_state?(object))
 
         value = state.value
@@ -334,13 +335,10 @@ module StateMachines
       #
       # The minimum requirement is that the last argument in the method be an
       # options hash which contains at least <tt>:if</tt> condition support.
-      def state(*names, &)
+      def state(*names, &block)
         options = names.last.is_a?(Hash) ? names.pop : {}
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name)
-
-        # Store the context so that it can be used for / matched against any state
-        # that gets added
-        @states.context(names, &) if block_given?
+        parent = options.delete(:parent) || @nested_state
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name, :history, :initial_child)
 
         if names.first.is_a?(Matcher)
           # Add any states referenced in the matcher.  When matchers are used,
@@ -349,7 +347,7 @@ module StateMachines
 
           states = add_states(names.first.values)
         else
-          states = add_states(names)
+          states = add_states(names, parent: parent)
 
           # Update the configuration for the state(s)
           states.each do |state|
@@ -361,6 +359,29 @@ module StateMachines
             state.human_name = options[:human_name] if options.include?(:human_name)
             state.cache = options[:cache] if options.include?(:cache)
             state.matcher = options[:if] if options.include?(:if)
+            state.history = options[:history] if options.include?(:history)
+
+            state.initial = options[:initial] if options.include?(:initial)
+
+            if options[:initial_child] || (parent && state.initial?)
+              state.initial_child = true
+              state.initial = false
+            end
+          end
+        end
+
+        if block
+          if names.first.is_a?(Matcher)
+            @states.context(names, &block)
+          elsif block.arity.zero?
+            states.each { |state| state.context(&block) }
+          else
+            previous_nested_state = @nested_state
+            begin
+              states.each { |state| @nested_state = state; block.call(state) }
+            ensure
+              @nested_state = previous_nested_state
+            end
           end
         end
 
@@ -385,7 +406,54 @@ module StateMachines
         ivar ? object.instance_variable_set(:"@#{attribute}", value) : object.send("#{attribute}=", value)
       end
 
+      def state_matches_name?(value, name)
+        target_state = name.is_a?(State) ? name : states[name]
+        return false unless target_state
+
+        actual_state = value.is_a?(State) ? value : states[value]
+        actual_state&.descendant_of?(target_state) == true
+      end
+
+      def state_path_length(value, name)
+        target_state = name.is_a?(State) ? name : states[name]
+        return 0 unless target_state
+
+        actual_state = value.is_a?(State) ? value : states[value]
+        return target_state.path.length if actual_state&.descendant_of?(target_state)
+
+        0
+      end
+
+      def leaf_state_for(object, state)
+        child = state.composite? ? state_histories(object)[state.name] || state.default_child : nil
+        return state unless child
+
+        leaf_state_for(object, child)
+      end
+
       protected
+
+      def state_histories(object)
+        histories = object.instance_variable_get(:@state_machine_histories) ||
+                    object.instance_variable_set(:@state_machine_histories, {})
+        histories[name] ||= {}
+      end
+
+      def remember_state_history(object, state)
+        return unless state.parent
+
+        state_histories(object)[state.parent.name] = state if state.parent.history?
+      end
+
+      def snapshot_state_histories(object)
+        state_histories(object).transform_values(&:itself)
+      end
+
+      def restore_state_histories(object, snapshot)
+        histories = object.instance_variable_get(:@state_machine_histories) || {}
+        histories[name] = snapshot
+        object.instance_variable_set(:@state_machine_histories, histories)
+      end
 
       # Determines if the machine's attribute needs to be initialized.  This
       # will only be true if the machine's attribute is blank.

@@ -52,6 +52,12 @@ module StateMachines
       @to_state = machine.states.fetch(to_name)
       @to = @to_state.value
 
+      @from_state_path = @from_state.path
+      @to_state_path = @to_state.path
+      common_path = @from_state_path.zip(@to_state_path).take_while { |from_state, to_state| from_state == to_state }.map(&:first)
+      @exit_states = (@from_state_path - common_path).reverse
+      @enter_states = @to_state_path - common_path
+
       reset
     end
 
@@ -251,6 +257,7 @@ module StateMachines
       return if @persisted
 
       machine.write(object, :state, to)
+      remember_history
       @persisted = true
     end
 
@@ -279,6 +286,7 @@ module StateMachines
     #   transition.rollback
     #   vehicle.state             # => "parked"
     def rollback
+      restore_history
       reset
       machine.write(object, :state, from)
     end
@@ -287,6 +295,8 @@ module StateMachines
     # the state has already been persisted
     def reset
       @before_run = @persisted = @after_run = false
+      @enter_callbacks_run = false
+      @history_snapshot = nil
       # Kill so ensure blocks in paused callbacks still run (CRuby only:
       # TruffleRuby lacks Fiber#kill, JRuby's doesn't wait for ensure)
       @paused_fiber.kill if RUBY_ENGINE == 'ruby' && @paused_fiber&.alive? && !@paused_fiber.equal?(Fiber.current)
@@ -543,9 +553,11 @@ module StateMachines
       else
         # No more callbacks, execute the action block if at the end
         if block_given?
+          @exit_states.each { |state| state.run_exit_callbacks(object, self) }
           action = { success: true }.merge(yield)
           @result = action[:result]
           @success = action[:success]
+          run_enter_callbacks if @success
         else
           # No action block provided, default to success
           @success = true
@@ -581,6 +593,25 @@ module StateMachines
       end
 
       @after_run = true
+    end
+
+    def remember_history
+      machine.send(:remember_state_history, object, @to_state)
+    end
+
+    def snapshot_history
+      @history_snapshot = machine.send(:snapshot_state_histories, object)
+    end
+
+    def restore_history
+      machine.send(:restore_state_histories, object, @history_snapshot) if @history_snapshot
+    end
+
+    def run_enter_callbacks
+      return if @enter_callbacks_run
+
+      @enter_states.each { |state| state.run_enter_callbacks(object, self) }
+      @enter_callbacks_run = true
     end
 
     # Gets a hash of the context defining this unique transition (including

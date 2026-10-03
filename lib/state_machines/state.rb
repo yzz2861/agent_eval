@@ -12,6 +12,7 @@ module StateMachines
   # StateMachines::Machine#state for more information about how state-driven
   # behavior can be utilized.
   class State
+    include EvalHelpers
     # The state machine for which this state is defined
     attr_reader :machine
 
@@ -40,6 +41,18 @@ module StateMachines
     # state
     attr_accessor :matcher
 
+    # The parent state when this state is nested inside another state
+    attr_reader :parent
+
+    # Child states nested directly beneath this state
+    attr_reader :children
+
+    # Whether this state records its most recently active direct child
+    attr_accessor :history
+
+    # Whether this state is the default child of its parent
+    attr_reader :initial_child
+
     # Creates a new state within the context of the given machine.
     #
     # Configuration options:
@@ -53,7 +66,7 @@ module StateMachines
     #   (e.g. :value => lambda {Time.now}, :if => lambda {|state| !state.nil?}).
     #   By default, the configured value is matched.
     # * <tt>:human_name</tt> - The human-readable version of this state's name
-    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, **extra_options) # :nodoc:
+    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, parent: nil, history: false, initial_child: false, **extra_options) # :nodoc:
       # Handle both old hash style and new kwargs style for backward compatibility
       case options
       in Hash
@@ -66,7 +79,8 @@ module StateMachines
         human_name = options[:human_name]
       in nil
         # New style: initialize(machine, name, initial: true, value: 'foo')
-        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name) unless extra_options.empty?
+        public_extra_options = extra_options.except(:parent, :history, :initial_child)
+        StateMachines::OptionsValidator.assert_valid_keys!(public_extra_options, :initial, :value, :cache, :if, :human_name) unless public_extra_options.empty?
         if_condition = binding.local_variable_get(:if) # 'if' is a keyword, need special handling
       else
         # Handle unexpected options
@@ -81,7 +95,15 @@ module StateMachines
       @cache = cache
       @matcher = if_condition
       @initial = initial == true
+      @parent = nil
+      @children = []
+      @history = history == true
+      @initial_child = initial_child == true
+      @enter_callbacks = []
+      @exit_callbacks = []
       @context = StateContext.new(self)
+
+      self.parent = parent if parent
 
       return unless name
 
@@ -108,11 +130,87 @@ module StateMachines
     def initialize_copy(orig) # :nodoc:
       super
       @context = StateContext.new(self)
+      @children = []
+      @enter_callbacks = @enter_callbacks.dup
+      @exit_callbacks = @exit_callbacks.dup
     end
 
     def machine=(machine)
       @machine = machine
       @context = StateContext.new(self)
+    end
+
+    def parent=(parent)
+      return if @parent.equal?(parent)
+
+      @parent.children.delete(self) if @parent
+      @parent = parent
+      parent.children << self if parent && !parent.children.include?(self)
+    end
+
+    # Whether this state contains nested states
+    def composite?
+      children.any?
+    end
+
+    # Whether this state can be the single value persisted for an object
+    def leaf?
+      !composite?
+    end
+
+    # States from the outermost ancestor to this state
+    def path
+      (parent ? parent.path : []) + [self]
+    end
+
+    # Ancestor states, ordered from outermost to immediate parent
+    def ancestors
+      path[0...-1]
+    end
+
+    # Whether this state is the given state or nested beneath it
+    def descendant_of?(state)
+      self == state || ancestors.include?(state)
+    end
+
+    def initial_child?
+      initial_child == true
+    end
+
+    def initial_child=(value)
+      @initial_child = value == true
+    end
+
+    def history?
+      history == true
+    end
+
+    def default_child
+      children.detect(&:initial_child?) || children.first
+    end
+
+    def on_enter(*methods, &block)
+      @enter_callbacks.concat(methods)
+      @enter_callbacks << block if block
+      @enter_callbacks
+    end
+
+    alias enter on_enter
+
+    def on_exit(*methods, &block)
+      @exit_callbacks.concat(methods)
+      @exit_callbacks << block if block
+      @exit_callbacks
+    end
+
+    alias exit on_exit
+
+    def run_enter_callbacks(object, transition)
+      @enter_callbacks.each { |callback| evaluate_method(object, callback, transition) }
+    end
+
+    def run_exit_callbacks(object, transition)
+      @exit_callbacks.each { |callback| evaluate_method(object, callback, transition) }
     end
 
     # Determines whether there are any states that can be transitioned to from
@@ -194,7 +292,19 @@ module StateMachines
     #   state.matches?(nil)         # => false
     #   state.matches?(Time.now)    # => true
     def matches?(other_value)
-      matcher ? matcher.call(other_value) : other_value == value
+      return matcher.call(other_value) if matcher
+
+      if composite?
+        other_state = if other_value.respond_to?(:descendant_of?)
+                        other_value
+                      else
+                        machine.states[other_value, :value]
+                      end
+
+        return other_state.descendant_of?(self) == true if other_state
+      end
+
+      other_value == value
     end
 
     # Defines a context for the state which will be enabled on instances of
@@ -245,7 +355,7 @@ module StateMachines
       options = { method_name: method }.merge(options)
       state = machine.states.match!(object)
 
-      if state == self && object.respond_to?(method)
+      if state.descendant_of?(self) && method_defined_in_context?(method)
         object.send(method, *args, &)
       elsif (method_missing = options[:method_missing])
         # Dispatch to the superclass since the object either isn't in this state
@@ -278,6 +388,11 @@ module StateMachines
     end
 
     private
+
+    def method_defined_in_context?(method)
+      context_name = method.to_s
+      @context.method_defined?(method) || @context.method_defined?(context_name.to_sym) || @context.private_method_defined?(method)
+    end
 
     # Should the value be cached after it's evaluated for the first time?
     def cache_value?

@@ -64,7 +64,19 @@ module StateMachines
     #   matcher.matches?(:parked)       # => true
     #   matcher.matches?(:first_gear)   # => false
     def matches?(value, _context = {})
-      values.include?(value)
+      return true if values.include?(value)
+
+      machine = Thread.current[:state_machines_match_machine]
+      return false unless machine
+
+      values.any? { |state_name| machine.state_matches_name?(value, state_name) }
+    end
+
+    def filter(values)
+      explicit_values = values & self.values
+      return explicit_values if explicit_values.any?
+
+      values.select { |value| matches?(value) }
     end
 
     # A human-readable description of this matcher
@@ -84,7 +96,12 @@ module StateMachines
     #   matcher.matches?(:parked)       # => false
     #   matcher.matches?(:first_gear)   # => true
     def matches?(value, _context = {})
-      !values.include?(value)
+      return false if values.include?(value)
+
+      machine = Thread.current[:state_machines_match_machine]
+      return true unless machine
+
+      values.none? { |state_name| machine.state_matches_name?(value, state_name) }
     end
 
     # Finds all values that are *not* within the blacklist configured for this

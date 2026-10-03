@@ -144,6 +144,12 @@ module StateMachines
       @branch = Branch.new(options)
     end
 
+    def initialize_copy(orig) # :nodoc:
+      super
+      @methods = @methods.dup
+      @branch = @branch.dup
+    end
+
     # Gets a list of the states known to this callback by looking at the
     # branch's known states
     def known_states

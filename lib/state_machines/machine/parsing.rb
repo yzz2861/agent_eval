@@ -30,25 +30,31 @@ module StateMachines
       # Adds a new transition callback of the given type.
       def add_callback(type, options, &)
         callbacks[type == :around ? :before : type] << callback = Callback.new(type, options, &)
+        callback.branch.machine = self
         add_states(callback.known_states)
         callback
       end
 
       # Tracks the given set of states in the list of all known states for
       # this machine
-      def add_states(new_states)
+      def add_states(new_states, parent: nil)
         new_states.map do |new_state|
           # Check for other states that use a different class type for their name.
           # This typically prevents string / symbol misuse.
           if new_state && (conflict = states.detect { |state| state.name && state.name.class != new_state.class })
             raise ArgumentError, "#{new_state.inspect} state defined as #{new_state.class}, #{conflict.name.inspect} defined as #{conflict.name.class}; all states must be consistent"
           end
-
           unless (state = states[new_state])
-            states << state = State.new(self, new_state)
+            parent_state = if parent
+                             parent.is_a?(State) ? parent : states[parent]
+                           end
+            states << state = State.new(self, new_state, parent: parent_state)
 
             # Copy states over to sibling machines
             sibling_machines.each { |machine| machine.states << state }
+          end
+          if parent && state.parent.nil?
+            state.parent = parent.is_a?(State) ? parent : states[parent]
           end
 
           state

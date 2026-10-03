@@ -251,6 +251,66 @@ vehicle.fire_events!(:ignite, :enable_alarm)    # => StateMachines:InvalidParall
 
 State machines can coordinate with each other using state guards, allowing transitions to depend on the state of other state machines within the same object. This enables complex system modeling where components are interdependent.
 
+### Nested States and Shallow History
+
+States can be nested in a single active branch. Only the current leaf state is stored on the object, while parent predicates match any descendant. Add `history: true` to a parent state to restore its most recently active direct child when a transition targets that parent.
+
+```ruby
+class WorkOrder
+  state_machine initial: :processing do
+    state :idle
+    state :paused
+
+    state :processing, history: true do |processing|
+      processing.enter { |_order, _transition| track(:enter_processing) }
+      processing.exit  { |_order, _transition| track(:exit_processing) }
+
+      state :dispatching, initial: true do |state|
+        state.enter { track(:enter_dispatching) }
+        state.exit  { track(:exit_dispatching) }
+      end
+
+      state :executing do |state|
+        state.enter { track(:enter_executing) }
+        state.exit  { track(:exit_executing) }
+      end
+
+      event :assign do
+        transition executing: same
+      end
+    end
+
+    event :assign do
+      transition processing: :executing
+    end
+
+    event :start do
+      transition idle: :processing
+    end
+
+    event :pause do
+      transition executing: :paused
+    end
+
+    event :resume do
+      transition paused: :processing
+    end
+  end
+end
+
+order = WorkOrder.new
+order.state       # => "dispatching"
+order.processing? # => true
+order.assign
+order.state       # => "executing"
+order.pause
+order.state       # => "paused"
+order.resume
+order.state       # => "executing" (shallow history)
+```
+
+Exit callbacks run from the leaf up to the nearest common ancestor; enter callbacks then run from the child below that ancestor down to the leaf. The common ancestor is neither exited nor re-entered. Events declared in a parent state can be refined by a more specific child state.
+
 ## State Guard Options
 
 ### Single State Guards

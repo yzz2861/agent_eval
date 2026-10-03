@@ -7,6 +7,16 @@ module StateMachines
       super(machine, index: %i[name qualified_name value])
     end
 
+    def initialize_copy(orig) # :nodoc:
+      super
+
+      copied_states = @nodes.each_with_object({}) { |state, map| map[state.name] = state }
+      @nodes.each do |state|
+        original_state = orig.detect { |candidate| candidate.name == state.name }
+        state.parent = copied_states[original_state.parent.name] if original_state&.parent
+      end
+    end
+
     # Determines whether the given object is in a specific state.  If the
     # object's current value doesn't match the state, then this will return
     # false, otherwise true.  If the given state is unknown, then an IndexError
