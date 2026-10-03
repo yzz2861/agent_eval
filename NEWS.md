@@ -1,5 +1,11 @@
 # NEWS
 
+## Unreleased
+
+### Improvements
+
+* Add SCRAM-SHA-256 authenticator without channel binding
+
 ## Version 0.5.0 (2024-03-27)
 
 ### Improvements

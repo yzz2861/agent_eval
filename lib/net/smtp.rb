@@ -171,8 +171,8 @@ module Net
   #
   # The Net::SMTP class supports the \SMTP extension for SASL Authentication
   # [RFC4954[https://www.rfc-editor.org/rfc/rfc4954.html]] and the following
-  # SASL mechanisms: +PLAIN+, +LOGIN+ _(deprecated)_, and +CRAM-MD5+
-  # _(deprecated)_.
+  # SASL mechanisms: +PLAIN+, +LOGIN+ _(deprecated)_, +CRAM-MD5+
+  # _(deprecated)_, and +SCRAM-SHA-256+.
   #
   # To use \SMTP authentication, pass extra arguments to
   # SMTP.start or SMTP#start.
@@ -181,8 +181,8 @@ module Net
   #     Net::SMTP.start('your.smtp.server', 25,
   #                     user: 'Your Account', secret: 'Your Password', authtype: :plain)
   #
-  # Support for other SASL mechanisms-such as +EXTERNAL+, +OAUTHBEARER+,
-  # +SCRAM-SHA-256+, and +XOAUTH2+-will be added in a future release.
+  # Support for other SASL mechanisms-such as +EXTERNAL+ and +OAUTHBEARER+-
+  # will be added in a future release.
   #
   # The +LOGIN+ and +CRAM-MD5+ mechanisms are still available for backwards
   # compatibility, but are deprecated and should be avoided.
@@ -318,6 +318,12 @@ module Net
     # You cannot get valid value before opening SMTP session.
     def capable_cram_md5_auth?
       auth_capable?('CRAM-MD5')
+    end
+
+    # true if server advertises AUTH SCRAM-SHA-256.
+    # You cannot get valid value before opening SMTP session.
+    def capable_scram_sha256_auth?
+      auth_capable?('SCRAM-SHA-256')
     end
 
     # Returns whether the server advertises support for the authentication type.

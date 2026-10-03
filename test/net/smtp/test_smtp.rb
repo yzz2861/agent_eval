@@ -162,6 +162,15 @@ module Net
       assert_equal "535", err.response.status
     end
 
+    def test_auth_scram_sha256
+      omit "openssl library not loaded" unless defined?(OpenSSL::VERSION)
+
+      server = FakeServer.start(auth: 'SCRAM-SHA-256')
+      smtp = Net::SMTP.start('localhost', server.port)
+      assert smtp.authenticate('account', 'password', :scram_sha_256).success?
+      smtp.finish
+    end
+
     def test_send_message
       port = fake_server_start
       smtp = Net::SMTP.start 'localhost', port
@@ -735,6 +744,7 @@ module Net
         return
       end
       type, arg = args
+      type = type.to_s.upcase
       unless Array(@capa[:auth]).map(&:upcase).include? type.upcase
         @sock.puts "535 5.7.8 Error: authentication failed: no mechanism available\r\n"
         return
@@ -755,12 +765,65 @@ module Net
                  r == 'YWNjb3VudCAyYzBjMTgxZjkxOGU2ZGM5Mjg3Zjk3N2E1ODhiMzg1YQ=='
                when 'XOAUTH2'
                  arg == 'dXNlcj1hY2NvdW50AWF1dGg9QmVhcmVyIHRva2VuAQE='
+               when 'SCRAM-SHA-256'
+                 return scram_auth(arg)
                end
       if result
         @sock.puts "235 2.7.0 Authentication successful\r\n"
       else
         @sock.puts "535 5.7.8 Error: authentication failed: authentication failure\r\n"
       end
+    end
+
+    def scram_auth(arg)
+      if arg.nil? && @scram_step == 2
+        @scram_step = nil
+        return
+      end
+
+      message = arg.to_s.unpack1('m')
+      unless message.start_with?('n,,n=')
+        @sock.puts "535 5.7.8 Error: authentication failed: authentication failure\r\n"
+        return
+      end
+
+      @scram_client_nonce = message.split('r=', 2).last
+      first = scram_server_first_message
+      @scram_step = 1
+      @sock.puts "334 #{[first].pack('m0')}\r\n"
+    end
+
+    def scram_server_first_message
+      @scram_password = 'password'
+      @scram_salt = OpenSSL::Random.random_bytes(16)
+      "r=#{@scram_client_nonce}server,s=#{[@scram_salt].pack('m0')},i=4096"
+    end
+
+    def scram_continue(argument)
+      if @scram_step == 1
+        @scram_step = 2
+        @sock.puts "334 #{[scram_server_final_message(argument)].pack('m0')}\r\n"
+        scram_client_final_response
+      else
+        @scram_step = nil
+      end
+    end
+
+    def scram_client_final_response
+      @sock.gets
+    end
+
+    def scram_server_final_message(_)
+      server_first = "r=#{@scram_client_nonce}server,s=#{[@scram_salt].pack('m0')},i=4096"
+      client_first_bare = "n=account,r=#{@scram_client_nonce}"
+      client_final = "c=biws,r=#{@scram_client_nonce}server"
+      auth_message = [client_first_bare, server_first, client_final].join(',')
+      salted = OpenSSL::PKCS5.pbkdf2_hmac(
+        @scram_password, @scram_salt, 4096, 32, OpenSSL::Digest.new('SHA256')
+      )
+      server_key = OpenSSL::HMAC.digest(OpenSSL::Digest.new('SHA256'), salted, 'Server Key')
+      verifier = OpenSSL::HMAC.digest(OpenSSL::Digest.new('SHA256'), server_key, auth_message)
+      "v=#{[verifier].pack('m0')}"
     end
 
     def mail(_)
@@ -798,8 +861,18 @@ module Net
           ehlo(comm.split[1])
         when "STARTTLS"
           starttls
+        when ""
+          if @scram_step == 2
+            @scram_step = nil
+            @sock.puts "235 2.7.0 Authentication successful\r\n"
+          end
         when /\AAUTH /
-          auth(*$'.split)
+          type, argument = $'.split(' ', 2)
+          if type == 'SCRAM-SHA-256' && @scram_step == 1
+            scram_continue(argument)
+          else
+            auth(type, argument)
+          end
         when /\AMAIL FROM:/
           mail($')
         when /\ARCPT TO:/
