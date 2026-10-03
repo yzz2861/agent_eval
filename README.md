@@ -79,6 +79,36 @@ This keeps inherited state safe and lets updates happen by replacing config obje
 * Custom exception handlers
 * Extensible architecture with a swappable backend
 
+### Translation references
+
+Translations can reference other translations inside a String, so shared
+fragments (e.g. a salutation reused by several notices) only need to be
+stored once:
+
+```yml
+en:
+  mailer:
+    salutation: "Dear %{name}"
+    greeting: "@{.salutation},"        # relative: mailer.salutation
+    notice:   "@{.salutation}, your order shipped. @{footer}"
+  footer: "The Team"
+```
+
+* `@{foo.bar}` references the absolute key `foo.bar`.
+* `@{.bar}` is a relative reference, resolved against the scope of the key
+  being translated (`mailer.greeting` + `@{.salutation}` => `mailer.salutation`).
+* `\@{foo.bar}` escapes the syntax and renders a literal `@{foo.bar}`.
+
+References are resolved through the regular translation path, so the current
+locale, locale fallbacks and Symbol aliases all apply. The expanded String is
+interpolated afterwards as a whole, which means referenced values may contain
+`%{...}` placeholders themselves.
+
+Referencing a key that resolves to a non-String value raises
+`I18n::InvalidTranslationReference` (values are never coerced with `to_s`).
+Circular references raise `I18n::CircularTranslationReference`, reporting the
+chain of keys involved.
+
 ## Pluggable Features
 
 * Cache

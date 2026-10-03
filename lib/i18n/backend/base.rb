@@ -8,6 +8,17 @@ module I18n
     module Base
       include I18n::Backend::Transliterator
 
+      # Matches translation references inside Strings, e.g. <tt>@{foo.bar}</tt>
+      # (absolute key) or <tt>@{.foo}</tt> (relative to the scope of the key
+      # currently being translated). A leading backslash escapes the
+      # reference: <tt>\@{foo}</tt> renders as a literal <tt>@{foo}</tt>.
+      TRANSLATION_REFERENCE_PATTERN = /(?<!\\)@\{([^{}]+)\}/
+
+      # Option key used to propagate the chain of keys currently being
+      # resolved through nested reference lookups. Reserved so it is never
+      # treated as an interpolation value.
+      REFERENCE_CHAIN_OPTION = :translation_reference_chain
+
       # Accepts a list of paths to translation files. Loads translations from
       # plain Ruby (*.rb), YAML files (*.yml), or JSON files (*.json). See #load_rb, #load_yml, and #load_json
       # for details.
@@ -52,6 +63,8 @@ module I18n
         if entry.nil? && !subtrees?
           throw(:exception, I18n::MissingTranslation.new(locale, key, options))
         end
+
+        entry = resolve_translation_references(locale, key, entry, options)
 
         deep_interpolation = options[:deep_interpolation]
         skip_interpolation = options[:skip_interpolation]
@@ -119,6 +132,91 @@ module I18n
 
         def subtrees?
           true
+        end
+
+        # Expands translation references (<tt>@{key}</tt> / <tt>@{.key}</tt>)
+        # in the given String. References are resolved through the regular
+        # translation path, so the current locale and any fallback rules
+        # apply, and Symbol aliases in referenced values keep working.
+        # Interpolation of the expanded result happens afterwards, together
+        # with the rest of the String, so referenced values may contain
+        # <tt>%{...}</tt> placeholders themselves.
+        def resolve_translation_references(locale, key, entry, options, path = nil)
+          return entry unless translation_references?(entry)
+
+          path ||= begin
+            keys = key.nil? ? [] : I18n.normalize_keys(nil, key, options[:scope], options[:separator])
+            keys.map(&:to_s)
+          end
+
+          case entry
+          when ::String
+            expand_translation_references(locale, path, entry, options)
+          when ::Hash
+            entry.each_with_object({}) do |(child_key, value), result|
+              result[child_key] = resolve_translation_references(locale, nil, value, options, path + [child_key.to_s])
+            end
+          when ::Array
+            entry.map { |value| resolve_translation_references(locale, nil, value, options, path) }
+          else
+            entry
+          end
+        end
+
+        # Cheap pre-filter so that Strings and subtrees without any
+        # reference are returned untouched (and not copied).
+        def translation_references?(entry)
+          case entry
+          when ::String then entry.include?('@{')
+          when ::Hash   then entry.any? { |_, value| translation_references?(value) }
+          when ::Array  then entry.any? { |value| translation_references?(value) }
+          else false
+          end
+        end
+
+        def expand_translation_references(locale, path, entry, options)
+          chain = Array(options[REFERENCE_CHAIN_OPTION])
+          chain += [path.join(I18n.default_separator)] unless path.empty?
+
+          expanded = entry.gsub(TRANSLATION_REFERENCE_PATTERN) do
+            reference = Regexp.last_match(1)
+            referenced_key = normalize_translation_reference(path, reference)
+
+            raise I18n::CircularTranslationReference.new(chain + [referenced_key]) if chain.include?(referenced_key)
+
+            nested_options = options.merge(
+              :locale => options[:fallback_original_locale] || locale,
+              :throw => true,
+              :skip_interpolation => true,
+              :scope => nil,
+              REFERENCE_CHAIN_OPTION => chain
+            )
+            nested_options.delete(:fallback_in_progress)
+
+            referenced = catch(:exception) { I18n.translate(referenced_key, **nested_options) }
+
+            case referenced
+            when I18n::MissingTranslation
+              throw(:exception, referenced)
+            when ::String
+              referenced
+            else
+              raise I18n::InvalidTranslationReference.new(referenced_key, referenced)
+            end
+          end
+
+          expanded.gsub(/\\(?=@\{[^{}]*\})/, '')
+        end
+
+        # Absolute references (<tt>@{foo.bar}</tt>) are used as given.
+        # Relative references (<tt>@{.bar}</tt>) are resolved against the
+        # scope of the key currently being translated, i.e. a reference in
+        # <tt>mailer.greeting</tt> to <tt>@{.salutation}</tt> looks up
+        # <tt>mailer.salutation</tt>.
+        def normalize_translation_reference(path, reference)
+          return reference unless reference.start_with?('.')
+
+          (path[0...-1] + [reference[1..-1]]).join(I18n.default_separator)
         end
 
         # Evaluates defaults.

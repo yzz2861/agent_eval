@@ -32,6 +32,7 @@ module I18n
     scope
     separator
     throw
+    translation_reference_chain
   ]
   EMPTY_HASH = {}.freeze
 

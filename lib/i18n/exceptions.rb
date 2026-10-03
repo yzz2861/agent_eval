@@ -111,6 +111,27 @@ module I18n
     end
   end
 
+  # Raised when a translation reference (e.g. <tt>@{foo.bar}</tt>) points to a
+  # key that already appears earlier in the reference chain currently being
+  # resolved.
+  class CircularTranslationReference < ArgumentError
+    attr_reader :keys
+    def initialize(keys)
+      @keys = keys
+      super "circular translation reference detected: #{keys.join(' -> ')}"
+    end
+  end
+
+  # Raised when a translation reference resolves to something that is not a
+  # String. Referenced values are never coerced with +to_s+.
+  class InvalidTranslationReference < ArgumentError
+    attr_reader :key, :entry
+    def initialize(key, entry)
+      @key, @entry = key, entry
+      super "translation reference #{key.inspect} resolved to #{entry.inspect}, which is not a String"
+    end
+  end
+
   class UnknownFileType < ArgumentError
     attr_reader :type, :filename
     def initialize(type, filename)
