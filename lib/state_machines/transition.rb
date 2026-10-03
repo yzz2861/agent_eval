@@ -25,6 +25,12 @@ module StateMachines
     # The new state value *after* the transition
     attr_reader :to
 
+    # The new state *after* the transition
+    attr_reader :to_state
+
+    # The original state *before* the transition
+    attr_reader :from_state
+
     # The arguments passed in to the event that triggered the transition
     # (does not include the +run_action+ boolean argument if specified)
     attr_accessor :args
@@ -35,12 +41,19 @@ module StateMachines
     # Whether the transition is only existing temporarily for the object
     attr_writer :transient
 
+    # Path of the orthogonal region changed by this transition
+    attr_accessor :region_path
+
+    # Previous value of the region before persistence
+    attr_accessor :previous_region_value
+
     # Creates a new, specific transition
     def initialize(object, machine, event, from_name, to_name, read_state = true) # :nodoc:
       @object = object
       @machine = machine
       @args = []
       @transient = false
+      @region_path = []
       @paused_fiber = nil
       @resuming = false
       @continuation_block = nil
@@ -250,7 +263,11 @@ module StateMachines
     def persist
       return if @persisted
 
-      machine.write(object, :state, to)
+      if region_path.any?
+        machine.persist_region_state(self)
+      else
+        machine.write(object, :state, to)
+      end
       @persisted = true
     end
 
@@ -280,7 +297,11 @@ module StateMachines
     #   vehicle.state             # => "parked"
     def rollback
       reset
-      machine.write(object, :state, from)
+      if region_path.any?
+        machine.rollback_region_state(self)
+      else
+        machine.write(object, :state, from)
+      end
     end
 
     # Resets any tracking of which callbacks have already been run and whether

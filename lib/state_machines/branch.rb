@@ -24,6 +24,9 @@ module StateMachines
     # The state guards that are set, keyed by option
     attr_reader :state_guards
 
+    # The orthogonal region path and enclosing composite state for this branch
+    attr_reader :region_path, :parent_state_name
+
     # The requirement for verifying the event being matched
     attr_reader :event_requirement
 
@@ -57,10 +60,20 @@ module StateMachines
         unless_any_state: @unless_any_state_condition
       }.compact.freeze
 
+      implicit_requirements = options.delete(:implicit_state_requirements)
+      @region_path = options.delete(:region) || []
+      @parent_state_name = options.delete(:parent_state)
+
       # Build event requirement
       @event_requirement = build_matcher(options, :on, :except_on)
 
-      if (options.keys - %i[from to on except_from except_to except_on]).empty?
+      if implicit_requirements
+        @state_requirements = implicit_requirements.map do |requirement|
+          requirement.transform_values do |value|
+            value.is_a?(Matcher) ? value : WhitelistMatcher.new(value)
+          end
+        end
+      elsif (options.keys - %i[from to on except_from except_to except_on]).empty?
         # Explicit from/to requirements specified
         @state_requirements = [{ from: build_matcher(options, :from, :except_from), to: build_matcher(options, :to, :except_to) }]
       else
@@ -80,7 +93,12 @@ module StateMachines
       # on the priority in which tracked states should be added.
       @known_states = []
       @state_requirements.each do |state_requirement|
-        %i[from to].each { |option| @known_states |= state_requirement[option].values }
+        %i[from to].each do |option|
+          matcher = state_requirement[option]
+          next if matcher.is_a?(AllMatcher) || matcher.is_a?(LoopbackMatcher)
+
+          @known_states |= matcher.respond_to?(:values) ? matcher.values : Array(matcher)
+        end
       end
     end
 

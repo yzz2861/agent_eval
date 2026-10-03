@@ -58,7 +58,7 @@ module StateMachines
         state = initial_state(object)
         return unless state && (options[:force] || initialize_state?(object))
 
-        value = state.value
+        value = state.composite? ? initial_region_value(state) : state.value
 
         if (hash = options[:to])
           hash[attribute.to_s] = value
@@ -336,6 +336,9 @@ module StateMachines
       # options hash which contains at least <tt>:if</tt> condition support.
       def state(*names, &)
         options = names.last.is_a?(Hash) ? names.pop : {}
+        orthogonal_options = options.slice(:final, :composite)
+        options.delete(:final)
+        options.delete(:composite)
         StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name)
 
         # Store the context so that it can be used for / matched against any state
@@ -361,6 +364,8 @@ module StateMachines
             state.human_name = options[:human_name] if options.include?(:human_name)
             state.cache = options[:cache] if options.include?(:cache)
             state.matcher = options[:if] if options.include?(:if)
+            state.final = orthogonal_options[:final] if orthogonal_options.key?(:final)
+            state.composite = orthogonal_options[:composite] if orthogonal_options.key?(:composite)
           end
         end
 

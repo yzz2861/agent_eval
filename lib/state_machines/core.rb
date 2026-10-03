@@ -30,6 +30,8 @@ require 'state_machines/node_collection'
 require 'state_machines/state_context'
 require 'state_machines/state'
 require 'state_machines/state_collection'
+require 'state_machines/region'
+require 'state_machines/orthogonal'
 
 require 'state_machines/event'
 require 'state_machines/event_collection'

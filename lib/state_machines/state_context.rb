@@ -69,7 +69,14 @@ module StateMachines
 
       state_name = state.name
       machine_name = machine.name
-      @condition = ->(object) { object.class.state_machine(machine_name).states.matches?(object, state_name) }
+      @condition = ->(object) {
+        machine = object.class.state_machine(machine_name)
+        if machine.orthogonal_configured?
+          machine.active_state_named?(object, state_name)
+        else
+          machine.states.fetch(state_name).matches?(machine.read(object, :state))
+        end
+      }
     end
 
     # Creates a new transition that determines what to change the current state
@@ -95,6 +102,16 @@ module StateMachines
 
       machine.transition(options.merge(options[:to] ? { from: state.name } : { to: state.name }))
     end
+
+    def region(name = nil, initial: nil, &block)
+      machine.define_region(state.name, name, initial: initial, &block)
+    end
+
+    def event(*names, &block)
+      machine.event(*names, &block)
+    end
+
+    alias on event
 
     # Hooks in condition-merging to methods that don't exist in this module
     def method_missing(*args, &)

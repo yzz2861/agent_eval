@@ -33,6 +33,7 @@ module StateMachines
         @events = EventCollection.new(self)
         @states = StateCollection.new(self)
         @callbacks = { before: [], after: [], failure: [] }
+        @regions = []
         @namespace = options[:namespace]
         @messages = options[:messages] || {}
         @action = options[:action]
@@ -70,6 +71,14 @@ module StateMachines
         @events.machine = self
         @states = @states.dup
         @states.machine = self
+        @regions = @regions.map(&:dup)
+        states_by_name = @states.each_with_object({}) { |state, states| states[state.name] = state }
+        @regions.each { |region| region.rewire(self, states_by_name) }
+        @states.each do |state|
+          next unless state.parent_region
+
+          state.parent_region = @regions.detect { |region| region.path == state.parent_region.path }
+        end
         @callbacks = { before: @callbacks[:before].dup, after: @callbacks[:after].dup, failure: @callbacks[:failure].dup }
         @async_requested = orig.instance_variable_get(:@async_requested)
         @async_mode_enabled = orig.instance_variable_get(:@async_mode_enabled)

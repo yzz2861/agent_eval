@@ -100,14 +100,32 @@ module StateMachines
     # See StateMachines::Machine#transition for a description of the possible
     # configurations for defining transitions.
     def transition(options)
+      options = options.dup
       raise ArgumentError, 'Must specify as least one transition requirement' if options.empty?
-
       # Only a certain subset of explicit options are allowed for transition
       # requirements
-      StateMachines::OptionsValidator.assert_valid_keys!(options, :from, :to, :except_from, :except_to, :if, :unless, :if_state, :unless_state, :if_all_states, :unless_all_states, :if_any_state, :unless_any_state) if (options.keys - %i[from to on except_from except_to except_on if unless if_state unless_state if_all_states unless_all_states if_any_state unless_any_state]).empty?
+      valid_keys = %i[from to except_from except_to if unless if_state unless_state if_all_states unless_all_states if_any_state unless_any_state region parent_state on except_on]
+      implicit_pairs = options.select { |key, _value| !valid_keys.include?(key) }
+      if implicit_pairs.empty?
+        legacy_keys = %i[from to except_from except_to if unless if_state unless_state if_all_states unless_all_states if_any_state unless_any_state]
+        StateMachines::OptionsValidator.assert_valid_keys!(options, *legacy_keys)
+      end
+      unless implicit_pairs.empty?
+        implicit_pairs.each_key { |key| options.delete(key) }
+      end
 
-      branches << branch = Branch.new(options.merge(on: name))
-      @known_states |= branch.known_states
+      branch_options = options.merge(on: name)
+      unless implicit_pairs.empty?
+        branch_options[:implicit_state_requirements] = implicit_pairs.map { |from, to| { from: from, to: to } }
+      end
+
+      branches << branch = Branch.new(branch_options)
+      @known_states |= branch.state_requirements.flat_map do |requirement|
+        %i[from to].flat_map do |option|
+          matcher = requirement[option]
+          matcher == AllMatcher.instance || matcher == LoopbackMatcher.instance ? [] : matcher.values
+        end
+      end
       branch
     end
 
@@ -136,6 +154,8 @@ module StateMachines
     #
     # Event arguments are passed to guard conditions if they accept multiple parameters.
     def transition_for(object, requirements = {}, *event_args)
+      return transitions_for(object, requirements, *event_args).first if machine.orthogonal_configured?
+
       StateMachines::OptionsValidator.assert_valid_keys!(requirements, :from, :to, :guard)
       requirements[:from] = machine.states.match!(object).name unless (custom_from_state = requirements.include?(:from))
 
@@ -159,17 +179,103 @@ module StateMachines
       nil
     end
 
+    # Builds every region transition selected for one event. Transitions are
+    # selected before callbacks run, so guards observe the same configuration.
+    def transitions_for(object, requirements = {}, *event_args)
+      machine.transitions_for_event(self, object, requirements, *event_args)
+    end
+
+    def transition_in_frame(object, frame, requirements = {}, event_args = [])
+      requirements = requirements.dup
+      requirements[:from] = frame[:state].name
+      transition_for_branch(object, frame, requirements, event_args)
+    end
+
+    def transition_for_branch(object, frame, requirements = {}, event_args = [])
+      custom_from_state = requirements.include?(:from)
+
+      branches.each do |branch|
+        next unless branch_applicable_in_frame?(branch, frame)
+        next unless (match = branch.match(object, requirements, event_args))
+
+        from = requirements[:from]
+        to = if match[:to].is_a?(LoopbackMatcher)
+               from
+             else
+               values = requirements.include?(:to) ? [requirements[:to]].flatten : [from] | machine.states.map { |state| state.name }
+               selected_to = match[:to].filter(values).first
+               next unless selected_to
+
+               selected_to
+             end
+
+        read_state = machine.orthogonal_configured? ? false : !custom_from_state
+        transition = Transition.new(object, machine, name, from, to, read_state)
+        transition.region_path = transition.from_state.parent_region&.path || []
+        return transition
+      end
+
+      nil
+    end
+
+    def branch_applicable_in_frame?(branch, frame)
+      return true if frame.nil?
+
+      region = frame&.dig(:region)
+      source_matches = branch.state_requirements.any? do |requirement|
+        requirement[:from].matches?(frame[:state]&.name)
+      end
+
+      if frame[:ancestor]
+        return source_matches if branch.region_path.empty?
+        return false unless region
+
+        return source_matches if region.path[0...branch.region_path.length] == branch.region_path
+
+        branch.region_path == region.path &&
+          (branch.parent_state_name.nil? || branch.parent_state_name == region.parent_state&.name) &&
+          source_matches
+      end
+
+      return false unless region
+      return false unless source_matches
+      return true if region.path.include?(frame[:state]&.name)
+
+      branch.region_path == region.path &&
+        (branch.parent_state_name.nil? || branch.parent_state_name == region.parent_state&.name)
+    end
+
     # Attempts to perform the next available transition on the given object.
     # If no transitions can be made, then this will return false, otherwise
     # true.
     #
     # Any additional arguments are passed to the StateMachines::Transition#perform
     # instance method.
-    def fire(object, *event_args)
+    def fire(object, *event_args, preselected_transitions: nil, from_helper: false, helper_run_action: nil, **event_options)
       machine.reset(object)
+      event_args << event_options unless event_options.empty?
 
-      if (transition = transition_for(object, {}, *event_args))
-        transition.perform(*event_args)
+      run_action = helper_run_action.nil? ? true : helper_run_action
+      if from_helper
+        if event_args.length == 1 && (event_args.first.equal?(true) || event_args.first.equal?(false)) && preselected_transitions.nil?
+          run_action = event_args.pop
+        elsif event_args.length > 1 && (event_args.last.equal?(true) || event_args.last.equal?(false)) && !event_args[-2].equal?(true) && !event_args[-2].equal?(false)
+          run_action = event_args.pop
+        end
+      elsif event_args.length == 1 && (event_args.first.equal?(true) || event_args.first.equal?(false))
+        run_action = event_args.pop
+      elsif boolean_run_action?(event_args)
+        run_action = event_args.pop
+      end
+      transitions = preselected_transitions || (machine.orthogonal_configured? ? transitions_for(object, {}, *event_args) : Array(transition_for(object, {}, *event_args)))
+      transitions.each { |transition| transition.args = event_args }
+
+      if transitions.any?
+        result = TransitionCollection.new(transitions,
+                                          use_transactions: machine.use_transactions,
+                                          actions: run_action).perform
+        machine.run_completion_transitions(object, event_args, run_action) if result && machine.orthogonal_configured?
+        result
       else
         on_failure(object, *event_args)
         false
@@ -179,7 +285,8 @@ module StateMachines
     # Marks the object as invalid and runs any failure callbacks associated with
     # this event.  This should get called anytime this event fails to transition.
     def on_failure(object, *args)
-      state = machine.states.match!(object)
+      state = machine.orthogonal_configured? ? machine.active_states(object).first : machine.states.match!(object)
+      state ||= machine.initial_state(object)
       machine.invalidate(object, :state, :invalid_transition, [[:event, human_name(object.class)], [:state, state.human_name(object.class)]])
 
       transition = Transition.new(object, machine, name, state.name, state.name)
@@ -219,6 +326,15 @@ module StateMachines
 
     protected
 
+    def boolean_run_action?(event_args)
+      return false if event_args.empty?
+
+      if event_args.length > 1
+        (event_args.last.equal?(true) || event_args.last.equal?(false)) &&
+          !event_args[-2].equal?(true) && !event_args[-2].equal?(false)
+      end
+    end
+
     # Add the various instance methods that can transition the object using
     # the current event
     def add_actions
@@ -235,7 +351,23 @@ module StateMachines
 
       # Fires the event
       machine.define_helper(:instance, qualified_name) do |machine, object, *args, **kwargs|
-        machine.event(name).fire(object, *args, **kwargs)
+        event = machine.event(name)
+        run_action = true
+        preselected = nil
+        if args.length == 1 && (args.last.equal?(true) || args.last.equal?(false))
+          preselected = machine.orthogonal_configured? ? event.transitions_for(object, {}, *args) : Array(event.transition_for(object, {}, *args))
+          without_boolean = machine.orthogonal_configured? ? event.transitions_for(object, {}) : Array(event.transition_for(object, {}))
+          if preselected.any? && preselected.map(&:to_name) != without_boolean.map(&:to_name)
+          else
+            preselected = nil
+            run_action = false
+            args.pop
+          end
+        elsif args.length > 1 && (args.last.equal?(true) || args.last.equal?(false)) && !args[-2].equal?(true) && !args[-2].equal?(false)
+          run_action = args.pop
+        end
+
+        event.fire(object, *args, **kwargs, preselected_transitions: preselected, from_helper: true, helper_run_action: run_action)
       end
 
       # Fires the event, raising an exception if it fails

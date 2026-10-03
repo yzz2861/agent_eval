@@ -40,6 +40,18 @@ module StateMachines
     # state
     attr_accessor :matcher
 
+    # Whether the state explicitly represents a final state
+    attr_accessor :final
+
+    # Whether the state contains orthogonal regions
+    attr_accessor :composite
+
+    # Orthogonal regions contained in this composite state
+    attr_reader :regions
+
+    # The region directly containing this state, if any
+    attr_accessor :parent_region
+
     # Creates a new state within the context of the given machine.
     #
     # Configuration options:
@@ -53,7 +65,7 @@ module StateMachines
     #   (e.g. :value => lambda {Time.now}, :if => lambda {|state| !state.nil?}).
     #   By default, the configured value is matched.
     # * <tt>:human_name</tt> - The human-readable version of this state's name
-    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, **extra_options) # :nodoc:
+    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, final: false, composite: false, **extra_options) # :nodoc:
       # Handle both old hash style and new kwargs style for backward compatibility
       case options
       in Hash
@@ -64,6 +76,8 @@ module StateMachines
         cache = options[:cache]
         if_condition = options[:if]
         human_name = options[:human_name]
+        final = options.fetch(:final, false)
+        composite = options.fetch(:composite, false)
       in nil
         # New style: initialize(machine, name, initial: true, value: 'foo')
         StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name) unless extra_options.empty?
@@ -81,6 +95,9 @@ module StateMachines
       @cache = cache
       @matcher = if_condition
       @initial = initial == true
+      @final = final == true
+      @composite = composite == true
+      @regions = []
       @context = StateContext.new(self)
 
       return unless name
@@ -108,6 +125,7 @@ module StateMachines
     def initialize_copy(orig) # :nodoc:
       super
       @context = StateContext.new(self)
+      @regions = []
     end
 
     def machine=(machine)
@@ -115,18 +133,22 @@ module StateMachines
       @context = StateContext.new(self)
     end
 
-    # Determines whether there are any states that can be transitioned to from
-    # this state.  If there are none, then this state is considered *final*.
-    # Any objects in a final state will remain so forever given the current
-    # machine's definition.
     def final?
-      machine.events.none? do |event|
+      return false if composite?
+
+      @final || machine.events.none? do |event|
+        next false if defined?(StateMachines::Orthogonal::COMPLETION_EVENT) && event.name == StateMachines::Orthogonal::COMPLETION_EVENT
+
         event.branches.any? do |branch|
           branch.state_requirements.any? do |requirement|
             requirement[:from].matches?(name) && !requirement[:to].matches?(name, from: name)
           end
         end
       end
+    end
+
+    def composite?
+      @composite == true
     end
 
     # Transforms the state name into a more human-readable format, such as
@@ -243,7 +265,13 @@ module StateMachines
     def call(object, method, *args, &)
       options = args.last.is_a?(Hash) ? args.pop : {}
       options = { method_name: method }.merge(options)
-      state = machine.states.match!(object)
+      if machine.orthogonal_configured?
+        active = machine.active_states(object)
+        state = active.detect { |candidate| candidate == self }
+        state = self if state.nil? && machine.active_state_named?(object, name)
+      else
+        state = machine.states.match!(object)
+      end
 
       if state == self && object.respond_to?(method)
         object.send(method, *args, &)
@@ -295,7 +323,11 @@ module StateMachines
         warn_about_method_conflict(predicate_method, machine.owner_class)
       else
         machine.define_helper(:instance, predicate_method) do |machine, object|
-          machine.states.matches?(object, name)
+          if machine.orthogonal_configured?
+            machine.active_state_named?(object, name)
+          else
+            machine.states[name].matches?(machine.read(object, :state))
+          end
         end
       end
     end

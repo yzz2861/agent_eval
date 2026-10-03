@@ -172,16 +172,16 @@ module StateMachines
           callable.call
         in 1
           callable.call(object)
-        in -1
-          # Splat parameters: object + all event args
-          callable.call(object, *event_args)
-        in arity if arity > 1
-          # Explicit parameters: object + limited event args
-          args_needed = arity - 1 # Subtract 1 for the object parameter
-          callable.call(object, *event_args[0, args_needed])
         else
-          # Negative arity other than -1 (unlikely but handle gracefully)
-          callable.call(object, *event_args)
+          if arity.negative?
+            required_args = -arity - 2
+            callable.call(object, *event_args) if event_args.length >= required_args
+          else
+            required_args = arity - 1
+            return false if event_args.length < required_args
+
+            callable.call(object, *event_args[0, required_args])
+          end
         end
       in String
         # String evaluation doesn't support event arguments for security

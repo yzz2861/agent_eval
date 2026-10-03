@@ -27,7 +27,10 @@ module StateMachines
     #   states.matches?(vehicle, :idling)   # => false
     #   states.matches?(vehicle, :invalid)  # => IndexError: :invalid is an invalid key for :name index
     def matches?(object, name)
-      fetch(name).matches?(machine.read(object, :state))
+      state = fetch(name)
+      return machine.active_state_named?(object, name) if machine.orthogonal_configured?
+
+      state.matches?(machine.read(object, :state))
     end
 
     # Determines the current state of the given object as configured by this
@@ -54,7 +57,13 @@ module StateMachines
     #   states.match(vehicle)         # => nil
     def match(object)
       value = machine.read(object, :state)
-      self[value, :value] || detect { |state| state.matches?(value) }
+      if machine.orthogonal_configured?
+        return machine.active_states(object).first unless value.nil?
+      else
+        return self[value, :value] || detect { |state| state.matches?(value) }
+      end
+
+      detect { |state| state.matches?(value) }
     end
 
     # Determines the current state of the given object as configured by this

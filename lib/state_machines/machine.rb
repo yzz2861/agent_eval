@@ -432,6 +432,7 @@ module StateMachines
     include Callbacks
     include Rendering
     include Integration
+    include Orthogonal
 
     # Whether to ignore any conflicts that are detected for helper methods that
     # get generated for a machine's owner class.  Default is false.
@@ -459,6 +460,9 @@ module StateMachines
     #
     # These are sorted, by default, in the order in which they were referenced.
     attr_reader :states
+
+    # The orthogonal regions defined for this machine's composite states
+    attr_reader :regions
 
     # The callbacks to invoke before/after a transition is performed
     #

@@ -32,7 +32,9 @@ module StateMachines
       reject!(&:!)
 
       attributes = map(&:attribute).uniq
-      raise ArgumentError, 'Cannot perform multiple transitions in parallel for the same state machine attribute' if attributes.length != length
+      if attributes.length != length && none? { |transition| transition.region_path.any? }
+        raise ArgumentError, 'Cannot perform multiple transitions in parallel for the same state machine attribute'
+      end
 
       StateMachines::OptionsValidator.assert_valid_keys!(options, :actions, :after, :use_transactions, :fiber)
       options = { actions: true, after: true, use_transactions: true }.merge(options)
@@ -175,7 +177,7 @@ module StateMachines
                      actions.each { |action| results[action] = result }
                      !!result
                    else
-                     actions.compact.each { |action| !skip_actions && (results[action] = object.send(action)) }
+                    actions.compact.each { |action| results[action] = object.send(action) unless skip_actions }
                      results.values.all?
                    end
       end
