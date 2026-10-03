@@ -25,6 +25,26 @@ module I18n
         # Mutex to ensure that concurrent translations loading will be thread-safe
         MUTEX = Mutex.new
 
+        # Bridges the internal disabled signal to the public protocol: a plain
+        # Simple backend lookup turns it into the standard :exception throw
+        # (handled like a missing translation by I18n.translate). When the
+        # lookup is part of a Fallbacks/Chain traversal the internal signal is
+        # re-thrown so the surrounding backend can short-circuit.
+        def translate(locale, key, options = EMPTY_HASH)
+          disabled = catch(:i18n_disabled) do
+            result = super
+            # Prune disabled leaves from namespace/array lookups at the public
+            # boundary so the marker never reaches callers.
+            result = prune_disabled_entries(result) if result.is_a?(Hash) || result.is_a?(Array)
+            return result
+          end
+          if options[:fallback_in_progress]
+            throw(:i18n_disabled, disabled)
+          else
+            throw(:exception, disabled)
+          end
+        end
+
         def initialized?
           @initialized ||= false
         end
@@ -42,6 +62,7 @@ module I18n
           locale = locale.to_sym
           translations[locale] ||= Concurrent::Hash.new
           data = Utils.deep_symbolize_keys(data) unless options.fetch(:skip_symbolize_keys, false)
+          data = Utils.mark_disabled_entries(data)
           MUTEX.synchronize { Utils.deep_merge!(translations[locale], data) }
         end
 
@@ -101,6 +122,7 @@ module I18n
               return nil unless result.has_key?(_key)
             end
             result = result[_key]
+            return result if result.respond_to?(:disabled?) && result.disabled?
             result = resolve_entry(locale, _key, result, Utils.except(options.merge(:scope => nil), :count)) if result.is_a?(Symbol)
             result
           end

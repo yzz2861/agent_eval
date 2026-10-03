@@ -52,19 +52,25 @@ module I18n
         default = extract_non_symbol_default!(options) if options[:default]
 
         fallback_options = options.merge(:fallback_in_progress => true, fallback_original_locale: locale)
-        I18n.fallbacks[locale].each do |fallback|
-          begin
-            catch(:exception) do
-              result = super(fallback, key, fallback_options)
-              unless result.nil?
-                on_fallback(locale, fallback, key, options) if locale.to_s != fallback.to_s
-                return result
+        disabled = catch(:i18n_disabled) do
+          I18n.fallbacks[locale].each do |fallback|
+            begin
+              catch(:exception) do
+                result = super(fallback, key, fallback_options)
+                unless result.nil?
+                  on_fallback(locale, fallback, key, options) if locale.to_s != fallback.to_s
+                  return result
+                end
               end
+            rescue I18n::InvalidLocale
+              # we do nothing when the locale is invalid, as this is a fallback anyways.
             end
-          rescue I18n::InvalidLocale
-            # we do nothing when the locale is invalid, as this is a fallback anyways.
           end
+          false
         end
+
+        # Do not fall through to defaults when the key is disabled.
+        throw(:exception, I18n::DisabledTranslation.new(locale, key, options)) if disabled
 
         return if options.key?(:default) && options[:default].nil?
 
@@ -75,7 +81,7 @@ module I18n
       def resolve_entry(locale, object, subject, options = EMPTY_HASH)
         return subject if options[:resolve] == false
         result = catch(:exception) do
-          options.delete(:fallback_in_progress) if options.key?(:fallback_in_progress)
+          options = options.reject { |key, _| key == :fallback_in_progress } if options.key?(:fallback_in_progress)
 
           case subject
           when Symbol
@@ -91,6 +97,7 @@ module I18n
             subject
           end
         end
+        return result if result.respond_to?(:disabled?) && result.disabled?
         result unless result.is_a?(MissingTranslation)
       end
 
@@ -107,7 +114,11 @@ module I18n
         return super unless options.fetch(:fallback, true)
         I18n.fallbacks[locale].each do |fallback|
           begin
-            return true if super(fallback, key, options)
+            state = exists_state(fallback, key, options)
+            # A disabled key is explicitly not present here and must not be
+            # reported as existing through another fallback locale.
+            return false if state == :disabled
+            return true if state == :found
           rescue I18n::InvalidLocale
             # we do nothing when the locale is invalid, as this is a fallback anyways.
           end
@@ -117,6 +128,17 @@ module I18n
       end
 
       private
+
+        # Ternary existence check used while walking fallback locales.
+        # Relies on #lookup, which Simple provides and Chain implements by
+        # delegating to its backends.
+        def exists_state(locale, key, options)
+          entry = catch(:exception) do
+            lookup(locale, key, options[:scope], options)
+          end
+          return :disabled if disabled_entry?(entry)
+          entry.nil? ? :missing : :found
+        end
 
         # Overwrite on_fallback to add specified logic when the fallback succeeds.
         def on_fallback(_original_locale, _fallback_locale, _key, _options)

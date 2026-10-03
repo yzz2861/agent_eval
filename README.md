@@ -66,6 +66,47 @@ I18n.config.with(locale: :ja).set!
 `set!` stores a frozen config in the current execution context.
 This keeps inherited state safe and lets updates happen by replacing config objects.
 
+### Disabling a translation key for some locales
+
+Setting a translation to `nil` keeps the traditional "missing" meaning: I18n
+keeps looking in fallback locales, other backends and `:default` values. If you
+need to say "this key is intentionally turned off for this locale" (for example
+headquarters provides campaign copy that a region is not allowed to show), use
+the explicit `I18n::DISABLED` marker:
+
+```ruby
+I18n.backend.store_translations(:en, promo: "Headquarters campaign")
+I18n.backend.store_translations(:de, promo: I18n::DISABLED)
+
+I18n.t(:promo, locale: :en) # => "Headquarters campaign"
+I18n.t(:promo, locale: :de) # => "Translation disabled: de.promo"
+```
+
+A disabled key:
+
+* does not fall back to parent/default locales,
+* stops further backends in a `I18n::Backend::Chain`,
+* cannot be overridden by a `:default`,
+* reports `I18n.exists?` as `false`,
+* is never returned from a namespace (bulk) lookup, and
+* stays disabled through deep merges.
+
+It is distinct from both a missing key and `nil`. Use `I18n.t!` if you want to
+raise/catch the dedicated `I18n::DisabledTranslationData` error (which is still a
+kind of `I18n::MissingTranslationData`).
+
+In YAML/JSON files use the `I18N_DISABLED` token, and in Ruby files you can use
+the constant directly:
+
+```yml
+de:
+  promo: I18N_DISABLED
+```
+
+```ruby
+{ de: { promo: I18n::DISABLED } }
+```
+
 ## Features
 
 * Translation and localization
@@ -73,6 +114,7 @@ This keeps inherited state safe and lets updates happen by replacing config obje
 * Pluralization (CLDR compatible)
 * Customizable transliteration to ASCII
 * Flexible defaults
+* Explicitly disabling a translation key per locale (`I18n::DISABLED`)
 * Bulk lookup
 * Lambdas as translation data
 * Custom key/scope separator

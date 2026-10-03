@@ -55,9 +55,10 @@ module I18n
       end
 
       def keys
-        @keys ||= I18n.normalize_keys(locale, key, options[:scope]).tap do |keys|
-          keys << 'no key' if keys.size < 2
+        keys = I18n.normalize_keys(locale, key, options[:scope]).tap do |normalized|
+          normalized << 'no key' if normalized.size < 2
         end
+        frozen? ? keys : (@keys ||= keys)
       end
 
       def message
@@ -77,6 +78,13 @@ module I18n
 
       def to_exception
         MissingTranslationData.new(locale, key, options)
+      end
+
+      # Plain missing translations can fall back; I18n::DisabledTranslation
+      # overrides this to return true so fallbacks, backend chains and
+      # defaults are short-circuited.
+      def disabled?
+        false
       end
     end
 

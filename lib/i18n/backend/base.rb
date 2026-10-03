@@ -35,7 +35,7 @@ module I18n
         if entry.nil? && options.key?(:default)
           entry = default(locale, key, options[:default], options)
         else
-          entry = resolve_entry(locale, key, entry, options)
+          entry = resolve_entry(locale, key, entry, options) unless disabled_entry?(entry)
         end
 
         count = options[:count]
@@ -51,6 +51,13 @@ module I18n
 
         if entry.nil? && !subtrees?
           throw(:exception, I18n::MissingTranslation.new(locale, key, options))
+        end
+
+        # A leaf explicitly marked as disabled short-circuits everything:
+        # no fallback locale, no later backend and no :default value can
+        # provide text for it.
+        if disabled_entry?(entry)
+          throw(:i18n_disabled, I18n::DisabledTranslation.new(locale, key, options))
         end
 
         deep_interpolation = options[:deep_interpolation]
@@ -69,7 +76,8 @@ module I18n
       end
 
       def exists?(locale, key, options = EMPTY_HASH)
-        lookup(locale, key, options[:scope]) != nil
+        entry = lookup(locale, key, options[:scope], options)
+        !entry.nil? && !disabled_entry?(entry)
       end
 
       # Acts the same as +strftime+, but uses a localized version of the
@@ -167,9 +175,37 @@ module I18n
               subject
             end
           end
+          # A disabled translation must keep short-circuiting lookup even
+          # when reached through a symbol link; only plain misses resolve
+          # to nil so that defaults/fallbacks can kick in.
+          return result if result.respond_to?(:disabled?) && result.disabled?
           result unless result.is_a?(MissingTranslation)
         end
         alias_method :resolve_entry, :resolve
+
+        # True when the given stored value is the explicit "key disabled"
+        # marker. Works both for the stored marker and for a caught
+        # DisabledTranslation exception.
+        def disabled_entry?(entry)
+          entry.respond_to?(:disabled?) && entry.disabled?
+        end
+
+        # Removes disabled marker leaves from a namespace hash so the marker
+        # never leaks to callers. Disabled array elements become nil so the
+        # array keeps its position/structure.
+        def prune_disabled_entries(data)
+          case data
+          when Hash
+            data.each_with_object({}) do |(key, value), result|
+              next if disabled_entry?(value)
+              result[key] = value.is_a?(Hash) || value.is_a?(Array) ? prune_disabled_entries(value) : value
+            end
+          when Array
+            data.map { |value| disabled_entry?(value) ? nil : prune_disabled_entries(value) }
+          else
+            data
+          end
+        end
 
         # Picks a translation from a pluralized mnemonic subkey according to English
         # pluralization rules :
@@ -244,6 +280,10 @@ module I18n
           unless data.is_a?(Hash)
             raise InvalidLocaleData.new(filename, 'expects it to return a hash, but does not')
           end
+          # Translate the textual I18N_DISABLED marker (YAML/JSON) into the
+          # real I18n::DISABLED object. Ruby files can use I18n::DISABLED
+          # directly.
+          data = Utils.mark_disabled_entries(data)
           data.each { |locale, d| store_translations(locale, d || {}, skip_symbolize_keys: keys_symbolized) }
 
           data

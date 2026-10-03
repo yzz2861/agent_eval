@@ -93,6 +93,8 @@ module I18n
               end
             when Proc
               raise "Key-value stores cannot handle procs"
+            when I18n::DisabledTranslation
+              value = I18n::DISABLED_TOKEN
             end
 
             @store[key] = JSON.encode(value) unless value.is_a?(Symbol)
@@ -115,6 +117,7 @@ module I18n
         def translations
           @translations = Utils.deep_symbolize_keys(@store.keys.clone.map do |main_key|
             main_value = JSON.decode(@store[main_key])
+            main_value = I18n::DISABLED if main_value == I18n::DISABLED_TOKEN
             main_key.to_s.split(".").reverse.inject(main_value) do |value, key|
               {key.to_sym => value}
             end
@@ -137,6 +140,7 @@ module I18n
           key   = normalize_flat_keys(locale, key, scope, options[:separator])
           value = @store["#{locale}.#{key}"]
           value = JSON.decode(value) if value
+          value = I18n::DISABLED if value == I18n::DISABLED_TOKEN
 
           if value.is_a?(Hash)
             Utils.deep_symbolize_keys(value)
