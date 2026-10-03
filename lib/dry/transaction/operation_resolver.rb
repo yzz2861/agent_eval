@@ -5,6 +5,10 @@ module Dry
     class OperationResolver < Module
       def initialize(container)
         module_exec(container) do |ops_container|
+          define_method :operations_container do
+            ops_container
+          end
+
           define_method :initialize do |**kwargs|
             operation_kwargs = self.class.steps.select(&:operation_name).to_h { |step|
               operation = kwargs.fetch(step.name) {

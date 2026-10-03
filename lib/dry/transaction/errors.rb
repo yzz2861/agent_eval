@@ -25,5 +25,17 @@ module Dry
         super("step +#{step_name}+ requires one or more exception classes provided via +catch:+")
       end
     end
+
+    class InvalidBranchError < ArgumentError
+      def initialize(step_name, message)
+        super("branch step +#{step_name}+ #{message}")
+      end
+    end
+
+    class NoBranchMatchedError < ArgumentError
+      def initialize(step_name)
+        super("no branch matched for branch step +#{step_name}+ and no fallback branch was defined")
+      end
+    end
   end
 end

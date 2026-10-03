@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "dry/transaction/branch_dsl"
+
 module Dry
   module Transaction
     class DSL < Module
@@ -28,13 +30,17 @@ module Dry
       def define_dsl
         module_exec(@step_adapters) do |step_adapters|
           step_adapters.each do |adapter_name, adapter|
-            define_method(adapter_name) do |step_name, with: nil, **options|
-              operation_name = with
+            define_method(adapter_name) do |step_name, with: nil, **options, &block|
+              if adapter_name.to_sym == :branch
+                raise ArgumentError, "+branch:+ step +#{step_name}+ requires a block" unless block
+
+                options = {**options, branches: BranchDSL.new(step_adapters: step_adapters).build(step_name, &block)}
+              end
 
               steps << Step.new(
                 adapter: adapter,
                 name: step_name,
-                operation_name: operation_name,
+                operation_name: with,
                 operation: nil, # operations are resolved only when transactions are instantiated
                 options: options
               )
