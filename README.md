@@ -325,6 +325,56 @@ encoded_token.verify_signature!(algorithm: 'HS256', key: "secret")
 encoded_token.payload # => {"pay"=>"load"}
 ```
 
+### Strict JSON parsing
+
+JSON documents containing duplicate object members can be ambiguous: different
+parsers may keep different values for the same key. To make sure a token can
+never be interpreted in two ways, `JWT::EncodedToken` parses both the header
+and the payload with a strict parser by default. The strict parser:
+
+- rejects objects with duplicate members, including keys that only become equal
+  after escape sequence processing, e.g. `{"a":1,"\u0061":2}`,
+- rejects strings that are not valid UTF-8,
+- limits the nesting depth (100), the total number of object members and array
+  elements (10 000) and the lexical length of numbers (100 characters),
+- reports parse errors with only the error category and a zero based position,
+  never with fragments of the token content.
+
+```ruby
+JWT::EncodedToken.new(token.jwt) # strict by default
+
+# the limits can be customized
+JWT::EncodedToken.new(
+  token.jwt,
+  max_depth: 32,
+  max_members: 1_000,
+  max_number_length: 50
+)
+```
+
+The historical `JWT.decode` entry point keeps its lenient default behavior for
+backwards compatibility. Opt in to strict parsing with the `strict_json` decode
+option:
+
+```ruby
+JWT.decode(token, key, true, algorithm: 'HS256', strict_json: true)
+
+# the same limits can be passed through
+JWT.decode(
+  token,
+  key,
+  true,
+  algorithm: 'HS256',
+  strict_json: true,
+  json_max_depth: 32,
+  json_max_members: 1_000,
+  json_max_number_length: 50
+)
+```
+
+Tokens rejected by the strict parser raise a `JWT::MalformedTokenError` whose
+message looks like `Invalid JSON: duplicate_member at position 7`.
+
 ## Claims
 
 JSON Web Token defines some reserved claim names and defines how they should be

@@ -25,13 +25,27 @@ module JWT
     # Initializes a new EncodedToken instance.
     #
     # @param jwt [String] the encoded JWT token.
+    # @param strict_json [Boolean] when true (default) the header and payload
+    #   are parsed strictly: duplicate JSON members are rejected and the depth,
+    #   member count and number lexical length are limited.
+    # @param max_depth [Integer] maximum nesting depth accepted by the strict parser.
+    # @param max_members [Integer] maximum number of object members and array
+    #   elements accepted by the strict parser.
+    # @param max_number_length [Integer] maximum lexical length of a number
+    #   accepted by the strict parser.
     # @raise [ArgumentError] if the provided JWT is not a String.
-    def initialize(jwt)
+    def initialize(jwt, strict_json: true, max_depth: nil, max_members: nil, max_number_length: nil)
       raise ArgumentError, 'Provided JWT must be a String' unless jwt.is_a?(String)
 
       @jwt = jwt
       @signature_verified = false
       @claims_verified    = false
+      @strict_json = strict_json
+      @json_limits = {
+        max_depth: max_depth,
+        max_members: max_members,
+        max_number_length: max_number_length
+      }.compact
 
       @encoded_header, @encoded_payload, @encoded_signature = jwt.split('.')
     end
@@ -210,7 +224,7 @@ module JWT
     end
 
     def unencoded_payload?
-      header['b64'] == false
+      header.is_a?(Hash) && header['b64'] == false
     end
 
     def parse_and_decode(segment)
@@ -218,7 +232,14 @@ module JWT
     end
 
     def parse(segment)
-      JWT::JSON.parse(segment)
+      if @strict_json
+        JWT::JSON.strict_parse(segment, **@json_limits)
+      else
+        JWT::JSON.parse(segment)
+      end
+    rescue JWT::StrictJSON::ParseError => e
+      message = segment.empty? ? 'Invalid segment encoding' : e.message
+      raise JWT::MalformedTokenError, message
     rescue ::JSON::ParserError
       raise JWT::MalformedTokenError, 'Invalid segment encoding'
     end

@@ -6,7 +6,12 @@
 
 **Features:**
 
-- Your contribution here
+- Add a strict JSON parser for token segments that rejects duplicate JSON
+  members (including keys equal after unescaping), limits nesting depth,
+  member count and number lexical length, and rejects invalid UTF-8. It is
+  enabled by default on `JWT::EncodedToken` and can be enabled for
+  `JWT.decode` with the `strict_json` option. Parse errors only contain the
+  error category and position.
 
 **Fixes and enhancements:**
 

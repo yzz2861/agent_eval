@@ -16,4 +16,14 @@ RSpec.describe JWT do
       expect(described_class.configuration.decode.verify_expiration).to eq(false)
     end
   end
+
+  describe 'decode.strict_json' do
+    it 'defaults to false for the backwards compatible JWT.decode entry point' do
+      expect(described_class.configuration.decode.strict_json).to eq(false)
+    end
+
+    it 'is included in the decode configuration hash' do
+      expect(described_class.configuration.decode.to_h[:strict_json]).to eq(false)
+    end
+  end
 end
