@@ -120,6 +120,9 @@ module URI
     # Returns the origin for an HTTP uri, as defined in
     # https://www.rfc-editor.org/rfc/rfc6454.
     #
+    # This is the canonical serialization of the URI::Origin value
+    # object returned by #origin_value.
+    #
     #
     # Example:
     #
@@ -129,7 +132,7 @@ module URI
     #     URI::HTTPS.build(host: 'www.example.com', path: '/foo/bar').origin #=> "https://www.example.com"
     #
     def origin
-      "#{scheme}://#{authority}"
+      origin_value.to_s
     end
   end
 

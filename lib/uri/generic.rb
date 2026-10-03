@@ -11,6 +11,7 @@
 require_relative 'common'
 autoload :IPSocket, 'socket'
 autoload :IPAddr, 'ipaddr'
+require_relative 'origin'
 
 module URI
 
@@ -1359,6 +1360,26 @@ module URI
       if host && host != host.downcase
         set_host(self.host.downcase)
       end
+    end
+
+    #
+    # == Description
+    #
+    # Returns the origin of this URI as a URI::Origin value object.
+    #
+    # Hierarchical URIs with a scheme and a host (such as HTTP and
+    # HTTPS URIs) yield a tuple origin made of the scheme, the
+    # normalized host, and the effective port; other URIs yield a
+    # fresh opaque origin.  See URI::Origin for details.
+    #
+    # Unlike the components of a URI, an origin can be used to compare
+    # and group URIs by the endpoint they belong to:
+    #
+    #   URI('http://example.com/a').origin_value ==
+    #     URI('http://example.com:80/b?x=1#f').origin_value  #=> true
+    #
+    def origin_value
+      Origin.from_uri(self)
     end
 
     #
