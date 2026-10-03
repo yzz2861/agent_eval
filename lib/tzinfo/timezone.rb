@@ -978,6 +978,89 @@ module TZInfo
       end
     end
 
+    # Compares this {Timezone} with another {Timezone} over a window of UTC
+    # time and returns the intervals within the window where the two time
+    # zones differ.
+    #
+    # This can be used, for example, to determine when an update to the
+    # time zone data will cause two versions of the same time zone to
+    # produce different results.
+    #
+    # The window is defined as a half-open range of UTC times from `from`
+    # (inclusive) to `to` (exclusive). The UTC offsets of the `from` and
+    # `to` parameters are ignored (they are treated as UTC times).
+    #
+    # The comparison is performed by examining the transitions of each time
+    # zone that occur within the window (including transitions that fall
+    # exactly on `from`). The window is not sampled at a fixed interval, so
+    # differences of any duration are detected, including those involving
+    # historical offsets that are not a whole number of hours.
+    #
+    # By default, only the observed UTC offsets of the two time zones are
+    # compared. Pass `compare: :full` to also compare the time zone
+    # abbreviations and daylight savings indicators.
+    #
+    # The result is an `Array` of {TimezoneDifference} instances, ordered by
+    # start time. Each {TimezoneDifference} describes a half-open UTC interval
+    # and the {TimezonePeriod} of each time zone that is in effect during that
+    # interval. Adjacent intervals where the compared attributes of both time
+    # zones are unchanged are merged into a single {TimezoneDifference}. An
+    # empty `Array` is returned if the two time zones do not differ within
+    # the window.
+    #
+    # @param other [Timezone] the {Timezone} to compare with.
+    # @param from [Object] a `Time`, `DateTime` or {Timestamp} specifying the
+    #   start (inclusive) of the window to compare.
+    # @param to [Object] a `Time`, `DateTime` or {Timestamp} specifying the
+    #   end (exclusive) of the window to compare.
+    # @param compare [Symbol] either `:offset` to compare only the observed
+    #   UTC offsets, or `:full` to also compare abbreviations and daylight
+    #   savings indicators.
+    # @return [Array<TimezoneDifference>] the intervals within the window
+    #   where the two time zones differ.
+    # @raise [ArgumentError] if `other`, `from` or `to` is `nil`.
+    # @raise [ArgumentError] if `compare` is not `:offset` or `:full`.
+    # @raise [ArgumentError] if `to` is not greater than `from`.
+    def compare_with(other, from, to, compare: :offset)
+      raise ArgumentError, 'other must be specified' unless other
+      raise ArgumentError, 'from must be specified' unless from
+      raise ArgumentError, 'to must be specified' unless to
+      raise ArgumentError, 'compare must be :offset or :full' unless compare == :offset || compare == :full
+
+      from_timestamp = Timestamp.for(from, :treat_as_utc)
+      to_timestamp = Timestamp.for(to, :treat_as_utc)
+      raise ArgumentError, 'to must be greater than from' unless to_timestamp > from_timestamp
+
+      boundaries = [from_timestamp, to_timestamp]
+      transitions_up_to(to_timestamp, from_timestamp).each {|t| boundaries << t.at }
+      other.transitions_up_to(to_timestamp, from_timestamp).each {|t| boundaries << t.at }
+      boundaries = boundaries.uniq.sort
+
+      result = []
+
+      boundaries.each_cons(2) do |interval_start, interval_end|
+        first_period = period_for_utc(interval_start)
+        second_period = other.period_for_utc(interval_start)
+
+        first_key = period_comparison_key(first_period, compare)
+        second_key = period_comparison_key(second_period, compare)
+
+        next if first_key == second_key
+
+        last = result.last
+
+        if last && last.ends_at == interval_start &&
+            period_comparison_key(last.first_period, compare) == first_key &&
+            period_comparison_key(last.second_period, compare) == second_key
+          result[-1] = TimezoneDifference.new(last.starts_at, interval_end, last.first_period, last.second_period)
+        else
+          result << TimezoneDifference.new(interval_start, interval_end, first_period, second_period)
+        end
+      end
+
+      result
+    end
+
     # Returns the canonical identifier of this time zone.
     #
     # This is a shortcut for calling `canonical_zone.identifier`. Please refer
@@ -1149,6 +1232,21 @@ module TZInfo
     end
 
     private
+
+    # Returns the key used to compare a {TimezonePeriod} when evaluating
+    # differences between two time zones with {compare_with}.
+    #
+    # @param period [TimezonePeriod] the period to obtain a comparison key
+    #   for.
+    # @param compare [Symbol] either :offset or :full.
+    # @return [Object] the comparison key for the period.
+    def period_comparison_key(period, compare)
+      if compare == :full
+        [period.observed_utc_offset, period.abbreviation, period.dst?]
+      else
+        period.observed_utc_offset
+      end
+    end
 
     # Raises an {UnknownTimezone} exception.
     #

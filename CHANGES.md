@@ -1,5 +1,15 @@
 # Changes
 
+## Unreleased
+
+* Added `TZInfo::Timezone#compare_with`, which compares two time zones over a
+  window of UTC time and returns the half-open intervals within the window
+  where they differ (as `TZInfo::TimezoneDifference` instances, including the
+  `TimezonePeriod` of each zone). The comparison can be limited to the
+  observed UTC offsets or extended to also cover abbreviations and daylight
+  savings indicators.
+
+
 ## Version 2.0.6 - 28-Jan-2023
 
 * Eliminate `Object#untaint` deprecation warnings on JRuby 9.4.0.0. #145.

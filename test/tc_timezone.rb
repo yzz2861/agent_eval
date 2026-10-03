@@ -1620,6 +1620,250 @@ class TCTimezone < Minitest::Test
     assert_match(Regexp.new("\\b#{Regexp.escape(from.class.name)}\\b"), error.message)
   end
 
+  def test_compare_with_offsets
+    a1 = TimezoneOffset.new(561, 0, 'A1')
+    a2 = TimezoneOffset.new(3600, 0, 'A2')
+    a3 = TimezoneOffset.new(561, 0, 'A3')
+    a4 = TimezoneOffset.new(561, 0, 'A4')
+    b1 = TimezoneOffset.new(561, 0, 'B1')
+    b2 = TimezoneOffset.new(7200, 0, 'B2')
+
+    a = transitions_timezone('Test/A', [
+      TimezoneTransition.new(a2, a1, Time.utc(2026,3,1).to_i),
+      TimezoneTransition.new(a3, a2, Time.utc(2026,6,1).to_i),
+      TimezoneTransition.new(a4, a3, Time.utc(2026,6,15).to_i)
+    ])
+    b = transitions_timezone('Test/B', [
+      TimezoneTransition.new(b2, b1, Time.utc(2026,4,1).to_i)
+    ])
+
+    result = a.compare_with(b, Time.utc(2026,1,1), Time.utc(2026,8,1))
+
+    assert_equal(3, result.length)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,3,1).to_i), result[0].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,4,1).to_i), result[0].ends_at)
+    assert_equal(3600, result[0].first_period.observed_utc_offset)
+    assert_equal(561, result[0].second_period.observed_utc_offset)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,4,1).to_i), result[1].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,6,1).to_i), result[1].ends_at)
+    assert_equal(3600, result[1].first_period.observed_utc_offset)
+    assert_equal(7200, result[1].second_period.observed_utc_offset)
+
+    # The abbreviation-only transition at 2026-06-15 does not affect the
+    # offset comparison, so the adjacent intervals either side of it are
+    # merged.
+    assert_equal(Timestamp.utc(Time.utc(2026,6,1).to_i), result[2].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,8,1).to_i), result[2].ends_at)
+    assert_equal(561, result[2].first_period.observed_utc_offset)
+    assert_equal(7200, result[2].second_period.observed_utc_offset)
+  end
+
+  def test_compare_with_full
+    a1 = TimezoneOffset.new(561, 0, 'A1')
+    a2 = TimezoneOffset.new(3600, 0, 'A2')
+    a3 = TimezoneOffset.new(561, 0, 'A3')
+    a4 = TimezoneOffset.new(561, 0, 'A4')
+    b1 = TimezoneOffset.new(561, 0, 'B1')
+    b2 = TimezoneOffset.new(7200, 0, 'B2')
+
+    a = transitions_timezone('Test/A', [
+      TimezoneTransition.new(a2, a1, Time.utc(2026,3,1).to_i),
+      TimezoneTransition.new(a3, a2, Time.utc(2026,6,1).to_i),
+      TimezoneTransition.new(a4, a3, Time.utc(2026,6,15).to_i)
+    ])
+    b = transitions_timezone('Test/B', [
+      TimezoneTransition.new(b2, b1, Time.utc(2026,4,1).to_i)
+    ])
+
+    result = a.compare_with(b, Time.utc(2026,1,1), Time.utc(2026,8,1), compare: :full)
+
+    assert_equal(5, result.length)
+
+    # The offsets are equal before 2026-03-01, but the abbreviations differ.
+    assert_equal(Timestamp.utc(Time.utc(2026,1,1).to_i), result[0].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,3,1).to_i), result[0].ends_at)
+    assert_equal('A1', result[0].first_period.abbreviation)
+    assert_equal('B1', result[0].second_period.abbreviation)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,3,1).to_i), result[1].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,4,1).to_i), result[1].ends_at)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,4,1).to_i), result[2].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,6,1).to_i), result[2].ends_at)
+
+    # The abbreviation-only transition at 2026-06-15 splits the interval.
+    assert_equal(Timestamp.utc(Time.utc(2026,6,1).to_i), result[3].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,6,15).to_i), result[3].ends_at)
+    assert_equal('A3', result[3].first_period.abbreviation)
+    assert_equal('B2', result[3].second_period.abbreviation)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,6,15).to_i), result[4].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,8,1).to_i), result[4].ends_at)
+    assert_equal('A4', result[4].first_period.abbreviation)
+    assert_equal('B2', result[4].second_period.abbreviation)
+  end
+
+  def test_compare_with_full_dst
+    c = constant_offset_timezone('Test/C', TimezoneOffset.new(0, 3600, 'CD'))
+    d = constant_offset_timezone('Test/D', TimezoneOffset.new(3600, 0, 'CS'))
+
+    # The observed offsets are equal.
+    assert_equal([], c.compare_with(d, Time.utc(2026,1,1), Time.utc(2026,8,1)))
+
+    # The daylight savings indicators differ.
+    result = c.compare_with(d, Time.utc(2026,1,1), Time.utc(2026,8,1), compare: :full)
+
+    assert_equal(1, result.length)
+    assert_equal(Timestamp.utc(Time.utc(2026,1,1).to_i), result[0].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,8,1).to_i), result[0].ends_at)
+    assert_equal(true, result[0].first_period.dst?)
+    assert_equal(false, result[0].second_period.dst?)
+  end
+
+  def test_compare_with_does_not_merge_across_equal_intervals
+    # Differences separated by an interval where the zones are equal must
+    # not be merged, even when the differences are identical.
+    g1 = TimezoneOffset.new(0, 0, 'G1')
+    g2 = TimezoneOffset.new(3600, 0, 'G2')
+
+    g = transitions_timezone('Test/G', [
+      TimezoneTransition.new(g2, g1, Time.utc(2026,2,1).to_i),
+      TimezoneTransition.new(g1, g2, Time.utc(2026,3,1).to_i),
+      TimezoneTransition.new(g2, g1, Time.utc(2026,4,1).to_i),
+      TimezoneTransition.new(g1, g2, Time.utc(2026,5,1).to_i)
+    ])
+    h = constant_offset_timezone('Test/H', TimezoneOffset.new(0, 0, 'H'))
+
+    result = g.compare_with(h, Time.utc(2026,1,1), Time.utc(2026,6,1))
+
+    assert_equal(2, result.length)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,2,1).to_i), result[0].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,3,1).to_i), result[0].ends_at)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,4,1).to_i), result[1].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,5,1).to_i), result[1].ends_at)
+  end
+
+  def test_compare_with_transitions_on_window_boundaries
+    e1 = TimezoneOffset.new(0, 0, 'E1')
+    e2 = TimezoneOffset.new(3600, 0, 'E2')
+    e3 = TimezoneOffset.new(7200, 0, 'E3')
+
+    e = transitions_timezone('Test/E', [
+      TimezoneTransition.new(e2, e1, Time.utc(2026,1,1).to_i),
+      TimezoneTransition.new(e3, e2, Time.utc(2026,8,1).to_i)
+    ])
+    f = constant_offset_timezone('Test/F', TimezoneOffset.new(0, 0, 'F'))
+
+    # The transition at 2026-01-01 takes effect at the start of the window.
+    # The transition at 2026-08-01 is outside of the window (to is exclusive).
+    result = e.compare_with(f, Time.utc(2026,1,1), Time.utc(2026,8,1))
+
+    assert_equal(1, result.length)
+    assert_equal(Timestamp.utc(Time.utc(2026,1,1).to_i), result[0].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,8,1).to_i), result[0].ends_at)
+    assert_equal(3600, result[0].first_period.observed_utc_offset)
+    assert_equal(0, result[0].second_period.observed_utc_offset)
+  end
+
+  def test_compare_with_no_differences
+    g = constant_offset_timezone('Test/G', TimezoneOffset.new(3600, 0, 'G'))
+    h = constant_offset_timezone('Test/H', TimezoneOffset.new(3600, 0, 'H'))
+
+    assert_equal([], g.compare_with(h, Time.utc(2026,1,1), Time.utc(2026,8,1)))
+
+    result = g.compare_with(h, Time.utc(2026,1,1), Time.utc(2026,8,1), compare: :full)
+    assert_equal(1, result.length)
+    assert_equal(Timestamp.utc(Time.utc(2026,1,1).to_i), result[0].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,8,1).to_i), result[0].ends_at)
+  end
+
+  def test_compare_with_timestamp_and_datetime
+    london = Timezone.get('Europe/London')
+    new_york = Timezone.get('America/New_York')
+
+    result = london.compare_with(new_york, Timestamp.utc(Time.utc(2026,1,1).to_i), DateTime.new(2026,7,1))
+
+    assert_equal(3, result.length)
+    assert_equal(Timestamp.utc(Time.utc(2026,1,1).to_i), result[0].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,7,1).to_i), result[2].ends_at)
+  end
+
+  def test_compare_with_real_zones
+    london = Timezone.get('Europe/London')
+    new_york = Timezone.get('America/New_York')
+
+    result = london.compare_with(new_york, Time.utc(2026,1,1), Time.utc(2026,7,1))
+
+    assert_equal(3, result.length)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,1,1).to_i), result[0].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,3,8,7).to_i), result[0].ends_at)
+    assert_equal(0, result[0].first_period.observed_utc_offset)
+    assert_equal(-18000, result[0].second_period.observed_utc_offset)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,3,8,7).to_i), result[1].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,3,29,1).to_i), result[1].ends_at)
+    assert_equal(0, result[1].first_period.observed_utc_offset)
+    assert_equal(-14400, result[1].second_period.observed_utc_offset)
+
+    assert_equal(Timestamp.utc(Time.utc(2026,3,29,1).to_i), result[2].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(2026,7,1).to_i), result[2].ends_at)
+    assert_equal(3600, result[2].first_period.observed_utc_offset)
+    assert_equal(-14400, result[2].second_period.observed_utc_offset)
+  end
+
+  def test_compare_with_non_whole_hour_historical_offsets
+    paris = Timezone.get('Europe/Paris')
+    london = Timezone.get('Europe/London')
+
+    # Europe/Paris observed LMT (UTC+0:09:21) until 1911-03-11.
+    result = paris.compare_with(london, Time.utc(1900,1,1), Time.utc(1901,1,1))
+
+    assert_equal(1, result.length)
+    assert_equal(Timestamp.utc(Time.utc(1900,1,1).to_i), result[0].starts_at)
+    assert_equal(Timestamp.utc(Time.utc(1901,1,1).to_i), result[0].ends_at)
+    assert_equal(561, result[0].first_period.observed_utc_offset)
+    assert_equal(0, result[0].second_period.observed_utc_offset)
+  end
+
+  def test_compare_with_nil_other
+    tz = Timezone.get('Europe/London')
+    error = assert_raises(ArgumentError) { tz.compare_with(nil, Time.utc(2026,1,1), Time.utc(2026,8,1)) }
+    assert_equal('other must be specified', error.message)
+  end
+
+  def test_compare_with_nil_from
+    tz = Timezone.get('Europe/London')
+    error = assert_raises(ArgumentError) { tz.compare_with(tz, nil, Time.utc(2026,8,1)) }
+    assert_equal('from must be specified', error.message)
+  end
+
+  def test_compare_with_nil_to
+    tz = Timezone.get('Europe/London')
+    error = assert_raises(ArgumentError) { tz.compare_with(tz, Time.utc(2026,1,1), nil) }
+    assert_equal('to must be specified', error.message)
+  end
+
+  def test_compare_with_invalid_compare
+    tz = Timezone.get('Europe/London')
+    error = assert_raises(ArgumentError) { tz.compare_with(tz, Time.utc(2026,1,1), Time.utc(2026,8,1), compare: :invalid) }
+    assert_equal('compare must be :offset or :full', error.message)
+  end
+
+  def test_compare_with_to_not_greater_than_from
+    tz = Timezone.get('Europe/London')
+
+    error = assert_raises(ArgumentError) { tz.compare_with(tz, Time.utc(2026,8,1), Time.utc(2026,1,1)) }
+    assert_equal('to must be greater than from', error.message)
+
+    error = assert_raises(ArgumentError) { tz.compare_with(tz, Time.utc(2026,1,1), Time.utc(2026,1,1)) }
+    assert_equal('to must be greater than from', error.message)
+  end
+
   def test_now
     o1 = TimezoneOffset.new(0, 0, 'GMT')
     o2 = TimezoneOffset.new(0, 3600, 'BST')
@@ -1947,6 +2191,14 @@ class TCTimezone < Minitest::Test
   end
 
   private
+
+  def transitions_timezone(identifier, transitions)
+    DataTimezone.new(DataSources::TransitionsDataTimezoneInfo.new(identifier, transitions))
+  end
+
+  def constant_offset_timezone(identifier, offset)
+    DataTimezone.new(DataSources::ConstantOffsetDataTimezoneInfo.new(identifier, offset))
+  end
 
   def assert_raises_unknown_timezone(&block)
     error = assert_raises(UnknownTimezone, &block)
