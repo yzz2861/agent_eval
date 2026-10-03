@@ -977,6 +977,7 @@ module Net
     # *   #read_timeout
     # *   #ssl_timeout
     # *   #ssl_version
+    # *   `unix_socket` (calls #unix_socket=)
     # *   `use_ssl` (calls #use_ssl=)
     # *   #verify_callback
     # *   #verify_depth
@@ -998,7 +999,7 @@ module Net
 
     # <!--
     #   rdoc-file=lib/net/http.rb
-    #   - new(address, port = nil, p_addr = :ENV, p_port = nil, p_user = nil, p_pass = nil, p_no_proxy = nil, p_use_ssl = nil)
+    #   - new(address, port = nil, p_addr = :ENV, p_port = nil, p_user = nil, p_pass = nil, p_no_proxy = nil, p_use_ssl = nil, unix_socket: nil)
     # -->
     # Returns a new Net::HTTP object `http` (but does not open a TCP connection or
     # HTTP session).
@@ -1028,7 +1029,7 @@ module Net
     # For proxy-defining arguments `p_addr` through `p_no_proxy`, see [Proxy
     # Server](rdoc-ref:Net::HTTP@Proxy+Server).
     #
-    def self.new: (String address, ?Integer? port, ?String | :ENV | nil p_addr, ?Integer? p_port, ?String? p_user, ?String? p_pass, ?untyped? p_no_proxy) -> Net::HTTP
+    def self.new: (String address, ?Integer? port, ?String | :ENV | nil p_addr, ?Integer? p_port, ?String? p_user, ?String? p_pass, ?untyped? p_no_proxy, ?untyped? p_use_ssl, ?unix_socket: String?) -> Net::HTTP
 
     # <!--
     #   rdoc-file=lib/net/http.rb
@@ -1105,6 +1106,8 @@ module Net
     # Returns the integer port number given as argument `port` in ::new.
     #
     attr_reader port: Integer
+
+    attr_reader unix_socket: String?
 
     # <!-- rdoc-file=lib/net/http.rb -->
     # Sets or returns the string local host used to establish the connection;
@@ -1332,6 +1335,8 @@ module Net
     # Raises OpenSSL::SSL::SSLError if the port is not an HTTPS port.
     #
     def use_ssl=: (boolish flag) -> void
+
+    def unix_socket=: (String? path) -> String?
 
     SSL_IVNAMES: Array[untyped]
 

@@ -108,6 +108,8 @@ class NetSingletonTest < Test::Unit::TestCase
   def test_new
     assert_send_type "(String, Integer, nil, nil, nil, nil, nil) -> Net::HTTP",
                      Net::HTTP, :new, 'www.ruby-lang.org', 80, nil, nil, nil, nil, nil
+    assert_send_type "(String, Integer, unix_socket: String) -> Net::HTTP",
+                     Net::HTTP, :new, 'www.ruby-lang.org', 80, nil, unix_socket: '/tmp/http.sock'
   end
 
   def test_start
@@ -222,6 +224,13 @@ class NetInstanceTest < Test::Unit::TestCase
                      TestNet.new, :use_ssl?
     assert_send_type "(bool) -> void",
                      TestNet.new, :use_ssl=, true
+  end
+
+  def test_unix_socket
+    assert_send_type "() -> nil",
+                     TestNet.new, :unix_socket
+    assert_send_type "(String) -> String",
+                     TestNet.new, :unix_socket=, '/tmp/http.sock'
   end
 
   def test_start
