@@ -17,16 +17,37 @@ module Fugit
     MAXDAYS = [
       nil, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 ].freeze
 
+    # Policies for local times that occur twice (DST "fall back")
+    #
+    FOLD_POLICIES = [ :earlier, :later, :twice ].freeze
+      #
+      # :earlier only triggers on the first occurrence (current behaviour)
+      # :later only triggers on the second occurrence
+      # :twice triggers on both occurrences
+
+    # Policies for local times that never occur (DST "spring forward")
+    #
+    GAP_POLICIES = [ :skip, :shift ].freeze
+      #
+      # :skip does not trigger at all (current behaviour)
+      # :shift triggers after shifting the local time by the gap size
+
+    # How far (in seconds, wall-clock) to keep collecting candidates
+    # after an ambiguous (fold) or shifted (gap) candidate, since their
+    # UTC instants may interleave with the ones of neighbour candidates
+    #
+    DST_LOOKAHEAD_S = 2 * DAY_S
+
     attr_reader(
-      :original, :zone)
+      :original, :zone, :fold, :gap)
     attr_reader(
       :seconds, :minutes, :hours, :monthdays, :months, :weekdays, :timezone)
 
     class << self
 
-      def new(original)
+      def new(original, opts={})
 
-        parse(original)
+        parse(original, opts)
       end
 
       def parse(s, opts={})
@@ -269,7 +290,15 @@ module Fugit
       # gh-18 and noticing some > 1024 for some experiments. 2048 should
       # be ok.
 
+    DST_MAX_ITERATION_COUNT = 64 * MAX_ITERATION_COUNT
+      #
+      # For the fold/gap policy aware #next_time and #previous_time,
+      # a per-second cron expression scanning a DST fold or gap
+      # iterates once per second of the transition window
+
     def next_time(from=::EtOrbi::EoTime.now)
+
+      return next_time_with_dst_policies(from) if dst_policies?
 
       from = ::EtOrbi.make_time(from)
       sfrom = from.strftime('%F|%T')
@@ -323,6 +352,8 @@ module Fugit
 
     def previous_time(from=::EtOrbi::EoTime.now)
 
+      return previous_time_with_dst_policies(from) if dst_policies?
+
       from = ::EtOrbi.make_time(from)
 
       i = 0
@@ -347,6 +378,230 @@ module Fugit
       end
 
       t.time.translate(from.zone)
+    end
+
+    # Returns true when this cron instance was given explicit
+    # DST fold/gap policies
+    #
+    def dst_policies?
+
+      @dst_policies
+    end
+
+    # A copy of this cron instance, in the UTC timezone, used to
+    # enumerate wall-clock (local time) candidates, which are then
+    # resolved to UTC instants according to the fold/gap policies
+    #
+    def wall_cron
+
+      @wall_cron ||=
+        begin
+          s = to_cron_s
+          s = s.sub(/ +#{Regexp.escape(@timezone.name)}\z/, '') if @timezone
+          self.class.do_parse("#{s} UTC")
+        end
+    end
+
+    def next_time_with_dst_policies(from)
+
+      from = ::EtOrbi.make_time(from)
+      zone = @timezone || from.zone
+      ifrom = from.to_i
+
+      w = ::EtOrbi::EoTime.new(
+        ifrom + from.translate(zone).utc_offset - 1, 'UTC')
+      w = ::EtOrbi::EoTime.new(
+        fold_rewind_wall(zone, ifrom, w.to_i), 'UTC')
+
+      i = 0
+      min = nil
+      horizon = nil
+
+      loop do
+
+        fail RuntimeError.new(
+          "too many loops for #{@original.inspect} #next_time, breaking, " +
+          "cron expression most likely invalid (Feb 30th like?) or " +
+          "only matching non-existent local times, " +
+          "please fill an issue at https://git.io/fjJC9"
+        ) if (i += 1) > DST_MAX_ITERATION_COUNT
+
+        w = wall_cron.next_time(w)
+
+        instants, complex = resolve_wall_time(zone, w)
+
+        if complex
+          h = instants.max
+          horizon = h if horizon.nil? || h > horizon
+        end
+
+        t = instants.select { |ts| ts > ifrom }.min
+        min = t if t && (min.nil? || t < min)
+
+        # a trivial (unambiguous, unshifted) candidate whose instant
+        # is past the horizon cannot be beaten by later candidates
+        #
+        return ::EtOrbi::EoTime.new(min, from.zone) \
+          if min && ! complex &&
+          (horizon.nil? || (instants.first && instants.first >= horizon))
+      end
+    end
+
+    def previous_time_with_dst_policies(from)
+
+      from = ::EtOrbi.make_time(from)
+      zone = @timezone || from.zone
+      ifrom = from.to_i
+
+      w = ::EtOrbi::EoTime.new(
+        ifrom + from.translate(zone).utc_offset + 1, 'UTC')
+      w = ::EtOrbi::EoTime.new(
+        fold_forward_wall(zone, ifrom, w.to_i), 'UTC')
+
+      i = 0
+      max = nil
+      horizon = nil
+
+      loop do
+
+        fail RuntimeError.new(
+          "too many loops for #{@original.inspect} #previous_time, breaking, " +
+          "cron expression most likely invalid (Feb 30th like?) or " +
+          "only matching non-existent local times, " +
+          "please fill an issue at https://git.io/fjJCQ"
+        ) if (i += 1) > DST_MAX_ITERATION_COUNT
+
+        w = wall_cron.previous_time(w)
+
+        instants, complex = resolve_wall_time(zone, w)
+
+        if complex
+          h = instants.min
+          horizon = h if horizon.nil? || h < horizon
+        else
+          complex = shift_conflict?(zone, w.to_i, max)
+        end
+
+        t = instants.select { |ts| ts < ifrom }.max
+        max = t if t && (max.nil? || t > max)
+
+        return ::EtOrbi::EoTime.new(max, from.zone) \
+          if max && ! complex &&
+          (horizon.nil? || (instants.last && instants.last <= horizon))
+      end
+    end
+
+    # Returns true when a DST gap transition is still ahead of the
+    # backward wall-clock walk and its gap-shifted occurrences may
+    # beat the current maximum (only relevant with gap: :shift)
+    #
+    def shift_conflict?(zone, w, max)
+
+      return false unless @gap == :shift && max
+
+      zone
+        .transitions_up_to(
+          ::Time.at(w + DST_LOOKAHEAD_S).utc,
+          ::Time.at(w - DST_LOOKAHEAD_S).utc)
+        .any? { |tr|
+          pre = tr.previous_offset.utc_total_offset
+          post = tr.offset.utc_total_offset
+          gap = post - pre
+          gap > 0 &&
+          w > tr.timestamp_value + post &&
+          tr.timestamp_value + gap > max }
+    end
+
+    # When `from` sits within (or just ahead of) a DST fold, wall-clock
+    # candidates located before the wall time of `from` may still yield
+    # second pass UTC instants after `from`; rewinds the wall starting
+    # point past the beginning of the fold
+    #
+    def fold_rewind_wall(zone, ifrom, wfrom)
+
+      each_fold_transition(zone, ifrom) { |ts, pre, post|
+        wfrom = ts + post - 1 \
+          if ts + pre - post > ifrom && ts + post - 1 < wfrom }
+
+      wfrom
+    end
+
+    # Symmetric of #fold_rewind_wall for #previous_time; extends the
+    # wall starting point past the end of the fold, so that first pass
+    # UTC instants before `from` are not missed
+    #
+    def fold_forward_wall(zone, ifrom, wfrom)
+
+      each_fold_transition(zone, ifrom) { |ts, pre, post|
+        wfrom = ts + pre + 1 \
+          if ts < ifrom + pre - post && ts + pre + 1 > wfrom }
+
+      wfrom
+    end
+
+    # Yields [ timestamp, offset_before, offset_after ] for each DST
+    # fold (clock turned back) transition around the given UTC instant
+    #
+    def each_fold_transition(zone, ifrom)
+
+      zone
+        .transitions_up_to(
+          ::Time.at(ifrom + DST_LOOKAHEAD_S).utc,
+          ::Time.at(ifrom - DST_LOOKAHEAD_S).utc)
+        .each { |tr|
+          pre = tr.previous_offset.utc_total_offset
+          post = tr.offset.utc_total_offset
+          yield(tr.timestamp_value, pre, post) if pre > post }
+
+      zone
+    end
+
+    # Resolves a wall-clock time (an EoTime in UTC standing for local
+    # time fields) in the given timezone to a list of UTC epoch seconds,
+    # according to this cron instance's fold and gap policies.
+    # The second element of the returned pair is true when the
+    # resolution was ambiguous (fold) or shifted (gap), in which case
+    # neighbour candidates may yield interleaving UTC instants
+    #
+    def resolve_wall_time(zone, w)
+
+      local = ::Time.utc(w.year, w.month, w.day, w.hour, w.min, w.sec)
+
+      periods = zone.periods_for_local(local)
+
+      return resolve_gap_wall_time(zone, local) if periods.empty?
+
+      utcs = periods
+        .collect { |p| local.to_i - p.utc_total_offset }
+        .sort
+
+      case @fold
+      when :later then [ [ utcs.last ], false ]
+      when :twice then [ utcs, utcs.length > 1 ]
+      else [ [ utcs.first ], false ]
+      end
+    end
+
+    # The local time does not exist (DST gap); either skip it or
+    # shift it by the gap size (which is equivalent to reading it
+    # with the UTC offset in effect before the gap)
+    #
+    def resolve_gap_wall_time(zone, local)
+
+      return [ [], false ] if @gap == :skip
+
+      li = local.to_i
+
+      tr = zone
+        .transitions_up_to(
+          ::Time.at(li + 2 * DAY_S).utc, ::Time.at(li - 2 * DAY_S).utc)
+        .find { |t|
+          t.timestamp_value + t.previous_offset.utc_total_offset <= li &&
+          li < t.timestamp_value + t.offset.utc_total_offset }
+
+      return [ [], false ] unless tr
+
+      [ [ li - tr.previous_offset.utc_total_offset ], true ]
     end
 
     # Used by Fugit::Cron#next and Fugit::Cron#prev
@@ -589,7 +844,32 @@ module Fugit
       return nil unless valid
       return nil unless compact_month_days
 
+      @fold = determine_dst_policy(:fold, opts, FOLD_POLICIES, :earlier)
+      @gap = determine_dst_policy(:gap, opts, GAP_POLICIES, :skip)
+
+      @dst_policies = opts.key?(:fold) || opts.key?(:gap)
+        #
+        # the fold/gap policy aware #next_time and #previous_time
+        # are only used when the policies were explicitly set,
+        # the default behaviour is left untouched
+
       self
+    end
+
+    def determine_dst_policy(key, opts, policies, default)
+
+      v = opts[key]
+
+      return default if v.nil?
+
+      v = v.to_sym if v.respond_to?(:to_sym)
+
+      return v if policies.include?(v)
+
+      fail ArgumentError.new(
+        "invalid #{key} policy #{opts[key].inspect}, " +
+        "expected one of #{policies.collect(&:inspect).join(', ')}"
+      )
     end
 
     def expand(min, max, opts, r)

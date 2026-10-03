@@ -1794,6 +1794,191 @@ group Fugit::Cron do
     end
   end
 
+  group 'DST fold and gap policies' do
+
+    # America/New_York, 2026:
+    #   spring forward 2026-03-08 07:00:00 UTC (02:00 EST -> 03:00 EDT)
+    #   fall back    2026-11-01 06:00:00 UTC (02:00 EDT -> 01:00 EST)
+
+    ny_nexts = lambda do |c, from, n|
+      t = EtOrbi::EoTime.new(Time.utc(*from), 'America/New_York')
+      n.times.collect { t = c.next_time(t); t.utc.strftime('%F %T') }
+    end
+
+    ny_prevs = lambda do |c, from, n|
+      t = EtOrbi::EoTime.new(Time.utc(*from), 'America/New_York')
+      n.times.collect { t = c.previous_time(t); t.utc.strftime('%F %T') }
+    end
+
+    test 'defaults to fold: :earlier and gap: :skip' do
+
+      c = Fugit::Cron.parse('0 30 1 * * * America/New_York')
+
+      assert c.fold, :earlier
+      assert c.gap, :skip
+
+      assert(
+        ny_nexts.(c, [ 2026, 11, 1, 4, 0, 0 ], 2),
+        [ '2026-11-01 05:30:00', # 01:30 EDT, second occurrence skipped
+          '2026-11-02 06:30:00' ])
+    end
+
+    test 'accepts string policy values' do
+
+      c = Fugit::Cron.parse('0 30 1 * * * America/New_York', fold: 'twice')
+
+      assert c.fold, :twice
+    end
+
+    test 'fails on invalid policy values' do
+
+      assert_error(ArgumentError) { Fugit::Cron.parse('0 0 * * *', fold: :both) }
+      assert_error(ArgumentError) { Fugit::Cron.parse('0 0 * * *', gap: :move) }
+    end
+
+    test 'fold: :earlier only triggers on the first occurrence' do
+
+      c = Fugit::Cron.parse('0 30 1 * * * America/New_York', fold: :earlier)
+
+      assert(
+        ny_nexts.(c, [ 2026, 11, 1, 4, 0, 0 ], 2),
+        [ '2026-11-01 05:30:00', # 01:30 EDT
+          '2026-11-02 06:30:00' ])
+      assert(
+        ny_prevs.(c, [ 2026, 11, 3, 0, 0, 0 ], 2),
+        [ '2026-11-02 06:30:00',
+          '2026-11-01 05:30:00' ])
+    end
+
+    test 'fold: :later only triggers on the second occurrence' do
+
+      c = Fugit::Cron.parse('0 30 1 * * * America/New_York', fold: :later)
+
+      assert(
+        ny_nexts.(c, [ 2026, 11, 1, 4, 0, 0 ], 2),
+        [ '2026-11-01 06:30:00', # 01:30 EST
+          '2026-11-02 06:30:00' ])
+      assert(
+        ny_prevs.(c, [ 2026, 11, 3, 0, 0, 0 ], 2),
+        [ '2026-11-02 06:30:00',
+          '2026-11-01 06:30:00' ])
+    end
+
+    test 'fold: :twice triggers on both occurrences' do
+
+      c = Fugit::Cron.new('0 30 1 * * * America/New_York', fold: :twice)
+
+      assert(
+        ny_nexts.(c, [ 2026, 11, 1, 4, 0, 0 ], 4),
+        [ '2026-11-01 05:30:00', # 01:30 EDT
+          '2026-11-01 06:30:00', # 01:30 EST
+          '2026-11-02 06:30:00',
+          '2026-11-03 06:30:00' ])
+      assert(
+        ny_prevs.(c, [ 2026, 11, 3, 0, 0, 0 ], 4),
+        [ '2026-11-02 06:30:00',
+          '2026-11-01 06:30:00', # 01:30 EST
+          '2026-11-01 05:30:00', # 01:30 EDT
+          '2026-10-31 05:30:00' ])
+    end
+
+    test 'fold: :twice interleaves both passes (seconds field)' do
+
+      c = Fugit::Cron.parse('0 0,20,40 1 * * * America/New_York', fold: :twice)
+
+      assert(
+        ny_nexts.(c, [ 2026, 11, 1, 4, 0, 0 ], 8),
+        [ '2026-11-01 05:00:00', # 01:00 EDT
+          '2026-11-01 05:20:00', # 01:20 EDT
+          '2026-11-01 05:40:00', # 01:40 EDT
+          '2026-11-01 06:00:00', # 01:00 EST
+          '2026-11-01 06:20:00', # 01:20 EST
+          '2026-11-01 06:40:00', # 01:40 EST
+          '2026-11-02 06:00:00',
+          '2026-11-02 06:20:00' ])
+      assert(
+        ny_prevs.(c, [ 2026, 11, 2, 4, 0, 0 ], 7),
+        [ '2026-11-01 06:40:00', # 01:40 EST
+          '2026-11-01 06:20:00', # 01:20 EST
+          '2026-11-01 06:00:00', # 01:00 EST
+          '2026-11-01 05:40:00', # 01:40 EDT
+          '2026-11-01 05:20:00', # 01:20 EDT
+          '2026-11-01 05:00:00', # 01:00 EDT
+          '2026-10-31 05:40:00' ])
+    end
+
+    test 'gap: :skip does not trigger on the non-existent local time' do
+
+      c = Fugit::Cron.parse('0 30 2 * * * America/New_York', gap: :skip)
+
+      assert(
+        ny_nexts.(c, [ 2026, 3, 8, 4, 0, 0 ], 2),
+        [ '2026-03-09 06:30:00', # 2026-03-08 02:30 does not exist
+          '2026-03-10 06:30:00' ])
+      assert(
+        ny_prevs.(c, [ 2026, 3, 10, 4, 0, 0 ], 2),
+        [ '2026-03-09 06:30:00',
+          '2026-03-07 07:30:00' ])
+    end
+
+    test 'gap: :shift triggers after shifting by the gap' do
+
+      c = Fugit::Cron.parse('0 30 2 * * * America/New_York', gap: :shift)
+
+      assert(
+        ny_nexts.(c, [ 2026, 3, 8, 4, 0, 0 ], 3),
+        [ '2026-03-08 07:30:00', # 02:30 + 1h gap -> 03:30 EDT
+          '2026-03-09 06:30:00',
+          '2026-03-10 06:30:00' ])
+      assert(
+        ny_prevs.(c, [ 2026, 3, 10, 4, 0, 0 ], 3),
+        [ '2026-03-09 06:30:00',
+          '2026-03-08 07:30:00', # 03:30 EDT
+          '2026-03-07 07:30:00' ])
+    end
+
+    test 'gap: :shift interleaves shifted and regular occurrences' do
+
+      c = Fugit::Cron.parse('0 0,30 1,2,3,4 * * * America/New_York', gap: :shift)
+
+      assert(
+        ny_nexts.(c, [ 2026, 3, 8, 4, 0, 0 ], 7),
+        [ '2026-03-08 06:00:00', # 01:00 EST
+          '2026-03-08 06:30:00', # 01:30 EST
+          '2026-03-08 07:00:00', # 02:00 shifted to 03:00 EDT
+          '2026-03-08 07:30:00', # 02:30 shifted to 03:30 EDT
+          '2026-03-08 08:00:00', # 04:00 EDT
+          '2026-03-08 08:30:00', # 04:30 EDT
+          '2026-03-09 05:00:00' ])
+      assert(
+        ny_prevs.(c, [ 2026, 3, 9, 4, 0, 0 ], 7),
+        [ '2026-03-08 08:30:00', # 04:30 EDT
+          '2026-03-08 08:00:00', # 04:00 EDT
+          '2026-03-08 07:30:00', # 03:30 EDT and shifted 02:30
+          '2026-03-08 07:00:00', # 03:00 EDT and shifted 02:00
+          '2026-03-08 06:30:00', # 01:30 EST
+          '2026-03-08 06:00:00', # 01:00 EST
+          '2026-03-07 09:30:00' ])
+    end
+
+    test 'fixed offset timezones are not affected by the policies' do
+
+      c = Fugit::Cron.parse('0 30 2 * * * +08:00', fold: :twice, gap: :shift)
+
+      t = EtOrbi::EoTime.new(Time.utc(2026, 3, 7, 16, 0, 0), '+08:00')
+
+      assert(
+        3.times.collect { t = c.next_time(t); t.utc.strftime('%F %T') },
+        [ '2026-03-07 18:30:00', # 2026-03-08 02:30 +08:00
+          '2026-03-08 18:30:00',
+          '2026-03-09 18:30:00' ])
+      assert(
+        2.times.collect { t = c.previous_time(t); t.utc.strftime('%F %T') },
+        [ '2026-03-08 18:30:00',
+          '2026-03-07 18:30:00' ])
+    end
+  end
+
   group 'the module % extension' do
 
     # mostly about 2025-09-26 gh-114

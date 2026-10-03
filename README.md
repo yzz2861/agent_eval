@@ -228,6 +228,38 @@ Fugit accepts a IANA timezone identifier right after a cron string:
 
 When no time zone is specified, fugit uses Ruby's provided timezone.
 
+### DST folds and gaps
+
+When a time zone switches out of daylight saving time ("fall back"), a
+range of local times occurs twice (the fold). When it switches into
+daylight saving time ("spring forward"), a range of local times never
+occurs (the gap).
+
+By default, `Fugit::Cron` triggers only on the first occurrence of a
+repeated local time and simply skips non-existent local times. Explicit
+`fold:` and `gap:` policies can be given at parse time to change that:
+
+```ruby
+c = Fugit::Cron.parse('0 30 1 * * * America/New_York', fold: :twice)
+c = Fugit::Cron.parse('0 30 2 * * * America/New_York', gap: :shift)
+  #
+  # also via Fugit::Cron.new(str, fold: ..., gap: ...)
+```
+
+The `fold:` policy (for repeated local times) accepts:
+* `:earlier` - only trigger on the first (earlier UTC) occurrence (default)
+* `:later` - only trigger on the second (later UTC) occurrence
+* `:twice` - trigger on both occurrences
+
+The `gap:` policy (for non-existent local times) accepts:
+* `:skip` - do not trigger at all (default)
+* `:shift` - trigger on the local time shifted by the gap size
+  (`02:30` in a one hour gap triggers at `03:30`)
+
+`next_time` and `previous_time` follow the same semantics: iterating in
+either direction yields each retained occurrence exactly once, in order.
+Timezones with a fixed UTC offset are not affected by those policies.
+
 ### the first Monday of the month
 
 Fugit tries to follow the `man 5 crontab` documentation.
@@ -713,4 +745,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
