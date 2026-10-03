@@ -1,6 +1,7 @@
 # frozen_string_literal: false
 require 'net/http'
 require 'test/unit'
+require 'stringio'
 
 class HTTPRequestTest < Test::Unit::TestCase
 
@@ -121,5 +122,78 @@ class HTTPRequestTest < Test::Unit::TestCase
     req.update_uri("test", 8080, false)
     assert_equal "[2001:db8::1]", req.uri.host
     assert_equal 8080, req.uri.port
+  end
+
+  def test_body_factory_default
+    req = Net::HTTP::Put.new('/')
+    assert_nil req.body_factory
+  end
+
+  def test_body_factory_assignment
+    factory = proc { [StringIO.new('abc'), 3] }
+    req = Net::HTTP::Put.new('/')
+    req.body = 'xyz'
+    req.body_factory = factory
+    assert_same factory, req.body_factory
+    assert_nil req.body
+    assert_nil req.body_stream
+  end
+
+  def test_body_factory_cleared_by_body_assignment
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = proc { [StringIO.new('abc'), 3] }
+    req.body = 'xyz'
+    assert_nil req.body_factory
+    assert_equal 'xyz', req.body
+  end
+
+  def test_body_factory_cleared_by_body_stream_assignment
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = proc { [StringIO.new('abc'), 3] }
+    req.body_stream = StringIO.new('xyz')
+    assert_nil req.body_factory
+    assert_not_nil req.body_stream
+  end
+
+  def test_body_factory_cleared_by_set_form
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = proc { [StringIO.new('abc'), 3] }
+    req.set_form([['field', 'value']], 'multipart/form-data')
+    assert_nil req.body_factory
+  end
+
+  def test_body_factory_must_respond_to_call
+    req = Net::HTTP::Put.new('/')
+    assert_raise(ArgumentError) { req.body_factory = 123 }
+  end
+
+  def test_body_factory_mutual_exclusion_with_request_body_argument
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = proc { [StringIO.new('abc'), 3] }
+    assert_raise(ArgumentError) { req.set_body_internal('xyz') }
+  end
+
+  def test_exec_with_body_factory_validates_result
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = proc { StringIO.new('abc') }
+    assert_raise(ArgumentError) do
+      req.send(:send_request_with_body_factory, nil, '1.1', '/', nil)
+    end
+  end
+
+  def test_exec_with_body_factory_validates_length
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = proc { [StringIO.new('abc'), 'many'] }
+    assert_raise(ArgumentError) do
+      req.send(:send_request_with_body_factory, nil, '1.1', '/', nil)
+    end
+  end
+
+  def test_exec_with_body_factory_validates_stream
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = proc { [Object.new, 3] }
+    assert_raise(ArgumentError) do
+      req.send(:send_request_with_body_factory, nil, '1.1', '/', nil)
+    end
   end
 end

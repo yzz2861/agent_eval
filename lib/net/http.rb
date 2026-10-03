@@ -2487,11 +2487,12 @@ module Net   #:nodoc:
 
     def transport_request(req)
       count = 0
+      failed_exception = nil
       begin
         begin_transport req
         res = catch(:response) {
           begin
-            req.exec @socket, @curr_http_version, edit_path(req.path)
+            req.exec @socket, @curr_http_version, edit_path(req.path), failed_exception
           rescue Errno::EPIPE
             # Failure when writing full request, but we can probably
             # still read the received response.
@@ -2531,6 +2532,7 @@ module Net   #:nodoc:
           count += 1
           @socket.close if @socket
           debug "Conn close because of error #{exception}, and retry"
+          failed_exception = exception
           retry
         end
         debug "Conn close because of error #{exception}"

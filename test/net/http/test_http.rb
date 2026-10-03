@@ -1355,6 +1355,203 @@ class TestNetHTTPKeepAlive < Test::Unit::TestCase
     @log_tester = nil
   end
 
+  class OneShotStream
+    attr_reader :closed, :read_count, :length
+
+    def initialize(content)
+      @content = content
+      @closed = false
+      @read_count = 0
+      @length = content.bytesize
+    end
+
+    def read(*args)
+      raise IOError, "cannot read a closed stream" if @closed
+      @read_count += 1
+      if args.last.is_a?(String)
+        buf = args.pop
+        chunk = @content.slice!(0, args.first || 4096)
+        return nil if chunk.nil?
+        buf.replace(chunk)
+        buf
+      else
+        @content.slice!(0, args.first || 4096)
+      end
+    end
+
+    def close
+      @closed = true
+    end
+
+    def closed?
+      @closed
+    end
+  end
+
+  # A socket that records everything written to it through a real pipe IO
+  # (so IO.copy_stream works as it does against the real BufferedIO) and
+  # fails response reads until the +success_after+th attempt, like
+  # MockSocket does for the header-only retry tests.
+  class BodyFactorySocket < MockSocket
+    def initialize(success_after:, fail_body_writes: false)
+      super
+      @reader, @writer = IO.pipe
+      @fail_body_writes = fail_body_writes
+    end
+
+    def continue_timeout
+      nil
+    end
+
+    def close
+      @writer.close unless @writer.closed?
+    rescue IOError
+    ensure
+      @reader.close rescue nil
+      @dead_writer&.close rescue nil
+    end
+
+    def write(*chunks)
+      @writer.write(*chunks)
+      chunks.map(&:bytesize).sum
+    end
+
+    def io
+      self
+    end
+
+    def to_io
+      if @fail_body_writes
+        @dead_writer ||= begin
+          FailingIO.new
+        end
+      else
+        @writer
+      end
+    end
+
+    def eof?
+      false
+    end
+
+    def written_bytes
+      @writer.close
+      @reader.read
+    end
+
+    # An IO wrapper whose writes always fail as if the peer had reset the
+    # connection while the request body was being streamed.
+    class FailingIO
+      def write(*)
+        raise Errno::EPIPE
+      end
+
+      def close
+      end
+
+      def to_io
+        self
+      end
+    end
+  end
+
+  def test_body_factory_refetches_source_on_retry
+    start {|http|
+      socket = BodyFactorySocket.new(success_after: 2)
+      http.instance_variable_get(:@socket).close
+      http.instance_variable_set(:@socket, socket)
+      http.max_retries = 3
+
+      sources = []
+      req = Net::HTTP::Put.new('/')
+      req.body_factory = proc do
+        source = OneShotStream.new(sources.empty? ? 'first-body' : 'second-body')
+        sources << source
+        [source, source.length]
+      end
+
+      http.request(req)
+
+      assert_equal 2, sources.size, 'factory is invoked once per transmission'
+      assert_not_same sources[0], sources[1],
+                      'retry obtains a fresh source rather than rewinding'
+      assert_predicate sources[0], :closed?, 'first generation source is closed'
+      assert_predicate sources[1], :closed?, 'second generation source is closed'
+      assert_operator sources[0].read_count, :>, 0
+      assert_operator sources[1].read_count, :>, 0
+
+      sent = socket.written_bytes
+      first_pos = sent.index('first-body')
+      second_pos = sent.index('second-body')
+      assert_not_nil first_pos
+      assert_not_nil second_pos
+      assert first_pos < second_pos, 'each attempt sends its own fresh body'
+    }
+  end
+
+  def test_body_factory_failure_keeps_transport_error_as_cause
+    start {|http|
+      socket = BodyFactorySocket.new(success_after: 10)
+      http.instance_variable_get(:@socket).close
+      http.instance_variable_set(:@socket, socket)
+      http.max_retries = 10
+
+      calls = 0
+      req = Net::HTTP::Put.new('/')
+      req.body_factory = proc do
+        calls += 1
+        raise 'cannot build body' if calls > 1
+        source = OneShotStream.new('first-body')
+        [source, source.length]
+      end
+
+      error = assert_raise(RuntimeError) { http.request(req) }
+      assert_equal 'cannot build body', error.message
+      assert_kind_of Errno::ECONNRESET, error.cause
+      assert_equal 2, calls
+    }
+  end
+
+  def test_body_factory_not_retried_for_non_idempotent_request
+    start {|http|
+      socket = BodyFactorySocket.new(success_after: 10)
+      http.instance_variable_get(:@socket).close
+      http.instance_variable_set(:@socket, socket)
+      http.max_retries = 10
+
+      calls = 0
+      sources = []
+      req = Net::HTTP::Post.new('/')
+      req.body_factory = proc do
+        calls += 1
+        source = OneShotStream.new("body-#{calls}")
+        sources << source
+        [source, source.length]
+      end
+
+      assert_raise(Errno::ECONNRESET) { http.request(req) }
+      assert_equal 1, calls, 'a body factory must not relax retry rules'
+      assert_equal 1, sources.size
+      assert_predicate sources[0], :closed?
+    }
+  end
+
+  def test_body_factory_closes_source_when_send_fails
+    start {|http|
+      socket = BodyFactorySocket.new(success_after: 10, fail_body_writes: true)
+      http.instance_variable_get(:@socket).close
+      http.instance_variable_set(:@socket, socket)
+      http.max_retries = 0
+
+      source = OneShotStream.new('first-body')
+      req = Net::HTTP::Put.new('/')
+      req.body_factory = proc { [source, source.length] }
+
+      assert_raise(Errno::ECONNRESET, Errno::EPIPE) { http.request(req) }
+      assert_predicate source, :closed?
+    }
+  end
+
   def test_keep_alive_server_close
     def @server.run(sock)
       sock.close

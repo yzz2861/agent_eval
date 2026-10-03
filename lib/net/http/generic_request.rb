@@ -52,6 +52,7 @@ class Net::HTTPGenericRequest
     @body = nil
     @body_stream = nil
     @body_data = nil
+    @body_factory = nil
   end
 
   # Returns the string method name for the request:
@@ -177,6 +178,7 @@ class Net::HTTPGenericRequest
     @body = str
     @body_stream = nil
     @body_data = nil
+    @body_factory = nil
     str
   end
 
@@ -202,13 +204,67 @@ class Net::HTTPGenericRequest
     @body = nil
     @body_stream = input
     @body_data = nil
+    @body_factory = nil
     input
   end
 
+  # Returns the body factory for the request, or +nil+ if there is none.
+  #
+  # See body_factory= for details.
+  #
+  attr_reader :body_factory
+
+  # Sets a body factory for the request.
+  #
+  # +factory+ must be a callable object.  It is called without arguments
+  # every time the request body is actually transmitted, including each
+  # automatic retry (see Net::HTTP#max_retries).  It must return a two
+  # element array +[stream, length]+, where +stream+ is an IO-like object
+  # that responds to #read and #close, and +length+ is the number of bytes
+  # that will be read from +stream+, used as the Content-Length header.
+  #
+  # A fresh stream must be returned on every call.  This allows the request
+  # to be replayed after the connection is unexpectedly closed while the
+  # request is being written, when the previously used one-shot stream (for
+  # example, an open File or a socket) can no longer be rewound and read
+  # again:
+  #
+  #   req = Net::HTTP::Put.new('/upload')
+  #   req.body_factory = proc do
+  #     file = File.open('large.bin', 'rb')
+  #     [file, file.size]
+  #   end
+  #
+  # The factory is only called for requests that are eligible for
+  # automatic retry.  Non-idempotent requests are never retried, so setting
+  # a body factory does not relax that rule.
+  #
+  # Net::HTTP closes each stream returned by the factory when the
+  # transmission of that attempt finishes, whether it succeeds or raises.
+  # The factory therefore owns no stream other than the one it has just
+  # returned; it must not reuse or close that stream later.
+  #
+  # If the factory raises, that exception is raised to the caller.  When
+  # the failure happens while preparing a retry, the exception that caused
+  # the retry is available as the raised exception's #cause.
+  #
+  # A request cannot have both a body factory and a body or body stream.
+  #
+  def body_factory=(factory)
+    unless factory.nil? || factory.respond_to?(:call)
+      raise ArgumentError, "body factory must respond to #call"
+    end
+    @body = nil
+    @body_stream = nil
+    @body_data = nil
+    @body_factory = factory
+    factory
+  end
+
   def set_body_internal(str)   #:nodoc: internal use only
-    raise ArgumentError, "both of body argument and HTTPRequest#body set" if str and (@body or @body_stream)
+    raise ArgumentError, "both of body argument and HTTPRequest#body set" if str and (@body or @body_stream or @body_factory)
     self.body = str if str
-    if @body.nil? && @body_stream.nil? && @body_data.nil? && request_body_permitted?
+    if @body.nil? && @body_stream.nil? && @body_data.nil? && @body_factory.nil? && request_body_permitted?
       self.body = ''
     end
   end
@@ -217,13 +273,15 @@ class Net::HTTPGenericRequest
   # write
   #
 
-  def exec(sock, ver, path)   #:nodoc: internal use only
+  def exec(sock, ver, path, exception = nil)   #:nodoc: internal use only
     if @body
       send_request_with_body sock, ver, path, @body
     elsif @body_stream
       send_request_with_body_stream sock, ver, path, @body_stream
     elsif @body_data
       send_request_with_body_data sock, ver, path, @body_data
+    elsif @body_factory
+      send_request_with_body_factory sock, ver, path, exception
     else
       write_header sock, ver, path
     end
@@ -302,6 +360,45 @@ class Net::HTTPGenericRequest
       chunker.finish
     else
       IO.copy_stream(f, sock)
+    end
+  end
+
+  def send_request_with_body_factory(sock, ver, path, exception)
+    begin
+      factory_result = @body_factory.call
+      unless factory_result.is_a?(Array) && factory_result.length == 2
+        raise ArgumentError, "body factory must return [stream, length]"
+      end
+      source, length = factory_result
+      unless source.respond_to?(:read) && source.respond_to?(:close)
+        raise ArgumentError, "body factory stream must respond to #read and #close"
+      end
+    rescue StandardError => factory_error
+      # The factory runs while preparing an actual transmission.  When the
+      # previous attempt failed with a transport error and that error
+      # triggered a retry, preserve it as the cause so the connection
+      # failure is not lost behind the factory failure.
+      if exception && !factory_error.equal?(exception)
+        raise factory_error, cause: exception
+      end
+      raise factory_error, cause: nil
+    end
+
+    length = begin
+      length.to_int
+    rescue NoMethodError, TypeError, FloatDomainError
+      raise ArgumentError, "body factory length must be an Integer"
+    end
+    raise ArgumentError, "body factory length must be non-negative" if length < 0
+
+    begin
+      self.content_length = length
+      delete 'Transfer-Encoding'
+      write_header sock, ver, path
+      wait_for_continue sock, ver if sock.continue_timeout
+      IO.copy_stream(source, sock)
+    ensure
+      source.close
     end
   end
 

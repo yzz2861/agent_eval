@@ -970,6 +970,7 @@ module Net::HTTPHeader
     @body_data = params
     @body = nil
     @body_stream = nil
+    @body_factory = nil
     @form_option = formopt
     case enctype
     when /\Aapplication\/x-www-form-urlencoded\z/i,
