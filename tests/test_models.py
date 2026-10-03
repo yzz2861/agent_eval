@@ -187,3 +187,25 @@ async def test_response_async_streaming():
     with pytest.raises(RuntimeError):
         async for chunk in response.aiter_stream():
             pass  # pragma: nocover
+
+
+def test_proxy_chain():
+    chain = httpcore.ProxyChain(
+        httpcore.Proxy("https://outer.example:8080/"),
+        "http://inner.example:8080/",
+    )
+    assert [proxy.url for proxy in chain.proxies] == [
+        httpcore.URL("https://outer.example:8080/"),
+        httpcore.URL("http://inner.example:8080/"),
+    ]
+    assert len(chain) == 2
+
+
+def test_proxy_chain_requires_proxy():
+    with pytest.raises(ValueError, match="at least one proxy"):
+        httpcore.ProxyChain([])
+
+
+def test_proxy_chain_rejects_non_http_proxy():
+    with pytest.raises(ValueError, match="http.*https"):
+        httpcore.ProxyChain(["socks5://127.0.0.1:1080/"])

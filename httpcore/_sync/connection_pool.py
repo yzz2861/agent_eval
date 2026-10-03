@@ -8,7 +8,7 @@ import typing
 from .._backends.sync import SyncBackend
 from .._backends.base import SOCKET_OPTION, NetworkBackend
 from .._exceptions import ConnectionNotAvailable, UnsupportedProtocol
-from .._models import Origin, Proxy, Request, Response
+from .._models import Origin, Proxy, ProxyChain, Request, Response
 from .._synchronization import Event, ShieldCancellation, ThreadLock
 from .connection import HTTPConnection
 from .interfaces import ConnectionInterface, RequestInterface
@@ -49,6 +49,7 @@ class ConnectionPool(RequestInterface):
         self,
         ssl_context: ssl.SSLContext | None = None,
         proxy: Proxy | None = None,
+        proxy_chain: ProxyChain | None = None,
         max_connections: int | None = 10,
         max_keepalive_connections: int | None = None,
         keepalive_expiry: float | None = None,
@@ -67,6 +68,8 @@ class ConnectionPool(RequestInterface):
             ssl_context: An SSL context to use for verifying connections.
                 If not specified, the default `httpcore.default_ssl_context()`
                 will be used.
+            proxy: A single SOCKS or HTTP proxy to use.
+            proxy_chain: An ordered chain of HTTP or HTTPS proxies to use.
             max_connections: The maximum number of concurrent HTTP connections that
                 the pool should allow. Any attempt to send a request on a pool that
                 would exceed this amount will block until a connection is available.
@@ -90,7 +93,27 @@ class ConnectionPool(RequestInterface):
              in the TCP socket when the connection was established.
         """
         self._ssl_context = ssl_context
-        self._proxy = proxy
+        if proxy is not None and proxy_chain is not None:
+            raise ValueError("Specify either 'proxy' or 'proxy_chain', not both.")
+        if proxy is not None:
+            self._proxy = proxy
+            self._proxy_chain = (
+                None
+                if proxy.url.scheme in (b"socks5", b"socks5h")
+                else proxy
+                if isinstance(proxy, ProxyChain)
+                else ProxyChain(proxy)
+            )
+        elif proxy_chain is not None:
+            self._proxy_chain = (
+                proxy_chain
+                if isinstance(proxy_chain, ProxyChain)
+                else ProxyChain(proxy_chain)
+            )
+            self._proxy = self._proxy_chain.proxies[0]
+        else:
+            self._proxy = None
+            self._proxy_chain = None
         self._max_connections = (
             sys.maxsize if max_connections is None else max_connections
         )
@@ -126,43 +149,56 @@ class ConnectionPool(RequestInterface):
         self._optional_thread_lock = ThreadLock()
 
     def create_connection(self, origin: Origin) -> ConnectionInterface:
-        if self._proxy is not None:
-            if self._proxy.url.scheme in (b"socks5", b"socks5h"):
-                from .socks_proxy import Socks5Connection
+        if (
+            self._proxy is not None
+            and self._proxy.url.scheme in (b"socks5", b"socks5h")
+        ):
+            from .socks_proxy import Socks5Connection
 
-                return Socks5Connection(
-                    proxy_origin=self._proxy.url.origin,
-                    proxy_auth=self._proxy.auth,
-                    remote_origin=origin,
-                    ssl_context=self._ssl_context,
-                    keepalive_expiry=self._keepalive_expiry,
-                    http1=self._http1,
-                    http2=self._http2,
-                    network_backend=self._network_backend,
-                )
-            elif origin.scheme == b"http":
-                from .http_proxy import ForwardHTTPConnection
-
-                return ForwardHTTPConnection(
-                    proxy_origin=self._proxy.url.origin,
-                    proxy_headers=self._proxy.headers,
-                    proxy_ssl_context=self._proxy.ssl_context,
-                    remote_origin=origin,
-                    keepalive_expiry=self._keepalive_expiry,
-                    network_backend=self._network_backend,
-                )
-            from .http_proxy import TunnelHTTPConnection
-
-            return TunnelHTTPConnection(
+            return Socks5Connection(
                 proxy_origin=self._proxy.url.origin,
-                proxy_headers=self._proxy.headers,
-                proxy_ssl_context=self._proxy.ssl_context,
+                proxy_auth=self._proxy.auth,
                 remote_origin=origin,
                 ssl_context=self._ssl_context,
                 keepalive_expiry=self._keepalive_expiry,
                 http1=self._http1,
                 http2=self._http2,
                 network_backend=self._network_backend,
+            )
+
+        if self._proxy_chain is not None:
+            from .http_proxy import (
+                ForwardHTTPConnection,
+                TunnelHTTPConnection,
+            )
+
+            if origin.scheme == b"http":
+                if len(self._proxy_chain) == 1:
+                    return ForwardHTTPConnection(
+                        proxy_origin=self._proxy.url.origin,
+                        proxy_headers=self._proxy.headers,
+                        proxy_ssl_context=self._proxy.ssl_context,
+                        remote_origin=origin,
+                        keepalive_expiry=self._keepalive_expiry,
+                        network_backend=self._network_backend,
+                    )
+                proxy_origin = origin
+            else:
+                proxy_origin = None
+
+            return TunnelHTTPConnection(
+                proxies=self._proxy_chain.proxies,
+                remote_origin=origin,
+                forward_origin=proxy_origin,
+                ssl_context=self._ssl_context,
+                http1=self._http1,
+                http2=self._http2,
+                network_backend=self._network_backend,
+                socket_options=self._socket_options,
+                retries=self._retries,
+                local_address=self._local_address,
+                uds=self._uds,
+                keepalive_expiry=self._keepalive_expiry,
             )
 
         return HTTPConnection(

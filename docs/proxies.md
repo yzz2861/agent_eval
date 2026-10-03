@@ -9,7 +9,7 @@ import httpcore
 
 proxy = httpcore.Proxy("http://127.0.0.1:8080/")
 pool = httpcore.ConnectionPool(proxy=proxy)
-r = proxy.request("GET", "https://www.example.com/")
+r = pool.request("GET", "https://www.example.com/")
 
 print(r)
 # <Response [200]>
@@ -80,6 +80,30 @@ proxy = httpcore.Proxy(
 pool = httpcore.ConnectionPool(proxy=proxy)
 ```
 
+## Proxy chains
+
+An ordered chain of HTTP proxies can be configured with `httpcore.ProxyChain`.
+The client connects to the first proxy, asks it to `CONNECT` to the next proxy,
+and continues through each hop before connecting to the destination. Each proxy
+may independently use HTTP or HTTPS, and its credentials, SNI, and TLS context
+are used only for that hop.
+
+```python
+import httpcore
+
+proxy_chain = httpcore.ProxyChain(
+    [
+        httpcore.Proxy("https://outer.example:8080/", auth=("outer-user", "password")),
+        httpcore.Proxy("http://inner.example:8080/", auth=("inner-user", "password")),
+    ]
+)
+pool = httpcore.ConnectionPool(proxy_chain=proxy_chain)
+```
+
+Connections are reused per destination origin and the complete configured proxy
+chain. If tunnel establishment fails, the error identifies the failing hop and
+phase, and the partially established tunnel is closed.
+
 ## HTTP Versions
 
 If you use proxies, keep in mind that the `httpcore` package only supports proxies to HTTP/1.1 servers.
@@ -121,6 +145,13 @@ r = pool.request("GET", "https://www.example.com/")
 ## `httpcore.Proxy`
 
 ::: httpcore.Proxy
+    handler: python
+    rendering:
+        show_source: False
+
+## `httpcore.ProxyChain`
+
+::: httpcore.ProxyChain
     handler: python
     rendering:
         show_source: False

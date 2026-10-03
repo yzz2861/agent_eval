@@ -5,6 +5,7 @@ import hpack
 import hyperframe.frame
 import pytest
 
+import httpcore
 from httpcore import (
     SOCKET_OPTION,
     ConnectionPool,
@@ -15,6 +16,104 @@ from httpcore import (
     Proxy,
     ProxyError,
 )
+
+
+class ChainMockStream(MockStream):
+    def __init__(
+        self,
+        backend: "ChainMockBackend",
+        responses: list[bytes],
+    ) -> None:
+        super().__init__([])
+        self._backend = backend
+        self._closed = False
+
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: typing.Optional[str] = None,
+        timeout: typing.Optional[float] = None,
+    ) -> NetworkStream:
+        self._backend.tls_hostnames.append(server_hostname)
+        self._backend.ssl_contexts.append(ssl_context)
+        return self
+
+    def read(self, max_bytes: int, timeout: typing.Optional[float] = None) -> bytes:
+        if self._closed:
+            from httpcore._exceptions import ReadError
+
+            raise ReadError("Connection closed")
+        return self._backend.next_response()
+
+    def write(self, buffer: bytes, timeout: typing.Optional[float] = None) -> None:
+        self._backend.writes[-1] += buffer
+
+    def close(self) -> None:
+        self._closed = True
+        self._backend.closed_streams.append(self)
+        super().close()
+
+
+class ChainMockBackend(MockBackend):
+    def __init__(
+        self,
+        connect_responses: list[bytes],
+        final_responses: list[bytes],
+    ) -> None:
+        super().__init__(connect_responses)
+        self.connect_responses = connect_responses
+        self.final_responses = list(final_responses)
+        self.response_queue = list(connect_responses)
+        self.writes: list[bytes] = []
+        self.tls_hostnames: list[str | None] = []
+        self.ssl_contexts: list[ssl.SSLContext] = []
+        self.connect_attempts = 0
+        self.closed_streams: list[ChainMockStream] = []
+
+    def next_response(self) -> bytes:
+        if not self.response_queue:
+            self.response_queue.extend(self.final_responses)
+        return self.response_queue.pop(0)
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: typing.Optional[float] = None,
+        local_address: typing.Optional[str] = None,
+        socket_options: typing.Optional[typing.Iterable[SOCKET_OPTION]] = None,
+    ) -> NetworkStream:
+        self.connect_attempts += 1
+        self.writes.append(b"")
+        return ChainMockStream(self, [])
+
+
+class TLSErrorMockStream(ChainMockStream):
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: typing.Optional[str] = None,
+        timeout: typing.Optional[float] = None,
+    ) -> NetworkStream:
+        from httpcore._exceptions import ConnectError
+
+        raise ConnectError("TLS handshake failed")
+
+
+class TLSErrorMockBackend(ChainMockBackend):
+    def __init__(self) -> None:
+        super().__init__([], [])
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: typing.Optional[float] = None,
+        local_address: typing.Optional[str] = None,
+        socket_options: typing.Optional[typing.Iterable[SOCKET_OPTION]] = None,
+    ) -> NetworkStream:
+        self.connect_attempts += 1
+        return TLSErrorMockStream(self, [])
 
 
 
@@ -276,3 +375,114 @@ def test_proxy_headers():
     assert proxy.headers == [
         (b"Proxy-Authorization", b"Basic dXNlcm5hbWU6cGFzc3dvcmQ=")
     ]
+
+
+
+def test_proxy_chain_headers_sni_and_reuse():
+    network_backend = ChainMockBackend(
+        [
+            b"HTTP/1.1 200 Connection Established\r\n\r\n",
+            b"HTTP/1.1 200 Connection Established\r\n\r\n",
+        ],
+        [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Type: plain/text\r\n",
+            b"Content-Length: 5\r\n",
+            b"\r\n",
+            b"hello",
+        ]
+    )
+    outer_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    inner_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    destination_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    chain = httpcore.ProxyChain(
+        [
+            httpcore.Proxy(
+                "https://outer.example:8080/",
+                auth=("outer", "secret"),
+                ssl_context=outer_context,
+            ),
+            httpcore.Proxy(
+                "https://inner.example:8081/",
+                auth=("inner", "secret"),
+                ssl_context=inner_context,
+            ),
+        ]
+    )
+
+    with ConnectionPool(
+        proxy_chain=chain,
+        ssl_context=destination_context,
+        network_backend=network_backend,
+    ) as pool:
+        response = pool.request("GET", "https://destination.example/")
+        assert response.content == b"hello"
+        response = pool.request("GET", "https://destination.example/")
+        assert response.content == b"hello"
+
+        assert len(pool.connections) == 1
+        assert network_backend.connect_attempts == 1
+        assert network_backend.tls_hostnames == [
+            "outer.example",
+            "inner.example",
+            "destination.example",
+        ]
+        assert network_backend.ssl_contexts == [
+            outer_context,
+            inner_context,
+            destination_context,
+        ]
+        wire_bytes = network_backend.writes[0]
+        assert b"CONNECT inner.example:8081" in wire_bytes
+        assert b"CONNECT destination.example:443" in wire_bytes
+        assert b"Basic b3V0ZXI6c2VjcmV0" in wire_bytes
+        assert b"Basic aW5uZXI6c2VjcmV0" in wire_bytes
+        assert wire_bytes.count(b"GET / HTTP/1.1") == 2
+        reused_request = wire_bytes.rsplit(b"GET / HTTP/1.1", 1)[1]
+        assert b"Proxy-Authorization" not in reused_request
+
+
+
+def test_proxy_chain_407_reports_hop_and_closes():
+    network_backend = ChainMockBackend(
+        [
+            b"HTTP/1.1 200 Connection Established\r\n\r\n",
+            b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n",
+        ],
+        [],
+    )
+    chain = httpcore.ProxyChain(
+        [
+            httpcore.Proxy("https://outer.example:8080/"),
+            httpcore.Proxy("http://inner.example:8081/"),
+        ]
+    )
+
+    with ConnectionPool(
+        proxy_chain=chain,
+        network_backend=network_backend,
+    ) as pool:
+        with pytest.raises(ProxyError, match=r"hop 2/2.*CONNECT response"):
+            pool.request("GET", "https://destination.example/")
+        assert not pool.connections
+        assert len(network_backend.closed_streams) == 1
+
+
+
+def test_proxy_chain_outer_tls_failure_reports_hop_and_closes():
+    network_backend = TLSErrorMockBackend()
+    chain = httpcore.ProxyChain(
+        [
+            httpcore.Proxy("https://outer.example:8080/"),
+            httpcore.Proxy("http://inner.example:8081/"),
+        ]
+    )
+
+    with ConnectionPool(
+        proxy_chain=chain,
+        network_backend=network_backend,
+    ) as pool:
+        with pytest.raises(ProxyError, match=r"hop 1/2.*TLS handshake"):
+            pool.request("GET", "https://destination.example/")
+        assert not pool.connections
+        assert len(network_backend.closed_streams) == 1

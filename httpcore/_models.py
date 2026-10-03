@@ -514,3 +514,59 @@ class Proxy:
             self.headers = [(b"Proxy-Authorization", authorization)] + self.headers
         else:
             self.auth = None
+
+
+ProxyTypes = typing.Union["Proxy", URL, bytes, str]
+ProxyChainTypes = typing.Union["ProxyChain", ProxyTypes, typing.Sequence[ProxyTypes]]
+
+
+class ProxyChain:
+    """
+    An ordered chain of HTTP proxies.
+
+    Requests connect to the first proxy, which tunnels to the next proxy,
+    and so on until the final origin is reached.
+    """
+
+    def __init__(
+        self,
+        proxies: ProxyTypes | typing.Sequence[ProxyTypes],
+        *additional_proxies: ProxyTypes,
+    ) -> None:
+        single_proxy_types = (Proxy, URL, bytes, str)
+        if isinstance(proxies, single_proxy_types):
+            proxy_list = [proxies, *additional_proxies]
+        elif additional_proxies:
+            raise TypeError(
+                "Additional proxies may only be provided when the first "
+                "argument is a single proxy."
+            )
+        else:
+            proxy_list = list(proxies)
+
+        if not proxy_list:
+            raise ValueError("A proxy chain must contain at least one proxy.")
+
+        self.proxies: tuple[Proxy, ...] = tuple(
+            proxy if isinstance(proxy, Proxy) else Proxy(url=proxy)
+            for proxy in proxy_list
+        )
+
+        for proxy in self.proxies:
+            if proxy.url.scheme not in (b"http", b"https"):
+                raise ValueError(
+                    "Proxy chains only support proxies with the 'http' or "
+                    "'https' schemes."
+                )
+
+    def __len__(self) -> int:
+        return len(self.proxies)
+
+    def __iter__(self) -> typing.Iterator[Proxy]:
+        return iter(self.proxies)
+
+    def __eq__(self, other: typing.Any) -> bool:
+        return isinstance(other, ProxyChain) and other.proxies == self.proxies
+
+    def __repr__(self) -> str:
+        return f"ProxyChain(proxies={self.proxies!r})"
