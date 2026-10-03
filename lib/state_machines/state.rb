@@ -53,21 +53,25 @@ module StateMachines
     #   (e.g. :value => lambda {Time.now}, :if => lambda {|state| !state.nil?}).
     #   By default, the configured value is matched.
     # * <tt>:human_name</tt> - The human-readable version of this state's name
-    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, **extra_options) # :nodoc:
+    def initialize(machine, name, options = nil, initial: false, value: :__not_provided__, cache: nil, if: nil, human_name: nil, invariant: nil, invariants: nil, **extra_options) # :nodoc:
       # Handle both old hash style and new kwargs style for backward compatibility
       case options
       in Hash
         # Old style: initialize(machine, name, {initial: true, value: 'foo'})
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :initial, :value, :cache, :if, :human_name, :invariant, :invariants)
         initial = options.fetch(:initial, false)
         value = options.include?(:value) ? options[:value] : :__not_provided__
         cache = options[:cache]
         if_condition = options[:if]
         human_name = options[:human_name]
+        invariant = options[:invariant]
+        invariants = options[:invariants]
       in nil
         # New style: initialize(machine, name, initial: true, value: 'foo')
-        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name) unless extra_options.empty?
+        StateMachines::OptionsValidator.assert_valid_keys!(extra_options, :initial, :value, :cache, :if, :human_name, :invariant, :invariants) unless extra_options.empty?
         if_condition = binding.local_variable_get(:if) # 'if' is a keyword, need special handling
+        invariant = extra_options[:invariant]
+        invariants = extra_options[:invariants]
       else
         # Handle unexpected options
         raise ArgumentError, "Unexpected positional argument in State initialize: #{options.inspect}"
@@ -81,6 +85,9 @@ module StateMachines
       @cache = cache
       @matcher = if_condition
       @initial = initial == true
+      @invariants = []
+      self.invariant(invariant)
+      self.invariant(invariants)
       @context = StateContext.new(self)
 
       return unless name
@@ -108,6 +115,33 @@ module StateMachines
     def initialize_copy(orig) # :nodoc:
       super
       @context = StateContext.new(self)
+      @invariants = orig.invariants.dup
+    end
+
+    # The invariants that must pass after an action transitions into this state
+    attr_reader :invariants
+
+    # Adds one or more invariants for this state. Each invariant receives the
+    # object being transitioned and optionally the transition. Returning a
+    # falsey value marks the transition failed; exceptions remain exceptions.
+    def invariant(*callables)
+      Array(callables).flatten.each do |callable|
+        next if callable.nil?
+
+        unless callable.is_a?(Symbol) || callable.respond_to?(:call)
+          raise ArgumentError, 'State invariant must be a Symbol or callable'
+        end
+
+        @invariants << callable
+      end
+
+      self
+    end
+
+    # Checks all invariants for this state. Returns false when any invariant
+    # returns false or nil. Exceptions are allowed to propagate to the caller.
+    def verify_invariants(object, transition)
+      invariants.all? { |callable| machine.evaluate_method(object, callable, transition) }
     end
 
     def machine=(machine)

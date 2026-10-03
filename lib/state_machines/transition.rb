@@ -254,6 +254,13 @@ module StateMachines
       @persisted = true
     end
 
+    # Verifies invariants declared for the target state. This is run after the
+    # action has had a chance to populate business data but before the
+    # transition is considered successful.
+    def verify_state_invariants
+      @to_state.verify_invariants(object, self)
+    end
+
     # Rolls back changes made to the object's state via this transition.  This
     # will revert the state back to the +from+ value.
     #

@@ -110,25 +110,31 @@ module StateMachines
       # Override run_actions to be thread-safe when needed
       def run_actions(&)
         catch_exceptions do
-          @success = if block_given?
-                      result = yield
-                      actions.each { |action| results[action] = result }
-                      !!result
-                    else
-                      actions.compact.each do |action|
-                        next if skip_actions
+          action_succeeded = if block_given?
+                               result = yield
+                               actions.each { |action| results[action] = result }
+                               each { |transition| @transition_action_results[transition] = result }
+                               @block_evaluated_invariants = true
+                               !!result
+                             else
+                               actions.compact.each do |action|
+                                 next if skip_actions
 
-                        # Use thread-safe write for results
-                        if object.respond_to?(:state_machine_mutex)
-                          object.state_machine_mutex.with_write_lock do
-                            results[action] = object.send(action)
-                          end
-                        else
-                          results[action] = object.send(action)
-                        end
-                      end
-                      results.values.all?
-                    end
+                                 result = if object.respond_to?(:state_machine_mutex)
+                                            object.state_machine_mutex.with_write_lock { object.send(action) }
+                                          else
+                                            object.send(action)
+                                          end
+                                 results[action] = result unless results.key?(action)
+                                 each do |transition|
+                                   @transition_action_results[transition] = result if transition.action == action
+                                 end
+                               end
+
+                               @transition_action_results.values.all?
+                             end
+
+          @success = action_succeeded && verify_state_invariants
         end
       end
     end

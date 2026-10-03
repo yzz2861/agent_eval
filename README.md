@@ -247,6 +247,40 @@ vehicle.alarm_state_name                        # => :active
 
 vehicle.fire_events!(:ignite, :enable_alarm)    # => StateMachines:InvalidParallelTransition: Cannot run events in parallel: ignite, enable_alarm
 
+### State Invariants
+
+State invariants verify that an object satisfies a target state after the
+configured action has run. Unlike a transition guard, this allows the action to
+write related business data before the transition is considered successful.
+
+```ruby
+class Shipment
+  attr_accessor :state, :tracking_number
+
+  state_machine initial: :pending, action: :save do
+    event :ship do
+      transition pending: :shipped
+    end
+
+    state :shipped do
+      invariant { |shipment| !shipment.tracking_number.nil? }
+    end
+  end
+
+  def save
+    self.tracking_number ||= generate_tracking_number
+    true
+  end
+end
+```
+
+Invariants can also be declared with `state :shipped, invariant: ->(shipment, transition) { ... }`.
+A falsey result uses the normal transition failure path: no success callbacks run
+and only state-machine-managed attributes are rolled back. Raised exceptions
+continue through the existing exception and rollback path, so they remain
+distinguishable from `false`. When multiple state machines share an action, all
+of their target-state invariants run before the final result is reported.
+
 # Coordinated State Management
 
 State machines can coordinate with each other using state guards, allowing transitions to depend on the state of other state machines within the same object. This enables complex system modeling where components are interdependent.

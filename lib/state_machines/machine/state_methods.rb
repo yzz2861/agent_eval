@@ -78,6 +78,8 @@ module StateMachines
       #   (e.g. :value => lambda {Time.now}, :if => lambda {|state| !state.nil?}).
       #   By default, the configured value is matched.
       # * <tt>:human_name</tt> - The human-readable version of this state's name.
+      # * <tt>:invariant</tt> / <tt>:invariants</tt> - Checks run after the
+      #   configured action completes, before success callbacks are run.
       #   By default, this is either defined by the integration or stringifies the
       #   name and converts underscores to spaces.
       #
@@ -336,7 +338,7 @@ module StateMachines
       # options hash which contains at least <tt>:if</tt> condition support.
       def state(*names, &)
         options = names.last.is_a?(Hash) ? names.pop : {}
-        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name)
+        StateMachines::OptionsValidator.assert_valid_keys!(options, :value, :cache, :if, :human_name, :invariant, :invariants)
 
         # Store the context so that it can be used for / matched against any state
         # that gets added
@@ -361,6 +363,8 @@ module StateMachines
             state.human_name = options[:human_name] if options.include?(:human_name)
             state.cache = options[:cache] if options.include?(:cache)
             state.matcher = options[:if] if options.include?(:if)
+            state.invariant(options[:invariant]) if options.include?(:invariant)
+            state.invariant(options[:invariants]) if options.include?(:invariants)
           end
         end
 

@@ -70,6 +70,7 @@ module StateMachines
           end
 
           run_actions
+          rollback unless success?
         else
           within_transaction do
             catch(:halt) { run_callbacks(&) }
@@ -78,8 +79,15 @@ module StateMachines
         end
       end
 
-      if actions.length == 1 && results.include?(actions.first)
-        results[actions.first]
+      if empty?
+        results.key?(nil) ? results[nil] : success?
+      elsif actions.length == 1 && results.include?(actions.first)
+        result = results[actions.first]
+        if success?
+          result
+        else
+          result ? false : result
+        end
       else
         success?
       end
@@ -128,6 +136,8 @@ module StateMachines
     # collection
     def reset
       @results = {}
+      @transition_action_results = {}
+      @block_evaluated_invariants = false
       @success = false
     end
 
@@ -170,15 +180,59 @@ module StateMachines
     # The results of the actions will be used to determine #success?.
     def run_actions
       catch_exceptions do
-        @success = if block_given?
-                     result = yield
-                     actions.each { |action| results[action] = result }
-                     !!result
-                   else
-                     actions.compact.each { |action| !skip_actions && (results[action] = object.send(action)) }
-                     results.values.all?
-                   end
+        action_succeeded = if block_given?
+                             result = yield
+                             actions.each { |action| results[action] = result }
+                             each { |transition| @transition_action_results[transition] = result }
+                             @block_evaluated_invariants = true
+                             !!result
+                           else
+                             actions.compact.each do |action|
+                               next if skip_actions
+
+                               result = object.send(action)
+                               results[action] = result unless results.key?(action)
+                               each do |transition|
+                                 @transition_action_results[transition] = result if transition.action == action
+                               end
+                             end
+
+                             @transition_action_results.values.all?
+                           end
+
+        @success = action_succeeded && verify_state_invariants
       end
+    end
+
+    # Checks every target state before reporting the result. Exceptions are
+    # collected so that later state machines still get checked, then the first
+    # exception is re-raised after all of the checks have run.
+    def verify_state_invariants
+      exception = nil
+
+      invariant_results = map do |transition|
+        next true unless verify_transition_state_invariants?(transition)
+        next true if transition.action.nil?
+        action_passed = !!@transition_action_results.fetch(transition, true)
+        next action_passed unless action_passed
+
+        begin
+          transition.verify_state_invariants
+        rescue StandardError => error
+          exception ||= error
+          false
+        end
+      end
+
+      raise exception if exception
+      invariant_results.all?
+    end
+
+    def verify_transition_state_invariants?(transition)
+      # A block can invoke the attribute-based transition collection. In that
+      # nested collection invariants run after the block result is known, so
+      # transient transitions should not be checked again in this collection.
+      !transition.transient? || @block_evaluated_invariants
     end
 
     # Rolls back changes made to the object's states via each transition
@@ -305,6 +359,10 @@ module StateMachines
     def rollback
       super
       each { |transition| transition.machine.write(object, :event, transition.event) unless transition.transient? }
+    end
+
+    def verify_transition_state_invariants?(_transition)
+      true
     end
   end
 end

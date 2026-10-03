@@ -96,6 +96,11 @@ module StateMachines
       machine.transition(options.merge(options[:to] ? { from: state.name } : { to: state.name }))
     end
 
+    # Declares an invariant for this state. See State#invariant.
+    def invariant(callable = nil, &block)
+      state.invariant(callable || block || raise(ArgumentError, 'State invariant must be a Symbol or callable'))
+    end
+
     # Hooks in condition-merging to methods that don't exist in this module
     def method_missing(*args, &)
       # Get the configuration
