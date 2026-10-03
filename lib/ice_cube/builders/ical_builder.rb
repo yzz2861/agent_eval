@@ -42,6 +42,25 @@ module IceCube
       end
     end
 
+    # Fold a content line to at most +limit+ octets per physical line,
+    # per RFC 5545 section 3.1. Continuation lines start with a single
+    # space (which counts toward the limit) and multi-byte UTF-8
+    # characters are never split across a fold.
+    def self.fold_line(line, limit = 75)
+      return line if line.bytesize <= limit
+      segments = []
+      current = +""
+      line.each_char do |char|
+        if current.bytesize + char.bytesize > limit
+          segments << current
+          current = +" "
+        end
+        current << char
+      end
+      segments << current
+      segments.join("\n")
+    end
+
     def self.ical_duration(duration)
       hours = duration / 3600
       duration %= 3600

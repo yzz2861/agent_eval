@@ -3,20 +3,33 @@ module IceCube
     def self.schedule_from_ical(ical_string, options = {})
       data = {}
 
+      preserve = options[:preserve]
+      preserved = []
+
       # First join lines that are wrapped
       lines = []
-      ical_string.each_line do |line|
-        if lines[-1] && line =~ /\A[ \t].+/
-          lines[-1] = lines[-1].strip + line.sub(/\A[ \t]+/, "")
-        else
-          lines << line
+      if preserve
+        lines = unfold_lines(ical_string)
+      else
+        ical_string.each_line do |line|
+          if lines[-1] && line =~ /\A[ \t].+/
+            lines[-1][0] = lines[-1][0].strip + line.sub(/\A[ \t]+/, "")
+          else
+            lines << [line, nil]
+          end
         end
       end
 
-      lines.each do |line|
-        (property, value) = line.split(":")
-        (property, _tzid) = property.split(";")
-        case property
+      lines.each do |line, line_number|
+        if preserve
+          property = IcalProperty.parse(line, line_number: line_number)
+          name = property.name.upcase
+          value = property.value
+        else
+          (property, value) = line.split(":")
+          (name, _tzid) = property.split(";")
+        end
+        case name
         when "DTSTART"
           data[:start_time] = TimeUtil.deserialize_time(value)
         when "DTEND"
@@ -32,9 +45,34 @@ module IceCube
         when "RRULE"
           data[:rrules] ||= []
           data[:rrules] += [rule_from_ical(value)]
+        else
+          # Unrecognized content lines (X- properties, DESCRIPTION, etc.)
+          # are kept verbatim so they survive a round trip.
+          preserved << property if preserve
         end
       end
-      Schedule.from_hash data
+      schedule = Schedule.from_hash data
+      schedule.preserved_ical_properties = preserved if preserve
+      schedule
+    end
+
+    # Unfold content lines per RFC 5545 section 3.1: a line break
+    # followed by a single space or tab marks a continuation, so the
+    # break and exactly one whitespace character are removed. Returns
+    # [line, line_number] pairs where line_number is the 1-based
+    # physical line on which the content line starts.
+    def self.unfold_lines(ical_string)
+      lines = []
+      ical_string.each_line.with_index(1) do |physical, line_number|
+        physical = physical.chomp
+        next if physical.empty?
+        if lines[-1] && physical.start_with?(" ", "\t")
+          lines[-1][0] << physical[1..]
+        else
+          lines << [physical.dup, line_number]
+        end
+      end
+      lines
     end
 
     def self.rule_from_ical(ical)

@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [UNRELEASED]
 ### Added
+- iCalendar preservation mode: `Schedule.from_ical(ical, preserve: true)` keeps unrecognized content lines (e.g. vendor `X-` properties) with their parameters and re-emits them from `Schedule#to_ical` after the modeled properties, folding lines to 75 octets without splitting UTF-8 characters. Malformed content lines raise `IceCube::InvalidIcalError` with the line number and position. `Schedule#to_ical(preserve: false)` still returns the plain concise output.
 - Support for BYSETPOS with all rule frequencies (yearly, monthly, weekly, daily, hourly, minutely, secondly). ([#449](https://github.com/ice-cube-ruby/ice_cube/pull/449)) by [@nehresma](https://github.com/nehresma) and [@NicolasMarlier](https://github.com/NicolasMarlier)
 
 ### Changed

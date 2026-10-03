@@ -154,6 +154,26 @@ ical = schedule.to_ical
 IceCube::Schedule.from_ical(ical)
 ```
 
+### Preserving vendor (X-) properties
+
+By default `from_ical` only models the properties it understands
+(`DTSTART`, `DTEND`, `RRULE`, `RDATE`, `EXDATE`, `DURATION`) and drops
+everything else. Pass `preserve: true` to keep unrecognized content
+lines - such as vendor `X-` properties, `DESCRIPTION` or `EXRULE` -
+including their parameters, so they survive an import/edit/export
+round trip:
+
+``` ruby
+schedule = IceCube::Schedule.from_ical(ical, preserve: true)
+schedule.add_recurrence_rule(IceCube::Rule.daily)
+schedule.to_ical # modeled properties first, then preserved lines in
+                  # their original order, folded to 75 octets
+schedule.to_ical(preserve: false) # plain concise output, as before
+```
+
+Malformed content lines raise `IceCube::InvalidIcalError` with the
+offending line number and character position.
+
 ---
 
 ## Using your words

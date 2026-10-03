@@ -12,6 +12,12 @@ module IceCube
     attr_reader :end_time
     deprecated_alias :end_date, :end_time
 
+    # Unrecognized iCalendar content lines (IceCube::IcalProperty)
+    # preserved when the schedule was built with
+    # Schedule.from_ical(ical, preserve: true). Emitted again by
+    # #to_ical unless preserve: false is passed.
+    attr_accessor :preserved_ical_properties
+
     # Create a new schedule
     def initialize(start_time = nil, options = {})
       self.start_time = start_time || TimeUtil.now
@@ -322,7 +328,13 @@ module IceCube
     end
 
     # Serialize this schedule to_ical
-    def to_ical(force_utc = false)
+    #
+    # When the schedule carries preserved properties (from
+    # Schedule.from_ical(ical, preserve: true)) they are merged back in
+    # after the modeled properties, in their original order, and lines
+    # longer than 75 octets are folded. Pass preserve: false for the
+    # plain concise output containing only modeled properties.
+    def to_ical(force_utc = false, preserve: true)
       pieces = []
       pieces << "DTSTART#{IcalBuilder.ical_format(start_time, force_utc)}"
       pieces.concat recurrence_rules.map { |r| "RRULE:#{r.to_ical}" }
@@ -330,6 +342,10 @@ module IceCube
       pieces.concat recurrence_times_without_start_time.map { |t| "RDATE#{IcalBuilder.ical_format(t, force_utc)}" }
       pieces.concat exception_times.map { |t| "EXDATE#{IcalBuilder.ical_format(t, force_utc)}" }
       pieces << "DTEND#{IcalBuilder.ical_format(end_time, force_utc)}" if end_time
+      if preserve && preserved_ical_properties && !preserved_ical_properties.empty?
+        pieces.concat preserved_ical_properties.map(&:to_s)
+        pieces = pieces.map { |line| IcalBuilder.fold_line(line) }
+      end
       pieces.join("\n")
     end
 
