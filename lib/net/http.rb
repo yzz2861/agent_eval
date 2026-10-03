@@ -2485,34 +2485,124 @@ module Net   #:nodoc:
 
     IDEMPOTENT_METHODS_ = %w/GET HEAD PUT DELETE OPTIONS TRACE QUERY/.freeze # :nodoc:
 
+    # Reads the response from the socket in a separate thread while the
+    # request body is still being sent.  Used when
+    # Net::HTTPGenericRequest#early_response is enabled.
+    class EarlyResponseWatcher # :nodoc:
+      def initialize(sock)
+        @sock = sock
+        @queue = Queue.new
+        @stop = false
+        @sender_aborted = false
+        @thread = Thread.new { watch }
+      end
+
+      # Whether the sender should stop writing the request body.
+      def stop?
+        @stop
+      end
+
+      # Records that the sender stopped before the whole request body was
+      # sent, meaning the connection cannot be reused.
+      def sender_aborted!
+        @sender_aborted = true
+      end
+
+      def sender_aborted?
+        @sender_aborted
+      end
+
+      # Returns the final response received by the watcher, raising the
+      # error instead if the response could not be read in full.
+      def result
+        value = @queue.pop
+        raise value if value.is_a?(Exception)
+        value
+      end
+
+      # Stops the watcher thread; called once the request is over.
+      def terminate
+        @thread.kill
+        @thread.join
+      end
+
+      private
+
+      def watch
+        informational_count = 0
+        loop do
+          res = HTTPResponse.read_new(@sock)
+          unless res.kind_of?(HTTPInformation)
+            @queue.push(res)
+            return
+          end
+          informational_count += 1
+          if informational_count > HTTPResponse::MAX_INFORMATIONAL_RESPONSES
+            @queue.push(HTTPBadResponse.new('too many informational responses'))
+            return
+          end
+        end
+      rescue Exception => exception
+        @queue.push(exception)
+      ensure
+        @stop = true
+      end
+    end
+
     def transport_request(req)
       count = 0
       begin
         begin_transport req
+        aborted_upload = false
         res = catch(:response) {
+          watcher = nil
           begin
-            req.exec @socket, @curr_http_version, edit_path(req.path)
-          rescue Errno::EPIPE
-            # Failure when writing full request, but we can probably
-            # still read the received response.
-          end
+            if req.early_response && (req.body || req.body_stream)
+              watcher = EarlyResponseWatcher.new(@socket)
+            end
+            write_failed = false
+            begin
+              req.exec @socket, @curr_http_version, edit_path(req.path), watcher
+            rescue Errno::EPIPE
+              # Failure when writing full request, but we can probably
+              # still read the received response.
+              write_failed = true
+            rescue Errno::ECONNRESET
+              # With early_response the server may send its final response
+              # and close the connection while the request body is still
+              # being sent; the server's response is preferred over the
+              # write error when it can be read in full.
+              raise unless watcher
+              write_failed = true
+            end
 
-          informational_count = 0
-          begin
-            res = HTTPResponse.read_new(@socket)
+            if watcher
+              res = watcher.result
+            else
+              informational_count = 0
+              begin
+                res = HTTPResponse.read_new(@socket)
+                if res.kind_of?(HTTPInformation)
+                  informational_count += 1
+                  raise HTTPBadResponse, 'too many informational responses' if
+                    informational_count > HTTPResponse::MAX_INFORMATIONAL_RESPONSES
+                end
+              end while res.kind_of?(HTTPInformation)
+            end
+
             res.decode_content = req.decode_content
             res.body_encoding = @response_body_encoding
             res.ignore_eof = @ignore_eof
-            if res.kind_of?(HTTPInformation)
-              informational_count += 1
-              raise HTTPBadResponse, 'too many informational responses' if
-                informational_count > HTTPResponse::MAX_INFORMATIONAL_RESPONSES
-            end
-          end while res.kind_of?(HTTPInformation)
 
-          res.uri = req.uri
+            res.uri = req.uri
 
-          res
+            aborted_upload = watcher ? (watcher.sender_aborted? || write_failed) : false
+
+            res
+          ensure
+            # The watcher thread must not outlive the request.
+            watcher&.terminate
+          end
         }
         res.reading_body(@socket, req.response_body_permitted?) {
           if block_given?
@@ -2520,6 +2610,11 @@ module Net   #:nodoc:
             yield res
           end
         }
+        if aborted_upload
+          # The request body was not sent in full, so the connection state
+          # is unknown and it must not be reused.
+          @socket.close
+        end
       rescue Net::OpenTimeout
         raise
       rescue Net::ReadTimeout, IOError, EOFError,

@@ -2232,6 +2232,30 @@ module Net
     #     req.body_stream                         # => #<StringIO:0x0000027d1e5affa8>
     #
     attr_accessor body_stream: untyped
+
+    # <!-- rdoc-file=lib/net/http/generic_request.rb -->
+    # Whether to receive the response while the request body is still being
+    # sent:
+    #
+    #     req = Net::HTTP::Post.new(uri)
+    #     req.body_stream = File.open('large-file')
+    #     req.early_response = true
+    #
+    # When +true+, the response is read concurrently with sending the
+    # request body. If the server sends its final response before the whole
+    # body has been sent (for example when it rejects an upload with
+    # 413 Payload Too Large), sending stops at once: the rest of the body
+    # source is left unread, and the server's response is returned instead
+    # of a write error such as Errno::EPIPE. Informational (1xx) responses
+    # do not interrupt the upload.
+    #
+    # When the upload is cut short the connection cannot be reused and is
+    # closed once the response has been read.
+    #
+    # This only applies to requests using #body or #body_stream, and is
+    # disabled by default.
+    #
+    attr_accessor early_response: bool
   end
 
   # <!-- rdoc-file=lib/net/http/header.rb -->

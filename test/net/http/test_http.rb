@@ -1213,6 +1213,184 @@ class TestNetHTTPInformationalResponses < Test::Unit::TestCase
   end
 end
 
+class TestNetHTTPEarlyResponse < Test::Unit::TestCase
+  # A request body stream that yields +chunks+ chunks slowly and records
+  # how many times it has been read.
+  class SlowStream
+    CHUNK = 'a' * Net::BufferedIO::BUFSIZE
+
+    def initialize(chunks)
+      @chunks = chunks
+      @reads = 0
+    end
+
+    attr_reader :reads
+
+    def read(len, outbuf = nil)
+      return nil if @chunks <= 0
+      sleep 0.01
+      @chunks -= 1
+      @reads += 1
+      outbuf ? outbuf.replace(CHUNK) : CHUNK
+    end
+  end
+
+  def new_upload_request(stream, chunks)
+    req = Net::HTTP::Post.new('/')
+    req.content_length = chunks * Net::BufferedIO::BUFSIZE
+    req.body_stream = stream
+    req.early_response = true
+    req
+  end
+
+  def test_early_response_disabled_by_default
+    assert_equal false, Net::HTTP::Post.new('/').early_response
+  end
+
+  def test_early_response_stops_upload
+    th = nil
+    TCPServer.open('127.0.0.1', 0) {|server|
+      port = server.addr[1]
+      th = Thread.new do
+        sock = server.accept
+        sock.gets("\r\n\r\n") # request head
+        sock.write "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"
+        sleep 1
+        sock.close
+      end
+
+      stream = SlowStream.new(1000)
+      req = new_upload_request(stream, 1000)
+      res = Net::HTTP.start('127.0.0.1', port) {|http| http.request(req) }
+
+      assert_equal '413', res.code
+      assert_operator stream.reads, :<, 1000
+    }
+  ensure
+    th&.kill
+    th&.join
+  end
+
+  def test_early_response_with_string_body
+    th = nil
+    TCPServer.open('127.0.0.1', 0) {|server|
+      port = server.addr[1]
+      th = Thread.new do
+        sock = server.accept
+        sock.gets("\r\n\r\n") # request head
+        sock.write "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"
+        sleep 1
+        sock.close
+      end
+
+      req = Net::HTTP::Post.new('/')
+      req.body = 'a' * (1000 * Net::BufferedIO::BUFSIZE)
+      req.early_response = true
+      res = Net::HTTP.start('127.0.0.1', port) {|http| http.request(req) }
+
+      assert_equal '413', res.code
+    }
+  ensure
+    th&.kill
+    th&.join
+  end
+
+  def test_early_response_continues_after_informational
+    th = nil
+    TCPServer.open('127.0.0.1', 0) {|server|
+      port = server.addr[1]
+      th = Thread.new do
+        sock = server.accept
+        head = sock.gets("\r\n\r\n")
+        content_length = head[/^Content-Length: (\d+)/i, 1].to_i
+        sock.write "HTTP/1.1 100 Continue\r\n\r\n"
+        sock.read(content_length)
+        sock.write "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        sock.close
+      end
+
+      stream = SlowStream.new(5)
+      req = new_upload_request(stream, 5)
+      res = Net::HTTP.start('127.0.0.1', port) {|http| http.request(req) }
+
+      assert_equal '200', res.code
+      assert_equal 'ok', res.body
+      assert_equal 5, stream.reads
+    }
+  ensure
+    th&.kill
+    th&.join
+  end
+
+  def test_early_response_connection_not_reused
+    th = nil
+    connections = 0
+    TCPServer.open('127.0.0.1', 0) {|server|
+      port = server.addr[1]
+      th = Thread.new do
+        2.times do |i|
+          sock = server.accept
+          connections += 1
+          sock.gets("\r\n\r\n") # request head
+          if i == 0
+            # keep-alive response, but the aborted upload must still
+            # prevent the connection from being reused
+            sock.write "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"
+            sleep 1
+          else
+            sock.write "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+          end
+          sock.close
+        end
+      end
+
+      stream = SlowStream.new(1000)
+      req = new_upload_request(stream, 1000)
+      http = Net::HTTP.new('127.0.0.1', port)
+      begin
+        http.start
+        res1 = http.request(req)
+        assert_equal '413', res1.code
+        res2 = http.get('/')
+        assert_equal '200', res2.code
+        assert_equal 2, connections
+      ensure
+        http.finish if http.started?
+      end
+    }
+  ensure
+    th&.kill
+    th&.join
+  end
+
+  def test_upload_without_early_response_consumes_body
+    th = nil
+    TCPServer.open('127.0.0.1', 0) {|server|
+      port = server.addr[1]
+      th = Thread.new do
+        sock = server.accept
+        head = sock.gets("\r\n\r\n")
+        content_length = head[/^Content-Length: (\d+)/i, 1].to_i
+        sock.write "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        sock.read(content_length) # drain the request body
+        sock.close
+      end
+
+      stream = SlowStream.new(5)
+      req = Net::HTTP::Post.new('/')
+      req.content_length = 5 * Net::BufferedIO::BUFSIZE
+      req.body_stream = stream
+      res = Net::HTTP.start('127.0.0.1', port) {|http| http.request(req) }
+
+      assert_equal '413', res.code
+      assert_equal 5, stream.reads
+    }
+  ensure
+    th&.kill
+    th&.join
+  end
+end
+
 class TestNetHTTPKeepAlive < Test::Unit::TestCase
   CONFIG = {
     'host' => '127.0.0.1',

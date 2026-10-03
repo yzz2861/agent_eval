@@ -52,6 +52,7 @@ class Net::HTTPGenericRequest
     @body = nil
     @body_stream = nil
     @body_data = nil
+    @early_response = false
   end
 
   # Returns the string method name for the request:
@@ -205,6 +206,28 @@ class Net::HTTPGenericRequest
     input
   end
 
+  # Whether to receive the response while the request body is still being
+  # sent:
+  #
+  #   req = Net::HTTP::Post.new(uri)
+  #   req.body_stream = File.open('large-file')
+  #   req.early_response = true
+  #
+  # When +true+, the response is read concurrently with sending the
+  # request body.  If the server sends its final response before the whole
+  # body has been sent (for example when it rejects an upload with
+  # 413 Payload Too Large), sending stops at once: the rest of the body
+  # source is left unread, and the server's response is returned instead
+  # of a write error such as Errno::EPIPE.  Informational (1xx) responses
+  # do not interrupt the upload.
+  #
+  # When the upload is cut short the connection cannot be reused and is
+  # closed once the response has been read.
+  #
+  # This only applies to requests using #body or #body_stream, and is
+  # disabled by default.
+  attr_accessor :early_response
+
   def set_body_internal(str)   #:nodoc: internal use only
     raise ArgumentError, "both of body argument and HTTPRequest#body set" if str and (@body or @body_stream)
     self.body = str if str
@@ -217,11 +240,11 @@ class Net::HTTPGenericRequest
   # write
   #
 
-  def exec(sock, ver, path)   #:nodoc: internal use only
+  def exec(sock, ver, path, watcher = nil)   #:nodoc: internal use only
     if @body
-      send_request_with_body sock, ver, path, @body
+      send_request_with_body sock, ver, path, @body, watcher
     elsif @body_stream
-      send_request_with_body_stream sock, ver, path, @body_stream
+      send_request_with_body_stream sock, ver, path, @body_stream, watcher
     elsif @body_data
       send_request_with_body_data sock, ver, path, @body_data
     else
@@ -281,28 +304,64 @@ class Net::HTTPGenericRequest
     end
   end
 
-  def send_request_with_body(sock, ver, path, body)
+  def send_request_with_body(sock, ver, path, body, watcher = nil)
     self.content_length = body.bytesize
     delete 'Transfer-Encoding'
     write_header sock, ver, path
-    wait_for_continue sock, ver if sock.continue_timeout
-    sock.write body
+    wait_for_continue sock, ver if sock.continue_timeout && !watcher
+    if watcher
+      write_body_watching sock, body, watcher
+    else
+      sock.write body
+    end
   end
 
-  def send_request_with_body_stream(sock, ver, path, f)
+  # Writes +body+ to +sock+ in chunks, stopping as soon as +watcher+
+  # receives the final response.  Marks the watcher as aborted when the
+  # body could not be sent in full.
+  def write_body_watching(sock, body, watcher)
+    offset = 0
+    size = body.bytesize
+    while offset < size
+      break if watcher.stop?
+      offset += sock.write(body.byteslice(offset, Net::BufferedIO::BUFSIZE))
+    end
+    watcher.sender_aborted! if offset < size
+  end
+
+  def send_request_with_body_stream(sock, ver, path, f, watcher = nil)
     unless content_length() or chunked?
       raise ArgumentError,
           "Content-Length not given and Transfer-Encoding is not `chunked'"
     end
     write_header sock, ver, path
-    wait_for_continue sock, ver if sock.continue_timeout
+    wait_for_continue sock, ver if sock.continue_timeout && !watcher
     if chunked?
       chunker = Chunker.new(sock)
-      IO.copy_stream(f, chunker)
-      chunker.finish
+      if watcher
+        chunker.finish if copy_stream_watching(f, chunker, watcher)
+      else
+        IO.copy_stream(f, chunker)
+        chunker.finish
+      end
+    elsif watcher
+      copy_stream_watching(f, sock, watcher)
     else
       IO.copy_stream(f, sock)
     end
+  end
+
+  # Copies from +f+ to +dst+, stopping without consuming further input as
+  # soon as +watcher+ receives the final response.  Returns true when +f+
+  # was read to the end, and marks the watcher as aborted otherwise.
+  def copy_stream_watching(f, dst, watcher)
+    until watcher.stop?
+      chunk = f.read(Net::BufferedIO::BUFSIZE)
+      return true if chunk.nil? || chunk.empty?
+      dst.write chunk
+    end
+    watcher.sender_aborted!
+    false
   end
 
   def send_request_with_body_data(sock, ver, path, params)
