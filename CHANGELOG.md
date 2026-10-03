@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- Streaming, event-driven validation via `JSONSchemer::Streaming.validator` and `JSONSchemer::Schema#streaming_validator`: push `[:start_object]`, `[:start_array]`, `[:key, name]`, `[:scalar, value]`, and `[:end]` events to validate large documents in a single pass with bounded memory. Supports a documented keyword subset (`type`, `enum`, `const`, `properties`, `required`, `items`, `minItems`, `maxItems`, `contains`, `minContains`, `maxContains`, scalar validation keywords); unsupported combinations are rejected at prepare time with `JSONSchemer::Streaming::UnsupportedKeyword`, and malformed event streams raise `JSONSchemer::Streaming::StructureError` separately from collected schema errors.
+
 ## [2.5.0] - 2025-12-08
 
 ### Bug Fixes

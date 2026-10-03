@@ -105,6 +105,10 @@ module JSONSchemer
       validate(instance, :output_format => 'flag', **options).fetch('valid')
     end
 
+    def streaming_validator(**options)
+      Streaming::Validator.new(value, **options)
+    end
+
     def validate(instance, output_format: @configuration.output_format, resolve_enumerators: @configuration.resolve_enumerators, access_mode: @configuration.access_mode)
       instance_location = Location.root
       context = Context.new(instance, [], nil, (!insert_property_defaults && output_format == 'flag'), access_mode)

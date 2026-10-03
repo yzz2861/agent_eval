@@ -144,6 +144,52 @@ schemer.bundle
 #       "http://example.com/schema/two"=>{"minimum"=>11, "$id"=>"http://example.com/schema/two", "$schema"=>"https://json-schema.org/draft/2020-12/schema"}}}
 ```
 
+## Streaming Validation
+
+Large documents (for example, huge arrays) can be validated while they are
+being read, without holding the whole document in memory. Push parser events
+to a streaming validator instead of parsing first:
+
+```ruby
+validator = JSONSchemer::Streaming.validator(schema)
+
+validator << [:start_array]
+validator << [:start_object]
+validator << [:key, "id"]
+validator << [:scalar, 1]
+validator << [:end] # closes the object
+validator << [:end] # closes the array
+validator.finish    # signals end of input; raises IncompleteDocument if truncated
+
+validator.valid? # => true
+validator.errors # => classic-style errors with full JSON Pointers in "data_pointer"
+```
+
+Events are `[:start_object]`, `[:start_array]`, `[:key, name]`,
+`[:scalar, value]`, and `[:end]` (`[:end_object]`/`[:end_array]` are also
+accepted and checked against the open container). `valid?` is only true once
+the root value's end marker has arrived and no errors were found.
+`validate_events(source)` consumes any enumerable event source and closes the
+source (if it responds to `close`) when validation stops early, e.g. with
+`fail_fast: true`.
+
+Malformed event streams (unknown events, keys outside objects, unbalanced
+containers, truncated input) are reported separately from schema mismatches by
+raising `JSONSchemer::Streaming::StructureError`; schema mismatches are
+collected in `errors`.
+
+Only keywords that can be guaranteed in a single streaming pass with bounded
+memory are supported: `type`, `enum`, `const`, `properties`, `required`,
+`items` (single schema), `minItems`, `maxItems`, `contains`,
+`minContains`, `maxContains`, `minimum`, `maximum`, `exclusiveMinimum`,
+`exclusiveMaximum`, `minLength`, `maxLength`, and `pattern`. Annotation
+keywords (`title`, `$comment`, ...) are ignored. Anything else - `$ref`,
+combiners, `uniqueItems`, tuple `items`, container-valued `enum`/`const`,
+etc. - raises `JSONSchemer::Streaming::UnsupportedKeyword` when the validator
+is prepared. `JSONSchemer::Schema#streaming_validator` builds a streaming
+validator from a compiled schema.
+
+
 ## Options
 
 ```ruby
