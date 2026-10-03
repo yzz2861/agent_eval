@@ -173,5 +173,182 @@ module Concurrent
         end
       end
     end
+    context '#managed_block' do
+      subject do
+        described_class.new(
+          min_threads: 1,
+          max_threads: 1,
+          max_queue: 2,
+          idletime: 60,
+          fallback_policy: :abort
+        )
+      end
+
+      it 'temporarily replaces a blocked worker for a child task' do
+        child_started = Queue.new
+        release_child = Queue.new
+        child_finished = Queue.new
+        parent_finished = Queue.new
+        observed_length = Queue.new
+
+        subject.post do
+          subject.managed_block do
+            subject.post do
+              child_started << true
+              release_child.pop
+              child_finished << true
+            end
+
+            child_started.pop
+            observed_length << subject.length
+            release_child << true
+            child_finished.pop
+          end
+          parent_finished << true
+        end
+
+        expect(parent_finished.pop).to be true
+        expect(observed_length.pop).to eq 2
+        repeat_until_success { expect(subject.length).to eq 1 }
+      end
+
+      it 'counts nested blocks only once' do
+        first_started = Queue.new
+        release_first = Queue.new
+        first_finished = Queue.new
+        second_started = Queue.new
+        nested_finished = Queue.new
+        observed_length = Queue.new
+        observed_queue_length = Queue.new
+
+        subject.post do
+          subject.managed_block do
+            subject.managed_block do
+              subject.post do
+                first_started << true
+                release_first.pop
+                first_finished << true
+              end
+
+              first_started.pop
+              observed_length << subject.length
+              subject.post { second_started << true }
+              observed_queue_length << subject.queue_length
+              release_first << true
+              second_started.pop
+            end
+          end
+          nested_finished << true
+        end
+
+        expect(nested_finished.pop).to be true
+        expect(observed_length.pop).to eq 2
+        expect(observed_queue_length.pop).to eq 1
+        repeat_until_success { expect(subject.length).to eq 1 }
+      end
+
+      it 'rejects calls from threads outside the pool' do
+        expect { subject.managed_block { } }
+          .to raise_error(Concurrent::IllegalOperationError)
+      end
+
+      it 'keeps ordinary work at the configured capacity while blocked' do
+        child_started = Queue.new
+        release_child = Queue.new
+        active_count = Queue.new
+
+        subject.post do
+          subject.managed_block do
+            subject.post do
+              child_started << true
+              release_child.pop
+            end
+
+            child_started.pop
+            active_count << subject.active_count
+          end
+        end
+
+        expect(active_count.pop).to eq 1
+        release_child << true
+      end
+
+      it 'returns compensation when the block exits with an exception' do
+        child_finished = Queue.new
+        allow_failure = Queue.new
+        failure_observed = Queue.new
+
+        subject.post do
+          begin
+            subject.managed_block do
+              subject.post { child_finished.pop }
+              allow_failure.pop
+              raise 'managed block failure'
+            end
+          rescue RuntimeError => error
+            failure_observed << error.message
+          end
+        end
+
+        repeat_until_success { expect(subject.length).to eq 2 }
+        child_finished << true
+        allow_failure << true
+        expect(failure_observed.pop).to eq 'managed block failure'
+        repeat_until_success { expect(subject.length).to eq 1 }
+      end
+
+      it 'does not add compensation after shutdown starts' do
+        block_entered = Queue.new
+        release_block = Queue.new
+
+        subject.post do
+          subject.managed_block do
+            block_entered << true
+            release_block.pop
+          end
+        end
+
+        block_entered.pop
+        subject.shutdown
+
+        expect { subject.post { } }
+          .to raise_error(Concurrent::RejectedExecutionError)
+        expect(subject.length).to eq 1
+
+        release_block << true
+        expect(subject.wait_for_termination(pool_termination_timeout)).to eq true
+      end
+
+      it 'drains queued work before stopping after shutdown inside a block' do
+        first_started = Queue.new
+        release_first = Queue.new
+        second_finished = Queue.new
+        release_block = Queue.new
+        parent_inside_block = Queue.new
+
+        subject.post do
+          subject.managed_block do
+            subject.post do
+              first_started << true
+              release_first.pop
+            end
+
+            subject.post { second_finished << true }
+            first_started.pop
+            parent_inside_block << true
+            release_block.pop
+          end
+        end
+
+        parent_inside_block.pop
+        repeat_until_success { expect(subject.length).to eq 2 }
+        subject.shutdown
+        release_first << true
+        expect(second_finished.pop).to be true
+        release_block << true
+
+        expect(subject.wait_for_termination(pool_termination_timeout)).to eq true
+      end
+    end
   end
 end

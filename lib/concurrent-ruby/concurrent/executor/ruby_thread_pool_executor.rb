@@ -28,6 +28,8 @@ module Concurrent
     # @!macro thread_pool_executor_constant_default_synchronous
     DEFAULT_SYNCHRONOUS = false
 
+    MANAGED_BLOCK_THREAD_VARIABLE = :concurrent_ruby_managed_block_worker
+
     # @!macro thread_pool_executor_attr_reader_max_length
     attr_reader :max_length
 
@@ -48,6 +50,37 @@ module Concurrent
       super(opts)
     end
 
+    # Mark the current worker as temporarily unavailable while the block runs.
+    # The pool may add one temporary worker for the outer managed block so
+    # other tasks can run. Nested blocks share that replacement allowance.
+    #
+    # @raise [ArgumentError] when called without a block
+    # @raise [Concurrent::IllegalOperationError] when called outside a worker of
+    #   this pool
+    # @return [Object] the value returned by the block
+    def managed_block
+      raise ArgumentError.new('no block given') unless block_given?
+
+      worker = synchronize do
+        ns_reset_if_forked
+        current_worker = Thread.current.thread_variable_get(MANAGED_BLOCK_THREAD_VARIABLE)
+        unless current_worker.is_a?(Worker) &&
+               @pool.include?(current_worker) &&
+               current_worker.managed_block_pool.equal?(self)
+          raise IllegalOperationError.new('managed_block can only be called by a worker of this pool')
+        end
+
+        ns_begin_managed_block(current_worker)
+        current_worker
+      end
+
+      begin
+        yield
+      ensure
+        synchronize { ns_end_managed_block(worker) }
+      end
+    end
+
     # @!macro thread_pool_executor_attr_reader_largest_length
     def largest_length
       synchronize { @largest_length }
@@ -66,7 +99,7 @@ module Concurrent
     # @!macro thread_pool_executor_method_active_count
     def active_count
       synchronize do
-        @pool.length - @ready.length
+        @pool.length - @ready.length - @managed_block_depths.length
       end
     end
 
@@ -167,6 +200,7 @@ module Concurrent
       @largest_length       = 0
       @workers_counter      = 0
       @ruby_pid             = $$ # detects if Ruby has forked
+      @managed_block_depths = {}
     end
 
     # @!visibility private
@@ -208,6 +242,8 @@ module Concurrent
       @pool.each(&:kill)
       @pool.clear
       @ready.clear
+      @managed_block_depths.clear
+      ns_broadcast
     end
 
     # tries to assign task to a worker, tries to get one from @ready or to create new one
@@ -245,6 +281,7 @@ module Concurrent
 
     # @!visibility private
     def ns_worker_died(worker)
+      @managed_block_depths.delete(worker)
       ns_remove_busy_worker worker
       replacement_worker = ns_add_busy_worker
       ns_ready_worker replacement_worker, Concurrent.monotonic_time, false if replacement_worker
@@ -255,27 +292,90 @@ module Concurrent
     #
     # @!visibility private
     def ns_add_busy_worker
-      return if @pool.size >= @max_length
+      return if ns_effective_pool_size >= @max_length
 
       @workers_counter += 1
       @pool << (worker = Worker.new(self, @workers_counter))
       @largest_length = @pool.length if @pool.length > @largest_length
       worker
+    rescue ThreadError
+      # Raised when the operating system refuses to create the new thread
+      nil
+    end
+
+    # @!visibility private
+    def ns_begin_managed_block(worker)
+      depth = (@managed_block_depths[worker] || 0) + 1
+      @managed_block_depths[worker] = depth
+      return unless depth == 1
+
+      begin
+        if ns_running? && !@queue.empty? && ns_effective_pool_size < @max_length
+          compensation_worker, _ = (@ready.pop if @pool.size >= @min_length) || ns_add_busy_worker
+          compensation_worker << @queue.shift if compensation_worker
+        end
+      rescue ThreadError
+        @managed_block_depths.delete(worker)
+        raise
+      end
+    end
+
+    # @!visibility private
+    def ns_end_managed_block(worker)
+      depth = @managed_block_depths[worker]
+      return unless depth
+
+      if depth > 1
+        @managed_block_depths[worker] = depth - 1
+        return
+      end
+
+      @managed_block_depths.delete(worker)
+
+      if ns_running?
+        ns_retire_excess_compensation_worker
+        ns_wait_until { ns_effective_pool_size <= @max_length }
+      else
+        ns_wait_until { @queue.empty? }
+      end
+    end
+
+    # @!visibility private
+    def ns_effective_pool_size
+      @pool.size - @managed_block_depths.size
+    end
+
+    # @!visibility private
+    def ns_retire_excess_compensation_worker
+      return unless ns_effective_pool_size > @max_length
+
+      worker, _ = @ready.pop
+      return unless worker
+
+      @pool.delete(worker)
+      worker.stop
+      stopped_event.set if @pool.empty? && !running?
+      ns_broadcast
     end
 
     # handle ready worker, giving it new job or assigning back to @ready
     #
     # @!visibility private
     def ns_ready_worker(worker, last_message, success = true)
+      return unless @pool.include?(worker)
+
       task_and_args = @queue.shift
       if task_and_args
         worker << task_and_args
+        ns_broadcast if !running? && @queue.empty?
       else
         # stop workers when !running?, do not return them to @ready
         if running?
           raise unless last_message
           @ready.push([worker, last_message])
+          ns_retire_excess_compensation_worker
         else
+          ns_broadcast
           worker.stop
         end
       end
@@ -285,8 +385,10 @@ module Concurrent
     #
     # @!visibility private
     def ns_remove_busy_worker(worker)
+      @managed_block_depths.delete(worker)
       @pool.delete(worker)
       stopped_event.set if @pool.empty? && !running?
+      ns_broadcast
       true
     end
 
@@ -321,6 +423,8 @@ module Concurrent
         @largest_length       = 0
         @workers_counter      = 0
         @ruby_pid             = $$
+        @managed_block_depths = {}
+        ns_broadcast
       end
     end
 
@@ -332,7 +436,7 @@ module Concurrent
         # instance variables accessed only under pool's lock so no need to sync here again
         @queue  = Collection::TimeoutQueue.new
         @pool   = pool
-        @thread = create_worker @queue, pool, pool.idletime
+        @thread = create_worker @queue, self, pool, pool.idletime
 
         if @thread.respond_to?(:name=)
           @thread.name = [pool.name, 'worker', id].compact.join('-')
@@ -351,10 +455,15 @@ module Concurrent
         @thread.kill
       end
 
+      def managed_block_pool
+        @pool
+      end
+
       private
 
-      def create_worker(queue, pool, idletime)
-        Thread.new(queue, pool, idletime) do |my_queue, my_pool, my_idletime|
+      def create_worker(queue, worker, pool, idletime)
+        Thread.new(queue, worker, pool, idletime) do |my_queue, my_worker, my_pool, my_idletime|
+          Thread.current.thread_variable_set(RubyThreadPoolExecutor::MANAGED_BLOCK_THREAD_VARIABLE, my_worker)
           catch(:stop) do
             prunable = true
 
