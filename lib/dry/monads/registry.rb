@@ -12,6 +12,7 @@ module Dry
       lazy: "Lazy",
       list: "List",
       maybe: "Maybe",
+      state: "State",
       task: "Task",
       try: "Try",
       validated: "Validated",

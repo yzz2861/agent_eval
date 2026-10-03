@@ -9,6 +9,22 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- New State monad for modeling state transitions
+
+  ```ruby
+  include Dry::Monads[:state, :result]
+
+  withdraw = ->(amount) {
+    State.get.bind_result { |balance|
+      amount <= balance ? Success(amount) : Failure(:insufficient_funds)
+    }.bind { |amount|
+      State.modify { |balance| balance - amount }.fmap { amount }
+    }
+  }
+
+  withdraw.(100).bind { withdraw.(30) }.run(150) # => [30, 20]
+  ```
+
 ### Changed
 
 ### Deprecated
