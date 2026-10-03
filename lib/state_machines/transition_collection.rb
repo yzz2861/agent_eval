@@ -31,8 +31,7 @@ module StateMachines
       @valid = all?
       reject!(&:!)
 
-      attributes = map(&:attribute).uniq
-      raise ArgumentError, 'Cannot perform multiple transitions in parallel for the same state machine attribute' if attributes.length != length
+      validate_attributes!
 
       StateMachines::OptionsValidator.assert_valid_keys!(options, :actions, :after, :use_transactions, :fiber)
       options = { actions: true, after: true, use_transactions: true }.merge(options)
@@ -129,6 +128,15 @@ module StateMachines
     def reset
       @results = {}
       @success = false
+    end
+
+    # Validates that the transitions in this collection are allowed to be
+    # performed together.  By default, each transition must be for a
+    # different attribute.  Subclasses (like ParallelTransitionCollection)
+    # may relax this requirement.
+    def validate_attributes!
+      attributes = map(&:attribute).uniq
+      raise ArgumentError, 'Cannot perform multiple transitions in parallel for the same state machine attribute' if attributes.length != length
     end
 
     # Runs each transition's callbacks recursively.  Once all before callbacks

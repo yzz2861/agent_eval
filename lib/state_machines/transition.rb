@@ -35,6 +35,18 @@ module StateMachines
     # Whether the transition is only existing temporarily for the object
     attr_writer :transient
 
+    # The orthogonal region this transition is performed within, if it is
+    # part of a parallel state's region dispatch.  Region transitions only
+    # update their own region's active substate within the machine's
+    # attribute.
+    attr_accessor :region
+
+    # A snapshot of the machine attribute's full value before this
+    # transition was performed.  For transitions within orthogonal regions,
+    # this encodes every region's active substate and is used to restore the
+    # complete configuration on rollback.
+    attr_accessor :configuration_snapshot
+
     # Creates a new, specific transition
     def initialize(object, machine, event, from_name, to_name, read_state = true) # :nodoc:
       @object = object
@@ -250,7 +262,7 @@ module StateMachines
     def persist
       return if @persisted
 
-      machine.write(object, :state, to)
+      machine.persist_transition(self)
       @persisted = true
     end
 
@@ -280,7 +292,7 @@ module StateMachines
     #   vehicle.state             # => "parked"
     def rollback
       reset
-      machine.write(object, :state, from)
+      machine.write(object, :state, configuration_snapshot || from)
     end
 
     # Resets any tracking of which callbacks have already been run and whether

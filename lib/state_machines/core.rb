@@ -20,6 +20,7 @@ require 'state_machines/matcher_helpers'
 
 require 'state_machines/transition'
 require 'state_machines/transition_collection'
+require 'state_machines/parallel_transition_collection'
 
 require 'state_machines/branch'
 
@@ -30,6 +31,9 @@ require 'state_machines/node_collection'
 require 'state_machines/state_context'
 require 'state_machines/state'
 require 'state_machines/state_collection'
+
+require 'state_machines/region'
+require 'state_machines/parallel_state_context'
 
 require 'state_machines/event'
 require 'state_machines/event_collection'

@@ -58,7 +58,7 @@ module StateMachines
         state = initial_state(object)
         return unless state && (options[:force] || initialize_state?(object))
 
-        value = state.value
+        value = state.parallel? ? encode_initial_parallel_value(state) : state.value
 
         if (hash = options[:to])
           hash[attribute.to_s] = value

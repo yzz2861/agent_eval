@@ -137,6 +137,14 @@ module StateMachines
     # Event arguments are passed to guard conditions if they accept multiple parameters.
     def transition_for(object, requirements = {}, *event_args)
       StateMachines::OptionsValidator.assert_valid_keys!(requirements, :from, :to, :guard)
+
+      # When the object is inside a parallel state, the event is dispatched
+      # to the state's orthogonal regions; the first transition of the
+      # resulting set is returned
+      if requirements.empty? && machine.parallel? && machine.parallel_state_for(object)
+        return machine.parallel_transitions_for(self, object, event_args).first
+      end
+
       requirements[:from] = machine.states.match!(object).name unless (custom_from_state = requirements.include?(:from))
 
       branches.each do |branch|
@@ -167,6 +175,11 @@ module StateMachines
     # instance method.
     def fire(object, *event_args)
       machine.reset(object)
+
+      # Dispatch to orthogonal regions when inside a parallel state
+      if machine.parallel? && machine.parallel_state_for(object)
+        return machine.fire_parallel_event(self, object, event_args)
+      end
 
       if (transition = transition_for(object, {}, *event_args))
         transition.perform(*event_args)

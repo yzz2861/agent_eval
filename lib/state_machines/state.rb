@@ -36,6 +36,16 @@ module StateMachines
     attr_accessor :initial
     alias initial? initial
 
+    # The orthogonal regions defined within this state.  Only parallel
+    # (composite) states -- those defined via Machine#parallel_state -- have
+    # regions.  Each region tracks its own active substate while an object
+    # is in this state.
+    attr_reader :regions
+
+    # The name of the event to fire automatically once every region of this
+    # parallel state has reached a final state
+    attr_accessor :completion_event
+
     # A custom lambda block for determining whether a given value matches this
     # state
     attr_accessor :matcher
@@ -82,6 +92,7 @@ module StateMachines
       @matcher = if_condition
       @initial = initial == true
       @context = StateContext.new(self)
+      @regions = []
 
       return unless name
 
@@ -108,6 +119,19 @@ module StateMachines
     def initialize_copy(orig) # :nodoc:
       super
       @context = StateContext.new(self)
+      @regions = orig.regions.map { |region| region.copy_for(self) }
+    end
+
+    # Determines whether this state is a parallel (composite) state, i.e. it
+    # has one or more orthogonal regions, each with its own active substate
+    def parallel?
+      !@regions.empty?
+    end
+
+    # Gets the orthogonal region with the given name, or nil if no such
+    # region exists within this state
+    def region(name)
+      @regions.detect { |region| region.name == name.to_sym }
     end
 
     def machine=(machine)
