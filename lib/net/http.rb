@@ -2487,6 +2487,7 @@ module Net   #:nodoc:
 
     def transport_request(req)
       count = 0
+      retried_error = nil
       begin
         begin_transport req
         res = catch(:response) {
@@ -2521,6 +2522,7 @@ module Net   #:nodoc:
           end
         }
       rescue Net::OpenTimeout
+        retried_error = nil
         raise
       rescue Net::ReadTimeout, IOError, EOFError,
              Errno::ECONNRESET, Errno::ECONNABORTED, Errno::EPIPE, Errno::ETIMEDOUT,
@@ -2531,10 +2533,12 @@ module Net   #:nodoc:
           count += 1
           @socket.close if @socket
           debug "Conn close because of error #{exception}, and retry"
+          retried_error = exception
           retry
         end
         debug "Conn close because of error #{exception}"
         @socket.close if @socket
+        retried_error = nil
         raise
       end
 
@@ -2543,6 +2547,11 @@ module Net   #:nodoc:
     rescue => exception
       debug "Conn close because of error #{exception}"
       @socket.close if @socket
+      # If the body factory of a retried request failed, keep the transport
+      # error that triggered the retry as the context of the failure.
+      if retried_error && req.body_factory && exception.cause.nil?
+        raise exception, cause: retried_error
+      end
       raise exception
     end
 

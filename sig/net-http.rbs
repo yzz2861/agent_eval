@@ -2232,6 +2232,45 @@ module Net
     #     req.body_stream                         # => #<StringIO:0x0000027d1e5affa8>
     #
     attr_accessor body_stream: untyped
+
+    # <!-- rdoc-file=lib/net/http/generic_request.rb -->
+    # Returns the body factory for the request, or `nil` if there is none:
+    #
+    #     req = Net::HTTP::Put.new(uri)   # => #<Net::HTTP::Put PUT>
+    #     req.body_factory                # => nil
+    # ----
+    # <!--
+    #   rdoc-file=lib/net/http/generic_request.rb
+    #   - body_factory=(factory)
+    # -->
+    # Sets a factory that provides a fresh body source for the request:
+    #
+    #     req = Net::HTTP::Put.new(uri)   # => #<Net::HTTP::Put PUT>
+    #     req.body_factory = -> { [File.open('data.bin', 'rb'), File.size('data.bin')] }
+    #
+    # The factory must be a callable object that takes no argument and returns
+    # a two-element array `[source, length]`:
+    #
+    # *   `source`: an IO-like object (readable via IO.copy_stream) that
+    #     provides the request body for a single send attempt.
+    # *   `length`: the Integer number of bytes in `source`; it is sent as the
+    #     `Content-Length` of the request.
+    #
+    # The factory is called each time the request is actually sent, so that a
+    # request retried after a transport error (see Net::HTTP#max_retries=) is
+    # resent with a brand-new source instead of a possibly consumed one. Note
+    # that only requests that Net::HTTP may retry anyway (idempotent methods)
+    # are ever sent more than once; setting a body factory does not make a
+    # non-idempotent request retryable.
+    #
+    # Each source returned by the factory is closed by Net::HTTP once its send
+    # attempt is over, whether it succeeded or failed; the factory must
+    # therefore return a new source on every call.
+    #
+    # Setting the body factory clears any previously set #body, #body_stream,
+    # or form data, and vice versa.
+    #
+    attr_accessor body_factory: untyped
   end
 
   # <!-- rdoc-file=lib/net/http/header.rb -->

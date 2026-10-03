@@ -52,6 +52,7 @@ class Net::HTTPGenericRequest
     @body = nil
     @body_stream = nil
     @body_data = nil
+    @body_factory = nil
   end
 
   # Returns the string method name for the request:
@@ -177,6 +178,7 @@ class Net::HTTPGenericRequest
     @body = str
     @body_stream = nil
     @body_data = nil
+    @body_factory = nil
     str
   end
 
@@ -202,13 +204,56 @@ class Net::HTTPGenericRequest
     @body = nil
     @body_stream = input
     @body_data = nil
+    @body_factory = nil
     input
   end
 
+  # Returns the body factory for the request, or +nil+ if there is none:
+  #
+  #   req = Net::HTTP::Put.new(uri)   # => #<Net::HTTP::Put PUT>
+  #   req.body_factory                # => nil
+  #
+  attr_reader :body_factory
+
+  # Sets a factory that provides a fresh body source for the request:
+  #
+  #   req = Net::HTTP::Put.new(uri)   # => #<Net::HTTP::Put PUT>
+  #   req.body_factory = -> { [File.open('data.bin', 'rb'), File.size('data.bin')] }
+  #
+  # The factory must be a callable object that takes no argument and returns
+  # a two-element array <tt>[source, length]</tt>:
+  #
+  # - +source+: an IO-like object (readable via IO.copy_stream) that provides
+  #   the request body for a single send attempt.
+  # - +length+: the Integer number of bytes in +source+;
+  #   it is sent as the +Content-Length+ of the request.
+  #
+  # The factory is called each time the request is actually sent,
+  # so that a request retried after a transport error
+  # (see Net::HTTP#max_retries=) is resent with a brand-new source
+  # instead of a possibly consumed one.
+  # Note that only requests that Net::HTTP may retry anyway
+  # (idempotent methods) are ever sent more than once;
+  # setting a body factory does not make a non-idempotent request retryable.
+  #
+  # Each source returned by the factory is closed by Net::HTTP
+  # once its send attempt is over, whether it succeeded or failed;
+  # the factory must therefore return a new source on every call.
+  #
+  # Setting the body factory clears any previously set
+  # #body, #body_stream, or form data, and vice versa.
+  def body_factory=(factory)
+    @body = nil
+    @body_stream = nil
+    @body_data = nil
+    @body_factory = factory
+    factory
+  end
+
   def set_body_internal(str)   #:nodoc: internal use only
-    raise ArgumentError, "both of body argument and HTTPRequest#body set" if str and (@body or @body_stream)
+    raise ArgumentError, "both of body argument and HTTPRequest#body set" if str and (@body or @body_stream or @body_factory)
     self.body = str if str
-    if @body.nil? && @body_stream.nil? && @body_data.nil? && request_body_permitted?
+    if @body.nil? && @body_stream.nil? && @body_factory.nil? && @body_data.nil? && request_body_permitted?
       self.body = ''
     end
   end
@@ -222,6 +267,8 @@ class Net::HTTPGenericRequest
       send_request_with_body sock, ver, path, @body
     elsif @body_stream
       send_request_with_body_stream sock, ver, path, @body_stream
+    elsif @body_factory
+      send_request_with_body_factory sock, ver, path
     elsif @body_data
       send_request_with_body_data sock, ver, path, @body_data
     else
@@ -302,6 +349,19 @@ class Net::HTTPGenericRequest
       chunker.finish
     else
       IO.copy_stream(f, sock)
+    end
+  end
+
+  def send_request_with_body_factory(sock, ver, path)
+    source, length = @body_factory.call
+    begin
+      self.content_length = length
+      delete 'Transfer-Encoding'
+      write_header sock, ver, path
+      wait_for_continue sock, ver if sock.continue_timeout
+      IO.copy_stream(source, sock)
+    ensure
+      source.close if source.respond_to?(:close)
     end
   end
 

@@ -1368,6 +1368,146 @@ class TestNetHTTPKeepAlive < Test::Unit::TestCase
   end
 end
 
+class TestNetHTTPBodyFactory < Test::Unit::TestCase
+  # A socket double that records everything written to it and raises
+  # Errno::ECONNRESET on the write calls (1-based) listed in +fail_on_writes+.
+  class BodyFactoryMockSocket
+    attr_reader :written
+
+    def initialize(fail_on_writes: [])
+      @fail_on_writes = fail_on_writes
+      @written = []
+    end
+
+    def write(*chunks)
+      # IO.copy_stream reuses its read buffer, so copy the chunks.
+      @written.concat(chunks.map(&:dup))
+      raise Errno::ECONNRESET if @fail_on_writes.include?(@written.size)
+      chunks.sum(&:bytesize)
+    end
+
+    def readuntil(terminator, ignore_eof = false, limit: nil)
+      raise "unexpected terminator #{terminator.dump}" unless terminator == "\n"
+      # A header read ends the headers at once. Every other read is the
+      # status line of a fresh attempt.
+      return "" if ignore_eof
+      "HTTP/1.1 200 OK\n"
+    end
+
+    def read_all(_)
+    end
+
+    def continue_timeout
+    end
+
+    def close
+    end
+
+    def closed?
+    end
+  end
+
+  def start_with_socket(socket)
+    http = Net::HTTP.new('example.com', 80)
+    http.define_singleton_method(:connect) { @socket = socket }
+    http.start
+    http
+  end
+
+  def test_body_factory_retry_fetches_fresh_source
+    bodies = ["first", "second body"]
+    sources = []
+    factory_calls = 0
+    factory = -> {
+      source = StringIO.new(bodies[factory_calls])
+      factory_calls += 1
+      sources << source
+      [source, source.string.bytesize]
+    }
+    # Fail the body write of the first attempt (write #1 is the header).
+    socket = BodyFactoryMockSocket.new(fail_on_writes: [2])
+    http = start_with_socket(socket)
+    http.max_retries = 1
+
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = factory
+    res = http.request(req)
+
+    assert_kind_of Net::HTTPResponse, res
+    # The factory was called again for the retry instead of rewinding
+    # the first source.
+    assert_equal 2, factory_calls
+    # The retried attempt sent the second, different body with its own length.
+    written = socket.written.join
+    assert_include written, "second body"
+    assert_include written, "Content-Length: 11"
+    # Each generation of the source was closed after its attempt.
+    assert_equal 2, sources.size
+    assert sources.all?(&:closed?)
+  ensure
+    http.finish if http
+  end
+
+  def test_body_factory_not_retried_for_non_idempotent_request
+    factory_calls = 0
+    factory = -> {
+      factory_calls += 1
+      source = StringIO.new("data")
+      [source, source.string.bytesize]
+    }
+    socket = BodyFactoryMockSocket.new(fail_on_writes: [2])
+    http = start_with_socket(socket)
+    http.max_retries = 10
+
+    req = Net::HTTP::Post.new('/')
+    req.body_factory = factory
+    assert_raise(Errno::ECONNRESET) { http.request(req) }
+    assert_equal 1, factory_calls
+  ensure
+    http.finish if http
+  end
+
+  def test_body_factory_error_keeps_transport_error_as_cause
+    factory_calls = 0
+    factory = -> {
+      factory_calls += 1
+      raise "factory boom" if factory_calls > 1
+      source = StringIO.new("data")
+      [source, source.string.bytesize]
+    }
+    socket = BodyFactoryMockSocket.new(fail_on_writes: [2])
+    http = start_with_socket(socket)
+    http.max_retries = 1
+
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = factory
+    error = assert_raise(RuntimeError) { http.request(req) }
+    assert_equal "factory boom", error.message
+    assert_kind_of Errno::ECONNRESET, error.cause
+  ensure
+    http.finish if http
+  end
+
+  def test_body_factory_send_sets_content_length_and_closes_source
+    source = StringIO.new("xyzzy")
+    req = Net::HTTP::Put.new('/')
+    req.body_factory = -> { [source, source.string.bytesize] }
+    socket = BodyFactoryMockSocket.new
+    http = start_with_socket(socket)
+
+    res = http.request(req)
+
+    assert_kind_of Net::HTTPResponse, res
+    written = socket.written.join
+    assert_include written, "Content-Length: 5"
+    assert_not_include written, "Transfer-Encoding"
+    assert_include written, "xyzzy"
+    assert source.closed?
+  ensure
+    http.finish if http
+  end
+end
+
 class TestNetHTTPLocalBind < Test::Unit::TestCase
   CONFIG = {
     'host' => 'localhost',

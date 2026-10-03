@@ -1,5 +1,6 @@
 # frozen_string_literal: false
 require 'net/http'
+require 'stringio'
 require 'test/unit'
 
 class HTTPRequestTest < Test::Unit::TestCase
@@ -121,5 +122,29 @@ class HTTPRequestTest < Test::Unit::TestCase
     req.update_uri("test", 8080, false)
     assert_equal "[2001:db8::1]", req.uri.host
     assert_equal 8080, req.uri.port
+  end
+
+  def test_body_factory_exclusive_with_other_body_sources
+    factory = -> { [StringIO.new('xyzzy'), 5] }
+    req = Net::HTTP::Post.new '/'
+
+    req.body = 'body'
+    req.body_factory = factory
+    assert_nil req.body
+    assert_same factory, req.body_factory
+
+    req.body_stream = StringIO.new('stream')
+    assert_nil req.body_factory
+
+    req.body_factory = factory
+    req.body = 'body'
+    assert_nil req.body_factory
+
+    req.body_factory = factory
+    req.set_form('a' => 'b')
+    assert_nil req.body_factory
+
+    req.body_factory = factory
+    assert_raise(ArgumentError) { req.set_body_internal 'body' }
   end
 end
