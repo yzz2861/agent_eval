@@ -39,6 +39,11 @@ module Dry
         @yields
       end
 
+      def requires_operation?
+        receiver = @adapter.receiver if @adapter.respond_to?(:receiver)
+        !receiver.respond_to?(:requires_operation?) || receiver.requires_operation?
+      end
+
       def call(args, &block)
         adapter.(operation, options, args, &block)
       end

@@ -15,7 +15,10 @@ module Dry
 
       def initialize(steps: self.class.steps, listeners: nil, **operations)
         @steps = steps.map { |step|
-          operation = resolve_operation(step, **operations)
+          operation =
+            if step.adapter.requires_operation?
+              resolve_operation(step, **operations)
+            end
           step.with(operation: operation)
         }
         @operations = operations
@@ -109,6 +112,8 @@ module Dry
 
       def assert_step_arity
         steps.each do |step|
+          next unless step.adapter.requires_operation?
+
           num_args_required = step.arity >= 0 ? step.arity : ~step.arity
           num_args_supplied = step.call_args.length + 1 # add 1 for main `input`
 
