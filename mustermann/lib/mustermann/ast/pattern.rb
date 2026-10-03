@@ -16,7 +16,7 @@ module Mustermann
     # Superclass for pattern styles that parse an AST from the string pattern.
     # @abstract
     class Pattern < Mustermann::RegexpBased
-      supported_options :capture, :except, :greedy, :space_matches_plus
+      supported_options :capture, :except, :greedy, :space_matches_plus, :on_duplicate
 
       extend Forwardable, SingleForwardable
       single_delegate on: :parser, suffix: :parser
@@ -108,7 +108,7 @@ module Mustermann
           ast   = parse(@string, pattern: self)
           ast &&= transform(ast)
           ast &&= set_boundaries(ast, string: @string)
-          validate(ast)
+          validate(ast, on_duplicate: options[:on_duplicate])
         end
         @param_converters ||= Mustermann.dedup(scan_params(ast, options)) if ast
         ast

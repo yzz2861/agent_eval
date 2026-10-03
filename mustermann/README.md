@@ -715,6 +715,7 @@ pattern === '/foo.png' # => false
 Supported by: All types except `identity` and `shell` patterns.
 Default value: `true`
 
+
 **Simple** patterns are greedy, meaning that for the pattern `:foo:bar?`, everything will be captured as `foo`, `bar` will always be `nil`. By setting `greedy` to `false`, `foo` will capture as little as possible (which in this case would only be the first letter), leaving the rest to `bar`.
 
 **All other** supported patterns are semi-greedy. This means `:foo(.:bar)?` (`:foo(.:bar)` for Rails patterns) will capture everything before the *last* dot as `foo`. For these two pattern types, you can switch into non-greedy mode by setting the `greedy` option to false. In that case `foo` will only capture the part before the *first* dot.
@@ -727,6 +728,38 @@ pattern.match('a.b.c.d') # => #<Mustermann::Match>
 
 pattern = Mustermann.new(':a.:b', greedy: false)
 pattern.match('a.b.c.d') # => #<Mustermann::Match>
+```
+
+<a name="-available-options--on_duplicate"></a>
+### `on_duplicate`
+
+Supported by: All AST-based pattern types (`sinatra`, `rails`, `hybrid`, `template`, `express`, `flask`, `pyramid`, `cake`).
+Default value: `:error`
+
+By default, using the same capture name twice in one pattern raises a `Mustermann::CompileError`. With `on_duplicate` you can give repeated capture names a well-defined meaning instead:
+
+- **`:check`** - the pattern only matches if all occurrences decode to the same value. The param is the single decoded value.
+- **`:collect`** - the param becomes an array of the decoded values of all occurrences, in the order they appear in the pattern.
+
+``` ruby
+check = Mustermann.new('/accounts/:id/mirror/:id', on_duplicate: :check)
+check.params('/accounts/1/mirror/1')   # => { 'id' => '1' }
+check.params('/accounts/1/mirror/2')   # => nil
+check.params('/accounts/x/mirror/%78') # => { 'id' => 'x' } (compared after URI decoding)
+
+collect = Mustermann.new('/accounts/:id/mirror/:id', on_duplicate: :collect)
+collect.params('/accounts/1/mirror/2') # => { 'id' => ['1', '2'] }
+```
+
+Occurrences inside optional groups that did not participate in the match are ignored: with `:check` they do not take part in the comparison, with `:collect` they are skipped (an empty array if no occurrence matched). The raw, undecoded value of each occurrence remains available via `Match#captures`.
+
+When expanding a pattern, a scalar is only valid for `:check` (it is used for every occurrence); a list is checked against the strategy and errors point at the offending occurrence:
+
+``` ruby
+check.expand(id: 'x')          # => '/accounts/x/mirror/x'
+check.expand(id: ['x', 'y'])   # => raises Mustermann::ExpandError (occurrence 2 is "y" ...)
+collect.expand(id: ['a', 'b']) # => '/accounts/a/mirror/b'
+collect.expand(id: 'a')        # => raises Mustermann::ExpandError
 ```
 
 <a name="-available-options--space_matches_plus"></a>

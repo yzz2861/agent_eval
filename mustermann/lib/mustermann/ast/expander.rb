@@ -68,6 +68,18 @@ module Mustermann
         @mappings ||= {}
       end
 
+      # duplicate capture names mapped to their on_duplicate strategy
+      # @!visibility private
+      def duplicate_strategies
+        @duplicate_strategies ||= {}
+      end
+
+      # duplicate capture names mapped to the occurrence counts they may expand to
+      # @!visibility private
+      def duplicate_counts
+        @duplicate_counts ||= {}
+      end
+
       # all the known keys
       # @!visibility private
       def keys
@@ -76,10 +88,31 @@ module Mustermann
 
       # add a tree for expansion
       # @!visibility private
-      def add(ast)
-        translate(ast).each do |keys, pattern, filter|
+      def add(ast, on_duplicate: nil)
+        translated = translate(ast)
+        translated.each do |keys, pattern, filter|
           self.keys.concat(keys).uniq!
           mappings[keys.sort] ||= [keys, pattern, filter]
+        end
+        register_duplicates(translated, on_duplicate) if on_duplicate && on_duplicate != :error
+        translated
+      end
+
+      # remembers occurrence counts and the strategy for repeated capture names
+      # @!visibility private
+      def register_duplicates(translated, strategy)
+        counts = {}
+        translated.each do |keys, _, _|
+          keys.tally.each { |name, count| (counts[name] ||= []) << count }
+        end
+        counts.each do |name, list|
+          list.uniq!
+          next unless list.any? { |count| count > 1 }
+          if duplicate_strategies.key?(name) && duplicate_strategies[name] != strategy
+            raise ArgumentError, "conflicting on_duplicate strategies for capture #{name.inspect}"
+          end
+          duplicate_strategies[name] = strategy
+          duplicate_counts[name]     = ((duplicate_counts[name] || []) | list).sort
         end
       end
 
@@ -92,11 +125,53 @@ module Mustermann
       # @see Mustermann::Pattern#expand
       # @!visibility private
       def expand(values)
+        validate_duplicates(values) unless duplicate_strategies.empty?
         adjusted = values.each_with_object({}){ |(key, value), new_hash|
           new_hash[value.instance_of?(Array) ? [key] * value.length : key] = value }
-        keys, pattern, filters = mappings.fetch(adjusted.keys.flatten.sort) { error_for(values) }
+        keys, pattern, filters = mappings.fetch(adjusted.keys.flatten.sort) { duplicate_mapping(adjusted) || error_for(values) }
         filters.each { |key, filter| adjusted[key] &&= escape(adjusted[key], also_escape: filter) }
         pattern % (adjusted[keys] || adjusted.values_at(*keys))
+      end
+
+      # Checks values for repeated capture names against their on_duplicate
+      # strategy, raising an ExpandError pointing at the offending occurrence.
+      # @!visibility private
+      def validate_duplicates(values)
+        duplicate_strategies.each do |name, strategy|
+          next unless values.key? name
+          value  = values[name]
+          counts = duplicate_counts[name]
+          if value.instance_of? Array
+            unless counts.include? value.length
+              raise error_class, "cannot expand #{name.inspect} with #{value.length} values, pattern expects #{counts.join(' or ')} occurrences"
+            end
+            next unless strategy == :check
+            value.each_with_index do |element, index|
+              next if element == value.first
+              raise error_class, "values for #{name.inspect} must all be equal (on_duplicate: :check), but occurrence #{index + 1} is #{element.inspect} and occurrence 1 is #{value.first.inspect}"
+            end
+          elsif strategy == :collect
+            raise error_class, "cannot expand #{name.inspect} with a single value (on_duplicate: :collect expects an Array of #{counts.join(' or ')} values)"
+          end
+        end
+      end
+
+      # Finds a mapping for scalar values of repeated capture names by treating
+      # them as if they occurred at every position (valid for on_duplicate:
+      # :check, the only strategy allowing scalars).
+      # @!visibility private
+      def duplicate_mapping(adjusted)
+        return if duplicate_strategies.empty?
+        signature = adjusted.keys.flatten.sort
+        candidates = [signature]
+        duplicate_strategies.each_key do |name|
+          next unless adjusted.key? name
+          candidates += candidates.flat_map do |sig|
+            duplicate_counts[name].filter_map { |count| (sig + [name] * (count - 1)).sort if count > 1 }
+          end
+        end
+        candidates.each { |sig| return mappings[sig] if mappings.key? sig }
+        nil
       end
 
       # @see Mustermann::Pattern#expandable?

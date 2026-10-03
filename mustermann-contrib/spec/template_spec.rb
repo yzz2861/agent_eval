@@ -839,4 +839,23 @@ describe Mustermann::Template do
       example { pattern.peek_params("/foo bar")       .should be_nil }
     end
   end
+
+  context "on_duplicate" do
+    it "rejects duplicate variables by default" do
+      expect { Mustermann::Template.new("/{id}/mirror/{id}") }.to raise_error(Mustermann::CompileError)
+    end
+
+    it "requires equal occurrences with :check" do
+      pattern = Mustermann::Template.new("/{id}/mirror/{id}", on_duplicate: :check)
+      expect(pattern.params("/a/mirror/a")).to eq("id" => "a")
+      expect(pattern.params("/a/mirror/b")).to be_nil
+      expect(pattern.expand(id: "x")).to eq("/x/mirror/x")
+    end
+
+    it "collects occurrences in order with :collect" do
+      pattern = Mustermann::Template.new("/{id}/mirror/{id}", on_duplicate: :collect)
+      expect(pattern.params("/a/mirror/b")).to eq("id" => ["a", "b"])
+      expect(pattern.expand(id: %w[a b])).to eq("/a/mirror/b")
+    end
+  end
 end

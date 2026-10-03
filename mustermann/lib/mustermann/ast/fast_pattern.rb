@@ -58,7 +58,17 @@ module Mustermann
           options[:except].nil? &&
           options.fetch(:greedy, true) != false &&
           uri_decode &&
-          @string.match?(SIMPLE)
+          @string.match?(SIMPLE) &&
+          !duplicate_names?
+      end
+
+      # The fast path neither validates capture names nor applies duplicate
+      # name strategies, so patterns using the same capture name twice must
+      # go through the full AST pipeline.
+      def duplicate_names?
+        seen = {}
+        @string.scan(/:([a-zA-Z_]\w*)/) { |(name)| return true if seen[name]; seen[name] = true }
+        false
       end
 
       def compile(**options)

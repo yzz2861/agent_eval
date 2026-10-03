@@ -26,6 +26,15 @@ module Mustermann
       @regexp          = Mustermann.dedup(/\A#{regexp}\Z/)
       @simple_captures = @regexp.named_captures.none? { |name, positions| positions.size > 1 || always_array?(name) }
 
+      @duplicate_strategy = self.options&.[](:on_duplicate)
+      @duplicate_names    = EMPTY_ARRAY
+      @check_duplicates   = nil
+      unless @simple_captures
+        duplicates = @regexp.named_captures.reject { |name, positions| positions.size < 2 || always_array?(name) }
+        @duplicate_names  = duplicates.keys.freeze unless duplicates.empty?
+        @check_duplicates = duplicates.to_a.freeze if @duplicate_strategy == :check && duplicates.any?
+      end
+
       cache_class = ObjectSpace::WeakKeyMap if defined?(ObjectSpace::WeakKeyMap)
 
       case cache
@@ -62,17 +71,41 @@ module Mustermann
     # @see (see Mustermann::Pattern#match)
     def match(string) = cache_match(@match_cache, @regexp, string)
 
+    # @api private
+    # @return [Symbol, nil] the duplicate capture name strategy (:check or :collect), if any
+    attr_reader :duplicate_strategy
+
+    # @api private
+    # @return [Array<String>] capture names occurring more than once in the pattern
+    attr_reader :duplicate_names
+
+    # Patterns using on_duplicate: :check only match if all occurrences of a
+    # repeated capture name decode to the same value, so a plain regexp test is
+    # not sufficient for those.
+    # @see Mustermann::Pattern#===
+    def ===(string)
+      return @regexp === string unless @check_duplicates
+      !!(match = @regexp.match(string)) && !duplicate_mismatch?(match)
+    end
+
+    # @see Mustermann::Pattern#=~
+    def =~(string)
+      return @regexp =~ string unless @check_duplicates
+      self === string ? 0 : nil
+    end
+
     # Extracts params directly from the regexp without allocating a Match object or
     # populating the match cache — significant GC savings when called in hot loops.
     # @param (see Mustermann::Pattern#params)
     # @return (see Mustermann::Pattern#params)
     def params(string = nil)
       return unless md = @regexp.match(string)
+      return if duplicate_mismatch?(md)
       build_params(md)
     end
 
     extend Forwardable
-    def_delegators :regexp, :===, :=~, :names
+    def_delegators :regexp, :names
 
     private
 
@@ -87,7 +120,19 @@ module Mustermann
 
     def build_match(regexp, string)
       return unless match = regexp.match(string)
+      return if duplicate_mismatch?(match)
       Match.new(self, match, params: build_params(match))
+    end
+
+    # @return [Boolean] true if a duplicate capture name with on_duplicate: :check
+    #   has occurrences that decode to different values
+    # @!visibility private
+    def duplicate_mismatch?(match)
+      return false unless @check_duplicates
+      @check_duplicates.any? do |name, positions|
+        values = positions.filter_map { |pos| match[pos] }
+        values.map { |value| map_param(name, value) }.uniq.size > 1
+      end
     end
 
     def build_params(match)
@@ -97,10 +142,27 @@ module Mustermann
         params.each_with_object({}) { |(k, v), h| h[k] = map_param(k, v) }
       else
         match.regexp.named_captures.to_h do |name, positions|
-          value = positions.size < 2 && !always_array?(name) ? map_param(name, match[name]) :
-            positions.flat_map { |pos| map_param(name, match[pos]) }
+          value = if positions.size < 2 && !always_array?(name)
+            map_param(name, match[name])
+          else
+            multi_param(name, positions.map { |pos| match[pos] })
+          end
           [name, value]
         end
+      end
+    end
+
+    # Resolves the values of a capture occurring multiple times (or always
+    # rendered as an Array, like splats) according to the duplicate strategy.
+    # Absent occurrences (optional groups that did not participate) are ignored
+    # for :check and :collect. Comparison for :check happens on decoded values,
+    # while the raw captured ranges remain available via Match#captures.
+    # @!visibility private
+    def multi_param(name, raw_values)
+      case @duplicate_strategy
+      when :check   then raw_values.filter_map { |raw| map_param(name, raw) }.first
+      when :collect then raw_values.filter_map { |raw| map_param(name, raw) }
+      else raw_values.flat_map { |raw| map_param(name, raw) }
       end
     end
 

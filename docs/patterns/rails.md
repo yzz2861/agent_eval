@@ -6,6 +6,7 @@ The `rails` pattern is part of Mustermann (no mustermann-contrib needed). It is 
 [`capture`](#-available-options--capture),
 [`except`](#-available-options--except),
 [`greedy`](#-available-options--greedy),
+[`on_duplicate`](#-available-options--on_duplicate),
 [`space_matches_plus`](#-available-options--space_matches_plus),
 [`uri_decode`](#-available-options--uri_decode),
 [`version`](#version),

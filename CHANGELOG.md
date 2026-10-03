@@ -6,6 +6,10 @@ Mustermann follows [Semantic Versioning 2.0](http://semver.org/). Anything docum
 
 ### Mustermann 4.0.1
 
+#### New features
+
+* Add `on_duplicate` option for AST-based pattern types, giving repeated capture names a well-defined meaning: `:check` requires all occurrences to decode to the same value, `:collect` collects all values in occurrence order. The default (`:error`) keeps raising `Mustermann::CompileError` instead of silently keeping the last capture.
+
 #### Performance improvements
 
 * Reduce memory usage by deduplicating internal data structures. This is especially effective when using large `Mustermann::Set` objects. [#159](https://github.com/sinatra/mustermann/issues/159) [#160](https://github.com/sinatra/mustermann/pull/160) [@byroot](https://github.com/byroot)

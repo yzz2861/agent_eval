@@ -6,6 +6,7 @@ The `sinatra` pattern type is implemented by Mustermann itself. Moreover, it is 
 [`capture`](#-available-options--capture),
 [`except`](#-available-options--except),
 [`greedy`](#-available-options--greedy),
+[`on_duplicate`](#-available-options--on_duplicate),
 [`space_matches_plus`](#-available-options--space_matches_plus),
 [`uri_decode`](#-available-options--uri_decode),
 [`ignore_unknown_options`](#-available-options--ignore_unknown_options).

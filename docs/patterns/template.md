@@ -5,7 +5,7 @@ The `uri-template` (or `template`) pattern type is implemented by the `musterman
 ## Overview
 
 **Supported options:**
-`capture`, `except`, `greedy`, `space_matches_plus`, `uri_decode`, and `ignore_unknown_options`.
+`capture`, `except`, `greedy`, `on_duplicate`, `space_matches_plus`, `uri_decode`, and `ignore_unknown_options`.
 
 Please keep the following in mind:
 

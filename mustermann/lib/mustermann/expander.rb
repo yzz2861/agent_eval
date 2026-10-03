@@ -52,7 +52,7 @@ module Mustermann
           @api_expander.add(yield(pattern))
         else
           raise NotImplementedError, "expanding not supported for #{pattern.class}" unless pattern.respond_to? :to_ast
-          @api_expander.add(pattern.to_ast)
+          @api_expander.add(pattern.to_ast, on_duplicate: pattern.options&.[](:on_duplicate))
         end
         @patterns << pattern
       end
