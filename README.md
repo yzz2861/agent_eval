@@ -242,6 +242,8 @@ encoded_token.payload # => { 'exp'=>1234, 'jti'=>'1234", 'sub'=>'my-subject' }
 encoded_token.header # {'kid'=>'hmac', 'alg'=>'HS256'}
 ```
 
+The payload and header returned by `JWT::EncodedToken` are deeply frozen and cannot be modified. This guarantees that the content that was verified cannot be altered afterwards. The token string and its encoded segments are frozen as well.
+
 The `JWT::EncodedToken#verify!` method can be used to verify signature and claim verification in one go. The `exp` claim is verified by default.
 
 ```ruby

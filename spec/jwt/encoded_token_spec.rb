@@ -560,4 +560,116 @@ RSpec.describe JWT::EncodedToken do
       end
     end
   end
+
+  describe 'immutable token state' do
+    let(:payload) { { 'pay' => 'load', 'nested' => { 'list' => ['a', 'b'] } } }
+    let(:header) { { 'custom' => { 'alg' => 'HS256' }, 'tags' => ['one'] } }
+
+    it 'returns frozen token segments' do
+      expect(token.jwt).to be_frozen
+      expect(token.encoded_header).to be_frozen
+      expect(token.encoded_payload).to be_frozen
+      expect(token.encoded_signature).to be_frozen
+      expect(token.signature).to be_frozen
+    end
+
+    context 'when the token has been verified' do
+      before { token.verify!(signature: { algorithm: 'HS256', key: 'secret' }) }
+
+      it 'does not allow the verified payload to be mutated' do
+        expect { token.payload['pay'] = 'tampered' }.to raise_error(FrozenError)
+        expect { token.payload['pay'] << 'tampered' }.to raise_error(FrozenError)
+        expect { token.payload['nested']['list'] << 'c' }.to raise_error(FrozenError)
+        expect { token.payload['nested']['list'][0] << 'c' }.to raise_error(FrozenError)
+
+        expect(token.payload).to eq(payload)
+      end
+
+      it 'does not allow the header to be mutated' do
+        expect { token.header['alg'] = 'none' }.to raise_error(FrozenError)
+        expect { token.header['custom']['alg'] = 'none' }.to raise_error(FrozenError)
+        expect { token.header['tags'] << 'two' }.to raise_error(FrozenError)
+
+        expect(token.header).to eq({ 'alg' => 'HS256', 'custom' => { 'alg' => 'HS256' }, 'tags' => ['one'] })
+      end
+    end
+
+    context 'when the payload is accessed without verification' do
+      it 'does not allow the unverified payload to be mutated' do
+        expect { token.unverified_payload['pay'] = 'tampered' }.to raise_error(FrozenError)
+        expect { token.unverified_payload['nested']['list'] << 'c' }.to raise_error(FrozenError)
+
+        expect(token.unverified_payload).to eq(payload)
+      end
+    end
+
+    context 'when the token string given to the constructor is mutated afterwards' do
+      it 'is not affected' do
+        jwt = encoded_token.dup
+        token = described_class.new(jwt)
+        jwt.replace('tampered.token.string')
+
+        expect(token.jwt).to eq(encoded_token)
+        expect(token.verify!(signature: { algorithm: 'HS256', key: 'secret' })).to eq(nil)
+        expect(token.payload).to eq(payload)
+      end
+    end
+
+    context 'when the encoded payload string assigned by the caller is mutated afterwards' do
+      let(:other_encoded_payload) do
+        JWT::Token.new(payload: { 'other' => 'payload' }).tap { |t| t.sign!(algorithm: 'HS256', key: 'secret') }.encoded_payload
+      end
+
+      it 'is not affected' do
+        encoded_payload = other_encoded_payload.dup
+        token.encoded_payload = encoded_payload
+        encoded_payload.replace('tampered')
+
+        expect(token.encoded_payload).to eq(other_encoded_payload)
+        expect(token.unverified_payload).to eq({ 'other' => 'payload' })
+      end
+    end
+
+    context 'when the token is verified again after a successful verification' do
+      before { token.verify!(signature: { algorithm: 'HS256', key: 'secret' }) }
+
+      it 'fails with an invalid key and revokes access to the payload' do
+        expect(token.valid?(signature: { algorithm: 'HS256', key: 'wrong' })).to be(false)
+
+        expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token signature before accessing the payload')
+      end
+
+      it 'raises on verify_signature! with an invalid key and revokes access to the payload' do
+        expect { token.verify_signature!(algorithm: 'HS256', key: 'wrong') }.to raise_error(JWT::VerificationError, 'Signature verification failed')
+
+        expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token signature before accessing the payload')
+      end
+    end
+
+    context 'when a detached payload with nested arrays is reset' do
+      let(:payload) { { 'pay' => 'load', 'list' => [%w[a b], { 'c' => ['d'] }] } }
+      let(:encoded_token) { detached_payload_token.jwt }
+
+      before do
+        token.encoded_payload = detached_payload_token.encoded_payload
+        token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+      end
+
+      it 'returns the deeply frozen payload' do
+        expect(token.payload).to eq(payload)
+        expect { token.payload['list'] << 'x' }.to raise_error(FrozenError)
+        expect { token.payload['list'][0] << 'x' }.to raise_error(FrozenError)
+        expect { token.payload['list'][1]['c'] << 'x' }.to raise_error(FrozenError)
+      end
+
+      it 'requires re-verification when the payload is reset' do
+        token.encoded_payload = detached_payload_token.encoded_payload
+
+        expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token signature before accessing the payload')
+
+        token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+        expect(token.payload).to eq(payload)
+      end
+    end
+  end
 end

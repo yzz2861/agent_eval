@@ -19,6 +19,8 @@ module JWT
     private_constant(:DEFAULT_CLAIMS)
 
     # Returns the original token provided to the class.
+    #
+    # The returned String is frozen and cannot be modified.
     # @return [String] The JWT token.
     attr_reader :jwt
 
@@ -29,27 +31,31 @@ module JWT
     def initialize(jwt)
       raise ArgumentError, 'Provided JWT must be a String' unless jwt.is_a?(String)
 
-      @jwt = jwt
+      @jwt = jwt.dup.freeze
       @signature_verified = false
       @claims_verified    = false
 
-      @encoded_header, @encoded_payload, @encoded_signature = jwt.split('.')
+      @encoded_header, @encoded_payload, @encoded_signature = @jwt.split('.').map!(&:freeze)
     end
 
     # Returns the decoded signature of the JWT token.
     #
+    # The returned String is frozen and cannot be modified.
     # @return [String] the decoded signature.
     def signature
-      @signature ||= ::JWT::Base64.url_decode(encoded_signature || '')
+      @signature ||= ::JWT::Base64.url_decode(encoded_signature || '').freeze
     end
 
     # Returns the encoded signature of the JWT token.
     #
+    # The returned String is frozen and cannot be modified.
     # @return [String] the encoded signature.
     attr_reader :encoded_signature
 
     # Returns the decoded header of the JWT token.
     #
+    # The returned Hash is deeply frozen and cannot be modified. This guarantees
+    # that the content that was verified cannot be altered afterwards.
     # @return [Hash] the header.
     def header
       @header ||= parse_and_decode(@encoded_header)
@@ -57,11 +63,14 @@ module JWT
 
     # Returns the encoded header of the JWT token.
     #
+    # The returned String is frozen and cannot be modified.
     # @return [String] the encoded header.
     attr_reader :encoded_header
 
     # Returns the payload of the JWT token. Access requires the signature and claims to have been verified.
     #
+    # The returned Hash is deeply frozen and cannot be modified. This guarantees
+    # that the claims that were verified cannot be altered afterwards.
     # @return [Hash] the payload.
     # @raise [JWT::TokenError] if the signature has not been verified.
     def payload
@@ -72,6 +81,8 @@ module JWT
     end
 
     # Returns the payload of the JWT token without requiring the signature to have been verified.
+    #
+    # The returned Hash is deeply frozen and cannot be modified.
     # @return [Hash] the payload.
     def unverified_payload
       decoded_payload
@@ -79,16 +90,18 @@ module JWT
 
     # Returns the encoded payload of the JWT token.
     #
+    # The returned String is frozen and cannot be modified.
     # @return [String] the encoded payload.
     attr_reader :encoded_payload
 
     # Sets the encoded payload of the JWT token.
     #
     # Resets the verification state, requiring the token to be verified again.
+    # The given String is duplicated, later modifications of it do not affect the token.
     #
     # @param encoded_payload [String] the encoded payload.
     def encoded_payload=(encoded_payload)
-      @encoded_payload = encoded_payload
+      @encoded_payload = encoded_payload&.dup&.freeze
       @decoded_payload = nil
       @signature_verified = @claims_verified = false
     end
@@ -218,9 +231,24 @@ module JWT
     end
 
     def parse(segment)
-      JWT::JSON.parse(segment)
+      deep_freeze(JWT::JSON.parse(segment))
     rescue ::JSON::ParserError
       raise JWT::MalformedTokenError, 'Invalid segment encoding'
+    end
+
+    # Freezes the given object and all the objects it contains, preventing
+    # modifications to the verified content of the token.
+    def deep_freeze(object)
+      case object
+      when Hash
+        object.each do |key, value|
+          deep_freeze(key)
+          deep_freeze(value)
+        end
+      when Array
+        object.each { |element| deep_freeze(element) }
+      end
+      object.freeze
     end
 
     def decoded_payload

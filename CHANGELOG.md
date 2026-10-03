@@ -10,7 +10,7 @@
 
 **Fixes and enhancements:**
 
-- Your contribution here
+- Deep freeze the decoded header and payload of `JWT::EncodedToken` and freeze the token string and its encoded segments, so verified content can no longer be mutated
 
 ## [v3.3.0](https://github.com/jwt/ruby-jwt/tree/v3.3.0) (2026-09-11)
 
