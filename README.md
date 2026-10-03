@@ -50,6 +50,26 @@ This will only modify the timeout for this particular invocation.
 This is useful if you want to fail-fast on certain non-critical
 sections when a resource is not available, or conversely if you are comfortable blocking longer on a particular resource.
 
+Optionally, you can pass a cancellation token to abort a wait early, e.g. when
+the upstream request was cancelled and there is no point waiting for the pool
+timeout:
+
+``` ruby
+token = ConnectionPool::CancellationToken.new
+upstream.on_cancel { token.cancel }
+
+$memcached.with(cancel_token: token) do |conn|
+  conn.get('some-count')
+end
+```
+
+Cancelling the token wakes the waiter promptly and raises
+`ConnectionPool::CancelledError` instead of `ConnectionPool::TimeoutError`.
+The token only affects the wait: once a connection has been checked out,
+cancelling the token has no effect and never returns the connection on your
+behalf. Nested `with`/`checkout` calls on a thread that already holds a
+connection ignore the token, preserving the usual borrow semantics.
+
 ## Migrating to a Connection Pool
 
 You can use `ConnectionPool::Wrapper` to wrap a single global connection, making it easier to migrate existing connection code over time:

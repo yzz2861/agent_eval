@@ -56,30 +56,47 @@ class ConnectionPool::TimedStack
   #
   # @option options [Float] :timeout (0.5) Wait this many seconds for an available entry
   # @option options [Class] :exception (ConnectionPool::TimeoutError) Exception class to raise
-  #   if an entry was not available within the timeout period. Use `exception: false` to return nil.
+  #   if an entry was not available within the timeout period. Use +exception: false+ to return nil.
+  # @option options [ConnectionPool::CancellationToken] :cancel_token (nil) Token that can
+  #   cancel the wait. When cancelled while waiting, the waiter is woken promptly and
+  #   ConnectionPool::CancelledError is raised instead of waiting for the timeout.
+  #   Once a connection has been returned the token has no further effect.
   #
   # Other options may be used by subclasses that extend TimedStack.
-  def pop(timeout: 0.5, exception: ConnectionPool::TimeoutError, **kwargs)
+  def pop(timeout: 0.5, exception: ConnectionPool::TimeoutError, cancel_token: nil, **kwargs)
     deadline = current_time + timeout
     @mutex.synchronize do
-      loop do
-        raise ConnectionPool::PoolShuttingDownError if @shutdown_block
-        if (conn = try_fetch_connection(**kwargs))
-          return conn
+      unregister = nil
+      begin
+        if cancel_token
+          # Registered while holding @mutex so a concurrent cancel either
+          # flips the flag before we check it, or wakes us via broadcast
+          # once we release @mutex by waiting. No lost wakeups.
+          unregister = cancel_token.on_cancel { wake_waiters }
+          cancel_token.raise_if_cancelled unless unregister
         end
-
-        connection = try_create(**kwargs)
-        return connection if connection
-
-        to_wait = deadline - current_time
-        if to_wait <= 0
-          if exception
-            raise exception, "Waited #{timeout} sec, #{length}/#{@max} available"
-          else
-            return nil
+        loop do
+          raise ConnectionPool::PoolShuttingDownError if @shutdown_block
+          cancel_token&.raise_if_cancelled
+          if (conn = try_fetch_connection(**kwargs))
+            return conn
           end
+
+          connection = try_create(**kwargs)
+          return connection if connection
+
+          to_wait = deadline - current_time
+          if to_wait <= 0
+            if exception
+              raise exception, "Waited #{timeout} sec, #{length}/#{@max} available"
+            else
+              return nil
+            end
+          end
+          @resource.wait(@mutex, to_wait)
         end
-        @resource.wait(@mutex, to_wait)
+      ensure
+        unregister&.call
       end
     end
   end
@@ -148,6 +165,13 @@ class ConnectionPool::TimedStack
   end
 
   private
+
+  ##
+  # Wakes all waiting threads. Invoked via a CancellationToken callback,
+  # possibly from a foreign thread, when a pending checkout is cancelled.
+  def wake_waiters
+    @mutex.synchronize { @resource.broadcast }
+  end
 
   def current_time
     Process.clock_gettime(Process::CLOCK_MONOTONIC)

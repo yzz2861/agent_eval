@@ -1,5 +1,14 @@
 # connection_pool Changelog
 
+HEAD
+------
+
+- Add ConnectionPool::CancellationToken and a :cancel_token option for
+  checkout/with. Cancelling the token wakes a pending checkout promptly
+  and raises ConnectionPool::CancelledError instead of waiting for the
+  pool timeout. The token only affects the wait; it never checks an
+  already-checked-out connection back in.
+
 3.0.2
 ------
 

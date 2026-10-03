@@ -7,6 +7,9 @@ class ConnectionPool
   class PoolShuttingDownError < ::ConnectionPool::Error; end
 
   class TimeoutError < ::Timeout::Error; end
+
+  # Raised when a pending checkout is cancelled via a CancellationToken.
+  class CancelledError < ::ConnectionPool::Error; end
 end
 
 # Generic connection pool class for sharing a limited number of objects or network connections
@@ -23,6 +26,13 @@ end
 #
 #    @pool.with(timeout: 2.0) do |redis|
 #      redis.lpop('my-list') if redis.llen('my-list') > 0
+#    end
+#
+# Using a cancellation token to abort a wait for a connection
+#
+#    token = ConnectionPool::CancellationToken.new
+#    @pool.with(cancel_token: token) do |redis|
+#      redis.lpop('my-list')
 #    end
 #
 # Example usage replacing an existing connection (slower):
@@ -111,12 +121,21 @@ class ConnectionPool
     ::Thread.current[@discard_key] = block || proc { |conn| conn }
   end
 
-  def checkout(timeout: @timeout, **kwargs)
+  ##
+  # Checks out a connection from the pool.
+  #
+  # Pass a ConnectionPool::CancellationToken via +:cancel_token+ to abort the
+  # wait for a connection: a cancelled token wakes the waiter promptly and
+  # raises ConnectionPool::CancelledError instead of waiting for the timeout.
+  # The token only affects the wait; once a connection has been checked out
+  # it has no further effect and is ignored for nested checkouts on a thread
+  # that already holds a connection.
+  def checkout(timeout: @timeout, cancel_token: nil, **kwargs)
     if ::Thread.current[@key]
       ::Thread.current[@key_count] += 1
       ::Thread.current[@key]
     else
-      conn = @available.pop(timeout:, **kwargs)
+      conn = @available.pop(timeout:, cancel_token:, **kwargs)
       ::Thread.current[@key] = conn
       ::Thread.current[@key_count] = 1
       ::Thread.current[@key_kwargs] = kwargs
@@ -191,3 +210,4 @@ end
 require_relative "connection_pool/timed_stack"
 require_relative "connection_pool/wrapper"
 require_relative "connection_pool/fork"
+require_relative "connection_pool/cancellation_token"
