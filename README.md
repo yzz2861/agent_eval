@@ -163,6 +163,16 @@ JSONSchemer.schema(
   # default: JSONSchemer.draft202012
   meta_schema: 'https://json-schema.org/draft/2020-12/schema',
 
+  # register custom vocabularies for this schema instance
+  # maps vocabulary URIs to keyword implementations (see "Custom Vocabularies")
+  # Hash{String => Hash{String => Class}}
+  # default: {}
+  vocabularies: {
+    'https://example.com/vocab/string-case' => {
+      'stringCase' => StringCase
+    }
+  },
+
   # validate `format` (https://json-schema.org/draft/2020-12/json-schema-validation.html#section-7)
   # true/false
   # default: true
@@ -258,6 +268,58 @@ end
 # configuration accessors
 JSONSchemer.configuration.insert_property_defaults = true
 ```
+
+## Custom Vocabularies
+
+JSON Schema [vocabularies](https://json-schema.org/draft/2020-12/json-schema-core.html#section-10) group related keywords under a URI. Use the `vocabularies` option to register keyword implementations for custom vocabulary URIs on a schema instance. A meta-schema then enables the vocabulary by declaring its URI in `$vocabulary`, and schemas using that meta-schema get the new keywords.
+
+```ruby
+# keyword implementations subclass JSONSchemer::Keyword and follow the same
+# annotation protocol as built-in keywords: return a result with an
+# `:annotation` and read sibling annotations from `context.adjacent_results`
+class StringCase < JSONSchemer::Keyword
+  def error(formatted_instance_location:, **)
+    "value at #{formatted_instance_location} is not #{value} case"
+  end
+
+  def validate(instance, instance_location, keyword_location, _context)
+    return unless instance.is_a?(String)
+    valid = value == 'upper' ? instance == instance.upcase : instance == instance.downcase
+    result(instance, instance_location, keyword_location, valid, :annotation => value)
+  end
+end
+
+meta_schema = JSONSchemer.schema(
+  {
+    '$id' => 'https://example.com/meta/string-case',
+    '$vocabulary' => {
+      'https://json-schema.org/draft/2020-12/vocab/core' => true,
+      'https://json-schema.org/draft/2020-12/vocab/applicator' => true,
+      'https://json-schema.org/draft/2020-12/vocab/validation' => true,
+      'https://example.com/vocab/string-case' => true
+    }
+  },
+  :vocabularies => {
+    'https://example.com/vocab/string-case' => {
+      'stringCase' => StringCase
+    }
+  }
+)
+
+schemer = JSONSchemer.schema({ 'stringCase' => 'upper' }, :meta_schema => meta_schema)
+schemer.valid?('ABC')
+# => true
+schemer.valid?('abc')
+# => false
+```
+
+Vocabulary declarations follow the specification:
+
+- A vocabulary declared as required (`true`) without a registered implementation raises `JSONSchemer::UnknownVocabulary` when the schema is created.
+- A vocabulary declared as optional (`false`) without a registered implementation is ignored.
+- Registered vocabularies cannot redefine keywords provided by other vocabularies (including core keywords like `type` or `$ref`); attempting to do so raises `JSONSchemer::VocabularyKeywordConflict`.
+
+Registrations are scoped to the schema instance: the global `JSONSchemer::VOCABULARIES` is never modified, so two schemas can register different implementations for the same vocabulary URI. The registry is also passed along when `$ref` crosses into another dialect, so referenced schemas resolve their own `$vocabulary` declarations against it.
 
 ## Custom Error Messages
 

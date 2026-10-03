@@ -68,6 +68,7 @@ module JSONSchemer
   class UnknownRef < StandardError; end
   class UnknownFormat < StandardError; end
   class UnknownVocabulary < StandardError; end
+  class VocabularyKeywordConflict < StandardError; end
   class UnknownContentEncoding < StandardError; end
   class UnknownContentMediaType < StandardError; end
   class UnknownOutputFormat < StandardError; end

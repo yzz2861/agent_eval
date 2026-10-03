@@ -16,20 +16,34 @@ module JSONSchemer
 
         class Vocabulary < Keyword
           def parse
-            value.each_with_object({}) do |(vocabulary, required), out|
-              if VOCABULARIES.key?(vocabulary)
-                out[vocabulary] = VOCABULARIES.fetch(vocabulary)
+            registered_vocabularies = schema.configuration.vocabularies
+            vocabularies = value.each_with_object([]) do |(vocabulary, required), out|
+              if registered_vocabularies.key?(vocabulary)
+                out << [vocabulary, registered_vocabularies.fetch(vocabulary), true]
+              elsif VOCABULARIES.key?(vocabulary)
+                out << [vocabulary, VOCABULARIES.fetch(vocabulary), false]
               elsif required
                 raise UnknownVocabulary, vocabulary
               end
-            end.tap do |vocabularies|
-              schema.keywords = vocabularies.sort_by do |vocabulary, _keywords|
-                VOCABULARY_ORDER.fetch(vocabulary, Float::INFINITY)
-              end.each_with_object({}) do |(_vocabulary, keywords), out|
-                out.merge!(keywords)
-              end
-              schema.keyword_order = schema.keywords.transform_values.with_index { |_keyword_class, index| index }
             end
+
+            keywords = {}
+            keyword_sources = {}
+
+            vocabularies.sort_by.with_index do |(vocabulary, _keywords, _registered), index|
+              [VOCABULARY_ORDER.fetch(vocabulary, Float::INFINITY), index]
+            end.each do |vocabulary, vocabulary_keywords, registered|
+              vocabulary_keywords.each do |keyword, keyword_class|
+                if (source_vocabulary, source_registered = keyword_sources[keyword]) && (registered || source_registered)
+                  raise VocabularyKeywordConflict, "`#{vocabulary}` cannot redefine the `#{keyword}` keyword already defined by `#{source_vocabulary}`"
+                end
+                keywords[keyword] = keyword_class
+                keyword_sources[keyword] = [vocabulary, registered]
+              end
+            end
+
+            schema.keywords = keywords
+            schema.keyword_order = keywords.transform_values.with_index { |_keyword_class, index| index }
           end
         end
 
