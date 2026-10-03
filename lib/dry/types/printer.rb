@@ -10,6 +10,7 @@ module Dry
     class Printer
       MAPPING = {
         Nominal => :visit_nominal,
+        Decimal => :visit_decimal,
         Constructor => :visit_constructor,
         [
           Constrained,
@@ -156,6 +157,13 @@ module Dry
       def visit_nominal(type)
         visit_options(type.options, type.meta) do |opts|
           yield "Nominal<#{type.primitive}#{opts}>"
+        end
+      end
+
+      def visit_decimal(type)
+        visit_options(EMPTY_HASH, type.meta) do |opts|
+          yield "Decimal(#{type.precision}, #{type.scale}, " \
+            "rounding: #{type.rounding_option.inspect}, accept_float: #{type.accept_float?})#{opts}"
         end
       end
 

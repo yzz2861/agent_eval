@@ -104,6 +104,11 @@ module Dry
         end
 
         # @api private
+        def visit_decimal(node)
+          visit_nominal([::BigDecimal, node.last])
+        end
+
+        # @api private
         def visit_hash(_)
           HASH
         end

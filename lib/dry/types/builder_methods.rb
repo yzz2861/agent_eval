@@ -89,6 +89,13 @@ module Dry
         end
       end
 
+      # Build a strict fixed-precision decimal type
+      #
+      # @return [Dry::Types::Decimal]
+      def Decimal(...)
+        Types::Decimal.new(...)
+      end
+
       # Build a nominal type
       #
       # @param [Class] klass

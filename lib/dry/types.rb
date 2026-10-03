@@ -73,6 +73,15 @@ module Dry
     # @api private
     def self.included(*) = raise "Import Dry.Types, not Dry::Types"
 
+    # Build a strict configurable decimal type
+    #
+    # @return [Types::Decimal]
+    #
+    # @api public
+    def self.Decimal(...)
+      Types::Decimal.new(...)
+    end
+
     # Return container with registered built-in type objects
     #
     # @return [Container{String => Nominal}]

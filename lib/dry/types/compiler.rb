@@ -54,6 +54,11 @@ module Dry
         end
       end
 
+      def visit_decimal(node)
+        precision, scale, options, meta = node
+        Types::Decimal.new(precision, scale, **options).meta(meta)
+      end
+
       def visit_rule(node)
         ::Dry::Types.rule_compiler.([node])[0]
       end
