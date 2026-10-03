@@ -1476,6 +1476,215 @@ group Fugit::Cron do
     end
   end
 
+  group 'stable hash extension' do
+
+    HID = 'reports/nightly'
+
+    group '.fnv1a_32' do
+
+      {
+        '' => 2166136261,
+        'a' => 3826002220,
+        'foobar' => 3214735720,
+        'fugit-hash-v1|min|reports/nightly|' => 2782564298,
+      }.each do |s, i|
+
+        test "hashes #{s.inspect} to #{i}" do
+
+          assert(Fugit::Cron.fnv1a_32(s), i)
+        end
+      end
+
+      test 'is stable for identical inputs' do
+
+        s = 'fugit-hash-v1|hou|task|salt'
+
+        assert(Fugit::Cron.fnv1a_32(s), Fugit::Cron.fnv1a_32(s.dup))
+      end
+    end
+
+    group 'expands to a fixed plain cron' do
+
+      [
+        [ 'H * * * *',       {},                       '38 * * * *' ],
+        [ 'H29 * * * *',     {},                       '8 * * * *' ],
+        [ '30-H * * * *',    {},                       '38 * * * *' ],
+        [ '30H * * * *',     {},                       '38 * * * *' ],
+        [ 'H/10 * * * *',    {},                       '8,18,28,38,48,58 * * * *' ],
+        [ 'H29/10 * * * *',  {},                       '8,18,28 * * * *' ],
+        [ '30-H/10 * * * *', {},                       '38,48,58 * * * *' ],
+        [ 'H H * * *',       {},                       '38 18 * * *' ],
+        [ '* * * * H',       {},                       '* * * * 0' ],
+        [ '* * * * H7',      {},                       '* * * * 4' ],
+        [ '* * * * H-sun',   {},                       '* * * * 0' ],
+        [ '0 12 * * mon-H',  {},                       '0 12 * * 3' ],
+        [ '0 12 * * H-fri',  {},                       '0 12 * * 2' ],
+        [ '* * * H-feb *',   {},                       '* * * 1 *' ],
+        [ 'H H H H H',       {},                       '38 18 29 9 0' ],
+        [ 'H/5 H/6 H H H',   {},                       '3,8,13,18,23,28,33,38,43,48,53,58 0,6,12,18 29 9 0' ],
+        [ '5,H * * * *',     {},                       '5,38 * * * *' ],
+        [ '5,H30 * * * *',   {},                       '5,20 * * * *' ],
+        [ 'H * * * *',       { hash_salt: 's1' },      '2 * * * *' ],
+        [ 'H * * * *',       { hash_id: 'other-job' }, '45 * * * *' ],
+        [ 'H * * * * UTC',   {},                       '38 * * * * UTC' ],
+        [ '* * * * * HST',     { hash_id: nil },        '* * * * * HST' ],
+        [ '* * * * * Hongkong', { hash_id: nil },       '* * * * * Hongkong' ],
+      ].each do |cron, extra, expected|
+
+        test "stably parses #{cron.inspect} #{extra.inspect}" do
+
+          opts =
+            extra.has_key?(:hash_id) ? extra : { hash_id: HID }.merge(extra)
+
+          c = Fugit::Cron.parse(cron, opts)
+
+          assert(c.class, Fugit::Cron)
+          assert(c.to_cron_s, expected)
+        end
+      end
+
+      test 'accepts a symbol id and salt' do
+
+        c_str = Fugit::Cron.parse('H * * * *', hash_id: 'reports', hash_salt: 's')
+        c_sym = Fugit::Cron.parse('H * * * *', hash_id: 'reports', hash_salt: :s)
+
+        assert(c_str.to_cron_s, c_sym.to_cron_s)
+      end
+
+      test 'does not depend on the :random option' do
+
+        c1 = Fugit::Cron.parse('H * * * *', hash_id: HID, random: false)
+        c2 = Fugit::Cron.parse('H * * * *', hash_id: HID, random: true)
+
+        assert(c1.to_cron_s, '38 * * * *')
+        assert(c2.to_cron_s, '38 * * * *')
+      end
+
+      test 'leaves plain crons and the random extension untouched' do
+
+        assert(Fugit::Cron.parse('* * * * *').to_cron_s, '* * * * *')
+        assert(Fugit::Cron.parse('~ * * * *', random: false).to_cron_s,
+          '0 * * * *')
+      end
+
+      test 'is deterministic across parses, salt changes the result' do
+
+        cron = 'H/5 H/6 H H H'
+
+        c1 = Fugit::Cron.parse(cron, hash_id: HID)
+        c2 = Fugit::Cron.parse(cron, hash_id: HID, hash_salt: 'x')
+        c3 = Fugit::Cron.parse(cron, hash_id: HID)
+
+        assert(c1.to_cron_s, c3.to_cron_s)
+        assert(c1.to_cron_s != c2.to_cron_s, true)
+      end
+
+      test 'spreads each field independently' do
+
+        c = Fugit::Cron.parse('H H H H H', hash_id: HID)
+
+        assert(
+          [ c.minutes, c.hours, c.monthdays, c.months, c.weekdays ],
+          [ [ 38 ], [ 18 ], [ 29 ], [ 9 ], [ [ 0 ] ] ])
+      end
+    end
+
+    group '#next_time' do
+
+      [
+        [ 'H/10 H * * *', '2024-01-01 18:08:00', '2024-01-01 00:00:00' ],
+        [ '0 12 * * H-fri', '2024-03-05 12:00:00', '2024-03-01 00:00:00' ],
+        [ 'H H H H *', '2024-09-29 18:38:00', '2024-01-01 00:00:00' ],
+      ].each do |cron, expected, now|
+
+        test "triggers #{cron.inspect} at #{expected}" do
+
+          in_zone('UTC') do
+
+            c = Fugit::Cron.parse(cron, hash_id: HID)
+
+            assert(
+              Fugit.time_to_plain_s(c.next_time(Time.parse(now)), false),
+              expected)
+          end
+        end
+      end
+    end
+
+    group 'invalid' do
+
+      [
+        'H-H * * * *',
+        '5-H-H * * * *',
+        '* * * * mon-Hfri',
+        'H/0 * * * *',
+        'H99 * * * *',
+        '* * * H13 *',
+        '* * * * H8',
+        'H#3 * * * *',
+        '* * * * H%2',
+        '-H * * * *',
+        '* * * * Hfri',
+        '* * * Hfeb *',
+      ].each do |cron|
+
+        test "returns nil for #{cron.inspect}" do
+
+          assert(Fugit::Cron.parse(cron, hash_id: HID), nil)
+        end
+
+        test "do_parse raises for #{cron.inspect}" do
+
+          assert_error(
+            lambda { Fugit::Cron.do_parse(cron, hash_id: HID) },
+            ArgumentError, "invalid cron string #{cron.inspect}")
+        end
+      end
+    end
+
+    group 'missing task id' do
+
+      MSG = 'missing :hash_id, a stable hash cron field (H) requires a task id'
+
+      [ 'H * * * *', 'H H * * *', '0 12 * * H-fri' ].each do |cron|
+
+        test "Cron.parse raises for #{cron.inspect} without id" do
+
+          assert_error(
+            lambda { Fugit::Cron.parse(cron) },
+            ArgumentError, MSG)
+        end
+
+        test "Cron.parse raises for #{cron.inspect} with an empty id" do
+
+          assert_error(
+            lambda { Fugit::Cron.parse(cron, hash_id: '') },
+            ArgumentError, MSG)
+        end
+      end
+
+      test 'Fugit.do_parse raises without :hash_id' do
+
+        assert_error(
+          lambda { Fugit.do_parse('H * * * *') },
+          ArgumentError, MSG)
+      end
+
+      test 'raises for an invalid :hash_salt' do
+
+        assert_error(
+          lambda { Fugit::Cron.parse('H * * * *', hash_id: 'x', hash_salt: 1) },
+          ArgumentError,
+          'invalid :hash_salt, expected a String but got Integer')
+      end
+
+      test 'still parses a plain cron without :hash_id' do
+
+        assert(Fugit::Cron.parse('* * * * *').class, Fugit::Cron)
+      end
+    end
+  end
+
   group '.do_parse' do
 
     [ #     min hou dom mon dow
@@ -1974,4 +2183,3 @@ group Fugit do
     end
   end
 end
-

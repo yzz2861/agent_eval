@@ -509,6 +509,45 @@ Fugit.parse('~ * * * *', random: SecureRandom) # on a cryptographically secure r
 Please note that the random values are determined at parse time. So `"~29 * * * *"` at parse time could become `"17 * * * *"` for example and go on triggering every hour at minute 17, until a new parsing occurs and another (or the same) minute is picked. This aligns with the OpenBSD [`man 5 crontab`](https://man.openbsd.org/crontab.5), OpenBSD `crond` rolling the dice at load time.
 
 
+### the stable hash extension
+
+The random extension above is determined at parse time, so a job schedule may change every time the process restarts. The `H` (for hash) extension is a stable, deterministic variant: given a task id (and an optional salt), Fugit always picks the same value, in any process, on any Ruby version. It never relies on Ruby's `Object#hash`.
+
+The task id is passed as the `:hash_id` option (a non-empty String, a Symbol is turned into a String). An optional `:hash_salt` may be given to deterministically change the result.
+
+```ruby
+Fugit.parse('H * * * *', hash_id: 'reports/nightly')
+  # ==> '38 * * * *', every hour at minute 38
+Fugit.parse('H * * * *', hash_id: 'reports/nightly', hash_salt: '2026')
+  # ==> '2 * * * *', salted, still stable
+Fugit.parse('H H * * *', hash_id: 'reports/nightly')
+  # ==> '38 18 * * *', every day at 18:38
+Fugit.parse('0 12 * * mon-H', hash_id: 'reports/nightly')
+  # ==> '0 12 * * 3', every Wednesday at noon
+```
+
+Like the random extension, either or both ends of the range may be omitted and a step may be given after a slash:
+
+```ruby
+'H * * * *'     # a stable minute between 0 and 59
+'H29 * * * *'   # a stable minute between 0 and 29
+'30-H * * * *'  # a stable minute between 30 and 59
+'H/10 * * * *'  # every 10 minutes, start minute stable between 0 and 9
+'H H * * * H'   # stable minute, hour, and weekday
+```
+
+Month and weekday aliases are accepted as bounds after a hyphen (`'0 12 * * H-fri'`, `'* * * H-feb *'`); writing `H` directly next to an alias (`Hfri`) is not accepted so timezone names such as `HST` or `Hongkong` still parse as timezones. Numeric bounds need no hyphen (`H7`, `H29`). As usual, `0`, `7`, and `sun` all mean Sunday. A field with a value on both sides of `H` (such as `H-H` or `mon-Hfri`), a step of `0`, or any value outside the field's range makes the cron invalid. `H` cannot combine with `#` or `%`.
+
+Parsing raises an `ArgumentError` when an `H` field is present but no `:hash_id` was given (with `Cron.parse`, which usually returns `nil`, the error is raised as well since the schedule cannot be determined):
+
+```ruby
+Fugit.parse('H * * * *')
+  # ArgumentError: missing :hash_id, a stable hash cron field (H) requires a task id
+```
+
+The value is chosen with FNV-1a (32-bit) over a string combining the cron field name, the task id, and the salt, so two different tasks with overlapping schedules are spread independently, while re-parsing the same cron, in a fresh process, yields the exact same plain cron. `Cron#to_cron_s` returns that expanded, plain cron string.
+
+
 ### the second extension
 
 Fugit accepts cron strings with five elements, `minute hour day-of-month month day-of-week`, the standard cron format or six elements `second minute hour day-of-month month day-of-week`.
@@ -713,4 +752,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-

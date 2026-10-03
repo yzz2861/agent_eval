@@ -17,6 +17,30 @@ module Fugit
     MAXDAYS = [
       nil, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 ].freeze
 
+    STABLE_HASH_DOMAINS = {
+      seconds: 'sec',
+      minutes: 'min',
+      hours: 'hou',
+      monthdays: 'dom',
+      months: 'mon',
+      weekdays: 'dow',
+    }.freeze
+
+    FNV1A_32_OFFSET = 0x811c9dc5
+    FNV1A_32_PRIME = 0x01000193
+
+    class << self
+
+      # FNV-1a (32-bit), deterministic across Ruby versions and processes.
+      #
+      def fnv1a_32(s)
+
+        h = FNV1A_32_OFFSET
+        s.each_byte { |b| h = ((h ^ b) * FNV1A_32_PRIME) & 0xffffffff }
+        h
+      end
+    end
+
     attr_reader(
       :original, :zone)
     attr_reader(
@@ -592,7 +616,7 @@ module Fugit
       self
     end
 
-    def expand(min, max, opts, r)
+    def expand(key, min, max, opts, r)
 
       sta, edn, sep, sla = r
 
@@ -605,6 +629,9 @@ module Fugit
 
       if sep == :tilde
         sta = random(min, max, sta, edn, sla, opts)
+        edn = nil unless sla
+      elsif sep == :hmark
+        sta = stable_hash_pick(key, min, max, sta, edn, sla, opts)
         edn = nil unless sla
       end
 
@@ -635,6 +662,43 @@ module Fugit
 
       r = sta + random.rand(n)
       r = r + min - max - 1 if r > max
+      r
+    end
+
+    def stable_hash_pick(key, min, max, sta, edn, sla, opts)
+
+      id = opts[:hash_id]
+      id = id.to_s if id.is_a?(Symbol)
+
+      fail ArgumentError.new(
+        'missing :hash_id, a stable hash cron field (H) requires a task id'
+      ) unless id.is_a?(::String) && ! id.empty?
+
+      salt = opts[:hash_salt]
+      salt = salt.to_s if salt.is_a?(Symbol)
+
+      fail ArgumentError.new(
+        "invalid :hash_salt, expected a String but got #{salt.class}"
+      ) unless salt.nil? || salt.is_a?(::String)
+
+      dsta = sta.nil? ? min : sta
+      dend = edn.nil? ? max : edn
+
+      n = dend - dsta + 1
+
+      wrap = n <= 0
+
+      n = max - min + 1 + n if wrap
+      n = sla if sla && sla < n
+
+      domain = STABLE_HASH_DOMAINS.fetch(key)
+
+      s = "fugit-hash-v1|#{domain}|#{id}|#{salt}"
+
+      r = dsta + (self.class.fnv1a_32(s) % n)
+
+      r = r + min - max - 1 if wrap && r > max
+
       r
     end
 
@@ -686,7 +750,7 @@ module Fugit
 
       r = arr
         .collect { |v|
-          expand(min, max, opts, v) }
+          expand(key, min, max, opts, v) }
         .flatten(1)
         .collect { |e|
           return false if e == false
@@ -724,6 +788,9 @@ module Fugit
       arr.each do |a, z, sp, sl, ha, mo| # a to z, seperator, slash, hash, and mod
         if sp == :tilde
           a = random(0, 6, a, z, sl, opts)
+          z = nil unless sl
+        elsif sp == :hmark
+          a = stable_hash_pick(:weekdays, 0, 6, a, z, sl, opts)
           z = nil unless sl
         end
 
@@ -780,6 +847,8 @@ module Fugit
 
     module Parser include Raabro
 
+      HNode = Struct.new(:name, :string)
+
       WEEKDAYS =
         %w[ sunday monday tuesday wednesday thursday friday saturday ].freeze
 
@@ -799,6 +868,10 @@ module Fugit
       def star(i); str(nil, i, '*'); end
       def hyphen(i); str(:hyphen, i, '-'); end
       def tilde(i); str(:tilde, i, '~'); end
+      def hmark(i); rex(:hmark, i, /H(?![A-Za-z])/); end
+
+      def hdnum(i); rex(:hdnum, i, /H[0-7](?![0-9])/); end
+      def hmnum(i); rex(:hmnum, i, /H(?:1[0-2]|0?[1-9])(?![0-9])/); end
       def comma(i); rex(nil, i, /,([ \t]*,)*/); end
       def comma?(i); rex(nil, i, /([ \t]*,)*/); end
       def and?(i); rex(nil, i, /&?/); end
@@ -819,6 +892,12 @@ module Fugit
       def _mon(i); seq(nil, i, :hyphen, :mon); end
       def _dow(i); seq(nil, i, :hyphen, :dow); end
 
+      def _sh_mos(i); seq(nil, i, :hyphen, '?', :hmark); end
+      def _sh_hou(i); seq(nil, i, :hyphen, '?', :hmark); end
+      def _sh_dom(i); seq(nil, i, :hyphen, '?', :hmark); end
+      def _sh_mon(i); seq(nil, i, :hyphen, '?', :hmark); end
+      def _sh_dow(i); seq(nil, i, :hyphen, '?', :hmark); end
+
       # r: range
       def r_mos(i); seq(nil, i, :mos, :_mos, '?'); end
       def r_hou(i); seq(nil, i, :hou, :_hou, '?'); end
@@ -833,12 +912,51 @@ module Fugit
       def t_mon(i); seq(nil, i, :mon, '?', :tilde, :mon, '?'); end
       def t_dow(i); seq(nil, i, :dow, '?', :tilde, :dow, '?'); end
 
+      # h: stable hash range
+      def sh_mos(i)
+        alt(nil, i,
+          :sh_mos_a, :sh_mos_b)
+      end
+      def sh_hou(i)
+        alt(nil, i,
+          :sh_hou_a, :sh_hou_b)
+      end
+      def sh_dom(i)
+        alt(nil, i,
+          :sh_dom_a, :sh_dom_b)
+      end
+      def sh_mon(i)
+        alt(nil, i,
+          :sh_mon_a, :sh_mon_b)
+      end
+      def sh_dow(i)
+        alt(nil, i,
+          :sh_dow_a, :sh_dow_b)
+      end
+
+      def sh_mos_a(i); seq(nil, i, :mos, :_sh_mos); end
+      def sh_mos_b(i); seq(nil, i, :hmark, :hyphen, '?', :mos, '?'); end
+      def sh_hou_a(i); seq(nil, i, :hou, :_sh_hou); end
+      def sh_hou_b(i); seq(nil, i, :hmark, :hyphen, '?', :hou, '?'); end
+      def sh_dom_a(i); seq(nil, i, :dom, :_sh_dom); end
+      def sh_dom_b(i); seq(nil, i, :hmark, :hyphen, '?', :dom, '?'); end
+      def sh_mon_a(i); seq(nil, i, :mon, :_sh_mon); end
+      def sh_mon_b(i); alt(nil, i, :sh_mon_a2, :sh_mon_n, :sh_mon_h); end
+      def sh_mon_h(i); seq(nil, i, :hmark); end
+      def sh_mon_n(i); seq(nil, i, :hmnum); end
+      def sh_mon_a2(i); seq(nil, i, :hmark, :hyphen, :mon); end
+      def sh_dow_a(i); seq(nil, i, :dow, :_sh_dow); end
+      def sh_dow_b(i); alt(nil, i, :sh_dow_a2, :sh_dow_n, :sh_dow_h); end
+      def sh_dow_h(i); seq(nil, i, :hmark); end
+      def sh_dow_n(i); seq(nil, i, :hdnum); end
+      def sh_dow_a2(i); seq(nil, i, :hmark, :hyphen, :dow); end
+
       # sor: star or range
-      def sor_mos(i); alt(nil, i, :star, :t_mos, :r_mos); end
-      def sor_hou(i); alt(nil, i, :star, :t_hou, :r_hou); end
-      def sor_dom(i); alt(nil, i, :star, :t_dom, :r_dom); end
-      def sor_mon(i); alt(nil, i, :star, :t_mon, :r_mon); end
-      def sor_dow(i); alt(nil, i, :star, :t_dow, :r_dow); end
+      def sor_mos(i); alt(nil, i, :star, :t_mos, :sh_mos, :r_mos); end
+      def sor_hou(i); alt(nil, i, :star, :t_hou, :sh_hou, :r_hou); end
+      def sor_dom(i); alt(nil, i, :star, :t_dom, :sh_dom, :r_dom); end
+      def sor_mon(i); alt(nil, i, :star, :t_mon, :sh_mon, :r_mon); end
+      def sor_dow(i); alt(nil, i, :star, :t_dow, :sh_dow, :r_dow); end
 
       # sorws: star or range with[out] slash
       def sorws_mos(i); seq(nil, i, :sor_mos, :slash, '?'); end
@@ -920,16 +1038,51 @@ module Fugit
 
         at, zt, spt, slt, hat, mot = nil
 
-        t.subgather(nil).each do |tt|
+        hm_had_left = false
+        invalid = false
+
+        nodes = t.subgather(nil).flat_map { |tt|
+          if tt.name == :hdnum || tt.name == :hmnum
+            [ HNode.new(:hmark, 'H'), HNode.new(:bound, tt.string[1..-1]) ]
+          else
+            [ tt ]
+          end
+        }
+
+        nodes.each do |tt|
           case tt.name
           when :slash then slt = tt
           when :hash then hat = tt
           when :mod then mot = tt
-          when :hyphen then spt = tt
           when :tilde then spt = tt
-          else if spt; zt ||= tt; else; at = tt; end
+          when :hmark
+            return false if spt && spt.name == :hmark # two H marks
+            hm_had_left = (at != nil) || (spt != nil)
+            spt = tt
+          when :bound
+            if spt && spt.name == :hmark && ! hm_had_left
+              zt ||= tt
+            else
+              at = tt
+            end
+          when :hyphen
+            spt = tt unless spt
+          else
+            if spt && spt.name == :hmark
+              if hm_had_left
+                invalid = true # a value on both sides of H, meaningless
+              else
+                zt ||= tt # H-z, H is the start
+              end
+            elsif spt
+              zt ||= tt
+            else
+              at = tt
+            end
           end
         end
+
+        return false if invalid
 
         sl = slt ? slt.string[1..-1].to_i : nil
 
@@ -951,9 +1104,11 @@ module Fugit
 
       def rewrite_entry(t)
 
-        t
+        a = t
           .subgather(:elt)
           .collect { |et| rewrite_elt(t.name, et) }
+
+        a.include?(false) ? false : a
       end
 
       def rewrite_tz(t)
@@ -976,6 +1131,11 @@ module Fugit
           .inject({}) { |h, tt|
             h[tt.name] = tt.name == :tz ? rewrite_tz(tt) : rewrite_entry(tt)
             h }
+
+        return nil if
+          [ :sec, :min, :hou, :dom, :mon, :dow ]
+            .any? { |k| hcron[k] == false }
+
         hcron[:&] = true if t.string.index('&')
 
         z, tz = hcron[:tz]; return nil if z && ! tz
@@ -985,4 +1145,3 @@ module Fugit
     end
   end
 end
-
