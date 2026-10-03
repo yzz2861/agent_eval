@@ -845,6 +845,86 @@ class URI::TestGeneric < Test::Unit::TestCase
     assert_equal('foo:xyzzy', uri.to_s)
   end
 
+  def test_query_params_keep_original_encoding_and_order
+    uri = URI.parse('http://example.com/path?a=%20&b=+&c=%2f&d=X%78&e=%6c&q=one&q=two&flag')
+    params = uri.query_params
+
+    assert_equal([
+      ['a', ' '], ['b', ' '], ['c', '/'], ['d', 'Xx'], ['e', 'l'],
+      ['q', 'one'], ['q', 'two'], ['flag', nil]
+    ], params.to_a)
+
+    params[1].value = 'new value%'
+    assert_equal('a=%20&b=new+value%25&c=%2f&d=X%78&e=%6c&q=one&q=two&flag', uri.query)
+
+    item = params[1]
+    item.value = 'second edit'
+    item.value = 'third edit'
+    assert_equal('a=%20&b=third+edit&c=%2f&d=X%78&e=%6c&q=one&q=two&flag', uri.query)
+
+    params[6] = '2'
+    assert_equal('a=%20&b=third+edit&c=%2f&d=X%78&e=%6c&q=one&q=2&flag', uri.query)
+
+    params['q'] = 'first'
+    assert_equal('a=%20&b=third+edit&c=%2f&d=X%78&e=%6c&q=first&q=2&flag', uri.query)
+
+    params.delete('q')
+    assert_equal('a=%20&b=third+edit&c=%2f&d=X%78&e=%6c&q=2&flag', uri.query)
+  end
+
+  def test_query_params_without_equal_sign
+    uri = URI.parse('http://example.com/?flag&a=old')
+    params = uri.query_params
+
+    assert_nil(params[0].value)
+    assert_equal('old', params['a'])
+
+    params[0].value = 'on'
+    assert_equal('flag=on&a=old', uri.query)
+
+    params['a'] = nil
+    assert_equal('flag=on&a', uri.query)
+  end
+
+  def test_query_params_empty_and_missing_query
+    without_query = URI.parse('http://example.com/path')
+    empty_query = URI.parse('http://example.com/path?')
+    empty_value = URI.parse('http://example.com/path?a=')
+    trailing_empty_parameter = URI.parse('http://example.com/path?a=&')
+
+    assert_nil(without_query.query)
+    assert_equal('', empty_query.query)
+    assert_equal('a=', empty_value.query)
+    assert_equal('a=&', trailing_empty_parameter.query)
+
+    assert_equal('http://example.com/path', without_query.to_s)
+    assert_equal('http://example.com/path?', empty_query.to_s)
+    assert_equal('http://example.com/path?a=', empty_value.to_s)
+    assert_equal('http://example.com/path?a=&', trailing_empty_parameter.to_s)
+    assert_equal('/path?', empty_query.request_uri)
+
+    assert_equal(0, empty_query.query_params.size)
+    assert_equal(1, empty_value.query_params.size)
+    assert_equal(['a', ''], empty_value.query_params.to_a.first)
+    assert_equal([['a', ''], ['', nil]], trailing_empty_parameter.query_params.to_a)
+  end
+
+  def test_query_params_add_to_missing_and_empty_query
+    without_query = URI.parse('http://example.com/path')
+    without_query.query_params['a'] = 'x'
+    assert_equal('a=x', without_query.query)
+    assert_equal('http://example.com/path?a=x', without_query.to_s)
+
+    empty_query = URI.parse('http://example.com/path?')
+    empty_query.query_params['a'] = 'x'
+    assert_equal('a=x', empty_query.query)
+    assert_equal('http://example.com/path?a=x', empty_query.to_s)
+  end
+
+  def test_merge_empty_query_is_preserved
+    assert_equal('http://example.com/path?', URI.parse('http://example.com/path?a').merge('?').to_s)
+  end
+
   def test_bad_password_component
     uri = URI.parse('http://foo:bar@baz')
     password = 'foo@bar'

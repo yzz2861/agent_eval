@@ -9,6 +9,7 @@
 #
 
 require_relative 'common'
+require_relative 'query_params'
 autoload :IPSocket, 'socket'
 autoload :IPAddr, 'ipaddr'
 
@@ -264,6 +265,13 @@ module URI
     #   URI("http://foo/bar/baz?search=FooBar").query #=> "search=FooBar"
     #
     attr_reader :query
+
+    # Returns an editable view of the +application/x-www-form-urlencoded+
+    # query component.
+    def query_params
+      QueryParams.new(self)
+    end
+    alias query_items query_params
 
     # Returns the opaque part of the URI.
     #
@@ -852,7 +860,7 @@ module URI
     #   uri.to_s  #=> "http://my.example.com/?id=1"
     #
     def query=(v)
-      return @query = nil unless v
+      return set_query(nil) if v.nil?
       raise InvalidURIError, "query conflicts with opaque" if @opaque
 
       x = v.to_str
@@ -863,8 +871,14 @@ module URI
       raise InvalidURIError, "invalid percent escape: #{$1}" if /(%\H\H)/n.match(v)
       v.gsub!(/(?!%\h\h|[!$-&(-;=?-_a-~])./n.freeze){'%%%02X' % $&.ord}
       v.force_encoding(Encoding::US_ASCII)
+      set_query(v)
+      v
+    end
+
+    def set_query(v)
       @query = v
     end
+    protected :set_query
 
     #
     # Checks the opaque +v+ component for RFC2396 compliance and
@@ -1151,7 +1165,7 @@ module URI
       authority = rel.authority
 
       # RFC2396, Section 5.2, 2)
-      if (rel.path.nil? || rel.path.empty?) && !authority && !rel.query
+      if (rel.path.nil? || rel.path.empty?) && !authority && rel.query.nil?
         base.fragment=(rel.fragment) if rel.fragment
         return base
       end
@@ -1168,7 +1182,7 @@ module URI
       end
 
       # RFC2396, Section 5.2, 7)
-      base.query = rel.query       if rel.query
+      base.send(:set_query, rel.query) unless rel.query.nil?
       base.fragment=(rel.fragment) if rel.fragment
 
       return base
@@ -1251,11 +1265,11 @@ module URI
 
       if rel.path && rel.path == oth.path
         rel.set_path('')
-        rel.query = nil if rel.query == oth.query
+        rel.send(:set_query, nil) if rel.query == oth.query
         return rel, rel
       elsif rel.opaque && rel.opaque == oth.opaque
         rel.set_opaque('')
-        rel.query = nil if rel.query == oth.query
+        rel.send(:set_query, nil) if rel.query == oth.query
         return rel, rel
       end
 
@@ -1295,7 +1309,7 @@ module URI
       end
 
       rel.set_path(route_from_path(oth.path, self.path))
-      if rel.path == './' && self.query
+      if rel.path == './' && !self.query.nil?
         # "./?foo" -> "?foo"
         rel.set_path('')
       end
@@ -1392,7 +1406,7 @@ module URI
           str << '/'
         end
         str << @path
-        if @query
+        unless @query.nil?
           str << '?'
           str << @query
         end
