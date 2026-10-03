@@ -226,6 +226,9 @@ class Net::HTTPGenericRequest
       send_request_with_body_data sock, ver, path, @body_data
     else
       write_header sock, ver, path
+      if sock.respond_to?(:http_transport_failure_context) && sock.http_transport_failure_context
+        sock.http_transport_failure_context.request_body_started!
+      end
     end
   end
 
@@ -264,20 +267,38 @@ class Net::HTTPGenericRequest
   # :stopdoc:
 
   class Chunker #:nodoc:
-    def initialize(sock)
+    def initialize(sock, context = nil)
       @sock = sock
+      @context = context
       @prev = nil
     end
 
     def write(buf)
       # avoid memcpy() of buf, buf can huge and eat memory bandwidth
       rv = buf.bytesize
-      @sock.write("#{rv.to_s(16)}\r\n", buf, "\r\n")
+      if @context
+        @context.without_request_body_write_tracking do
+          @sock.write("#{rv.to_s(16)}\r\n", buf, "\r\n")
+        end
+        @context.request_body_written!(rv)
+      else
+        @sock.write("#{rv.to_s(16)}\r\n", buf, "\r\n")
+      end
       rv
+    rescue Exception
+      @context.request_body_bytes_unknown! if @context&.request_body_bytes_written.nil?
+      raise
     end
 
     def finish
-      @sock.write("0\r\n\r\n")
+      context = @sock.http_transport_failure_context
+      if context
+        context.without_request_body_write_tracking do
+          @sock.write("0\r\n\r\n")
+        end
+      else
+        @sock.write("0\r\n\r\n")
+      end
     end
   end
 
@@ -286,6 +307,8 @@ class Net::HTTPGenericRequest
     delete 'Transfer-Encoding'
     write_header sock, ver, path
     wait_for_continue sock, ver if sock.continue_timeout
+    context = sock.http_transport_failure_context
+    context.phase = :request_body if context
     sock.write body
   end
 
@@ -296,12 +319,15 @@ class Net::HTTPGenericRequest
     end
     write_header sock, ver, path
     wait_for_continue sock, ver if sock.continue_timeout
+    context = sock.http_transport_failure_context
+    context.phase = :request_body if context
     if chunked?
-      chunker = Chunker.new(sock)
+      chunker = Chunker.new(sock, context)
       IO.copy_stream(f, chunker)
       chunker.finish
     else
       IO.copy_stream(f, sock)
+      context.request_body_started! if context
     end
   end
 
@@ -317,6 +343,8 @@ class Net::HTTPGenericRequest
     self.set_content_type(self.content_type, boundary: opt[:boundary])
     if chunked?
       write_header sock, ver, path
+      context = sock.http_transport_failure_context
+      context.phase = :request_body if context
       encode_multipart_form_data(sock, params, opt)
     else
       require 'tempfile'
@@ -340,6 +368,7 @@ class Net::HTTPGenericRequest
       raise ArgumentError, "multipart boundary cannot include CR/LF"
     end
     chunked_p = chunked?
+    context = out.http_transport_failure_context if chunked_p && out.respond_to?(:http_transport_failure_context)
 
     buf = +''
     params.each do |key, value, h={}|
@@ -365,9 +394,25 @@ class Net::HTTPGenericRequest
         elsif value.respond_to?(:size) && chunked_p
           # if +out+ is an IO and +value+ is a File, use IO.copy_stream
           flush_buffer(out, buf, chunked_p)
-          out << "%x\r\n" % value.size if chunked_p
-          IO.copy_stream(value, out)
-          out << "\r\n" if chunked_p
+          if context
+            begin
+              context.without_request_body_write_tracking do
+                out << "%x\r\n" % value.size
+              end
+              written = IO.copy_stream(value, out)
+              context.request_body_written!(written)
+              context.without_request_body_write_tracking do
+                out << "\r\n"
+              end
+            rescue Exception
+              context.request_body_bytes_unknown! if context.request_body_bytes_written.nil?
+              raise
+            end
+          else
+            out << "%x\r\n" % value.size if chunked_p
+            IO.copy_stream(value, out)
+            out << "\r\n" if chunked_p
+          end
         else
           # +out+ is an IO, and +value+ is not a File but an IO
           flush_buffer(out, buf, chunked_p)
@@ -385,7 +430,15 @@ class Net::HTTPGenericRequest
     end
     buf << "--#{boundary}--\r\n"
     flush_buffer(out, buf, chunked_p)
-    out << "0\r\n\r\n" if chunked_p
+    if chunked_p
+      if context
+        context.without_request_body_write_tracking do
+          out << "0\r\n\r\n"
+        end
+      else
+        out << "0\r\n\r\n"
+      end
+    end
   end
 
   def quote_string(str, charset)
@@ -398,10 +451,23 @@ class Net::HTTPGenericRequest
 
   def flush_buffer(out, buf, chunked_p)
     return unless buf
-    out << "%x\r\n"%buf.bytesize if chunked_p
-    out << buf
-    out << "\r\n" if chunked_p
+    context = out.http_transport_failure_context if out.respond_to?(:http_transport_failure_context)
+    if chunked_p && context
+      context.without_request_body_write_tracking do
+        out << "%x\r\n" % buf.bytesize
+        out << buf
+        out << "\r\n"
+      end
+      context.request_body_written!(buf.bytesize)
+    else
+      out << "%x\r\n"%buf.bytesize if chunked_p
+      out << buf
+      out << "\r\n" if chunked_p
+    end
     buf.clear
+  rescue Exception
+    context.request_body_bytes_unknown! if chunked_p && context&.request_body_bytes_written.nil?
+    raise
   end
 
   ##
@@ -411,17 +477,22 @@ class Net::HTTPGenericRequest
   def wait_for_continue(sock, ver)
     if ver >= '1.1' and @header['expect'] and
         @header['expect'].include?('100-continue')
+      context = sock.http_transport_failure_context
+      context.phase = :response_header if context
       if sock.io.to_io.wait_readable(sock.continue_timeout)
         res = Net::HTTPResponse.read_new(sock)
         unless res.kind_of?(Net::HTTPContinue)
           res.decode_content = @decode_content
+          context.final_response_received! if context
           throw :response, res
         end
+        context.request_body_phase! if context
       end
     end
   end
 
   def write_header(sock, ver, path)
+    context = sock.http_transport_failure_context
     reqline = "#{@method} #{path} HTTP/#{ver}"
     if /[\r\n]/ =~ reqline
       raise ArgumentError, "A Request-Line must not contain CR or LF"
@@ -433,6 +504,7 @@ class Net::HTTPGenericRequest
     end
     buf << "\r\n"
     sock.write buf
+    context.request_headers_started! if context
   end
 
 end

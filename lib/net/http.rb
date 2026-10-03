@@ -727,6 +727,68 @@ module Net   #:nodoc:
   #
   class HTTP < Protocol
 
+    class TrackingBufferedIO < BufferedIO # :nodoc: internal use only
+      attr_accessor :http_transport_failure_context
+
+      def initialize(io, **options)
+        super
+        io.instance_variable_set(:@tracking_buffered_io, self)
+        io.extend(TrackingWriter)
+      end
+
+      private
+
+      TrackingWriter = Module.new do
+        def write_nonblock(string, buffer = nil, exception: true)
+          result = buffer ? super(string, buffer, exception: exception) : super(string, exception: exception)
+          if result.is_a?(Integer)
+            @tracking_buffered_io.send(:record_tracking_write, result)
+          end
+          result
+        end
+      end
+
+      def writing
+        @tracking_written_bytes = 0
+        super
+      ensure
+        @tracking_written_bytes = nil
+      end
+
+      def record_tracking_write(length)
+        @tracking_written_bytes += length
+      end
+
+      def write0(*strs)
+        context = http_transport_failure_context
+        return super unless context
+
+        if context.phase == :request_header
+          begin
+            written = super
+            context.request_headers_started!
+            return written
+          rescue Exception
+            context.request_headers_started! unless @tracking_written_bytes.zero?
+            raise
+          end
+        end
+
+        return super unless context.tracking_request_body_writes? &&
+                              context.phase == :request_body
+
+        begin
+          written = super
+          context.request_body_written!(@tracking_written_bytes)
+          written
+        rescue Exception
+          context.request_body_written!(@tracking_written_bytes) unless @tracking_written_bytes.zero?
+          context.request_body_bytes_unknown! if context.request_body_bytes_written.nil?
+          raise
+        end
+      end
+    end
+
     # :stopdoc:
     VERSION = "0.9.1"
     HTTPVersion = '1.1'
@@ -1174,6 +1236,7 @@ module Net   #:nodoc:
       @last_communicated = nil
       @close_on_empty_response = options[:close_on_empty_response]
       @socket  = nil
+      @transport_failure_context = nil
       @started = false
       @open_timeout = options[:open_timeout]
       @read_timeout = options[:read_timeout]
@@ -1661,7 +1724,33 @@ module Net   #:nodoc:
     end
     private :do_start
 
+    def transport_failure_context
+      @transport_failure_context
+    end
+
+    def new_transport_failure_context(phase)
+      @transport_failure_context = TransportFailureContext.new(phase: phase)
+    end
+
+    def attach_transport_failure(exception)
+      exception.extend(TransportFailure)
+      exception.http_transport_failure_context = @transport_failure_context
+    end
+
+    def transport_failure?(exception)
+      exception.is_a?(Net::ReadTimeout) ||
+        exception.is_a?(Net::WriteTimeout) ||
+        exception.is_a?(IOError) ||
+        exception.is_a?(EOFError) ||
+        exception.is_a?(SocketError) ||
+        exception.is_a?(SystemCallError) ||
+        exception.is_a?(HTTPBadResponse) ||
+        exception.is_a?(Timeout::Error) ||
+        (defined?(OpenSSL::SSL) && exception.is_a?(OpenSSL::SSL::SSLError))
+    end
+
     def connect
+      new_transport_failure_context(:tcp_connect)
       if use_ssl?
         # reference early to load OpenSSL before connecting,
         # as OpenSSL may take time to load.
@@ -1692,14 +1781,17 @@ module Net   #:nodoc:
         if proxy?
           if @proxy_use_ssl
             proxy_sock = OpenSSL::SSL::SSLSocket.new(s)
+            @transport_failure_context.phase = :tls_handshake
             ssl_socket_connect(proxy_sock, @open_timeout)
           else
             proxy_sock = s
           end
-          proxy_sock = BufferedIO.new(proxy_sock, read_timeout: @read_timeout,
-                                      write_timeout: @write_timeout,
-                                      continue_timeout: @continue_timeout,
-                                      debug_output: @debug_output)
+          @transport_failure_context.phase = :proxy_connect_request
+          proxy_sock = TrackingBufferedIO.new(proxy_sock, read_timeout: @read_timeout,
+                                              write_timeout: @write_timeout,
+                                              continue_timeout: @continue_timeout,
+                                              debug_output: @debug_output)
+          proxy_sock.http_transport_failure_context = @transport_failure_context
           buf = +"CONNECT #{conn_address}:#{@port} HTTP/#{HTTPVersion}\r\n" \
             "Host: #{@address}:#{@port}\r\n"
           if proxy_user
@@ -1708,6 +1800,7 @@ module Net   #:nodoc:
           end
           buf << "\r\n"
           proxy_sock.write(buf)
+          @transport_failure_context.phase = :proxy_connect_response
           HTTPResponse.read_new(proxy_sock).value
           # assuming nothing left in buffers after successful CONNECT response
         end
@@ -1757,16 +1850,20 @@ module Net   #:nodoc:
            Process.clock_gettime(Process::CLOCK_REALTIME) < @ssl_session.time.to_f + @ssl_session.timeout
           s.session = @ssl_session
         end
+        @transport_failure_context.phase = :tls_handshake
         ssl_socket_connect(s, @open_timeout)
         if (@ssl_context.verify_mode != OpenSSL::SSL::VERIFY_NONE) && verify_hostname
+          @transport_failure_context.phase = :tls_verification
           s.post_connection_check(@address)
         end
         debug "SSL established, protocol: #{s.ssl_version}, cipher: #{s.cipher[0]}"
       end
-      @socket = BufferedIO.new(s, read_timeout: @read_timeout,
-                               write_timeout: @write_timeout,
-                               continue_timeout: @continue_timeout,
-                               debug_output: @debug_output)
+      @socket = TrackingBufferedIO.new(s, read_timeout: @read_timeout,
+                                       write_timeout: @write_timeout,
+                                       continue_timeout: @continue_timeout,
+                                       debug_output: @debug_output)
+      @socket.http_transport_failure_context = @transport_failure_context
+      @transport_failure_context.phase = :connected
       @last_communicated = nil
       on_connect
     rescue => exception
@@ -1774,6 +1871,7 @@ module Net   #:nodoc:
         debug "Conn close because of connect error #{exception}"
         s.close
       end
+      attach_transport_failure(exception) if transport_failure?(exception)
       raise
     end
     private :connect
@@ -2488,6 +2586,8 @@ module Net   #:nodoc:
     def transport_request(req)
       count = 0
       begin
+        new_transport_failure_context(:request_header)
+        @socket.http_transport_failure_context = @transport_failure_context if @socket
         begin_transport req
         res = catch(:response) {
           begin
@@ -2498,6 +2598,7 @@ module Net   #:nodoc:
           end
 
           informational_count = 0
+          @transport_failure_context.phase = :response_header
           begin
             res = HTTPResponse.read_new(@socket)
             res.decode_content = req.decode_content
@@ -2507,6 +2608,8 @@ module Net   #:nodoc:
               informational_count += 1
               raise HTTPBadResponse, 'too many informational responses' if
                 informational_count > HTTPResponse::MAX_INFORMATIONAL_RESPONSES
+            else
+              @transport_failure_context.final_response_received!
             end
           end while res.kind_of?(HTTPInformation)
 
@@ -2514,15 +2617,22 @@ module Net   #:nodoc:
 
           res
         }
-        res.reading_body(@socket, req.response_body_permitted?) {
-          if block_given?
-            count = max_retries # Don't restart in the middle of a download
-            yield res
-          end
-        }
+        @transport_failure_context.phase = :response_body
+        begin
+          res.reading_body(@socket, req.response_body_permitted?) {
+            if block_given?
+              count = max_retries # Don't restart in the middle of a download
+              yield res
+            end
+          }
+        rescue => exception
+          attach_transport_failure(exception) if transport_failure?(exception)
+          raise
+        end
       rescue Net::OpenTimeout
+        attach_transport_failure(exception)
         raise
-      rescue Net::ReadTimeout, IOError, EOFError,
+      rescue Net::ReadTimeout, Net::WriteTimeout, IOError, EOFError,
              Errno::ECONNRESET, Errno::ECONNABORTED, Errno::EPIPE, Errno::ETIMEDOUT,
              # avoid a dependency on OpenSSL
              defined?(OpenSSL::SSL) ? OpenSSL::SSL::SSLError : IOError,
@@ -2535,6 +2645,7 @@ module Net   #:nodoc:
         end
         debug "Conn close because of error #{exception}"
         @socket.close if @socket
+        attach_transport_failure(exception)
         raise
       end
 
@@ -2543,6 +2654,7 @@ module Net   #:nodoc:
     rescue => exception
       debug "Conn close because of error #{exception}"
       @socket.close if @socket
+      attach_transport_failure(exception) if transport_failure?(exception)
       raise exception
     end
 
@@ -2654,6 +2766,7 @@ module Net   #:nodoc:
 end
 
 require_relative 'http/exceptions'
+require_relative 'http/transport_failure_context'
 
 require_relative 'http/header'
 

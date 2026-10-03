@@ -722,6 +722,38 @@ module Net
   #     stream for debugging.
   #
   class HTTP < Protocol
+    class TransportFailureContext
+      attr_reader phase: (:tcp_connect | :tls_handshake | :tls_verification |
+                         :proxy_connect_request | :proxy_connect_response |
+                         :connected | :request_header | :request_body |
+                         :response_header | :response_body)
+      attr_reader request_body_bytes_written: Integer?
+
+      def initialize: (?phase: (:tcp_connect | :tls_handshake | :tls_verification |
+                                 :proxy_connect_request | :proxy_connect_response |
+                                 :connected | :request_header | :request_body |
+                                 :response_header | :response_body)) -> void
+      def request_headers_started?: () -> bool
+      def final_response_received?: () -> bool
+      alias connection_phase phase
+      alias request_header_started? request_headers_started?
+      attr_writer phase: (:tcp_connect | :tls_handshake | :tls_verification |
+                          :proxy_connect_request | :proxy_connect_response |
+                          :connected | :request_header | :request_body |
+                          :response_header | :response_body)
+      def request_headers_started!: () -> void
+      def request_body_started!: () -> void
+      def request_body_phase!: () -> void
+      def request_body_written!: (Integer bytes) -> void
+      def request_body_bytes_unknown!: () -> void
+      def final_response_received!: () -> void
+    end
+
+    module TransportFailure
+      attr_accessor http_transport_failure_context: TransportFailureContext?
+      alias transport_failure http_transport_failure_context
+    end
+
     # :stopdoc:
     VERSION: String
 
