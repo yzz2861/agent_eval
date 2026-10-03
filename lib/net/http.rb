@@ -2500,17 +2500,20 @@ module Net   #:nodoc:
           informational_count = 0
           begin
             res = HTTPResponse.read_new(@socket)
+            res.uri = req.uri
             res.decode_content = req.decode_content
             res.body_encoding = @response_body_encoding
             res.ignore_eof = @ignore_eof
-            if res.kind_of?(HTTPInformation)
+            if res.is_a?(HTTPSwitchProtocol)
+              req.call_informational_response(res)
+              break
+            elsif res.kind_of?(HTTPInformation)
               informational_count += 1
               raise HTTPBadResponse, 'too many informational responses' if
                 informational_count > HTTPResponse::MAX_INFORMATIONAL_RESPONSES
+              req.call_informational_response(res)
             end
           end while res.kind_of?(HTTPInformation)
-
-          res.uri = req.uri
 
           res
         }
@@ -2576,6 +2579,9 @@ module Net   #:nodoc:
         debug 'Conn socket closed'
       elsif not res.body and @close_on_empty_response
         debug 'Conn close'
+        @socket.close
+      elsif res.is_a?(HTTPSwitchProtocol)
+        debug 'Conn close for protocol switch'
         @socket.close
       elsif keep_alive?(req, res)
         debug 'Conn keep-alive'

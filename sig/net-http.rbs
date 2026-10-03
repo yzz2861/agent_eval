@@ -2148,6 +2148,14 @@ module Net
     #
     attr_reader decode_content: bool
 
+    # Returns or sets the callback invoked when the server sends an
+    # informational response (1xx status code) before the final response.
+    def on_informational_response: () -> (^(HTTPInformation) -> void)?
+                          | (^(HTTPInformation) -> void callback) -> (^(HTTPInformation) -> void)
+                          | () { (HTTPInformation response) -> void } -> (^(HTTPInformation) -> void)
+    def on_informational_response=: (nil | ^(HTTPInformation) -> void) -> (nil | ^(HTTPInformation) -> void)
+    def call_informational_response: (HTTPInformation response) -> untyped
+
     # <!--
     #   rdoc-file=lib/net/http/generic_request.rb
     #   - inspect()

@@ -5,6 +5,59 @@ require 'net/http'
 require 'stringio'
 require_relative 'utils'
 
+module TestNetHTTPRawResponses
+  def with_raw_http_server(response_handler)
+    server = TCPServer.new('127.0.0.1', 0)
+    threads = []
+    connections = 0
+    mutex = Mutex.new
+
+    server_thread = Thread.new do
+      loop do
+        client = begin
+          server.accept
+        rescue IOError
+          break
+        end
+        mutex.synchronize { connections += 1 }
+        threads << Thread.start(client) do |socket|
+          begin
+            response_handler.call(socket)
+          ensure
+            socket.close unless socket.closed?
+          end
+        end
+      end
+    end
+
+    begin
+      yield server, -> { mutex.synchronize { connections } }
+    ensure
+      server.close
+      server_thread.join
+      threads.each do |thread|
+        thread.kill.join if thread.alive?
+      end
+    end
+  end
+
+  def read_raw_request(socket)
+    request_line = socket.gets
+    headers = {}
+    while (line = socket.gets)
+      break if line == "\r\n"
+      key, value = line.split(': ', 2)
+      headers[key.downcase] = value.strip
+    end
+    [request_line, headers]
+  end
+
+  def read_until_closed(socket)
+    socket.read
+  rescue IOError, Errno::EPIPE, Errno::ECONNRESET
+  end
+end
+
 class TestNetHTTP < Test::Unit::TestCase
 
   def test_class_Proxy
@@ -1138,36 +1191,175 @@ class TestNetHTTPContinue < Test::Unit::TestCase
 end
 
 class TestNetHTTPSwitchingProtocols < Test::Unit::TestCase
-  CONFIG = {
-    'host' => '127.0.0.1',
-    'proxy_host' => nil,
-    'proxy_port' => nil,
-    'chunked' => true,
-  }
+  include TestNetHTTPRawResponses
 
-  include TestNetHTTPUtils
+  def test_switching_protocols_is_final_response
+    response = <<~RESPONSE.gsub("\n", "\r\n")
+      HTTP/1.1 101 Switching Protocols
+      Upgrade: websocket
+      Connection: Upgrade
 
-  def logfile
-    @debug = StringIO.new('')
+    RESPONSE
+
+    informational_responses = []
+    with_raw_http_server(lambda do |socket|
+      read_raw_request(socket)
+      socket.write(response)
+      read_until_closed(socket)
+    end) do |port, _connections|
+      Net::HTTP.start('127.0.0.1', port) do |http|
+        request = Net::HTTP::Get.new('/')
+        request.on_informational_response = proc do |res|
+          informational_responses << res
+        end
+        response = http.request(request)
+
+        assert_kind_of Net::HTTPSwitchProtocol, response
+        assert_equal '101', response.code
+        assert_equal 'websocket', response['Upgrade']
+        assert_equal 'Upgrade', response['Connection']
+        assert_nil response.body
+        assert_equal [response], informational_responses
+        assert_predicate http.instance_variable_get(:@socket), :closed?
+      end
+    end
+  end
+end
+
+class TestNetHTTPInformationalResponseCallback < Test::Unit::TestCase
+  include TestNetHTTPRawResponses
+
+  def test_receives_each_early_hints_response_before_final_response
+    responses = <<~RESPONSES.gsub("\n", "\r\n")
+      HTTP/1.1 103 Early Hints
+      Link: </style1.css>; rel=preload; as=style
+      Link: </font1.woff2>; rel=preload; as=font
+
+      HTTP/1.1 103 Early Hints
+      Link: </style2.css>; rel=preload; as=style
+
+      HTTP/1.1 200 OK
+      Content-Length: 4
+      X-Final: yes
+
+      BODY
+    RESPONSES
+
+    informational_responses = []
+    events = []
+
+    with_raw_http_server(lambda do |socket|
+      read_raw_request(socket)
+      socket.write(responses)
+      read_until_closed(socket)
+    end) do |port, _connections|
+      Net::HTTP.start('127.0.0.1', port) do |http|
+        request = Net::HTTP::Get.new('/')
+        request.on_informational_response = proc do |res|
+          events << :informational
+          informational_responses << res
+        end
+        response = http.request(request)
+        events << :final
+
+        assert_equal '200', response.code
+        assert_equal 'BODY', response.body
+        assert_equal 'yes', response['X-Final']
+      end
+    end
+
+    assert_equal [:informational, :informational, :final], events
+    assert_equal [Net::HTTPEarlyHints, Net::HTTPEarlyHints],
+                 informational_responses.map(&:class)
+    assert_equal ['103', '103'], informational_responses.map(&:code)
+    assert_equal 2, informational_responses.map(&:object_id).uniq.size
+    assert_equal ['</style1.css>; rel=preload; as=style',
+                  '</font1.woff2>; rel=preload; as=font'],
+                 informational_responses[0].get_fields('Link')
+    assert_equal ['</style2.css>; rel=preload; as=style'],
+                 informational_responses[1].get_fields('Link')
+    informational_responses.each do |response|
+      assert_not_equal 'yes', response['X-Final']
+    end
   end
 
-  def mount_proc(&block)
-    @server.mount('/continue', block.to_proc)
+  def test_callback_exception_closes_connection_without_reusing_unread_bytes
+    responses = <<~RESPONSES.gsub("\n", "\r\n")
+      HTTP/1.1 103 Early Hints
+      Link: </style.css>; rel=preload; as=style
+
+      HTTP/1.1 200 OK
+      Content-Length: 4
+
+      BODY
+    RESPONSES
+    callback_error = Class.new(StandardError)
+
+    with_raw_http_server(lambda do |socket|
+      read_raw_request(socket)
+      socket.write(responses)
+      read_until_closed(socket)
+    end) do |port, connection_count|
+      Net::HTTP.start('127.0.0.1', port) do |http|
+        request = Net::HTTP::Get.new('/')
+        request.on_informational_response = proc do
+          raise callback_error, 'callback failed'
+        end
+
+        assert_raise(callback_error) do
+          http.request(request)
+        end
+        assert_predicate http.instance_variable_get(:@socket), :closed?
+
+        response = http.get('/')
+        assert_equal '200', response.code
+        assert_equal 'BODY', response.body
+        assert_equal 2, connection_count.call
+      end
+    end
   end
 
-  def test_info
-    mount_proc {|req, res|
-      req.instance_variable_get(:@socket) << "HTTP/1.1 101 Switching Protocols\r\n\r\n"
-      res.body = req.query['body']
-    }
-    start {|http|
-      http.continue_timeout = 0.2
-      http.request_post('/continue', 'body=BODY',
-                        'content-type' => 'application/x-www-form-urlencoded') {|res|
-        assert_equal('BODY', res.read_body)
-      }
-    }
-    assert_match(/HTTP\/1.1 101 Switching Protocols/, @debug.string)
+  def test_continue_control_still_sends_request_body_after_other_information
+    with_raw_http_server(lambda do |socket|
+      _request_line, headers = read_raw_request(socket)
+      socket.write <<~RESPONSE.gsub("\n", "\r\n")
+        HTTP/1.1 103 Early Hints
+        Link: </style.css>; rel=preload; as=style
+
+        HTTP/1.1 100 Continue
+
+      RESPONSE
+      body = socket.read(headers['content-length'].to_i)
+      socket.write <<~RESPONSE.gsub("\n", "\r\n")
+        HTTP/1.1 200 OK
+        Content-Length: #{body.bytesize}
+
+        #{body}
+      RESPONSE
+      read_until_closed(socket)
+    end) do |port, _connections|
+      informational_responses = []
+
+      Net::HTTP.start('127.0.0.1', port) do |http|
+        http.continue_timeout = 1
+        request = Net::HTTP::Post.new(
+          '/',
+          'Content-Type' => 'application/x-www-form-urlencoded',
+          'Expect' => '100-continue'
+        )
+        request.body = 'body=BODY'
+        request.on_informational_response = proc do |response|
+          informational_responses << response
+        end
+        response = http.request(request)
+
+        assert_equal 'BODY', response.body
+      end
+    end
+
+    assert_equal [Net::HTTPEarlyHints, Net::HTTPContinue],
+                 informational_responses.map(&:class)
+    assert_equal ['103', '100'], informational_responses.map(&:code)
   end
 end
 

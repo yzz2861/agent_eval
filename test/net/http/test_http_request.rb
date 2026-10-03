@@ -122,4 +122,19 @@ class HTTPRequestTest < Test::Unit::TestCase
     assert_equal "[2001:db8::1]", req.uri.host
     assert_equal 8080, req.uri.port
   end
+
+  def test_informational_response_callback
+    request = Net::HTTP::Get.new('/')
+    response = Object.new
+
+    request.on_informational_response = proc { |res| @assigned_response = res }
+    request.call_informational_response(response)
+    assert_same response, @assigned_response
+
+    request.on_informational_response do |res|
+      @block_response = res
+    end
+    request.call_informational_response(response)
+    assert_same response, @block_response
+  end
 end

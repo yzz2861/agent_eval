@@ -205,6 +205,33 @@ class Net::HTTPGenericRequest
     input
   end
 
+  # Returns or sets the callback invoked when the server sends an
+  # informational response (1xx status code) before the final response.
+  #
+  # A callback object may be assigned:
+  #
+  #   request.on_informational_response = proc do |response|
+  #     puts response.code
+  #   end
+  #
+  # Or a block may be registered directly:
+  #
+  #   request.on_informational_response do |response|
+  #     puts response.code
+  #   end
+  #
+  # Each informational response is passed to the callback as a separate
+  # Net::HTTPResponse object. A 101 Switching Protocols response is also
+  # passed to the callback, but remains the final response for the request.
+  def on_informational_response(callback = nil, &block)
+    @on_informational_response = block || callback if callback || block
+    @on_informational_response
+  end
+
+  def on_informational_response=(callback)
+    @on_informational_response = callback
+  end
+
   def set_body_internal(str)   #:nodoc: internal use only
     raise ArgumentError, "both of body argument and HTTPRequest#body set" if str and (@body or @body_stream)
     self.body = str if str
@@ -409,17 +436,41 @@ class Net::HTTPGenericRequest
   # we're speaking HTTP 1.1 and are expecting a 100-continue response.
 
   def wait_for_continue(sock, ver)
-    if ver >= '1.1' and @header['expect'] and
-        @header['expect'].include?('100-continue')
-      if sock.io.to_io.wait_readable(sock.continue_timeout)
-        res = Net::HTTPResponse.read_new(sock)
-        unless res.kind_of?(Net::HTTPContinue)
-          res.decode_content = @decode_content
-          throw :response, res
-        end
+    return unless ver >= '1.1' && @header['expect'] &&
+                  @header['expect'].include?('100-continue')
+
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + sock.continue_timeout
+    while continue_timeout_remaining?(sock, deadline)
+      res = Net::HTTPResponse.read_new(sock)
+      res.decode_content = @decode_content
+      res.uri = @uri
+
+      if res.kind_of?(Net::HTTPContinue)
+        call_informational_response(res)
+        return
+      elsif res.kind_of?(Net::HTTPSwitchProtocol)
+        call_informational_response(res)
+        throw :response, res
+      elsif res.kind_of?(Net::HTTPInformation)
+        call_informational_response(res)
+      else
+        throw :response, res
       end
     end
   end
+
+  def continue_timeout_remaining?(sock, deadline)
+    return true if sock.send(:rbuf_size).positive?
+    timeout = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    return false if timeout <= 0
+    sock.io.to_io.wait_readable(timeout)
+  end
+  private :continue_timeout_remaining?
+
+  def call_informational_response(res) #:nodoc: internal use only
+    @on_informational_response&.call(res)
+  end
+  public :call_informational_response
 
   def write_header(sock, ver, path)
     reqline = "#{@method} #{path} HTTP/#{ver}"
