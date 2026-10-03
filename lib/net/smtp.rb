@@ -39,6 +39,13 @@ module Net
         super(message || response)
       end
     end
+
+    # Additional errors encountered while cleaning up a failed mail
+    # transaction. The original exception is still raised; these are
+    # retained so callers can diagnose failed RSET/close cleanup.
+    def transaction_cleanup_errors
+      @transaction_cleanup_errors || []
+    end
   end
 
   # Represents an SMTP authentication error.
@@ -746,6 +753,69 @@ module Net
       addresses.any?{ |a| requires_smtputf8(a) }
     end
 
+    # Runs a single mail transaction (envelope + DATA) and guarantees
+    # that, after any failure, the connection is either proven clean or
+    # dropped before the next transaction can start.
+    def mail_transaction
+      @mail_transaction_phase = :envelope
+      begin
+        res = yield
+      rescue Exception => original_error
+        abort_mail_transaction(original_error)
+      end
+      @mail_transaction_phase = nil
+      res
+    end
+
+    def abort_mail_transaction(original_error)
+      phase = @mail_transaction_phase
+      @mail_transaction_phase = nil
+      if phase == :data
+        # DATA was issued but the end-of-data sequence and final reply
+        # are not both confirmed. RSET cannot be sent here: the server
+        # would treat its text as message content, so the connection
+        # must be discarded.
+        close_mail_connection_after_error(original_error)
+      else
+        reset_mail_envelope_after_error(original_error)
+      end
+    end
+
+    def reset_mail_envelope_after_error(original_error)
+      # A command failed while still in the envelope phase (before DATA
+      # was accepted), so the server transaction can be aborted with
+      # RSET. Reuse the connection only after a confirmed RSET reply.
+      @error_occurred = false
+      begin
+        rset
+        # The RSET reply is confirmed successful: the failed
+        # transaction is aborted and the session is clean again.
+        @error_occurred = false
+      rescue Exception => cleanup_error
+        close_mail_connection_after_error(original_error, cleanup_error)
+      end
+      raise original_error
+    end
+
+    def close_mail_connection_after_error(original_error, *additional_errors)
+      @error_occurred = true
+      begin
+        @socket.close if @socket and not @socket.closed?
+      rescue Exception => cleanup_error
+        additional_errors << cleanup_error
+      end
+      @socket = nil
+      additional_errors.each do |cleanup_error|
+        suppress_transaction_error(original_error, cleanup_error)
+      end
+      raise original_error
+    end
+
+    def suppress_transaction_error(error, additional_error)
+      (error.instance_variable_get(:@transaction_cleanup_errors) ||
+        error.instance_variable_set(:@transaction_cleanup_errors, [])) << additional_error
+    end
+
     #
     # Message Sending
     #
@@ -791,9 +861,11 @@ module Net
     def send_message(msgstr, from_addr, *to_addrs)
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
-      from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      mail_transaction do
+        from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
+        mailfrom from_addr
+        rcptto_list(to_addrs) {data msgstr}
+      end
     end
 
     alias send_mail send_message
@@ -846,9 +918,11 @@ module Net
     def open_message_stream(from_addr, *to_addrs, &block)   # :yield: stream
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
-      from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data(&block)}
+      mail_transaction do
+        from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
+        mailfrom from_addr
+        rcptto_list(to_addrs) {data(&block)}
+      end
     end
 
     alias ready open_message_stream   # obsolete
@@ -960,7 +1034,20 @@ module Net
         raise ArgumentError, "message or block is required"
       end
       res = critical {
-        check_continue get_response('DATA')
+        begin
+          data_response = get_response('DATA')
+        rescue Exception
+          # The reply to DATA is unknown: the server may already be
+          # reading message content. Sending RSET now could be written
+          # into the message body, so force the connection to be closed.
+          @mail_transaction_phase = :data
+          raise
+        end
+        check_continue data_response
+        # The session is now in mail data mode. Any failure from here
+        # until the final reply leaves the connection in an unknown
+        # state, so it must not be reused.
+        @mail_transaction_phase = :data
         socket_sync_bak = @socket.io.sync
         begin
           @socket.io.sync = false
@@ -973,7 +1060,12 @@ module Net
           @socket.io.flush
           @socket.io.sync = socket_sync_bak
         end
-        recv_response()
+        final_response = recv_response()
+        # The final reply is received: the server is back in command
+        # state (even if the reply is 4xx/5xx), so mark the data phase
+        # as completed before the status is checked.
+        @mail_transaction_phase = :data_complete
+        final_response
       }
       check_response res
       res

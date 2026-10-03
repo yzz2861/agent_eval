@@ -186,6 +186,114 @@ module Net
       end
     end
 
+    def test_envelope_error_rset_then_reuse_connection
+      server = FakeServer.new
+      def server.rcpt(addr)
+        if !@bad_rcpt_rejected && addr.include?("bad@example.com")
+          @bad_rcpt_rejected = true
+          @sock.puts "550 5.1.1 User unknown\r\n"
+        else
+          super
+        end
+      end
+      server.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      begin
+        assert_raise(Net::SMTPFatalError) do
+          smtp.send_message("message", "sender@example.com", "bad@example.com")
+        end
+        # Still in the envelope phase: RSET must confirm the abort
+        # before the next message is allowed.
+        assert_equal "RSET\r\n", server.commands.last
+        assert_nothing_raised do
+          smtp.send_message("second message", "sender@example.com", "good@example.com")
+        end
+        assert_equal "second message\r\n", server.body.lines.last
+      ensure
+        server.stop
+      end
+    end
+
+    def test_data_body_callback_error_drops_connection_without_rset
+      server = FakeServer.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      begin
+        callback_error = assert_raise(RuntimeError) do
+          smtp.open_message_stream("sender@example.com", "rcpt@example.com") do |stream|
+            stream.puts "partial body"
+            raise "body construction failed"
+          end
+        end
+        assert_equal "body construction failed", callback_error.message
+        # The server is still reading DATA content: RSET must never be
+        # written as if it were a command.
+        assert_not_equal "RSET\r\n", server.commands.last
+        closed_error = assert_raise(IOError) do
+          smtp.send_message("next message", "sender@example.com", "rcpt@example.com")
+        end
+        assert_equal "closed session", closed_error.message
+      ensure
+        server.stop
+      end
+    end
+
+    def test_rset_failure_after_envelope_error_drops_connection
+      server = FakeServer.new
+      def server.rset
+        @sock.puts "500 5.5.1 RSET failed\r\n"
+      end
+      def server.rcpt(_)
+        @sock.puts "550 5.1.1 User unknown\r\n"
+      end
+      server.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      begin
+        original_error = assert_raise(Net::SMTPFatalError) do
+          smtp.send_message("message", "sender@example.com", "bad@example.com")
+        end
+        assert_equal "550", original_error.response.status
+        cleanup_error = original_error.transaction_cleanup_errors.first
+        assert_kind_of Net::SMTPSyntaxError, cleanup_error
+        assert_equal "500", cleanup_error.response.status
+        closed_error = assert_raise(IOError) do
+          smtp.send_message("next message", "sender@example.com", "rcpt@example.com")
+        end
+        assert_equal "closed session", closed_error.message
+      ensure
+        server.stop
+      end
+    end
+
+    def test_final_data_error_back_in_command_state_allows_reuse
+      server = FakeServer.new
+      def server.data
+        unless @final_rejected
+          @final_rejected = true
+          @sock.puts "354 End data with <CR><LF>.<CR><LF>\r\n"
+          while (l = @sock.gets)
+            break if l.chomp == '.'
+            @body.concat l.sub(/^\./, '')
+          end
+          @sock.puts "451 4.3.2 Try again later\r\n"
+          return
+        end
+        super
+      end
+      server.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      begin
+        assert_raise(Net::SMTPServerBusy) do
+          smtp.send_message("message", "sender@example.com", "rcpt@example.com")
+        end
+        assert_equal "RSET\r\n", server.commands.last
+        assert_nothing_raised do
+          smtp.send_message("retry message", "sender@example.com", "rcpt@example.com")
+        end
+      ensure
+        server.stop
+      end
+    end
+
     def test_unsuccessful_send_message_server_busy
       server = FakeServer.new
       def server.greeting
