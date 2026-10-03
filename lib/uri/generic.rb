@@ -265,6 +265,29 @@ module URI
     #
     attr_reader :query
 
+    # Returns an editable URI::QueryParams view of the query component.
+    #
+    # The view preserves the order of the query items, duplicate keys,
+    # items without an equals sign, and the original percent-encoding of
+    # untouched items; only a modified item is re-encoded:
+    #
+    #   uri = URI.parse("http://example.com/?a=hello+world&b=%2f&a=2")
+    #   uri.query_params[1] = "x y"
+    #   uri.query #=> "a=hello+world&b=x+y&a=2"
+    #
+    # Lookup by key addresses only the first item with that key; use an
+    # Integer index to target a specific occurrence of a duplicate key:
+    #
+    #   uri.query_params['a'] = '3'  # changes the first "a" only
+    #   uri.query_params[2] = '4'     # changes the item at position 2
+    #
+    # The returned object is cached and reflects edits made through it,
+    # but assigning to #query discards it.
+    def query_params
+      @query_params ||= QueryParams.new(self)
+    end
+
+
     # Returns the opaque part of the URI.
     #
     #   URI("mailto:foo@example.org").opaque #=> "foo@example.org"
@@ -852,7 +875,18 @@ module URI
     #   uri.to_s  #=> "http://my.example.com/?id=1"
     #
     def query=(v)
+      @query_params = nil
       return @query = nil unless v
+      @query = check_query(v)
+    end
+
+    # Sets the query component from a QueryParams view without
+    # invalidating that view. Not intended for direct use.
+    def set_query_for_query_params(v) # :nodoc:
+      @query = check_query(v)
+    end
+
+    def check_query(v)
       raise InvalidURIError, "query conflicts with opaque" if @opaque
 
       x = v.to_str
@@ -863,7 +897,7 @@ module URI
       raise InvalidURIError, "invalid percent escape: #{$1}" if /(%\H\H)/n.match(v)
       v.gsub!(/(?!%\h\h|[!$-&(-;=?-_a-~])./n.freeze){'%%%02X' % $&.ord}
       v.force_encoding(Encoding::US_ASCII)
-      @query = v
+      v
     end
 
     #
