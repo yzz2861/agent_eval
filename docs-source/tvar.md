@@ -28,6 +28,11 @@ Our implementation uses a very simple algorithm that locks each `TVar` when it
 is first read or written. If it cannot lock a `TVar` it aborts and retries.
 There is no contention manager so competing transactions may retry eternally.
 
+`Concurrent.retry_transaction` can be called inside a transaction to discard the
+current attempt and wait until one of the TVars read by that attempt changes.
+The outermost flattened transaction is then run again. Transactions that do not
+read a TVar cannot retry.
+
 ```ruby
 require 'concurrent'
 

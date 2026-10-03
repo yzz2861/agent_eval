@@ -16,6 +16,8 @@ module Concurrent
     def initialize(value)
       @value = value
       @lock = Mutex.new
+      @waiters_lock = Mutex.new
+      @waiters = []
     end
 
     # Get the value of a `TVar`.
@@ -47,6 +49,29 @@ module Concurrent
       @lock
     end
 
+    # @!visibility private
+    def add_waiter(transaction) # :nodoc:
+      @waiters_lock.synchronize do
+        @waiters << transaction unless @waiters.include?(transaction)
+      end
+    end
+
+    # @!visibility private
+    def remove_waiter(transaction) # :nodoc:
+      @waiters_lock.synchronize do
+        @waiters.delete(transaction)
+      end
+    end
+
+    # @!visibility private
+    def take_waiters # :nodoc:
+      @waiters_lock.synchronize do
+        waiters = @waiters.dup
+        @waiters.clear
+        waiters
+      end
+    end
+
   end
 
   # Run a block that reads and writes `TVar`s as a single atomic transaction.
@@ -63,6 +88,10 @@ module Concurrent
   #     side-effects, except for via TVar.
   #
   # * If an exception escapes an atomically block it will abort the transaction.
+  #
+  # * Calling `Concurrent.retry_transaction` discards the current attempt and
+  #     waits until one of the TVars read by that attempt changes before running
+  #     the outermost transaction again.
   #
   # * It is undefined behaviour to use callcc or Fiber with atomically.
   #
@@ -111,13 +140,16 @@ module Concurrent
           rescue Transaction::LeaveError
             transaction.abort
             break result
+          rescue Transaction::RetryError
+            transaction.wait_for_change
+            result = Transaction::RETRY
           rescue Exception
             transaction.abort
             raise
           end
           # If we can commit, break out of the loop
 
-          if result != Transaction::ABORTED
+          if result != Transaction::ABORTED && result != Transaction::RETRY
             if transaction.commit
               break result
             end
@@ -145,7 +177,20 @@ module Concurrent
     raise Transaction::LeaveError.new
   end
 
-  module_function :atomically, :abort_transaction, :leave_transaction
+  # Retry a currently running transaction after one of the TVars it read has
+  # changed. Writes from the current attempt are discarded. Nested transactions
+  # are flattened, so retrying from a nested block retries the outermost
+  # transaction.
+  #
+  # @raise [IllegalOperationError] if called outside a transaction or without
+  #   reading a TVar in the current transaction.
+  def retry_transaction
+    transaction = Transaction::current
+    raise IllegalOperationError.new('cannot retry outside a transaction') if transaction.nil?
+    transaction.retry
+  end
+
+  module_function :atomically, :abort_transaction, :leave_transaction, :retry_transaction
 
   private
 
@@ -153,28 +198,34 @@ module Concurrent
   class Transaction
 
     ABORTED = ::Object.new
+    RETRY = ::Object.new
 
-    OpenEntry = Struct.new(:value, :modified)
+    OpenEntry = Struct.new(:value, :modified, :read, :original_value)
 
     AbortError = Class.new(StandardError)
     LeaveError = Class.new(StandardError)
+    RetryError = Class.new(StandardError)
 
     def initialize
       @open_tvars = {}
+      @wait_mutex = Mutex.new
+      @wait_condition = ConditionVariable.new
+      @signaled = false
     end
 
     def read(tvar)
       entry = open(tvar)
+      entry.read = true
       entry.value
     end
 
     def write(tvar, value)
-      entry = open(tvar)
+      entry = open(tvar, false)
       entry.modified = true
       entry.value = value
     end
 
-    def open(tvar)
+    def open(tvar, read = true)
       entry = @open_tvars[tvar]
 
       unless entry
@@ -182,11 +233,41 @@ module Concurrent
           Concurrent::abort_transaction
         end
 
-        entry = OpenEntry.new(tvar.unsafe_value, false)
+        entry = OpenEntry.new(tvar.unsafe_value, false, read, tvar.unsafe_value)
         @open_tvars[tvar] = entry
       end
 
       entry
+    end
+
+    def retry
+      unless @open_tvars.any? { |_, entry| entry.read }
+        raise IllegalOperationError.new('cannot retry a transaction that did not read a TVar')
+      end
+
+      raise RetryError.new
+    end
+
+    def wait_for_change
+      @wait_mutex.synchronize do
+        @open_tvars.each do |tvar, entry|
+          tvar.add_waiter(self) if entry.read
+        end
+
+        unlock
+        @wait_condition.wait(@wait_mutex) until @signaled
+      end
+    ensure
+      @open_tvars.each_key do |tvar|
+        tvar.remove_waiter(self)
+      end
+    end
+
+    def signal
+      @wait_mutex.synchronize do
+        @signaled = true
+        @wait_condition.signal
+      end
     end
 
     def abort
@@ -194,13 +275,18 @@ module Concurrent
     end
 
     def commit
+      waiters = []
+
       @open_tvars.each do |tvar, entry|
         if entry.modified
           tvar.unsafe_value = entry.value
+          waiters.concat(tvar.take_waiters) if entry.value != entry.original_value
         end
       end
 
       unlock
+      waiters.uniq.each(&:signal)
+      true
     end
 
     def unlock

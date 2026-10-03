@@ -1,5 +1,7 @@
 ## Current
 
+* Add `Concurrent.retry_transaction` for retrying TVar transactions after a read TVar changes.
+
 ## Release v1.3.8 (19 July 2026)
 
 concurrent-ruby:
