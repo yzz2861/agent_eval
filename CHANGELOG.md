@@ -6,6 +6,7 @@
 
 **Features:**
 
+- Add `JWT::JWE::Compact` for direct-key AES-256-GCM Compact JWE encryption and decryption
 - Your contribution here
 
 **Fixes and enhancements:**

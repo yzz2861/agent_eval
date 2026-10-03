@@ -209,6 +209,28 @@ decoded_token = JWT.decode(token, nil, true, { algorithm: 'none' })
 #     ]
 ```
 
+### Compact JWE (dir / A256GCM)
+
+Compact JWE is available through a separate entry point. It currently supports only `alg=dir` and `enc=A256GCM`, and does not change `JWT.decode` behavior.
+
+```ruby
+key = SecureRandom.random_bytes(32)
+token = JWT::JWE::Compact.encrypt('plaintext', key)
+
+plaintext = JWT::JWE::Compact.decrypt(token, key)
+```
+
+The key must be exactly 32 bytes and the GCM IV exactly 12 bytes. The encoded protected header is authenticated as additional authenticated data, so no plaintext is returned when the tag or any protected segment has been modified.
+
+A random source can be injected for reproducible tests:
+
+```ruby
+iv = SecureRandom.random_bytes(12)
+token = JWT::JWE::Compact.encrypt('plaintext', key, rng: ->(_length) { iv })
+```
+
+Nested JWS values are not verified automatically. Decrypt the JWE first, then explicitly verify the returned JWS with `JWT.decode`. Compression (`zip`) is not supported and is rejected.
+
 ## `JWT::Token` and `JWT::EncodedToken`
 
 The `JWT::Token` and `JWT::EncodedToken` classes can be used to manage your JWTs.
