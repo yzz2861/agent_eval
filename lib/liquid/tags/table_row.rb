@@ -107,6 +107,12 @@ module Liquid
           # Handle any interrupts if they exist.
           if context.interrupt?
             interrupt = context.pop_interrupt
+            if interrupt.is_a?(LoopInterrupt) && !interrupt.targets?(nil)
+              # Labeled interrupt targeting an outer loop: leave it on the
+              # interrupt stack and unwind this loop.
+              context.push_interrupt(interrupt)
+              break
+            end
             break if interrupt.is_a?(BreakInterrupt)
           end
 

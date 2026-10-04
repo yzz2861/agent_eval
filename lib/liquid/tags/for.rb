@@ -24,22 +24,29 @@ module Liquid
   # @liquid_optional_param offset: [number] The 1-based index to start iterating at.
   # @liquid_optional_param range [untyped] A custom numeric range to iterate over.
   # @liquid_optional_param reversed [untyped] Iterate in reverse order.
+  # @liquid_optional_param label: [untyped] A label that `break` and `continue` can target to control this loop from nested loops.
   class For < Block
     Syntax = /\A(#{VariableSegment}+)\s+in\s+(#{QuotedFragment}+)\s*(reversed)?/o
 
-    attr_reader :collection_name, :variable_name, :limit, :from
+    attr_reader :collection_name, :variable_name, :limit, :from, :label
 
     def initialize(tag_name, markup, options)
       super
       @from = @limit = nil
+      @label = nil
       parse_with_selected_parser(markup)
       @for_block = new_body
       @else_block = nil
     end
 
     def parse(tokens)
-      if parse_body(@for_block, tokens)
-        parse_body(@else_block, tokens)
+      parse_context.push_loop_label(@label)
+      begin
+        if parse_body(@for_block, tokens)
+          parse_body(@else_block, tokens)
+        end
+      ensure
+        parse_context.pop_loop_label
       end
       if blank?
         @else_block&.remove_blank_strings
@@ -100,11 +107,15 @@ module Liquid
 
       while p.look(:comma) || p.look(:id)
         p.consume?(:comma)
-        unless (attribute = p.id?('limit') || p.id?('offset'))
+        if p.id?('label')
+          p.consume(:colon)
+          set_loop_label(p.consume(:id))
+        elsif (attribute = p.id?('limit') || p.id?('offset'))
+          p.consume(:colon)
+          set_attribute(attribute, p.expression, safe: true)
+        else
           raise SyntaxError, options[:locale].t("errors.syntax.for_invalid_attribute")
         end
-        p.consume(:colon)
-        set_attribute(attribute, p.expression, safe: true)
       end
       p.consume(:end_of_string)
     end
@@ -168,8 +179,17 @@ module Liquid
             # Handle any interrupts if they exist.
             next unless context.interrupt?
             interrupt = context.pop_interrupt
+            next unless interrupt.is_a?(LoopInterrupt)
+
+            unless interrupt.targets?(@label)
+              # Labeled interrupt targeting an outer loop: leave it on the
+              # interrupt stack and unwind this loop so the targeted loop
+              # can handle it.
+              context.push_interrupt(interrupt)
+              break
+            end
+
             break if interrupt.is_a?(BreakInterrupt)
-            next if interrupt.is_a?(ContinueInterrupt)
           end
         ensure
           for_stack.pop
@@ -189,7 +209,19 @@ module Liquid
         end
       when 'limit'
         @limit = parse_expression(expr, safe: safe)
+      when 'label'
+        set_loop_label(expr)
       end
+    end
+
+    def set_loop_label(label)
+      if @label
+        raise SyntaxError, options[:locale].t("errors.syntax.for_duplicate_label")
+      end
+      unless label.is_a?(String) && label.match?(/\A#{VariableSegment}+\z/o)
+        raise SyntaxError, options[:locale].t("errors.syntax.loop_label_invalid", tag: 'for', label: label)
+      end
+      @label = label
     end
 
     def render_else(context, output)

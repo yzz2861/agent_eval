@@ -74,6 +74,51 @@ module Liquid
       @options = value ? partial_options : @template_options
 
       @error_mode = @options[:error_mode] || @environment.error_mode
+
+      # Loop labels must not leak across a render/include boundary: a
+      # partial is parsed as its own template, so break/continue inside
+      # it cannot control loops of the outer template.
+      if value
+        @outer_loop_label_stack = @loop_label_stack
+        @loop_label_stack = []
+      else
+        @loop_label_stack = @outer_loop_label_stack
+        @outer_loop_label_stack = nil
+      end
+    end
+
+    # Loop labels declared by enclosing `for` tags, innermost last.
+    # Used at parse time to validate break/continue label references
+    # and to reject duplicate declarations in nested loops.
+    def push_loop_label(label)
+      @loop_label_stack ||= []
+      if label && @loop_label_stack.include?(label)
+        raise SyntaxError, locale.t("errors.syntax.loop_label_duplicate", label: label)
+      end
+      @loop_label_stack.push(label)
+    end
+
+    def pop_loop_label
+      @loop_label_stack&.pop
+    end
+
+    def loop_label_visible?(label)
+      !!@loop_label_stack&.include?(label)
+    end
+
+    # Parses the optional loop label of a break/continue tag and validates
+    # that it refers to a loop label visible at this point in the template.
+    def parse_loop_label(markup, tag_name)
+      label = markup.strip
+      return nil if label.empty?
+
+      unless label.match?(/\A#{VariableSegment}+\z/o)
+        raise SyntaxError, locale.t("errors.syntax.loop_label_invalid", tag: tag_name, label: label)
+      end
+      unless loop_label_visible?(label)
+        raise SyntaxError, locale.t("errors.syntax.loop_label_unknown", tag: tag_name, label: label)
+      end
+      label
     end
 
     def partial_options

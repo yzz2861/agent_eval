@@ -21,8 +21,16 @@ module Liquid
   class Break < Tag
     INTERRUPT = BreakInterrupt.new.freeze
 
+    attr_reader :label
+
+    def initialize(tag_name, markup, options)
+      super
+      @label = parse_context.parse_loop_label(markup, tag_name)
+      @interrupt = @label ? BreakInterrupt.new(@label).freeze : INTERRUPT
+    end
+
     def render_to_output_buffer(context, output)
-      context.push_interrupt(INTERRUPT)
+      context.push_interrupt(@interrupt)
       output
     end
   end
