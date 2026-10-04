@@ -45,6 +45,7 @@ module Mail # :doc:
   require 'mail/parts_list'
   require 'mail/attachments_list'
   require 'mail/body'
+  require 'mail/thread_index'
   require 'mail/field'
   require 'mail/field_list'
 

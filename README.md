@@ -562,6 +562,31 @@ Results in the same email as done using the block form
 @mail.retryable?       #=> false
 ```
 
+### Rebuilding Discussion Threads from References / In-Reply-To:
+
+`Mail::ThreadIndex` incrementally indexes messages that arrive out of
+order (e.g. a support mailbox archive) and rebuilds the conversation
+threads. Ancestors that have not been seen yet are kept as placeholders
+and merged once the real message arrives.
+
+```ruby
+index = Mail::ThreadIndex.new
+Mail.find_all_and_delete(:imap).each { |mail| index.add(mail) }
+
+index.roots                  #=> Message-IDs of thread roots
+index.parent_of(id)          #=> parent Message-ID or nil
+index.children_of(id)        #=> child Message-IDs
+index.unresolved_references  #=> referenced ids still missing (placeholders)
+index.conflicts              #=> same Message-ID arrived with different content
+```
+
+Parent selection is deterministic: the last In-Reply-To id wins,
+otherwise the last References id; remaining References entries only link
+the ancestor chain and are overridden by a message's own headers once it
+arrives. The Subject is never used for threading. Reference cycles are
+broken by dropping the parent link of the cycle's smallest Message-ID,
+so the resulting forest is identical for any arrival order.
+
 ### Attaching and Detaching Files
 
 You can just read the file off an absolute path, Mail will try
