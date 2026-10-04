@@ -100,6 +100,138 @@ describe Protocol::WebSocket::Connection do
 			connection.shutdown
 			expect(connection).to be(:closed?)
 		end
+		
+		it "records local and remote close details when both sides close simultaneously" do
+			close_frame = Protocol::WebSocket::CloseFrame.new
+			close_frame.pack(1000, "bye")
+			client.write_frame(close_frame)
+			
+			close_state = connection.shutdown
+			
+			expect(close_state).to be == connection.close_state
+			expect(close_state.local_code).to be == 1000
+			expect(close_state.local_reason).to be == ""
+			expect(close_state.remote_code).to be == 1000
+			expect(close_state.remote_reason).to be == "bye"
+			expect(close_state.result).to be == :closed
+			expect(connection).to be(:closed?)
+			
+			# Only one close frame was sent, no reply to the peer's close frame:
+			frame = client.read_frame
+			expect(frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(frame.unpack).to be == [1000, ""]
+			expect(IO.select([sockets.first], nil, nil, 0)).to be == nil
+		end
+		
+		it "records eof when the connection terminates without a close frame" do
+			sockets.first.close_write
+			
+			close_state = connection.shutdown
+			
+			expect(close_state.result).to be == :eof
+			expect(close_state.local_code).to be == 1000
+			expect(close_state.remote_code).to be == nil
+			expect(close_state.remote_reason).to be == nil
+			expect(connection).to be(:closed?)
+		end
+		
+		it "records error when sending the close frame fails" do
+			server.close
+			
+			close_state = connection.shutdown
+			
+			expect(close_state.result).to be == :error
+			expect(close_state.error).to be_a(IOError)
+			expect(close_state.local_code).to be == 1000
+			expect(close_state.remote_code).to be == nil
+			expect(connection).to be(:closed?)
+		end
+		
+		it "times out waiting for the remote close frame using an injected clock" do
+			times = [0.0, 100.0]
+			clock = ->{times.shift || 100.0}
+			
+			ping_frame = Protocol::WebSocket::PingFrame.new
+			ping_frame.pack("yo")
+			client.write_frame(ping_frame)
+			
+			close_state = connection.shutdown(timeout: 5.0, clock: clock)
+			
+			expect(close_state.result).to be == :timeout
+			expect(close_state.local_code).to be == 1000
+			expect(close_state.remote_code).to be == nil
+			expect(connection).to be(:closed?)
+			
+			# The close frame was sent, and the ping was answered while draining:
+			expect(client.read_frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(client.read_frame).to be_a(Protocol::WebSocket::PongFrame)
+		end
+	end
+	
+	with "#send_close" do
+		it "transitions to the closing state and records the local code and reason" do
+			expect(connection.send_close(1001, "going away")).to be == true
+			
+			expect(connection).to be(:closing?)
+			expect(connection).not.to be(:closed?)
+			
+			close_state = connection.close_state
+			expect(close_state.local_code).to be == 1001
+			expect(close_state.local_reason).to be == "going away"
+			expect(close_state.result).to be == nil
+			
+			frame = client.read_frame
+			expect(frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(frame.unpack).to be == [1001, "going away"]
+		end
+		
+		it "does not send a second close frame" do
+			connection.send_close(1000, "first")
+			
+			expect(connection.send_close(1001, "second")).to be == false
+			connection.close!
+			
+			frame = client.read_frame
+			expect(frame.unpack).to be == [1000, "first"]
+			expect(IO.select([sockets.first], nil, nil, 0)).to be == nil
+			
+			expect(connection.close_state.local_code).to be == 1000
+			expect(connection.close_state.local_reason).to be == "first"
+		end
+		
+		it "rejects data messages after closing begins" do
+			connection.send_close
+			
+			expect do
+				connection.send_text("Hello")
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Cannot send text/)
+			
+			expect do
+				connection.send_binary("Hello")
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Cannot send binary/)
+			
+			expect do
+				connection.write("Hello")
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Cannot send text/)
+		end
+		
+		it "continues to handle control frames while closing" do
+			connection.send_close
+			expect(client.read_frame).to be_a(Protocol::WebSocket::CloseFrame)
+			
+			# Incoming ping is still answered with a pong:
+			ping_frame = Protocol::WebSocket::PingFrame.new
+			ping_frame.pack("yo")
+			client.write_frame(ping_frame)
+			
+			frame = connection.read_frame
+			expect(frame).to be_a(Protocol::WebSocket::PingFrame)
+			expect(client.read_frame).to be_a(Protocol::WebSocket::PongFrame)
+			
+			# Outgoing ping is still allowed:
+			connection.send_ping
+			expect(client.read_frame).to be_a(Protocol::WebSocket::PingFrame)
+		end
 	end
 	
 	it "doesn't generate mask by default" do

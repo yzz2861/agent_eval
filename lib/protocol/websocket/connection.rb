@@ -6,6 +6,7 @@
 # Copyright, 2021, by Aurora Nockert.
 
 require_relative "framer"
+require_relative "close_state"
 
 module Protocol
 	module WebSocket
@@ -18,6 +19,7 @@ module Protocol
 				
 				@state = :open
 				@frames = []
+				@close_state = CloseState.new
 				
 				@reserved = Frame::RESERVED
 				
@@ -27,6 +29,12 @@ module Protocol
 			
 			# @attribute [Framer] The framer which is used for reading and writing frames.
 			attr :framer
+			
+			# @attribute [Symbol] The current state of the connection: `:open`, `:closing` or `:closed`.
+			attr :state
+			
+			# @attribute [CloseState] The state of the closing handshake, including the close code/reason sent and received, and the final result.
+			attr :close_state
 			
 			# @attribute [String | Boolean | Nil] The optional mask which is used when generating frames.
 			attr :mask
@@ -63,6 +71,7 @@ module Protocol
 			# Transition the connection to the open state (the default for new connections).
 			def open!
 				@state = :open
+				@close_state = CloseState.new
 				
 				return self
 			end
@@ -71,16 +80,21 @@ module Protocol
 			# Will try to send a close frame with the specified code and reason, but will ignore any errors that occur while sending.
 			def close!(...)
 				unless @state == :closed
-					@state = :closed
-					
 					begin
 						send_close(...)
 					rescue
 						# Ignore errors.
+					ensure
+						@state = :closed
 					end
 				end
 				
 				return self
+			end
+			
+			# @returns [Boolean] if the connection is in the closing state, i.e. a close frame has been sent but the closing handshake has not completed.
+			def closing?
+				@state == :closing
 			end
 			
 			# @returns [Boolean] if the connection is in the closed state.
@@ -109,13 +123,44 @@ module Protocol
 			end
 			
 			# Close the connection gracefully. This will send a close frame and wait for the remote end to respond with a close frame. Any data received after the close frame is sent will be ignored. If you want to process this data, use {#close_write} instead, and read the data before calling {#close}.
-			def shutdown
-				send_close unless @state == :closed
+			#
+			# The progress and outcome of the closing handshake is recorded in {#close_state}, including the close code/reason sent and received, and the final result (`:closed`, `:eof`, `:timeout` or `:error`).
+			#
+			# @parameter timeout [Numeric | Nil] The maximum time in seconds to wait for the remote end to respond with a close frame. If nil, wait indefinitely.
+			# @parameter clock [Proc | Nil] A clock that returns the current monotonic time in seconds, used to implement the timeout. Injected for testing.
+			# @returns [CloseState] The final state of the closing handshake.
+			def shutdown(timeout: nil, clock: nil)
+				clock ||= ->{Process.clock_gettime(Process::CLOCK_MONOTONIC)}
 				
-				# `read_frame` will return nil after receiving a close frame:
-				while read_frame
-					# Drain the connection.
+				begin
+					send_close unless closed?
+				rescue => error
+					# If we can't send the close frame, the connection cannot be shut down gracefully:
+					@close_state.finish!(:error, error)
+					@state = :closed
+					
+					return @close_state
 				end
+				
+				deadline = timeout && (clock.call + timeout)
+				
+				begin
+					# `read_frame` will return nil after receiving a close frame:
+					while read_frame
+						# Drain the connection.
+						if deadline and clock.call >= deadline
+							@close_state.finish!(:timeout)
+							break
+						end
+					end
+				rescue EOFError
+					# The connection was terminated without receiving a close frame:
+					@close_state.finish!(:eof)
+				ensure
+					@state = :closed
+				end
+				
+				return @close_state
 			end
 			
 			# Read a frame from the framer, and apply it to the connection.
@@ -180,8 +225,18 @@ module Protocol
 			def receive_close(frame)
 				code, reason = frame.unpack
 				
+				@close_state.remote_close(code, reason)
+				
+				# If we have not sent a close frame yet, we must reply with one:
+				begin
+					send_close(code, reason)
+				rescue
+					# Ignore errors, we are closing anyway.
+				end
+				
 				# On receiving a close frame, we must enter the closed state:
-				close!(code, reason)
+				@state = :closed
+				@close_state.finish!(:closed)
 				
 				if code and code != Error::NO_ERROR
 					raise ClosedError.new reason, code
@@ -233,7 +288,11 @@ module Protocol
 			# Send a text frame with the specified buffer.
 			# @parameter buffer [String] The text to send.
 			def send_text(buffer, **options)
-				write_frame(@writer.pack_text_frame(buffer, **options))
+				if @state == :open
+					write_frame(@writer.pack_text_frame(buffer, **options))
+				else
+					raise ProtocolError, "Cannot send text in state #{@state}!"
+				end
 			end
 			
 			# Pack a binary frame with the specified buffer. This is used by the {#writer} interface.
@@ -249,18 +308,36 @@ module Protocol
 			# Send a binary frame with the specified buffer.
 			# @parameter buffer [String] The binary data to send.
 			def send_binary(buffer, **options)
-				write_frame(@writer.pack_binary_frame(buffer, **options))
+				if @state == :open
+					write_frame(@writer.pack_binary_frame(buffer, **options))
+				else
+					raise ProtocolError, "Cannot send binary in state #{@state}!"
+				end
 			end
 			
 			# Send a control frame with data containing a specified control sequence to begin the closing handshake. Does not close the connection, until the remote end responds with a close frame.
+			# Only one close frame is ever sent; subsequent calls are ignored.
 			# @parameter code [Integer] The close code to send.
 			# @parameter reason [String] The reason for closing the connection.
+			# @returns [Boolean] Whether a close frame was sent.
 			def send_close(code = Error::NO_ERROR, reason = "")
-				frame = CloseFrame.new(mask: @mask)
-				frame.pack(code, reason)
+				return false unless @state == :open
 				
-				self.write_frame(frame)
-				self.flush
+				@state = :closing
+				@close_state.local_close(code, reason)
+				
+				begin
+					frame = CloseFrame.new(mask: @mask)
+					frame.pack(code, reason)
+					
+					self.write_frame(frame)
+					self.flush
+				rescue => error
+					@close_state.finish!(:error, error)
+					raise
+				end
+				
+				return true
 			end
 			
 			# Write a message to the connection.
