@@ -434,9 +434,11 @@ module Net
     end
 
     # MailboxList represents the data of an untagged +LIST+ response, for a
-    # _single_ mailbox path.  IMAP#list returns an array of MailboxList objects.
+    # _single_ mailbox path.  A basic IMAP#list returns an array of
+    # MailboxList objects; an extended IMAP#list returns MailboxListResult,
+    # whose MailboxListResult#mailboxes contains these objects.
     #
-    class MailboxList < Struct.new(:attr, :delim, :name)
+    class MailboxList < Struct.new(:attr, :delim, :name, :extended)
       ##
       # :method: attr
       # :call-seq: attr -> array of Symbols
@@ -461,6 +463,68 @@ module Net
       # :call-seq: name -> string
       #
       # Returns the mailbox name.
+
+      ##
+      # :method: extended
+      # :call-seq: extended -> hash or nil
+      #
+      # Returns extended LIST response data, such as +CHILDINFO+ and
+      # +RECURSIVEMATCH+.  Unknown extension data is preserved.
+    end
+
+    # Returned by IMAP#list when extended LIST options are used.  It combines
+    # the LIST responses with any data returned by the +RETURN+ options.
+    #
+    # It also delegates Enumerable and Array-style methods to #mailboxes, so it
+    # can often be used like the array returned by a basic IMAP#list call.
+    class MailboxListResult < Data.define(:mailboxes, :status)
+      def initialize(mailboxes: [], status: nil)
+        mailboxes => Array
+        status    => Hash | nil
+        super(mailboxes: mailboxes.freeze, status: (status || {}).freeze)
+      end
+
+      include Enumerable
+
+      # Yields each entry in #mailboxes.
+      def each(&) = mailboxes.each(&)
+
+      # Returns the array of MailboxList entries.
+      def to_a = mailboxes
+
+      # Returns #mailboxes, allowing implicit conversion to Array.
+      def to_ary = mailboxes
+
+      # With an Integer, delegates to #mailboxes.  With a String, returns the
+      # associated #status for that mailbox.
+      def [](index_or_mailbox)
+        case index_or_mailbox
+        when Integer then mailboxes[index_or_mailbox]
+        else              status[index_or_mailbox]
+        end
+      end
+
+      # Delegates to #mailboxes.
+      def size = mailboxes.size
+
+      alias length size
+
+      def last(*args) = mailboxes.last(*args)
+
+      def first(*args) = mailboxes.first(*args)
+
+      ##
+      # :method: mailboxes
+      # :call-seq: mailboxes -> array of MailboxList
+      #
+      # The decoded LIST responses, in their server order.
+
+      ##
+      # :method: status
+      # :call-seq: status -> hash
+      #
+      # STATUS data associated by decoded mailbox name.  Each value is a hash
+      # of requested status attributes; missing attributes are +nil+.
     end
 
     # MailboxQuota represents the data of an untagged +QUOTA+ response.

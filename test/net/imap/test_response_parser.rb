@@ -108,6 +108,43 @@ class ResponseParserTest < Net::IMAP::TestCase
   # response data, should still use normal tests, below
   ############################################################################
 
+  test "extended LIST response data preserves known and unknown extensions" do
+    response =
+      '* LIST () "/" foo ' +
+      '(SUBSCRIBED NIL CHILDINFO (SUBSCRIBED "yes" X-UNKNOWN 7) ' +
+      'RECURSIVEMATCH (CHILDINFO (X-UNKNOWN "ok" X-ATOM yes) X-ATOM yes ' \
+      'X-LIST (ok)) X-UNKNOWN (a 42))' + "\r\n"
+    data = Net::IMAP::ResponseParser.new.parse(response).data
+
+    assert_nil data.extended["SUBSCRIBED"]
+    assert_equal(
+      {"SUBSCRIBED" => "yes", "X-UNKNOWN" => 7},
+      data.extended["CHILDINFO"]
+    )
+    assert_equal(
+      {"CHILDINFO" => {"X-UNKNOWN" => "ok", "X-ATOM" => "yes"},
+       "X-ATOM" => "yes",
+       "X-LIST" => Net::IMAP::ExtensionData.new(["ok"])},
+      data.extended["RECURSIVEMATCH"]
+    )
+    assert_equal(
+      Net::IMAP::ExtensionData.new(["a", 42]),
+      data.extended["X-UNKNOWN"]
+    )
+    scalar = Net::IMAP::ResponseParser.new
+      .parse("* LIST () \"/\" foo (X-UNKNOWN 42)\r\n")
+      .data.extended["X-UNKNOWN"]
+    assert_equal 42, scalar
+  end
+
+  test "LIST and STATUS mailbox names may be literals" do
+    list = Net::IMAP::ResponseParser.new.parse("* LIST () \"/\" {3}\r\nfoo\r\n")
+    status = Net::IMAP::ResponseParser.new.parse("* STATUS {3}\r\nfoo (MESSAGES 1)\r\n")
+
+    assert_equal "foo", list.data.name
+    assert_equal "foo", status.data.mailbox
+  end
+
   test "default config inherits from Config.global" do
     parser = Net::IMAP::ResponseParser.new
     refute parser.config.frozen?

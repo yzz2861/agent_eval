@@ -600,13 +600,13 @@ module Net
       #                       ; a "quoted" string.
       def tagged_ext_comp
         vals = []
-        while true
+        loop do
           vals << case lookahead!(*ASTRING_TOKENS, T_LPAR).symbol
                   when T_LPAR   then lpar; ary = tagged_ext_comp; rpar; ary
                   when T_NUMBER then number
                   else               astring
                   end
-          SP? or break
+          break unless SP?
         end
         vals
       end
@@ -1407,8 +1407,110 @@ module Net
         lpar; attr  = peek_rpar? ? [] : mbx_list_flags; rpar
         SP!;  delim = nquoted
         SP!;  name  = mailbox
-        # TODO: mbox-list-extended
-        MailboxList.new(attr, delim, name)
+        extended = mbox_list_extended if SP?
+        MailboxList.new(attr, delim, name, extended)
+      end
+
+      # RFC5258:
+      #   mbox-list-extended  = "(" mbox-list-ext-item
+      #                          *(SP mbox-list-ext-item) ")"
+      def mbox_list_extended
+        lpar
+        mbox_list_ext_items do |name|
+          case name
+          when "CHILDINFO"      then SP!; childinfo_extended_list
+          when "RECURSIVEMATCH" then SP!; recursive_match_extended_list
+          else mbox_list_ext_val if SP?
+          end
+        end
+      end
+
+      # mbox-list-ext-val  = nstring / tagged-ext-val
+      def mbox_list_ext_val
+        case lookahead.symbol
+        when T_NIL, T_QUOTED, T_LITERAL then nstring
+        when T_LPAR then ExtensionData.new(mbox_list_ext_comp)
+        when T_NUMBER then number
+        else atom
+        end
+      end
+
+      def childinfo_extended_list
+        lpar
+        mbox_list_ext_items do |name|
+          childinfo_extended_value(name) if SP?
+        end
+      end
+
+      def childinfo_extended_value(name)
+        case name
+        when "SUBSCRIBED", "MAILBOXID"
+          nstring
+        else
+          childinfo_ext_val
+        end
+      end
+
+      def childinfo_ext_val
+        case lookahead.symbol
+        when T_QUOTED, T_LITERAL, T_NUMBER then mbox_list_ext_val
+        when T_LPAR then ExtensionData.new(mbox_list_ext_comp)
+        else atom
+        end
+      end
+
+      # RFC5258:
+      #   recursive-match-ext-item =
+      #     "CHILDINFO" SP childinfo-extended-list /
+      #     tagged-ext-label [SP tagged-ext-val]
+      def recursive_match_extended_list
+        lpar
+        mbox_list_ext_items do |name|
+          case name
+          when "CHILDINFO" then SP!; childinfo_extended_list
+          else recursive_match_ext_val if SP?
+          end
+        end
+      end
+
+      def recursive_match_ext_val
+        if lookahead.symbol == T_LPAR
+          ExtensionData.new(mbox_list_ext_comp)
+        else
+          mbox_list_ext_val
+        end
+      end
+
+      def mbox_list_ext_comp
+        lpar
+        vals = []
+        until peek_rpar?
+          SP! unless vals.empty?
+          vals <<
+            case lookahead.symbol
+            when T_LPAR   then mbox_list_ext_comp
+            when T_NIL
+              NIL?
+              nil
+            when T_NUMBER then number
+            else astring
+            end
+        end
+        rpar
+        vals
+      end
+
+      def mbox_list_ext_items
+        data = {}
+        first = true
+        until peek_rpar?
+          SP! unless first
+          name = tagged_ext_label
+          data[name] = yield(name)
+          first = false
+        end
+        rpar
+        data.freeze
       end
 
       def quota_response

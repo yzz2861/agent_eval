@@ -528,8 +528,6 @@ module Net
   # - *Obsolete* #lsub: <em>Replaced by <tt>LIST-EXTENDED</tt> and removed from
   #   +IMAP4rev2+.</em>  Lists mailboxes in the "subscribed" set.
   #
-  #   <em>*Note:* Net::IMAP hasn't implemented <tt>LIST-EXTENDED</tt> yet.</em>
-  #
   # ==== Selected state
   #
   # In addition to the commands for any state and the +authenticated+
@@ -577,8 +575,7 @@ module Net
   # >>>
   #   <em>The following are folded into +IMAP4rev2+ but are currently
   #   unsupported or incompletely supported by</em> Net::IMAP<em>: RFC4466
-  #   extensions, +SEARCHRES+, +LIST-EXTENDED+, +LIST-STATUS+,
-  #   and +SPECIAL-USE+.</em>
+  #   extensions and +SEARCHRES+.</em>
   #
   # ==== RFC2087: +QUOTA+
   # +NOTE:+ Only the +STORAGE+ quota resource type is currently supported.
@@ -650,6 +647,13 @@ module Net
   # - #thread, #uid_thread: An alternate version of #search or #uid_search,
   #   which arranges the results into ordered groups or threads according to a
   #   chosen algorithm.
+  #
+  # ==== RFC5258: +LIST-EXTENDED+
+  # - #list: Supports selection options, return options, and extended response
+  #   data.
+  #
+  # ==== RFC5819: +LIST-STATUS+
+  # - #list: Supports <tt>RETURN (STATUS ...)</tt> and MailboxListResult#status.
   #
   # ==== +X-GM-EXT-1+
   # +X-GM-EXT-1+ is a non-standard Gmail extension.  See {Google's
@@ -1927,9 +1931,12 @@ module Net
     # which mailboxes to match.  If +mailbox+ is empty, the root
     # name of +refname+ and the hierarchy delimiter are returned.
     #
-    # The return value is an array of MailboxList.
+    # Without extended options, the return value is an array of MailboxList.
     #
-    # Related: #lsub, MailboxList
+    # When extended options are used, the return value is a MailboxListResult.
+    # It is enumerable and delegates array-like access to its MailboxListResult#
+    # mailboxes, while MailboxListResult#status provides STATUS data associated
+    # by decoded mailbox name.
     #
     # ==== For example:
     #
@@ -1940,13 +1947,40 @@ module Net
     #        #<Net::IMAP::MailboxList attr=[:Noinferiors, :Marked], delim="/", name="foo/bar">, \\
     #        #<Net::IMAP::MailboxList attr=[:Noinferiors], delim="/", name="foo/baz">]
     #
-    #--
-    # TODO: support LIST-EXTENDED extension [RFC5258].  Needed for IMAP4rev2.
-    #++
-    def list(refname, mailbox)
+    # ==== Extended LIST [RFC5258]
+    #
+    # +selection_options+ are sent as the parenthesized LIST selection options.
+    # Options with values may be nested in arrays, e.g. <tt>["REMOTE",
+    # ["SPECIAL-USE"]]</tt>.  Symbols are sent as atoms, without a flag
+    # backslash.
+    #
+    # ==== RETURN options
+    #
+    # +return+ options are sent as <tt>RETURN (...)</tt>.  The +STATUS+ return
+    # option [RFC5819] can be supplied as, for example, <tt>return: {status:
+    # %w[MESSAGES UNSEEN]}</tt>.  The returned STATUS attributes are associated
+    # with their mailbox by decoded mailbox identity, not by response order.
+    # If the server omits a requested STATUS attribute, its value is +nil+.
+    #
+    # Related: #lsub, MailboxList, MailboxListResult
+    def list(refname, mailbox, *selection_options, **options)
+      unknown = options.keys - [:return]
+      unless unknown.empty?
+        raise ArgumentError, "unknown keyword arguments: #{unknown.join(", ")}"
+      end
+      return_options = options[:return]
+      extended_selection = !selection_options.empty?
+      args, status_attrs =
+        list_args(refname, mailbox, selection_options, return_options,
+                  extended_selection)
+      extended = extended_selection || !return_options.nil?
       synchronize do
-        send_command("LIST", refname, mailbox)
-        clear_responses("LIST")
+        if extended
+          list_extended_result(args, status_attrs)
+        else
+          send_command("LIST", *args)
+          clear_responses("LIST")
+        end
       end
     end
 
@@ -2039,11 +2073,6 @@ module Net
     #
     # The server's capabilities must include +XLIST+,
     # a deprecated Gmail extension (replaced by +SPECIAL-USE+).
-    #--
-    # TODO: Net::IMAP doesn't yet have full SPECIAL-USE support.  Supporting
-    # servers MAY return SPECIAL-USE attributes, but are not *required* to
-    # unless the SPECIAL-USE return option is supplied.
-    #++
     def xlist(refname, mailbox)
       synchronize do
         send_command("XLIST", refname, mailbox)
@@ -3998,6 +4027,111 @@ module Net
       args.prepend("CHARSET", charset)     if charset
       args.prepend("RETURN",  return_opts) if return_opts
       return args, esearch
+    end
+
+    def list_args(refname, mailbox, selection_options, return_options,
+                  extended_selection)
+      explicit_selection =
+        extended_selection &&
+          selection_options.size == 1 &&
+          Array.try_convert(selection_options.first)
+      selection_options =
+        explicit_selection ? selection_options.first : selection_options
+      args = [refname, mailbox]
+      if explicit_selection
+        args << selection_options.map { normalize_list_option(_1) }
+      end
+      normalized_return_options = nil
+      unless return_options.nil?
+        normalized_return_options = normalize_list_return_options(return_options)
+        args.concat(["RETURN", normalized_return_options])
+      end
+      [args, list_status_attributes(normalized_return_options)]
+    end
+
+    def normalize_list_option(option)
+      case option
+      when Flag then option.data.to_s
+      when Symbol then option.to_s
+      when Array  then option.map { normalize_list_option(_1) }
+      else             option
+      end
+    end
+
+    def normalize_list_return_options(options)
+      options =
+        case options
+        when Array then options
+        when Hash  then options.map {|name, attrs| [name.to_s.upcase, attrs] }
+        else
+          Array.try_convert(options) or
+            raise TypeError, "expected return options to be Array or Hash, " \
+                             "got #{options.class}"
+        end
+      options.each_with_object([]) do |option, result|
+        case option
+        when Hash
+          result.concat(option.map { |name, attrs|
+            name = name.to_s.upcase
+            values = Array(attrs)
+            values.map! { normalize_list_option(_1) }
+            values.map! { String(_1).upcase } if name == "STATUS"
+            values.empty? ? name : [name, values]
+          })
+        when Symbol
+          result << option.to_s
+        when Array
+          name, *values = option
+          if name.to_s.upcase == "STATUS"
+            unless values.size == 1 && Array.try_convert(values.first)
+              raise TypeError, "STATUS return option requires an array of attributes"
+            end
+            values = [values.first.map { String(_1).upcase }]
+          end
+          unless values.empty? || values.size == 1
+            raise ArgumentError, "invalid LIST return option: #{option.inspect}"
+          end
+          result << [name.to_s.upcase, *values.map { normalize_list_option(_1) }]
+        else
+          result << option
+        end
+      end
+    end
+
+    def list_status_attributes(return_options)
+      return [] if return_options.nil?
+      return_options.flat_map do |option|
+        case option
+        in ["STATUS", attrs]
+          Array.try_convert(attrs) or
+            raise TypeError, "expected STATUS attributes to be Array, got #{attrs.class}"
+          attrs.map { normalize_list_option(_1) }.map { String(_1).upcase }
+        else
+          []
+        end
+      end
+    end
+
+    def list_extended_result(args, status_attributes)
+      send_command("LIST", *args)
+      mailboxes = clear_responses("LIST")
+      return MailboxListResult.new(mailboxes:) if status_attributes.empty?
+      mailbox_identities = mailboxes.map { mailbox_identity(_1.name) }
+      status_data = extract_responses("STATUS") do |response|
+        mailbox_identities.include?(mailbox_identity(response.mailbox))
+      end
+      status_by_mailbox = status_data.group_by { mailbox_identity(_1.mailbox) }
+      status = mailboxes.to_h do |mailbox|
+        attrs = status_by_mailbox[mailbox_identity(mailbox.name)]&.last&.attr || {}
+        attrs = attrs.dup
+        status_attributes.each { attrs[_1] = nil unless attrs.key?(_1) }
+        [mailbox.name, attrs]
+      end
+      MailboxListResult[mailboxes:, status:]
+    end
+
+    def mailbox_identity(mailbox)
+      mailbox.casecmp?("INBOX") ? "inbox" : mailbox
     end
 
     def convert_return_opts(unconverted)
