@@ -9,6 +9,7 @@ Compatibility:
 
 Features:
 
+* Add Mail::PartialMessageCollector, an in-memory reassembler for RFC 2046 message/partial fragments
 * Updated README to improve around sending multipart mail @kapfenho
 * Add delivery_interceptors method to Mail class to fetch registered interceptors @ghousemohamed
 
