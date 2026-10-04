@@ -101,6 +101,7 @@
     ],
     "Other": [
       "plugins/atomic_helpers",
+      "plugins/attachment_group_commit",
       "plugins/included",
       "plugins/instrumentation",
       "plugins/fallback_storage",
