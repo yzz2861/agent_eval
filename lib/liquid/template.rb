@@ -164,11 +164,13 @@ module Liquid
       end
 
       output = nil
+      use_bytecode = false
 
       case args.last
       when Hash
         options = args.pop
         output  = options[:output] if options[:output]
+        use_bytecode = options[:bytecode] if options.key?(:bytecode)
         static_registers = context.registers.static
 
         options[:registers]&.each do |key, register|
@@ -194,7 +196,11 @@ module Liquid
 
       begin
         # render the nodelist.
-        @root.render_to_output_buffer(context, output || +'')
+        if use_bytecode
+          Liquid::Bytecode.render(bytecode_program, context, output || +'')
+        else
+          @root.render_to_output_buffer(context, output || +'')
+        end
       rescue Liquid::MemoryError => e
         context.handle_error(e)
       ensure
@@ -214,6 +220,40 @@ module Liquid
 
     def render_to_output_buffer(context, output)
       render(context, output: output)
+    end
+
+    # Compiles the parsed template into the experimental bytecode
+    # representation. Raises Liquid::Bytecode::Compiler::UnsupportedTagError if
+    # the template uses a tag the bytecode VM cannot execute. The compiled
+    # Program is reusable across renders and exposes #disassemble for debugging.
+    def compile_bytecode
+      @bytecode_program = Liquid::Bytecode.compile(@root)
+    end
+
+    # Returns the cached bytecode Program, compiling it on first use.
+    def bytecode_program
+      @bytecode_program ||= compile_bytecode
+    end
+
+    # Renders through the experimental bytecode VM. Accepts the same arguments
+    # and options as #render; compilation happens lazily on first call and is
+    # cached on the template.
+    def render_bytecode(*args)
+      options = args.last.is_a?(Hash) ? args.pop.dup : {}
+      render(*args, options.merge(bytecode: true))
+    end
+
+    # Like #render_bytecode but raises errors instead of rendering them.
+    def render_bytecode!(*args)
+      options = args.last.is_a?(Hash) ? args.pop.dup : {}
+      @rethrow_errors = true
+      render_bytecode(*args, options)
+    end
+
+    # Returns a human readable disassembly of the compiled bytecode program,
+    # compiling the template first if necessary.
+    def disassemble_bytecode
+      bytecode_program.disassemble
     end
 
     private

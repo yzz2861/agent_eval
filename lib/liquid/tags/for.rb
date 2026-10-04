@@ -29,6 +29,26 @@ module Liquid
 
     attr_reader :collection_name, :variable_name, :limit, :from
 
+    # @api private
+    def reversed?
+      @reversed
+    end
+
+    # @api private
+    def iteration_name
+      @name
+    end
+
+    # @api private
+    def for_block
+      @for_block
+    end
+
+    # @api private
+    def else_block
+      @else_block
+    end
+
     def initialize(tag_name, markup, options)
       super
       @from = @limit = nil
