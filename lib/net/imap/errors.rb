@@ -17,6 +17,35 @@ module Net
     class DataFormatError < Error
     end
 
+    # Error raised when the server does not support a required capability,
+    # or when capability negotiation with the server fails.
+    class CapabilityError < Error
+    end
+
+    # Error raised when the +UIDVALIDITY+ returned by the server does not
+    # match the +UIDVALIDITY+ stored by the client.
+    #
+    # When +UIDVALIDITY+ changes, all previously known UIDs are invalid:
+    # deletions that were reported against the old +UIDVALIDITY+ must not be
+    # applied to the new mailbox state.  The client must discard its local
+    # cache for the mailbox and rebuild it from scratch.
+    class UIDValidityMismatchError < Error
+      # The mailbox for which the mismatch was detected.
+      attr_reader :mailbox
+
+      # The +UIDVALIDITY+ stored by the client, as an Integer.
+      attr_reader :expected
+
+      # The +UIDVALIDITY+ returned by the server, as an Integer.
+      attr_reader :actual
+
+      def initialize(mailbox = nil, expected: nil, actual: nil)
+        @mailbox, @expected, @actual = mailbox, expected, actual
+        fmt = "UIDVALIDITY changed for %s (%p => %p): cached UIDs are invalid and the mailbox must be rebuilt"
+        super(format(fmt, mailbox.inspect, expected, actual))
+      end
+    end
+
     # Error raised when the socket cannot be read, due to a Config limit.
     class ResponseReadError < Error
     end

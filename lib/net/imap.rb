@@ -1821,15 +1821,30 @@ module Net
     # the +condstore+ keyword parameter may be used.
     #   imap.select("mbox", condstore: true)
     #   modseq = imap.responses("HIGHESTMODSEQ", &:last)
-    def select(mailbox, condstore: false)
-      args = ["SELECT", mailbox]
-      args << ["CONDSTORE"] if condstore
-      synchronize do
-        state_unselected! # implicitly closes current mailbox
-        @responses.clear
-        send_command(*args)
-          .tap do state_selected! end
-      end
+    #
+    # If [QRESYNC[https://www.rfc-editor.org/rfc/rfc7162.html]] is supported,
+    # the +qresync+ keyword parameter may be used to quickly resynchronize a
+    # previously cached mailbox.  Its value must be a hash with the client's
+    # stored +:uidvalidity+ and +:highest_modseq+, and optionally the
+    # +:known_uids+ sequence-set of cached UIDs:
+    #   result = imap.select("mbox", qresync: {
+    #     uidvalidity: 3857529045, highest_modseq: 982, known_uids: "1:100",
+    #   })
+    #   result.vanished_earlier #=> UIDs deleted since the last sync
+    #
+    # When +qresync+ is used, a QResyncResult is returned instead of the
+    # TaggedResponse.  +QRESYNC+ is enabled automatically when needed.  When
+    # the server does not support +QRESYNC+ or negotiation fails,
+    # +on_unsupported+ chooses the behavior: <tt>:raise</tt> (the default)
+    # raises CapabilityError, and <tt>:degrade</tt> falls back to a plain
+    # select.
+    #
+    # If the server's +UIDVALIDITY+ differs from the stored +:uidvalidity+,
+    # UIDValidityMismatchError is raised: the old UIDs and the new mailbox
+    # state must never be mixed, and the local cache must be rebuilt.
+    def select(mailbox, condstore: false, qresync: nil, on_unsupported: :raise)
+      select_internal("SELECT", mailbox, condstore: condstore,
+                      qresync: qresync, on_unsupported: on_unsupported)
     end
 
     # Sends a {EXAMINE command [IMAP4rev1 §6.3.2]}[https://www.rfc-editor.org/rfc/rfc3501#section-6.3.2]
@@ -1841,15 +1856,14 @@ module Net
     # exist or is for some reason non-examinable.
     #
     # Related: #select
-    def examine(mailbox, condstore: false)
-      args = ["EXAMINE", mailbox]
-      args << ["CONDSTORE"] if condstore
-      synchronize do
-        state_unselected! # implicitly closes current mailbox
-        @responses.clear
-        send_command(*args)
-          .tap do state_selected! end
-      end
+    #
+    # ==== Capabilities
+    #
+    # Supports the same +condstore+, +qresync+, and +on_unsupported+ keyword
+    # arguments as #select.
+    def examine(mailbox, condstore: false, qresync: nil, on_unsupported: :raise)
+      select_internal("EXAMINE", mailbox, condstore: condstore,
+                      qresync: qresync, on_unsupported: on_unsupported)
     end
 
     # Sends a {CREATE command [IMAP4rev1 §6.3.3]}[https://www.rfc-editor.org/rfc/rfc3501#section-6.3.3]
@@ -3242,14 +3256,15 @@ module Net
     #
     # [+QRESYNC+ {[RFC7162]}[https://www.rfc-editor.org/rfc/rfc7162.html]]
     #   *NOTE:* Enabling QRESYNC will replace +EXPUNGE+ with +VANISHED+, but
-    #   the extension arguments to #select, #examine, and #uid_fetch are not
-    #   supported yet.
+    #   the <tt>vanished: true</tt> argument to #uid_fetch is not supported
+    #   yet.
     #
     #   Adds quick resynchronization options to #select, #examine, and
-    #   #uid_fetch.  +QRESYNC+ _must_ be explicitly enabled before using any of
-    #   the extension's command parameters.  All +EXPUNGE+ responses will be
-    #   replaced with +VANISHED+ responses.  Enabling +QRESYNC+ implicitly
-    #   enables +CONDSTORE+ as well.
+    #   #uid_fetch.  +QRESYNC+ _must_ be explicitly enabled before using any
+    #   of the extension's command parameters (the +qresync+ argument to
+    #   #select and #examine enables it automatically).  All +EXPUNGE+
+    #   responses will be replaced with +VANISHED+ responses.  Enabling
+    #   +QRESYNC+ implicitly enables +CONDSTORE+ as well.
     #   See {[RFC7162 §3.2]}[https://www.rfc-editor.org/rfc/rfc7162.html#section-3.2].
     #
     # [+:utf8+ --- an alias for <tt>"UTF8=ACCEPT"</tt>]
@@ -3940,6 +3955,100 @@ module Net
 
     def enforce_logindisabled?
       may_depend_on_capabilities_cached?(config.enforce_logindisabled)
+    end
+
+    def select_internal(cmd, mailbox, condstore:, qresync:, on_unsupported:)
+      synchronize do
+        state_unselected! # implicitly closes current mailbox
+        stored_uidvalidity = nil
+        args = [cmd, mailbox]
+        args << ["CONDSTORE"] if condstore
+        if qresync
+          qresync_args = qresync_select_params(**qresync.to_h)
+          stored_uidvalidity = qresync_args.first
+          qresync_used = negotiate_qresync(on_unsupported)
+          args << ["QRESYNC", qresync_args] if qresync_used
+        end
+        @responses.clear
+        response = send_command(*args).tap { state_selected! }
+        if qresync
+          qresync_result(mailbox, stored_uidvalidity, qresync_used)
+        else
+          response
+        end
+      end
+    end
+
+    # Returns the QRESYNC select parameters list:
+    # [uidvalidity, highest_modseq, known_uids]
+    def qresync_select_params(uidvalidity:, highest_modseq:, known_uids: nil)
+      params = [Integer(uidvalidity), Integer(highest_modseq)]
+      if known_uids && !(known_uids = SequenceSet[known_uids]).empty?
+        params << known_uids
+      end
+      params
+    end
+
+    # Returns true when QRESYNC can be used, enabling it when needed.  When
+    # the server doesn't support QRESYNC or negotiation fails, +on_unsupported+
+    # chooses between raising CapabilityError (+:raise+) or degrading to a
+    # plain select (+:degrade+).
+    def negotiate_qresync(on_unsupported)
+      error =
+        if !capable?("QRESYNC")
+          "server does not support the QRESYNC capability"
+        elsif enabled?("QRESYNC")
+          nil
+        else
+          begin
+            enable("QRESYNC")
+            unless enabled?("QRESYNC")
+              "server did not confirm QRESYNC in its ENABLED response"
+            end
+          rescue ResponseError => err
+            "server refused to ENABLE QRESYNC: #{err.message}"
+          end
+        end
+      return true unless error
+      case on_unsupported
+      when :raise   then raise CapabilityError, error
+      when :degrade then false
+      else
+        raise ArgumentError,
+              "invalid on_unsupported: %p (expected :raise or :degrade)" % [
+                on_unsupported,
+              ]
+      end
+    end
+
+    # Builds the QResyncResult for a SELECT or EXAMINE with +qresync+.
+    #
+    # Raises UIDValidityMismatchError when the server's UIDVALIDITY differs
+    # from the stored value: deletions reported against the old UIDVALIDITY
+    # must never be mixed with the new mailbox state, so the caller is
+    # required to rebuild its local cache.
+    def qresync_result(mailbox, stored_uidvalidity, qresync_used)
+      uidvalidity = responses("UIDVALIDITY").last
+      if stored_uidvalidity && uidvalidity && uidvalidity != stored_uidvalidity
+        raise UIDValidityMismatchError.new(
+          mailbox, expected: stored_uidvalidity, actual: uidvalidity
+        )
+      end
+      vanished = responses("VANISHED").partition(&:earlier?)
+      QResyncResult.new(
+        mailbox:          mailbox,
+        qresync:          qresync_used,
+        uidvalidity:      uidvalidity,
+        highest_modseq:   responses("HIGHESTMODSEQ").last,
+        vanished_earlier: merge_vanished_uids(vanished.first),
+        vanished:         merge_vanished_uids(vanished.last),
+        expunged:         responses("EXPUNGE"),
+      )
+    end
+
+    def merge_vanished_uids(vanished_array)
+      sets = vanished_array.map(&:uids)
+      sets.empty? ? SequenceSet.empty : SequenceSet[*sets]
     end
 
     def may_depend_on_capabilities_cached?(value)
