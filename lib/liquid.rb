@@ -58,6 +58,7 @@ require 'liquid/parser_switching'
 require 'liquid/tag'
 require 'liquid/block'
 require 'liquid/parse_tree_visitor'
+require 'liquid/static_variable_analyzer'
 require 'liquid/interrupts'
 require 'liquid/tags'
 require "liquid/environment"

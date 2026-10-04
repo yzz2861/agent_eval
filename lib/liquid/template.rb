@@ -216,6 +216,17 @@ module Liquid
       render(context, output: output)
     end
 
+    # Statically reports external variable reads without rendering the template,
+    # invoking filters/Drops, or loading rendered snippets.
+    def variable_references(render_resolver: nil, render_dependency_resolver: render_resolver)
+      StaticVariableAnalyzer.analyze(
+        self,
+        render_dependency_resolver: render_dependency_resolver,
+      )
+    end
+
+    alias_method :static_variable_references, :variable_references
+
     private
 
     def configure_options(options)
