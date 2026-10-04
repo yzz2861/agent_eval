@@ -69,6 +69,10 @@ module Zip
     # default -> true.
     attr_accessor :restore_times
 
+    # The ::Zip::EntryNameAuditor::Report produced when the archive was
+    # opened with a +name_audit+ mode other than +:off+ (+nil+ otherwise).
+    attr_reader :name_audit_report
+
     def_delegators :@cdir, :comment, :comment=, :each, :entries, :glob, :size
 
     # Opens a zip archive. Pass create: true to create
@@ -78,13 +82,21 @@ module Zip
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                    compression_level: ::Zip.default_compression,
-                   suppress_extra_fields: false)
+                   suppress_extra_fields: false,
+                   name_audit: :off)
       super()
+
+      unless ::Zip::EntryNameAuditor::MODES.include?(name_audit)
+        raise ::Zip::Error, "Unknown name audit mode: #{name_audit.inspect}. " \
+                            'Expected one of: ' \
+                            "#{::Zip::EntryNameAuditor::MODES.map(&:inspect).join(', ')}."
+      end
 
       @name    = path_or_io.respond_to?(:path) ? path_or_io.path : path_or_io
       @create  = create ? true : false # allow any truthy value to mean true
 
       initialize_cdir(path_or_io, buffer: buffer)
+      audit_entry_names(path_or_io, name_audit)
 
       @restore_ownership     = restore_ownership
       @restore_permissions   = restore_permissions
@@ -97,18 +109,28 @@ module Zip
       # Similar to ::new. If a block is passed the Zip::File object is passed
       # to the block and is automatically closed afterwards, just as with
       # ruby's builtin File::open method.
+      #
+      # Pass +name_audit: :lenient+ to audit the entry names recorded in
+      # the local headers, the central directory and any Unicode Path extra
+      # fields (see ::Zip::EntryNameAuditor) while reading as normal; the
+      # resulting report is available via #name_audit_report. Pass
+      # +name_audit: :strict+ to instead raise ::Zip::NameAmbiguityError
+      # when any inconsistency is found. The default, +:off+, skips the
+      # audit entirely.
       def open(file_name, create: false,
                restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                compression_level: ::Zip.default_compression,
-               suppress_extra_fields: false)
+               suppress_extra_fields: false,
+               name_audit: :off)
         zf = ::Zip::File.new(file_name, create:                create,
                                         restore_ownership:     restore_ownership,
                                         restore_permissions:   restore_permissions,
                                         restore_times:         restore_times,
                                         compression_level:     compression_level,
-                                        suppress_extra_fields: suppress_extra_fields)
+                                        suppress_extra_fields: suppress_extra_fields,
+                                        name_audit:            name_audit)
 
         return zf unless block_given?
 
@@ -128,7 +150,8 @@ module Zip
                       restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                       restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                       compression_level: ::Zip.default_compression,
-                      suppress_extra_fields: false)
+                      suppress_extra_fields: false,
+                      name_audit: :off)
         unless IO_METHODS.map { |method| io.respond_to?(method) }.all? || io.kind_of?(String)
           raise 'Zip::File.open_buffer expects a String or IO-like argument' \
                 "(responds to #{IO_METHODS.join(', ')}). Found: #{io.class}"
@@ -141,7 +164,8 @@ module Zip
                                  restore_permissions:   restore_permissions,
                                  restore_times:         restore_times,
                                  compression_level:     compression_level,
-                                 suppress_extra_fields: suppress_extra_fields)
+                                 suppress_extra_fields: suppress_extra_fields,
+                                 name_audit:            name_audit)
 
         return zf unless block_given?
 
@@ -512,6 +536,24 @@ module Zip
           warn "WARNING: skipped '#{src_path}' - not a regular file or directory."
         end
       end
+    end
+
+    # Audits the entry names of an existing archive when a +name_audit+
+    # mode other than +:off+ was requested. In +:strict+ mode this raises
+    # ::Zip::NameAmbiguityError if any ambiguity is found, rather than
+    # silently trusting the central directory names; in +:lenient+ mode
+    # the report is simply made available via #name_audit_report and
+    # reading proceeds exactly as before.
+    def audit_entry_names(path_or_io, mode)
+      return if mode == :off || @create
+
+      @name_audit_report =
+        if path_or_io.respond_to?(:read)
+          ::Zip::EntryNameAuditor.audit(path_or_io)
+        else
+          ::File.open(@name, 'rb') { |file| ::Zip::EntryNameAuditor.audit(file) }
+        end
+      @name_audit_report.strict! if mode == :strict
     end
 
     def initialize_cdir(path_or_io, buffer: false)

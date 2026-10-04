@@ -134,6 +134,27 @@ module Zip
     end
   end
 
+  # Error raised, in strict name-audit mode, when the names recorded for an
+  # entry in the local header, the central directory and/or the Unicode Path
+  # extra field disagree with each other (or cannot be trusted), so that
+  # picking any one of them silently would be ambiguous.
+  class NameAmbiguityError < Error
+    # The array of issue messages that caused this error.
+    attr_reader :issues
+
+    # Create a new NameAmbiguityError with the list of audit issues found.
+    def initialize(issues)
+      super()
+      @issues = issues
+    end
+
+    # The message returned by this error.
+    def message
+      "Ambiguous entry names found while auditing this archive:\n" \
+        "  - #{@issues.join("\n  - ")}"
+    end
+  end
+
   # Error raised if there is not enough metadata for the entry to be streamed.
   class StreamingError < Error
     # The entry that has caused this error.
