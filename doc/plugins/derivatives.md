@@ -437,6 +437,80 @@ Attacher.derivatives :my_processor, download: false do |source|
 end
 ```
 
+## Incremental rebuilds
+
+When an original is first converted into an intermediate format and then into
+multiple final specifications, processors can be wired together as a graph and
+rebuilt incrementally. Register each processor with an explicit recipe
+`version:` and declare the derivative nodes it consumes with `depends_on:`.
+
+```rb
+Attacher.derivatives :intermediate, version: 1 do |original|
+  { intermediate: StringIO.new(original.read.upcase) }
+end
+
+Attacher.derivatives :small, version: 1, depends_on: :intermediate do |original, intermediate:|
+  { small: StringIO.new(intermediate.read.reverse) }
+end
+
+Attacher.derivatives :large, version: 1, depends_on: :intermediate do |original, intermediate:|
+  { large: StringIO.new(intermediate.read + "!") }
+end
+```
+
+`Attacher#rebuild_derivatives` computes the rebuild set from (1) the identity
+of the attached file, (2) each processor's recipe version, and (3) whether any
+of its dependency nodes was rebuilt. Only the affected processors run; their
+dependency files are passed as keyword arguments and producers are always
+processed before consumers.
+
+```rb
+attacher.rebuild_derivatives        # builds :intermediate, :small, :large
+attacher.rebuild_derivatives        # nothing is up to date => runs nothing
+
+# a new original rebuilds the whole chain
+attacher.attach(new_original)
+attacher.rebuild_derivatives        #=> runs :intermediate, :small, :large
+
+# bumping only :small rebuilds just that node; :intermediate is reused
+Attacher.derivatives :small, version: 2, depends_on: :intermediate do |original, intermediate:|
+  { small: StringIO.new(intermediate.read + " v2") }
+end
+attacher.rebuild_derivatives        #=> runs :small only
+```
+
+Pass processor names to limit the rebuild set (their dependency producers are
+still pulled in when needed):
+
+```rb
+attacher.rebuild_derivatives(:large)
+```
+
+Nested nodes are declared with path arrays and passed under a keyword built by
+joining the segments with underscores:
+
+```rb
+Attacher.derivatives :web, version: 1, depends_on: [[:thumbnails, :large]] do |original, thumbnails_large:|
+  # ...
+end
+```
+
+The rebuild is published atomically: until every new output has been uploaded
+successfully, the previously published derivatives remain available and are
+what readers see. If processing or uploading fails midway, files produced by
+the failed run are cleaned up, while the old derivative references are left
+untouched.
+
+The build metadata (source identity, recipe versions and produced nodes) is
+stored alongside the attachment data as `derivation_manifest`, so rebuild
+scoping also works after the record is reloaded. Processor options can be
+forwarded as keyword arguments, and `storage:` changes where the new outputs
+are uploaded:
+
+```rb
+attacher.rebuild_derivatives(:small, suffix: "?", storage: :other_store)
+```
+
 ## Adding derivatives
 
 If you already have processed files that you want to save, you can do that with

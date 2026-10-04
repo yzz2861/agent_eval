@@ -562,6 +562,319 @@ describe Shrine::Plugins::Derivatives do
       end
     end
 
+    describe "#rebuild_derivatives" do
+      run_log = []
+
+      before do
+        run_log.clear
+        @shrine.derivatives_options[:processors].clear
+        @shrine.derivatives_options[:processor_settings].clear
+
+        @shrine::Attacher.derivatives :middle, version: 1 do |original|
+          run_log << :middle
+          { middle: StringIO.new(original.read.upcase) }
+        end
+
+        @shrine::Attacher.derivatives :final, version: 1, depends_on: :middle do |original, middle:|
+          run_log << :final
+          { final: StringIO.new(middle.read.reverse) }
+        end
+      end
+
+      it "runs processors in dependency order and passes dependency results" do
+        @attacher.attach fakeio("hello")
+
+        @attacher.rebuild_derivatives
+
+        assert_equal [:middle, :final], run_log
+        assert_equal "HELLO", @attacher.derivatives[:middle].read
+        assert_equal "OLLEH", @attacher.derivatives[:final].read
+      end
+
+      it "runs every registered processor when no names are given" do
+        @shrine::Attacher.derivatives :other, version: 1 do |original|
+          run_log << :other
+          { other: StringIO.new("x") }
+        end
+
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        assert_includes run_log, :middle
+        assert_includes run_log, :final
+        assert_includes run_log, :other
+      end
+
+      it "skips processors that are already up to date" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        run_log.clear
+        result = @attacher.rebuild_derivatives
+
+        assert_equal [], run_log
+        assert_equal({}, result)
+      end
+
+      it "rebuilds only consumers when the source stays the same but a recipe version changes" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        middle_id = @attacher.derivatives[:middle].id
+        run_log.clear
+
+        @shrine::Attacher.derivatives :final, version: 2, depends_on: :middle do |original, middle:|
+          run_log << :final
+          { final: StringIO.new(middle.read + "!") }
+        end
+
+        result = @attacher.rebuild_derivatives
+
+        assert_equal [:final], run_log
+        assert_equal [:final], result.keys
+        assert_equal middle_id, @attacher.derivatives[:middle].id
+        assert_equal "HELLO!", @attacher.derivatives[:final].read
+      end
+
+      it "rebuilds consumers when a dependency recipe version changes" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+        run_log.clear
+
+        @shrine::Attacher.derivatives :middle, version: 2 do |original|
+          run_log << :middle
+          { middle: StringIO.new(original.read.upcase + "?") }
+        end
+
+        @attacher.rebuild_derivatives
+
+        assert_equal [:middle, :final], run_log
+        assert_equal "?OLLEH", @attacher.derivatives[:final].read
+      end
+
+      it "rebuilds the whole chain when the source identity changes" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+        run_log.clear
+
+        @attacher.attach fakeio("world")
+        @attacher.rebuild_derivatives
+
+        assert_equal [:middle, :final], run_log
+        assert_equal "WORLD", @attacher.derivatives[:middle].read
+        assert_equal "DLROW", @attacher.derivatives[:final].read
+      end
+
+      it "limits the rebuild set to requested processors and their dependencies" do
+        @shrine::Attacher.derivatives :other, version: 1 do |original|
+          run_log << :other
+          { other: StringIO.new("x") }
+        end
+
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+        run_log.clear
+
+        @shrine::Attacher.derivatives :final, version: 2, depends_on: :middle do |original, middle:|
+          run_log << :final
+          { final: StringIO.new("x") }
+        end
+
+        result = @attacher.rebuild_derivatives(:final)
+
+        assert_equal [:final], run_log
+        assert_equal [:final], result.keys
+      end
+
+      it "fails on cyclic processor dependencies" do
+        @shrine::Attacher.derivatives :middle, version: 2, depends_on: :final do |original, final:|
+          { middle: StringIO.new("x") }
+        end
+
+        @attacher.attach fakeio("abc")
+
+        error = assert_raises(Shrine::Error) { @attacher.rebuild_derivatives }
+        assert_match(/cyclic dependency|cannot resolve/, error.message)
+      end
+
+      it "accepts multiple dependencies declared as an array" do
+        run_log.clear
+
+        @shrine::Attacher.derivatives :left, version: 1, depends_on: :middle do |original, middle:|
+          run_log << :left
+          { left: StringIO.new(middle.read + "L") }
+        end
+
+        @shrine::Attacher.derivatives :right, version: 1, depends_on: :middle do |original, middle:|
+          run_log << :right
+          { right: StringIO.new(middle.read + "R") }
+        end
+
+        @shrine::Attacher.derivatives :combined, version: 1, depends_on: [[:left], [:right]] do |original, left:, right:|
+          run_log << :combined
+          { combined: StringIO.new("#{left.read}+#{right.read}") }
+        end
+
+        @attacher.attach fakeio("abc")
+        @attacher.rebuild_derivatives(:combined)
+
+        assert_equal :combined, run_log.last
+        assert_equal "ABCL+ABCR", @attacher.derivatives[:combined].read
+        assert run_log.index(:middle) < run_log.index(:left)
+        assert run_log.index(:middle) < run_log.index(:right)
+      end
+
+      it "keeps the old derivatives published until the whole rebuild set is ready" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        attacher  = @attacher
+        observed = []
+        @shrine::Attacher.derivatives :final, version: 2, depends_on: :middle do |original, middle:|
+          observed << attacher.derivatives[:final].read
+          { final: StringIO.new("new") }
+        end
+
+        @attacher.rebuild_derivatives
+
+        assert_equal ["OLLEH"], observed
+        assert_equal "new", @attacher.derivatives[:final].read
+      end
+
+      it "preserves old derivative references when processing fails" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        old_middle = @attacher.derivatives[:middle]
+        old_final  = @attacher.derivatives[:final]
+
+        @shrine::Attacher.derivatives :middle, version: 2 do |original|
+          { middle: StringIO.new("new-middle") }
+        end
+
+        @shrine::Attacher.derivatives :final, version: 2, depends_on: :middle do |original, middle:|
+          raise "processing failed"
+        end
+
+        error = assert_raises(RuntimeError) { @attacher.rebuild_derivatives }
+        assert_equal "processing failed", error.message
+
+        assert_equal old_middle, @attacher.derivatives[:middle]
+        assert_equal old_final, @attacher.derivatives[:final]
+        assert_equal "OLLEH", @attacher.derivatives[:final].read
+      end
+
+      it "deletes files uploaded during a failed run but keeps old files in storage" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        old_middle_id = @attacher.derivatives[:middle].id
+        old_final_id  = @attacher.derivatives[:final].id
+        stored_ids    = @shrine.storages[:store].store.keys
+
+        @shrine::Attacher.derivatives :middle, version: 2 do |original|
+          { middle: StringIO.new("new-middle") }
+        end
+
+        @shrine::Attacher.derivatives :final, version: 2, depends_on: :middle do |original, middle:|
+          raise "processing failed"
+        end
+
+        assert_raises(RuntimeError) { @attacher.rebuild_derivatives }
+
+        remaining_ids = @shrine.storages[:store].store.keys
+        assert_includes remaining_ids, old_middle_id
+        assert_includes remaining_ids, old_final_id
+        assert_equal stored_ids.sort, remaining_ids.sort
+      end
+
+      it "keeps old references when uploading the new results fails" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        old_final = @attacher.derivatives[:final]
+
+        @shrine::Attacher.derivatives :final, version: 2, depends_on: :middle do |original, middle:|
+          { final: StringIO.new("new") }
+        end
+
+        @shrine.storages[:store].stubs(:upload).raises(RuntimeError, "upload failed")
+
+        assert_raises(RuntimeError) { @attacher.rebuild_derivatives }
+        @shrine.storages[:store].unstub(:upload)
+
+        assert_equal old_final, @attacher.derivatives[:final]
+        assert_equal "OLLEH", @attacher.derivatives[:final].read
+      end
+
+      it "replaces outputs that are no longer produced by the new recipe" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        @shrine::Attacher.derivatives :final, version: 2, depends_on: :middle do |original, middle:|
+          { alternate: StringIO.new(middle.read + "!") }
+        end
+
+        @attacher.rebuild_derivatives
+
+        refute @attacher.derivatives.key?(:final)
+        assert_equal "HELLO!", @attacher.derivatives[:alternate].read
+      end
+
+      it "persists the manifest and skips up-to-date processors after a reload" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        reloaded = @shrine::Attacher.from_data(@attacher.data)
+
+        run_log.clear
+        reloaded.rebuild_derivatives
+
+        assert_equal [], run_log
+        assert_equal "HELLO", reloaded.derivatives[:middle].read
+      end
+
+      it "fails when the requested processor is not registered" do
+        @attacher.attach fakeio("hello")
+
+        error = assert_raises(Shrine::Error) { @attacher.rebuild_derivatives(:unknown) }
+        assert_match(/not registered/, error.message)
+      end
+
+      it "fails when a dependency node cannot be resolved" do
+        @shrine::Attacher.derivatives :final, version: 2, depends_on: :missing do |original, missing:|
+          { final: StringIO.new("x") }
+        end
+
+        @attacher.attach fakeio("hello")
+
+        error = assert_raises(Shrine::Error) { @attacher.rebuild_derivatives(:final) }
+        assert_match(/not found/, error.message)
+      end
+
+      it "fails without an attached file" do
+        assert_raises(Shrine::Error) { @attacher.rebuild_derivatives }
+      end
+
+      it "forwards processor options to processor blocks" do
+        @shrine::Attacher.derivatives :final, version: 2, depends_on: :middle do |original, middle:, suffix:|
+          { final: StringIO.new(middle.read + suffix) }
+        end
+
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives(:final, suffix: "?")
+
+        assert_equal "HELLO?", @attacher.derivatives[:final].read
+      end
+
+      it "uploads rebuilt derivatives to the given storage" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives(:final, storage: :other_store)
+
+        assert_equal :other_store, @attacher.derivatives[:final].storage_key
+      end
+    end
+
     describe "#add_derivatives" do
       it "uploads given files to permanent storage" do
         @attacher.add_derivatives({ one: fakeio })

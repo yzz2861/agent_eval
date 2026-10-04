@@ -62,10 +62,32 @@ class Shrine
         # This can be useful if you'd like to defer or avoid a possibly
         # expensive download operation for processor logic that does not
         # require it.
-        def derivatives_processor(name = :default, download: true, &block)
+        #
+        # Pass `version:` with an explicit recipe version to participate in
+        # incremental rebuilds performed by `Attacher#rebuild_derivatives`:
+        # changing the version forces this processor and all of its consumers
+        # to be rebuilt.
+        #
+        #     Attacher.derivatives_processor :thumbnail, version: 3 do |original|
+        #       # ...
+        #     end
+        #
+        # Use `depends_on:` to declare derivative nodes produced by other
+        # processors; the corresponding files are passed to the block as
+        # keyword arguments (nested paths joined with underscores) and are
+        # guaranteed to be processed first.
+        #
+        #     Attacher.derivatives_processor :web, version: 1, depends_on: [[:thumbnails, :large]] do |original, thumbnails_large:|
+        #       # ...
+        #     end
+        def derivatives_processor(name = :default, version: nil, depends_on: nil, download: true, &block)
           if block
             shrine_class.derivatives_options[:processors][name.to_sym] = block
-            shrine_class.derivatives_options[:processor_settings][name.to_sym] = { download: download }
+            shrine_class.derivatives_options[:processor_settings][name.to_sym] = {
+              download:    download,
+              version:     version,
+              depends_on:  Array(depends_on).map { |path| Array(path) },
+            }
           else
             shrine_class.derivatives_options[:processors].fetch(name.to_sym) do
               fail Error, "derivatives processor #{name.inspect} not registered" unless name == :default
@@ -108,8 +130,9 @@ class Shrine
         def initialize(derivatives: {}, **options)
           super(**options)
 
-          @derivatives       = derivatives
-          @derivatives_mutex = Mutex.new if shrine_class.derivatives_options[:mutex]
+          @derivatives         = derivatives
+          @derivation_manifest = {}
+          @derivatives_mutex   = Mutex.new if shrine_class.derivatives_options[:mutex]
         end
 
         # Convenience method for accessing derivatives.
@@ -199,6 +222,80 @@ class Shrine
         def create_derivatives(*args, storage: nil, **options)
           files = process_derivatives(*args, **options)
           add_derivatives(files, storage: storage)
+        end
+
+        # Incrementally rebuilds registered derivatives based on the attached
+        # file's identity, each processor's explicit recipe version and the
+        # results of processors it depends on.
+        #
+        #     Attacher.derivatives_processor :intermediate, version: 1 do |original|
+        #       { intermediate: StringIO.new(original.read.upcase) }
+        #     end
+        #
+        #     Attacher.derivatives_processor :derived, version: 1, depends_on: :intermediate do |original, intermediate:|
+        #       { derived: StringIO.new(intermediate.read.reverse) }
+        #     end
+        #
+        #     attacher.rebuild_derivatives
+        #     # rebuilds only :intermediate and :derived if the source changed,
+        #     # only :derived if its recipe version changed, and nothing when
+        #     # everything is still up to date.
+        #
+        # Newly built derivatives replace the old results atomically: until the
+        # whole rebuild set is ready, the previously published derivatives stay
+        # available. If processing fails, files uploaded during the failed run
+        # are cleaned up while the old derivative references are preserved.
+        def rebuild_derivatives(*processor_names, storage: nil, **options)
+          processor_names = processor_names.map(&:to_sym)
+
+          source          = file!
+          source_identity = derivation_source_identity(source)
+
+          runnable = derivation_run_plan(processor_names, source_identity)
+
+          return {} if runnable.empty?
+
+          processed_files  = {}
+          staged_files     = []
+          transient_files  = []
+          processed_entries = {}
+
+          begin
+            source_block = -> (source_file) do
+              run_derivation_processors(
+                runnable, source_file, source_identity, options,
+                processed_entries, processed_files, transient_files
+              )
+            end
+
+            if runnable.any? { |name| self.class.derivatives_processor_settings(name)[:download] }
+              shrine_class.with_file(source) { |file| source_block.call(file) }
+            else
+              source_block.call(source)
+            end
+
+            runnable.each do |name|
+              files = processed_files.fetch(name)
+
+              derivation_leaves(files).each do |_, file|
+                file.rewind if file.respond_to?(:rewind)
+              end
+
+              uploaded = upload_derivatives(files, storage: storage)
+              staged_files.concat(derivation_leaves(uploaded))
+              processed_files[name] = uploaded
+            end
+          rescue => error
+            transient_files.each { |file| File.delete(file.path) if file.respond_to?(:path) && File.exist?(file.path) }
+            staged_files.each(&:delete)
+            raise error
+          end
+
+          transient_files.each { |file| File.delete(file.path) if file.respond_to?(:path) && File.exist?(file.path) }
+
+          publish_derivations(runnable, processed_entries, processed_files)
+
+          runnable.inject({}) { |result, name| result.merge(processed_files.fetch(name)) }
         end
 
         # Uploads given hash of files and adds uploaded files to the
@@ -416,6 +513,11 @@ class Shrine
         def data
           result = super
 
+          if @derivation_manifest.any?
+            result ||= {}
+            result["derivation_manifest"] = serialize_derivation_manifest(@derivation_manifest)
+          end
+
           if derivatives.any?
             result ||= {}
             result["derivatives"] = map_derivative(derivatives, transform_keys: :to_s) do |_, derivative|
@@ -446,6 +548,9 @@ class Shrine
           data ||= {}
           data   = data.dup
 
+          manifest_data = data.delete("derivation_manifest") || data.delete(:derivation_manifest)
+          @derivation_manifest = deserialize_derivation_manifest(manifest_data)
+
           derivatives_data = data.delete("derivatives") || data.delete(:derivatives) || {}
           @derivatives     = shrine_class.derivatives(derivatives_data)
 
@@ -465,7 +570,10 @@ class Shrine
         #     attacher.derivatives #=> { thumb: #<Shrine::UploadedFile> }
         def change(*)
           result = super
-          set_derivatives({}) unless shrine_class.derivatives_options[:keep_derivatives]
+          unless shrine_class.derivatives_options[:keep_derivatives]
+            set_derivatives({})
+            @derivation_manifest = {}
+          end
           result
         end
 
@@ -507,6 +615,296 @@ class Shrine
           end
 
           result
+        end
+
+        # Computes which registered processors have to be rebuilt. A processor
+        # is stale when it has never been run for the current source, when its
+        # recipe version changed, when the source identity changed, or when a
+        # processor producing one of its dependencies is rebuilt. Returns the
+        # stale processors in dependency execution order.
+        def derivation_run_plan(requested_names, source_identity)
+          settings_map = shrine_class.derivatives_options[:processor_settings]
+
+          requested_names = settings_map.keys.select { |name| self.class.derivatives_processor(name) } if requested_names.empty?
+
+          requested_names.each do |name|
+            next if self.class.derivatives_processor(name)
+
+            fail Error, "derivatives processor #{name.inspect} not registered"
+          end
+
+          producers = derivation_dependency_producers
+
+          # expand the rebuild scope with processors that produce dependencies
+          included  = requested_names.dup
+          pending   = requested_names.dup
+
+          until pending.empty?
+            name = pending.shift
+            settings = settings_map[name]
+
+            next unless settings
+
+            settings[:depends_on].each do |dependency|
+              producer = producers[dependency] ||= derivation_infer_producer(dependency, settings_map)
+
+              if producer && !included.include?(producer)
+                included << producer
+                pending   << producer
+              end
+            end
+          end
+
+          stale = included.each_with_object({}) do |name, result|
+            result[name] = derivation_processor_stale?(name, source_identity, settings_map)
+          end
+
+          # a consumer is stale whenever one of its node producers is stale
+          loop do
+            propagated = false
+
+            included.each do |name|
+              next if stale[name]
+
+              consumer_stale = settings_map[name][:depends_on].any? do |dependency|
+                producer = producers[dependency]
+                producer && stale[producer]
+              end
+
+              if consumer_stale
+                stale[name] = true
+                propagated   = true
+              end
+            end
+
+            break unless propagated
+          end
+
+          runnable  = included.select { |name| stale[name] }
+          ordered   = []
+          remaining = runnable.dup
+
+          until remaining.empty?
+            next_batch = remaining.select do |name|
+              settings_map[name][:depends_on].all? do |dependency|
+                producer = producers[dependency]
+                producer.nil? || !runnable.include?(producer) || ordered.include?(producer)
+              end
+            end
+
+            if next_batch.empty?
+              fail Error, "cannot resolve derivatives dependencies for #{remaining.map(&:inspect).join(", ")} (missing producer or cyclic dependency)"
+            end
+
+            ordered.concat(next_batch)
+            remaining -= next_batch
+          end
+
+          ordered
+        end
+
+        # Maps dependency paths to the processors currently known to produce
+        # them, based on stored manifest records.
+        def derivation_dependency_producers
+          producers = {}
+
+          @derivation_manifest.each do |producer, entry|
+            entry[:outputs].each { |path| producers[path] = producer }
+          end
+
+          producers
+        end
+
+        # On the first run there is no stored manifest, so a dependency node is
+        # assumed to be produced by a processor named after its first path
+        # segment when such a processor exists.
+        def derivation_infer_producer(dependency, settings_map)
+          head = dependency.first
+          head if head.is_a?(Symbol) && settings_map.key?(head)
+        end
+
+        # Direct staleness of a single processor, without dependency effects.
+        def derivation_processor_stale?(name, source_identity, settings_map)
+          settings = settings_map[name]
+          entry    = @derivation_manifest[name]
+
+          return true unless entry
+          return true if source_identity.nil? || entry[:source] != source_identity
+          return true if settings[:version] != entry[:version]
+          return true unless settings[:depends_on].map(&:to_s).sort == entry[:depends_on].map(&:to_s).sort
+          return true if settings[:depends_on].any? { |path| derivatives.dig(*path).nil? }
+
+          false
+        end
+
+        # Runs the stale processors in dependency order, resolving dependencies
+        # from previously built results or the currently published derivatives.
+        def run_derivation_processors(order, source, source_identity, options, entries, processed_files, transient_files)
+          order.each do |name|
+            settings = self.class.derivatives_processor_settings(name)
+            dependencies = {}
+            source.rewind if source.respond_to?(:rewind)
+
+            settings[:depends_on].each do |path|
+              file = lookup_processed_derivative(processed_files, path) || derivatives.dig(*path)
+
+              if file.nil?
+                fail Error, "derivatives processor #{name.inspect} depends on #{path.inspect}, but it was not found"
+              end
+
+              file = derivation_with_file(file, transient_files)
+              file.rewind if file.respond_to?(:rewind)
+              dependencies[derivation_dependency_key(path)] = file
+            end
+
+            result = instrument_derivatives(name, source, options) do
+              instance_exec(source, **options, **dependencies, &self.class.derivatives_processor(name))
+            end
+
+            unless result.is_a?(Hash)
+              fail Error, "expected derivatives processor #{name.inspect} to return a Hash, got #{result.inspect}"
+            end
+
+            processed_files[name] = result
+            entries[name] = {
+              version:    settings[:version],
+              source:     source_identity,
+              outputs:    derivation_leaves(result).map(&:first),
+              depends_on: settings[:depends_on],
+            }
+          end
+        end
+
+        # Finds an uploaded or raw derivative produced during the current run.
+        def lookup_processed_derivative(processed_files, path)
+          processed_files.each_value do |files|
+            value = files.dig(*path)
+            return value if value
+          end
+
+          nil
+        end
+
+        # Keyword under which a dependency is passed to the processor block.
+        def derivation_dependency_key(path)
+          key = path.map { |segment| segment.is_a?(Integer) ? "node#{segment}" : segment }.join("_")
+          key.to_sym
+        end
+
+        # Provides each consumer with an independently readable file copy of
+        # the dependency, so multiple consumers (or a later node upload) never
+        # share IO read positions.
+        def derivation_with_file(derivative, transient_files)
+          if derivative.is_a?(Shrine::UploadedFile)
+            file = derivative.download
+          else
+            file = Tempfile.create("shrine-derivative", binmode: true)
+            derivative.rewind if derivative.respond_to?(:rewind)
+            IO.copy_stream(derivative, file.path)
+          end
+
+          file.rewind
+          transient_files << file
+          file
+        end
+
+        # Atomically replaces the rebuilt outputs: old derivatives stay
+        # referenced until every new output has been uploaded successfully.
+        def publish_derivations(order, entries, processed_files)
+          derivatives_synchronize do
+            published = deep_copy_derivatives(derivatives)
+
+            order.each do |name|
+              old_entry = @derivation_manifest[name]
+
+              if old_entry
+                old_entry[:outputs].each do |path|
+                  remove_derivative_at(published, path) unless path.empty?
+                end
+              end
+
+              published = deep_merge_derivatives(published, processed_files.fetch(name))
+            end
+
+            manifest = @derivation_manifest.dup
+            order.each { |name| manifest[name] = entries.fetch(name) }
+            @derivation_manifest = manifest
+
+            set_derivatives(published)
+          end
+        end
+
+        # Stable identity of the source used for incremental rebuilds. Ad-hoc
+        # IOs cannot be identified, which forces a full rebuild.
+        def derivation_source_identity(source)
+          return nil unless source.is_a?(Shrine::UploadedFile)
+
+          "#{source.storage_key}:#{source.id}"
+        end
+
+        # Recursively collects [path, file] pairs from a nested hash/array.
+        def derivation_leaves(object, path = [])
+          case object
+          when Hash
+            object.flat_map { |key, value| derivation_leaves(value, [*path, key]) }
+          when Array
+            object.flat_map.with_index { |value, index| derivation_leaves(value, [*path, index]) }
+          else
+            [[path, object]]
+          end
+        end
+
+        # Removes a value at the given path, cleaning up emptied parents.
+        def remove_derivative_at(object, path)
+          return nil if path.empty?
+
+          parent = path[0..-2].reduce(object) do |collection, key|
+            collection && collection.is_a?(Hash) ? collection[key] : nil
+          end
+
+          return nil unless parent.is_a?(Hash) || parent.is_a?(Array)
+
+          if parent.is_a?(Array) && path[-1].is_a?(Integer)
+            parent.delete_at(path[-1])
+          else
+            parent.delete(path[-1])
+          end
+        end
+
+        # Deep duplicates the structure while keeping UploadedFile references.
+        def deep_copy_derivatives(object)
+          case object
+          when Hash
+            object.transform_values { |value| deep_copy_derivatives(value) }
+          when Array
+            object.map { |value| deep_copy_derivatives(value) }
+          else
+            object
+          end
+        end
+
+        # Produces a JSON-safe representation of the stored manifest.
+        def serialize_derivation_manifest(manifest)
+          manifest.each_with_object({}) do |(name, entry), result|
+            result[name.to_s] = {
+              "version"    => entry[:version],
+              "source"     => entry[:source],
+              "outputs"    => entry[:outputs].map { |path| path.map(&:to_s) },
+              "depends_on" => entry[:depends_on].map { |path| path.map(&:to_s) },
+            }
+          end
+        end
+
+        # Loads a JSON-parsed manifest into symbol keys and paths.
+        def deserialize_derivation_manifest(manifest_data)
+          (manifest_data || {}).each_with_object({}) do |(name, entry), result|
+            result[name.to_sym] = {
+              version:    entry["version"] || entry[:version],
+              source:     entry["source"] || entry[:source],
+              outputs:    (entry["outputs"] || entry[:outputs] || []).map { |path| path.map { |key| key.is_a?(String) ? key.to_sym : key } },
+              depends_on: (entry["depends_on"] || entry[:depends_on] || []).map { |path| path.map { |key| key.is_a?(String) ? key.to_sym : key } },
+            }
+          end
         end
 
         # Sends a `derivatives.shrine` event for instrumentation plugin.
