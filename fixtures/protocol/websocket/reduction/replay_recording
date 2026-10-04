@@ -1,0 +1,64 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Independent replay of a reduced WebSocket session recording.
+#
+# This script never loads the reducer. It:
+#   1. loads the JSON recording,
+#   2. serializes the frames to raw RFC 6455 wire bytes with the production
+#      Framer and parses them straight back (byte-for-byte replay),
+#   3. feeds the resulting session to the user-provided failure judge.
+#
+# Exit codes:
+#   0 - the recorded failure reproduced
+#   1 - the session replayed but the failure did not reproduce
+#   2 - the recording could not be replayed (structural error)
+
+require "json"
+
+require_relative "../../../../lib/protocol/websocket/reduction/recording"
+require_relative "stale_fragment_offset"
+
+module Protocol
+	module WebSocket
+		module Reduction
+			module ReplayRecording
+				def self.call(path)
+					original = Recording.read(path)
+					
+					wire = Recording.to_wire(original)
+					frames = Recording.from_wire(wire)
+					session = Session.new(
+						role: original.role,
+						frames: frames,
+						extensions: original.extensions
+					)
+					
+					warn "role=#{session.role} frames=#{session.frames.length} wire=#{wire.bytesize}B"
+					
+					begin
+						BuggyEndpoint.replay(session)
+					rescue StaleFragmentOffset => error
+						warn "REPRODUCED: #{error.class}: #{error.message}"
+						exit 0
+					end
+					
+					warn "failure did not reproduce"
+					exit 1
+				rescue => error
+					warn "replay error: #{error.class}: #{error.message}"
+					exit 2
+				end
+			end
+		end
+	end
+end
+
+if __FILE__ == $PROGRAM_NAME
+	if ARGV.length != 1
+		warn "usage: replay_recording <session.json>"
+		exit 2
+	end
+	
+	Protocol::WebSocket::Reduction::ReplayRecording.call(ARGV.first)
+end
