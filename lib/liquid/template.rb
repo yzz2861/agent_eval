@@ -20,6 +20,10 @@ module Liquid
 
     attr_reader :profiler
 
+    # The Liquid::SourceMap recorded during the last render, or nil when the
+    # template was not parsed with the :source_map option.
+    attr_reader :source_map
+
     class << self
       # Sets how strict the parser should be.
       # :lax acts like liquid 2.5 and silently ignores malformed tags in most cases.
@@ -187,6 +191,13 @@ module Liquid
         @profiler = context.profiler = Liquid::Profiler.new
       end
 
+      output ||= +''
+
+      previous_source_map = context.source_map if @source_map_enabled
+      if @source_map_enabled && (previous_source_map.nil? || !previous_source_map.tracking?(output))
+        @source_map = context.source_map = Liquid::SourceMap.new(output)
+      end
+
       context.template_name ||= name
 
       previous_error_mode = context.registers.static[:template_error_mode]
@@ -194,10 +205,11 @@ module Liquid
 
       begin
         # render the nodelist.
-        @root.render_to_output_buffer(context, output || +'')
+        @root.render_to_output_buffer(context, output)
       rescue Liquid::MemoryError => e
         context.handle_error(e)
       ensure
+        context.source_map = previous_source_map if @source_map_enabled
         if previous_error_mode
           context.registers.static[:template_error_mode] = previous_error_mode
         else
@@ -223,9 +235,11 @@ module Liquid
         raise "Profiler not loaded, require 'liquid/profiler' first" unless defined?(Liquid::Profiler)
       end
 
-      @options      = options
-      @profiling    = profiling
-      @line_numbers = options[:line_numbers] || @profiling
+      @options            = options
+      @profiling          = profiling
+      @source_map         = nil
+      @source_map_enabled = options[:source_map] ? true : false
+      @line_numbers       = options[:line_numbers] || @profiling || @source_map_enabled
       parse_context = if options.is_a?(ParseContext)
         options
       else

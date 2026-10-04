@@ -19,13 +19,19 @@ module Liquid
       string_scanner:,
       line_numbers: false,
       line_number: nil,
-      for_liquid_tag: false
+      for_liquid_tag: false,
+      track_offsets: false,
+      offset_base: 0
     )
       @line_number = line_number || (line_numbers ? 1 : nil)
       @for_liquid_tag = for_liquid_tag
       @source = source.to_s.to_str
       @offset = 0
       @tokens = []
+      @token_offsets = track_offsets ? [] : nil
+      @offset_base = offset_base
+      @token_start = nil
+      @token_end = nil
 
       if @source
         @ss = string_scanner
@@ -34,10 +40,19 @@ module Liquid
       end
     end
 
+    # Byte offsets (relative to the template source) of the most recently
+    # shifted token. Only populated when offset tracking is enabled.
+    attr_reader :token_start, :token_end
+
     def shift
       token = @tokens[@offset]
 
       return unless token
+
+      if @token_offsets
+        @token_start = @token_offsets[@offset]
+        @token_end = @token_start + token.bytesize
+      end
 
       @offset += 1
 
@@ -53,6 +68,13 @@ module Liquid
     def tokenize
       if @for_liquid_tag
         @tokens = @source.split("\n")
+        if @token_offsets
+          offset = @offset_base
+          @tokens.each do |token|
+            @token_offsets << offset
+            offset += token.bytesize + 1
+          end
+        end
       else
         @tokens << shift_normal until @ss.eos?
       end
@@ -62,9 +84,12 @@ module Liquid
     end
 
     def shift_normal
+      start = @ss.pos if @token_offsets
       token = next_token
 
       return unless token
+
+      @token_offsets << (start + @offset_base) if @token_offsets
 
       token
     end

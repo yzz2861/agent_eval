@@ -48,6 +48,40 @@ class TokenizerTest < Minitest::Test
     assert_equal(["{%%}", "}"], tokenize('{%%}}'))
   end
 
+  def test_token_offsets
+    tokenizer = new_tokenizer('a {{b}} {%c%} d', parse_context: Liquid::ParseContext.new(source_map: true))
+    offsets   = []
+    while tokenizer.send(:shift)
+      offsets << [tokenizer.token_start, tokenizer.token_end]
+    end
+
+    assert_equal(
+      [[0, 2], [2, 7], [7, 8], [8, 13], [13, 15]],
+      offsets,
+    )
+  end
+
+  def test_token_offsets_disabled_by_default
+    tokenizer = new_tokenizer('a {{b}}')
+    tokenizer.send(:shift)
+
+    assert_nil(tokenizer.token_start)
+    assert_nil(tokenizer.token_end)
+  end
+
+  def test_token_offsets_with_offset_base
+    parse_context = Liquid::ParseContext.new(source_map: true)
+    tokenizer     = parse_context.new_tokenizer("a\nb", for_liquid_tag: true, offset_base: 10)
+
+    tokenizer.send(:shift)
+    assert_equal(10, tokenizer.token_start)
+    assert_equal(11, tokenizer.token_end)
+
+    tokenizer.send(:shift)
+    assert_equal(12, tokenizer.token_start)
+    assert_equal(13, tokenizer.token_end)
+  end
+
   private
 
   def new_tokenizer(source, parse_context: Liquid::ParseContext.new, start_line_number: nil)

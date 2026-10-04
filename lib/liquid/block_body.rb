@@ -19,6 +19,11 @@ module Liquid
       @blank    = true
     end
 
+    # Maps text nodes (Strings) to their byte range in the template source.
+    # Only populated when the template is parsed with the :source_map option.
+    # @api private
+    attr_reader :string_source_ranges
+
     def parse(tokenizer, parse_context, &block)
       raise FrozenError, "can't modify frozen Liquid::BlockBody" if frozen?
 
@@ -39,6 +44,8 @@ module Liquid
     private def parse_for_liquid_tag(tokenizer, parse_context)
       while (token = tokenizer.shift)
         unless token.empty? || token.match?(WhitespaceOrNothing)
+          token_start = tokenizer.token_start
+
           unless token =~ LiquidTagToken
             # line isn't empty but didn't match tag syntax, yield and let the
             # caller raise a syntax error
@@ -46,10 +53,12 @@ module Liquid
           end
           tag_name = Regexp.last_match(1)
           markup   = Regexp.last_match(2)
+          tag_offset = (token_start + Regexp.last_match.begin(1)) if token_start
 
           if tag_name == 'liquid'
             parse_context.line_number -= 1
-            next parse_liquid_tag(markup, parse_context)
+            offset_base = token_start ? token_start + Regexp.last_match.begin(2) : 0
+            next parse_liquid_tag(markup, parse_context, offset_base: offset_base)
           end
 
           unless (tag = parse_context.environment.tag_for_name(tag_name))
@@ -58,6 +67,7 @@ module Liquid
             return yield tag_name, markup
           end
           new_tag = tag.parse(tag_name, markup, tokenizer, parse_context)
+          new_tag.source_range = tag_offset...tokenizer.token_end if token_start
           @blank &&= new_tag.blank?
           @nodelist << new_tag
         end
@@ -107,9 +117,12 @@ module Liquid
       end
     end
 
-    private def parse_liquid_tag(markup, parse_context)
+    private def parse_liquid_tag(markup, parse_context, offset_base: 0)
       liquid_tag_tokenizer = parse_context.new_tokenizer(
-        markup, start_line_number: parse_context.line_number, for_liquid_tag: true
+        markup,
+        start_line_number: parse_context.line_number,
+        for_liquid_tag: true,
+        offset_base: offset_base,
       )
       parse_for_liquid_tag(liquid_tag_tokenizer, parse_context) do |end_tag_name, _end_tag_markup|
         if end_tag_name
@@ -129,6 +142,10 @@ module Liquid
     private def parse_for_document(tokenizer, parse_context, &block)
       while (token = tokenizer.shift)
         next if token.empty?
+
+        token_start = tokenizer.token_start
+        token_end   = tokenizer.token_end
+
         case
         when token.start_with?(TAGSTART)
           whitespace_handler(token, parse_context)
@@ -145,7 +162,8 @@ module Liquid
           end
 
           if tag_name == 'liquid'
-            parse_liquid_tag(markup, parse_context)
+            offset_base = token_start ? token_start + Regexp.last_match.begin(4) : 0
+            parse_liquid_tag(markup, parse_context, offset_base: offset_base)
             next
           end
 
@@ -155,17 +173,21 @@ module Liquid
             return yield tag_name, markup
           end
           new_tag = tag.parse(tag_name, markup, tokenizer, parse_context)
+          new_tag.source_range = token_start...tokenizer.token_end if token_start
           @blank &&= new_tag.blank?
           @nodelist << new_tag
         when token.start_with?(VARSTART)
           whitespace_handler(token, parse_context)
-          @nodelist << create_variable(token, parse_context)
+          variable = create_variable(token, parse_context)
+          variable.source_range = token_start...token_end if token_start
+          @nodelist << variable
           @blank = false
         else
           if parse_context.trim_whitespace
             token.lstrip!
           end
           parse_context.trim_whitespace = false
+          record_string_source_range(token, token_start...token_end) if token_start
           @nodelist << token
           @blank &&= token.match?(WhitespaceOrNothing)
         end
@@ -222,6 +244,10 @@ module Liquid
 
       context.resource_limits.increment_render_score(@nodelist.length)
 
+      if (source_map = context.source_map) && source_map.tracking?(output)
+        return render_to_output_buffer_with_source_map(context, output, source_map)
+      end
+
       idx = 0
       while (node = @nodelist[idx])
         if node.instance_of?(String)
@@ -245,6 +271,49 @@ module Liquid
 
     def render_node(context, output, node)
       BlockBody.render_node(context, output, node)
+    end
+
+    # Mirrors #render_to_output_buffer while recording a SourceMap entry for
+    # every rendered node. The output produced is identical to a normal render.
+    def render_to_output_buffer_with_source_map(context, output, source_map)
+      idx = 0
+      while (node = @nodelist[idx])
+        output_start = output.bytesize
+
+        if node.instance_of?(String)
+          output << node
+          source_map.record(context, node, string_source_range(node), output_start, output.bytesize - output_start)
+        else
+          source_map.push_frame(node)
+          begin
+            render_node(context, output, node)
+          ensure
+            source_map.pop_frame
+          end
+          source_map.record(context, node, node_source_range(node), output_start, output.bytesize - output_start)
+          # If we get an Interrupt that means the block must stop processing. An
+          # Interrupt is any command that stops block execution such as {% break %}
+          # or {% continue %}. These tags may also occur through Block or Include tags.
+          break if context.interrupt? # might have happened in a for-block
+        end
+        idx += 1
+
+        context.resource_limits.increment_write_score(output)
+      end
+
+      output
+    end
+
+    def string_source_range(node)
+      @string_source_ranges&.[](node)
+    end
+
+    def node_source_range(node)
+      node.source_range if node.respond_to?(:source_range)
+    end
+
+    def record_string_source_range(token, range)
+      (@string_source_ranges ||= {}.compare_by_identity)[token] = range
     end
 
     def create_variable(token, parse_context)

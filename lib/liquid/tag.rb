@@ -9,6 +9,10 @@ module Liquid
     alias_method :options, :parse_context
     include ParserSwitching
 
+    # Byte range (start...end) of this tag in the template source.
+    # Only populated when the template is parsed with the :source_map option.
+    attr_accessor :source_range
+
     class << self
       def parse(tag_name, markup, tokenizer, parse_context)
         tag = new(tag_name, markup, parse_context)

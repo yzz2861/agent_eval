@@ -32,6 +32,12 @@ module Liquid
       @options[option_key]
     end
 
+    # Whether template nodes should record their byte offsets in the template
+    # source while parsing. Enabled with the :source_map template option.
+    def track_source_ranges?
+      @options[:source_map] ? true : false
+    end
+
     def new_block_body
       Liquid::BlockBody.new
     end
@@ -41,12 +47,14 @@ module Liquid
       Parser.new(@string_scanner, reject_bare_brackets: @error_mode == :strict2 || @error_mode == :rigid)
     end
 
-    def new_tokenizer(source, start_line_number: nil, for_liquid_tag: false)
+    def new_tokenizer(source, start_line_number: nil, for_liquid_tag: false, offset_base: 0)
       Tokenizer.new(
         source: source,
         string_scanner: @string_scanner,
         line_number: start_line_number,
         for_liquid_tag: for_liquid_tag,
+        track_offsets: track_source_ranges?,
+        offset_base: offset_base,
       )
     end
 

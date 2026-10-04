@@ -22,6 +22,10 @@ module Liquid
     attr_reader :parse_context
     alias_method :options, :parse_context
 
+    # Byte range (start...end) of this variable in the template source.
+    # Only populated when the template is parsed with the :source_map option.
+    attr_accessor :source_range
+
     include ParserSwitching
 
     def initialize(markup, parse_context)
