@@ -49,6 +49,10 @@ class HTTP::CookieJar
   # specified store class.  For example, the `:mozilla`
   # (HTTP::CookieJar::MozillaStore) store class requires a `:filename`
   # option.  See individual store classes for details.
+  #
+  # :clock
+  # : A clock object responding to #now and #now_monotonic used as
+  #   the time source of this jar.  Defaults to the system clock.
   def initialize(options = nil)
     opthash = {
       :store => :hash,
@@ -88,6 +92,7 @@ class HTTP::CookieJar
   def add(cookie)
     @store.add(cookie) if
       begin
+        cookie.adopt_clock(@store.clock)
         cookie.acceptable?
       rescue RuntimeError => e
         raise ArgumentError, e.message
@@ -164,6 +169,8 @@ class HTTP::CookieJar
   #
   # See HTTP::Cookie.parse for available options.
   def parse(set_cookie, origin, options = nil) # :yield: cookie
+    options = options ? options.dup : {}
+    options[:clock] ||= @store.clock
     if block_given?
       HTTP::Cookie.parse(set_cookie, origin, options).tap { |cookies|
         cookies.select! { |cookie|
@@ -236,6 +243,7 @@ class HTTP::CookieJar
       raise ArgumentError, 'wrong number of arguments (%d for 1-3)' % (1 + options.size)
     end
 
+    opthash[:clock] ||= @store.clock
     saver = get_impl(AbstractSaver, opthash[:format], opthash)
 
     if writable.respond_to?(:write)
@@ -299,6 +307,7 @@ class HTTP::CookieJar
       raise ArgumentError, 'wrong number of arguments (%d for 1-3)' % (1 + options.size)
     end
 
+    opthash[:clock] ||= @store.clock
     saver = get_impl(AbstractSaver, opthash[:format], opthash)
 
     if readable.respond_to?(:write)

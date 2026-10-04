@@ -105,7 +105,7 @@ class HTTP::CookieJar
 
       @filename = options[:filename] or raise ArgumentError, ':filename option is missing'
 
-      @sjar = HTTP::CookieJar::HashStore.new
+      @sjar = HTTP::CookieJar::HashStore.new(:clock => @clock)
 
       @db = Database.new(@filename)
 
@@ -462,7 +462,7 @@ class HTTP::CookieJar
     SQL
 
     def each(uri = nil, &block) # :yield: cookie
-      now = Time.now
+      now = @clock.now
       if uri
         thost = DomainName.new(uri.host)
 
@@ -477,6 +477,7 @@ class HTTP::CookieJar
           end
 
           cookie = HTTP::Cookie.new({}.tap { |attrs|
+              attrs[:clock]       = @clock
               attrs[:name]        = row['name']
               attrs[:value]       = row['value']
               attrs[:domain]      = row['host']
@@ -505,6 +506,7 @@ class HTTP::CookieJar
             :expiry => now.to_i,
           }).each { |row|
           cookie = HTTP::Cookie.new({}.tap { |attrs|
+              attrs[:clock]       = @clock
               attrs[:name]        = row['name']
               attrs[:value]       = row['value']
               attrs[:domain]      = row['host']
@@ -558,7 +560,7 @@ class HTTP::CookieJar
       synchronize {
         break if @gc_index == 0
 
-        @stmt[:delete_expired].execute({ 'expiry' => Time.now.to_i })
+        @stmt[:delete_expired].execute({ 'expiry' => @clock.now.to_i })
 
         @stmt[:overusing_domains].execute({
             'count' => HTTP::Cookie::MAX_COOKIES_PER_DOMAIN

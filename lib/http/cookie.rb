@@ -6,6 +6,7 @@ require 'time'
 require 'uri'
 require 'domain_name'
 require 'http/cookie/ruby_compat'
+require 'http/cookie/clock'
 require 'cgi/escape'
 
 module HTTP
@@ -34,6 +35,13 @@ class HTTP::Cookie
     expires     max_age
     created_at  accessed_at
   ]
+
+  # Extra keys used when (de)serializing a Max-Age cookie.  A
+  # monotonic clock value is only meaningful inside a process, so the
+  # persisted form records the wall clock reference observed while
+  # saving and the elapsed monotonic seconds at that point.
+  SERIALIZED_MONOTONIC_KEY = 'saved_monotonic_elapsed'
+  SERIALIZED_WALL_KEY = 'saved_wall_reference'
   # :startdoc:
 
   # The cookie name.  It may not be nil or empty.
@@ -132,16 +140,18 @@ class HTTP::Cookie
   #
   def initialize(*args)
     @name = @origin = @domain = @path =
-      @expires = @max_age = nil
+      @expires = @max_age = @created_tick = @consumed_seconds = nil
     @for_domain = @secure = @httponly = false
     @session = true
-    @created_at = @accessed_at = Time.now
+    @clock_anchor_rebased = false
+    @clock = SYSTEM_CLOCK
     case argc = args.size
     when 1
       if attr_hash = Hash.try_convert(args.last)
         args.pop
       else
         self.name, self.value = args # value is set to nil
+        @created_at = @accessed_at = @clock.now
         return
       end
     when 2..3
@@ -152,6 +162,7 @@ class HTTP::Cookie
         argc == 2 or
           raise ArgumentError, "wrong number of arguments (#{argc} for 1-3)"
         self.name, self.value = args
+        @created_at = @accessed_at = @clock.now
         return
       end
     else
@@ -159,25 +170,38 @@ class HTTP::Cookie
     end
     for_domain = false
     domain = max_age = origin = nil
+    clock_option = attr_hash[:clock]
+    clock_option ||= attr_hash['clock'] if attr_hash.key?('clock')
+    clock_option ||= attr_hash['Clock'] if attr_hash.key?('Clock')
+    adopt_clock(clock_option)
+    created_at_given = attr_hash.key?(:created_at) ||
+      attr_hash.key?('created_at')
+    @created_at = @accessed_at = @clock.now
     attr_hash.each_pair { |okey, val|
       case key ||= okey
       when :name
         self.name = val
       when :value
         value = val
+      when :clock
+        # already applied above
       when :domain
         domain = val
       when :path
         self.path = val
       when :origin
         origin = val
+      when :created_at
+        self.created_at = val
+      when :accessed_at
+        self.accessed_at = val
       when :for_domain, :for_domain?
         for_domain = val
       when :max_age
         # Let max_age take precedence over expires
         max_age = val
       when :expires, :expires_at
-        self.expires = val unless max_age
+        self.expires = val if max_age.nil?
       when :httponly, :httponly?
         @httponly = val
       when :secure, :secure?
@@ -205,8 +229,11 @@ class HTTP::Cookie
     @for_domain = for_domain
     self.domain = domain if domain
     self.origin = origin if origin
-    self.max_age = max_age if max_age
-    self.value = value.nil? && (@expires || @max_age) ? '' : value
+    self.max_age = max_age unless max_age.nil?
+    # Realign the monotonic anchor with an explicitly given
+    # created_at after Max-Age was applied.
+    self.created_at = @created_at if created_at_given
+    self.value = value.nil? && (!@expires.nil? || !@max_age.nil?) ? '' : value
   end
 
   autoload :Scanner, 'http/cookie/scanner'
@@ -252,6 +279,20 @@ class HTTP::Cookie
     # :created_at
     # : The creation time of the cookies parsed.
     #
+    # :clock
+    # : A clock object responding to #now and #now_monotonic used as
+    #   the time source of the parsed cookies.  Defaults to the system
+    #   clock.
+    #
+    # :date
+    # : The value of the Date response header that carried this
+    #   Set-Cookie field.  It represents the server's wall clock time
+    #   at the moment of the response.  When given and parseable, the
+    #   difference between it and the client wall clock is used to
+    #   correct an absolute Expires attribute, so that a client clock
+    #   offset from the server does not change the effective
+    #   lifetime.  A missing or unparsable value means no correction.
+    #
     # :logger
     # : Logger object useful for debugging
     #
@@ -274,9 +315,14 @@ class HTTP::Cookie
     #   cookie definitions containing double-quotes just as naturally
     #   expected.
     def parse(set_cookie, origin, options = nil, &block)
+      clock = SYSTEM_CLOCK
+      server_offset = 0
       if options
         logger = options[:logger]
         created_at = options[:created_at]
+        clock = Clock.coerce(options[:clock])
+        response_date = parse_date_header(options[:date], logger)
+        server_offset = response_date ? response_date - clock.now : 0
       end
       origin = HTTP::Cookie::URIParser.parse(origin)
 
@@ -285,12 +331,11 @@ class HTTP::Cookie
           break if name.nil? || name.empty?
 
           begin
-            cookie = new(name, value)
+            cookie = new(name, value, :clock => clock)
           rescue => e
             logger.warn("Invalid name or value: #{e}") if logger
             next
           end
-          cookie.created_at = created_at if created_at
           attrs.each { |aname, avalue|
             begin
               case aname
@@ -305,7 +350,12 @@ class HTTP::Cookie
                 # RFC 6265 4.1.2.2
                 # The Max-Age attribute has precedence over the Expires
                 # attribute.
-                cookie.expires = avalue unless cookie.max_age
+                unless cookie.max_age
+                  # Translate the server-referenced absolute time to
+                  # the client clock by removing the observed offset.
+                  cookie.expires =
+                    server_offset.nonzero? ? avalue - server_offset : avalue
+                end
               when 'max-age'
                 cookie.max_age = avalue
               when 'secure'
@@ -318,6 +368,10 @@ class HTTP::Cookie
             end
           }
 
+          # Set created_at after the attributes so that the
+          # monotonic anchor of a Max-Age cookie is derived from it.
+          cookie.created_at = created_at if created_at
+
           cookie.origin = origin
 
           cookie.acceptable? or next
@@ -328,6 +382,25 @@ class HTTP::Cookie
         }
       }
     end
+
+    # Parses a Date response header value into a Time object, or
+    # returns nil if it is missing or malformed.
+    def parse_date_header(value, logger = nil)
+      return nil if value.nil?
+      time =
+        begin
+          Time.httpdate(value)
+        rescue ArgumentError
+          begin
+            Time.parse(value)
+          rescue ArgumentError
+            nil
+          end
+        end
+      logger.warn("Couldn't parse Date '#{value}'") if logger && time.nil?
+      time
+    end
+    private :parse_date_header
 
     # Takes an array of cookies and returns a string for use in the
     # Cookie header, like "name1=value2; name2=value2".
@@ -485,6 +558,10 @@ class HTTP::Cookie
   attr_reader :session
   alias session? session
 
+  # The clock this cookie uses to tell the current wall clock and
+  # monotonic elapsed time.  See HTTP::Cookie::Clock.
+  attr_reader :clock
+
   def expires
     @expires or @created_at && @max_age ? @created_at + @max_age : nil
   end
@@ -499,6 +576,7 @@ class HTTP::Cookie
       t = Time.parse(t)
     end
     @max_age = nil
+    @created_tick = nil
     @session = t.nil?
     @expires = t
   end
@@ -522,15 +600,32 @@ class HTTP::Cookie
     @expires = nil
     if @session = sec.nil?
       @max_age = nil
+      @created_tick = nil
+      @consumed_seconds = nil
     else
       @max_age = sec
+      # Anchor the Max-Age countdown on the monotonic clock so that
+      # adjusting the wall clock does not change the remaining life.
+      @created_tick = (@clock || SYSTEM_CLOCK).now_monotonic
+      @consumed_seconds = 0
     end
   end
 
-  # Tests if this cookie is expired by now, or by a given time.
-  def expired?(time = Time.now)
-    if expires = self.expires
-      expires <= time
+  # Tests if this cookie is expired.
+  #
+  # A Max-Age cookie is judged against the monotonic clock by
+  # default; an explicit Time argument compares the wall clock
+  # deadline against it.  An Expires cookie is always judged against
+  # the wall clock, using the given Time or the current clock time.
+  def expired?(time = nil)
+    if @max_age
+      if time
+        (expires) <= time
+      else
+        monotonic_elapsed >= @max_age
+      end
+    elsif expires = self.expires
+      expires <= (time || @clock.now)
     else
       false
     end
@@ -545,10 +640,60 @@ class HTTP::Cookie
 
   # The time this cookie was created at.  This value is used as a base
   # date for interpreting the Max-Age attribute value.  See #expires.
-  attr_accessor :created_at
+  attr_reader :created_at
+
+  def created_at= time
+    @created_at = time
+  end
 
   # The time this cookie was last accessed at.
   attr_accessor :accessed_at
+
+  # Adopts +clock+ as the time source of this cookie.
+  #
+  # When the clock changes, the monotonic anchor of a Max-Age cookie
+  # is translated by the elapsed time already consumed so that the
+  # remaining lifetime is preserved across clocks.
+  #
+  # If +saved_elapsed+ is given, the anchor is rebuilt from that many
+  # elapsed monotonic seconds; this is used when restoring a cookie
+  # that was saved in another process.
+  def adopt_clock(clock = nil, saved_elapsed = nil)
+    clock = Clock.coerce(clock)
+    old_clock = @clock
+    return self if clock == old_clock && saved_elapsed.nil?
+    if @max_age
+      if saved_elapsed
+        @consumed_seconds = saved_elapsed
+      elsif @clock_anchor_rebased
+        # The anchor was reconstructed from serialized data with a
+        # provisional clock; @consumed_seconds already holds the
+        # complete elapsed amount.
+      else
+        @consumed_seconds = monotonic_elapsed_on(old_clock)
+      end
+      @clock = clock
+      @created_tick = clock.now_monotonic
+      @clock_anchor_rebased = false
+    else
+      @clock = clock
+    end
+    self
+  end
+
+  # Seconds already consumed against the Max-Age countdown, measured
+  # on the monotonic clock.
+  def monotonic_elapsed
+    return nil unless @max_age
+    monotonic_elapsed_on(@clock)
+  end
+  private :monotonic_elapsed
+
+  def monotonic_elapsed_on(clock)
+    (@consumed_seconds || 0) +
+      (@created_tick ? clock.now_monotonic - @created_tick : 0)
+  end
+  private :monotonic_elapsed_on
 
   # Tests if it is OK to accept this cookie if it is sent from a given
   # URI/URL, `uri`.
@@ -670,6 +815,14 @@ class HTTP::Cookie
     PERSISTENT_PROPERTIES.each { |key|
       coder[key.to_s] = instance_variable_get(:"@#{key}")
     }
+    if @max_age
+      # Never write a process-local monotonic value.  Record the
+      # elapsed seconds consumed so far and the wall clock reference
+      # observed at saving time instead; the deadline is rebuilt from
+      # them in another process.
+      coder[SERIALIZED_MONOTONIC_KEY] = monotonic_elapsed
+      coder[SERIALIZED_WALL_KEY] = @clock.now
+    end
   end
 
   # YAML deserialization helper for Syck.
@@ -681,15 +834,39 @@ class HTTP::Cookie
   def yaml_initialize(tag, map)
     expires = nil
     @origin = nil
-    map.each { |key, value|
-      case key
-      when 'expires'
+    @clock ||= SYSTEM_CLOCK
+    saved_elapsed = map[SERIALIZED_MONOTONIC_KEY]
+    saved_wall_reference = map[SERIALIZED_WALL_KEY]
+
+    PERSISTENT_PROPERTIES.each { |key|
+      next unless map.key?(key)
+      value = map[key]
+      if key == 'expires'
         # avoid clobbering max_age
         expires = value
-      when *PERSISTENT_PROPERTIES
+      else
         __send__(:"#{key}=", value)
       end
     }
+
+    if @max_age && saved_elapsed
+      # Rebuild the deadline from the wall clock reference and the
+      # elapsed monotonic seconds recorded while saving, rather than
+      # from a process-local monotonic value.
+      wall_reference = saved_wall_reference || @clock.now
+      @created_at = wall_reference - saved_elapsed
+      @consumed_seconds = saved_elapsed
+      @created_tick = nil
+      @clock_anchor_rebased = true
+    elsif @max_age && @created_at
+      # Backward compatibility: an old representation that only
+      # records created_at.  No monotonic reference is available, so
+      # the countdown restarts from zero against the adopting clock.
+      @consumed_seconds = 0
+      @created_tick = nil
+      @clock_anchor_rebased = true
+    end
     self.expires = expires if self.max_age.nil?
   end
+
 end

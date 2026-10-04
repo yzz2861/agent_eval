@@ -3,6 +3,9 @@
 # An abstract superclass for all saver classes.
 class HTTP::CookieJar::AbstractSaver
 
+  # The paired wall/monotonic clock used for expiration checks.
+  attr_reader :clock
+
   def self.implementation(symbol)
     case symbol
     when :yaml
@@ -28,6 +31,7 @@ class HTTP::CookieJar::AbstractSaver
     options ||= {}
     @logger  = options[:logger]
     @session = options[:session]
+    @clock   = HTTP::Cookie::Clock.coerce(options[:clock])
     # Initializes each instance variable of the same name as option
     # keyword.
     default_options.each_pair { |key, default|

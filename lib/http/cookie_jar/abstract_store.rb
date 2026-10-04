@@ -5,6 +5,9 @@ require 'monitor'
 class HTTP::CookieJar::AbstractStore
   include MonitorMixin
 
+  # The paired wall/monotonic clock used for expiration checks.
+  attr_reader :clock
+
   class << self
 
     # Gets an implementation class by the name.
@@ -34,6 +37,7 @@ class HTTP::CookieJar::AbstractStore
     super() # MonitorMixin
     options ||= {}
     @logger = options[:logger]
+    @clock = HTTP::Cookie::Clock.coerce(options[:clock])
     # Initializes each instance variable of the same name as option
     # keyword.
     default_options.each_pair { |key, default|

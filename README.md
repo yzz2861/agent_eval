@@ -214,6 +214,40 @@ HTTP::Cookie/CookieJar raises runtime errors to help migration, so
 after replacing the class names, try running your test code once to
 find out how to fix your code base.
 
+### Clocks
+
+Expiration uses an injectable pair of clocks so that calibrating the
+system clock does not unexpectedly extend a cookie's remaining
+lifetime:
+
+- `#now` is the wall clock time (`Time`), which may jump when NTP or
+  the user adjusts the system clock.
+- `#now_monotonic` is a monotonically increasing elapsed time in
+  seconds.
+
+A `Max-Age` cookie counts down against the monotonic clock and is
+therefore unaffected by wall clock setbacks or fast-forwards.  An
+absolute `Expires` cookie is a wall clock deadline; when the response
+carries a `Date` header, the observed client/server offset is used to
+translate the deadline onto the client clock.  When both attributes
+are present, `Max-Age` takes precedence as per RFC 6265.  A missing or
+unparsable `Date`, an already-past `Expires`, and a negative
+`Max-Age` are all handled (the last two expire immediately).
+
+Any object responding to `#now` and `#now_monotonic` can be injected
+via the `:clock` option:
+
+```ruby
+jar = HTTP::CookieJar.new(:clock => my_clock)
+HTTP::Cookie.parse(set_cookie, uri, :clock => my_clock,
+                   :date => response_date)
+```
+
+When a jar is saved, process-local monotonic values are never
+written.  Max-Age cookies are persisted with the wall clock reference
+and the elapsed monotonic seconds at save time; on load the deadline
+is rebuilt from them in the new process.
+
 ### File formats
 
 The YAML serialization format has changed, and HTTP::CookieJar#load
