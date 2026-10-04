@@ -208,6 +208,34 @@ The ``Meta`` class
 
         Set this to generate a comment message for the table being created for the current model
 
+    .. attribute:: pk_attrs
+        :annotation: = None
+
+        Declare an explicit composite primary key as an ordered tuple of field names.
+
+        Use this when a table is primarily identified by the combination of two or
+        more existing columns, so no surrogate ``id`` column is added:
+
+        .. code-block:: python3
+
+            class Event(Model):
+                tournament_id = fields.IntField()
+                name = fields.CharField(max_length=100)
+
+                class Meta:
+                    pk_attrs = ("tournament_id", "name")
+
+        The ``pk`` property of an instance (and the ``pk`` filter lookup) then use
+        an ordered tuple of the component values, e.g. ``event.pk == (1, "A")`` and
+        ``Event.get(pk=(1, "A"))``. Each component keeps its own database type and
+        conversion. Components can't be nullable or DB-generated, and can't be
+        combined with ``primary_key=True`` fields or ``Meta.pk_attr``.
+
+        Composite primary keys are currently fully supported on SQLite. Foreign
+        keys towards a model with a composite primary key create one backing
+        column per component (``<field>_<component>``) and support forward
+        traversal and ``select_related``.
+
     .. attribute:: unique_together
         :annotation: = None
 

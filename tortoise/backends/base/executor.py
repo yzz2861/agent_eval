@@ -72,9 +72,17 @@ class BaseExecutor:
 
             table = self.model._meta.basetable
             basequery = cast(QueryBuilder, self.model._meta.basequery)
-            self.delete_query = str(
-                basequery.where(table[self.model._meta.db_pk_column] == self.parameter(0)).delete()
-            )
+            if self.model._meta.is_composite_pk:
+                delete_query = basequery
+                for idx, column in enumerate(self.model._meta.db_pk_columns):
+                    delete_query = delete_query.where(table[column] == self.parameter(idx))
+                self.delete_query = str(delete_query.delete())
+            else:
+                self.delete_query = str(
+                    basequery.where(
+                        table[self.model._meta.db_pk_column] == self.parameter(0)
+                    ).delete()
+                )
             self.update_cache: dict[str, str] = {}
 
             EXECUTOR_CACHE[key] = (
@@ -392,14 +400,19 @@ class BaseExecutor:
 
         # Build SELECT via pypika for proper quoting
         table = self.model._meta.basetable
-        pk_col = self.model._meta.db_pk_column
-        query = (
-            self.db.query_class.from_(table)
-            .select(*fields_to_fetch)
-            .where(table[pk_col] == self.parameter(0))
-        )
-        pk_value = self.model._meta.pk.to_db_value(instance.pk, instance)
-        _, rows = await self.db.execute_query(str(query), [pk_value])
+        meta = self.model._meta
+        query = self.db.query_class.from_(table).select(*fields_to_fetch)
+        if meta.is_composite_pk:
+            pk_values = [
+                pk_field.to_db_value(getattr(instance, pk_attr), instance)
+                for pk_attr, pk_field in zip(meta.pk_attrs, meta.pk_fields)
+            ]
+            for idx, column in enumerate(meta.db_pk_columns):
+                query = query.where(table[column] == self.parameter(idx))
+        else:
+            query = query.where(table[meta.db_pk_column] == self.parameter(0))
+            pk_values = [meta.pk.to_db_value(instance.pk, instance)]
+        _, rows = await self.db.execute_query(str(query), pk_values)
 
         if rows:
             row = rows[0]
@@ -425,6 +438,7 @@ class BaseExecutor:
         table = self.model._meta.basetable
         query = self.db.query_class.update(table)
         parameter_idx = 0
+        pk_attrs = set(self.model._meta.pk_attrs)
         for field in update_fields or self.model._meta.fields_db_projection.keys():
             db_column = self.model._meta.fields_db_projection[field]
             field_object = self.model._meta.fields_map[field]
@@ -432,7 +446,7 @@ class BaseExecutor:
                 if update_fields:
                     raise OperationalError(f"Can't update generated field {field}")
                 continue
-            if not field_object.pk:
+            if not field_object.pk and field not in pk_attrs:
                 if field not in expressions.keys():
                     query = query.set(db_column, self.parameter(parameter_idx))
                     parameter_idx += 1
@@ -451,7 +465,14 @@ class BaseExecutor:
                     )
                     query = query.set(db_column, value)
 
-        query = query.where(table[self.model._meta.db_pk_column] == self.parameter(parameter_idx))
+        if self.model._meta.is_composite_pk:
+            for column in self.model._meta.db_pk_columns:
+                query = query.where(table[column] == self.parameter(parameter_idx))
+                parameter_idx += 1
+        else:
+            query = query.where(
+                table[self.model._meta.db_pk_column] == self.parameter(parameter_idx)
+            )
 
         sql = query.get_sql()
         if not expressions:
@@ -472,7 +493,7 @@ class BaseExecutor:
         effective_fields: list[str] = []
         for field in source_fields:
             field_obj = self.model._meta.fields_map[field]
-            if field_obj.pk:
+            if field_obj.pk or field in self.model._meta.pk_attrs:
                 if user_specified:
                     raise OperationalError(
                         f"Can't update pk field, use `{self.model.__name__}.create` instead."
@@ -500,17 +521,24 @@ class BaseExecutor:
                 field_obj = self.model._meta.fields_map[field]
                 values.append(field_obj.to_db_value(instance_field, instance))
 
-        values.append(self.model._meta.pk.to_db_value(instance.pk, instance))
+        if self.model._meta.is_composite_pk:
+            for pk_attr, pk_field in zip(self.model._meta.pk_attrs, self.model._meta.pk_fields):
+                values.append(pk_field.to_db_value(getattr(instance, pk_attr), instance))
+        else:
+            values.append(self.model._meta.pk.to_db_value(instance.pk, instance))
         return (
             await self.db.execute_query(self.get_update_sql(effective_fields, expressions), values)
         )[0]
 
     async def execute_delete(self, instance: type[Model] | Model) -> int:
-        return (
-            await self.db.execute_query(
-                self.delete_query, [self.model._meta.pk.to_db_value(instance.pk, instance)]
-            )
-        )[0]
+        if self.model._meta.is_composite_pk:
+            pk_values = [
+                pk_field.to_db_value(getattr(instance, pk_attr), instance)
+                for pk_attr, pk_field in zip(self.model._meta.pk_attrs, self.model._meta.pk_fields)
+            ]
+        else:
+            pk_values = [self.model._meta.pk.to_db_value(instance.pk, instance)]
+        return (await self.db.execute_query(self.delete_query, pk_values))[0]
 
     async def _prefetch_reverse_relation(
         self,
@@ -521,6 +549,10 @@ class BaseExecutor:
         to_attr, related_query = related_query
         related_objects_for_fetch: dict[str, list] = {}
         related_field: BackwardFKRelation = self.model._meta.fields_map[field]  # type: ignore
+        if related_field.relation_fields:
+            return await self._prefetch_reverse_composite_relation(
+                instance_list, field, related_query=(to_attr, related_query)
+            )
         related_field_name = related_field.to_field_instance.model_field_name
         relation_field = related_field.relation_field
 
@@ -551,6 +583,47 @@ class BaseExecutor:
             relation_container = getattr(instance, field)
             relation_container._set_result_for_query(
                 related_object_map.get(getattr(instance, related_field_name), []),
+                to_attr,
+            )
+        return instance_list
+
+    async def _prefetch_reverse_composite_relation(
+        self,
+        instance_list: Iterable[Model],
+        field: str,
+        related_query: tuple[str | None, QuerySet],
+    ) -> Iterable[Model]:
+        """Prefetch a backward FK relation whose FK points to a composite primary key."""
+        from tortoise.expressions import Q
+
+        to_attr, related_query = related_query
+        related_field: BackwardFKRelation = self.model._meta.fields_map[field]  # type: ignore
+        relation_fields = related_field.relation_fields
+        to_field_names = [
+            to_field.model_field_name for to_field in related_field.to_field_instances
+        ]
+
+        condition: Q | None = None
+        instance_keys = []
+        for instance in instance_list:
+            key = tuple(getattr(instance, to_field_name) for to_field_name in to_field_names)
+            instance_keys.append(key)
+            instance_condition = Q(**dict(zip(relation_fields, key)))
+            condition = instance_condition if condition is None else condition | instance_condition
+
+        related_query.resolve_ordering(
+            related_query.model, related_query.model._meta.basetable, [], {}
+        )
+        related_object_list = await related_query.filter(condition) if condition else []
+
+        related_object_map: dict[tuple, list] = {}
+        for entry in related_object_list:
+            key = tuple(getattr(entry, relation_field) for relation_field in relation_fields)
+            related_object_map.setdefault(key, []).append(entry)
+        for instance, key in zip(instance_list, instance_keys):
+            relation_container = getattr(instance, field)
+            relation_container._set_result_for_query(
+                related_object_map.get(key, []),
                 to_attr,
             )
         return instance_list

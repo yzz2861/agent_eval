@@ -11,7 +11,7 @@ from pypika_tortoise.analytics import Count
 from pypika_tortoise.functions import Cast
 from pypika_tortoise.functions import Count as DistinctCount
 from pypika_tortoise.queries import QueryBuilder, _SetOperation
-from pypika_tortoise.terms import Case, Field, Function, Star, Term, Tuple, ValueWrapper
+from pypika_tortoise.terms import Case, Criterion, Field, Function, Star, Term, Tuple, ValueWrapper
 
 from tortoise.backends.base.client import BaseDBAsyncClient, Capabilities
 from tortoise.exceptions import (
@@ -173,9 +173,7 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
         in a subquery instead.
         """
         pk_cols = [
-            table[self.model._meta.fields_db_projection[name]]
-            for name, field in self.model._meta.fields_map.items()
-            if field.pk
+            table[self.model._meta.fields_db_projection[name]] for name in self.model._meta.pk_attrs
         ]
         inner = copy(self.query)
         inner._selects = list(pk_cols)
@@ -240,6 +238,17 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
         # Do not apply default ordering for annotated queries to not mess them up
         if not orderings and self.model._meta.ordering and not annotations:
             orderings = self.model._meta.ordering
+
+        # 'pk' orders by every primary key component in declaration order.
+        expanded_orderings: list[tuple[str, str | Order]] = []
+        for ordering in orderings:
+            if ordering[0] == "pk" and model._meta.pk_attrs:
+                expanded_orderings.extend(
+                    (pk_attr, ordering[1]) for pk_attr in model._meta.pk_attrs
+                )
+            else:
+                expanded_orderings.append(ordering)
+        orderings = expanded_orderings
 
         for ordering in orderings:
             field_name = ordering[0]
@@ -487,6 +496,7 @@ class QuerySet(AwaitableQuery[MODEL]):
             if not (
                 field_name.split("__")[0] in self.model._meta.fields
                 or field_name in self._annotations
+                or (field_name == "pk" and self.model._meta.pk_attrs)
             ):
                 raise FieldError(f"Unknown field {field_name} for model {self.model.__name__}")
             new_ordering.append((field_name, order_type))
@@ -909,8 +919,8 @@ class QuerySet(AwaitableQuery[MODEL]):
                 (field, Order.desc if order_type == Order.asc else Order.asc)
                 for field, order_type in queryset._orderings
             ]
-        elif pk := self.model._meta.pk:
-            new_ordering = [(pk.model_field_name, Order.desc)]
+        elif self.model._meta.pk_attrs:
+            new_ordering = [(pk_attr, Order.desc) for pk_attr in self.model._meta.pk_attrs]
         else:
             raise FieldError(
                 f"QuerySet has no ordering and model {self.model.__name__} has no pk defined"
@@ -1400,12 +1410,29 @@ class UpdateQuery(AwaitableQuery):
             field_object = self.model._meta.fields_map.get(key)
             if not field_object:
                 raise FieldError(f"Unknown keyword argument {key} for model {self.model}")
-            if field_object.pk:
+            if field_object.pk or key in self.model._meta.pk_attrs:
                 raise IntegrityError(f"Field {key} is PK and can not be updated")
             if field_object.generated:
                 raise IntegrityError(f"Field {key} is generated and can not be updated")
             if isinstance(field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
                 self.model._validate_relation_type(key, value)
+                if field_object.to_field_instances:
+                    # FK towards a composite primary key: update every backing column.
+                    for source_field, to_field_instance in zip(
+                        field_object.source_fields, field_object.to_field_instances
+                    ):
+                        backing_field = self.model._meta.fields_map[source_field]
+                        component_db_field = backing_field.source_field or source_field
+                        component_value = (
+                            getattr(value, to_field_instance.model_field_name)
+                            if value is not None
+                            else None
+                        )
+                        self.query = self.query.set(
+                            component_db_field,
+                            backing_field.to_db_value(component_value, None),
+                        )
+                    continue
                 fk_field: str = field_object.source_field  # type: ignore[assignment]
                 db_field = self.model._meta.fields_map[fk_field].source_field
                 value = self.model._meta.fields_map[fk_field].to_db_value(
@@ -1555,9 +1582,16 @@ class ContainsQuery(ExistsQuery):
 
     def _make_query(self) -> None:
         super()._make_query()
-        pk_field = Field(self.model._meta.db_pk_column)
-        pk_value = self.model._meta.pk.to_db_value(self._obj.pk, self._obj)
-        self.query = self.query.where(pk_field.eq(pk_value))
+        meta = self.model._meta
+        if meta.is_composite_pk:
+            for pk_attr, pk_field_object in zip(meta.pk_attrs, meta.pk_fields):
+                pk_field = Field(meta.fields_db_projection[pk_attr])
+                pk_value = pk_field_object.to_db_value(getattr(self._obj, pk_attr), self._obj)
+                self.query = self.query.where(pk_field.eq(pk_value))
+        else:
+            pk_field = Field(meta.db_pk_column)
+            pk_value = meta.pk.to_db_value(self._obj.pk, self._obj)
+            self.query = self.query.where(pk_field.eq(pk_value))
 
 
 class CountQuery(AwaitableQuery):
@@ -1601,8 +1635,16 @@ class CountQuery(AwaitableQuery):
             # ``DISTINCT`` on the outer SELECT does not apply to ``COUNT(*)``,
             # so rows duplicated by a join would still be counted. Count the
             # distinct primary keys instead.
-            pk_field: Field = self.model._meta.basetable[self.model._meta.db_pk_column]
-            count_term = DistinctCount(pk_field).distinct()
+            if self.model._meta.is_composite_pk:
+                pk_term: Term = Tuple(
+                    *[
+                        self.model._meta.basetable[column]
+                        for column in self.model._meta.db_pk_columns
+                    ]
+                )
+            else:
+                pk_term = self.model._meta.basetable[self.model._meta.db_pk_column]
+            count_term = DistinctCount(pk_term).distinct()
         else:
             count_term = Count(Star())
             if self.query._groupbys:
@@ -2083,34 +2125,54 @@ class BulkUpdateQuery(UpdateQuery, Generic[MODEL]):
             )
 
         self.resolve_filters()
-        pk_attr = self.model._meta.pk_attr
-        source_pk_attr = self.model._meta.fields_map[pk_attr].source_field or pk_attr
-        pk = Field(source_pk_attr)
+        meta = self.model._meta
+        is_composite_pk = meta.is_composite_pk
+        if is_composite_pk:
+            pk_fields = [Field(meta.fields_db_projection[pk_attr]) for pk_attr in meta.pk_attrs]
+        else:
+            pk_attr = meta.pk_attr
+            source_pk_attr = meta.fields_map[pk_attr].source_field or pk_attr
+            pk = Field(source_pk_attr)
         for objects_item in chunk(self._objects, self._batch_size):
             query = copy(self.query)
+            obj_matchers: list[Criterion] = []
+            if is_composite_pk:
+                for obj in objects_item:
+                    matcher: Criterion | None = None
+                    for pk_attr, pk_field in zip(meta.pk_attrs, pk_fields):
+                        pk_value = meta.fields_map[pk_attr].to_db_value(getattr(obj, pk_attr), None)
+                        component = pk_field == pk_value
+                        matcher = component if matcher is None else matcher & component
+                    obj_matchers.append(matcher)  # type: ignore[arg-type]
+                where_criterion = obj_matchers[0]
+                for matcher in obj_matchers[1:]:
+                    where_criterion = where_criterion | matcher
+                query = query.where(where_criterion)
             for field in self.fields:
                 case = Case()
                 pk_list = []
-                for obj in objects_item:
-                    pk_value = self.model._meta.fields_map[pk_attr].to_db_value(obj.pk, None)
+                for obj_index, obj in enumerate(objects_item):
                     field_obj = obj._meta.fields_map[field]
                     field_value = field_obj.to_db_value(getattr(obj, field), obj)
-                    case.when(
-                        pk == pk_value,
-                        (
-                            Cast(
-                                self.query._wrapper_cls(field_value),
-                                field_obj.get_for_dialect(
-                                    self._db.schema_generator.DIALECT, "SQL_TYPE"
-                                ),
-                            )
-                            if self._db.schema_generator.DIALECT == "postgres"
-                            else self.query._wrapper_cls(field_value)
-                        ),
+                    wrapped_value = (
+                        Cast(
+                            self.query._wrapper_cls(field_value),
+                            field_obj.get_for_dialect(
+                                self._db.schema_generator.DIALECT, "SQL_TYPE"
+                            ),
+                        )
+                        if self._db.schema_generator.DIALECT == "postgres"
+                        else self.query._wrapper_cls(field_value)
                     )
-                    pk_list.append(pk_value)
+                    if is_composite_pk:
+                        case.when(obj_matchers[obj_index], wrapped_value)
+                    else:
+                        pk_value = meta.fields_map[pk_attr].to_db_value(obj.pk, None)
+                        case.when(pk == pk_value, wrapped_value)
+                        pk_list.append(pk_value)
                 query = query.set(field, case)
-                query = query.where(pk.isin(pk_list))
+                if not is_composite_pk:
+                    query = query.where(pk.isin(pk_list))
             self._queries.append(query)
         return [query.get_parameterized_sql() for query in self._queries]
 

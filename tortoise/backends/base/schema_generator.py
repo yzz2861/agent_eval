@@ -33,6 +33,10 @@ class BaseSchemaGenerator(SchemaQuotingMixin):
     UNIQUE_CONSTRAINT_CREATE_TEMPLATE = 'CONSTRAINT "{index_name}" UNIQUE ({fields})'
     GENERATED_PK_TEMPLATE = '"{field_name}" {generated_sql}{comment}'
     FK_TEMPLATE = ' REFERENCES {table} ("{field}") ON DELETE {on_delete}{comment}'
+    COMPOSITE_PK_TEMPLATE = "PRIMARY KEY ({fields})"
+    COMPOSITE_FK_TEMPLATE = (
+        "FOREIGN KEY ({db_columns}) REFERENCES {table} ({fields}) ON DELETE {on_delete}"
+    )
     M2M_TABLE_TEMPLATE = (
         "CREATE TABLE {exists}{table_name} (\n"
         '    "{backward_key}" {backward_type} NOT NULL{backward_fk},\n'
@@ -229,6 +233,36 @@ class BaseSchemaGenerator(SchemaQuotingMixin):
                 )
         return ""
 
+    def _get_composite_pk_sql(self, model: type[Model]) -> str:
+        return self.COMPOSITE_PK_TEMPLATE.format(
+            fields=", ".join(self.quote(column) for column in model._meta.db_pk_columns)
+        )
+
+    def _get_composite_fk_sql(self, model: type[Model], relation_field: Field) -> tuple[str, str]:
+        """
+        Build a table-level FOREIGN KEY constraint for a FK towards a composite
+        primary key. Returns (sql, related_table_name) or ("", "").
+        """
+        to_field_instances = getattr(relation_field, "to_field_instances", None)
+        if not to_field_instances or not getattr(relation_field, "db_constraint", True):
+            return "", ""
+        db_columns = []
+        for source_field in relation_field.source_fields:
+            backing_field = model._meta.fields_map[source_field]
+            db_columns.append(backing_field.source_field or backing_field.model_field_name)
+        to_columns = [
+            to_field.source_field or to_field.model_field_name for to_field in to_field_instances
+        ]
+        related_model = relation_field.related_model
+        related_table_name = related_model._meta.db_table
+        sql = self.COMPOSITE_FK_TEMPLATE.format(
+            db_columns=", ".join(self.quote(column) for column in db_columns),
+            table=self._qualify_table_name(related_table_name, related_model._meta.schema),
+            fields=", ".join(self.quote(column) for column in to_columns),
+            on_delete=relation_field.on_delete,
+        )
+        return sql, related_table_name
+
     def _get_field_comment(self, field_object: Field, table_name: str, column_name: str) -> str:
         if desc := field_object.description:
             return self._column_comment_generator(
@@ -254,6 +288,20 @@ class BaseSchemaGenerator(SchemaQuotingMixin):
         if getattr(field_object, "reference", None):
             reference = cast("ForeignKeyFieldInstance", field_object.reference)
             comment = self._get_field_comment(reference, qualified_table_name, column_name)
+            if getattr(reference, "to_field_instances", None):
+                # FK towards a composite primary key: the column is created
+                # plainly, the FK constraint is emitted at table level.
+                related_table_name = reference.related_model._meta.db_table
+                field_creation_string = self._create_string(
+                    db_column=column_name,
+                    field_type=field_type,
+                    nullable=nullable,
+                    unique=unique,
+                    is_primary_key=False,
+                    comment=comment,
+                    default=default,
+                )
+                return field_creation_string, related_table_name
 
             to_field_name = reference.to_field_instance.source_field
             if not to_field_name:
@@ -466,6 +514,16 @@ class BaseSchemaGenerator(SchemaQuotingMixin):
 
             if field_object.index and not field_object.pk:
                 fields_with_index.append(column_name)
+
+        if model._meta.is_composite_pk:
+            fields_to_create.append(self._get_composite_pk_sql(model))
+
+        for relation_field_name in model._meta.fk_fields | model._meta.o2o_fields:
+            relation_field = model._meta.fields_map[relation_field_name]
+            composite_fk_sql, related_table_name = self._get_composite_fk_sql(model, relation_field)
+            if composite_fk_sql:
+                fields_to_create.append(composite_fk_sql)
+                references.add(related_table_name)
 
         if model._meta.unique_together:
             for unique_together_list in model._meta.unique_together:

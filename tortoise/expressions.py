@@ -30,6 +30,7 @@ from tortoise.query_utils import (
     get_joins_for_related_field,
     resolve_field_json_path,
     resolve_nested_field,
+    validate_composite_pk_value,
 )
 
 if TYPE_CHECKING:  # pragma: nocoverage
@@ -469,15 +470,28 @@ class Q:
     def _resolve_kwargs(self, resolve_context: ResolveContext) -> QueryModifier:
         modifier = QueryModifier()
         for raw_key, raw_value in self.filters.items():
-            key, value = self._get_actual_filter_params(resolve_context, raw_key, raw_value)
-            if key in resolve_context.custom_filters:
-                filter_modifier = self._resolve_custom_kwarg(
-                    resolve_context, key, value, resolve_context.table
+            if resolve_context.model._meta.is_composite_pk and (
+                raw_key == "pk" or raw_key.startswith("pk__")
+            ):
+                filter_modifier = self._resolve_composite_pk_kwarg(
+                    resolve_context, raw_key, raw_value
+                )
+            elif raw_key in resolve_context.model._meta.fk_fields and getattr(
+                resolve_context.model._meta.fields_map[raw_key], "source_fields", None
+            ):
+                filter_modifier = self._resolve_composite_fk_kwarg(
+                    resolve_context, raw_key, raw_value
                 )
             else:
-                filter_modifier = self._resolve_regular_kwarg(
-                    resolve_context, key, value, resolve_context.table
-                )
+                key, value = self._get_actual_filter_params(resolve_context, raw_key, raw_value)
+                if key in resolve_context.custom_filters:
+                    filter_modifier = self._resolve_custom_kwarg(
+                        resolve_context, key, value, resolve_context.table
+                    )
+                else:
+                    filter_modifier = self._resolve_regular_kwarg(
+                        resolve_context, key, value, resolve_context.table
+                    )
 
             if self.join_type == self.AND:
                 modifier &= filter_modifier
@@ -486,6 +500,45 @@ class Q:
         if self._is_negated:
             modifier = ~modifier
         return modifier
+
+    def _resolve_composite_pk_kwarg(
+        self, resolve_context: ResolveContext, key: str, value: Any
+    ) -> QueryModifier:
+        meta = resolve_context.model._meta
+        if key == "pk":
+            values = validate_composite_pk_value(meta, value)
+            q = Q(**dict(zip(meta.pk_attrs, values)))
+        elif key == "pk__in":
+            if not isinstance(value, (list, tuple)) or not value:
+                raise FieldError(
+                    f"pk__in for model {meta._model.__name__} requires a non-empty"
+                    " list of composite primary key tuples"
+                )
+            q = Q(
+                *[
+                    Q(**dict(zip(meta.pk_attrs, validate_composite_pk_value(meta, item))))
+                    for item in value
+                ],
+                join_type=Q.OR,
+            )
+        else:
+            raise FieldError(
+                f"Unsupported lookup '{key}' for the composite primary key of model"
+                f" {meta._model.__name__}. Only 'pk' and 'pk__in' are supported"
+            )
+        return q.resolve(resolve_context)
+
+    def _resolve_composite_fk_kwarg(
+        self, resolve_context: ResolveContext, key: str, value: Any
+    ) -> QueryModifier:
+        field_object = resolve_context.model._meta.fields_map[key]
+        if value is None:
+            q = Q(**{source_field: None for source_field in field_object.source_fields})
+        else:
+            pk_value = getattr(value, "pk", value)
+            values = validate_composite_pk_value(field_object.related_model._meta, pk_value)
+            q = Q(**dict(zip(field_object.source_fields, values)))
+        return q.resolve(resolve_context)
 
     def _resolve_children(self, resolve_context: ResolveContext) -> QueryModifier:
         modifier = QueryModifier()

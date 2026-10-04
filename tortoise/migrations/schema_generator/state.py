@@ -89,6 +89,8 @@ class ModelState(BaseEntityState):
             options["indexes"] = model._meta.indexes
         if model._meta.pk_attr:
             options["pk_attr"] = model._meta.pk_attr
+        if model._meta.is_composite_pk:
+            options["pk_attrs"] = list(model._meta.pk_attrs)
         if model._meta.table_description:
             options["table_description"] = model._meta.table_description
 

@@ -29,6 +29,35 @@ if TYPE_CHECKING:  # pragma: nocoverage
 TableCriterionTuple = tuple[Table, Criterion]
 
 
+def validate_composite_pk_value(meta: Any, value: Any) -> tuple[Any, ...]:
+    """
+    Validate a composite primary key value given as an ordered tuple/list.
+
+    Every component must be present (correct length) and not None.
+    Returns the value as a tuple.
+
+    :raises ValueError: If the value is not a tuple/list of the right length,
+        or any component is None.
+    """
+    expected = len(meta.pk_attrs)
+    if not isinstance(value, (tuple, list)):
+        raise ValueError(
+            f"Composite primary key for model {meta._model.__name__} must be"
+            f" a tuple of {expected} values ({', '.join(meta.pk_attrs)}), got {value!r}"
+        )
+    if len(value) != expected:
+        raise ValueError(
+            f"Composite primary key for model {meta._model.__name__} expects"
+            f" {expected} values ({', '.join(meta.pk_attrs)}), got {len(value)}: {value!r}"
+        )
+    if any(component is None for component in value):
+        raise ValueError(
+            f"Composite primary key for model {meta._model.__name__} can't contain"
+            f" empty (None) components: {value!r}"
+        )
+    return tuple(value)
+
+
 def get_joins_for_related_field(
     table: Table, related_field: RelationalField, related_field_name: str
 ) -> list[TableCriterionTuple]:
@@ -53,35 +82,66 @@ def get_joins_for_related_field(
             )
         )
     elif isinstance(related_field, BackwardFKRelation):
-        to_field_source_field = (
-            related_field.to_field_instance.source_field
-            or related_field.to_field_instance.model_field_name
-        )
-
         if table == related_table:
             related_table = related_table.as_(f"{table.get_table_name()}__{related_field_name}")
-        required_joins.append(
-            (
-                related_table,
-                table[to_field_source_field] == related_table[related_field.relation_source_field],
+        if related_field.relation_fields:
+            # Backward relation of a FK towards a composite primary key:
+            # join on every component.
+            criterion: Criterion | None = None
+            for to_field_instance, relation_field_name in zip(
+                related_field.to_field_instances, related_field.relation_fields
+            ):
+                to_col = to_field_instance.source_field or to_field_instance.model_field_name
+                from_field = related_field.related_model._meta.fields_map[relation_field_name]
+                from_col = from_field.source_field or from_field.model_field_name
+                component_criterion = table[to_col] == related_table[from_col]
+                criterion = (
+                    component_criterion if criterion is None else criterion & component_criterion
+                )
+            required_joins.append((related_table, criterion))  # type: ignore[arg-type]
+        else:
+            to_field_source_field = (
+                related_field.to_field_instance.source_field
+                or related_field.to_field_instance.model_field_name
             )
-        )
+            required_joins.append(
+                (
+                    related_table,
+                    table[to_field_source_field]
+                    == related_table[related_field.relation_source_field],
+                )
+            )
     else:
-        to_field_source_field = (
-            related_field.to_field_instance.source_field
-            or related_field.to_field_instance.model_field_name
-        )
-
-        from_field = related_field.model._meta.fields_map[related_field.source_field]  # type: ignore
-        from_field_source_field = from_field.source_field or from_field.model_field_name
-
         related_table = related_table.as_(f"{table.get_table_name()}__{related_field_name}")
-        required_joins.append(
-            (
-                related_table,
-                related_table[to_field_source_field] == table[from_field_source_field],
+        if to_field_instances := getattr(related_field, "to_field_instances", None):
+            # Foreign key towards a composite primary key: join on every component.
+            criterion: Criterion | None = None
+            for to_field_instance, from_field_name in zip(
+                to_field_instances, related_field.source_fields
+            ):
+                to_col = to_field_instance.source_field or to_field_instance.model_field_name
+                from_field = related_field.model._meta.fields_map[from_field_name]
+                from_col = from_field.source_field or from_field.model_field_name
+                component_criterion = related_table[to_col] == table[from_col]
+                criterion = (
+                    component_criterion if criterion is None else criterion & component_criterion
+                )
+            required_joins.append((related_table, criterion))  # type: ignore[arg-type]
+        else:
+            to_field_source_field = (
+                related_field.to_field_instance.source_field
+                or related_field.to_field_instance.model_field_name
             )
-        )
+
+            from_field = related_field.model._meta.fields_map[related_field.source_field]  # type: ignore
+            from_field_source_field = from_field.source_field or from_field.model_field_name
+
+            required_joins.append(
+                (
+                    related_table,
+                    related_table[to_field_source_field] == table[from_field_source_field],
+                )
+            )
     return required_joins
 
 

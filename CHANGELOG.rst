@@ -13,6 +13,12 @@ Changelog
 
 Added
 ^^^^^
+- Explicit composite primary keys via ``Meta.pk_attrs``: an ordered tuple of existing
+  fields forms the primary key (no surrogate ``id`` column is added). ``pk`` is exposed
+  as an ordered tuple for filtering (``pk``/``pk__in``), instance ``save()``/``delete()``,
+  bulk operations and ordering (``order_by("pk")``). Foreign keys towards a composite
+  primary key create one backing column per component and support forward traversal
+  and ``select_related``. Fully supported on SQLite.
 - ``Q.__bool__()`` so ``Q`` objects with no filters/children (including nested empty ``Q`` children) are falsy. (#2227)
 - PostgreSQL ``password`` credential now accepts a sync or async callable, resolved once per new connection, to support short-lived credentials such as AWS RDS/Aurora IAM tokens and Azure Entra ID tokens. (#2261)
 

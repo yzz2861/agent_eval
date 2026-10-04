@@ -38,9 +38,9 @@ class ReverseRelation(Generic[MODEL]):
     def __init__(
         self,
         remote_model: type[MODEL],
-        relation_field: str,
+        relation_field: str | tuple[str, ...],
         instance: Model,
-        from_field: str,
+        from_field: str | tuple[str, ...],
     ) -> None:
         self.remote_model = remote_model
         self.relation_field = relation_field
@@ -55,6 +55,13 @@ class ReverseRelation(Generic[MODEL]):
         if not self.instance._saved_in_db:
             raise OperationalError(
                 "This objects hasn't been instanced, call .save() before calling related queries"
+            )
+        if isinstance(self.relation_field, tuple):
+            return self.remote_model.filter(
+                **{
+                    relation_field: getattr(self.instance, from_field)
+                    for relation_field, from_field in zip(self.relation_field, self.from_field)
+                }
             )
         return self.remote_model.filter(
             **{self.relation_field: getattr(self.instance, self.from_field)}
@@ -275,6 +282,8 @@ class RelationalField(Field[MODEL]):
         self.related_model: type[MODEL] = related_model
         self.to_field: str = to_field  # type: ignore
         self.to_field_instance: Field = None  # type: ignore
+        self.to_field_instances: tuple[Field, ...] = ()
+        self.source_fields: tuple[str, ...] = ()
         self.db_constraint = db_constraint
 
     if TYPE_CHECKING:
@@ -336,6 +345,8 @@ class ForeignKeyFieldInstance(RelationalField[MODEL]):
         desc = super().describe(serializable)
         desc["raw_field"] = self.source_field
         desc["on_delete"] = str(self.on_delete)
+        if self.to_field_instances:
+            desc["raw_fields"] = list(self.source_fields)
         return desc
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
@@ -346,7 +357,11 @@ class ForeignKeyFieldInstance(RelationalField[MODEL]):
         # Without this, makemigrations writes the backing field name as the column name
         # and a migrated schema disagrees with generate_schemas().
         model = getattr(self, "model", None)
-        if model is not None and self.source_field:
+        if self.to_field_instances:
+            # FK towards a composite primary key: backing columns are derived
+            # from the related model, no source_field is persisted.
+            kwargs.pop("source_field", None)
+        elif model is not None and self.source_field:
             backing_field = model._meta.fields_map.get(self.source_field)
             if backing_field is not None and backing_field.source_field:
                 kwargs["source_field"] = backing_field.source_field
@@ -366,6 +381,7 @@ class BackwardFKRelation(RelationalField[MODEL]):
         super().__init__(field_type, null=null, **kwargs)
         self.relation_field: str = relation_field
         self.relation_source_field: str = relation_source_field
+        self.relation_fields: tuple[str, ...] = ()
         self.description: str | None = description
 
 

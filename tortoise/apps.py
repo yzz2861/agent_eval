@@ -160,6 +160,59 @@ class Apps:
                 )
             return items[0], items[1]
 
+        def init_composite_fk_field(
+            model: type[Model],
+            field: str,
+            fk_object: ForeignKeyFieldInstance,
+            related_model: type[Model],
+        ) -> None:
+            """
+            Initialise a ForeignKeyField pointing to a model with a composite
+            primary key: one backing column per primary key component.
+            """
+            if fk_object.source_field:
+                raise ConfigurationError(
+                    f"source_field is not supported for ForeignKeyField '{field}'"
+                    " towards a model with a composite primary key"
+                )
+            to_field_instances = related_model._meta.pk_fields
+            key_fields = []
+            for to_field_instance in to_field_instances:
+                key_field = f"{field}_{to_field_instance.model_field_name}"
+                key_fk_object = copy(to_field_instance)
+                key_fk_object.reference = fk_object
+                key_fk_object.source_field = key_field
+                for attr in ("index", "default", "null", "generated", "description", "db_default"):
+                    setattr(key_fk_object, attr, getattr(fk_object, attr))
+                key_fk_object.pk = False
+                key_fk_object.unique = False
+                model._meta.add_field(key_field, key_fk_object)
+                key_fields.append(key_field)
+            fk_object.to_field_instances = to_field_instances
+            fk_object.source_fields = tuple(key_fields)
+            fk_object.related_model = related_model
+            fk_object.field_type = tuple(
+                to_field_instance.field_type for to_field_instance in to_field_instances
+            )
+            if (backward_relation_name := fk_object.related_name) is not False:
+                if not backward_relation_name:
+                    backward_relation_name = f"{model._meta.db_table}s"
+                if backward_relation_name in related_model._meta.fields:
+                    raise ConfigurationError(
+                        f'backward relation "{backward_relation_name}" duplicates in'
+                        f" model {related_model.__name__}"
+                    )
+                fk_relation = BackwardFKRelation(
+                    model,
+                    key_fields[0],
+                    key_fields[0],
+                    null=fk_object.null,
+                    description=fk_object.description,
+                )
+                fk_relation.to_field_instances = to_field_instances
+                fk_relation.relation_fields = tuple(key_fields)
+                related_model._meta.add_field(backward_relation_name, fk_relation)
+
         def init_fk_o2o_field(model: type[Model], field: str, is_o2o: bool = False) -> None:
             fk_object = cast(
                 "OneToOneFieldInstance | ForeignKeyFieldInstance", model._meta.fields_map[field]
@@ -172,6 +225,14 @@ class Apps:
                 related_app_name, related_model_name = split_reference(reference)
                 related_model = get_related_model(related_app_name, related_model_name)
 
+            if not fk_object.to_field and related_model._meta.is_composite_pk:
+                if is_o2o:
+                    raise ConfigurationError(
+                        f"OneToOneField '{model.__name__}.{field}' can't point to model"
+                        f" '{related_model_name}' with a composite primary key"
+                    )
+                init_composite_fk_field(model, field, fk_object, related_model)
+                return
             if to_field := fk_object.to_field:
                 related_field = related_model._meta.fields_map.get(to_field)
                 if not related_field:
