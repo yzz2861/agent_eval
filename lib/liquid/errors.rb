@@ -56,4 +56,11 @@ module Liquid
   DisabledError         = Class.new(Error)
   InternalError         = Class.new(Error)
   TemplateEncodingError = Class.new(Error)
+
+  # Raised when an output sink given to Template#render_to fails while
+  # receiving a chunk. The original exception is available via #cause.
+  # Sink errors are never converted into template error output; they
+  # abort the render immediately.
+  class SinkError < Error
+  end
 end

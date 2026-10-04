@@ -212,6 +212,45 @@ module Liquid
       render(*args)
     end
 
+    # Renders the template like #render, but streams the output to +sink+
+    # chunk by chunk instead of building one big String. Plain text,
+    # variables and loop bodies are emitted as soon as they are rendered;
+    # only tags that genuinely need a complete value (e.g. {% capture %})
+    # buffer their fragment locally.
+    #
+    # The sink can be a callable (e.g. a Proc), an IO-like object responding
+    # to +#write+, or any object responding to +#<<+ (e.g. an Array):
+    #
+    #   template.render_to(->(chunk) { io.write(chunk) }, 'user' => user)
+    #
+    # Accepts the same arguments and options as #render and returns the sink.
+    #
+    # Resource limits are enforced separately for the final output and for
+    # local buffers: +render_length_limit+ caps the total number of bytes
+    # emitted to the sink, while +assign_score_limit+ caps what tags like
+    # {% capture %} materialize locally, so output cannot be hidden inside
+    # a capture to bypass the limit.
+    #
+    # If the sink raises, the render aborts immediately (no further drops or
+    # filters are invoked), the context is restored, and a Liquid::SinkError
+    # is raised with the original exception as its #cause.
+    def render_to(sink, *args)
+      output  = StreamOutput.new(sink)
+      options = { output: output }
+
+      # A trailing Hash is render options (a lone Hash would be the assigns),
+      # and a trailing Module/Array is the legacy filters shorthand; both must
+      # be merged into the options we pass along to #render.
+      options = args.pop.merge(options) if args.length > 1 && args.last.is_a?(Hash)
+      if args.length > 1 && (args.last.is_a?(Module) || args.last.is_a?(Array))
+        options[:filters] = Array(options[:filters]) + Array(args.pop)
+      end
+
+      args = [nil] if args.empty?
+      render(*args, options)
+      sink
+    end
+
     def render_to_output_buffer(context, output)
       render(context, output: output)
     end

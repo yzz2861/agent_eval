@@ -93,7 +93,7 @@ module Liquid
     # @api private
     def self.rescue_render_node(context, output, line_number, exc, blank_tag)
       case exc
-      when MemoryError
+      when MemoryError, SinkError
         raise
       when UndefinedVariable, UndefinedDropMethod, UndefinedFilter
         context.handle_error(exc, line_number)
