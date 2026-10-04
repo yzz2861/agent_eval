@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative "macro"
 require_relative "tags/table_row"
 require_relative "tags/echo"
 require_relative "tags/if"
@@ -24,6 +25,8 @@ require_relative "tags/doc"
 module Liquid
   module Tags
     STANDARD_TAGS = {
+      'macro' => Macro,
+      'call' => MacroCall,
       'cycle' => Cycle,
       'render' => Render,
       'raw' => Raw,

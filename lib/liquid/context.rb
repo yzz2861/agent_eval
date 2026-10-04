@@ -14,7 +14,7 @@ module Liquid
   #
   #   context['bob']  #=> nil  class Context
   class Context
-    attr_reader :scopes, :errors, :registers, :environments, :resource_limits, :static_registers, :static_environments
+    attr_reader :scopes, :errors, :registers, :environments, :resource_limits, :static_registers, :static_environments, :disabled_tags
     attr_accessor :exception_renderer, :template_name, :partial, :global_filter, :strict_variables, :strict_filters, :environment
 
     # rubocop:disable Metrics/ParameterLists
@@ -159,6 +159,35 @@ module Liquid
         subcontext.errors   = errors
         subcontext.warnings = warnings
         subcontext.disabled_tags = @disabled_tags
+      end
+    end
+
+    def new_macro_subcontext(macro_reference)
+      definition_context = macro_reference.definition_context
+      lexical_scopes    = macro_reference.lexical_scopes.map(&:dup)
+
+      check_overflow
+
+      self.class.build(
+        environment: definition_context.environment,
+        environments: definition_context.environments.map(&:dup),
+        static_environments: definition_context.static_environments,
+        registers: Registers.new(registers),
+        resource_limits: resource_limits,
+      ).tap do |subcontext|
+        subcontext.instance_variable_set(:@scopes, lexical_scopes)
+        subcontext.base_scope_depth   = base_scope_depth + 1
+        subcontext.template_name      = template_name
+        subcontext.exception_renderer = exception_renderer
+        subcontext.filters            = @filters
+        subcontext.strainer           = nil
+        subcontext.errors             = errors
+        subcontext.warnings           = warnings
+        subcontext.disabled_tags      = definition_context.disabled_tags
+        subcontext.strict_variables   = strict_variables
+        subcontext.strict_filters     = strict_filters
+        subcontext.global_filter      = global_filter
+        subcontext.environment        = definition_context.environment
       end
     end
 
