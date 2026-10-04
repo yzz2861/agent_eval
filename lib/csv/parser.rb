@@ -52,6 +52,14 @@ class CSV
     class Scanner < StringScanner
       alias_method :scan_all, :scan
 
+      # Advances the scan pointer like +scan_all+ but doesn't build the
+      # matched String.  Returns the matched size in characters, or +nil+
+      # when +pattern+ doesn't match.
+      def skip_all(pattern)
+        start = charpos
+        skip(pattern) ? charpos - start : nil
+      end
+
       def initialize(*args)
         super
         @keeps = []
@@ -178,6 +186,25 @@ class CSV
         end
         # trace(__method__, pattern, :done, value)
         value
+      end
+
+      # Advances the scan pointer like +scan_all+ but doesn't build the
+      # matched String.  Returns the matched size in characters, or +nil+
+      # when +pattern+ doesn't match.
+      def skip_all(pattern)
+        start = @scanner.charpos
+        skipped = @scanner.skip(pattern)
+        return (skipped ? @scanner.charpos - start : nil) if @last_scanner
+
+        return nil if skipped.nil?
+        size = @scanner.charpos - start
+        while @scanner.eos? and read_chunk
+          start = @scanner.charpos
+          sub_skipped = @scanner.skip(pattern)
+          break unless sub_skipped
+          size += @scanner.charpos - start
+        end
+        size
       end
 
       def eos?
@@ -467,6 +494,7 @@ class CSV
       prepare_unquoted
       prepare_line
       prepare_header
+      prepare_projection
       prepare_parser
     end
 
@@ -814,11 +842,111 @@ class CSV
       adjusted_headers
     end
 
+    def prepare_projection
+      @project_columns = @options[:project_columns]
+      @projected_indices = nil
+      @projected_column_indices = nil
+      @projected_header_names = nil
+      @materialize_skipped_columns = false
+      return if @project_columns.nil? or @project_columns == false
+
+      unless @project_columns.is_a?(Array)
+        message = ':project_columns must be an Array of column indices ' +
+                  'and/or header names'
+        raise ArgumentError, message
+      end
+      indices = []
+      names = []
+      @project_columns.each do |selector|
+        case selector
+        when Integer
+          if selector < 0
+            message = ':project_columns column index must not be ' +
+                      "negative: #{selector}"
+            raise ArgumentError, message
+          end
+          indices << selector
+        when String, Symbol
+          names << selector
+        else
+          message = ':project_columns selector must be an Integer column ' +
+                    "index or a String/Symbol header name: #{selector.inspect}"
+          raise ArgumentError, message
+        end
+      end
+      if names.any? and not @use_headers
+        message = ':project_columns header names require the :headers option'
+        raise ArgumentError, message
+      end
+      @projected_column_indices = indices
+      @projected_header_names = names
+      if names.empty?
+        @projected_indices = indices.uniq.sort
+      elsif @headers
+        resolve_projected_indices
+      end
+      # When headers aren't known yet (headers: true), header name
+      # resolution is deferred to the first emit_row.
+      if @projected_indices and @headers
+        @headers = @projected_indices.map {|index| @headers[index]}
+        if @raw_headers
+          @raw_headers = @projected_indices.map {|index| @raw_headers[index]}
+        end
+      end
+      # Field sizes can't be measured exactly without the field String
+      # when these options rewrite the scanned value, so skipped columns
+      # are materialized (and discarded) to keep the max_field_size check
+      # intact.
+      @materialize_skipped_columns =
+        !!(@max_field_size and
+           (@backslash_quote or @rstrip_value or @double_quote_outside_quote))
+    end
+
+    def resolve_projected_indices
+      return if @projected_indices
+
+      indices = @projected_column_indices.dup
+      @projected_header_names.each do |name|
+        index = @headers.index do |header|
+          header == name or header.to_s == name.to_s
+        end
+        if index.nil?
+          message = ":project_columns has unknown header: #{name.inspect}"
+          raise ArgumentError, message
+        end
+        indices << index
+      end
+      @projected_indices = indices.uniq.sort
+    end
+
+    def projection_active?
+      not @projected_indices.nil? and not header_row?
+    end
+
+    def project_column?(index)
+      return true unless projection_active?
+
+      @projected_indices.include?(index)
+    end
+
+    def project_row(row)
+      return row unless projection_active?
+
+      size = row.size
+      projected = []
+      @projected_indices.each do |index|
+        projected << row[index] if index < size
+      end
+      projected
+    end
+
     def prepare_parser
       @may_quoted = may_quoted?
       if @quote_character.nil?
         @parse_method = :parse_no_quote
-      elsif @liberal_parsing or @strip
+      elsif @liberal_parsing or @strip or @project_columns
+        # Column projection skips unwanted fields while scanning, which
+        # the line-splitting loose parser can't do; use the robust parser.
         @parse_method = :parse_quotable_robust
       else
         @parse_method = :parse_quotable_loose
@@ -947,6 +1075,14 @@ class CSV
       raise MalformedCSVError.new(message, @lineno)
     end
 
+    def validate_skipped_field_size(size)
+      return unless @max_field_size
+      return if size <= @max_field_size
+      ignore_broken_line
+      message = "Field size exceeded: #{size} > #{@max_field_size}"
+      raise MalformedCSVError.new(message, @lineno)
+    end
+
     def parse_no_quote(&block)
       @scanner.each_line(@row_separator) do |line|
         next if @skip_lines and skip_line?(line)
@@ -964,6 +1100,7 @@ class CSV
               validate_field_size(column)
             end
           end
+          row = project_row(row)
           n_columns = row.size
           i = 0
           while i < n_columns
@@ -1042,34 +1179,54 @@ class CSV
       quoted_fields = []
       skip_needless_lines
       start_row
+      column_index = 0
       while true
         @quoted_column_value = false
         @unquoted_column_value = false
         @scanner.scan_all(@strip_value) if @strip_value
-        value = parse_column_value
-        if value
-          @scanner.scan_all(@strip_value) if @strip_value
-          validate_field_size(value)
+        projected = project_column?(column_index)
+        if projected or @materialize_skipped_columns
+          value = parse_column_value
+          if value
+            @scanner.scan_all(@strip_value) if @strip_value
+            validate_field_size(value)
+          end
+        else
+          # Skipped column: check the CSV syntax without building the
+          # field String; +value+ is the field size in characters.
+          value = skip_column_value
+          if value
+            @scanner.scan_all(@strip_value) if @strip_value
+            validate_skipped_field_size(value)
+          end
         end
         if parse_column_end
-          row << value
-          quoted_fields << @quoted_column_value
-        elsif parse_row_end
-          if row.empty? and value.nil?
-            emit_row([], &block) unless @skip_blanks
-          else
+          if projected
             row << value
             quoted_fields << @quoted_column_value
+          end
+          column_index += 1
+        elsif parse_row_end
+          if column_index.zero? and value.nil?
+            emit_row([], &block) unless @skip_blanks
+          else
+            if projected
+              row << value
+              quoted_fields << @quoted_column_value
+            end
             emit_row(row, quoted_fields, &block)
             row = []
             quoted_fields.clear
           end
+          column_index = 0
           skip_needless_lines
           start_row
         elsif @scanner.eos?
-          break if row.empty? and value.nil?
-          row << value
-          quoted_fields << @quoted_column_value
+          break if column_index.zero? and value.nil?
+          if projected
+            row << value
+            quoted_fields << @quoted_column_value
+          end
           emit_row(row, quoted_fields, &block)
           break
         else
@@ -1207,6 +1364,92 @@ class CSV
       end
     end
 
+    # Skips a column value like +parse_column_value+ but doesn't build
+    # the value String.  Returns the value size in characters, or +nil+
+    # when there is no value.  Syntax errors are reported exactly like
+    # +parse_column_value+ does.
+    def skip_column_value
+      if @liberal_parsing
+        quoted_size = skip_quoted_column_value
+        if quoted_size
+          @scanner.scan_all(@strip_value) if @strip_value
+          unquoted_size = skip_unquoted_column_value
+          if unquoted_size
+            quoted_size + unquoted_size + 2
+          else
+            quoted_size
+          end
+        else
+          skip_unquoted_column_value
+        end
+      elsif @may_quoted
+        skip_quoted_column_value ||
+          skip_unquoted_column_value
+      else
+        skip_unquoted_column_value ||
+          skip_quoted_column_value
+      end
+    end
+
+    def skip_unquoted_column_value
+      size = @scanner.skip_all(@unquoted_value)
+      return nil unless size
+
+      @unquoted_column_value = true
+      if @first_column_separators
+        while true
+          @scanner.keep_start
+          is_column_end = @column_ends.all? do |column_end|
+            @scanner.scan(column_end)
+          end
+          @scanner.keep_back
+          break if is_column_end
+          sub_separator = @scanner.skip_all(@first_column_separators)
+          break if sub_separator.nil?
+          size += sub_separator
+          sub_value = @scanner.skip_all(@unquoted_value)
+          break if sub_value.nil?
+          size += sub_value
+        end
+      end
+      size
+    end
+
+    def skip_quoted_column_value
+      quotes = @scanner.scan_all(@quotes)
+      return nil unless quotes
+
+      @quoted_column_value = true
+      n_quotes = quotes.size
+      if (n_quotes % 2).zero?
+        return (n_quotes - 2) / 2
+      end
+      size = n_quotes / 2
+      while true
+        quoted_size = @scanner.skip_all(@quoted_value)
+        size += quoted_size if quoted_size
+        if @backslash_quote
+          if @scanner.scan(@escaped_backslash)
+            @scanner.scan(@escaped_quote)
+            size += 1
+            next
+          end
+        end
+
+        quotes = @scanner.scan_all(@quotes)
+        unless quotes
+          ignore_broken_line
+          message = "Unclosed quoted field"
+          raise MalformedCSVError.new(message, @lineno)
+        end
+        n_quotes = quotes.size
+        break if n_quotes == 1
+        size += n_quotes / 2
+        break if (n_quotes % 2) == 1
+      end
+      size
+    end
+
     def parse_column_end
       return true if @scanner.scan(@column_end)
       return false unless @column_ends
@@ -1274,6 +1517,14 @@ class CSV
       if @use_headers
         if @headers.nil?
           @headers = adjust_headers(row, quoted_fields)
+          if @project_columns
+            # The header row is always parsed in full so that header
+            # name selectors can be resolved here.
+            resolve_projected_indices
+            @headers = @projected_indices.map {|index| @headers[index]}
+            row = @projected_indices.map {|index| row[index]}
+            raw_row = row
+          end
           return unless @return_headers
           row = Row.new(@headers, row, true)
         else

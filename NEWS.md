@@ -1,5 +1,16 @@
 # News
 
+## Unreleased
+
+### Improvements
+
+  * Added the `project_columns` parse option that keeps only the
+    selected columns.  Columns may be selected by 0-based index and,
+    when `headers` is enabled, by header name.  Skipped columns are
+    still checked for CSV syntax errors and `max_field_size`, but
+    their field Strings are not built and their converters are not
+    called.
+
 ## 3.3.6 - 2026-07-27
 
 ### Improvements

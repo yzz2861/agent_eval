@@ -1,0 +1,31 @@
+====== Option +project_columns+
+
+Specifies an \Array of the columns to keep while parsing;
+all other columns are still checked for CSV syntax errors
+(and against option +max_field_size+),
+but their field Strings are not built and their converters are not called.
+
+Each entry may be:
+- an \Integer: the 0-based index of the column to keep.
+- a \String or \Symbol: the name of the header of the column to keep;
+  header name selectors require option +headers+.
+
+Kept columns always appear in their original order.
+
+Default value:
+  CSV::DEFAULT_OPTIONS.fetch(:project_columns) # => nil
+
+For examples in this section:
+  str = <<-EOT
+  id,name,comment
+  1,foo,hello
+  2,bar,world
+  EOT
+
+Using column indices:
+  CSV.parse(str, project_columns: [0, 2])
+  # => [["id", "comment"], ["1", "hello"], ["2", "world"]]
+
+Using header names with option +headers+:
+  CSV.parse(str, headers: true, project_columns: ["id", :name]).to_a
+  # => [["id", "name"], ["1", "foo"], ["2", "bar"]]

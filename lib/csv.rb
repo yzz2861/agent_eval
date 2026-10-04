@@ -332,6 +332,7 @@ require_relative "csv/writer"
 #     nil_value:          nil,
 #     empty_value:        "",
 #     strip:              false,
+#     project_columns:    nil,
 #     # For generating.
 #     write_headers:      nil,
 #     quote_empty:        true,
@@ -365,6 +366,9 @@ require_relative "csv/writer"
 #   non-compliant data.
 # - +nil_value+: Specifies the object that is to be substituted for each null (no-text) field.
 # - +empty_value+: Specifies the object that is to be substituted for each empty field.
+# - +project_columns+: Specifies the columns to be kept while parsing;
+#   other columns are checked for syntax errors but their fields are
+#   neither built nor converted.
 #
 # :include: ../doc/csv/options/common/row_sep.rdoc
 #
@@ -395,6 +399,8 @@ require_relative "csv/writer"
 # :include: ../doc/csv/options/parsing/nil_value.rdoc
 #
 # :include: ../doc/csv/options/parsing/empty_value.rdoc
+#
+# :include: ../doc/csv/options/parsing/project_columns.rdoc
 #
 # ==== Options for Generating
 #
@@ -970,6 +976,7 @@ class CSV
     nil_value:          nil,
     empty_value:        "",
     strip:              false,
+    project_columns:    nil,
     # For generating.
     write_headers:      nil,
     quote_empty:        true,
@@ -2053,6 +2060,7 @@ class CSV
                  nil_value: nil,
                  empty_value: "",
                  strip: false,
+                 project_columns: nil,
                  quote_empty: true,
                  write_converters: nil,
                  write_nil_value: nil,
@@ -2108,6 +2116,7 @@ class CSV
       nil_value: nil_value,
       empty_value: empty_value,
       strip: strip,
+      project_columns: project_columns,
     }
     @parser = nil
 
