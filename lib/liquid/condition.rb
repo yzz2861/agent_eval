@@ -53,12 +53,14 @@ module Liquid
     end
 
     attr_reader :attachment, :child_condition
+    attr_accessor :line_number
     attr_accessor :left, :operator, :right
 
     def initialize(left = nil, operator = nil, right = nil)
       @left     = left
       @operator = operator
       @right    = right
+      @line_number = nil
 
       @child_relation  = nil
       @child_condition = nil

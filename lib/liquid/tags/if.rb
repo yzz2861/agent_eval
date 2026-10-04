@@ -76,6 +76,7 @@ module Liquid
       else
         parse_with_selected_parser(markup)
       end
+      block.line_number = parse_context.line_number unless block.else?
 
       @blocks.push(block)
       block.attach(new_body)

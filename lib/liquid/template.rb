@@ -21,6 +21,12 @@ module Liquid
     attr_reader :profiler
 
     class << self
+      # Parses source and returns its external variable references without
+      # rendering it. External render dependencies come from render_resolver.
+      def analyze_external_variables(source, options = {}, render_resolver = nil)
+        parse(source, options).analyze_external_variables(render_resolver: render_resolver)
+      end
+
       # Sets how strict the parser should be.
       # :lax acts like liquid 2.5 and silently ignores malformed tags in most cases.
       # :warn is the default and will give deprecation warnings when invalid syntax is used.
@@ -91,6 +97,13 @@ module Liquid
       @environment = environment
       @rethrow_errors  = false
       @resource_limits = ResourceLimits.new(environment.default_resource_limits)
+    end
+
+    # Returns external variable references found by static analysis.
+    # render_resolver supplies dependencies for isolated render tags; parsing
+    # never reads partial files from disk.
+    def analyze_external_variables(render_resolver: nil)
+      StaticVariableAnalysis.analyze(self, render_resolver)
     end
 
     # Parse source code.

@@ -120,6 +120,7 @@ module Liquid
       loop do
         expr = Condition.parse_expression(parse_context, parser.expression, safe: true)
         block = Condition.new(@left, '==', expr)
+        block.line_number = parse_context.line_number
         block.attach(body)
         @blocks << block
 
@@ -138,6 +139,7 @@ module Liquid
         markup = Regexp.last_match(2)
 
         block = Condition.new(@left, '==', Condition.parse_expression(parse_context, Regexp.last_match(1)))
+        block.line_number = parse_context.line_number
         block.attach(body)
         @blocks << block
       end
