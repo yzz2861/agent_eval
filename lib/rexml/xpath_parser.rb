@@ -58,9 +58,9 @@ module REXML
 
     DEBUG = (ENV["REXML_XPATH_PARSER_DEBUG"] == "true")
 
-    def initialize(strict: false)
+    def initialize(strict: false, require_variables: false)
       @debug = DEBUG
-      @parser = REXML::Parsers::XPathParser.new
+      @parser = nil
       @namespaces = nil
       @variables = {}
       @functions = FunctionsClass.new
@@ -70,6 +70,30 @@ module REXML
       @node_indexes = nil
       @nest = 0
       @strict = strict
+      @require_variables = require_variables
+    end
+
+    def compile(path)
+      freeze_path_stack(parse_path(path || "*").dclone)
+    end
+
+    def evaluate(path_stack, node, namespaces=nil, variables={})
+      @namespaces = namespaces
+      self.variables = variables
+
+      if node.is_a?(Array)
+        Kernel.warn("REXML::XPath.each, REXML::XPath.first, REXML::XPath.match dropped support for nodeset...", uplevel: 1)
+        return [] if node.empty?
+        node = node.first
+      end
+
+      match(clone_path_stack(path_stack), node)
+    ensure
+      @namespaces = nil
+      @variables = {}
+      @attlist_mappings = nil
+      @document = nil
+      @element_namespaces_cache.clear
     end
 
     def namespaces=( namespaces={} )
@@ -81,24 +105,17 @@ module REXML
     end
 
     def parse path, node
-      path_stack = @parser.parse( path )
-      if node.is_a?(Array)
-        Kernel.warn("REXML::XPath.each, REXML::XPath.first, REXML::XPath.match dropped support for nodeset...", uplevel: 1)
-        return [] if node.empty?
-        node = node.first
-      end
-
-      match(path_stack, node)
+      evaluate(parse_path(path), node, @namespaces, @variables)
     end
 
     def get_first path, node
-      path_stack = @parser.parse( path )
+      path_stack = parse_path(path)
       @document = node.document
       first( path_stack, node )
     end
 
     def predicate path, node
-      path_stack = @parser.parse( path )
+      path_stack = parse_path(path)
       match( path_stack, node )
     end
 
@@ -106,6 +123,29 @@ module REXML
       @variables[variable_name] = coerce_variable(value)
     end
 
+    def clone_path_stack(path_stack)
+      path_stack.collect do |part|
+        part.is_a?(Array) ? clone_path_stack(part) : part
+      end
+    end
+
+    def parse_path(path)
+      @parser ||= REXML::Parsers::XPathParser.new
+      @parser.parse(path)
+    end
+
+    def freeze_path_stack(path_stack)
+      path_stack.each do |part|
+        if part.is_a?(Array)
+          freeze_path_stack(part)
+        else
+          part.freeze if part.is_a?(String)
+        end
+      end
+      path_stack.freeze
+    end
+
+    private :clone_path_stack, :freeze_path_stack, :parse_path
 
     # Performs a depth-first (document order) XPath search, and returns the
     # first match.  This is the fastest, lightest way to return a single result.
@@ -163,12 +203,11 @@ module REXML
         [result]
       end
     ensure
-      # Let go of the indexes: they are no use to the next evaluation, and the
-      # cache holds one entry per node it had to look up.  The document itself
-      # stays reachable through @document and @element_namespaces_cache, which
-      # outlive the evaluation.
+      # Let go of all evaluation-only state, so reusing a parser for another
+      # document cannot leak indexes, function context, or namespace caches.
       @node_indexes = nil
       @functions.node_indexes = nil
+      @functions.context = nil
     end
 
     private
@@ -278,6 +317,9 @@ module REXML
           end
         when :variable
           var_name = path_stack.shift
+          if @require_variables && !@variables.key?(var_name)
+            raise XPath::UndefinedVariable.new(var_name)
+          end
           value = @variables.key?(var_name) ? @variables[var_name] : ""
           return value if path_stack.empty?
 
