@@ -142,6 +142,49 @@ class CSV
   #   table['Name'] = ['Foo', 'Bar', 'Baz']
   #   table['Name'] # => ["Foo", "Bar", "Baz"]
   class Table
+    # Used internally to distinguish an absent pivoted coordinate from a
+    # coordinate whose value is truly +nil+.
+    MISSING_HEADER = Object.new.freeze
+    private_constant(:MISSING_HEADER)
+
+    class PivotRow < Row
+      def initialize(headers, pairs)
+        super([], [])
+        @pivot_headers = headers
+        @row = pairs
+      end
+
+      def headers
+        @pivot_headers.dup
+      end
+
+      def has_key?(header)
+        return false if header.equal?(MISSING_HEADER)
+
+        super
+      end
+      alias_method :include?, :has_key?
+      alias_method :key?, :has_key?
+      alias_method :member?, :has_key?
+      alias_method :header?, :has_key?
+
+      def each(&block)
+        return enum_for(__method__) do
+          @row.count { |pair| !pair.first.equal?(MISSING_HEADER) }
+        end unless block_given?
+
+        @row.each do |pair|
+          next if pair.first.equal?(MISSING_HEADER)
+
+          yield(pair)
+        end
+
+        self
+      end
+      alias_method :each_pair, :each
+    end
+    private_constant(:PivotRow)
+
     # :call-seq:
     #   CSV::Table.new(array_of_rows, headers = nil) -> csv_table
     #
@@ -746,6 +789,174 @@ class CSV
     end
 
     # :call-seq:
+    #   table.pivot(row_columns, column_column, value_column,
+    #               columns: nil, column_order: nil, merge: nil)
+    #     {|old_value, new_value| ... } -> csv_table
+    #
+    # Returns a new table in wide format. +row_columns+ identifies the
+    # columns retained as row keys, +column_column+ supplies the new column
+    # labels, and +value_column+ supplies cell values.
+    #
+    # Each dimension may be an Integer column index or a header. A row key
+    # may consist of several columns; pass an Array for +row_columns+.
+    #
+    # New columns are ordered by first appearance by default. Pass +columns+
+    # (or its alias +column_order+) to specify an explicit order, including
+    # columns that do not occur in the source table.
+    #
+    # Raises ArgumentError if the same row and column coordinate has more
+    # than one value and no merge block or +merge+ callable is given. The
+    # block or callable receives the old and new values and returns the
+    # merged value.
+    def pivot(row_columns, column_column, value_column,
+              columns: nil, column_order: nil, merge: nil, &merge_block)
+      if !column_order.nil? && !columns.nil?
+        raise ArgumentError, "cannot pass both columns and column_order"
+      end
+      columns ||= column_order
+      if merge && merge_block
+        raise ArgumentError, "cannot pass both merge and a block"
+      end
+      unless merge.nil? || merge.respond_to?(:call)
+        raise TypeError, "merge must respond to #call"
+      end
+
+      row_specs = Array(row_columns)
+      explicit_columns = pivot_column_order(columns)
+      column_labels = []
+      grouped_values = {}
+      row_order = []
+      merge ||= merge_block
+
+      each_pivot_record(row_specs, column_column, value_column) do
+        |row_key, column_label, value|
+        column_index = if explicit_columns
+                         explicit_columns.index(column_label)
+                       else
+                         column_labels.index(column_label) || column_labels.size
+                       end
+        next if column_index.nil?
+
+        unless grouped_values.key?(row_key)
+          grouped_values[row_key] = {}
+          row_order << row_key
+        end
+
+        if column_index >= column_labels.size
+          column_labels.concat(Array.new(column_index + 1 - column_labels.size))
+        end
+        column_labels[column_index] = column_label
+
+        if grouped_values[row_key].key?(column_index)
+          unless merge
+            raise ArgumentError,
+                    "conflicting values found for pivot coordinate " \
+                    "#{row_key.inspect}, #{column_label.inspect}"
+          end
+          value = merge.call(grouped_values[row_key][column_index], value)
+        end
+        grouped_values[row_key][column_index] = value
+      end
+
+      columns = explicit_columns || column_labels
+      headers = pivot_headers(row_specs, columns)
+      rows = row_order.map do |row_key|
+        pairs = row_specs.each_with_index.map do |spec, index|
+          [pivot_header(spec), row_key[index]]
+        end
+        columns.each_with_index do |column_label, column_index|
+          value = grouped_values[row_key][column_index]
+          if value.nil? && !grouped_values[row_key].key?(column_index)
+            pairs << [MISSING_HEADER, nil]
+          else
+            pairs << [column_label, value]
+          end
+        end
+        PivotRow.new(headers, pairs)
+      end
+
+      self.class.new(rows, headers: headers)
+    end
+
+    # :call-seq:
+    #   table.unpivot(row_columns, value_columns = nil,
+    #                 column_name: "column", value_name: "value") -> csv_table
+    #   table.unpivot(row_columns, value_columns: nil,
+    #                 column_name: "column", value_name: "value") -> csv_table
+    #
+    # Returns a new table in long format. +row_columns+ identifies the
+    # columns retained as row keys. +value_columns+ identifies the columns to
+    # unpivot; if omitted, all non-row columns are used.
+    #
+    # Both arguments accept headers or Integer indexes; multiple columns may
+    # be passed as Arrays. The unpivoted column label and value are placed in
+    # columns named by +column_name+ and +value_name+.
+    #
+    # A present +nil+ value is emitted, while a coordinate absent from a
+    # sparse row is omitted.
+    def unpivot(row_columns, *positional_value_columns,
+                value_columns: nil,
+                column_name: :pivot_default_column_name,
+                value_name: :pivot_default_value_name)
+      unless positional_value_columns.empty? ||
+             positional_value_columns.size == 1
+        raise ArgumentError,
+              "wrong number of arguments " \
+              "(given #{1 + positional_value_columns.size}, expected 1..2)"
+      end
+      unless positional_value_columns.empty? || value_columns.nil?
+        raise ArgumentError, "cannot pass both positional and keyword value columns"
+      end
+
+      value_columns = positional_value_columns.first unless positional_value_columns.empty?
+      column_name = "column" if column_name == :pivot_default_column_name
+      value_name = "value" if value_name == :pivot_default_value_name
+
+      row_specs = Array(row_columns)
+      value_specs = value_columns.nil? ? nil : Array(value_columns)
+      headers = [
+        *pivot_headers(row_specs),
+        column_name,
+        value_name,
+      ]
+      rows = []
+
+      @table.each do |row|
+        next if row.header_row?
+
+        row_pairs = row_specs.map do |spec|
+          pair_for(row, spec)
+        end
+        next if row_pairs.any? { |pair| pair.nil? }
+
+        value_pairs = if value_specs
+                        value_specs.map do |spec|
+                          pair = pair_for(row, spec)
+                          next if pair.nil?
+                          next if pair.first.equal?(MISSING_HEADER)
+
+                          pair
+                        end.compact
+                      else
+                        selected_indices = row_specs.map do |spec|
+                          pair_index(row, spec)
+                        end.compact
+                        row.send(:row).each.with_index.reject do |pair, index|
+                          selected_indices.include?(index) ||
+                            pair.first.equal?(MISSING_HEADER)
+                        end.map(&:first)
+                      end
+
+        value_pairs.each do |column_label, value|
+          rows << Row.new(headers,
+                          row_pairs.map(&:last) + [column_label, value])
+        end
+      end
+
+      self.class.new(rows, headers: headers)
+    end
+
+    # :call-seq:
     #   table << row_or_array -> self
     #
     # If +row_or_array+ is a \CSV::Row object,
@@ -1050,6 +1261,90 @@ class CSV
       summary = to_csv(limit: 5)
       inspected << "\n" << summary if summary.encoding.ascii_compatible?
       inspected
+    end
+
+    private
+
+    def each_pivot_record(row_specs, column_spec, value_spec)
+      @table.each do |row|
+        next if row.header_row?
+
+        row_pairs = row_specs.map { |spec| pair_for(row, spec) }
+        next if row_pairs.any?(&:nil?)
+
+        column_pair = pair_for(row, column_spec)
+        next if column_pair.nil?
+
+        value_pair = pair_for(row, value_spec)
+        next if value_pair.nil?
+
+        yield(row_pairs.map(&:last), column_pair.last, value_pair.last)
+      end
+    end
+
+    def pivot_column_order(column_order)
+      return nil if column_order.nil?
+      unless column_order.is_a?(Array)
+        raise TypeError, "column_order must be an Array"
+      end
+
+      column_order.each_with_index do |column, index|
+        if column_order[(index + 1)..-1].include?(column)
+          raise ArgumentError, "duplicate pivot column: #{column.inspect}"
+        end
+      end
+      column_order.dup
+    end
+
+    def pivot_header(spec)
+      return spec unless spec.is_a?(Integer)
+
+      headers[spec]
+    end
+
+    def pivot_headers(row_specs, columns = nil)
+      headers = row_specs.map { |spec| pivot_header(spec) }
+      headers.concat(columns) if columns
+      headers
+    end
+
+    def pair_for(row, spec)
+      pairs = row.send(:row)
+      if spec.is_a?(Integer)
+        index = spec
+        index += row.size if index.negative?
+        return nil if index.negative?
+
+        pair = pairs[index]
+      else
+        pair = pairs.find do |header, _value|
+          !header.equal?(MISSING_HEADER) && header == spec
+        end
+      end
+
+      return nil if pair.nil?
+      return nil if pair.first.equal?(MISSING_HEADER)
+
+      pair
+    end
+
+    def pair_index(row, spec)
+      pairs = row.send(:row)
+      if spec.is_a?(Integer)
+        index = spec
+        index += row.size if index.negative?
+        return nil if index.negative? || index >= row.size
+
+        found = pairs.each.with_index.find do |(header, _value), pair_index|
+          pair_index == index && !header.equal?(MISSING_HEADER)
+        end
+        found&.last
+      else
+        found = pairs.each.with_index.find do |(header, _value), _index|
+          !header.equal?(MISSING_HEADER) && header == spec
+        end
+        found&.last
+      end
     end
   end
 end
