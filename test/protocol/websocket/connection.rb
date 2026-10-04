@@ -75,6 +75,18 @@ describe Protocol::WebSocket::Connection do
 			expect(connection).not.to be(:closed?)
 		end
 		
+		it "is closing after close_write succeeds" do
+			connection.close_write
+			
+			expect(connection).to be(:closing?)
+			expect(connection).not.to be(:closed?)
+			
+			result = connection.close_result
+			expect(result).to be(:local_close?)
+			expect(result.local_code).to be == Protocol::WebSocket::Error::NO_ERROR
+			expect(result).not.to be(:finished?)
+		end
+		
 		it "can still read after a successful close_write" do
 			text_frame = Protocol::WebSocket::TextFrame.new(true)
 			text_frame.pack("Hello")
@@ -97,8 +109,163 @@ describe Protocol::WebSocket::Connection do
 			close_frame = Protocol::WebSocket::CloseFrame.new.tap(&:pack)
 			client.write_frame(close_frame)
 			
-			connection.shutdown
+			result = connection.shutdown
+			
 			expect(connection).to be(:closed?)
+			expect(result).to be == connection.close_result
+			expect(result).to be(:remote_close?)
+			expect(result.cause).to be == :remote_close
+			expect(result.local_code).to be == Protocol::WebSocket::Error::NO_ERROR
+		end
+		
+		it "records the remote close when the peer initiates" do
+			close_frame = Protocol::WebSocket::CloseFrame.new
+			close_frame.pack(1000, "bye")
+			client.write_frame(close_frame)
+			
+			connection.read_frame
+			
+			result = connection.close_result
+			expect(result.remote_code).to be == 1000
+			expect(result.remote_reason).to be == "bye"
+			expect(result.cause).to be == :remote_close
+			expect(connection).to be(:closed?)
+			
+			# We replied with a close frame:
+			reply = client.read_frame
+			expect(reply).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(reply.unpack).to be == [1000, "bye"]
+			expect(result.local_code).to be == 1000
+		end
+		
+		it "handles both ends initiating the close simultaneously" do
+			# The remote end sends its own close frame at the same time as we do:
+			close_frame = Protocol::WebSocket::CloseFrame.new
+			close_frame.pack(1000, "done")
+			client.write_frame(close_frame)
+			
+			result = connection.shutdown
+			
+			expect(result.local_code).to be == Protocol::WebSocket::Error::NO_ERROR
+			expect(result.remote_code).to be == 1000
+			expect(result.remote_reason).to be == "done"
+			expect(result.cause).to be == :remote_close
+			expect(result).to be(:remote_close?)
+			expect(connection).to be(:closed?)
+			
+			# Only one close frame was sent:
+			frame = client.read_frame
+			expect(frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(IO.select([sockets.first], nil, nil, 0)).to be == nil
+		end
+		
+		it "handles EOF without a close frame" do
+			# The remote end closes the underlying connection without sending a close frame:
+			sockets.first.shutdown(Socket::SHUT_WR)
+			
+			result = connection.shutdown
+			
+			expect(result.cause).to be == :eof
+			expect(result).not.to be(:remote_close?)
+			expect(result.remote_code).to be == nil
+			expect(connection).to be(:closed?)
+			
+			# We still sent a close frame:
+			frame = client.read_frame
+			expect(frame).to be_a(Protocol::WebSocket::CloseFrame)
+		end
+		
+		it "records send failures" do
+			# The underlying stream is closed, so sending the close frame fails:
+			server.close
+			
+			result = connection.shutdown
+			
+			expect(result.cause).to be == :send_error
+			expect(result.error).not.to be == nil
+			expect(result.local_code).to be == Protocol::WebSocket::Error::NO_ERROR
+			expect(result).not.to be(:remote_close?)
+			expect(connection).to be(:closed?)
+		end
+		
+		it "times out waiting for the remote close" do
+			now = 0.0
+			clock = ->{now}
+			
+			# The remote end never sends a close frame, but keeps sending pings:
+			mock(server) do |mock|
+				mock.replace(:read_frame) do
+					now += 2.0
+					Protocol::WebSocket::PingFrame.new.tap{|frame| frame.pack("tick")}
+				end
+			end
+			
+			result = connection.shutdown(timeout: 5.0, clock: clock)
+			
+			expect(result.cause).to be == :timeout
+			expect(result).not.to be(:remote_close?)
+			expect(result.local_code).to be == Protocol::WebSocket::Error::NO_ERROR
+			expect(connection).to be(:closed?)
+			
+			# Control frames were still processed while waiting:
+			expect(client.read_frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(client.read_frame).to be_a(Protocol::WebSocket::PongFrame)
+		end
+		
+		it "does not send a second close frame" do
+			connection.send_close(1000, "first")
+			connection.send_close(1001, "second")
+			connection.close!
+			
+			frame = client.read_frame
+			expect(frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(frame.unpack).to be == [1000, "first"]
+			
+			# No further frames were sent:
+			expect(IO.select([sockets.first], nil, nil, 0)).to be == nil
+			
+			result = connection.close_result
+			expect(result.local_code).to be == 1000
+			expect(result.local_reason).to be == "first"
+		end
+	end
+	
+	with "closing state" do
+		it "rejects data messages after closing begins" do
+			connection.send_close
+			
+			expect do
+				connection.send_text("Hello")
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Cannot send text/)
+			
+			expect do
+				connection.send_binary("Hello")
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Cannot send binary/)
+			
+			expect do
+				connection.write("Hello")
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Cannot send text/)
+			
+			# Control frames are still allowed:
+			connection.send_ping
+			
+			expect(client.read_frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(client.read_frame).to be_a(Protocol::WebSocket::PingFrame)
+		end
+		
+		it "continues to process control frames while closing" do
+			connection.send_close
+			
+			ping_frame = Protocol::WebSocket::PingFrame.new
+			ping_frame.pack("yo")
+			client.write_frame(ping_frame)
+			
+			frame = connection.read_frame
+			expect(frame).to be_a(Protocol::WebSocket::PingFrame)
+			
+			# The close frame was sent first, then the pong reply:
+			expect(client.read_frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(client.read_frame).to be_a(Protocol::WebSocket::PongFrame)
 		end
 	end
 	

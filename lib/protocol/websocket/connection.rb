@@ -6,6 +6,7 @@
 # Copyright, 2021, by Aurora Nockert.
 
 require_relative "framer"
+require_relative "close_result"
 
 module Protocol
 	module WebSocket
@@ -17,6 +18,7 @@ module Protocol
 				@mask = mask
 				
 				@state = :open
+				@close_result = nil
 				@frames = []
 				
 				@reserved = Frame::RESERVED
@@ -33,6 +35,12 @@ module Protocol
 			
 			# @attribute [Integer] The allowed reserved bits.
 			attr :reserved
+			
+			# @attribute [Symbol] The state of the connection: `:open`, `:closing` or `:closed`.
+			attr :state
+			
+			# @attribute [CloseResult | Nil] The result of the closing handshake, available once closing has begun.
+			attr :close_result
 			
 			# @attribute [Array(Frame)] Buffered frames which form part of a complete message.
 			attr_accessor :frames
@@ -63,6 +71,7 @@ module Protocol
 			# Transition the connection to the open state (the default for new connections).
 			def open!
 				@state = :open
+				@close_result = nil
 				
 				return self
 			end
@@ -88,6 +97,11 @@ module Protocol
 				@state == :closed
 			end
 			
+			# @returns [Boolean] if the connection has started the closing handshake.
+			def closing?
+				@state == :closing
+			end
+			
 			# Immediately transition the connection to the closed state *and* close the underlying connection. Any data not yet read will be lost.
 			def close(...)
 				close!(...)
@@ -109,13 +123,49 @@ module Protocol
 			end
 			
 			# Close the connection gracefully. This will send a close frame and wait for the remote end to respond with a close frame. Any data received after the close frame is sent will be ignored. If you want to process this data, use {#close_write} instead, and read the data before calling {#close}.
-			def shutdown
-				send_close unless @state == :closed
+			#
+			# The result of the closing handshake is recorded in {#close_result}, including the close code/reason sent by the local end, the close code/reason received from the remote end (if any), and the final cause which terminated the connection.
+			#
+			# @parameter timeout [Numeric | Nil] The maximum time to wait for the remote end to respond with a close frame. The timeout is checked between incoming frames.
+			# @parameter clock [Proc | Nil] A clock which returns the current monotonic time, used to compute the timeout deadline. Defaults to the system monotonic clock. You can inject a fake clock for testing.
+			# @returns [CloseResult] The result of the closing handshake.
+			def shutdown(timeout: nil, clock: nil)
+				begin
+					send_close unless closed?
+				rescue
+					# The send failure is recorded in the close result:
+					return @close_result
+				end
+				
+				if timeout
+					clock ||= ->{::Process.clock_gettime(::Process::CLOCK_MONOTONIC)}
+					deadline = clock.call + timeout
+				end
 				
 				# `read_frame` will return nil after receiving a close frame:
-				while read_frame
-					# Drain the connection.
+				until closed?
+					if deadline and clock.call >= deadline
+						@close_result&.finish!(CloseResult::TIMEOUT)
+						break
+					end
+					
+					begin
+						break unless read_frame
+					rescue EOFError
+						# The connection was closed without a close frame:
+						@close_result&.finish!(CloseResult::EOF)
+						break
+					end
 				end
+				
+				if result = @close_result
+					# The connection terminated without a close frame from the remote end:
+					result.finish!(CloseResult::EOF) unless result.finished?
+				end
+				
+				@state = :closed
+				
+				return result
 			end
 			
 			# Read a frame from the framer, and apply it to the connection.
@@ -180,6 +230,9 @@ module Protocol
 			def receive_close(frame)
 				code, reason = frame.unpack
 				
+				result = (@close_result ||= CloseResult.new)
+				result.remote_close!(code, reason)
+				
 				# On receiving a close frame, we must enter the closed state:
 				close!(code, reason)
 				
@@ -233,7 +286,11 @@ module Protocol
 			# Send a text frame with the specified buffer.
 			# @parameter buffer [String] The text to send.
 			def send_text(buffer, **options)
-				write_frame(@writer.pack_text_frame(buffer, **options))
+				if @state == :open
+					write_frame(@writer.pack_text_frame(buffer, **options))
+				else
+					raise ProtocolError, "Cannot send text in state #{@state}"
+				end
 			end
 			
 			# Pack a binary frame with the specified buffer. This is used by the {#writer} interface.
@@ -249,18 +306,41 @@ module Protocol
 			# Send a binary frame with the specified buffer.
 			# @parameter buffer [String] The binary data to send.
 			def send_binary(buffer, **options)
-				write_frame(@writer.pack_binary_frame(buffer, **options))
+				if @state == :open
+					write_frame(@writer.pack_binary_frame(buffer, **options))
+				else
+					raise ProtocolError, "Cannot send binary in state #{@state}"
+				end
 			end
 			
-			# Send a control frame with data containing a specified control sequence to begin the closing handshake. Does not close the connection, until the remote end responds with a close frame.
+			# Send a control frame with data containing a specified control sequence to begin the closing handshake. Does not close the connection, until the remote end responds with a close frame. Only one close frame is ever sent; subsequent calls return the existing {CloseResult} without sending another frame.
+			#
 			# @parameter code [Integer] The close code to send.
 			# @parameter reason [String] The reason for closing the connection.
+			# @returns [CloseResult] The result of the closing handshake.
 			def send_close(code = Error::NO_ERROR, reason = "")
+				result = (@close_result ||= CloseResult.new)
+				
+				# Only one close frame is ever sent:
+				return result if result.local_close?
+				
+				result.local_close!(code, reason)
+				
+				@state = :closing unless @state == :closed
+				
 				frame = CloseFrame.new(mask: @mask)
 				frame.pack(code, reason)
 				
-				self.write_frame(frame)
-				self.flush
+				begin
+					write_frame(frame)
+					flush
+				rescue => error
+					result.finish!(CloseResult::SEND_ERROR, error)
+					@state = :closed
+					raise
+				end
+				
+				return result
 			end
 			
 			# Write a message to the connection.
