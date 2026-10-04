@@ -272,6 +272,47 @@ class CSV
     end
 
     # :call-seq:
+    #   indices(header) -> array
+    #   indices(header, offset) -> array
+    #
+    # Returns the indexes of all fields whose header is equal to +header+;
+    # see #index, which returns only the first-found index.
+    #
+    # Returns an empty Array if the header does not exist:
+    #   source = "Name,Name,Name\nFoo,Bar,Baz\n"
+    #   table = CSV.parse(source, headers: true)
+    #   row = table[0]
+    #   row.indices('Name') # => [0, 1, 2]
+    #   row.indices('Name', 1) # => [1, 2]
+    #   row.indices('NONE') # => []
+    def indices(header, minimum_index = 0)
+      matching = []
+      headers.each_with_index do |candidate, index|
+        next if index < minimum_index
+        matching << index if candidate == header
+      end
+      matching
+    end
+
+    # :call-seq:
+    #   fetch_all(header) -> array
+    #
+    # Returns the values of all fields whose header is equal to +header+.
+    # Unlike #field, #fetch, and #[], which return only the first match,
+    # this method makes duplicate headers (including duplicate column paths
+    # built from multi-row headers) unambiguous by returning every match.
+    #
+    # Returns an empty Array if the header does not exist:
+    #   source = "Name,Name,Name\nFoo,Bar,Baz\n"
+    #   table = CSV.parse(source, headers: true)
+    #   row = table[0]
+    #   row.fetch_all('Name') # => ["Foo", "Bar", "Baz"]
+    #   row.fetch_all('NONE') # => []
+    def fetch_all(header)
+      indices(header).collect { |index| @row[index].last }
+    end
+
+    # :call-seq:
     #   row.has_key?(header) -> true or false
     #
     # Returns +true+ if there is a field with the given +header+,

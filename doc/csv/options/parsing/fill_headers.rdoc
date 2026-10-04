@@ -1,0 +1,32 @@
+====== Option +fill_headers+
+
+Specifies whether blank cells in multi-row headers inherit the nearest
+non-blank header to their left within the same header row. This mirrors
+merged cells such as a category heading that spans several indicators.
+
+This option has an effect only when multi-row headers are used
+(see {Option headers}[#class-CSV-label-Option+headers]).
+Blank cells are never filled automatically when this option is +false+.
+
+Default value:
+  CSV::DEFAULT_OPTIONS.fetch(:fill_headers) # => false
+
+Without fill:
+  str = <<-EOT
+  last year,,,this year,,
+  amount,count,note,amount,count,note
+  1,2,a,3,4,b
+  EOT
+  table = CSV.parse(str, headers: 2)
+  table.headers
+  # => [["last year", "amount"], ["count"], ["note"],
+  #     ["this year", "amount"], ["count"], ["note"]]
+
+With fill:
+  table = CSV.parse(str, headers: 2, fill_headers: true)
+  table.headers
+  # => [["last year", "amount"], ["last year", "count"], ["last year", "note"],
+  #     ["this year", "amount"], ["this year", "count"], ["this year", "note"]]
+
+A column that is blank in every header row remains an empty path, since
+it has no category to inherit.

@@ -97,6 +97,25 @@ class TestCSVRow < Test::Unit::TestCase
     end
   end
 
+  def test_fetch_all
+    row = CSV::Row.new(%w[A B A], [1, 2, 3])
+    assert_equal([1, 3], row.fetch_all('A'))
+    assert_equal([2], row.fetch_all('B'))
+    assert_equal([], row.fetch_all('Z'))
+
+    # array paths are matched whole, not element by element
+    path_row = CSV::Row.new([[:a, :x], [:a, :y]], [1, 2])
+    assert_equal([1], path_row.fetch_all([:a, :x]))
+    assert_equal([], path_row.fetch_all([:a]))
+  end
+
+  def test_indices
+    row = CSV::Row.new(%w[A B A], [1, 2, 3])
+    assert_equal([0, 2], row.indices('A'))
+    assert_equal([2], row.indices('A', 1))
+    assert_equal([], row.indices('Z'))
+  end
+
   def test_has_key?
     assert_equal(true, @row.has_key?('B'))
     assert_equal(false, @row.has_key?('foo'))

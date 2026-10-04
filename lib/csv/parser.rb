@@ -412,7 +412,17 @@ class CSV
     def parse(&block)
       return to_enum(__method__) unless block_given?
 
-      if @return_headers and @headers and @raw_headers
+      if @return_headers and @headers and @raw_headers and @multi_row_headers
+        layer_count = @headers.collect(&:size).max || 0
+        layer_count.times do |layer_index|
+          raw_header = @headers.collect { |path| path[layer_index] }
+          header_row = Row.new(@headers, raw_header, true)
+          if @unconverted_fields
+            header_row = add_unconverted_fields(header_row, [])
+          end
+          yield header_row
+        end
+      elsif @return_headers and @headers and @raw_headers
         headers = Row.new(@headers, @raw_headers, true)
         if @unconverted_fields
           headers = add_unconverted_fields(headers, [])
@@ -770,26 +780,49 @@ class CSV
 
     def prepare_header
       @return_headers = @options[:return_headers]
+      @fill_headers = @options[:fill_headers]
 
       headers = @options[:headers]
       case headers
       when Array
+        @multi_row_headers = headers.any? { |header| header.is_a?(Array) }
+        @header_rows = nil
         @raw_headers = headers
-        quoted_fields = FieldsConverter::NO_QUOTED_FIELDS
         @use_headers = true
+        if @multi_row_headers
+          @headers = headers.collect do |path|
+            path = @header_fields_converter.convert(path, nil, @lineno,
+                                                     FieldsConverter::NO_QUOTED_FIELDS)
+            path.each {|h| h.freeze if h.is_a?(String)}
+            path.freeze
+          end
+        else
+          @headers = adjust_headers(headers, FieldsConverter::NO_QUOTED_FIELDS)
+        end
       when String
         @raw_headers, quoted_fields = parse_headers(headers)
+        @multi_row_headers = false
         @use_headers = true
-      when nil, false
-        @raw_headers = nil
-        @use_headers = false
-      else
-        @raw_headers = nil
-        @use_headers = true
-      end
-      if @raw_headers
         @headers = adjust_headers(@raw_headers, quoted_fields)
+      when Integer
+        raise ArgumentError, "headers must be a positive integer" if headers < 1
+        @header_rows = headers > 1 ? [] : nil
+        @header_row_count = headers > 1 ? headers : nil
+        @raw_headers = nil
+        @multi_row_headers = headers > 1
+        @use_headers = true
+        @headers = nil
+      when nil, false
+        @header_rows = nil
+        @raw_headers = nil
+        @multi_row_headers = false
+        @use_headers = false
+        @headers = nil
       else
+        @header_rows = nil
+        @raw_headers = nil
+        @multi_row_headers = false
+        @use_headers = true
         @headers = nil
       end
     end
@@ -812,6 +845,53 @@ class CSV
       adjusted_headers = @header_fields_converter.convert(headers, nil, @lineno, quoted_fields)
       adjusted_headers.each {|h| h.freeze if h.is_a? String}
       adjusted_headers
+    end
+
+    # Accumulates multiple physical header rows and builds the column paths
+    # used as the final headers. Each returned header is an Array whose
+    # elements are the per-layer header values, in original column order.
+    def build_multiple_headers
+      adjusted_rows = @header_rows.each_with_index.collect do |row, index|
+        adjusted = @header_fields_converter.convert(row, nil, index + 1,
+                                                    FieldsConverter::NO_QUOTED_FIELDS)
+        adjusted.each {|h| h.freeze if h.is_a?(String)}
+        adjusted
+      end
+      column_count = adjusted_rows.collect(&:size).max || 0
+      headers = Array.new(column_count) do |column_index|
+        path = adjusted_rows.collect { |row| row[column_index] }
+        if @fill_headers and path.any? { |header| header_value?(header) }
+          path = fill_header_path(path, column_index, adjusted_rows)
+        elsif @fill_headers
+          path = []
+        else
+          path = path.reject { |header| not header_value?(header) }
+        end
+        path.freeze
+      end
+      @raw_headers = @header_rows
+      @headers = headers
+    end
+
+    def header_value?(header)
+      not (header.nil? or (header.is_a?(String) and header.empty?))
+    end
+
+    # Fills blank layers of a column path by carrying the nearest labeled
+    # value to the left within the same layer, mirroring merged cells.
+    def fill_header_path(path, column_index, rows)
+      path.each_with_index.collect do |header, layer_index|
+        next header if header_value?(header)
+        filled = nil
+        (column_index - 1).downto(0) do |left_index|
+          candidate = rows[layer_index][left_index]
+          if header_value?(candidate)
+            filled = candidate
+            break
+          end
+        end
+        filled
+      end
     end
 
     def prepare_parser
@@ -1271,7 +1351,22 @@ class CSV
       @lineno += 1
 
       raw_row = row
-      if @use_headers
+      if @use_headers and @headers.nil? and @header_row_count
+        @header_rows << row
+        if @header_rows.size < @header_row_count
+          return
+        end
+        build_multiple_headers
+        return unless @return_headers
+        @header_rows.each do |header_row|
+          returned_row = Row.new(@headers, header_row, true)
+          if @unconverted_fields
+            returned_row = add_unconverted_fields(returned_row, header_row)
+          end
+          yield(returned_row)
+        end
+        return
+      elsif @use_headers
         if @headers.nil?
           @headers = adjust_headers(row, quoted_fields)
           return unless @return_headers

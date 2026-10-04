@@ -78,8 +78,15 @@ class CSV
       headers = @options[:headers]
       case headers
       when Array
-        @headers = headers
-        @use_headers = true
+        if headers.any? { |header| header.is_a?(Array) }
+          # Multi-row column paths: only the data rows are written;
+          # callers that need the physical header rows can append them.
+          @headers = nil
+          @use_headers = true
+        else
+          @headers = headers
+          @use_headers = true
+        end
       when String
         @headers = CSV.parse_line(headers,
                                   col_sep: @options[:column_separator],
@@ -87,6 +94,9 @@ class CSV
                                   quote_char: @options[:quote_character])
         @use_headers = true
       when true
+        @headers = nil
+        @use_headers = true
+      when Integer
         @headers = nil
         @use_headers = true
       else

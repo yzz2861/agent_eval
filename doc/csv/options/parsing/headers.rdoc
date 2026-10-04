@@ -62,3 +62,33 @@ with the current +options+, and the returned \Array is treated as headers:
   csv
   csv.headers # => ["Name", "Count"]
   csv.shift # => #<CSV::Row "Name":"foo" "Count":"0">
+
+---
+
+If set to an \+Integer +n+ greater than 1, the first +n+ rows of the data
+are treated as multiple header rows. The header of each column becomes an
+\Array path formed from that column's cells across the header rows, while
+the data rows retain their original column order:
+  str = <<-EOT
+  last year,,,this year,,
+  amount,count,note,amount,count,note
+  1,2,a,3,4,b
+  EOT
+  table = CSV.parse(str, headers: 2)
+  table.headers
+  # => [["last year", "amount"], ["count"], ["note"],
+  #     ["this year", "amount"], ["count"], ["note"]]
+  table.first
+  # => #<CSV::Row ["last year", "amount"]:"1" ["count"]:"2" ["note"]:"a"
+  #     ["this year", "amount"]:"3" ["count"]:"4" ["note"]:"b">
+
+Blank header cells are not carried over from the left unless option
+{fill_headers}[#class-CSV-label-Option+fill_headers] is enabled.
+
+Duplicate column paths are retained as separate columns; use
+CSV::Row#fetch_all to retrieve all of the matching values explicitly.
+
+If set to an \+Array of \+Arrays, each inner \+Array is treated directly
+as a column path:
+  csv = CSV.new("foo,0\n", headers: [["Name", "Given"], ["Count"]])
+  csv.headers # => [["Name", "Given"], ["Count"]]

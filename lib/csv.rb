@@ -326,6 +326,7 @@ require_relative "csv/writer"
 #     headers:            false,
 #     return_headers:     false,
 #     header_converters:  nil,
+#     fill_headers:       false,
 #     skip_blanks:        false,
 #     skip_lines:         nil,
 #     liberal_parsing:    false,
@@ -356,6 +357,8 @@ require_relative "csv/writer"
 #   or specifies the headers themselves.
 # - +return_headers+: Specifies whether headers are to be returned.
 # - +header_converters+: Specifies the header converters to be used.
+# - +fill_headers+: Specifies whether blank multi-row header cells inherit
+#   the nearest heading to the left.
 # - +skip_blanks+: Specifies whether blanks lines are to be ignored.
 # - +skip_lines+: Specifies how comments lines are to be recognized.
 # - +strip+: Specifies whether leading and trailing whitespace are to be
@@ -383,6 +386,8 @@ require_relative "csv/writer"
 # :include: ../doc/csv/options/parsing/return_headers.rdoc
 #
 # :include: ../doc/csv/options/parsing/header_converters.rdoc
+#
+# :include: ../doc/csv/options/parsing/fill_headers.rdoc
 #
 # :include: ../doc/csv/options/parsing/skip_blanks.rdoc
 #
@@ -964,6 +969,7 @@ class CSV
     headers:            false,
     return_headers:     false,
     header_converters:  nil,
+    fill_headers:       false,
     skip_blanks:        false,
     skip_lines:         nil,
     liberal_parsing:    false,
@@ -2043,6 +2049,7 @@ class CSV
                  return_headers: false,
                  write_headers: nil,
                  header_converters: nil,
+                 fill_headers: false,
                  skip_blanks: false,
                  force_quotes: false,
                  skip_lines: nil,
@@ -2101,6 +2108,7 @@ class CSV
       unconverted_fields: unconverted_fields,
       headers: headers,
       return_headers: return_headers,
+      fill_headers: fill_headers,
       skip_blanks: skip_blanks,
       skip_lines: skip_lines,
       liberal_parsing: liberal_parsing,
@@ -2243,7 +2251,7 @@ class CSV
       parsed_headers = parser.headers
       return parsed_headers if parsed_headers
       raw_headers = @parser_options[:headers]
-      raw_headers = nil if raw_headers == false
+      raw_headers = nil if raw_headers == false or raw_headers.is_a?(Integer)
       raw_headers
     end
   end
