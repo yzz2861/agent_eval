@@ -1,0 +1,23 @@
+====== Options +open_quote_char+ and +close_quote_char+
+
+Specifies distinct opening and closing quote characters:
+
+  CSV.parse_line('«foo»', open_quote_char: '«', close_quote_char: '»')
+  # => ["foo"]
+
+The two options must be specified together.
+When both are omitted, +quote_char+ is used as the same opening and closing
+quote character. Specifying the pair is equivalent to:
+
+  CSV.parse_line(str, open_quote_char: quote_char,
+                     close_quote_char: quote_char)
+
+The opening quote begins a quoted field only at the start of a field;
+an opening quote encountered inside an unquoted field is an ordinary character.
+Inside a quoted field, a closing quote is escaped by doubling it:
+
+  CSV.generate_line(["a»b"], open_quote_char: '«', close_quote_char: '»')
+  # => "«a»»b»\n"
+
+Each quote character must be a single character and may not be included in
++col_sep+ or +row_sep+.

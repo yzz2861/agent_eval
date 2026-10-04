@@ -319,6 +319,8 @@ require_relative "csv/writer"
 #     col_sep:            ",",
 #     row_sep:            :auto,
 #     quote_char:         '"',
+#     open_quote_char:    nil,
+#     close_quote_char:   nil,
 #     # For parsing.
 #     field_size_limit:   nil,
 #     converters:         nil,
@@ -346,7 +348,11 @@ require_relative "csv/writer"
 # Options for parsing, described in detail below, include:
 # - +row_sep+: Specifies the row separator; used to delimit rows.
 # - +col_sep+: Specifies the column separator; used to delimit fields.
-# - +quote_char+: Specifies the quote character; used to quote fields.
+# - +quote_char+: Specifies the symmetric quote character; used to quote fields.
+# - +open_quote_char+: Specifies the opening quote character used with
+#   +close_quote_char+.
+# - +close_quote_char+: Specifies the closing quote character used with
+#   +open_quote_char+.
 # - +field_size_limit+: Specifies the maximum field size + 1 allowed.
 #   Deprecated since 3.2.3. Use +max_field_size+ instead.
 # - +max_field_size+: Specifies the maximum field size allowed.
@@ -371,6 +377,8 @@ require_relative "csv/writer"
 # :include: ../doc/csv/options/common/col_sep.rdoc
 #
 # :include: ../doc/csv/options/common/quote_char.rdoc
+#
+# :include: ../doc/csv/options/common/open_quote_char.rdoc
 #
 # :include: ../doc/csv/options/parsing/field_size_limit.rdoc
 #
@@ -401,7 +409,11 @@ require_relative "csv/writer"
 # Options for generating, described in detail below, include:
 # - +row_sep+: Specifies the row separator; used to delimit rows.
 # - +col_sep+: Specifies the column separator; used to delimit fields.
-# - +quote_char+: Specifies the quote character; used to quote fields.
+# - +quote_char+: Specifies the symmetric quote character; used to quote fields.
+# - +open_quote_char+: Specifies the opening quote character used with
+#   +close_quote_char+.
+# - +close_quote_char+: Specifies the closing quote character used with
+#   +open_quote_char+.
 # - +write_headers+: Specifies whether headers are to be written.
 # - +force_quotes+: Specifies whether each output field is to be quoted.
 # - +quote_empty+: Specifies whether each empty output field is to be quoted.
@@ -414,6 +426,8 @@ require_relative "csv/writer"
 # :include: ../doc/csv/options/common/col_sep.rdoc
 #
 # :include: ../doc/csv/options/common/quote_char.rdoc
+#
+# :include: ../doc/csv/options/common/open_quote_char.rdoc
 #
 # :include: ../doc/csv/options/generating/write_headers.rdoc
 #
@@ -956,6 +970,8 @@ class CSV
     col_sep:            ",",
     row_sep:            :auto,
     quote_char:         '"',
+    open_quote_char:    nil,
+    close_quote_char:   nil,
     # For parsing.
     field_size_limit:   nil,
     max_field_size:     nil,
@@ -1225,7 +1241,7 @@ class CSV
     #     is used for generator the filter input.
     #
     # However, there are three options that may be used for both parsing and generating:
-    # +col_sep+, +quote_char+, and +row_sep+.
+    # +col_sep+, +quote_char+, +open_quote_char+, +close_quote_char+, and +row_sep+.
     #
     # Therefore for method +filter+ (and method +filter+ only),
     # there are special options that allow these parsing and generating options
@@ -1237,6 +1253,10 @@ class CSV
     # - Options +input_quote_char+ and +output_quote_char+
     #   (and their aliases +in_quote_char+ and +out_quote_char+)
     #   specify the quote characters for parsing and generting.
+    # - Options +input_open_quote_char+ and +output_open_quote_char+
+    #   specify the opening quote characters for parsing and generating.
+    # - Options +input_close_quote_char+ and +output_close_quote_char+
+    #   specify the closing quote characters for parsing and generating.
     # - Options +input_row_sep+ and +output_row_sep+
     #   (and their aliases +in_row_sep+ and +out_row_sep+)
     #   specify the row separators for parsing and generating.
@@ -2035,6 +2055,8 @@ class CSV
                  col_sep: ",",
                  row_sep: :auto,
                  quote_char: '"',
+                 open_quote_char: nil,
+                 close_quote_char: nil,
                  field_size_limit: nil,
                  max_field_size: nil,
                  converters: nil,
@@ -2093,10 +2115,19 @@ class CSV
     if max_field_size.nil? and field_size_limit
       max_field_size = field_size_limit - 1
     end
+    if open_quote_char.nil? != close_quote_char.nil?
+      raise ArgumentError,
+            ":open_quote_char and :close_quote_char must be specified together"
+    end
+    if open_quote_char
+      quote_char = open_quote_char
+    end
     @parser_options = {
       column_separator: col_sep,
       row_separator: row_sep,
       quote_character: quote_char,
+      open_quote_character: open_quote_char,
+      close_quote_character: close_quote_char,
       max_field_size: max_field_size,
       unconverted_fields: unconverted_fields,
       headers: headers,
@@ -2120,6 +2151,8 @@ class CSV
       column_separator: col_sep,
       row_separator: row_sep,
       quote_character: quote_char,
+      open_quote_character: open_quote_char,
+      close_quote_character: close_quote_char,
       quote_empty: quote_empty,
     }
 
@@ -2161,6 +2194,22 @@ class CSV
   #   CSV.new('').quote_char # => "\""
   def quote_char
     parser.quote_character
+  end
+
+  # :call-seq:
+  #   csv.open_quote_char -> string or nil
+  #
+  # Returns the encoded opening quote character used for parsing and writing.
+  def open_quote_char
+    parser.open_quote_character
+  end
+
+  # :call-seq:
+  #   csv.close_quote_char -> string or nil
+  #
+  # Returns the encoded closing quote character used for parsing and writing.
+  def close_quote_char
+    parser.close_quote_character
   end
 
   # :call-seq:
@@ -2817,6 +2866,10 @@ class CSV
       if a = __send__(attr_name)
         str << " " << attr_name << ":" << a.inspect
       end
+    end
+    if open_quote_char != close_quote_char
+      str << " open_quote_char:" << open_quote_char.inspect
+      str << " close_quote_char:" << close_quote_char.inspect
     end
     ["skip_blanks", "liberal_parsing"].each do |attr_name|
       if a = __send__("#{attr_name}?")

@@ -4,6 +4,9 @@ Specifies the character (\String of length 1) used to quote fields
 in both parsing and generating.
 This String will be transcoded into the data's \Encoding before use.
 
+Use +open_quote_char+ and +close_quote_char+ when the opening and closing
+quote characters differ.
+
 Default value:
   CSV::DEFAULT_OPTIONS.fetch(:quote_char) # => "\"" (double quote)
 

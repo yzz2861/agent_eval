@@ -84,7 +84,9 @@ class CSV
         @headers = CSV.parse_line(headers,
                                   col_sep: @options[:column_separator],
                                   row_sep: @options[:row_separator],
-                                  quote_char: @options[:quote_character])
+                                  quote_char: @options[:quote_character],
+                                  open_quote_char: @options[:open_quote_character],
+                                  close_quote_char: @options[:close_quote_character])
         @use_headers = true
       when true
         @headers = nil
@@ -138,6 +140,41 @@ class CSV
         @row_separator = row_separator.to_s.encode(@encoding)
       end
       @quote_character = @options[:quote_character]
+      @open_quote_character = @options[:open_quote_character]
+      @close_quote_character = @options[:close_quote_character]
+      if @open_quote_character.nil? != @close_quote_character.nil?
+        raise ArgumentError,
+              ":open_quote_char and :close_quote_char must be specified together"
+      end
+      if @quote_character.nil?
+        @open_quote_character = nil
+        @close_quote_character = nil
+      elsif @open_quote_character
+        @open_quote_character = @open_quote_character.to_s.encode(@encoding)
+        @close_quote_character = @close_quote_character.to_s.encode(@encoding)
+        unless @open_quote_character.length == 1 and @close_quote_character.length == 1
+          raise ArgumentError,
+                ":open_quote_char and :close_quote_char have to be single character Strings"
+        end
+        @quote_character = @open_quote_character
+      else
+        @quote_character = @quote_character.to_s.encode(@encoding)
+        unless @quote_character.length == 1
+          raise ArgumentError,
+                ":quote_char has to be nil or a single character String"
+        end
+        @open_quote_character = @quote_character
+        @close_quote_character = @quote_character
+      end
+      [@open_quote_character, @close_quote_character].compact.each do |quote_character|
+        [@column_separator, @row_separator].each do |separator|
+          next unless Encoding.compatible?(quote_character, separator)
+          if separator.include?(quote_character)
+            raise ArgumentError,
+                  "Quote character cannot be included in col_sep or row_sep"
+          end
+        end
+      end
       force_quotes = @options[:force_quotes]
       if force_quotes.is_a?(Array)
         prepare_force_quotes_fields(force_quotes)
@@ -150,11 +187,20 @@ class CSV
         @force_quotes = false
       end
       unless @force_quotes
-        @quotable_pattern =
-          Regexp.new("[\r\n".encode(@encoding) +
-                     Regexp.escape(@column_separator) +
-                     Regexp.escape(@quote_character.encode(@encoding)) +
-                     "]".encode(@encoding))
+        if @quote_character.nil?
+          @quotable_pattern =
+            Regexp.new("[\r\n".encode(@encoding) +
+                       Regexp.escape(@column_separator) +
+                       "]".encode(@encoding))
+        else
+          quote_characters =
+            [@open_quote_character, @close_quote_character].uniq.join
+          @quotable_pattern =
+            Regexp.new("[\r\n".encode(@encoding) +
+                       Regexp.escape(@column_separator) +
+                       Regexp.escape(quote_characters) +
+                       "]".encode(@encoding))
+        end
       end
       @quote_empty = @options.fetch(:quote_empty, true)
     end
@@ -179,11 +225,14 @@ class CSV
 
     def quote_field(field)
       field = String(field)
-      encoded_quote_character = @quote_character.encode(field.encoding)
-      encoded_quote_character +
-        field.gsub(encoded_quote_character,
-                   encoded_quote_character * 2) +
-        encoded_quote_character
+      encoded_open_quote_character =
+        (@open_quote_character || @quote_character).encode(field.encoding)
+      encoded_close_quote_character =
+        (@close_quote_character || @quote_character).encode(field.encoding)
+      encoded_open_quote_character +
+        field.gsub(encoded_close_quote_character,
+                   encoded_close_quote_character * 2) +
+        encoded_close_quote_character
     end
 
     def quote(field, i)
