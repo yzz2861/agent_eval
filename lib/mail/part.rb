@@ -1,6 +1,7 @@
 # encoding: utf-8
 # frozen_string_literal: true
 require 'mail/constants'
+require 'mail/delivery_status'
 require 'mail/utilities'
 
 module Mail
@@ -49,6 +50,26 @@ module Mail
 
     def delivery_status_data
       delivery_status_report_part? ? parse_delivery_status_report : {}
+    end
+
+    # Parses the delivery status body into a Mail::DeliveryStatusReport that
+    # keeps report-level fields separate from each per-recipient block.
+    # Returns nil for parts that are not message/delivery-status reports.
+    def delivery_status_report
+      unless defined? @delivery_status_report
+        @delivery_status_report =
+          if delivery_status_report_part?
+            Mail::DeliveryStatusReport.new(body.to_s)
+          end
+      end
+      @delivery_status_report
+    end
+
+    # Returns one Mail::DeliveryStatusReport::Recipient per recipient block,
+    # in the order they appear in the report. Empty for non delivery-status
+    # parts.
+    def delivery_status_recipients
+      delivery_status_report ? delivery_status_report.recipients : []
     end
 
     def bounced?

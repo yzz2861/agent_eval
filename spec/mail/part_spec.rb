@@ -180,6 +180,49 @@ ENDPART
         expect(@delivery_report.diagnostic_code).to be_nil
       end
     end
+
+    describe "#delivery_status_report" do
+      it "parses report-level fields and the single recipient block" do
+        report = @delivery_report.delivery_status_report
+        expect(report).to be_a(Mail::DeliveryStatusReport)
+        expect(report["reporting-mta"]).to eq "dns; mail12.rrrr.com.au"
+
+        recipient = report.recipients.first
+        expect(recipient.address).to eq "edwin@zzzzzzz.com"
+        expect(recipient.address_type).to eq "RFC822"
+        expect(recipient.action).to eq "failed"
+        expect(recipient.status).to eq "5.3.0"
+        expect(recipient.diagnostic_code).to eq "SMTP; 553 5.3.0 <edwin@zzzzzzz.com>... Unknown E-Mail Address"
+      end
+
+      it "organizes several recipient blocks independently" do
+        part = Mail::Part.new(Mail::Utilities.to_crlf(<<ENDPART))
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; mx.example.org
+
+Final-Recipient: rfc822; alice@example.org
+Action: failed
+Status: 5.1.1
+
+Final-Recipient: rfc822; bob@example.org
+Action: delayed
+Status: 4.2.0
+ENDPART
+
+        recipients = part.delivery_status_recipients
+        expect(recipients.map(&:address)).to eq ["alice@example.org", "bob@example.org"]
+        expect(recipients.map(&:action)).to eq ["failed", "delayed"]
+        expect(recipients.map(&:status)).to eq ["5.1.1", "4.2.0"]
+        expect(part.delivery_status_report["reporting-mta"]).to eq "dns; mx.example.org"
+      end
+
+      it "is nil for parts that are not delivery-status reports" do
+        part = Mail::Part.new("Content-Type: text/plain\r\n\r\nHello")
+        expect(part.delivery_status_report).to be_nil
+        expect(part.delivery_status_recipients).to eq []
+      end
+    end
   end
 
   it "should correctly parse plain text raw source and not truncate after newlines - issue 208" do

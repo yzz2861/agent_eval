@@ -562,6 +562,29 @@ Results in the same email as done using the block form
 @mail.retryable?       #=> false
 ```
 
+A single bounce may report different results for several recipients.
+Use `delivery_status_recipients` to read one entry per recipient; each
+entry keeps that recipient's fields together instead of relying on array
+positions:
+
+```ruby
+report = @mail.delivery_status_report
+report['reporting-mta'] #=> "dns; mx.example.org"
+
+@mail.delivery_status_recipients.each do |recipient|
+  recipient.address          #=> "mikel@dont.exist.com"
+  recipient.final_recipient  #=> "rfc822;mikel@dont.exist.com"
+  recipient.action           #=> "failed"
+  recipient.status           #=> "5.5.0"
+  recipient.diagnostic_code  #=> "smtp;550 ..." or nil when absent
+  recipient['x-extension']   #=> unknown extension fields stay in their block
+  recipient.bounced?
+end
+```
+
+Absent fields return `nil`. Malformed fields keep their raw value and are
+reported separately on `report.errors` / `recipient.errors`.
+
 ### Attaching and Detaching Files
 
 You can just read the file off an absolute path, Mail will try

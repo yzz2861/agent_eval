@@ -1586,6 +1586,18 @@ module Mail
       delivery_status_part and delivery_status_part.retryable?
     end
 
+    # Returns the parsed delivery status report (see Mail::Part#delivery_status_report)
+    # or nil when this is not a multipart/report delivery-status message.
+    def delivery_status_report
+      delivery_status_part and delivery_status_part.delivery_status_report
+    end
+
+    # Returns one structured recipient entry per recipient block of the
+    # delivery status report. Empty for non delivery-status messages.
+    def delivery_status_recipients
+      delivery_status_part ? delivery_status_part.delivery_status_recipients : []
+    end
+
     # Returns the current boundary for this message part
     def boundary
       content_type_parameters ? content_type_parameters['boundary'] : nil

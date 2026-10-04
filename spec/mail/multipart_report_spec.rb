@@ -51,6 +51,39 @@ RSpec.describe "multipart/report emails" do
         expect(mail1).to be_bounced
         expect(mail2).to be_bounced
       end
+
+      it "organizes the results per recipient while keeping report-level fields" do
+        mail = read_fixture('emails', 'multipart_report_emails', 'multi_address_bounce1.eml')
+        report = mail.delivery_status_report
+
+        expect(report).to be_a(Mail::DeliveryStatusReport)
+        expect(report['reporting-mta']).to eq 'dns; lvmail01.LL.com'
+        expect(report['x-postfix-queue-id']).to eq '9B7841BC027'
+
+        recipients = mail.delivery_status_recipients
+        expect(recipients.size).to eq 5
+        expect(recipients.map(&:address)).to eq %w[
+          bbbbvhvbbvkjbhfbvbvjhb@gmail.com
+          bscdbcjhasbcjhbdscbhbsdhcbj@gmail.com
+          egyfefsdvsfvvhjsd@gmail.com
+          kfhejkfbsjkjsbhds@gmail.com
+          qfvhgsvhgsduiohncdhcvhsdfvsfygusd@gmail.com
+        ]
+        expect(recipients).to all(be_bounced)
+        expect(recipients.map(&:action)).to all(eq('failed'))
+        expect(recipients.map(&:status)).to all(eq('5.1.1'))
+        expect(recipients.first.diagnostic_code).to start_with('smtp; 550-5.1.1')
+        expect(recipients.first['original-recipient']).to start_with('rfc822;')
+        expect(recipients.first.errors).to be_empty
+      end
+
+      it "returns no recipients when the message is not a delivery-status report" do
+        mail = Mail.new do
+          body 'plain text only'
+        end
+        expect(mail.delivery_status_report).to be_nil
+        expect(mail.delivery_status_recipients).to eq []
+      end
     end
 
     describe "temporary failure" do
@@ -126,4 +159,3 @@ RSpec.describe "multipart/report emails" do
   end
 
 end
-
