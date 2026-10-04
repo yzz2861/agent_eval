@@ -1,5 +1,17 @@
 # News
 
+## Unreleased
+
+### Improvement
+
+  * Added an optional DTD content-model validator,
+    +REXML::Validation::DTD+. It validates element children against
+    declarations already present in the document's internal DTD subset
+    or explicitly supplied by the caller; external DTD resources are
+    never fetched. +EMPTY+, +ANY+, mixed content and element content
+    with choices, sequences and the +?+, +*+, +++ occurrence indicators
+    are supported.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement
