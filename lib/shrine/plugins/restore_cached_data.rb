@@ -18,7 +18,7 @@ class Shrine
           if cached_file.is_a?(Hash) || cached_file.is_a?(Array)
             uploaded_file(cached_file) { |file| file.refresh_metadata!(**context, **) }
           else
-            cached_file.refresh_metadata!(**context, **)
+            cached_file.refresh_metadata!(server_observed: true, **context, **)
           end
 
           cached_file

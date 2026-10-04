@@ -68,7 +68,16 @@ class Shrine
 
         # Calls the configured MIME type analyzer.
         def extract_mime_type(io)
-          self.class.determine_mime_type(io)
+          mime_type = self.class.determine_mime_type(io)
+          # The metadata_attribution plugin tags content-derived MIME types as
+          # measured evidence. The built-in :content_type analyzer merely reads
+          # the client-controlled header, so it stays declared.
+          if respond_to?(:_tag_metadata_value, true)
+            analyzer = opts[:determine_mime_type][:analyzer]
+            source   = analyzer == :content_type ? :declared : :measured
+            _tag_metadata_value("mime_type", mime_type, source)
+          end
+          mime_type
         end
       end
 
