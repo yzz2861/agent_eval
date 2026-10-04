@@ -4,7 +4,7 @@ require "strscan"
 
 module Liquid
   class Tokenizer
-    attr_reader :line_number, :for_liquid_tag
+    attr_reader :line_number, :for_liquid_tag, :last_token, :last_token_range
 
     TAG_END = /%\}/
     TAG_OR_VARIABLE_START = /\{[\{\%]/
@@ -19,13 +19,20 @@ module Liquid
       string_scanner:,
       line_numbers: false,
       line_number: nil,
-      for_liquid_tag: false
+      for_liquid_tag: false,
+      source_start_offset: 0,
+      track_source_ranges: false
     )
       @line_number = line_number || (line_numbers ? 1 : nil)
       @for_liquid_tag = for_liquid_tag
       @source = source.to_s.to_str
       @offset = 0
       @tokens = []
+      @token_ranges = []
+      @last_token = nil
+      @last_token_range = nil
+      @source_start_offset = source_start_offset
+      @track_source_ranges = track_source_ranges
 
       if @source
         @ss = string_scanner
@@ -40,6 +47,10 @@ module Liquid
       return unless token
 
       @offset += 1
+      if @track_source_ranges
+        @last_token = token
+        @last_token_range = @token_ranges[@offset - 1]
+      end
 
       if @line_number
         @line_number += @for_liquid_tag ? 1 : token.count("\n")
@@ -52,13 +63,44 @@ module Liquid
 
     def tokenize
       if @for_liquid_tag
-        @tokens = @source.split("\n")
+        if @track_source_ranges
+          tokenize_liquid_tag
+        else
+          @tokens = @source.split("\n")
+        end
       else
-        @tokens << shift_normal until @ss.eos?
+        tokenize_normal
       end
 
       @source = nil
       @ss = nil
+    end
+
+    def tokenize_normal
+      if @track_source_ranges
+        until @ss.eos?
+          start = @ss.pos
+          token = shift_normal
+          @tokens << token
+          @token_ranges << source_range(start, @ss.pos)
+        end
+      else
+        @tokens << shift_normal until @ss.eos?
+      end
+    end
+
+    def tokenize_liquid_tag
+      offset = 0
+      @source.each_line do |line|
+        token = line.chomp("\n")
+        @tokens << token
+        @token_ranges << source_range(offset, offset + token.bytesize)
+        offset += line.bytesize
+      end
+    end
+
+    def source_range(start_byte, end_byte)
+      (@source_start_offset + start_byte)...(@source_start_offset + end_byte)
     end
 
     def shift_normal

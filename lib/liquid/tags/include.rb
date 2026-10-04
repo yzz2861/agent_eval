@@ -65,13 +65,25 @@ module Liquid
           end
 
           if variable.is_a?(Array)
-            variable.each do |var|
+            variable.each_with_index do |var, index|
               context[context_variable_name] = var
-              partial.render_to_output_buffer(context, output)
+              if (source_map = context.render_source_map)
+                source_map.with_render_frame(self, partial.name, iteration: index + 1) do
+                  partial.render_to_output_buffer(context, output)
+                end
+              else
+                partial.render_to_output_buffer(context, output)
+              end
             end
           else
             context[context_variable_name] = variable
-            partial.render_to_output_buffer(context, output)
+            if (source_map = context.render_source_map)
+              source_map.with_render_frame(self, partial.name) do
+                partial.render_to_output_buffer(context, output)
+              end
+            else
+              partial.render_to_output_buffer(context, output)
+            end
           end
         end
       ensure

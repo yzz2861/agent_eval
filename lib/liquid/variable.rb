@@ -18,7 +18,7 @@ module Liquid
     JustTagAttributes        = /\A#{TagAttributes}\z/o
     MarkupWithQuotedFragment = /(#{QuotedFragment})(.*)/om
 
-    attr_accessor :filters, :name, :line_number
+    attr_accessor :filters, :name, :line_number, :source_range
     attr_reader :parse_context
     alias_method :options, :parse_context
 

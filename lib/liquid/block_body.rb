@@ -57,7 +57,9 @@ module Liquid
             # determine how to proceed
             return yield tag_name, markup
           end
+          start_range = tokenizer.last_token_range
           new_tag = tag.parse(tag_name, markup, tokenizer, parse_context)
+          assign_source_range(new_tag, start_range, parse_context, tokenizer.last_token_range || start_range)
           @blank &&= new_tag.blank?
           @nodelist << new_tag
         end
@@ -107,9 +109,19 @@ module Liquid
       end
     end
 
-    private def parse_liquid_tag(markup, parse_context)
+    private def parse_liquid_tag(markup, parse_context, outer_token = nil)
+      source_start_offset = if outer_token
+        character_offset = outer_token.index(markup) || 0
+        outer_token.byteslice(0, character_offset).bytesize
+      else
+        0
+      end
+
       liquid_tag_tokenizer = parse_context.new_tokenizer(
-        markup, start_line_number: parse_context.line_number, for_liquid_tag: true
+        markup,
+        start_line_number: parse_context.line_number,
+        for_liquid_tag: true,
+        source_start_offset: source_start_offset,
       )
       parse_for_liquid_tag(liquid_tag_tokenizer, parse_context) do |end_tag_name, _end_tag_markup|
         if end_tag_name
@@ -145,7 +157,7 @@ module Liquid
           end
 
           if tag_name == 'liquid'
-            parse_liquid_tag(markup, parse_context)
+            parse_liquid_tag(markup, parse_context, token)
             next
           end
 
@@ -154,19 +166,23 @@ module Liquid
             # determine how to proceed
             return yield tag_name, markup
           end
+          start_range = tokenizer.last_token_range
           new_tag = tag.parse(tag_name, markup, tokenizer, parse_context)
+          assign_source_range(new_tag, start_range, parse_context, tokenizer.last_token_range || start_range)
           @blank &&= new_tag.blank?
           @nodelist << new_tag
         when token.start_with?(VARSTART)
           whitespace_handler(token, parse_context)
-          @nodelist << create_variable(token, parse_context)
+          @nodelist << create_variable(token, parse_context, tokenizer.last_token_range)
           @blank = false
         else
           if parse_context.trim_whitespace
+            leading_whitespace = token[/\A\s*/].bytesize
             token.lstrip!
           end
           parse_context.trim_whitespace = false
-          @nodelist << token
+          text_range = adjust_text_source_range_start(tokenizer.last_token_range, leading_whitespace.to_i)
+          @nodelist << create_text_node(token, parse_context, text_range)
           @blank &&= token.match?(WhitespaceOrNothing)
         end
         parse_context.line_number = tokenizer.line_number
@@ -180,7 +196,10 @@ module Liquid
         previous_token = @nodelist.last
         if previous_token.is_a?(String)
           first_byte = previous_token.getbyte(0)
+          removed_trailing_whitespace = previous_token.bytesize
           previous_token.rstrip!
+          removed_trailing_whitespace -= previous_token.bytesize
+          adjust_text_source_range_end(previous_token, removed_trailing_whitespace)
           if previous_token.empty? && parse_context[:bug_compatible_whitespace_trimming] && first_byte
             previous_token << first_byte
           end
@@ -210,7 +229,7 @@ module Liquid
     # Note that it is now preferred to use the `liquid` tag for this use case.
     def remove_blank_strings
       raise "remove_blank_strings only support being called on a blank block body" unless @blank
-      @nodelist.reject! { |node| node.instance_of?(String) }
+      @nodelist.reject! { |node| node.is_a?(String) }
     end
 
     def render(context)
@@ -224,8 +243,8 @@ module Liquid
 
       idx = 0
       while (node = @nodelist[idx])
-        if node.instance_of?(String)
-          output << node
+        if node.is_a?(String)
+          render_text_node(context, output, node)
         else
           render_node(context, output, node)
           # If we get an Interrupt that means the block must stop processing. An
@@ -243,11 +262,39 @@ module Liquid
 
     private
 
+    def assign_source_range(tag, start_range, parse_context, end_range = start_range)
+      tag.source_range = start_range.begin...end_range.end if parse_context.source_map && start_range
+      tag
+    end
+
+    def create_text_node(token, parse_context, source_range)
+      return token unless parse_context.source_map && source_range
+
+      TextNode.new(token, source_range)
+    end
+
+    def adjust_text_source_range_end(node, byte_count)
+      return unless node.is_a?(TextNode) && byte_count.positive?
+
+      range = node.source_range
+      node.source_range = range.begin...(range.end - byte_count)
+    end
+
+    def adjust_text_source_range_start(range, byte_count)
+      return range unless range
+
+      (range.begin + byte_count)...range.end
+    end
+
     def render_node(context, output, node)
       BlockBody.render_node(context, output, node)
     end
 
-    def create_variable(token, parse_context)
+    def render_text_node(context, output, node)
+      output << node
+    end
+
+    def create_variable(token, parse_context, source_range)
       if token.end_with?("}}")
         i = 2
         i = 3 if token[i] == "-"
@@ -256,7 +303,9 @@ module Liquid
         markup_end = parse_end - i + 1
         markup = markup_end <= 0 ? "" : token.slice(i, markup_end)
 
-        return Variable.new(markup, parse_context)
+        variable = Variable.new(markup, parse_context)
+        variable.source_range = source_range if parse_context.source_map
+        return variable
       end
 
       BlockBody.raise_missing_variable_terminator(token, parse_context)

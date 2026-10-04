@@ -16,7 +16,7 @@ module Liquid
   #
   class Template
     attr_accessor :root, :name
-    attr_reader :resource_limits, :warnings
+    attr_reader :resource_limits, :warnings, :source_map
 
     attr_reader :profiler
 
@@ -103,7 +103,7 @@ module Liquid
         raise TemplateEncodingError, parse_context.locale.t("errors.syntax.invalid_template_encoding")
       end
 
-      tokenizer     = parse_context.new_tokenizer(source, start_line_number: @line_numbers && 1)
+      tokenizer     = parse_context.new_tokenizer(source, start_line_number: (@line_numbers || @source_mapping) && 1)
       @root         = Document.parse(tokenizer, parse_context)
       self
     end
@@ -179,6 +179,7 @@ module Liquid
       when Module, Array
         context.add_filters(args.pop)
       end
+      output_buffer = output || +''
 
       # Retrying a render resets resource usage
       context.resource_limits.reset
@@ -187,6 +188,13 @@ module Liquid
         @profiler = context.profiler = Liquid::Profiler.new
       end
 
+      existing_source_map = context.render_source_map
+      @source_map = if @source_mapping
+        existing_source_map || RenderSourceMap.new
+      end
+      context.render_source_map = @source_map
+      context.render_source_map_root_offset = output_buffer.bytesize if @source_mapping && existing_source_map.nil?
+
       context.template_name ||= name
 
       previous_error_mode = context.registers.static[:template_error_mode]
@@ -194,7 +202,7 @@ module Liquid
 
       begin
         # render the nodelist.
-        @root.render_to_output_buffer(context, output || +'')
+        @root.render_to_output_buffer(context, output_buffer)
       rescue Liquid::MemoryError => e
         context.handle_error(e)
       ensure
@@ -226,6 +234,7 @@ module Liquid
       @options      = options
       @profiling    = profiling
       @line_numbers = options[:line_numbers] || @profiling
+      @source_mapping = options[:source_map]
       parse_context = if options.is_a?(ParseContext)
         options
       else

@@ -2,7 +2,7 @@
 
 module Liquid
   class ParseContext
-    attr_accessor :locale, :line_number, :trim_whitespace, :depth
+    attr_accessor :locale, :line_number, :trim_whitespace, :depth, :source_map
     attr_reader :partial, :warnings, :error_mode, :environment
 
     def initialize(options = Const::EMPTY_HASH)
@@ -26,6 +26,7 @@ module Liquid
 
       self.depth   = 0
       self.partial = false
+      @source_map = options[:source_map]
     end
 
     def [](option_key)
@@ -41,12 +42,14 @@ module Liquid
       Parser.new(@string_scanner, reject_bare_brackets: @error_mode == :strict2 || @error_mode == :rigid)
     end
 
-    def new_tokenizer(source, start_line_number: nil, for_liquid_tag: false)
+    def new_tokenizer(source, start_line_number: nil, for_liquid_tag: false, source_start_offset: 0)
       Tokenizer.new(
         source: source,
         string_scanner: @string_scanner,
         line_number: start_line_number,
         for_liquid_tag: for_liquid_tag,
+        source_start_offset: source_start_offset,
+        track_source_ranges: !!@source_map,
       )
     end
 

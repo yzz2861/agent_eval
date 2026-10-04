@@ -5,6 +5,7 @@ module Liquid
     def self.load(template_name, context:, parse_context:)
       cached_partials = context.registers[:cached_partials]
       cache_key = "#{template_name}:#{parse_context.error_mode}"
+      cache_key = "#{cache_key}:source_map" if parse_context.source_map
       cached = cached_partials[cache_key]
       return cached if cached
 

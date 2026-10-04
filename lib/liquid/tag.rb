@@ -6,6 +6,7 @@ require 'liquid/tag/disableable'
 module Liquid
   class Tag
     attr_reader :nodelist, :tag_name, :line_number, :parse_context
+    attr_accessor :source_range
     alias_method :options, :parse_context
     include ParserSwitching
 
