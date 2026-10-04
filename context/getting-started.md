@@ -71,3 +71,29 @@ Text messages contain UTF-8 encoded text. Invalid UTF-8 sequences will result in
 ### Binary Messages
 
 Binary messages contain arbitrary binary data. They can be used to send any kind of data. Binary messages are useful for sending files or other binary data, like images or video.
+
+### Streaming Messages
+
+Large messages can be read without concatenating them into one string. The message type is available before reading any payload:
+
+~~~ ruby
+stream = server.read_stream
+
+File.open("message.bin", "wb") do |file|
+	while chunk = stream.read_partial
+		file.write(chunk)
+	end
+end
+~~~
+
+`stream.type` returns `:text` or `:binary`. Text chunks are valid UTF-8 boundaries; multi-byte characters can span WebSocket frames and are retained across chunks. Control frames such as ping and pong continue to be handled by the connection while a data message is being read.
+
+If you stop reading a message early, call `#discard` to consume the remainder before reading the next message:
+
+~~~ ruby
+stream = server.read_stream
+stream.read_partial(1024)
+stream.discard
+
+next_message = server.read
+~~~

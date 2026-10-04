@@ -4,7 +4,7 @@ This guide explains how to use `protocol-websocket` for implementing a websocket
 
 ## Per-message Deflate
 
-WebSockets have a mechanism for implementing extensions. At the time of writing, the only published extension is `permessage-deflate` for per-message compression. It operates on complete messages rather than individual frames.
+WebSockets have a mechanism for implementing extensions. At the time of writing, the only published extension is `permessage-deflate` for per-message compression. Compression state is maintained for the duration of each message and reused across messages when context takeover is negotiated; streamed chunks are logical message data rather than compressed wire frames.
 
 Clients and servers can negotiate a set of extensions to use. The server can accept or reject these extensions. The client can then instantiate the extensions and apply them to the connection. More specifically, clients need to define a set of extensions they want to support:
 
