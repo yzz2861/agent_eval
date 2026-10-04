@@ -408,7 +408,7 @@ module Mail
     # Sets the envelope from for the email
     def set_envelope(val)
       @raw_envelope = val
-      @envelope = Mail::Envelope.parse(val) rescue nil
+      @envelope = Mail::Envelope.parse(val) rescue fallback_envelope(val)
     end
 
     # The raw_envelope is the From mikel@test.lindsaar.net Mon May  2 16:07:05 2009
@@ -1987,6 +1987,22 @@ module Mail
       header_part, body_part = raw_source.lstrip.split(HEADER_SEPARATOR, 2)
       self.header = header_part
       self.body   = body_part
+    end
+
+    def fallback_envelope(raw_envelope)
+      sender, date_text = raw_envelope.to_s.split(nil, 2)
+      return if sender.nil? || sender.empty?
+
+      envelope = Object.new
+      envelope.define_singleton_method(:from) { sender }
+      envelope.define_singleton_method(:date) do
+        return nil unless date_text =~ /\A\w{3} \w{3} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}\z/
+
+        DateTime.parse(date_text)
+      rescue ArgumentError
+        nil
+      end
+      envelope
     end
 
     def raw_source=(value)
