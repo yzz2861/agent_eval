@@ -8,6 +8,13 @@ class Shrine
     class FileSystem
       attr_reader :directory, :prefix, :permissions, :directory_permissions
 
+      # Directory (relative to the storage directory) in which unfinished
+      # session chunks are staged until the session is finalized.
+      DEFAULT_UPLOAD_SESSIONS_DIRECTORY = ".upload-sessions"
+
+      # Sessions expire 24 hours after creation by default.
+      DEFAULT_UPLOAD_SESSION_TTL = 24 * 60 * 60
+
       # Initializes a storage for uploading to the filesystem.
       #
       # :prefix
@@ -28,7 +35,27 @@ class Shrine
       # :  By default empty folders inside the directory are automatically
       #    deleted, but if it happens that it causes too much load on the
       #    filesystem, you can set this option to `false`.
-      def initialize(directory, prefix: nil, clean: true, permissions: 0644, directory_permissions: 0755)
+      #
+      # :upload_sessions
+      # :  Whether resumable upload sessions are enabled. Defaults to `true`.
+      #
+      # :upload_session_store
+      # :  A custom object implementing the `Shrine::UploadSessions::Store`
+      #    interface used to persist upload session state. Defaults to an
+      #    in-memory store suitable for local testing.
+      #
+      # :upload_sessions_directory
+      # :  The directory (relative to the storage directory) where chunks of
+      #    unfinished sessions are staged. Defaults to `.upload-sessions`.
+      #
+      # :upload_session_ttl
+      # :  Lifetime in seconds of newly created sessions before they are
+      #    eligible for pruning. Defaults to 24 hours; set to `nil` to keep
+      #    sessions indefinitely.
+      def initialize(directory, prefix: nil, clean: true, permissions: 0644, directory_permissions: 0755,
+                     upload_sessions: true, upload_session_store: nil,
+                     upload_sessions_directory: nil,
+                     upload_session_ttl: DEFAULT_UPLOAD_SESSION_TTL)
         if prefix
           @prefix = Pathname(relative(prefix))
           @directory = Pathname(directory).join(@prefix).expand_path
@@ -44,6 +71,13 @@ class Shrine
           @directory.mkpath
           @directory.chmod(directory_permissions) if directory_permissions
         end
+
+        initialize_upload_sessions(
+          upload_sessions:          upload_sessions,
+          upload_session_store:     upload_session_store,
+          upload_sessions_directory: upload_sessions_directory,
+          upload_session_ttl:       upload_session_ttl,
+        )
       end
 
       # Copies the file into the given location.
@@ -187,3 +221,5 @@ class Shrine
     end
   end
 end
+
+require "shrine/storage/file_system/upload_sessions"
