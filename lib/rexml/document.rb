@@ -454,3 +454,5 @@ module REXML
     end
   end
 end
+
+require "rexml/xinclude"
