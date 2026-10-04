@@ -1804,6 +1804,22 @@ module Mail
       add_required_fields
     end
 
+    # Signs the message with a DKIM-Signature header field (RFC 6376)
+    # using rsa-sha256. See Mail::Dkim.sign for the available options.
+    #
+    #   mail.sign_with_dkim(
+    #     :domain      => 'example.com',
+    #     :selector    => 'mail',
+    #     :private_key => OpenSSL::PKey::RSA.new(File.read('mail.private'))
+    #   )
+    #
+    # The transfer encoding is finalized before signing, so subsequent
+    # calls to #encoded or #to_s will not change the signed bytes.
+    # Returns the Mail::DkimSignatureField that was added.
+    def sign_with_dkim(options = {})
+      Dkim.sign(self, options)
+    end
+
     # Outputs an encoded string representation of the mail message including
     # all headers, attachments, etc.  This is an encoded email in US-ASCII,
     # so it is able to be directly sent to an email server.

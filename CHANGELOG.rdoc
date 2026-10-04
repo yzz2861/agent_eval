@@ -9,6 +9,8 @@ Compatibility:
 
 Features:
 
+* Add DKIM signing (RFC 6376, rsa-sha256) via Mail::Message#sign_with_dkim,
+  with simple and relaxed header/body canonicalization
 * Updated README to improve around sending multipart mail @kapfenho
 * Add delivery_interceptors method to Mail class to fetch registered interceptors @ghousemohamed
 
