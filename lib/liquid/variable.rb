@@ -31,6 +31,7 @@ module Liquid
       @line_number   = parse_context.line_number
 
       strict_parse_with_error_mode_fallback(markup)
+      try_constant_fold
     end
 
     def raw
@@ -98,11 +99,17 @@ module Liquid
     end
 
     def render(context)
-      obj = context.evaluate(@name)
+      obj = if fold_valid_for?(context)
+        @folded_value
+      else
+        value = context.evaluate(@name)
 
-      @filters.each do |filter_name, filter_args, filter_kwargs|
-        filter_args = evaluate_filter_expressions(context, filter_args, filter_kwargs)
-        obj = context.invoke(filter_name, obj, *filter_args)
+        @filters.each do |filter_name, filter_args, filter_kwargs|
+          filter_args = evaluate_filter_expressions(context, filter_args, filter_kwargs)
+          value = context.invoke(filter_name, value, *filter_args)
+        end
+
+        value
       end
 
       context.apply_global_filter(obj)
@@ -136,6 +143,53 @@ module Liquid
     end
 
     private
+
+    # Compile-time constant folding for filter chains made entirely of
+    # literals. A fold only happens when the input and every filter argument
+    # are literals and every filter was explicitly registered as pure (no
+    # context dependency, no side effects). Undeclared filters and dynamic
+    # arguments are always left for runtime evaluation.
+    def try_constant_fold
+      return if @filters.empty?
+      return unless literal_expression?(@name)
+
+      strainer_class = @parse_context.environment.strainer_template
+
+      @filters.each do |filter_name, filter_args, filter_kwargs|
+        return unless strainer_class.pure_filter?(filter_name)
+        return unless filter_args.all? { |arg| literal_expression?(arg) }
+        return if filter_kwargs && !filter_kwargs.each_value.all? { |arg| literal_expression?(arg) }
+      end
+
+      strainer = strainer_class.new(nil)
+      value = @name
+
+      @filters.each do |filter_name, filter_args, filter_kwargs|
+        args = filter_kwargs ? filter_args + [filter_kwargs] : filter_args
+        value = strainer.invoke(filter_name, value, *args).to_liquid
+      end
+
+      @fold_strainer_class = strainer_class
+      @fold_version = strainer_class.filter_version
+      @folded_value = value.freeze
+    rescue ::StandardError
+      # If evaluating the literal chain fails at parse time, leave it to the
+      # runtime so that errors surface through the normal error handling path.
+      @fold_strainer_class = nil
+    end
+
+    # The cached constant is only valid for a render context whose strainer is
+    # exactly the one the fold was computed with (same environment, no
+    # context-local filters) and whose filter registry has not changed since.
+    def fold_valid_for?(context)
+      @fold_strainer_class &&
+        context.strainer.class.equal?(@fold_strainer_class) &&
+        @fold_strainer_class.filter_version == @fold_version
+    end
+
+    def literal_expression?(expr)
+      !expr.respond_to?(:evaluate)
+    end
 
     def lax_parse_filter_expressions(filter_name, unparsed_args)
       filter_args  = []

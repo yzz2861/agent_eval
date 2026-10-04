@@ -14,26 +14,52 @@ module Liquid
     end
 
     class << self
-      def add_filter(filter)
-        return if include?(filter)
+      # Adds a filter module to this strainer.
+      #
+      # When +pure+ is true, all public methods of the module are declared as
+      # pure filters: they must not depend on the render context and must not
+      # have side effects. Only pure filters are eligible for compile-time
+      # constant folding of literal filter expressions.
+      def add_filter(filter, pure: false)
+        unless include?(filter)
+          invokable_non_public_methods = (filter.private_instance_methods + filter.protected_instance_methods).select { |m| invokable?(m) }
+          if invokable_non_public_methods.any?
+            raise MethodOverrideError, "Filter overrides registered public methods as non public: #{invokable_non_public_methods.join(', ')}"
+          end
 
-        invokable_non_public_methods = (filter.private_instance_methods + filter.protected_instance_methods).select { |m| invokable?(m) }
-        if invokable_non_public_methods.any?
-          raise MethodOverrideError, "Filter overrides registered public methods as non public: #{invokable_non_public_methods.join(', ')}"
+          include(filter)
+
+          filter_methods.merge(filter.public_instance_methods.map(&:to_s))
         end
 
-        include(filter)
+        if pure
+          pure_filter_methods.merge(filter.public_instance_methods.map(&:to_s))
+        end
 
-        filter_methods.merge(filter.public_instance_methods.map(&:to_s))
+        @filter_version = filter_version + 1
       end
 
       def invokable?(method)
         filter_methods.include?(method.to_s)
       end
 
+      # Whether the given filter was explicitly declared as pure, meaning it
+      # does not depend on the render context and has no side effects.
+      def pure_filter?(method)
+        pure_filter_methods.include?(method.to_s)
+      end
+
+      # Monotonic counter bumped every time the filter registry of this
+      # strainer changes. Used to invalidate cached constant-folded filter
+      # results so they are never reused across an incompatible registry.
+      def filter_version
+        @filter_version ||= 0
+      end
+
       def inherited(subclass)
         super
         subclass.instance_variable_set(:@filter_methods, @filter_methods.dup)
+        subclass.instance_variable_set(:@pure_filter_methods, @pure_filter_methods.dup)
       end
 
       def filter_method_names
@@ -44,6 +70,10 @@ module Liquid
 
       def filter_methods
         @filter_methods ||= Set.new
+      end
+
+      def pure_filter_methods
+        @pure_filter_methods ||= Set.new
       end
     end
 

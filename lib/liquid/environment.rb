@@ -97,10 +97,14 @@ module Liquid
     # Registers a new filter with the environment.
     #
     # @param filter [Module] The module that contains the filter methods.
+    # @param pure [Boolean] When true, declares that all public methods of the
+    #   module are pure: they do not depend on the render context and have no
+    #   side effects. Pure filters on fully literal expressions are constant
+    #   folded at parse time. Do not declare impure filters as pure.
     # @return [void]
-    def register_filter(filter)
+    def register_filter(filter, pure: false)
       @strainer_template_class_cache.clear
-      @strainer_template.add_filter(filter)
+      @strainer_template.add_filter(filter, pure: pure)
     end
 
     # Registers multiple filters with this environment.

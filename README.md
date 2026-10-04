@@ -156,6 +156,24 @@ integer-range `for` and `tablerow` loops, including loops with empty bodies. Thi
 iteration work when a score limit is configured; `render_length_limit` only bounds generated
 output and does not by itself limit CPU work for output-free loops.
 
+### Pure filters and constant folding
+
+Filter expressions made entirely of literals (e.g. `{{ 'hello' | upcase }}`) are constant folded
+at parse time, so repeated renders don't re-run the filter chain. Only filters explicitly
+declared as pure participate: a pure filter must not depend on the render context and must not
+have side effects.
+
+```ruby
+environment = Liquid::Environment.build do |env|
+  env.register_filter(MyFilters, pure: true)
+end
+```
+
+Undeclared filters (including the built-in standard filters) and expressions with dynamic
+inputs or arguments are always evaluated at runtime. Folded results are cached per template,
+but are never reused across an incompatible environment: registering new filters or rendering
+with context-local filters falls back to runtime evaluation automatically.
+
 ### Usage tracking
 
 To help track usages of a feature or code path in production, we have released opt-in usage tracking. To enable this, we provide an empty `Liquid:: Usage.increment` method which you can customize to your needs. The feature is well suited to https://github.com/Shopify/statsd-instrument. However, the choice of implementation is up to you.
