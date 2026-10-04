@@ -5,6 +5,7 @@
 # Copyright, 2026, by William T. Nelson.
 
 require_relative "extension/compression"
+require_relative "extensions/plan"
 require_relative "headers"
 
 module Protocol
@@ -45,12 +46,15 @@ module Protocol
 				def initialize(extensions = [])
 					@extensions = extensions
 					@accepted = []
+					@plan = Plan.new(:client)
 				end
 				
 				# @attribute [Array] The list of extensions to offer.
 				attr :extensions
 				# @attribute [Array] The extensions accepted after negotiation.
 				attr :accepted
+				# @attribute [Plan] The negotiated plan, recording the selected extensions and their transform order.
+				attr :plan
 				
 				# Build a lookup table of extensions keyed by their name.
 				# @returns [Hash] A hash mapping extension names to their `[klass, options]` pairs.
@@ -75,16 +79,22 @@ module Protocol
 				# @parameter headers [Array(String)] The `Sec-WebSocket-Extensions` response header values.
 				# @returns [Array] The accepted extensions as `[klass, options]` pairs.
 				def accept(headers)
-					named = self.named
+					offered = self.named
+					pending = offered.dup
 					
-					# Each response header should map to at least one extension.
+					# Each response header should map to at least one offered extension.
 					Extensions.parse(headers) do |name, arguments|
-						if extension = named.delete(name)
+						if extension = pending.delete(name)
 							klass, options = extension
 							
 							options = klass.accept(arguments, **options)
 							
 							@accepted << [klass, options]
+							@plan.add(klass, options)
+						elsif offered.key?(name)
+							raise NegotiationError, "Server accepted extension #{name} more than once!"
+						else
+							raise NegotiationError, "Server accepted extension #{name} which was not offered!"
 						end
 					end
 					
@@ -94,9 +104,7 @@ module Protocol
 				# Apply all accepted extensions to the given connection as a client.
 				# @parameter connection [Connection] The WebSocket connection to configure.
 				def apply(connection)
-					@accepted.each do |(klass, options)|
-						klass.client(connection, **options)
-					end
+					@plan.install(connection)
 				end
 			end
 			
@@ -115,12 +123,15 @@ module Protocol
 				def initialize(extensions)
 					@extensions = extensions
 					@accepted = []
+					@plan = Plan.new(:server)
 				end
 				
 				# @attribute [Array] The list of supported extensions.
 				attr :extensions
 				# @attribute [Array] The extensions accepted after negotiation.
 				attr :accepted
+				# @attribute [Plan] The negotiated plan, recording the selected extensions and their transform order.
+				attr :plan
 				
 				# Build a lookup table of extensions keyed by their name.
 				# @returns [Hash] A hash mapping extension names to their `[klass, options]` pairs.
@@ -156,15 +167,18 @@ module Protocol
 						end
 					end
 					
+					# Extensions are installed in reverse order of acceptance:
+					@accepted.reverse_each do |(klass, options)|
+						@plan.add(klass, options)
+					end
+					
 					return @accepted
 				end
 				
 				# Apply all accepted extensions to the given connection as a server.
 				# @parameter connection [Connection] The WebSocket connection to configure.
 				def apply(connection)
-					@accepted.reverse_each do |(klass, options)|
-						klass.server(connection, **options)
-					end
+					@plan.install(connection)
 				end
 			end
 		end

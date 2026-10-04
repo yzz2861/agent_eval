@@ -32,7 +32,7 @@ module Protocol
 			attr :mask
 			
 			# @attribute [Integer] The allowed reserved bits.
-			attr :reserved
+			attr_accessor :reserved
 			
 			# @attribute [Array(Frame)] Buffered frames which form part of a complete message.
 			attr_accessor :frames

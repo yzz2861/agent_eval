@@ -13,6 +13,12 @@ module Protocol
 		module Extension
 			# Provides support for the permessage-deflate extension.
 			module Compression
+				# The reserved frame bits used by this extension.
+				# @returns [Integer] The bitmask of reserved frame bits claimed by this extension.
+				def self.reserved_bits(**options)
+					Frame::RSV1
+				end
+				
 				# Client offer to server, construct a list of requested compression parameters suitable for the `Sec-WebSocket-Extensions` header.
 				# @returns [Array(String)] a list of compression parameters suitable to send to the server.
 				def self.offer(client_max_window_bits: true, server_max_window_bits: true, client_no_context_takeover: false, server_no_context_takeover: false)
@@ -89,6 +95,20 @@ module Protocol
 					connection.writer = Deflate.server(connection.writer, **options)
 				end
 				
+				# Validate a window bits parameter as accepted/negotiated by the server.
+				# @parameter key [String] The name of the parameter.
+				# @parameter value [String] The value of the parameter, or nil if not specified.
+				# @returns [Integer] The validated window bits.
+				def self.validate_window_bits(key, value)
+					value = Integer(value || 15)
+					
+					unless (8..15).include?(value)
+						raise ArgumentError, "Invalid #{key}: #{value} is out of range!"
+					end
+					
+					return value
+				end
+				
 				# Accept on the client, the negotiated server response.
 				# @parameter options [Hash] a hash of options which are accepted by the client.
 				# @parameter arguments [Array(String)] a list of compression parameters as accepted/negotiated by the server.
@@ -100,9 +120,9 @@ module Protocol
 						when "client_no_context_takeover"
 							options[:client_no_context_takeover] = true
 						when "server_max_window_bits"
-							options[:server_max_window_bits] = Integer(value || 15)
+							options[:server_max_window_bits] = validate_window_bits(key, value)
 						when "client_max_window_bits"
-							options[:client_max_window_bits] = Integer(value || 15)
+							options[:client_max_window_bits] = validate_window_bits(key, value)
 						else
 							raise ArgumentError, "Unknown option: #{key}!"
 						end
