@@ -67,6 +67,11 @@ module Liquid
         render_segment(context, output, segment)
       end
 
+      if segment.is_a?(EnumeratorSlice)
+        offsets = context.registers[:for] ||= {}
+        offsets[@name] = segment.position
+      end
+
       output
     end
 
@@ -117,7 +122,6 @@ module Liquid
 
     def collection_segment(context)
       offsets = context.registers[:for] ||= {}
-
       from = if @from == :continue
         offsets[@name].to_i
       else
@@ -130,16 +134,12 @@ module Liquid
       end
 
       collection = context.evaluate(@collection_name)
+      limit = enumerator_limit(context)
 
-      limit_value = context.evaluate(@limit)
-      to = if limit_value.nil?
-        nil
-      else
-        Utils.to_integer(limit_value) + from
-      end
+      return lazy_enumerator_segment(context, collection, from, limit, offsets) if enumerator?(collection)
 
       segment = Utils.slice_collection_for_iteration(
-        collection, from, to, context.resource_limits, use_range_to_a: true
+        collection, from, segment_to(from, limit), context.resource_limits, use_range_to_a: true
       )
       segment.reverse! if @reversed
 
@@ -151,9 +151,12 @@ module Liquid
     def render_segment(context, output, segment)
       for_stack = context.registers[:for_stack] ||= []
       length    = segment.length
+      lazy      = segment.is_a?(EnumeratorSlice) && length.nil?
 
       context.stack do
-        loop_vars = Liquid::ForloopDrop.new(@name, length, for_stack[-1])
+        loop_vars = nil
+        last_check = -> { segment.last? } if lazy
+        loop_vars = Liquid::ForloopDrop.new(@name, length, for_stack[-1], last_check: last_check)
 
         for_stack.push(loop_vars)
 
@@ -177,6 +180,83 @@ module Liquid
       end
 
       output
+    end
+
+    def lazy_enumerator_segment(context, collection, from, limit, offsets)
+      if @reversed
+        return reversed_enumerator_segment(context, collection, from, limit, offsets)
+      end
+
+      slices = context.registers[:for_enumerator_slices] ||= {}
+      entry = slices[@name]
+
+      if entry && entry[:object_id] == collection.object_id
+        slice = entry[:slice].rebind(from: from, limit: limit)
+      else
+        slice = EnumeratorSlice.new(
+          collection,
+          from: from,
+          limit: limit,
+          resource_limits: context.resource_limits,
+        )
+        slices[@name] = { object_id: collection.object_id, slice: slice }
+      end
+
+      slice
+    end
+
+    def reversed_enumerator_segment(context, collection, from, limit, offsets)
+      assert_enumerator_rewindable!(collection)
+
+      slices = context.registers[:for_enumerator_slices] ||= {}
+      slice = EnumeratorSlice.new(
+        collection,
+        from: from,
+        limit: limit || finite_enumerator_reverse_limit(collection, from),
+        resource_limits: context.resource_limits,
+      )
+      slices[@name] = { object_id: collection.object_id, slice: slice }
+
+      segment = slice.each.to_a
+      segment.reverse!
+      offsets[@name] = slice.position
+      segment
+    end
+
+    def assert_enumerator_rewindable!(collection)
+      unless collection.respond_to?(:rewind)
+        raise Liquid::ArgumentError, "cannot reverse an Enumerator that cannot be rewound"
+      end
+
+      begin
+        collection.rewind
+      rescue StandardError
+        raise Liquid::ArgumentError, "cannot reverse an Enumerator that cannot be rewound"
+      end
+    end
+
+    def finite_enumerator_reverse_limit(collection, from)
+      size = collection.size if collection.respond_to?(:size)
+      return size - from if size.is_a?(Integer) && size >= 0
+
+      raise Liquid::ArgumentError, "cannot reverse an Enumerator without a known size or limit"
+    end
+
+    def enumerator_limit(context)
+      limit_value = context.evaluate(@limit)
+      return if limit_value.nil?
+
+      Utils.to_integer(limit_value)
+    end
+
+    def segment_to(from, limit)
+      return if limit.nil?
+
+      limit + from
+    end
+
+    def enumerator?(collection)
+      collection.is_a?(::Enumerator)
     end
 
     def set_attribute(key, expr, safe: false)

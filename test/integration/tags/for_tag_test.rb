@@ -8,6 +8,33 @@ class ThingWithValue < Liquid::Drop
   end
 end
 
+class RecordingEnumerator < Enumerator
+  attr_reader :next_calls
+
+  def initialize(items = nil, &block)
+    @next_calls = 0
+    source = block || ->(yielder) { items.each { |item| yielder << item } }
+    super(&source)
+  end
+
+  def next
+    @next_calls += 1
+    super
+  end
+end
+
+class NonRewindableEnumerator < RecordingEnumerator
+  def respond_to?(method_name, include_all = false)
+    return false if method_name == :rewind
+
+    super
+  end
+
+  def rewind
+    raise NotImplementedError, "cannot rewind"
+  end
+end
+
 class ForTagTest < Minitest::Test
   include Liquid
 
@@ -36,6 +63,156 @@ HERE
   def test_for_reversed
     assigns = { 'array' => [1, 2, 3] }
     assert_template_result('321', '{%for item in array reversed %}{{item}}{%endfor%}', assigns)
+  end
+
+  def test_enumerator_limit_is_lazy_and_reports_unknown_total
+    enumerator = RecordingEnumerator.new do |yielder|
+      value = 1
+      loop do
+        yielder << value
+        value += 1
+      end
+    end
+
+    output = Template.parse(
+      '{% for item in items limit:2 %}{{ item }}:{{ forloop.last }}:{{ forloop.length }} {% endfor %}',
+    ).render!('items' => enumerator)
+
+    assert_equal('1:false: 2:true: ', output)
+    assert_equal(2, enumerator.next_calls)
+  end
+
+  def test_enumerator_break_reads_only_rendered_items
+    enumerator = RecordingEnumerator.new do |yielder|
+      value = 1
+      loop do
+        yielder << value
+        value += 1
+      end
+    end
+
+    output = Template.parse(
+      '{% for item in items limit:5 %}{{ item }}{% if item == 2 %}{% break %}{% endif %}{% endfor %}',
+    ).render!('items' => enumerator)
+
+    assert_equal('12', output)
+    assert_equal(2, enumerator.next_calls)
+  end
+
+  def test_enumerator_allows_nil_and_false_items
+    enumerator = RecordingEnumerator.new([nil, false, true])
+
+    output = Template.parse(
+      '{% for item in items limit:3 %}' \
+      '{% if item == nil %}nil{% elsif item %}true{% else %}false{% endif %}{% endfor %}',
+    ).render!('items' => enumerator)
+
+    assert_equal('nilfalsetrue', output)
+  end
+
+  def test_enumerator_else_does_not_consume_past_first_probe
+    enumerator = RecordingEnumerator.new([])
+
+    output = Template.parse('{% for item in items %}+{% else %}-{% endfor %}').render!('items' => enumerator)
+
+    assert_equal('-', output)
+    assert_equal(1, enumerator.next_calls)
+  end
+
+  def test_enumerator_offset_skips_consumed_items_for_continue
+    enumerator = RecordingEnumerator.new do |yielder|
+      value = 1
+      loop do
+        yielder << value
+        value += 1
+      end
+    end
+    template = Template.parse(
+      '{% for item in items limit:2 %}{{ item }}{% endfor %}' \
+      '{% for item in items offset:continue limit:2 %}{{ item }}{% endfor %}',
+    )
+
+    assert_equal('1234', template.render!('items' => enumerator))
+    assert_equal(4, enumerator.next_calls)
+  end
+
+  def test_enumerator_continue_after_break_records_consumed_position
+    enumerator = RecordingEnumerator.new do |yielder|
+      value = 1
+      loop do
+        yielder << value
+        value += 1
+      end
+    end
+    template = Template.parse(
+      '{% for item in items limit:3 %}{{ item }}{% if item == 1 %}{% break %}{% endif %}{% endfor %}' \
+      '{% for item in items offset:continue limit:2 %}{{ item }}{% endfor %}',
+    )
+
+    assert_equal('123', template.render!('items' => enumerator))
+    assert_equal(3, enumerator.next_calls)
+  end
+
+  def test_unknown_sized_enumerator_reports_unknown_metadata_until_the_end
+    enumerator = RecordingEnumerator.new([1, 2, 3])
+
+    output = Template.parse(
+      '{% for item in items %}{{ item }}:{{ forloop.length }}:{{ forloop.rindex }}:{{ forloop.last }} {% endfor %}',
+    ).render!('items' => enumerator)
+
+    assert_equal('1:::false 2:::false 3:::true ', output)
+    assert_equal(4, enumerator.next_calls)
+  end
+
+  def test_known_sized_enumerator_reports_exact_length_and_zero_past_the_end
+    enumerator = [1, 2, 3].each
+
+    output = Template.parse(
+      '{% for item in items reversed offset:1 limit:1 %}' \
+      '{{ item }}:{{ forloop.length }}:{{ forloop.rindex0 }}{% endfor %}',
+    ).render!('items' => enumerator)
+
+    assert_equal('2:1:0', output)
+    assert_template_result(
+      '-',
+      '{% for item in items offset:4 %}+{% else %}-{% endfor %}',
+      { 'items' => [1, 2, 3].each },
+    )
+  end
+
+  def test_reversed_rejects_non_rewindable_enumerator
+    enumerator = NonRewindableEnumerator.new([1, 2, 3])
+
+    exception = assert_raises(Liquid::ArgumentError) do
+      Template.parse('{% for item in items reversed limit:2 %}{{ item }}{% endfor %}').render!('items' => enumerator)
+    end
+
+    assert_equal('Liquid error: cannot reverse an Enumerator that cannot be rewound', exception.message)
+    assert_equal(0, enumerator.next_calls)
+  end
+
+  def test_reversed_enumerator_records_consumed_position_for_continue
+    enumerator = RecordingEnumerator.new(1..10)
+    template = Template.parse(
+      '{% for item in items reversed limit:3 %}{{ item }}{% endfor %}' \
+      '{% for item in items offset:continue limit:2 %}{{ item }}{% endfor %}',
+    )
+
+    assert_equal('32145', template.render!('items' => enumerator))
+  end
+
+  def test_reversed_rejects_unbounded_unknown_size_enumerator
+    enumerator = RecordingEnumerator.new do |yielder|
+      value = 1
+      loop do
+        yielder << value
+        value += 1
+      end
+    end
+
+    assert_raises(Liquid::ArgumentError) do
+      Template.parse('{% for item in items reversed %}{{ item }}{% endfor %}').render!('items' => enumerator)
+    end
   end
 
   def test_for_with_range

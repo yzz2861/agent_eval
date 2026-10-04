@@ -7,11 +7,12 @@ module Liquid
   # @liquid_summary
   #   Information about a parent [`for` loop](/docs/api/liquid/tags/for).
   class ForloopDrop < Drop
-    def initialize(name, length, parentloop)
+    def initialize(name, length, parentloop, last_check: nil)
       @name       = name
       @length     = length
       @parentloop = parentloop
       @index      = 0
+      @last_check = last_check
     end
 
     # @liquid_public_docs
@@ -53,7 +54,7 @@ module Liquid
     #   The 1-based index of the current iteration, in reverse order.
     # @liquid_return [number]
     def rindex
-      @length - @index
+      @length && @length - @index
     end
 
     # @liquid_public_docs
@@ -61,7 +62,7 @@ module Liquid
     #   The 0-based index of the current iteration, in reverse order.
     # @liquid_return [number]
     def rindex0
-      @length - @index - 1
+      @length && @length - @index - 1
     end
 
     # @liquid_public_docs
@@ -77,7 +78,7 @@ module Liquid
     #   Returns `true` if the current iteration is the last. Returns `false` if not.
     # @liquid_return [boolean]
     def last
-      @index == @length - 1
+      @last_check ? @last_check.call : @index == @length - 1
     end
 
     protected
