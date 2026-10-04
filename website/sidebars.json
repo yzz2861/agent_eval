@@ -104,6 +104,7 @@
       "plugins/included",
       "plugins/instrumentation",
       "plugins/fallback_storage",
+      "plugins/virus_scanning",
       "plugins/keep_files",
       "plugins/mirroring"
     ]

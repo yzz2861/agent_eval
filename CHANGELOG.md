@@ -1,5 +1,7 @@
 ## 3.10.0 (2026-09-20)
 
+* Add `virus_scanning` plugin that quarantines newly assigned files until an external scanner callable confirms them, storing pending/passed/rejected/failed status, binding scan tasks to file identity and attachment generation, blocking download URLs and promotion while quarantined, ignoring stale and duplicate callbacks, and cleaning up only objects owned by the current scan task
+
 * Add `fallback_storage` plugin for reading files from a secondary storage when they're missing in the primary storage (@yegorov, @janko)
 
 * `data_uri` – Add `:max_size` option for limiting the size of the data URI content, checked before the content is decoded (@jalrax, @janko)
