@@ -1,3 +1,9 @@
+## HEAD
+
+* Add `content_addressable` plugin for sharing a single content-addressed blob between attachments with identical content, while each attachment keeps independent name and metadata; the blob key is a digest calculated from the server-read content and a new `Shrine::Storage::RefStore` atomic reference protocol coordinates reference counts
+
+* Add `Shrine::Storage::FileSystemRefStore`, a local on-disk RefStore implementation that serializes first-reference creation and last-reference deletion with per-key file locks
+
 ## 3.10.0 (2026-09-20)
 
 * Add `fallback_storage` plugin for reading files from a secondary storage when they're missing in the primary storage (@yegorov, @janko)

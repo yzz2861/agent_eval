@@ -1,5 +1,38 @@
 require "shrine/storage/memory"
 
+# Minimal thread-safe containers for concurrency tests, avoiding a direct
+# dependency on concurrent-ruby from the test suite.
+class AtomicCounter
+  def initialize
+    @mutex = Mutex.new
+    @value = 0
+  end
+
+  def increment
+    @mutex.synchronize { @value += 1 }
+  end
+
+  def value
+    @mutex.synchronize { @value }
+  end
+end
+
+class ThreadSafeArray
+  def initialize
+    @mutex = Mutex.new
+    @array = []
+  end
+
+  def <<(value)
+    @mutex.synchronize { @array << value }
+    self
+  end
+
+  def to_a
+    @mutex.synchronize { @array.dup }
+  end
+end
+
 module ShrineHelper
   def shrine(&block)
     uploader_class = Class.new(Shrine)
