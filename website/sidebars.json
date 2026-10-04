@@ -52,6 +52,7 @@
     ],
     "Flow": [
       "plugins/backgrounding",
+      "plugins/quarantine",
       "plugins/presign_endpoint",
       "plugins/upload_endpoint"
     ],
