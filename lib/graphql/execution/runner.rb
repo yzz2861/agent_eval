@@ -150,6 +150,7 @@ module GraphQL
             end
 
             query.result_values = fin_result
+            NullPropagation.append(query)
             if query.context.namespace?(:__query_result_extensions__)
               query.result_values["extensions"] = query.context.namespace(:__query_result_extensions__)
             end

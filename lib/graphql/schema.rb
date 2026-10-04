@@ -1335,6 +1335,7 @@ module GraphQL
         when GraphQL::InvalidNullError
           execution_error = GraphQL::ExecutionError.new(type_error.message, ast_nodes: type_error.ast_nodes)
           execution_error.path = type_error.path || context[:current_path]
+          execution_error.null_propagation_origin = type_error
 
           context.errors << execution_error
           execution_error

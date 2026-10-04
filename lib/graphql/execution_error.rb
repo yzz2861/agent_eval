@@ -17,6 +17,8 @@ module GraphQL
     # @return [Hash] Optional custom data for error objects which will be added
     # under the `extensions` key.
     attr_accessor :extensions
+    # @api private
+    attr_accessor :null_propagation_origin
 
     def initialize(message, ast_node: nil, ast_nodes: nil, options: nil, extensions: nil)
       @ast_nodes = ast_nodes || [ast_node]

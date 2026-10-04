@@ -5,6 +5,7 @@ require "graphql/execution/interpreter"
 require "graphql/execution/lazy"
 require "graphql/execution/lookahead"
 require "graphql/execution/multiplex"
+require "graphql/execution/null_propagation"
 require "graphql/execution/errors"
 
 module GraphQL
