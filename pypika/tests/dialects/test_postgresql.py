@@ -5,6 +5,7 @@ from pypika import (
     JSON,
     Array,
     Field,
+    Order,
     QueryException,
     Table,
 )
@@ -269,3 +270,48 @@ class ReturningClauseTests(unittest.TestCase):
             'RETURNING "xyz"."a"',
             str(q),
         )
+
+
+class LateralJoinTests(unittest.TestCase):
+    customers = Table("customers")
+    orders = Table("orders")
+
+    def test_cross_join_lateral(self):
+        latest_order = (
+            PostgreSQLQuery.from_(self.orders)
+            .select(self.orders.id.as_("latest_order_id"))
+            .where(self.orders.customer_id == self.customers.id)
+            .orderby(self.orders.created_at, order=Order.desc)
+            .limit(1)
+        )
+
+        query = (
+            PostgreSQLQuery.from_(self.customers)
+            .cross_join_lateral(latest_order)
+            .select(self.customers.id, latest_order.latest_order_id)
+        )
+
+        self.assertEqual(
+            'SELECT "customers"."id","sq0"."latest_order_id" FROM "customers" '
+            'CROSS JOIN LATERAL (SELECT "orders"."id" "latest_order_id" FROM "orders" '
+            'WHERE "orders"."customer_id"="customers"."id" ORDER BY "orders"."created_at" DESC '
+            'LIMIT 1) "sq0"',
+            str(query),
+        )
+
+    def test_left_join_lateral(self):
+        latest_order = (
+            PostgreSQLQuery.from_(self.orders)
+            .select(self.orders.id.as_("latest_order_id"))
+            .where(self.orders.customer_id == self.customers.id)
+            .limit(1)
+        )
+
+        query = (
+            PostgreSQLQuery.from_(self.customers)
+            .left_join_lateral(latest_order)
+            .select(self.customers.id, latest_order.latest_order_id)
+        )
+
+        self.assertIn('LEFT JOIN LATERAL', str(query))
+        self.assertIn('ON TRUE', str(query))

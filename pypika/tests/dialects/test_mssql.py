@@ -79,3 +79,41 @@ class SelectTests(unittest.TestCase):
         self.assertEqual(
             'SELECT "sq0"."abc" "a",COUNT(\'*\') FROM (SELECT "abc" FROM "table1") "sq0" GROUP BY "sq0"."abc"', str(q)
         )
+
+
+class ApplyTests(unittest.TestCase):
+    customers = Table("customers")
+    orders = Table("orders")
+
+    def latest_order(self):
+        return (
+            MSSQLQuery.from_(self.orders)
+            .select(self.orders.id.as_("latest_order_id"))
+            .where(self.orders.customer_id == self.customers.id)
+        )
+
+    def test_cross_apply(self):
+        latest_order = self.latest_order()
+        query = (
+            MSSQLQuery.from_(self.customers)
+            .cross_apply(latest_order)
+            .select(self.customers.id, latest_order.latest_order_id)
+        )
+
+        self.assertEqual(
+            'SELECT "customers"."id","sq0"."latest_order_id" FROM "customers" '
+            'CROSS APPLY (SELECT "orders"."id" "latest_order_id" FROM "orders" '
+            'WHERE "orders"."customer_id"="customers"."id") "sq0"',
+            str(query),
+        )
+
+    def test_outer_apply_preserves_empty_outer_rows(self):
+        latest_order = self.latest_order()
+        query = (
+            MSSQLQuery.from_(self.customers)
+            .outer_apply(latest_order)
+            .select(self.customers.id, latest_order.latest_order_id)
+        )
+
+        self.assertIn("OUTER APPLY", str(query))
+        self.assertNotIn("JOIN", str(query))

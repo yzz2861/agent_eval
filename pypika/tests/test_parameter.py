@@ -9,6 +9,7 @@ from pypika import (
     PyformatParameter,
     QmarkParameter,
     Query,
+    PostgreSQLQuery,
     Tables,
 )
 from pypika.terms import ListParameter, ParameterValueWrapper
@@ -204,3 +205,25 @@ class ParametrizedTestsWithValues(unittest.TestCase):
         sql = q.get_sql(parameter=parameter)
         self.assertEqual('INSERT INTO "abc" ("a","b","c") VALUES (%(param1)s,%(param2)s,%(param3)s)', sql)
         self.assertEqual({"param1": 1, "param2": 2.2, "param3": "foo"}, parameter.get_parameters())
+
+    def test_lateral_join_parameters_follow_sql_order(self):
+        customers, orders = Tables("customers", "orders")
+        latest_order = (
+            PostgreSQLQuery.from_(orders)
+            .select(orders.id)
+            .where(orders.customer_id == customers.id)
+            .where(orders.status == ParameterValueWrapper(QmarkParameter(), "paid"))
+        )
+        query = (
+            PostgreSQLQuery.from_(customers)
+            .left_join_lateral(latest_order)
+            .select(customers.id, latest_order.id)
+            .where(customers.kind == ParameterValueWrapper(QmarkParameter(), "vip"))
+        )
+
+        parameter = QmarkParameter()
+        sql = query.get_sql(parameter=parameter)
+
+        self.assertIn("LEFT JOIN LATERAL", sql)
+        self.assertEqual(["paid", "vip"], parameter.get_parameters())
+        self.assertIsNone(latest_order.alias)

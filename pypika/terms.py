@@ -676,12 +676,19 @@ class Field(Criterion, JSON):
         with_alias = kwargs.pop("with_alias", False)
         with_namespace = kwargs.pop("with_namespace", False)
         quote_char = kwargs.pop("quote_char", None)
+        table_alias_overrides = kwargs.pop("table_alias_overrides", {})
+        table_alias_override = table_alias_overrides.get(id(self.table))
+        explicit_table_alias = table_alias_override is not None or (
+            "alias" in getattr(self.table, "__dict__", {}) and self.table.alias is not None
+        )
 
         field_sql = format_quotes(self.name, quote_char)
 
         # Need to add namespace if the table has an alias
-        if self.table and (with_namespace or self.table.alias):
-            table_name = self.table.get_table_name()
+        if self.table and (with_namespace or explicit_table_alias):
+            table_name = table_alias_override
+            if table_name is None:
+                table_name = self.table.get_table_name()
             field_sql = "{namespace}.{name}".format(
                 namespace=format_quotes(table_name, quote_char),
                 name=field_sql,
@@ -714,8 +721,15 @@ class Star(Field):
     def get_sql(
         self, with_alias: bool = False, with_namespace: bool = False, quote_char: str | None = None, **kwargs: Any
     ) -> str:
-        if self.table and (with_namespace or self.table.alias):
-            namespace = self.table.alias or getattr(self.table, "_table_name")
+        table_alias_overrides = kwargs.get("table_alias_overrides", {})
+        table_alias_override = table_alias_overrides.get(id(self.table))
+        explicit_table_alias = table_alias_override is not None or (
+            "alias" in getattr(self.table, "__dict__", {}) and self.table.alias is not None
+        )
+        if self.table and (with_namespace or explicit_table_alias):
+            namespace = table_alias_overrides.get(id(self.table))
+            if namespace is None:
+                namespace = getattr(self.table, "_table_name")
             return "{}.*".format(format_quotes(namespace, quote_char))
 
         return "*"

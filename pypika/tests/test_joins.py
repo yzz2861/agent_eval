@@ -8,6 +8,7 @@ from pypika import (
     JoinType,
     MySQLQuery,
     Query,
+    MySQLQuery,
     SetOperationException,
     Table,
     Tables,
@@ -15,6 +16,7 @@ from pypika import (
 from pypika import (
     functions as fn,
 )
+from pypika.utils import DialectNotSupported
 
 __author__ = "Timothy Heys"
 __email__ = "theys@kayak.com"
@@ -1168,3 +1170,137 @@ class ExceptOfTests(unittest.TestCase):
             "SELECT AVG(sq0.t) FROM ((SELECT t FROM abc) EXCEPT (SELECT t FROM efg)) sq0",
             q.get_sql(quote_char=None),
         )
+
+
+class LateralJoinTests(unittest.TestCase):
+    customers, orders, payments, later_orders = Tables("customers", "orders", "payments", "later_orders")
+
+    def latest_order(self):
+        return (
+            Query.from_(self.orders)
+            .select(self.orders.id.as_("latest_order_id"))
+            .where(self.orders.customer_id == self.customers.id)
+            .limit(1)
+        )
+
+    def test_lateral_subquery_can_reference_left_relation(self):
+        latest_order = self.latest_order()
+
+        query = (
+            Query.from_(self.customers)
+            .cross_join_lateral(latest_order)
+            .select(self.customers.id, latest_order.latest_order_id)
+        )
+
+        self.assertEqual(
+            'SELECT "customers"."id","sq0"."latest_order_id" FROM "customers" '
+            'CROSS JOIN LATERAL (SELECT "orders"."id" "latest_order_id" FROM "orders" '
+            'WHERE "orders"."customer_id"="customers"."id" LIMIT 1) "sq0"',
+            str(query),
+        )
+
+    def test_lateral_subquery_can_reference_previous_lateral_relation(self):
+        latest_order = self.latest_order()
+        latest_payment = (
+            Query.from_(self.payments)
+            .select(self.payments.amount)
+            .where(self.payments.order_id == latest_order.latest_order_id)
+        )
+
+        query = (
+            Query.from_(self.customers)
+            .cross_join_lateral(latest_order)
+            .cross_join_lateral(latest_payment)
+            .select(self.customers.id, latest_order.latest_order_id, latest_payment.amount)
+        )
+
+        self.assertIn('"payments"."order_id"="sq0"."latest_order_id"', str(query))
+
+    def test_lateral_subquery_cannot_reference_future_right_relation(self):
+        latest_order = (
+            Query.from_(self.orders)
+            .select(self.orders.id)
+            .where(self.orders.customer_id == self.customers.id)
+            .where(self.orders.id == self.later_orders.id)
+            .limit(1)
+        )
+
+        query = (
+            Query.from_(self.customers)
+            .cross_join_lateral(latest_order)
+            .join(self.later_orders)
+            .on(self.later_orders.customer_id == self.customers.id)
+            .select(self.customers.id)
+        )
+
+        with self.assertRaisesRegex(JoinException, "introduced later"):
+            str(query)
+
+    def test_non_lateral_subquery_cannot_reference_outer_relation(self):
+        latest_order = self.latest_order()
+        query = (
+            Query.from_(self.customers)
+            .join(latest_order)
+            .on(self.customers.id == latest_order.latest_order_id)
+            .select(self.customers.id)
+        )
+
+        with self.assertRaisesRegex(JoinException, "non-lateral subquery"):
+            str(query)
+
+    def test_nested_local_alias_shadows_outer_relation(self):
+        outer = self.customers.as_("c")
+        inner_customers = Table("customers").as_("c")
+        latest_order = Query.from_(self.orders).select(self.orders.id).where(self.orders.customer_id == outer.id)
+        latest_order._from.append(inner_customers)
+
+        query = Query.from_(outer).cross_join_lateral(latest_order).select(outer.id)
+
+        with self.assertRaisesRegex(JoinException, "shadows"):
+            str(query)
+
+    def test_reusing_subquery_does_not_mutate_original(self):
+        latest_order = self.latest_order()
+
+        first = Query.from_(self.customers).cross_join_lateral(latest_order).select(latest_order.latest_order_id)
+        second = Query.from_(self.customers).left_join_lateral(latest_order).select(latest_order.latest_order_id)
+
+        self.assertIsNone(latest_order.alias)
+        self.assertIn("CROSS JOIN LATERAL", str(first))
+        self.assertIsNone(latest_order.alias)
+        self.assertIn("LEFT JOIN LATERAL", str(second))
+        self.assertIsNone(latest_order.alias)
+
+    def test_reusing_subquery_twice_in_one_query_uses_distinct_aliases(self):
+        latest_order = self.latest_order()
+
+        query = (
+            Query.from_(self.customers)
+            .cross_join_lateral(latest_order)
+            .cross_join_lateral(latest_order)
+            .select(self.customers.id)
+        )
+
+        sql = str(query)
+
+        self.assertIn('"sq0"', sql)
+        self.assertIn('"sq1"', sql)
+        self.assertIsNone(latest_order.alias)
+
+    def test_lateral_join_chain(self):
+        latest_order = self.latest_order()
+
+        query = (
+            Query.from_(self.customers)
+            .join(latest_order, JoinType.cross)
+            .lateral()
+            .select(self.customers.id, latest_order.latest_order_id)
+        )
+
+        self.assertIn("CROSS JOIN LATERAL", str(query))
+
+    def test_unsupported_dialect_rejects_lateral_join(self):
+        query = MySQLQuery.from_(self.customers).cross_join_lateral(self.latest_order()).select(self.customers.id)
+
+        with self.assertRaisesRegex(DialectNotSupported, "not supported"):
+            str(query)

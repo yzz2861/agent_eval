@@ -23,6 +23,7 @@ from pypika.terms import (
     ValueWrapper,
 )
 from pypika.utils import (
+    DialectNotSupported,
     JoinException,
     QueryException,
     RollupException,
@@ -634,13 +635,17 @@ class _SetOperation(Selectable, Term):
         # This initializes the quote char based on the base query, which could be a dialect specific query class
         # This might be overridden if quote_char is set explicitly in kwargs
         kwargs.setdefault("quote_char", self.base_query.QUOTE_CHAR)
-
-        base_querystring = self.base_query.get_sql(subquery=self.base_query.wrap_set_operation_queries, **kwargs)
+        kwargs.setdefault("table_alias_overrides", {})
+        base_querystring = self.base_query.get_sql(
+            subquery=self.base_query.wrap_set_operation_queries,
+            **kwargs,
+        )
 
         querystring = base_querystring
         for set_operation, set_operation_query in self._set_operation:
             set_operation_querystring = set_operation_query.get_sql(
-                subquery=self.base_query.wrap_set_operation_queries, **kwargs
+                subquery=self.base_query.wrap_set_operation_queries,
+                **kwargs,
             )
 
             if len(self.base_query._selects) != len(set_operation_query._selects):
@@ -765,6 +770,7 @@ class QueryBuilder(Selectable, Term):
 
         self._subquery_count = 0
         self._foreign_table = False
+        self._table_alias_overrides = {}
 
         self.dialect = dialect
         self.as_keyword = as_keyword
@@ -790,7 +796,33 @@ class QueryBuilder(Selectable, Term):
         newone._updates = copy(self._updates)
         newone._force_indexes = copy(self._force_indexes)
         newone._use_indexes = copy(self._use_indexes)
+        newone._table_alias_overrides = copy(self._table_alias_overrides)
         return newone
+
+    def _copy_selectable(self, selectable: Selectable) -> Selectable:
+        copied = copy(selectable)
+        source = selectable.__dict__.get("_alias_source")
+        copied._alias_source = source or selectable
+        if selectable.alias is not None:
+            self._table_alias_overrides[id(selectable)] = selectable.alias
+        return copied
+
+    def _alias_selectable(self, selectable: Selectable) -> Selectable:
+        if selectable.alias is not None:
+            return selectable
+
+        if isinstance(selectable, _SetOperation):
+            selectable.alias = "sq%d" % self._subquery_count
+            self._subquery_count += 1
+            return selectable
+
+        copied = self._copy_selectable(selectable)
+        sub_query_count = copied._subquery_count if isinstance(copied, QueryBuilder) else 0
+        copied.alias = "sq%d" % max(self._subquery_count, sub_query_count)
+        self._subquery_count = max(self._subquery_count, sub_query_count) + 1
+        if isinstance(selectable, QueryBuilder):
+            self._table_alias_overrides[id(selectable)] = copied.alias
+        return copied
 
     @builder
     def from_(self, selectable: Selectable | Query | str) -> None:
@@ -807,17 +839,12 @@ class QueryBuilder(Selectable, Term):
             A copy of the query with the table added.
         """
 
-        self._from.append(Table(selectable) if isinstance(selectable, str) else selectable)
+        if isinstance(selectable, str):
+            selectable = Table(selectable)
+        elif isinstance(selectable, (QueryBuilder, _SetOperation)) and selectable.alias is None:
+            selectable = self._alias_selectable(selectable)
 
-        if isinstance(selectable, (QueryBuilder, _SetOperation)) and selectable.alias is None:
-            if isinstance(selectable, QueryBuilder):
-                sub_query_count = selectable._subquery_count
-            else:
-                sub_query_count = 0
-
-            sub_query_count = max(self._subquery_count, sub_query_count)
-            selectable.alias = "sq%d" % sub_query_count
-            self._subquery_count = sub_query_count + 1
+        self._from.append(selectable)
 
     @builder
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> None:
@@ -1047,8 +1074,7 @@ class QueryBuilder(Selectable, Term):
             return Joiner(self, item, how, type_label="table")
 
         elif isinstance(item, QueryBuilder):
-            if item.alias is None:
-                self._tag_subquery(item)
+            item = self._alias_selectable(item)
             return Joiner(self, item, how, type_label="subquery")
 
         elif isinstance(item, AliasedQuery):
@@ -1085,6 +1111,14 @@ class QueryBuilder(Selectable, Term):
 
     def hash_join(self, item: Table | QueryBuilder | AliasedQuery) -> Joiner[Self]:
         return self.join(item, JoinType.hash)
+
+    @builder
+    def cross_join_lateral(self, item: QueryBuilder | _SetOperation) -> None:
+        self.do_lateral_join(item, JoinType.cross)
+
+    @builder
+    def left_join_lateral(self, item: QueryBuilder | _SetOperation) -> None:
+        self.do_lateral_join(item, JoinType.left)
 
     @builder
     def limit(self, limit: int) -> None:
@@ -1191,6 +1225,16 @@ class QueryBuilder(Selectable, Term):
 
         self._joins.append(join)
 
+    def do_lateral_join(self, item: QueryBuilder | _SetOperation, how: JoinType) -> None:
+        if not isinstance(item, (QueryBuilder, _SetOperation)):
+            raise ValueError("Cannot lateral join on type '%s'" % type(item))
+
+        if how not in (JoinType.cross, JoinType.left, JoinType.left_outer):
+            raise JoinException("Lateral joins are only supported for CROSS and LEFT joins.")
+
+        item = self._alias_selectable(item)
+        self._joins.append(LateralJoin(item, JoinType.left if how == JoinType.left_outer else how))
+
     def is_joined(self, table: Table) -> bool:
         return any(table == join.item for join in self._joins)
 
@@ -1214,10 +1258,6 @@ class QueryBuilder(Selectable, Term):
             ):
                 return False
         return True
-
-    def _tag_subquery(self, subquery: QueryBuilder) -> None:
-        subquery.alias = "sq%d" % self._subquery_count
-        self._subquery_count += 1
 
     def _apply_terms(self, *terms: Any) -> None:
         """
@@ -1266,6 +1306,11 @@ class QueryBuilder(Selectable, Term):
 
     def get_sql(self, with_alias: bool = False, subquery: bool = False, **kwargs: Any) -> str:
         self._set_kwargs_defaults(kwargs)
+        kwargs["table_alias_overrides"] = {
+            **self._table_alias_overrides,
+            **kwargs.get("table_alias_overrides", {}),
+        }
+        _QueryScopeValidator.validate(self)
         if not (self._selects or self._insert_table or self._delete_from or self._update_table):
             return ""
         if self._insert_table and not (self._selects or self._values):
@@ -1669,6 +1714,14 @@ class Joiner(Generic[QB]):
 
         return self.query
 
+    def lateral(self) -> QB:
+        """Return a lateral cross join."""
+        if self.how != JoinType.cross:
+            raise JoinException("Use left_join_lateral for a left lateral join.")
+
+        self.query.do_lateral_join(self.item, JoinType.cross)
+        return self.query
+
 
 class Join:
     def __init__(self, item: Term, how: JoinType) -> None:
@@ -1719,7 +1772,15 @@ class JoinOn(Join):
 
     def validate(self, _from: Sequence[Table], _joins: Sequence[Table]) -> None:
         criterion_tables = set([f.table for f in self.criterion.fields_()])
-        available_tables = set(_from) | {join.item for join in _joins} | {self.item}
+        available_tables = set()
+        for relation in list(_from) + [join.item for join in _joins] + [self.item]:
+            if relation is None:
+                continue
+            available_tables.add(relation)
+            source = relation.__dict__.get("_alias_source")
+            while source is not None:
+                available_tables.add(source)
+                source = source.__dict__.get("_alias_source")
         missing_tables = criterion_tables - available_tables
         if missing_tables:
             raise JoinException(
@@ -1776,6 +1837,296 @@ class JoinUsing(Join):
         """
         self.item = new_table if self.item == current_table else self.item
         self.fields = [field.replace_table(current_table, new_table) for field in self.fields]
+
+
+class LateralJoin(Join):
+    def get_sql(self, **kwargs: Any) -> str:
+        dialect = kwargs.get("dialect")
+        item_sql = self.item.get_sql(subquery=True, with_alias=True, **kwargs)
+
+        if dialect == Dialects.MSSQL:
+            apply_type = "CROSS APPLY" if self.how == JoinType.cross else "OUTER APPLY"
+            return "{type} {item}".format(type=apply_type, item=item_sql)
+
+        if dialect not in (None, Dialects.POSTGRESQL):
+            raise DialectNotSupported("Lateral joins are not supported by the %s dialect." % dialect)
+
+        if self.how == JoinType.cross:
+            return "CROSS JOIN LATERAL {item}".format(item=item_sql)
+
+        return "LEFT JOIN LATERAL {item} ON TRUE".format(item=item_sql)
+
+
+class _RelationBinding:
+    def __init__(self, source: Selectable, name: str, phase: int, origin: str) -> None:
+        self.source = source
+        self.name = source.__dict__.get("alias") or name
+        self.phase = phase
+        self.origin = origin
+
+
+class _RelationScope:
+    def __init__(self, label: str, bindings: list[_RelationBinding] | None = None) -> None:
+        self.label = label
+        self.bindings = bindings or []
+
+    def add(self, source: Selectable, phase: int, origin: str = "query block") -> _RelationBinding:
+        binding = _RelationBinding(source, source.get_table_name(), phase, origin)
+        self.bindings.append(binding)
+        return binding
+
+
+class _QueryScopeValidator:
+    def __init__(self, alias_overrides: dict[int, str]) -> None:
+        self.alias_overrides = alias_overrides
+
+    @classmethod
+    def validate(cls, query: QueryBuilder) -> None:
+        validator = cls(query._table_alias_overrides)
+        validator._analyze_query(query, [], "query")
+
+    def _analyze_query(
+        self,
+        query: QueryBuilder,
+        outer_frames: list[tuple[_RelationScope, int]],
+        label: str,
+        allow_outer: bool = True,
+    ) -> None:
+        base_phase = 0
+        scope = _RelationScope(label)
+        for cte in query._with:
+            scope.add(cte, base_phase + len(scope.bindings), "WITH clause")
+
+        for cte_index, cte in enumerate(query._with):
+            if cte.query is not None:
+                self._analyze_selectable(
+                    cte.query,
+                    [(scope, base_phase + cte_index)],
+                    "%s CTE '%s'" % (label, cte.name),
+                    False,
+                )
+
+        phase = base_phase + len(scope.bindings)
+        if query._update_table is not None:
+            scope.add(query._update_table, phase, "UPDATE clause")
+            phase += 1
+
+        for source in query._from:
+            binding = scope.add(source, phase, "FROM clause")
+            if isinstance(source, (QueryBuilder, _SetOperation)):
+                self._analyze_selectable(source, outer_frames + [(scope, phase)], self._item_label(binding), False)
+            elif isinstance(source, AliasedQuery) and isinstance(source.query, (QueryBuilder, _SetOperation)):
+                self._analyze_selectable(
+                    source.query,
+                    outer_frames + [(scope, phase)],
+                    self._item_label(binding),
+                    False,
+                )
+            phase += 1
+
+        join_phase = phase
+        for join in query._joins:
+            scope.add(join.item, phase, "JOIN clause")
+            phase += 1
+
+        for join in query._joins:
+            if hasattr(join, "criterion"):
+                self._analyze_term(
+                    join.criterion,
+                    scope,
+                    outer_frames,
+                    "%s %s ON clause" % (label, join.item.get_table_name()),
+                    join_phase + 1,
+                    allow_outer=True,
+                )
+
+            binding = next(binding for binding in scope.bindings if binding.source is join.item)
+            is_lateral = isinstance(join, LateralJoin)
+            if isinstance(join.item, (QueryBuilder, _SetOperation)):
+                self._analyze_selectable(
+                    join.item,
+                    outer_frames + [(scope, join_phase)],
+                    self._item_label(binding),
+                    is_lateral,
+                )
+            elif isinstance(join.item, AliasedQuery) and isinstance(join.item.query, (QueryBuilder, _SetOperation)):
+                self._analyze_selectable(
+                    join.item.query,
+                    outer_frames + [(scope, join_phase)],
+                    self._item_label(binding),
+                    is_lateral,
+                )
+            join_phase += 1
+
+        final_phase = phase
+        current_frames = outer_frames + [(scope, final_phase)]
+        for terms in (query._selects, query._groupbys, [orderby for orderby, _ in query._orderbys]):
+            for term in terms:
+                self._analyze_term(term, scope, outer_frames, label, phase, allow_outer)
+        for criterion in (
+            query._prewheres,
+            query._wheres,
+            query._havings,
+            query._qualifys,
+        ):
+            if criterion is not None:
+                self._analyze_term(criterion, scope, outer_frames, label, phase, allow_outer)
+        for field, value in query._updates:
+            self._analyze_term(field, scope, outer_frames, label, phase, allow_outer)
+            self._analyze_term(value, scope, outer_frames, label, phase, allow_outer)
+        for row in query._values:
+            for term in row:
+                self._analyze_term(term, scope, outer_frames, label, phase, allow_outer)
+        for term in query._columns:
+            self._analyze_term(term, scope, outer_frames, label, phase, allow_outer)
+        if "_returns" in query.__dict__:
+            for term in query._returns:
+                self._analyze_term(term, scope, outer_frames, label, phase, allow_outer)
+        if "_distinct_on" in query.__dict__:
+            for term in query._distinct_on:
+                self._analyze_term(term, scope, outer_frames, label, phase, allow_outer)
+        if "_on_conflict_fields" in query.__dict__:
+            for term in query._on_conflict_fields:
+                self._analyze_term(term, scope, outer_frames, label, phase, allow_outer)
+        if "_on_conflict_wheres" in query.__dict__ and query._on_conflict_wheres is not None:
+            self._analyze_term(query._on_conflict_wheres, scope, outer_frames, label, phase, allow_outer)
+        if "_on_conflict_do_update_wheres" in query.__dict__ and query._on_conflict_do_update_wheres is not None:
+            self._analyze_term(query._on_conflict_do_update_wheres, scope, outer_frames, label, phase, allow_outer)
+        if "_on_conflict_do_updates" in query.__dict__:
+            for field, value in query._on_conflict_do_updates:
+                self._analyze_term(field, scope, outer_frames, label, phase, allow_outer)
+                self._analyze_term(value, scope, outer_frames, label, phase, allow_outer)
+        for set_operation in query._unions:
+            self._analyze_selectable(set_operation, current_frames, label + " set operation", True)
+
+    def _analyze_selectable(
+        self,
+        selectable: QueryBuilder | _SetOperation,
+        outer_frames: list[tuple[_RelationScope, int]],
+        label: str,
+        allow_outer: bool,
+    ) -> None:
+        if isinstance(selectable, QueryBuilder):
+            self._analyze_query(selectable, outer_frames, label, allow_outer)
+            return
+
+        self._analyze_query(selectable.base_query, outer_frames, label + " left side", allow_outer)
+        for _, query in selectable._set_operation:
+            self._analyze_query(query, outer_frames, label + " set member", allow_outer)
+
+    def _analyze_term(
+        self,
+        term: Any,
+        scope: _RelationScope,
+        outer_frames: list[tuple[_RelationScope, int]],
+        label: str,
+        phase: int,
+        allow_outer: bool,
+    ) -> None:
+        if isinstance(term, (QueryBuilder, _SetOperation)):
+            self._analyze_selectable(term, outer_frames + [(scope, phase)], label + " scalar subquery", True)
+            return
+
+        if isinstance(term, AliasedQuery):
+            if term.query is not None:
+                self._analyze_selectable(term.query, outer_frames + [(scope, phase)], label, True)
+            return
+
+        if isinstance(term, Field):
+            self._resolve_field(term, scope, outer_frames, label, phase, allow_outer)
+            return
+
+        if not isinstance(term, Node):
+            return
+
+        for child in term.nodes_():
+            if child is term:
+                continue
+            if isinstance(child, Selectable):
+                continue
+            self._analyze_term(child, scope, outer_frames, label, phase, allow_outer)
+
+    def _resolve_field(
+        self,
+        field: Field,
+        scope: _RelationScope,
+        outer_frames: list[tuple[_RelationScope, int]],
+        label: str,
+        phase: int,
+        allow_outer: bool,
+    ) -> None:
+        table = field.table
+        if table is None:
+            return
+
+        name = self.alias_overrides.get(id(table), table.__dict__.get("alias") or table.get_table_name())
+        local_bindings = scope.bindings
+        exact_match = self._binding_exact_match(local_bindings, table)
+        visible_exact_match = exact_match if exact_match is not None and exact_match.phase < phase else None
+        same_name = [binding for binding in local_bindings if binding.name == name]
+        visible_same_name = [binding for binding in same_name if binding.phase < phase]
+        future_same_name = [binding for binding in same_name if binding.phase >= phase]
+
+        for outer_scope, outer_phase in reversed(outer_frames):
+            outer_exact_future = self._binding_exact_match(
+                [binding for binding in outer_scope.bindings if binding.phase >= outer_phase], table
+            )
+            if outer_exact_future is not None:
+                raise JoinException(
+                    "Invalid reference '%s' in %s: relation '%s' is introduced later in %s."
+                    % (field.get_sql(quote_char='\"'), label, name, outer_scope.label)
+                )
+
+            outer_bindings = [binding for binding in outer_scope.bindings if binding.phase < outer_phase]
+            outer_exact_match = self._binding_exact_match(outer_bindings, table)
+            if outer_exact_match is not None:
+                if visible_same_name or future_same_name:
+                    raise JoinException(
+                        "Invalid reference '%s' in %s: local alias '%s' shadows the relation from %s."
+                        % (field.get_sql(quote_char='"'), label, name, outer_scope.label)
+                    )
+                if not allow_outer:
+                    raise JoinException(
+                        "Invalid correlated reference '%s' in %s: '%s' is in %s, but this non-lateral subquery "
+                        "can only reference its own FROM/JOIN relations."
+                        % (field.get_sql(quote_char='"'), label, name, outer_scope.label)
+                    )
+                return
+
+            outer_name_match = next((binding for binding in outer_bindings if binding.name == name), None)
+            if outer_name_match is not None and not same_name:
+                if not allow_outer:
+                    raise JoinException(
+                        "Invalid correlated reference '%s' in %s: '%s' is in %s, but this non-lateral subquery "
+                        "can only reference its own FROM/JOIN relations."
+                        % (field.get_sql(quote_char='"'), label, name, outer_scope.label)
+                    )
+                return
+
+        if visible_exact_match is not None:
+            return
+
+        if visible_same_name:
+            return
+
+        if future_same_name or (exact_match is not None and exact_match.phase >= phase):
+            raise JoinException(
+                "Invalid reference '%s' in %s: relation '%s' is introduced later in the same scope."
+                % (field.get_sql(quote_char='"'), label, name)
+            )
+
+    @staticmethod
+    def _binding_exact_match(bindings: list[_RelationBinding], table: Selectable) -> _RelationBinding | None:
+        for binding in bindings:
+            source = binding.source
+            alias_source = source.__dict__.get("_alias_source")
+            if source is table or alias_source is table:
+                return binding
+        return None
+
+    @staticmethod
+    def _item_label(binding: _RelationBinding) -> str:
+        return "%s '%s'" % (binding.origin, binding.name)
 
 
 class CreateQueryBuilder:

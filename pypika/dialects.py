@@ -5,7 +5,7 @@ import warnings
 from copy import copy
 from typing import Any
 
-from pypika.enums import Dialects
+from pypika.enums import Dialects, JoinType
 from pypika.queries import (
     CreateQueryBuilder,
     Database,
@@ -702,6 +702,14 @@ class MSSQLQuery(Query):
 
 class MSSQLQueryBuilder(FetchNextAndOffsetRowsQueryBuilder):
     QUERY_CLS = MSSQLQuery
+
+    @builder
+    def cross_apply(self, item: QueryBuilder) -> MSSQLQueryBuilder:
+        self.do_lateral_join(item, JoinType.cross)
+
+    @builder
+    def outer_apply(self, item: QueryBuilder) -> MSSQLQueryBuilder:
+        self.do_lateral_join(item, JoinType.left)
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(dialect=Dialects.MSSQL, **kwargs)
