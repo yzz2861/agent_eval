@@ -82,6 +82,12 @@ class CSV
       def keep_drop
         @keeps.pop
       end
+
+      # Returns the number of bytes that were read from the input but not
+      # yet consumed by the parser.
+      def unconsumed_bytesize
+        rest.bytesize
+      end
     end
 
     #
@@ -267,6 +273,24 @@ class CSV
         @scanner.rest
       end
 
+      # Returns the number of bytes that were read from the inputs but not
+      # yet consumed by the parser: the rest of the current chunk plus the
+      # unread parts of pending in-memory inputs (samples or data pushed
+      # back via keep_back). Inputs that are read incrementally (such as
+      # the underlying IO) don't contribute: their unread bytes were never
+      # read and thus aren't counted in IO#pos either.
+      def unconsumed_bytesize
+        size = @scanner.rest.bytesize
+        @inputs.each do |input|
+          if input.is_a?(StringIO)
+            size += input.size - input.pos
+          elsif input.is_a?(UnoptimizedStringIO)
+            size += input.remaining_bytesize
+          end
+        end
+        size
+      end
+
       def check(pattern)
         @scanner.check(pattern)
       end
@@ -405,6 +429,15 @@ class CSV
       @lineno
     end
 
+    # The byte offset in the input at which the next record to parse
+    # starts, or +nil+ when no complete record has been delivered yet (or
+    # the input doesn't support seeking). Note that this is usually not
+    # the same as <tt>input.pos</tt>: the parser may have read ahead and
+    # buffered parts of the following records.
+    def checkpoint_offset
+      @checkpoint_offset
+    end
+
     def line
       last_line
     end
@@ -468,6 +501,7 @@ class CSV
       prepare_line
       prepare_header
       prepare_parser
+      prepare_checkpoint
     end
 
     def prepare_variable
@@ -755,9 +789,27 @@ class CSV
     end
 
     def prepare_line
-      @lineno = 0
+      resume = @options[:resume]
+      @lineno = (resume && resume[:lineno]) || 0
       @last_line = nil
       @scanner = nil
+    end
+
+    # Checkpoint positions are derived from the input's byte position, so
+    # they are only available for inputs that support seeking. IO#pos may
+    # raise (for example Errno::ESPIPE on a pipe), which is detected here
+    # once instead of on every delivered record.
+    def prepare_checkpoint
+      @checkpoint_offset = nil
+      @checkpoint_supported = checkpoint_input_seekable?
+    end
+
+    def checkpoint_input_seekable?
+      return false unless @input.respond_to?(:seek) and @input.respond_to?(:pos)
+      @input.pos
+      true
+    rescue Errno::ESPIPE, IOError
+      false
     end
 
     def last_line
@@ -791,6 +843,17 @@ class CSV
         @headers = adjust_headers(@raw_headers, quoted_fields)
       else
         @headers = nil
+      end
+
+      resume = @options[:resume]
+      if resume and resume[:headers]
+        # The headers were already read from the input before the
+        # checkpoint was taken; inject them instead of reading (and
+        # converting) them again. @raw_headers stays nil so that the
+        # header row isn't delivered again when @return_headers is set.
+        @use_headers = true
+        @raw_headers = nil
+        @headers = resume[:headers]
       end
     end
 
@@ -854,6 +917,10 @@ class CSV
 
       def eof?
         @io.eof?
+      end
+
+      def remaining_bytesize
+        @io.size - @io.pos
       end
     end
 
@@ -1290,7 +1357,17 @@ class CSV
         add_unconverted_fields(row, raw_row)
       end
 
+      update_checkpoint_offset if @checkpoint_supported
       yield(row)
+    end
+
+    # Records the byte offset in the input at which the next record
+    # starts. This is called right before a fully parsed record is
+    # delivered, so a checkpoint never points into the middle of a record
+    # (such as a multi-line quoted field), even if the parser has already
+    # read ahead and buffered parts of the following records.
+    def update_checkpoint_offset
+      @checkpoint_offset = @input.pos - @scanner.unconsumed_bytesize
     end
 
     # This method injects an instance variable <tt>unconverted_fields</tt> into

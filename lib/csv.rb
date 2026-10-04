@@ -93,7 +93,9 @@ require "forwardable"
 require "date"
 require "time"
 require "stringio"
+require "digest/sha2"
 
+require_relative "csv/checkpoint"
 require_relative "csv/fields_converter"
 require_relative "csv/input_record_separator"
 require_relative "csv/parser"
@@ -332,6 +334,7 @@ require_relative "csv/writer"
 #     nil_value:          nil,
 #     empty_value:        "",
 #     strip:              false,
+#     resume:             nil,
 #     # For generating.
 #     write_headers:      nil,
 #     quote_empty:        true,
@@ -365,6 +368,7 @@ require_relative "csv/writer"
 #   non-compliant data.
 # - +nil_value+: Specifies the object that is to be substituted for each null (no-text) field.
 # - +empty_value+: Specifies the object that is to be substituted for each empty field.
+# - +resume+: Specifies a checkpoint from which parsing should resume.
 #
 # :include: ../doc/csv/options/common/row_sep.rdoc
 #
@@ -395,6 +399,8 @@ require_relative "csv/writer"
 # :include: ../doc/csv/options/parsing/nil_value.rdoc
 #
 # :include: ../doc/csv/options/parsing/empty_value.rdoc
+#
+# :include: ../doc/csv/options/parsing/resume.rdoc
 #
 # ==== Options for Generating
 #
@@ -970,6 +976,7 @@ class CSV
     nil_value:          nil,
     empty_value:        "",
     strip:              false,
+    resume:             nil,
     # For generating.
     write_headers:      nil,
     quote_empty:        true,
@@ -1647,6 +1654,7 @@ class CSV
     def open(path_or_io, mode="r", **options)
       # wrap a File opened with the remaining +args+ with no newline
       # decorator
+      resume = options.delete(:resume)
       file_opts = {}
       may_enable_bom_detection_automatically(path_or_io,
                                              mode,
@@ -1660,6 +1668,7 @@ class CSV
       options.delete(:undef)
       options.delete(:replace)
       options.delete_if {|k, _| /newline\z/.match?(k)}
+      options[:resume] = resume if resume
 
       if path_or_io.is_a?(StringIO)
         f = create_stringio(path_or_io.string, mode, **file_opts)
@@ -2056,7 +2065,8 @@ class CSV
                  quote_empty: true,
                  write_converters: nil,
                  write_nil_value: nil,
-                 write_empty_value: "")
+                 write_empty_value: "",
+                 resume: nil)
     raise ArgumentError.new("Cannot parse nil as CSV") if data.nil?
 
     if data.is_a?(String)
@@ -2110,6 +2120,31 @@ class CSV
       strip: strip,
     }
     @parser = nil
+
+    # Fingerprint of the options that affect parsing; used to decide
+    # whether a checkpoint may be resumed with this instance.
+    @checkpoint_options = Checkpoint.normalize_options(
+      "col_sep" => col_sep,
+      "row_sep" => row_sep,
+      "quote_char" => quote_char,
+      "max_field_size" => max_field_size,
+      "skip_blanks" => skip_blanks,
+      "skip_lines" => skip_lines,
+      "liberal_parsing" => liberal_parsing,
+      "strip" => strip,
+      "headers" => headers,
+      "return_headers" => return_headers,
+      "unconverted_fields" => unconverted_fields,
+      "nil_value" => nil_value,
+      "empty_value" => empty_value,
+      "encoding" => encoding,
+      "internal_encoding" => internal_encoding,
+      "external_encoding" => external_encoding,
+    )
+    @resumed_checkpoint = nil
+    if resume
+      apply_checkpoint(Checkpoint.load(resume))
+    end
 
     @writer_options = {
       encoding: @encoding,
@@ -2381,6 +2416,42 @@ class CSV
     parser.line
   end
 
+  # :call-seq:
+  #   csv.checkpoint -> csv_checkpoint or nil
+  #
+  # Returns a CSV::Checkpoint marking the position right after the most
+  # recently delivered record; returns +nil+ if no complete record has
+  # been delivered yet, or if the input doesn't support seeking:
+  #   string = "foo,0\nbar,1\nbaz,2\n"
+  #   csv = CSV.new(string)
+  #   csv.checkpoint # => nil
+  #   csv.shift      # => ["foo", "0"]
+  #   checkpoint = csv.checkpoint
+  #   checkpoint.offset # => 6
+  #
+  # The checkpoint is computed from the parser's position, not from
+  # <tt>io.pos</tt>: the parser may already have read (and buffered) parts
+  # of the following records. It always points at the start of the next
+  # unparsed record, even when records contain multi-line quoted fields.
+  #
+  # Pass the checkpoint (or its CSV::Checkpoint#dump string) as the
+  # +resume+ option to CSV.new to continue parsing at the next record;
+  # see CSV::Checkpoint.
+  def checkpoint
+    return nil if @parser.nil?
+    offset = @parser.checkpoint_offset
+    return nil if offset.nil?
+    Checkpoint.new(
+      offset: offset,
+      lineno: @parser.lineno,
+      headers: @parser.use_headers? ? @parser.headers : nil,
+      row_separator: @parser.row_separator,
+      encoding: @encoding.name,
+      options: @checkpoint_options,
+      input: input_identity,
+    )
+  end
+
   ### IO and StringIO Delegation ###
 
   extend Forwardable
@@ -2436,6 +2507,13 @@ class CSV
   def rewind
     @parser = nil
     @writer.rewind if @writer
+    if @resumed_checkpoint
+      # Undo the changes made when the checkpoint was applied, so that
+      # rewinding really restarts parsing from the beginning.
+      @parser_options.delete(:resume)
+      @parser_options[:row_separator] = @pre_resume_row_separator
+      @resumed_checkpoint = nil
+    end
     @io.rewind
   end
 
@@ -2940,6 +3018,84 @@ class CSV
 
   def parser
     @parser ||= Parser.new(@io, parser_options)
+  end
+
+  # Returns a hash identifying the input, used to detect whether the input
+  # a checkpoint was taken from is still the same. Returns +nil+ when the
+  # input can't be identified (for example a generic IO); such checkpoints
+  # can't be guarded against input changes.
+  def input_identity
+    @input_identity ||= build_input_identity
+  end
+
+  def build_input_identity
+    if @io.respond_to?(:string)
+      string = @io.string
+      {
+        "type" => "string",
+        "bytesize" => string.bytesize,
+        "digest" => Digest::SHA256.hexdigest(string),
+      }
+    elsif @io.respond_to?(:path) and @io.path and File.file?(@io.path)
+      stat = File.stat(@io.path)
+      {
+        "type" => "file",
+        "path" => File.expand_path(@io.path),
+        "size" => stat.size,
+        "mtime" => stat.mtime.to_f,
+      }
+    else
+      nil
+    end
+  end
+
+  # Validates the given checkpoint against this instance's input and
+  # parsing options, seeks the input to the checkpoint's offset and
+  # arranges for the parser to continue from there. Raises
+  # CSV::InvalidCheckpointError when the checkpoint doesn't match.
+  def apply_checkpoint(checkpoint)
+    unless @io.respond_to?(:seek)
+      message = "cannot resume: the input does not support seeking"
+      raise InvalidCheckpointError, message
+    end
+
+    unless checkpoint.input == input_identity
+      message = "cannot resume: the input does not match the checkpoint"
+      raise InvalidCheckpointError, message
+    end
+
+    unless checkpoint.options == @checkpoint_options
+      differences = @checkpoint_options.keys.select do |key|
+        checkpoint.options[key] != @checkpoint_options[key]
+      end
+      message = "cannot resume: CSV options do not match the checkpoint"
+      unless differences.empty?
+        message += " (#{differences.join(', ')})"
+      end
+      raise InvalidCheckpointError, message
+    end
+
+    if checkpoint.encoding and checkpoint.encoding != @encoding.name
+      message = "cannot resume: the encoding does not match the checkpoint"
+      raise InvalidCheckpointError, message
+    end
+
+    begin
+      @io.seek(checkpoint.offset, IO::SEEK_SET)
+    rescue IOError, SystemCallError => error
+      message = "cannot resume: failed to seek the input: #{error.message}"
+      raise InvalidCheckpointError, message
+    end
+
+    # Use the resolved row separator from the checkpoint: re-detecting it
+    # from the middle of the input could pick a different separator.
+    @pre_resume_row_separator = @parser_options[:row_separator]
+    @parser_options[:row_separator] = checkpoint.row_separator
+    @parser_options[:resume] = {
+      lineno: checkpoint.lineno,
+      headers: checkpoint.headers,
+    }
+    @resumed_checkpoint = checkpoint
   end
 
   def parser_options

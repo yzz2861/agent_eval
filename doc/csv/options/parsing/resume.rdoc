@@ -1,0 +1,24 @@
+====== Option +resume+
+
+Specifies a CSV::Checkpoint (or a serialized checkpoint String as
+returned by CSV::Checkpoint#dump) from which parsing should resume,
+instead of starting at the beginning of the input.
+
+The input is sought to the record following the checkpoint's position;
+headers, the resolved row separator and the line number are restored
+from the checkpoint, so parsing continues exactly where the checkpoint
+was taken. The other parsing options must be the same as when the
+checkpoint was taken, and the input must be unchanged; otherwise
+CSV::InvalidCheckpointError is raised.
+
+Default value:
+  CSV::DEFAULT_OPTIONS.fetch(:resume) # => nil
+
+Examples:
+  str = "foo,0\nbar,1\nbaz,2\n"
+  csv = CSV.new(str)
+  csv.shift # => ["foo", "0"]
+  checkpoint = csv.checkpoint
+  # Later, possibly in another process:
+  csv = CSV.new(str, resume: checkpoint.dump)
+  csv.shift # => ["bar", "1"]
