@@ -323,3 +323,5 @@ class Shrine
   extend ClassMethods
   include InstanceMethods
 end
+
+require "shrine/attacher_group"

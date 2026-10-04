@@ -262,6 +262,11 @@ class Shrine
         !!@previous
       end
 
+      # Returns the file that was attached before the current change.
+      def previous_file
+        @previous&.file
+      end
+
       # Returns whether a file is attached.
       #
       #     attacher.attach(io)
