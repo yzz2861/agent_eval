@@ -43,6 +43,7 @@ module Mail # :doc:
   require 'mail/part'
   require 'mail/header'
   require 'mail/parts_list'
+  require 'mail/partial_collector'
   require 'mail/attachments_list'
   require 'mail/body'
   require 'mail/field'
