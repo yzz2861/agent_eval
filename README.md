@@ -121,6 +121,86 @@ Fugit.parse_cronish('12y12M')        # ==> nil
 Introduced in fugit 1.8.0.
 
 
+## convert_cron and do_convert_cron
+
+When importing schedules from other systems, cron expressions come in
+different dialects. These entry points convert from a declared source
+dialect into an executable `Fugit::Cron`. The dialect is mandatory,
+they never guess, and they do not change how `Fugit.parse` interprets
+strings.
+
+```ruby
+Fugit.convert_cron('30 4 1,15 * 5', from: :unix)
+  # ==> #<Fugit::Cron:0x0...>
+
+Fugit.convert_cron('0 30 9 ? * MON-FRI', from: :quartz)
+  # ==> #<Fugit::Cron:0x0...>
+
+Fugit.convert_cron('0 30 9 ? * MON-FRI 2026', from: :quartz)
+  # ==> #<Fugit::Convert::Error:0x0...> (not raised)
+
+Fugit.do_convert_cron('0 30 9 ? * MON-FRI 2026', from: :quartz)
+  # raises the Fugit::Convert::Error
+```
+
+`Fugit.convert_cron` returns a `Fugit::Cron` on success, or a
+`Fugit::Convert::Error` (returned, not raised) when the expression is
+not expressible. `Fugit.do_convert_cron` raises that error instead.
+
+The error is structured, it points at the offending parts in the
+original expression:
+
+```ruby
+err = Fugit.convert_cron('0 0 12 ? * MON 2025', from: :quartz)
+
+err.message
+  # ==> 'cannot convert quartz cron "0 0 12 ? * MON 2025": field 6 (year) "2025": ...'
+err.issues
+  # ==> [ { field: :year, index: 6, offset: 15, value: '2025', reason: '...' } ]
+```
+
+### unix dialect
+
+Five fields `minute hour day-of-month month day-of-week`. Numbers,
+three-letter names, `*`, lists, ranges and steps are supported. When
+both day-of-month and day-of-week are restricted, the classical unix
+"either matches" (OR) rule applies.
+
+### quartz dialect (supported subset)
+
+Six or seven fields `second minute hour day-of-month month day-of-week
+[year]`.
+
+* seconds, minutes, hours, months: numbers (and `JAN`-`DEC` for
+  months), `*`, lists, ranges, steps (`*/15` and `0/15` included)
+* day-of-month: numbers, lists, ranges, steps, `L` (last day of the
+  month), `L-n` (nth-to-last day), or `?`
+* day-of-week: `1`-`7` or `SUN`-`SAT` (1 and SUN both mean Sunday),
+  lists, ranges, steps, `L` alone (Saturday), `xL` (last x-day of the
+  month), `x#n` (nth x-day of the month), or `?`
+* year: only `*` (or absent); a bounded year cannot be expressed in a
+  fugit cron and yields a structured error pointing at the year field
+* `?` is accepted in the day-of-month and day-of-week fields only
+
+Not supported, each yields a structured error (nothing is silently
+dropped):
+
+* bounded years (`2025`, `2020-2030`, ...)
+* `W`, `LW` and `C` forms
+* expressions restricting both day-of-month and day-of-week (Quartz
+  itself requires `?` in one of the two fields)
+* wrap-around ranges (`FRI-MON`, ...)
+
+### verification
+
+Before a converted expression is returned, its occurrences are compared
+one by one against an independent implementation of the source dialect
+semantics, over a finite time window (2024-01-01 to 2029-01-01 UTC, up
+to 256 occurrences, overridable via the `:window` and `:count` options).
+A divergence yields a `Fugit::Convert::Error`, never a silently wrong
+schedule.
+
+
 ## `Fugit::Cron`
 
 A class `Fugit::Cron` to parse cron strings and then `#next_time` and `#previous_time` to compute the next or the previous occurrence respectively.
@@ -713,4 +793,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-

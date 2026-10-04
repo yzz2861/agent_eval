@@ -2,6 +2,14 @@
 # CHANGELOG.md
 
 
+## fugit 1.15.0  not yet released
+
+* Add Fugit.convert_cron / Fugit.do_convert_cron, converting from a
+  declared source dialect (:unix 5-field or a documented :quartz
+  subset) into an executable Fugit::Cron, with occurrence-by-occurrence
+  verification over a finite time window and structured errors
+  (Fugit::Convert::Error) for the non-expressible parts
+
 ## fugit 1.14.0 released 2026-09-14
 
 * Reject input when length > 256
@@ -362,4 +370,3 @@
 ## fugit 0.9.0  released 2017-01-03
 
 * Initial release
-
