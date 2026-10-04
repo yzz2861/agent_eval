@@ -96,6 +96,7 @@
       "plugins/dynamic_storage",
       "plugins/multi_cache",
       "plugins/pretty_location",
+      "plugins/content_addressable",
       "plugins/upload_options",
       "plugins/url_options"
     ],

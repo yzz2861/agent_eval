@@ -1,3 +1,7 @@
+## Unreleased
+
+* Add `content_addressable` plugin for generating locations from the file content hash, and `Shrine::Storage::ContentAddressable` storage wrapper which stores each unique file only once and deletes it when the last referencing attachment is deleted
+
 ## 3.10.0 (2026-09-20)
 
 * Add `fallback_storage` plugin for reading files from a secondary storage when they're missing in the primary storage (@yegorov, @janko)
