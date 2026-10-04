@@ -6,6 +6,7 @@
 # Copyright, 2021, by Aurora Nockert.
 
 require_relative "framer"
+require_relative "message_stream"
 
 module Protocol
 	module WebSocket
@@ -15,86 +16,90 @@ module Protocol
 			def initialize(framer, mask: nil, **options)
 				@framer = framer
 				@mask = mask
-				
+
 				@state = :open
 				@frames = []
-				
+				@message_stream = nil
+
 				@reserved = Frame::RESERVED
-				
+
 				@reader = self
 				@writer = self
 			end
-			
+
 			# @attribute [Framer] The framer which is used for reading and writing frames.
 			attr :framer
-			
+
 			# @attribute [String | Boolean | Nil] The optional mask which is used when generating frames.
 			attr :mask
-			
+
 			# @attribute [Integer] The allowed reserved bits.
 			attr :reserved
-			
+
 			# @attribute [Array(Frame)] Buffered frames which form part of a complete message.
 			attr_accessor :frames
-			
+
+			# @attribute [MessageStream | Nil] The message stream currently being read, if any.
+			attr :message_stream
+
 			# @attribute [Object] The reader which is used to unpack frames into messages.
 			attr_accessor :reader
-			
+
 			# @attribute [Object] The writer which is used to pack messages into frames.
 			attr_accessor :writer
-			
+
 			# Reserve a bit in the reserved flags for an extension.
 			# @parameter bit [Integer] The bit to reserve, see {Frame::RESERVED} for more details.
 			def reserve!(bit)
 				if (@reserved & bit).zero?
 					raise ArgumentError, "Unable to use #{bit}!"
 				end
-				
+
 				@reserved &= ~bit
-				
+
 				return true
 			end
-			
+
 			# Flush the underlying framer to ensure all buffered data is written to the connection.
 			def flush
 				@framer.flush
 			end
-			
+
 			# Transition the connection to the open state (the default for new connections).
 			def open!
 				@state = :open
-				
+
 				return self
 			end
-			
+
 			# If not already closed, transition the connection to the closed state and send a close frame.
 			# Will try to send a close frame with the specified code and reason, but will ignore any errors that occur while sending.
 			def close!(...)
 				unless @state == :closed
 					@state = :closed
-					
+
 					begin
 						send_close(...)
 					rescue
 						# Ignore errors.
 					end
 				end
-				
+
 				return self
 			end
-			
+
 			# @returns [Boolean] if the connection is in the closed state.
 			def closed?
 				@state == :closed
 			end
-			
+
 			# Immediately transition the connection to the closed state *and* close the underlying connection. Any data not yet read will be lost.
 			def close(...)
 				close!(...)
-				
+
 				@framer.close
 			end
-			
+
 			# Close the connection gracefully, sending a close frame with the specified error code and reason. If an error occurs while sending the close frame, the connection will be closed immediately. You may continue to read data from the connection after calling this method, but you should not write any more data.
 			#
 			# @parameter error [Error | Nil] The error that occurred, if any.
@@ -107,31 +112,40 @@ module Protocol
 			rescue
 				@state = :closed
 			end
-			
+
 			# Close the connection gracefully. This will send a close frame and wait for the remote end to respond with a close frame. Any data received after the close frame is sent will be ignored. If you want to process this data, use {#close_write} instead, and read the data before calling {#close}.
 			def shutdown
 				send_close unless @state == :closed
-				
+
 				# `read_frame` will return nil after receiving a close frame:
 				while read_frame
 					# Drain the connection.
 				end
 			end
-			
+
 			# Read a frame from the framer, and apply it to the connection.
-			def read_frame
+			def read_frame(maximum_frame_size = Framer::MAXIMUM_ALLOWED_FRAME_SIZE, &block)
+				if @message_stream
+					raise ProtocolError, "Cannot read a frame while a message stream is active!"
+				end
+
+				read_frame_internal(maximum_frame_size, &block)
+			end
+
+			# Used internally by message streams so control frames can still be handled while a data message is active.
+			private def read_frame_internal(maximum_frame_size = Framer::MAXIMUM_ALLOWED_FRAME_SIZE)
 				return nil if closed?
-				
-				frame = @framer.read_frame
-				
+
+				frame = @framer.read_frame(maximum_frame_size)
+
 				unless (frame.flags & @reserved).zero?
 					raise ProtocolError, "Received frame with reserved flags set!"
 				end
-				
+
 				yield frame if block_given?
-				
+
 				frame.apply(self)
-				
+
 				return frame
 			rescue ProtocolError => error
 				close(error.code, error.message)
@@ -140,15 +154,15 @@ module Protocol
 				close(Error::PROTOCOL_ERROR, error.message)
 				raise
 			end
-			
+
 			# Write a frame to the framer.
 			# Note: This does not immediately write the frame to the connection, you must call {#flush} to ensure the frame is written.
 			def write_frame(frame)
 				@framer.write_frame(frame)
-				
+
 				return frame
 			end
-			
+
 			# Receive a text frame from the connection.
 			def receive_text(frame)
 				if @frames.empty?
@@ -157,7 +171,7 @@ module Protocol
 					raise ProtocolError, "Received text, but expecting continuation!"
 				end
 			end
-			
+
 			# Receive a binary frame for the connection.
 			def receive_binary(frame)
 				if @frames.empty?
@@ -166,7 +180,7 @@ module Protocol
 					raise ProtocolError, "Received binary, but expecting continuation!"
 				end
 			end
-			
+
 			# Receive a continuation frame for the connection.
 			def receive_continuation(frame)
 				if @frames.any?
@@ -175,32 +189,32 @@ module Protocol
 					raise ProtocolError, "Received unexpected continuation!"
 				end
 			end
-			
+
 			# Receive a close frame from the connection.
 			def receive_close(frame)
 				code, reason = frame.unpack
-				
+
 				# On receiving a close frame, we must enter the closed state:
 				close!(code, reason)
-				
+
 				if code and code != Error::NO_ERROR
 					raise ClosedError.new reason, code
 				end
 			end
-			
+
 			# Send a ping frame with the specified data.
 			# @parameter data [String] The data to send in the ping frame.
 			def send_ping(data = "")
 				if @state != :closed
 					frame = PingFrame.new(mask: @mask)
 					frame.pack(data)
-					
+
 					write_frame(frame)
 				else
 					raise ProtocolError, "Cannot send ping in state #{@state}"
 				end
 			end
-			
+
 			# Receive a ping frame from the connection.
 			def receive_ping(frame)
 				if @state != :closed
@@ -209,60 +223,60 @@ module Protocol
 					raise ProtocolError, "Cannot receive ping in state #{@state}"
 				end
 			end
-			
+
 			# Receive a pong frame from the connection. By default, this method does nothing.
 			def receive_pong(frame)
 				# Ignore.
 			end
-			
+
 			# Receive a frame that is not a control frame. By default, this method raises a {ProtocolError}.
 			def receive_frame(frame)
 				raise ProtocolError, "Unhandled frame: #{frame}"
 			end
-			
+
 			# Pack a text frame with the specified buffer. This is used by the {#writer} interface.
 			# @parameter buffer [String] The text to pack into the frame.
 			# @returns [TextFrame] The packed frame.
 			def pack_text_frame(buffer, **options)
 				frame = TextFrame.new(mask: @mask)
 				frame.pack(buffer)
-				
+
 				return frame
 			end
-			
+
 			# Send a text frame with the specified buffer.
 			# @parameter buffer [String] The text to send.
 			def send_text(buffer, **options)
 				write_frame(@writer.pack_text_frame(buffer, **options))
 			end
-			
+
 			# Pack a binary frame with the specified buffer. This is used by the {#writer} interface.
 			# @parameter buffer [String] The binary data to pack into the frame.
 			# @returns [BinaryFrame] The packed frame.
 			def pack_binary_frame(buffer, **options)
 				frame = BinaryFrame.new(mask: @mask)
 				frame.pack(buffer)
-				
+
 				return frame
 			end
-			
+
 			# Send a binary frame with the specified buffer.
 			# @parameter buffer [String] The binary data to send.
 			def send_binary(buffer, **options)
 				write_frame(@writer.pack_binary_frame(buffer, **options))
 			end
-			
+
 			# Send a control frame with data containing a specified control sequence to begin the closing handshake. Does not close the connection, until the remote end responds with a close frame.
 			# @parameter code [Integer] The close code to send.
 			# @parameter reason [String] The reason for closing the connection.
 			def send_close(code = Error::NO_ERROR, reason = "")
 				frame = CloseFrame.new(mask: @mask)
 				frame.pack(code, reason)
-				
+
 				self.write_frame(frame)
 				self.flush
 			end
-			
+
 			# Write a message to the connection.
 			# @parameter message [Message] The message to send.
 			def write(message, **options)
@@ -280,7 +294,7 @@ module Protocol
 					raise ArgumentError, "Unsupported message type: #{message}"
 				end
 			end
-			
+
 			# The default implementation for reading a message buffer. This is used by the {#reader} interface.
 			def unpack_frames(frames)
 				if frames.size == 1
@@ -289,7 +303,77 @@ module Protocol
 					frames.map(&:unpack).join("")
 				end
 			end
-			
+
+			# Create a message stream using the default frame-oriented reader.
+			def read_stream(source, **options)
+				return MessageStream.new(self, source, **options)
+			end
+
+			# Read the beginning of a message without buffering its complete payload.
+			# @returns [MessageStream | Nil] A message stream, or nil when the connection is closed.
+			def read_message_stream(**options)
+				@framer.flush
+
+				if @message_stream
+					raise ProtocolError, "A message stream is already active!"
+				end
+
+				begin
+					frame = read_message_frame or return nil
+					source = MessageStream::Framed.new(self, @framer, frame)
+
+					return @message_stream = @reader.read_stream(source, **options)
+				rescue ProtocolError => error
+					@message_stream = nil
+					@frames = []
+					close(error.code, error.message)
+					raise
+				rescue => error
+					@message_stream = nil
+					@frames = []
+					close(Error::PROTOCOL_ERROR, error.message)
+					raise
+				end
+			end
+
+			# Called by a message stream once it has been fully consumed or explicitly discarded.
+			def finish_message_stream(stream)
+				return unless @message_stream.equal?(stream)
+
+				@message_stream = nil
+				@frames = []
+			end
+
+			private
+
+			def read_message_frame
+				until closed?
+					frame = @framer.begin_read_frame
+
+					unless (frame.flags & @reserved).zero?
+						raise ProtocolError, "Received frame with reserved flags set!"
+					end
+
+					if frame.control?
+						@framer.read_frame_payload(frame, frame.remaining_length)
+						frame.apply(self)
+					else
+						frame.apply(self)
+						return frame
+					end
+				end
+
+				raise ProtocolError, "Connection closed before message was complete!"
+			rescue ProtocolError => error
+				close(error.code, error.message)
+				raise
+			rescue => error
+				close(Error::PROTOCOL_ERROR, error.message)
+				raise
+			end
+
+			public
+
 			# Read a message from the connection. If an error occurs while reading the message, the connection will be closed.
 			#
 			# If the message is fragmented, this method will buffer the frames until a complete message is received.
@@ -297,12 +381,12 @@ module Protocol
 			# @returns message [Message] The received message.
 			def read(**options)
 				@framer.flush
-				
-				while read_frame
+
+				while read_frame_internal
 					if @frames.last&.finished?
 						frames = @frames
 						@frames = []
-						
+
 						buffer = @reader.unpack_frames(frames, **options)
 						return frames.first.read_message(buffer)
 					end
