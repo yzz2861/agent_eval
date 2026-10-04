@@ -625,6 +625,32 @@ end
 ```
 See "Testing and extracting attachments" above for more details.
 
+## Selecting the body part to display
+
+`Mail::Message#display_body` picks the best body part to display given the
+MIME types you can render, most preferred first. Unlike `html_part` /
+`text_part` (which return the first matching part anywhere, including
+inside attachments), it follows the MIME structure:
+
+* `multipart/alternative` - your type order decides which branch wins
+* `multipart/related` - honors the `start` parameter; sibling parts with
+  a Content-ID are returned as the result's resources (only from the
+  selected branch)
+* parts with an explicit `Content-Disposition: attachment` are never
+  selected
+* nested `message/rfc822` parts are not searched unless you pass
+  `search_nested: true`
+
+```ruby
+result = mail.display_body(%w[text/html text/plain])
+if result.found?
+  result.part      #=> the Mail::Part to render
+  result.resources #=> inline CID parts (images etc.) for that part
+else
+  # nothing displayable; result.part is nil and result.resources is []
+end
+```
+
 ## Using Mail with Testing or Spec'ing Libraries
 
 If mail is part of your system, you'll need a way to test it without actually

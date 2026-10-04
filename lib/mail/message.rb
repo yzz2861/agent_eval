@@ -1656,6 +1656,26 @@ module Mail
       end
     end
 
+    # Selects the best body part for display, given the MIME types you can
+    # display in order of preference. Unlike #html_part/#text_part this
+    # follows the MIME structure (multipart/alternative, multipart/related)
+    # instead of returning the first matching part anywhere, so text/html
+    # attachments are never mistaken for the body.
+    #
+    # Returns a Mail::DisplayBody result:
+    #
+    #   result = mail.display_body(%w[text/html text/plain])
+    #   if result.found?
+    #     result.part      # => the part to render
+    #     result.resources # => CID parts (inline images etc.) from the same
+    #                      #    multipart/related branch
+    #   end
+    #
+    # Nested message/rfc822 parts are not searched unless search_nested: true.
+    def display_body(mime_types = %w[text/html text/plain], search_nested: false)
+      Mail::DisplayBody.select(self, mime_types, search_nested: search_nested)
+    end
+
     # Helper to add a html part to a multipart/alternative email.  If this and
     # text_part are both defined in a message, then it will be a multipart/alternative
     # message and set itself that way.
