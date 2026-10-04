@@ -40,6 +40,7 @@ our documentation, add new features—up to you! Thank you for pitching in.
 * [API Policy](#api-policy)
 * [Installation](#installation)
 * [Encodings](#encodings)
+* [S/MIME Verification](#smime-verification)
 * [Contributing](#contributing)
 * [Usage](#usage)
 * [Excerpts from TREC Spam Corpus 2005](#excerpts-from-trec-spam-corpus-2005)
@@ -160,6 +161,38 @@ I have tried to simplify it some:
 5. Structured fields that have parameter values that can be encoded (e.g. Content-Type) will
    provide encoded parameter values when you call the parameter names through the
    <code>object.parameters['<parameter_name>']</code> method call.
+
+## S/MIME Verification
+
+Mail can verify detached S/MIME signatures carried by `multipart/signed`
+messages (RFC 5751) using Ruby's standard library OpenSSL. You provide the
+trust store; Mail never downloads certificates. The signed bytes are taken
+verbatim from the raw message, not produced by re-encoding the parsed part.
+
+```ruby
+require 'mail'
+
+store = OpenSSL::X509::Store.new
+store.add_cert(OpenSSL::X509::Certificate.new(File.read('ca-cert.pem')))
+
+verifier = Mail::SMIME.verifier(store)            # an X509::Store, a single
+                                                  # certificate, or an array
+mail = Mail.read('signed.eml')
+
+begin
+  signed = verifier.verify(mail)                  # returns the signed message
+  puts signed.decoded
+rescue Mail::SMIME::UnsupportedAlgorithmError     # unsupported digest/signature algorithm
+rescue Mail::SMIME::SignatureCorruptError         # signature missing, unparseable or invalid
+rescue Mail::SMIME::CertificateUntrustedError     # signer not trusted by the store
+rescue Mail::SMIME::ContentTamperedError          # content differs from what was signed
+rescue Mail::SMIME::NotSignedError                # not a multipart/signed message
+end
+```
+
+The original message is not modified. Certificates embedded in the signature
+may be used to validate the signature itself, but the certificate chain is
+checked only against the trust store you pass in.
 
 ## Contributing
 
