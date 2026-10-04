@@ -74,13 +74,15 @@ server.reader.class # => Protocol::WebSocket::Extension::Compression::Inflate
 server.writer.class # => Protocol::WebSocket::Extension::Compression::Deflate
 
 client.send_text("Hello World")
-# => #<Protocol::WebSocket::TextFrame:0x000000011d555460 @finished=true, @flags=4, @length=13, @mask=nil, @opcode=1, @payload="\xF2H\xCD\xC9\xC9W\b\xCF/\xCAI\x01\x00">
+# => #<Protocol::WebSocket::TextFrame:0x000000011d555460 @finished=true, @flags=0, @length=11, @mask=nil, @opcode=1, @payload="Hello World">
 
 server.read
 # => #<Protocol::WebSocket::TextMessage:0x000000011e1e5248 @buffer="Hello World">
 ~~~
 
-It's possible to disable compression on a per-message basis:
+Compression is selected per message. Messages shorter than the configured minimum size bypass trial compression, and larger messages are sent uncompressed unless the compressed payload is strictly smaller. The negotiated context takeover state remains active for subsequent compressed messages; an abandoned trial does not update the dictionary.
+
+It's possible to explicitly disable or force compression on a per-message basis:
 
 ~~~ ruby
 client.send_text("Hello World", compress: false)
@@ -88,4 +90,7 @@ client.send_text("Hello World", compress: false)
 
 server.read
 # => #<Protocol::WebSocket::TextMessage:0x000000011e77eb50 @buffer="Hello World">
+
+client.send_text("Hello World", compress: true)
+# => #<Protocol::WebSocket::TextFrame:0x00000001028945b0 @finished=true, @flags=4, @length=13, @mask=nil, @opcode=1, @payload="\xF2H\xCD\xC9\xC9W\b\xCF/\xCAI\x01\x00">
 ~~~
