@@ -5,6 +5,8 @@ require_relative 'xmltokens'
 module REXML
   # Adds named attributes to an object.
   module Namespace
+    XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+
     # The name of the object, valid if set
     attr_reader :name, :expanded_name
     # The expanded name of the object, valid if name is set

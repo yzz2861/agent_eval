@@ -207,6 +207,7 @@ module REXML
   #
   # {[index]}[#method-i-5B-5D]:: Returns the child at the given offset.
   # #add_element:: Adds an element as the last child.
+  # #import_subtree:: Adds a namespace-aware copy or move of a subtree.
   # #delete_element:: Deletes a child element.
   # #each_element:: Calls the given block with each child element.
   # #each_element_with_attribute:: Calls the given block with each child element
@@ -272,7 +273,6 @@ module REXML
     include Namespace
 
     UNDEFINED = "UNDEFINED";            # The default name
-
     # Mechanisms for accessing attributes and child elements of this
     # element.
     attr_reader :attributes, :elements
@@ -328,7 +328,7 @@ module REXML
       elsif arg.kind_of? Element
         self.name = arg.expanded_name
         arg.attributes.each_attribute{ |attribute|
-          @attributes << Attribute.new( attribute )
+          @attributes << Attribute.new(attribute, self)
         }
         @context = arg.context
       end
@@ -383,6 +383,91 @@ module REXML
     def clone
       self.class.new self
     end
+
+    # :call-seq:
+    #   import_subtree(element, qname_attributes: [], move: false) -> element
+    #
+    # Imports an element subtree while preserving the namespace URI and
+    # local name of every element and non-namespace attribute.
+    #
+    # Unlike #add_element, this method does not assume that an element
+    # prefix has the same meaning in the source and target trees. Missing
+    # namespace declarations are added to the imported root element. Those
+    # declarations shadow conflicting bindings inherited from the target.
+    # Unprefixed elements are protected with an empty default namespace when
+    # necessary; the default namespace never applies to unprefixed attributes.
+    #
+    # +qname_attributes+ identifies attributes whose values contain QNames.
+    # Each entry may be an expanded attribute name (<tt>"prefix:name"</tt>),
+    # a namespace/local-name pair (<tt>[namespace, "name"]</tt>), or a hash
+    # whose keys are namespaces and values are local-name arrays. Only those
+    # values are treated as QNames for namespace validation and declaration
+    # preservation; other values that contain ":" are left untouched.
+    #
+    # By default the source is deep-copied. With <tt>move: true</tt>, the
+    # source element is removed from its original position and imported in
+    # place.
+    def import_subtree(element, qname_attributes: [], move: false)
+      unless element.kind_of?(Element)
+        raise ArgumentError, "imported node must be an Element"
+      end
+      if move
+        if element.equal?(self)
+          raise ArgumentError, "cannot move an element into itself"
+        end
+        ancestor = parent
+        while ancestor
+          if ancestor.equal?(element)
+            raise ArgumentError, "cannot move an ancestor into its descendant"
+          end
+          ancestor = ancestor.parent
+        end
+      end
+
+      qname_attributes = _normalize_qname_attributes(qname_attributes)
+      target_namespaces = _calculate_namespaces
+      target_namespaces["xml"] = XML_NAMESPACE
+      target_namespaces["xmlns"] ||= ""
+      declarations = {}
+      external_namespaces = {}
+      attlist_mappings = element.document&.doctype&._attlist_mappings || {}
+      root_local_namespaces = _local_namespace_declarations(element, attlist_mappings)
+      source_namespaces = {}
+      if element.parent
+        source_namespaces = element.parent._calculate_namespaces(nil, attlist_mappings)
+      end
+      source_namespaces.merge!(root_local_namespaces)
+      source_namespaces["xml"] = XML_NAMESPACE
+      source_namespaces["xmlns"] ||= ""
+      _collect_import_namespace_requirements(element,
+                                             source_namespaces,
+                                             root_local_namespaces,
+                                             external_namespaces,
+                                             qname_attributes,
+                                             attlist_mappings)
+
+      external_namespaces.each do |prefix, uri|
+        next if prefix == "xml" && uri == XML_NAMESPACE
+        next if root_local_namespaces[prefix] == uri
+        next if target_namespaces[prefix] == uri
+        declarations[prefix] = uri
+      end
+
+      imported = move ? element : element.deep_clone
+      declarations.each do |prefix, uri|
+        if prefix == "xmlns"
+          imported.add_namespace(uri)
+        else
+          imported.add_namespace(prefix, uri)
+        end
+      end
+
+      element.remove if move
+      self << imported
+      imported
+    end
+
+    alias import import_subtree
 
     # :call-seq:
     #   root_node -> document or element
@@ -1527,6 +1612,7 @@ module REXML
     # Lookup namespace for the given prefix in the context of the element
     def _namespace_lookup_internal(prefix, namespaces = _calculate_namespaces) # :nodoc:
       prefix = (prefix == '') ? 'xmlns' : prefix.delete_prefix("xmlns:")
+      return XML_NAMESPACE if prefix == "xml"
       ns = namespaces[prefix]
       ns = +'' if ns.nil? and prefix == 'xmlns'
       ns
@@ -1541,6 +1627,119 @@ module REXML
       namespaces = attr_namespaces.any? ? inherited_namespaces.merge(attr_namespaces) : inherited_namespaces
       cache_hash[self] = namespaces if cache_hash
       namespaces
+    end
+
+    def _local_namespace_declarations(element, attlist_mappings = nil) # :nodoc:
+      namespaces = {}
+      element.attributes.send(:each_effective_attribute, attlist_mappings) do |attribute|
+        next unless attribute.namespace_declaration?
+        prefix = attribute.prefix.empty? ? "xmlns" : attribute.name
+        namespaces[prefix] = attribute.value
+      end
+      namespaces
+    end
+
+    def _normalize_qname_attributes(entries) # :nodoc:
+      normalized = []
+      Array(entries).each do |entry|
+        case entry
+        when String
+          normalized << entry
+        when Array
+          namespace, name = entry
+          normalized << [namespace || "", name]
+        when Hash
+          entry.each do |namespace, names|
+            Array(names).each do |name|
+              normalized << [namespace || "", name]
+            end
+          end
+        else
+          raise ArgumentError, "unsupported QName attribute entry: #{entry.inspect}"
+        end
+      end
+      normalized
+    end
+
+    def _qname_attribute?(attribute, whitelist) # :nodoc:
+      return false if attribute.namespace_declaration?
+      whitelist.any? do |entry|
+        if entry.kind_of?(Array)
+          attribute.namespace == entry[0] && attribute.name == entry[1]
+        else
+          attribute.expanded_name == entry
+        end
+      end
+    end
+
+    def _valid_qname?(value) # :nodoc:
+      /\A#{NCNAME_STR}(?::#{NCNAME_STR})?\z/u.match?(value)
+    end
+
+    def _collect_import_namespace_requirements(element, inherited_namespaces, subtree_namespaces, external_namespaces, whitelist, attlist_mappings) # :nodoc:
+      local_namespaces = _local_namespace_declarations(element, attlist_mappings)
+      namespaces = inherited_namespaces.merge(local_namespaces)
+      namespaces["xmlns"] ||= ""
+      if local_namespaces.key?("xml") && local_namespaces["xml"] != XML_NAMESPACE
+        raise ArgumentError, "the xml prefix must be bound to #{XML_NAMESPACE}"
+      end
+      namespaces["xml"] = XML_NAMESPACE
+      active_subtree_namespaces = subtree_namespaces.merge(local_namespaces)
+
+      if element.prefix.empty?
+        prefix = "xmlns"
+        unless active_subtree_namespaces.key?(prefix) && active_subtree_namespaces[prefix] == namespaces[prefix]
+          external_namespaces[prefix] = namespaces[prefix]
+        end
+      else
+        prefix = element.prefix
+        unless namespaces.key?(prefix)
+          raise ArgumentError, "undefined namespace prefix: #{prefix}"
+        end
+        unless active_subtree_namespaces.key?(prefix) && active_subtree_namespaces[prefix] == namespaces[prefix]
+          external_namespaces[prefix] = namespaces[prefix] if namespaces.key?(prefix)
+        end
+      end
+
+      element.attributes.each_attribute do |attribute|
+        if attribute.namespace_declaration?
+          next
+        end
+
+        prefix = attribute.prefix
+        unless prefix.empty?
+          unless namespaces.key?(prefix)
+            raise ArgumentError, "undefined namespace prefix: #{prefix}"
+          end
+          unless active_subtree_namespaces.key?(prefix) && active_subtree_namespaces[prefix] == namespaces[prefix]
+            external_namespaces[prefix] = namespaces[prefix] if namespaces.key?(prefix)
+          end
+        end
+
+        next unless _qname_attribute?(attribute, whitelist)
+        attribute.value.to_s.split(/\s+/).each do |token|
+          next if token.empty? || !_valid_qname?(token)
+          qname_prefix = token.split(?:, 2).first
+          next if qname_prefix == token
+          next if qname_prefix == "xml"
+          unless namespaces.key?(qname_prefix)
+            raise ArgumentError, "undefined QName namespace prefix: #{qname_prefix}"
+          end
+          unless active_subtree_namespaces.key?(qname_prefix) && active_subtree_namespaces[qname_prefix] == namespaces[qname_prefix]
+            external_namespaces[qname_prefix] = namespaces[qname_prefix]
+          end
+        end
+      end
+
+      child_subtree_namespaces = active_subtree_namespaces
+      element.each_element do |child|
+        _collect_import_namespace_requirements(child,
+                                               namespaces,
+                                               child_subtree_namespaces,
+                                               external_namespaces,
+                                               whitelist,
+                                               attlist_mappings)
+      end
     end
 
     private

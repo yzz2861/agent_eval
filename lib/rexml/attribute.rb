@@ -96,6 +96,8 @@ module REXML
       arg = prefix if arg.nil?
       if arg == ""
         ""
+      elsif arg == "xml"
+        Namespace::XML_NAMESPACE
       else
         @element.namespace(arg)
       end
