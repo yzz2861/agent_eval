@@ -52,6 +52,22 @@ For standard use you can just pass it the content of a file and call render with
 @template.render('name' => 'tobi')                # => "hi tobi"
 ```
 
+### Streaming rendering
+
+When the rendered output is large, `render_to` hands each chunk to a callable
+sink (or block) as soon as it is produced instead of building one big result
+String. Plain text, variables and loop iterations reach the sink while the
+rest of the template is still rendering. Tags that need the complete value of
+their body, such as `{% capture %}`, keep buffering locally.
+
+```ruby
+@template = Liquid::Template.parse("{% for item in items %}{{ item }}\n{% endfor %}")
+@template.render_to('items' => lots_of_items) { |chunk| socket.write(chunk) }
+```
+
+If the sink raises, rendering stops immediately, the context is restored, and
+the sink's exception is re-raised to the caller.
+
 ### Concept of Environments
 
 In Liquid, a "Environment" is a scoped environment that encapsulates custom tags, filters, and other configurations. This allows you to define and isolate different sets of functionality for different contexts, avoiding global overrides that can lead to conflicts and unexpected behavior.
@@ -155,6 +171,10 @@ template.render!({ 'x' => 1}, { strict_variables: true })
 integer-range `for` and `tablerow` loops, including loops with empty bodies. This bounds range
 iteration work when a score limit is configured; `render_length_limit` only bounds generated
 output and does not by itself limit CPU work for output-free loops.
+
+`capture_length_limit` independently bounds the amount of content that may be
+buffered locally inside a single `{% capture %}`, so streaming renders cannot
+be forced to materialize unbounded strings through capture.
 
 ### Usage tracking
 

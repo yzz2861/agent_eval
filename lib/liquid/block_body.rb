@@ -93,7 +93,11 @@ module Liquid
     # @api private
     def self.rescue_render_node(context, output, line_number, exc, blank_tag)
       case exc
-      when MemoryError
+      when MemoryError, StreamingOutput::SinkError
+        # Memory limits and sink failures must stop rendering entirely. In
+        # particular a sink failure must not be turned into rendered error
+        # text (which would re-invoke the already failed sink); it unwinds the
+        # render so every context stack is restored.
         raise
       when UndefinedVariable, UndefinedDropMethod, UndefinedFilter
         context.handle_error(exc, line_number)

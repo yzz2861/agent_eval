@@ -141,6 +141,83 @@ module Liquid
     def render(*args)
       return '' if @root.nil?
 
+      output = nil
+
+      render_to_buffer(*args) do |context, options|
+        output = options[:output] if options&.key?(:output)
+        begin
+          # render the nodelist.
+          @root.render_to_output_buffer(context, output || +'')
+        rescue Liquid::MemoryError => e
+          context.handle_error(e)
+        end
+      end
+    end
+
+    # Stream a rendered template to +sink+ instead of accumulating the whole
+    # result in one String.
+    #
+    # Plain text nodes, variable tags and the iterations of loops are handed to
+    # the sink as soon as they have been rendered, so a caller can start
+    # consuming output (e.g. write it to a socket) before the rest of the
+    # template finishes executing. Tags that genuinely need the complete value
+    # of their body (e.g. +{% capture %}+) still buffer locally; that buffering
+    # is bounded independently via the +capture_length_limit+ resource limit
+    # instead of counting against the final output budget.
+    #
+    # If the sink raises, execution stops immediately: no further drops, filters
+    # or nodes run, every context stack is unwound/restored, and the sink's
+    # exception is re-raised to the caller (unlike ordinary Liquid rendering
+    # errors, which are collected or converted to error text).
+    #
+    #   template.render_to(assigns, ->(chunk) { io.write(chunk) })
+    #   template.render_to(assigns) { |chunk| io.write(chunk) }
+    #
+    # @param args [Array] same argument signature as {#render}
+    #   (assigns/context/drop, filters, options), plus an optional callable
+    #   sink as the final positional argument; +options[:output]+ is ignored
+    #   because there is no accumulated output buffer.
+    # @yieldparam chunk [String] a rendered chunk; used as the sink when no
+    #   callable positional sink is given.
+    # @return [void]
+    def render_to(*args, &block)
+      return if @root.nil?
+
+      sink = args.pop if args.last.respond_to?(:call) && !args.last.is_a?(Hash)
+      sink ||= block
+      raise ArgumentError, "render_to requires a sink (callable or block)" unless sink.respond_to?(:call)
+
+      render_to_buffer(*args) do |context|
+        output = StreamingOutput.new(sink)
+        begin
+          @root.render_to_output_buffer(context, output)
+        rescue StreamingOutput::SinkError
+          # Surface the original sink exception untouched, after all the
+          # context stack +ensure+ blocks have run.
+          raise $!.cause || $!
+        end
+      end
+
+      nil
+    end
+
+    def render!(*args)
+      @rethrow_errors = true
+      render(*args)
+    end
+
+    def render_to_output_buffer(context, output)
+      render(context, output: output)
+    end
+
+    private
+
+    # Builds and prepares the rendering Context from the render/render_to
+    # argument signature, invokes the block with it, and takes care of
+    # resource-limit reset, profiling, error mode and error bookkeeping. The
+    # block performs the actual rendering and is responsible for its own output
+    # destination and for deciding which errors to swallow.
+    def render_to_buffer(*args)
       context = case args.first
       when Liquid::Context
         c = args.shift
@@ -163,12 +240,11 @@ module Liquid
         raise ArgumentError, "Expected Hash or Liquid::Context as parameter"
       end
 
-      output = nil
+      options = nil
 
       case args.last
       when Hash
         options = args.pop
-        output  = options[:output] if options[:output]
         static_registers = context.registers.static
 
         options[:registers]&.each do |key, register|
@@ -193,10 +269,7 @@ module Liquid
       context.registers.static[:template_error_mode] = @error_mode
 
       begin
-        # render the nodelist.
-        @root.render_to_output_buffer(context, output || +'')
-      rescue Liquid::MemoryError => e
-        context.handle_error(e)
+        yield context, options
       ensure
         if previous_error_mode
           context.registers.static[:template_error_mode] = previous_error_mode
@@ -206,17 +279,6 @@ module Liquid
         @errors = context.errors
       end
     end
-
-    def render!(*args)
-      @rethrow_errors = true
-      render(*args)
-    end
-
-    def render_to_output_buffer(context, output)
-      render(context, output: output)
-    end
-
-    private
 
     def configure_options(options)
       if (profiling = options[:profile])

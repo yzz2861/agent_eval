@@ -3,6 +3,7 @@
 module Liquid
   class ResourceLimits
     attr_accessor :render_length_limit,
+      :capture_length_limit,
       :render_score_limit,
       :assign_score_limit,
       :cumulative_render_score_limit,
@@ -14,6 +15,7 @@ module Liquid
 
     def initialize(limits)
       @render_length_limit           = limits[:render_length_limit]
+      @capture_length_limit          = limits[:capture_length_limit]
       @render_score_limit            = limits[:render_score_limit]
       @assign_score_limit            = limits[:assign_score_limit]
       @cumulative_render_score_limit = limits[:cumulative_render_score_limit]
@@ -43,8 +45,20 @@ module Liquid
         captured = output.bytesize
         increment = captured - last_captured
         @last_capture_length = captured
+        if @capture_length_limit && captured > @capture_length_limit
+          raise_limits_reached
+        end
         increment_assign_score(increment)
       elsif @render_length_limit && output.bytesize > @render_length_limit
+        raise_limits_reached
+      end
+    end
+
+    # Raises once a fully buffered capture exceeds its byte budget. Called
+    # after a capture body finishes rendering, covering code paths that don't
+    # go through increment_write_score on every write.
+    def raise_if_capture_length_exceeded(captured_bytesize)
+      if @capture_length_limit && captured_bytesize > @capture_length_limit
         raise_limits_reached
       end
     end

@@ -88,4 +88,32 @@ class ResourceLimitsUnitTest < Minitest::Test
       limits.increment_render_score(51)
     end
   end
+
+  def test_capture_length_limit_is_configurable
+    limits = Liquid::ResourceLimits.new(capture_length_limit: 123)
+    assert_equal(123, limits.capture_length_limit)
+  end
+
+  def test_capture_length_limit_raises_once_buffered_size_exceeds_it
+    limits = Liquid::ResourceLimits.new(capture_length_limit: 5)
+
+    captured = +'hello'
+    limits.with_capture do
+      captured << ' world'
+      assert_raises(Liquid::MemoryError) do
+        limits.increment_write_score(captured)
+      end
+    end
+
+    assert(limits.reached?)
+  end
+
+  def test_raise_if_capture_length_exceeded_checks_final_buffered_size
+    limits = Liquid::ResourceLimits.new(capture_length_limit: 3)
+    assert_raises(Liquid::MemoryError) do
+      limits.raise_if_capture_length_exceeded(4)
+    end
+    Liquid::ResourceLimits.new(capture_length_limit: 3)
+      .raise_if_capture_length_exceeded(3)
+  end
 end

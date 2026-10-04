@@ -52,6 +52,7 @@ module Liquid
     def render_to_output_buffer(context, output)
       context.resource_limits.with_capture do
         capture_output = render(context)
+        context.resource_limits.raise_if_capture_length_exceeded(capture_output.bytesize)
         context.scopes.last[@to] = capture_output
       end
       output
