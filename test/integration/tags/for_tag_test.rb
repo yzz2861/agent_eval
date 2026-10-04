@@ -546,4 +546,178 @@ HERE
       Template.parse('{% for i in numbers %}{{ i }}{% endfor %}').render!('numbers' => range)
     end
   end
+
+  def test_lazy_enumerator_limit_and_offset_read_only_selected_items
+    reads = []
+    items = recording_enumerator(1..6, reads)
+    def items.to_a
+      raise 'enumerator was materialized'
+    end
+
+    output = Template.parse('{% for item in items offset:1 limit:2 %}{{ item }}{% endfor %}')
+      .render!('items' => items)
+
+    assert_equal('23', output)
+    assert_equal([1, 2, 3], reads)
+  end
+
+  def test_lazy_enumerator_else_does_not_read_past_exhaustion
+    reads = []
+    items = recording_enumerator([], reads)
+
+    output = Template.parse('{% for item in items %}{{ item }}{% else %}empty{% endfor %}')
+      .render!('items' => items)
+
+    assert_equal('empty', output)
+    assert_empty(reads)
+  end
+
+  def test_lazy_enumerator_break_reads_only_rendered_items
+    reads = []
+    items = recording_enumerator(1.., reads)
+
+    output = Template.parse(
+      '{% for item in items %}{{ item }}{% if item == 2 %}{% break %}{% endif %}{% endfor %}',
+    ).render!('items' => items)
+
+    assert_equal('12', output)
+    assert_equal([1, 2], reads)
+  end
+
+  def test_lazy_enumerator_charges_offsets_and_lookahead
+    reads = []
+    items = recording_enumerator([1, 2, 3], reads)
+    template = Template.parse(
+      '{% for item in items offset:1 %}{% if forloop.last %}{{ item }}{% endif %}{% endfor %}',
+    )
+    template.resource_limits.render_score_limit = 2
+
+    assert_raises(Liquid::MemoryError) { template.render!('items' => items) }
+
+    assert_equal([1, 2], reads)
+  end
+
+  def test_lazy_enumerator_last_uses_one_item_lookahead
+    reads = []
+    items = recording_enumerator([1, 2, 3], reads)
+    source = '{% for item in items %}{% if forloop.last %}last:{% else %}next:{% endif %}{{ item }} {% endfor %}'
+
+    output = Template.parse(source).render!('items' => items)
+
+    assert_equal('next:1 next:2 last:3 ', output)
+    assert_equal([1, 2, 3], reads)
+  end
+
+  def test_lazy_enumerator_without_last_does_not_look_ahead
+    reads = []
+    items = recording_enumerator([1, 2, 3], reads)
+    source = '{% for item in items %}{{ item }}{% endfor %}'
+
+    output = Template.parse(source).render!('items' => items)
+
+    assert_equal('123', output)
+    assert_equal([1, 2, 3], reads)
+  end
+
+  def test_lazy_enumerator_length_and_rindex_become_known_when_limit_is_reached
+    reads = []
+    items = recording_enumerator(1.., reads)
+    source = '{% for item in items limit:2 %}{{ forloop.length }}/{{ forloop.rindex }}/{{ forloop.rindex0 }} {% endfor %}'
+
+    output = Template.parse(source).render!('items' => items)
+
+    assert_equal('// 2/1/0 ', output)
+    assert_equal([1, 2], reads)
+  end
+
+  def test_lazy_enumerator_length_and_rindex_stay_unknown_without_last_lookahead
+    reads = []
+    items = recording_enumerator([1, 2, 3], reads)
+    source = '{% for item in items %}{{ forloop.length }}/{{ forloop.rindex }}/{{ forloop.rindex0 }} {% endfor %}'
+
+    output = Template.parse(source).render!('items' => items)
+
+    assert_equal('// // // ', output)
+    assert_equal([1, 2, 3], reads)
+  end
+
+  def test_lazy_enumerator_last_on_limited_infinite_input_is_last_without_extra_read
+    reads = []
+    items = recording_enumerator(1.., reads)
+    source = '{% for item in items limit:2 %}{% if forloop.last %}{{ forloop.length }}:{{ forloop.rindex }}:{{ forloop.rindex0 }} {% else %}? {% endif %}{% endfor %}'
+
+    output = Template.parse(source).render!('items' => items)
+
+    assert_equal('? 2:1:0 ', output)
+    assert_equal([1, 2], reads)
+  end
+
+  def test_lazy_enumerator_continue_records_consumed_position
+    reads = []
+    items = recording_enumerator(1.., reads)
+    source = '{% for item in items limit:2 %}{{ item }}{% endfor %}' \
+      '{% for item in items offset:continue limit:2 %}{{ item }}{% endfor %}'
+
+    output = Template.parse(source).render!('items' => items)
+
+    assert_equal('1234', output)
+    assert_equal([1, 2, 3, 4], reads)
+  end
+
+  def test_lazy_enumerator_continue_after_break_resumes_after_rendered_items
+    reads = []
+    items = recording_enumerator(1.., reads)
+    source = '{% for item in items %}{{ item }}{% if item == 2 %}{% break %}{% endif %}{% endfor %}' \
+      '{% for item in items offset:continue limit:1 %}{{ item }}{% endfor %}'
+
+    output = Template.parse(source).render!('items' => items)
+
+    assert_equal('123', output)
+    assert_equal([1, 2, 3], reads)
+  end
+
+  def test_lazy_enumerator_continue_after_break_preserves_lookahead
+    reads = []
+    items = recording_enumerator(1.., reads)
+    source = '{% for item in items %}{% if forloop.last or item == 2 %}{% break %}{% endif %}{{ item }}{% endfor %}' \
+      '{% for item in items offset:continue limit:1 %}{{ item }}{% endfor %}'
+
+    output = Template.parse(source).render!('items' => items)
+
+    assert_equal('13', output)
+    assert_equal([1, 2, 3], reads)
+  end
+
+  def test_enumerator_reversed_is_rejected
+    reads = []
+    items = recording_enumerator([1, 2, 3], reads)
+
+    exception = assert_raises(Liquid::ArgumentError) do
+      Template.parse('{% for item in items reversed %}{{ item }}{% endfor %}')
+        .render!('items' => items)
+    end
+
+    assert_equal("Liquid error: cannot reverse an Enumerator", exception.message)
+    assert_empty(reads)
+  end
+
+  def test_known_size_enumerator_reversed_is_also_rejected
+    exception = assert_raises(Liquid::ArgumentError) do
+      Template.parse('{% for item in items reversed %}{{ item }}{% endfor %}')
+        .render!('items' => [1, 2, 3].each)
+    end
+
+    assert_equal("Liquid error: cannot reverse an Enumerator", exception.message)
+  end
+
+  private
+
+  def recording_enumerator(values, reads)
+    Enumerator.new do |yielder|
+      values.each do |value|
+        reads << value
+        yielder << value
+      end
+    end
+  end
 end
