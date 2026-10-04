@@ -115,15 +115,23 @@ module Liquid
     end
 
     def render_obj_to_output(obj, output)
-      case obj
-      when NilClass
-        # Do nothing
-      when Array
-        obj.each do |o|
-          render_obj_to_output(o, output)
+      self.class.render_obj_to_output(obj, output)
+    end
+
+    class << self
+      # Appends a rendered Liquid value to the output buffer.
+      # Shared by the interpreter and the experimental bytecode VM.
+      def render_obj_to_output(obj, output)
+        case obj
+        when NilClass
+          # Do nothing
+        when Array
+          obj.each do |o|
+            render_obj_to_output(o, output)
+          end
+        else
+          output << Liquid::Utils.to_s(obj)
         end
-      else
-        output << Liquid::Utils.to_s(obj)
       end
     end
 

@@ -52,7 +52,7 @@ module Liquid
       @@method_literals[markup] || parse_context.parse_expression(markup, safe: safe)
     end
 
-    attr_reader :attachment, :child_condition
+    attr_reader :attachment, :child_condition, :child_relation
     attr_accessor :left, :operator, :right
 
     def initialize(left = nil, operator = nil, right = nil)
@@ -101,13 +101,21 @@ module Liquid
       false
     end
 
+    # Evaluates a single non-compound comparison against the given context.
+    # Shared by the interpreter and the experimental bytecode VM.
+    def self.interpret_leaf(left_expression, operator, right_expression, context)
+      if operator.nil?
+        return context.evaluate(left_expression)
+      end
+
+      left  = Liquid::Utils.to_liquid_value(context.evaluate(left_expression))
+      right = Liquid::Utils.to_liquid_value(context.evaluate(right_expression))
+      new(left, operator, right).send(:interpret_condition, left, right, operator, context)
+    end
+
     def inspect
       "#<Condition #{[@left, @operator, @right].compact.join(' ')}>"
     end
-
-    protected
-
-    attr_reader :child_relation
 
     private
 

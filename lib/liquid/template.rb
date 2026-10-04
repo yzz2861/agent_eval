@@ -16,7 +16,7 @@ module Liquid
   #
   class Template
     attr_accessor :root, :name
-    attr_reader :resource_limits, :warnings
+    attr_reader :resource_limits, :warnings, :bytecode_program
 
     attr_reader :profiler
 
@@ -105,7 +105,20 @@ module Liquid
 
       tokenizer     = parse_context.new_tokenizer(source, start_line_number: @line_numbers && 1)
       @root         = Document.parse(tokenizer, parse_context)
+
+      @bytecode_program = options[:bytecode] ? Bytecode.compile(@root) : nil
       self
+    end
+
+    # Compiles this template to the experimental bytecode representation and
+    # returns the frozen, reusable Liquid::Bytecode::Program.
+    def compile_bytecode
+      @bytecode_program ||= Bytecode.compile(@root)
+    end
+
+    # Returns the disassembly of the template's compiled bytecode for debugging.
+    def disassemble_bytecode
+      compile_bytecode.disassemble
     end
 
     def registers
@@ -164,11 +177,13 @@ module Liquid
       end
 
       output = nil
+      use_bytecode = @bytecode_program ? true : false
 
       case args.last
       when Hash
         options = args.pop
         output  = options[:output] if options[:output]
+        use_bytecode = options[:bytecode] if options.key?(:bytecode)
         static_registers = context.registers.static
 
         options[:registers]&.each do |key, register|
@@ -194,7 +209,13 @@ module Liquid
 
       begin
         # render the nodelist.
-        @root.render_to_output_buffer(context, output || +'')
+        result_output = output || +''
+        if use_bytecode
+          Bytecode.execute(compile_bytecode, context, result_output)
+        else
+          @root.render_to_output_buffer(context, result_output)
+        end
+        result_output
       rescue Liquid::MemoryError => e
         context.handle_error(e)
       ensure

@@ -63,9 +63,7 @@ module Liquid
     end
 
     def render_to_output_buffer(context, output)
-      val = @from.render(context)
-      context.scopes.last[@to] = val
-      context.resource_limits.increment_assign_score(assign_score_of(val))
+      self.class.store_assignment(context, @to, @from.render(context))
       output
     end
 
@@ -73,27 +71,36 @@ module Liquid
       true
     end
 
-    private
+    class << self
+      # Performs the scope write and charges the assign score. Shared by the
+      # interpreter and the experimental bytecode VM.
+      def store_assignment(context, to, val)
+        context.scopes.last[to] = val
+        context.resource_limits.increment_assign_score(assign_score_of(val))
+      end
 
-    def assign_score_of(val)
-      if val.instance_of?(String)
-        val.bytesize
-      elsif val.instance_of?(Array)
-        sum = 1
-        # Uses #each to avoid extra allocations.
-        val.each { |child| sum += assign_score_of(child) }
-        sum
-      elsif val.instance_of?(Hash)
-        sum = 1
-        val.each do |key, entry_value|
-          sum += assign_score_of(key)
-          sum += assign_score_of(entry_value)
+      def assign_score_of(val)
+        if val.instance_of?(String)
+          val.bytesize
+        elsif val.instance_of?(Array)
+          sum = 1
+          # Uses #each to avoid extra allocations.
+          val.each { |child| sum += assign_score_of(child) }
+          sum
+        elsif val.instance_of?(Hash)
+          sum = 1
+          val.each do |key, entry_value|
+            sum += assign_score_of(key)
+            sum += assign_score_of(entry_value)
+          end
+          sum
+        else
+          1
         end
-        sum
-      else
-        1
       end
     end
+
+    private
 
     class ParseTreeVisitor < Liquid::ParseTreeVisitor
       def children
