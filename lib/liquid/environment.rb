@@ -8,6 +8,11 @@ module Liquid
     # per-template basis.
     attr_accessor :error_mode
 
+    # The default output mode (output context) for rendering. One of
+    # Liquid::Safety::MODES. Defaults to +:classic+, which preserves the
+    # historical, unescaped Liquid behaviour.
+    attr_reader :output_mode
+
     # The tags that are available to use in the template.
     attr_accessor :tags
 
@@ -39,12 +44,13 @@ module Liquid
       #   render exceptions.
       # @yieldparam environment [Environment] The environment instance that is being built.
       # @return [Environment] The new environment instance.
-      def build(tags: nil, file_system: nil, error_mode: nil, exception_renderer: nil)
+      def build(tags: nil, file_system: nil, error_mode: nil, exception_renderer: nil, output_mode: nil)
         ret = new
         ret.tags = tags if tags
         ret.file_system = file_system if file_system
         ret.error_mode = error_mode if error_mode
         ret.exception_renderer = exception_renderer if exception_renderer
+        ret.output_mode = output_mode if output_mode
         yield ret if block_given?
         ret.freeze
       end
@@ -76,6 +82,7 @@ module Liquid
     def initialize
       @tags = Tags::STANDARD_TAGS.dup
       @error_mode = :lax
+      @output_mode = Safety::CLASSIC
       @strainer_template = Class.new(StrainerTemplate).tap do |klass|
         klass.add_filter(StandardFilters)
       end
@@ -83,6 +90,10 @@ module Liquid
       @file_system = BlankFileSystem.new
       @default_resource_limits = Const::EMPTY_HASH
       @strainer_template_class_cache = {}
+    end
+
+    def output_mode=(mode)
+      @output_mode = Safety.coerce_mode(mode)
     end
 
     # Registers a new tag with the environment.

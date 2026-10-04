@@ -76,7 +76,7 @@ module Liquid
     private
 
     def assign_score_of(val)
-      if val.instance_of?(String)
+      if val.is_a?(String)
         val.bytesize
       elsif val.instance_of?(Array)
         sum = 1

@@ -62,13 +62,13 @@ module Liquid
 
           # if its a proc we will replace the entry with the proc
           res    = context.lookup_and_evaluate(object, key)
-          object = res.to_liquid
+          object = untrust_drop_value(object, res.to_liquid)
 
           # Some special cases. If the part wasn't in square brackets and
           # no key with the same name was found we interpret following calls
           # as commands and call them on the current object
         elsif lookup_command?(i) && object.respond_to?(key)
-          object = object.send(key).to_liquid
+          object = untrust_drop_value(object, object.send(key).to_liquid)
 
         # Handle string first/last like ActiveSupport does (returns first/last character)
         # ActiveSupport returns "" for empty strings, not nil
@@ -88,6 +88,13 @@ module Liquid
       end
 
       object
+    end
+
+    # Values that cross a Drop trust boundary are untrusted: any safety
+    # guarantees they claim are stripped so a malicious Drop cannot forge a
+    # SafeValue.
+    def untrust_drop_value(source, value)
+      source.is_a?(Drop) ? Safety.strip(value) : value
     end
 
     def ==(other)

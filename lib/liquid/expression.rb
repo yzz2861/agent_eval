@@ -41,7 +41,7 @@ module Liquid
 
         if (markup.start_with?('"') && markup.end_with?('"')) ||
           (markup.start_with?("'") && markup.end_with?("'"))
-          return markup[1..-2]
+          return Safety.mark(markup[1..-2], Safety::GUARANTEES)
         elsif LITERALS.key?(markup)
           return LITERALS[markup]
         end

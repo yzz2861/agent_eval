@@ -244,6 +244,7 @@ module Liquid
       context.exception_renderer = options[:exception_renderer] if options[:exception_renderer]
       context.strict_variables   = options[:strict_variables] if options[:strict_variables]
       context.strict_filters     = options[:strict_filters] if options[:strict_filters]
+      context.output_mode       = options[:output_mode] if options.key?(:output_mode)
     end
   end
 end

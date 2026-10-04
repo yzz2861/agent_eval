@@ -52,6 +52,7 @@ end
 require "liquid/version"
 require "liquid/deprecations"
 require "liquid/const"
+require "liquid/safety"
 require 'liquid/standardfilters'
 require 'liquid/file_system'
 require 'liquid/parser_switching'

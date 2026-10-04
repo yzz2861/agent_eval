@@ -16,6 +16,7 @@ module Liquid
   class Context
     attr_reader :scopes, :errors, :registers, :environments, :resource_limits, :static_registers, :static_environments
     attr_accessor :exception_renderer, :template_name, :partial, :global_filter, :strict_variables, :strict_filters, :environment
+    attr_reader :output_mode
 
     # rubocop:disable Metrics/ParameterLists
     def self.build(environment: Environment.default, environments: {}, outer_scope: {}, registers: {}, rethrow_errors: false, resource_limits: nil, static_environments: {}, &block)
@@ -39,6 +40,7 @@ module Liquid
       @filters             = []
       @global_filter       = nil
       @disabled_tags       = {}
+      @output_mode         = environment.output_mode
 
       # Instead of constructing new StringScanner objects for each Expression parse,
       # we recycle the same one.
@@ -80,6 +82,14 @@ module Liquid
 
     def apply_global_filter(obj)
       global_filter.nil? ? obj : global_filter.call(obj)
+    end
+
+    def output_mode=(mode)
+      @output_mode = Safety.coerce_mode(mode)
+    end
+
+    def filter_safety_spec(filter_name)
+      strainer.safety_spec(filter_name)
     end
 
     # are there any not handled interrupts?
@@ -159,6 +169,7 @@ module Liquid
         subcontext.errors   = errors
         subcontext.warnings = warnings
         subcontext.disabled_tags = @disabled_tags
+        subcontext.output_mode = @output_mode
       end
     end
 

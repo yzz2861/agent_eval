@@ -102,28 +102,90 @@ module Liquid
 
       @filters.each do |filter_name, filter_args, filter_kwargs|
         filter_args = evaluate_filter_expressions(context, filter_args, filter_kwargs)
-        obj = context.invoke(filter_name, obj, *filter_args)
+        obj = apply_filter(context, filter_name, obj, filter_args)
       end
 
-      context.apply_global_filter(obj)
+      obj = context.apply_global_filter(obj)
+      normalize_result(obj, Safety.guarantees(obj))
     end
 
     def render_to_output_buffer(context, output)
       obj = render(context)
-      render_obj_to_output(obj, output)
+      render_obj_to_output(obj, output, context.output_mode)
       output
     end
 
-    def render_obj_to_output(obj, output)
+    def render_obj_to_output(obj, output, mode = Safety::CLASSIC)
       case obj
       when NilClass
         # Do nothing
       when Array
         obj.each do |o|
-          render_obj_to_output(o, output)
+          render_obj_to_output(o, output, mode)
         end
       else
-        output << Liquid::Utils.to_s(obj)
+        output << render_scalar(obj, mode)
+      end
+    end
+
+    private
+
+    # Runs one filter and recomputes the guarantees attached to the result
+    # from the filter's declared spec. Filters without a declared spec strip
+    # every guarantee from string results.
+    def apply_filter(context, filter_name, obj, filter_args)
+      input_guarantees = Safety.guarantees(obj)
+      raw_result       = context.invoke(filter_name, obj, *filter_args)
+      spec             = context.filter_safety_spec(filter_name)
+
+      if spec
+        argument_guarantees = filter_args.flat_map { |arg| argument_guarantees_for(arg) }
+        guarantees = Safety.apply_spec(spec, input_guarantees, argument_guarantees)
+      else
+        guarantees = nil
+      end
+
+      normalize_result(raw_result, guarantees)
+    end
+
+    # String arguments participate in guarantee preservation: an unmarked
+    # string argument blocks preservation. Non-string arguments (numbers,
+    # booleans, nil) cannot inject markup and impose no restriction.
+    # Returns one entry per string-bearing argument: its guarantee set, or
+    # nil when it is an unmarked string (which then blocks preservation).
+    def argument_guarantees_for(arg)
+      case arg
+      when Safety::SafeValue
+        [arg.guarantees]
+      when String
+        [nil]
+      when Array
+        arg.flat_map { |item| argument_guarantees_for(item) }
+      when Hash
+        arg.values.flat_map { |item| argument_guarantees_for(item) }
+      else
+        []
+      end
+    end
+
+    def normalize_result(result, guarantees)
+      case result
+      when String then Safety.mark(Safety.strip(result), guarantees)
+      else result
+      end
+    end
+
+    # Converts a single output value to text for the active output mode,
+    # escaping untrusted content unless the value carries the matching
+    # guarantee for the current context.
+    def render_scalar(obj, mode)
+      str       = Liquid::Utils.to_s(obj)
+      guarantee = Safety.guarantee_for_mode(mode)
+
+      if guarantee && !Safety.safe_for?(obj, guarantee)
+        Safety.escape_for_mode(str, mode)
+      else
+        str
       end
     end
 
@@ -134,8 +196,6 @@ module Liquid
     def disabled_tags
       []
     end
-
-    private
 
     def lax_parse_filter_expressions(filter_name, unparsed_args)
       filter_args  = []

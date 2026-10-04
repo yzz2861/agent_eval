@@ -25,6 +25,10 @@ module Liquid
         include(filter)
 
         filter_methods.merge(filter.public_instance_methods.map(&:to_s))
+
+        if filter.respond_to?(:liquid_safety_specs)
+          safety_specs.merge!(filter.liquid_safety_specs)
+        end
       end
 
       def invokable?(method)
@@ -34,6 +38,7 @@ module Liquid
       def inherited(subclass)
         super
         subclass.instance_variable_set(:@filter_methods, @filter_methods.dup)
+        subclass.instance_variable_set(:@safety_specs, safety_specs.dup)
       end
 
       def filter_method_names
@@ -44,6 +49,10 @@ module Liquid
 
       def filter_methods
         @filter_methods ||= Set.new
+      end
+
+      def safety_specs
+        @safety_specs ||= {}
       end
     end
 
@@ -57,6 +66,12 @@ module Liquid
       end
     rescue ::ArgumentError => e
       raise Liquid::ArgumentError, e.message, e.backtrace
+    end
+
+    # Returns the Liquid::Safety::FilterSpec declared for +method+, or nil when
+    # the filter made no safety claims.
+    def safety_spec(method)
+      self.class.send(:safety_specs)[method.to_s]
     end
   end
 end

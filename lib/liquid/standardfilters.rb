@@ -124,6 +124,18 @@ module Liquid
     # @liquid_type filter
     # @liquid_category string
     # @liquid_summary
+    #   Escapes a string so it is safe to place between the quotes of a JSON
+    #   string literal.
+    # @liquid_syntax string | json_escape
+    # @liquid_return [string]
+    def json_escape(input)
+      Safety.json_escape(Utils.to_s(input)) unless input.nil?
+    end
+
+    # @liquid_public_docs
+    # @liquid_type filter
+    # @liquid_category string
+    # @liquid_summary
     #   Converts any URL-unsafe characters in a string to the
     #   [percent-encoded](https://developer.mozilla.org/en-US/docs/Glossary/percent-encoding) equivalent.
     # @liquid_description
@@ -1052,6 +1064,47 @@ module Liquid
         0
       else
         a.nil? ? 1 : -1
+      end
+    end
+
+    # Safety guarantees for the built-in filters. Filters only retain a
+    # guarantee when it is declared here; an undeclared filter always strips
+    # every guarantee from its result.
+    #
+    #   produces:   the result always carries these guarantees (it escapes for
+    #               the context, or is structurally incapable of containing
+    #               the characters that matter).
+    #   preserves:  the result keeps an input guarantee, provided every string
+    #               argument carries it too.
+    def self.liquid_safety_specs
+      @liquid_safety_specs ||= begin
+        html = Safety::HTML_TEXT_GUARANTEE
+        attr = Safety::HTML_ATTRIBUTE_GUARANTEE
+        json = Safety::JSON_STRING_GUARANTEE
+        all = [html, attr, json].freeze
+
+        specs = {}
+        declares = lambda do |names, produces: [], preserves: []|
+          spec = Safety::FilterSpec.new(produces: produces, preserves: preserves)
+          Array(names).each { |name| specs[name.to_s] = spec }
+        end
+
+        declares.call(%w[escape h escape_once], produces: [html, attr])
+        declares.call('json_escape', produces: [json])
+
+        # The output of these encoders uses only a restricted alphabet that is
+        # inert in every tracked context.
+        declares.call(%w[url_encode base64_encode base64_url_safe_encode], produces: all)
+
+        # Pure selectors / case transforms that cannot introduce unsafe bytes.
+        pure = %w[downcase upcase strip lstrip rstrip squish strip_newlines slice reverse]
+        declares.call(pure, preserves: all)
+
+        # Truncation only keeps a guarantee when its (possibly untrusted)
+        # suffix is also guaranteed for that context.
+        declares.call(%w[truncate truncatewords], preserves: all)
+
+        specs
       end
     end
 

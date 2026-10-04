@@ -191,7 +191,8 @@ module Liquid
         begin
           left.send(operation, right)
         rescue ::ArgumentError => e
-          raise Liquid::ArgumentError, e.message
+          message = e.message.sub(Liquid::Safety::SafeValue.name, 'String')
+          raise Liquid::ArgumentError, message
         end
       end
     end
