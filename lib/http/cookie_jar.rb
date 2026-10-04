@@ -45,6 +45,13 @@ class HTTP::CookieJar
   # classes, like `:hash` to HTTP::CookieJar::HashStore and `:mozilla`
   # to HTTP::CookieJar::MozillaStore.
   #
+  # :clock
+  # : A clock object (see HTTP::Cookie::Clock) used by this jar and
+  #   the cookies it manages for measuring elapsed time.  Cookies
+  #   added to or parsed through this jar are assigned this clock, so
+  #   that expiration is evaluated consistently.  If omitted,
+  #   HTTP::Cookie.clock is used.
+  #
   # Any options given are passed through to the initializer of the
   # specified store class.  For example, the `:mozilla`
   # (HTTP::CookieJar::MozillaStore) store class requires a `:filename`
@@ -54,8 +61,13 @@ class HTTP::CookieJar
       :store => :hash,
     }
     opthash.update(options) if options
+    @clock = opthash[:clock]
     @store = get_impl(AbstractStore, opthash[:store], opthash)
   end
+
+  # The clock object this jar was configured with, or nil if none
+  # was given (in which case HTTP::Cookie.clock is used).
+  attr_reader :clock
 
   # The copy constructor.  Not all backend store classes support cloning.
   def initialize_copy(other)
@@ -86,6 +98,7 @@ class HTTP::CookieJar
   #       jar.origin = origin
   #       jar.add(cookie)     # acceptance check is performed
   def add(cookie)
+    cookie.clock = @clock if @clock
     @store.add(cookie) if
       begin
         cookie.acceptable?
@@ -164,6 +177,10 @@ class HTTP::CookieJar
   #
   # See HTTP::Cookie.parse for available options.
   def parse(set_cookie, origin, options = nil) # :yield: cookie
+    if @clock
+      options = (options || {}).dup
+      options[:clock] ||= @clock
+    end
     if block_given?
       HTTP::Cookie.parse(set_cookie, origin, options).tap { |cookies|
         cookies.select! { |cookie|
@@ -216,6 +233,7 @@ class HTTP::CookieJar
       :format => :yaml,
       :session => false,
     }
+    opthash[:clock] = @clock if @clock
     case options.size
     when 0
     when 1
@@ -279,6 +297,7 @@ class HTTP::CookieJar
       :format => :yaml,
       :session => false,
     }
+    opthash[:clock] = @clock if @clock
     case options.size
     when 0
     when 1

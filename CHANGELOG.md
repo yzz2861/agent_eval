@@ -1,3 +1,22 @@
+## 1.2.0 (unreleased)
+
+- Add an injectable clock abstraction (HTTP::Cookie::Clock) with
+  separate wall-clock and monotonic time sources.  Max-Age
+  expiration is now measured with the monotonic clock, so a
+  recalibrated system clock cannot suddenly extend or shorten a
+  cookie's remaining lifetime.
+- HTTP::Cookie.parse and HTTP::CookieJar#parse accept a :date
+  option carrying the response's Date header; the server/client
+  clock offset is recorded and used to correct Expires evaluation,
+  tracked with the monotonic clock.  Missing or unparsable values
+  fall back to the local wall clock.
+- HTTP::CookieJar.new accepts a :clock option that is propagated
+  to the store, the cookies it manages, and the savers used by
+  #save/#load.
+- Monotonic timestamps are never persisted; on load, deadlines are
+  re-established from the saved absolute references (created_at +
+  max_age, server_offset) and the elapsed wall-clock time.
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

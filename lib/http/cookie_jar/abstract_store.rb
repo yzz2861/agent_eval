@@ -34,6 +34,7 @@ class HTTP::CookieJar::AbstractStore
     super() # MonitorMixin
     options ||= {}
     @logger = options[:logger]
+    @clock = options[:clock] || HTTP::Cookie.clock
     # Initializes each instance variable of the same name as option
     # keyword.
     default_options.each_pair { |key, default|

@@ -64,18 +64,17 @@ class HTTP::CookieJar
     end
 
     def each(uri = nil) # :yield: cookie
-      now = Time.now
       if uri
         tpath = uri.path
         @jar.each { |domain, paths|
           paths.each { |path, hash|
             next unless HTTP::Cookie.path_match?(path, tpath)
             hash.delete_if { |name, cookie|
-              if cookie.expired?(now)
+              if cookie.expired?
                 true
               else
                 if cookie.valid_for_uri?(uri)
-                  cookie.accessed_at = now
+                  cookie.accessed_at = @clock.wall_now
                   yield cookie
                 end
                 false
@@ -88,7 +87,7 @@ class HTTP::CookieJar
           @jar.each { |domain, paths|
             paths.each { |path, hash|
               hash.delete_if { |name, cookie|
-                if cookie.expired?(now)
+                if cookie.expired?
                   true
                 else
                   yield cookie
@@ -108,7 +107,6 @@ class HTTP::CookieJar
     end
 
     def cleanup(session = false)
-      now = Time.now
       all_cookies = []
 
       synchronize {
@@ -119,7 +117,7 @@ class HTTP::CookieJar
 
           paths.each { |path, hash|
             hash.delete_if { |name, cookie|
-              if cookie.expired?(now) || (session && cookie.session?)
+              if cookie.expired? || (session && cookie.session?)
                 true
               else
                 domain_cookies << cookie

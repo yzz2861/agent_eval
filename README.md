@@ -80,6 +80,26 @@ Or install it yourself as:
 
 
     ########################
+    # Clock injection and server time correction
+    ########################
+
+    # Cookie expiration is measured with a monotonic clock, so
+    # recalibrating the system clock cannot suddenly extend or
+    # shorten a cookie's remaining lifetime.  A custom clock (an
+    # object responding to #wall_now and #monotonic_now, see
+    # HTTP::Cookie::Clock) can be injected globally or per jar:
+
+    HTTP::Cookie.clock = my_clock            # process-wide default
+    jar = HTTP::CookieJar.new(clock: my_clock)
+
+    # When the Date header of the response is available, pass it to
+    # #parse so that Expires attributes are evaluated against the
+    # server clock instead of the (possibly skewed) local clock:
+
+    jar.parse(header['Set-Cookie'], uri, date: header['Date'])
+
+
+    ########################
     # Client side example 2
     ########################
 

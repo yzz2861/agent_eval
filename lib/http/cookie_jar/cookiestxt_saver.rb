@@ -91,7 +91,7 @@ class HTTP::CookieJar::CookiestxtSaver < HTTP::CookieJar::AbstractSaver
 
     if (expires_seconds = s_expires.to_i).nonzero?
       expires = Time.at(expires_seconds)
-      return nil if expires < Time.now
+      return nil if expires < @clock.wall_now
     end
 
     HTTP::Cookie.new(name, value,

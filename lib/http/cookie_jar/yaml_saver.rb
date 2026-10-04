@@ -40,6 +40,8 @@ class HTTP::CookieJar::YAMLSaver < HTTP::CookieJar::AbstractSaver
     case data
     when Array
       data.each { |cookie|
+        cookie.clock = @clock
+        cookie.reanchor!
         jar.add(cookie)
       }
     when Hash
@@ -56,6 +58,8 @@ class HTTP::CookieJar::YAMLSaver < HTTP::CookieJar::AbstractSaver
                   hash[key.to_sym] = value
                 }
               })
+            cookie.clock = @clock
+            cookie.reanchor!
             jar.add(cookie)
           }
         }
