@@ -4,6 +4,7 @@ require "graphql/execution/interpreter/argument_value"
 require "graphql/execution/interpreter/arguments"
 require "graphql/execution/interpreter/arguments_cache"
 require "graphql/execution/interpreter/execution_errors"
+require "graphql/execution/interpreter/null_propagation_trace"
 require "graphql/execution/interpreter/runtime"
 require "graphql/execution/interpreter/resolve"
 require "graphql/execution/interpreter/handles_raw_value"
@@ -114,6 +115,15 @@ module GraphQL
                 end
                 if query.context.namespace?(:__query_result_extensions__)
                   query.result_values["extensions"] = query.context.namespace(:__query_result_extensions__)
+                end
+                runtime = query.context.namespace(:interpreter_runtime)[:runtime]
+                if runtime && (traces = runtime.null_propagation_traces)
+                  extensions = query.result_values["extensions"]
+                  if extensions.nil?
+                    query.result_values["extensions"] = { NullPropagationTrace::EXTENSION_KEY => traces.map(&:to_h) }
+                  elsif !extensions.key?(NullPropagationTrace::EXTENSION_KEY)
+                    query.result_values["extensions"] = extensions.merge(NullPropagationTrace::EXTENSION_KEY => traces.map(&:to_h))
+                  end
                 end
                 # Get the Query::Result, not the Hash
                 results[idx] = query.result

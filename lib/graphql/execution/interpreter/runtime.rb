@@ -53,10 +53,20 @@ module GraphQL
           end
           # { Class => Boolean }
           @lazy_cache = {}.compare_by_identity
+          # @return [Array<NullPropagationTrace>, nil] Diagnostics for invalid-null propagation, when enabled
+          @null_propagation_traces = nil
         end
 
         def final_result
           @response.respond_to?(:graphql_result_data) ? @response.graphql_result_data : @response
+        end
+
+        # @return [Array<NullPropagationTrace>, nil]
+        attr_reader :null_propagation_traces
+
+        # @return [Boolean] Whether null-propagation diagnostics were explicitly requested for this query
+        def null_propagation_diagnostics?
+          !!@context[NullPropagationTrace::CONTEXT_KEY]
         end
 
         def inspect
@@ -494,7 +504,7 @@ module GraphQL
           end
         end
 
-        def set_result(selection_result, result_name, value, is_child_result, is_non_null)
+        def set_result(selection_result, result_name, value, is_child_result, is_non_null, null_trace: nil)
           if !selection_result.graphql_dead
             if value.nil? && is_non_null
               # This is an invalid nil that should be propagated
@@ -504,14 +514,31 @@ module GraphQL
               # `nil` to the response, not knowing whether it's an invalid `nil` or not.
               # (And in that case, we don't have to call the schema's handler, since it's not a bug in the application.)
               # TODO the code is trying to tell me something.
-              yield if block_given?
+              origin_trace = block_given? ? yield : nil
+              null_trace ||= origin_trace
               parent = selection_result.graphql_parent
               if parent.nil? # This is a top-level result hash
+                if null_trace
+                  null_trace.record_stop(at: NullPropagationTrace::STOP_ROOT, path: [])
+                  record_null_propagation_trace(null_trace)
+                end
                 @response = nil
               else
                 name_in_parent = selection_result.graphql_result_name
                 is_non_null_in_parent = selection_result.graphql_is_non_null_in_parent
-                set_result(parent, name_in_parent, nil, false, is_non_null_in_parent)
+                if null_trace
+                  if !is_non_null_in_parent
+                    null_trace.record_stop(at: NullPropagationTrace::STOP_NULLABLE, path: selection_result.path)
+                    record_null_propagation_trace(null_trace)
+                  else
+                    null_trace.record_wrapper(
+                      path: selection_result.path,
+                      kind: null_propagation_boundary_kind(selection_result),
+                      type: null_propagation_boundary_type(selection_result),
+                    )
+                  end
+                end
+                set_result(parent, name_in_parent, nil, false, is_non_null_in_parent, null_trace: null_trace)
                 set_graphql_dead(selection_result)
               end
             elsif is_child_result
@@ -520,6 +547,67 @@ module GraphQL
               selection_result.set_leaf(result_name, value)
             end
           end
+        end
+
+        # @return [String] Which non-null boundary the nulled result occupied inside its parent
+        def null_propagation_boundary_kind(selection_result)
+          if selection_result.graphql_parent.is_a?(GraphQLResultArray)
+            NullPropagationTrace::BOUNDARY_LIST_ELEMENT
+          elsif selection_result.is_a?(GraphQLResultArray)
+            NullPropagationTrace::BOUNDARY_LIST
+          else
+            NullPropagationTrace::BOUNDARY_FIELD
+          end
+        end
+
+        # @return [String] Type signature of the nulled result's non-null position in its parent
+        def null_propagation_boundary_type(selection_result)
+          inner_type = null_propagation_inner_type(selection_result)
+          inner_type = inner_type.of_type if inner_type.non_null?
+          "#{inner_type.to_type_signature}!"
+        end
+
+        # @return [GraphQL::BaseType] The type wrapped by this result's non-null position in its parent
+        def null_propagation_inner_type(selection_result)
+          if selection_result.graphql_parent.is_a?(GraphQLResultArray)
+            selection_result.graphql_parent.graphql_result_type.of_type
+          else
+            selection_result.graphql_result_type
+          end
+        end
+
+        def record_null_propagation_trace(null_trace)
+          (@null_propagation_traces ||= []) << null_trace
+        end
+
+        # Build the initial diagnostic for an invalid `nil` at `result_name`.
+        # The first wrapper (the boundary violated by the origin field) is recorded here
+        # as part of the origin, while later ancestors are recorded while propagating.
+        def build_null_propagation_trace(selection_result, result_name, field, is_from_array) # rubocop:disable Metrics/MethodLength
+          origin_path = selection_result.path.dup
+          origin_path << result_name
+
+          field_type = field.type
+          if is_from_array
+            origin_kind = NullPropagationTrace::ORIGIN_LIST_ELEMENT
+            # `field.type` is the list type; its (possibly non-null) element type is
+            # the position that actually received an invalid `nil`.
+            element_type = field_type
+            element_type = element_type.of_type if element_type.non_null?
+            violated_type = element_type.of_type.to_non_null_type
+          else
+            origin_kind = field_type.list? ? NullPropagationTrace::ORIGIN_LIST : NullPropagationTrace::ORIGIN_FIELD
+            violated_type = field_type.non_null? ? field_type : field_type.to_non_null_type
+          end
+
+          trace = NullPropagationTrace.new
+          trace.record_origin(
+            path: origin_path,
+            field: "#{field.owner.graphql_name}.#{field.graphql_name}",
+            kind: origin_kind,
+            type: violated_type.to_type_signature,
+          )
+          trace
         end
 
         # Mark this node and any already-registered children as dead,
@@ -560,6 +648,14 @@ module GraphQL
                 # This block is called if `result_name` is not dead. (Maybe a previous invalid nil caused it be marked dead.)
                 err = parent_type::InvalidNullError.new(parent_type, field, ast_node, is_from_array: is_from_array)
                 schema.type_error(err, context)
+                if null_propagation_diagnostics?
+                  build_null_propagation_trace(
+                    selection_result,
+                    result_name,
+                    field,
+                    is_from_array,
+                  )
+                end
               end
             else
               set_result(selection_result, result_name, nil, false, is_non_null)
