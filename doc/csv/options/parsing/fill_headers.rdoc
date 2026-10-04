@@ -1,0 +1,36 @@
+====== Option +fill_headers+
+
+Specifies whether blank cells in a multi-row header inherit
+the nearest non-blank value to the left within the same row.
+Used for parsing together with
+{Option +header_rows+}[#class-CSV-label-Option+header_rows].
+The option has no effect with the default single-row header.
+
+Default value:
+  CSV::DEFAULT_OPTIONS.fetch(:fill_headers) # => false
+
+With the default value of +false+, blank cells are not filled;
+the corresponding element of the column path is +nil+
+(blank cells are the unquoted empty fields that \CSV already reports
+as +nil+):
+  str = <<-EOT
+  Last year,,This year,,
+  Amount,Count,Amount,Count,Note
+  100,1,200,2,ok
+  EOT
+  table = CSV.parse(str, headers: true, header_rows: 2)
+  table.headers
+  # => [["Last year", "Amount"], [nil, "Count"],
+  #     ["This year", "Amount"], [nil, "Count"], [nil, "Note"]]
+
+With +true+, blank cells inherit the nearest non-blank value
+to the left, as spreadsheets do for merged title cells:
+  table = CSV.parse(str, headers: true, header_rows: 2,
+                         fill_headers: true)
+  table.headers
+  # => [["Last year", "Amount"], ["Last year", "Count"],
+  #     ["This year", "Amount"], ["This year", "Count"],
+  #     ["This year", "Note"]]
+
+Non-blank cells, including quoted empty strings (""), are never
+overwritten.

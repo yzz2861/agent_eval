@@ -420,9 +420,14 @@ class CSV
         yield headers
       end
 
+      if @return_headers and @headers and @pending_header_rows
+        emit_collected_header_rows(&block)
+      end
+
       begin
         @scanner ||= build_scanner
         __send__(@parse_method, &block)
+        finalize_header_rows(&block)
       rescue InvalidEncoding
         if @scanner
           ignore_broken_line
@@ -770,6 +775,18 @@ class CSV
 
     def prepare_header
       @return_headers = @options[:return_headers]
+
+      header_rows = @options[:header_rows]
+      if header_rows.nil?
+        @header_row_count = 1
+      else
+        @header_row_count = Integer(header_rows)
+        if @header_row_count < 1
+          raise ArgumentError, ":header_rows has to be a positive Integer"
+        end
+      end
+      @fill_headers = @options[:fill_headers]
+      @pending_header_rows = []
 
       headers = @options[:headers]
       case headers
@@ -1272,10 +1289,17 @@ class CSV
 
       raw_row = row
       if @use_headers
-        if @headers.nil?
-          @headers = adjust_headers(row, quoted_fields)
-          return unless @return_headers
-          row = Row.new(@headers, row, true)
+        if collecting_header_rows?
+          @pending_header_rows << [adjust_headers(row, quoted_fields), row]
+          if collecting_header_rows?
+            # Still collecting the leading rows that form the header paths.
+            return
+          end
+          # All header rows have been collected; combine them into paths.
+          @headers = build_header_paths
+          emit_collected_header_rows(&block) if @return_headers
+          @pending_header_rows = nil unless @return_headers
+          return
         else
           row = Row.new(@headers,
                         @fields_converter.convert(raw_row, @headers, @lineno, quoted_fields))
@@ -1291,6 +1315,70 @@ class CSV
       end
 
       yield(row)
+    end
+
+    def collecting_header_rows?
+      @headers.nil? and @use_headers and @raw_headers.nil? and
+        @pending_header_rows and
+        @pending_header_rows.size < @header_row_count
+    end
+
+    def finalize_header_rows(&block)
+      return unless collecting_header_rows?
+      @header_row_count = @pending_header_rows.size
+      if @header_row_count.zero?
+        @pending_header_rows = nil
+        return
+      end
+      @headers = build_header_paths
+      emit_collected_header_rows(&block) if @return_headers
+      @pending_header_rows = nil unless @return_headers
+    end
+
+    def emit_collected_header_rows(&block)
+      @pending_header_rows.each do |_adjusted_row, raw_row|
+        header_row = Row.new(@headers, raw_row, true)
+        if @unconverted_fields
+          header_row = add_unconverted_fields(header_row, raw_row.dup)
+        end
+        yield(header_row)
+      end
+    ensure
+      @pending_header_rows = nil
+    end
+
+    def build_header_paths
+      rows = @pending_header_rows
+      levels = rows.map(&:first)
+      column_count = levels.collect(&:size).max || 0
+
+      if @fill_headers and levels.size > 1
+        levels = levels.collect do |level|
+          filled = []
+          last_value = nil
+          started = false
+          level.each_with_index do |cell, index|
+            if blank_header_cell?(cell)
+              filled[index] = started ? last_value : nil
+            else
+              filled[index] = cell
+              last_value = cell
+              started = true
+            end
+          end
+          filled
+        end
+      end
+
+      return levels[0] if levels.size == 1
+
+      Array.new(column_count) do |column_index|
+        levels.collect { |level| level[column_index] }
+      end
+    end
+
+    def blank_header_cell?(cell)
+      cell.nil?
     end
 
     # This method injects an instance variable <tt>unconverted_fields</tt> into

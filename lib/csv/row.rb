@@ -272,6 +272,57 @@ class CSV
     end
 
     # :call-seq:
+    #   row.field_path(path) -> value, CSV::HeaderPathMatch, or nil
+    #   row.field_path(*path) -> value, CSV::HeaderPathMatch, or nil
+    #
+    # Returns the field value(s) for the given header +path+.
+    # The path identifies a column produced by option
+    # {header_rows}[#class-CSV-label-Option+header_rows].
+    #
+    # The path may be given as an \Array:
+    #   row.field_path(["去年", "金额"]) # => "100"
+    # or as splatted arguments:
+    #   row.field_path("去年", "金额") # => "100"
+    #
+    # Matching is by path prefix: a given path matches a column when it
+    # equals, or is a prefix of, that column's header path:
+    #   row.field_path("去年")
+    #
+    # Return values:
+    # - No matching column: +nil+.
+    # - Exactly one matching column: its field value.
+    # - More than one matching column: a \CSV::HeaderPathMatch containing
+    #   <tt>[column_index, field_value]</tt> pairs for all matches,
+    #   in column order.
+    def field_path(*path)
+      path = path.first if path.size == 1 and path.first.is_a?(Array)
+      raise ArgumentError, "wrong number of arguments (given 0, expected 1+)" if path.empty?
+      path_size = path.size
+      matches = []
+      @row.each_with_index do |(header, value), index|
+        if header.is_a?(Array) and header.first(path_size) == path
+          matches << [index, value]
+        end
+      end
+      case matches.size
+      when 0 then nil
+      when 1 then matches.first.last
+      else CSV::HeaderPathMatch.new(matches)
+      end
+    end
+
+    # :call-seq:
+    #   row.paths -> array_of_arrays
+    #
+    # Returns the column header paths. With a single-row header this is
+    # the same as #headers; with a multi-row header each element is an
+    # \Array path, and duplicated paths are retained (one entry per
+    # column), in original column order.
+    def paths
+      headers
+    end
+
+    # :call-seq:
     #   row.has_key?(header) -> true or false
     #
     # Returns +true+ if there is a field with the given +header+,

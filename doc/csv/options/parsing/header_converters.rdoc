@@ -11,6 +11,23 @@ except that:
 - The converters apply only to the header row.
 - The built-in header converters are +:downcase+ and +:symbol+.
 
+With multi-row headers (option
+{header_rows}[#class-CSV-label-Option+header_rows]), each converter is
+applied to each individual header cell before the column paths are
+assembled; it never applies to data fields, and the resulting paths
+contain the converted cells:
+  str = <<-EOT
+  Last year,,This year
+  Amount,Count,Amount
+  100,1,200
+  EOT
+  table = CSV.parse(str, headers: true, header_rows: 2,
+                         fill_headers: true,
+                         header_converters: :symbol)
+  table.headers
+  # => [[:last_year, :amount], [:last_year, :count],
+  #     [:this_year, :amount]]
+
 This section assumes prior execution of:
   str = <<-EOT
   Name,Value
@@ -40,4 +57,3 @@ The value may be a \Proc custom converter
   table.headers # => ["NAME", "VALUE"]
 
 See also {Custom Header Converters}[#class-CSV-label-Custom+Header+Converters]
-

@@ -521,6 +521,49 @@ class CSV
     end
 
     # :call-seq:
+    #   table.field_path(path) -> array or CSV::HeaderPathMatch or nil
+    #   table.field_path(*path) -> array or CSV::HeaderPathMatch or nil
+    #
+    # Returns column data for the given header +path+ (a column header
+    # produced by option
+    # {header_rows}[#class-CSV-label-Option+header_rows]).
+    #
+    # The path may be given as an \Array or as splatted arguments;
+    # matching is by path prefix (see CSV::Row#field_path).
+    #
+    # Return values:
+    # - No matching column: +nil+.
+    # - Exactly one matching column: an \Array of that column's values,
+    #   one per row, like #[] with a scalar header.
+    # - More than one matching column: a \CSV::HeaderPathMatch containing
+    #   <tt>[column_index, column_values_array]</tt> pairs for all matches,
+    #   in column order.
+    def field_path(*path)
+      path = path.first if path.size == 1 and path.first.is_a?(Array)
+      raise ArgumentError, "wrong number of arguments (given 0, expected 1+)" if path.empty?
+      path_size = path.size
+      indexes = []
+      headers.each_with_index do |header, index|
+        if header.is_a?(Array) and header.first(path_size) == path
+          indexes << index
+        end
+      end
+      case indexes.size
+      when 0
+        nil
+      when 1
+        column_index = indexes.first
+        @table.map { |row| row[column_index] }
+      else
+        CSV::HeaderPathMatch.new(
+          indexes.collect { |column_index|
+            [column_index, @table.map { |row| row[column_index] }]
+          }
+        )
+      end
+    end
+
+    # :call-seq:
     #   table[n] = row -> row
     #   table[n] = field_or_array_of_fields -> field_or_array_of_fields
     #   table[header] = field_or_array_of_fields -> field_or_array_of_fields

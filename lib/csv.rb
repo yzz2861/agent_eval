@@ -95,6 +95,7 @@ require "time"
 require "stringio"
 
 require_relative "csv/fields_converter"
+require_relative "csv/header_path_match"
 require_relative "csv/input_record_separator"
 require_relative "csv/parser"
 require_relative "csv/row"
@@ -324,6 +325,8 @@ require_relative "csv/writer"
 #     converters:         nil,
 #     unconverted_fields: nil,
 #     headers:            false,
+#     header_rows:        1,
+#     fill_headers:       false,
 #     return_headers:     false,
 #     header_converters:  nil,
 #     skip_blanks:        false,
@@ -354,6 +357,10 @@ require_relative "csv/writer"
 # - +unconverted_fields+: Specifies whether unconverted fields are to be available.
 # - +headers+: Specifies whether data contains headers,
 #   or specifies the headers themselves.
+# - +header_rows+: Specifies the number of leading rows to combine
+#   into column path headers.
+# - +fill_headers+: Specifies whether blank cells in multi-row headers
+#   inherit the nearest non-blank value to the left.
 # - +return_headers+: Specifies whether headers are to be returned.
 # - +header_converters+: Specifies the header converters to be used.
 # - +skip_blanks+: Specifies whether blanks lines are to be ignored.
@@ -379,6 +386,10 @@ require_relative "csv/writer"
 # :include: ../doc/csv/options/parsing/unconverted_fields.rdoc
 #
 # :include: ../doc/csv/options/parsing/headers.rdoc
+#
+# :include: ../doc/csv/options/parsing/header_rows.rdoc
+#
+# :include: ../doc/csv/options/parsing/fill_headers.rdoc
 #
 # :include: ../doc/csv/options/parsing/return_headers.rdoc
 #
@@ -962,6 +973,8 @@ class CSV
     converters:         nil,
     unconverted_fields: nil,
     headers:            false,
+    header_rows:        1,
+    fill_headers:       false,
     return_headers:     false,
     header_converters:  nil,
     skip_blanks:        false,
@@ -2040,6 +2053,8 @@ class CSV
                  converters: nil,
                  unconverted_fields: nil,
                  headers: false,
+                 header_rows: 1,
+                 fill_headers: false,
                  return_headers: false,
                  write_headers: nil,
                  header_converters: nil,
@@ -2100,6 +2115,8 @@ class CSV
       max_field_size: max_field_size,
       unconverted_fields: unconverted_fields,
       headers: headers,
+      header_rows: header_rows,
+      fill_headers: fill_headers,
       return_headers: return_headers,
       skip_blanks: skip_blanks,
       skip_lines: skip_lines,
@@ -2256,6 +2273,28 @@ class CSV
   #   CSV.new('').return_headers? # => false
   def return_headers?
     parser.return_headers?
+  end
+
+  # :call-seq:
+  #   csv.header_rows -> integer
+  #
+  # Returns the number of leading rows combined into column path
+  # headers; used for parsing;
+  # see {Option +header_rows+}[#class-CSV-label-Option+header_rows]:
+  #   CSV.new('').header_rows # => 1
+  def header_rows
+    @parser_options[:header_rows]
+  end
+
+  # :call-seq:
+  #   csv.fill_headers? -> true or false
+  #
+  # Returns whether blank cells in multi-row headers inherit the
+  # nearest non-blank value to the left; used for parsing;
+  # see {Option +fill_headers+}[#class-CSV-label-Option+fill_headers]:
+  #   CSV.new('').fill_headers? # => false
+  def fill_headers?
+    @parser_options[:fill_headers]
   end
 
   # :call-seq:

@@ -20,3 +20,35 @@ Examples:
   csv = CSV.new(str, headers: true, return_headers: true)
   csv.shift # => #<CSV::Row "Name":"Name" "Count":"Count">
 
+---
+
+With multi-row headers (option
+{header_rows}[#class-CSV-label-Option+header_rows]),
+each physical header row is returned as its own \CSV::Row, in order.
+The header (key) of every pair is the fully assembled column path
+(the same path for every returned header row), while the value is
+that physical row's original cell:
+  str = <<-EOT
+  Last year,,This year,,
+  Amount,Count,Amount,Count,Note
+  100,1,200,2,ok
+  EOT
+  rows = []
+  CSV.parse(str, headers: true, header_rows: 2, fill_headers: true,
+                 return_headers: true) do |row|
+    rows << row
+  end
+  rows[0].header_row? # => true
+  rows[0].to_a
+  # => [[["Last year", "Amount"], "Last year"],
+  #     [["Last year", "Count"], nil],
+  #     [["This year", "Amount"], "This year"],
+  #     [["This year", "Count"], nil],
+  #     [["This year", "Note"], nil]]
+  rows[1].to_a
+  # => [[["Last year", "Amount"], "Amount"],
+  #     [["Last year", "Count"], "Count"],
+  #     [["This year", "Amount"], "Amount"],
+  #     [["This year", "Count"], "Count"],
+  #     [["This year", "Note"], "Note"]]
+  rows[2].header_row? # => false
