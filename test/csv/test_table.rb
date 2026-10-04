@@ -688,4 +688,262 @@ A,B,C
       table.dig("A", 0, 0)
     end
   end
+
+  def test_pivot
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", "10"]),
+      CSV::Row.new(%w[account month value], ["Cash", "Feb", "20"]),
+      CSV::Row.new(%w[account month value], ["AR", "Jan", "30"]),
+    ])
+
+    pivoted = table.pivot("account", "month", "value")
+
+    assert_equal([%w[account Jan Feb],
+                  ["Cash", "10", "20"],
+                  ["AR", "30", nil]],
+                 pivoted.to_a)
+    assert_equal(<<-CSV, pivoted.to_csv)
+account,Jan,Feb
+Cash,10,20
+AR,30,
+    CSV
+  end
+
+  def test_pivot_with_multiple_row_keys
+    table = CSV::Table.new([
+      CSV::Row.new(%w[region account month value], ["West", "Cash", "Jan", "10"]),
+      CSV::Row.new(%w[region account month value], ["West", "Cash", "Feb", "20"]),
+      CSV::Row.new(%w[region account month value], ["East", "Cash", "Jan", "30"]),
+    ])
+
+    pivoted = table.pivot(%w[region account], "month", "value")
+
+    assert_equal([%w[region account Jan Feb],
+                  ["West", "Cash", "10", "20"],
+                  ["East", "Cash", "30", nil]],
+                 pivoted.to_a)
+  end
+
+  def test_pivot_with_column_indices_and_duplicate_headers
+    table = CSV::Table.new([
+      CSV::Row.new(["id", "dimension", "dimension", "value"],
+                   [1, "Cash", "Jan", "10"]),
+      CSV::Row.new(["id", "dimension", "dimension", "value"],
+                   [1, "Cash", "Feb", "20"]),
+    ])
+
+    pivoted = table.pivot([0, 1], 2, 3)
+
+    assert_equal([%w[id dimension Jan Feb],
+                  [1, "Cash", "10", "20"]],
+                 pivoted.to_a)
+  end
+
+  def test_pivot_with_duplicate_row_key_headers
+    table = CSV::Table.new([
+      CSV::Row.new(["name", "name", "month", "value"],
+                   ["Cash", "Account", "Jan", "10"]),
+      CSV::Row.new(["name", "name", "month", "value"],
+                   ["Cash", "Account", "name", "20"]),
+    ])
+
+    pivoted = table.pivot([0, 1], 2, 3)
+
+    assert_equal(["name", "name", "Jan", "name"], pivoted.headers)
+    assert_equal(["Cash", "Account", "10", "20"], pivoted.first.fields)
+    assert_equal("20", pivoted.first.field("name", 2))
+    assert_equal(true, pivoted.first.header?("name", 2))
+    assert_equal([%w[name name column value],
+                  ["Cash", "Account", "Jan", "10"],
+                  ["Cash", "Account", "name", "20"]],
+                 pivoted.unpivot([0, 1]).to_a)
+  end
+
+  def test_pivot_explicit_columns_order_and_missing_coordinates
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", nil]),
+      CSV::Row.new(%w[account month value], ["AR", "Mar", "30"]),
+    ])
+
+    pivoted = table.pivot(0, 1, 2, columns: %w[Feb Jan Mar])
+
+    assert_equal(%w[account Feb Jan Mar], pivoted.headers)
+    assert_equal(["Cash", nil, nil, nil], pivoted.first.fields)
+    assert_equal(["AR", nil, nil, "30"], pivoted[-1].fields)
+    assert_equal(<<-CSV, pivoted.to_csv)
+account,Feb,Jan,Mar
+Cash,,,
+AR,,,30
+    CSV
+
+    cash = pivoted.first
+    assert_equal(true, cash.header?("Jan"))
+    assert_nil(cash["Jan"])
+    assert_equal(false, cash.header?("Feb"))
+    assert_equal(false, cash.header?("Mar"))
+  end
+
+  def test_pivot_distinguishes_nil_from_missing_coordinate_on_unpivot
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", nil]),
+      CSV::Row.new(%w[account month value], ["Cash", "Feb", "20"]),
+    ])
+
+    pivoted = table.pivot(0, 1, 2, columns: %w[Jan Feb Mar])
+    unpivoted = pivoted.unpivot(0, [1, 2, 3],
+                                column_key: "month",
+                                value_key: "value")
+
+    assert_equal([%w[account month value],
+                  ["Cash", "Jan", nil],
+                  ["Cash", "Feb", "20"]],
+                 unpivoted.to_a)
+  end
+
+  def test_pivot_conflict
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", 10]),
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", 20]),
+    ])
+
+    message = assert_raise(ArgumentError) do
+      table.pivot(0, 1, 2)
+    end.message
+    assert_match(/multiple values/, message)
+  end
+
+  def test_pivot_with_merge_function
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", 10]),
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", 20]),
+    ])
+
+    pivoted = table.pivot(0, 1, 2) { |old_value, new_value| old_value + new_value }
+
+    assert_equal(30, pivoted.first["Jan"])
+
+    pivoted = table.pivot(0, 1, 2, merge: ->(old_value, new_value) { old_value * new_value })
+    assert_equal(200, pivoted.first["Jan"])
+  end
+
+  def test_pivot_rejects_unexpected_explicit_column
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", "10"]),
+    ])
+
+    assert_raise(ArgumentError) do
+      table.pivot(0, 1, 2, columns: %w[Feb])
+    end
+  end
+
+  def test_pivot_with_empty_string_column_label
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account month value], ["Cash", "", "10"]),
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", "20"]),
+    ])
+
+    pivoted = table.pivot(0, 1, 2)
+
+    assert_equal(["account", "", "Jan"], pivoted.headers)
+    assert_equal(["Cash", "10", "20"], pivoted.first.fields)
+    assert_equal(<<-CSV, pivoted.to_csv)
+account,"",Jan
+Cash,10,20
+    CSV
+  end
+
+  def test_pivot_empty_table_preserves_headers
+    table = CSV::Table.new([], headers: %w[account month value])
+
+    pivoted = table.pivot(0, 1, 2, columns: %w[Jan Feb])
+
+    assert_equal([], pivoted.to_a[1..])
+    assert_equal(%w[account Jan Feb], pivoted.headers)
+  end
+
+  def test_pivot_does_not_modify_input
+    rows = [
+      CSV::Row.new(%w[account month value], ["Cash", "Jan", "10"]),
+      CSV::Row.new(%w[account month value], ["Cash", "Feb", "20"]),
+    ]
+    table = CSV::Table.new(rows)
+    before = table.to_a
+
+    pivoted = table.pivot(0, 1, 2)
+    pivoted["Jan"] = ["99"]
+
+    assert_equal(before, table.to_a)
+    assert_equal(["Cash", "Jan", "10"], rows.first.fields)
+    assert_equal(["Cash", "Feb", "20"], rows[-1].fields)
+  end
+
+  def test_unpivot
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account Jan Feb], ["Cash", "10", "20"]),
+      CSV::Row.new(%w[account Jan Feb], ["AR", "30", nil]),
+    ])
+
+    unpivoted = table.unpivot("account", ["Jan", "Feb"],
+                              column_key: "month",
+                              value_key: "value")
+
+    assert_equal([%w[account month value],
+                  ["Cash", "Jan", "10"],
+                  ["Cash", "Feb", "20"],
+                  ["AR", "Jan", "30"],
+                  ["AR", "Feb", nil]],
+                 unpivoted.to_a)
+  end
+
+  def test_unpivot_defaults_to_remaining_columns
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account Jan Feb], ["Cash", "10", "20"]),
+    ])
+
+    unpivoted = table.unpivot("account")
+
+    assert_equal([%w[account column value],
+                  ["Cash", "Jan", "10"],
+                  ["Cash", "Feb", "20"]],
+                 unpivoted.to_a)
+  end
+
+  def test_unpivot_with_nil_output_headers
+    table = CSV::Table.new([
+      CSV::Row.new(%w[account Jan], ["Cash", "10"]),
+    ])
+
+    unpivoted = table.unpivot("account", ["Jan"],
+                              column_key: nil,
+                              value_key: nil)
+
+    assert_equal(["account", nil, nil], unpivoted.headers)
+    assert_equal(["Cash", "Jan", "10"], unpivoted.first.fields)
+  end
+
+  def test_unpivot_with_column_indices_and_empty_string_label
+    table = CSV::Table.new([
+      CSV::Row.new(["account", "", "Jan"], ["Cash", "10", "20"]),
+    ])
+
+    unpivoted = table.unpivot(0, [1, 2],
+                              column_key: "month",
+                              value_key: "value")
+
+    assert_equal([%w[account month value],
+                  ["Cash", "", "10"],
+                  ["Cash", "Jan", "20"]],
+                 unpivoted.to_a)
+  end
+
+  def test_unpivot_empty_table_preserves_headers
+    table = CSV::Table.new([], headers: %w[account Jan Feb])
+
+    unpivoted = table.unpivot("account", ["Jan", "Feb"],
+                              column_key: "month",
+                              value_key: "value")
+
+    assert_equal([], unpivoted.to_a[1..])
+    assert_equal(%w[account month value], unpivoted.headers)
+  end
 end

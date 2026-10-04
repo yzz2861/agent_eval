@@ -142,6 +142,8 @@ class CSV
   #   table['Name'] = ['Foo', 'Bar', 'Baz']
   #   table['Name'] # => ["Foo", "Bar", "Baz"]
   class Table
+    PIVOT_UNDEFINED = Object.new.freeze
+
     # :call-seq:
     #   CSV::Table.new(array_of_rows, headers = nil) -> csv_table
     #
@@ -1033,6 +1035,210 @@ class CSV
     end
 
     # :call-seq:
+    #   table.pivot(row_key, column_key, value_key, columns: nil,
+    #               merge: nil) {|old_value, new_value| ... } -> csv_table
+    #
+    # Returns a new table reshaped from long form to wide form.
+    #
+    # +row_key+ identifies one or more columns whose values identify a row.
+    # +column_key+ identifies the column containing the names for new columns.
+    # +value_key+ identifies the column containing the values for those columns.
+    # Each key may be given as a header or an integer column index, which makes
+    # it possible to select columns with duplicate headers.
+    #
+    #   source = "account,month,value\nCash,Jan,10\nCash,Feb,20\n"
+    #   table = CSV.parse(source, headers: true)
+    #   table.pivot("account", "month", "value").to_a
+    #   # => [["account", "Jan", "Feb"], ["Cash", "10", "20"]]
+    #
+    # New columns are ordered by first occurrence by default. Pass +columns+
+    # to specify the order explicitly and to include columns with no values:
+    #   table.pivot("account", "month", "value", columns: ["Feb", "Jan"])
+    #
+    # An exception is raised when a row-column coordinate has more than one
+    # value. Pass +merge+ or a block to combine duplicates:
+    #   table.pivot("account", "month", "value") do |old_value, new_value|
+    #     old_value + new_value
+    #   end
+    #
+    # A coordinate with an actual +nil+ value is retained. A coordinate with no
+    # source record is absent from the returned sparse row, so the two cases
+    # remain distinguishable through CSV::Row#header? while table output remains
+    # aligned with the full headers.
+    def pivot(row_key, column_key, value_key,
+              columns: PIVOT_UNDEFINED, column_order: PIVOT_UNDEFINED,
+              merge: PIVOT_UNDEFINED, &merge_block)
+      columns = PIVOT_UNDEFINED if columns.nil?
+      column_order = PIVOT_UNDEFINED if column_order.nil?
+      merge = PIVOT_UNDEFINED if merge.nil?
+      row_indices = resolve_pivot_selectors(row_key)
+      column_index = resolve_single_pivot_selector(column_key, "column_key")
+      value_index = resolve_single_pivot_selector(value_key, "value_key")
+
+      merge_callable = pivot_merge_callable(merge, merge_block)
+      selected_indices = row_indices + [column_index, value_index]
+      unless selected_indices.uniq.size == selected_indices.size
+        raise ArgumentError, "row_key, column_key, and value_key must not select the same column"
+      end
+
+      explicit_columns = !column_order.equal?(PIVOT_UNDEFINED) ||
+                         !columns.equal?(PIVOT_UNDEFINED)
+      explicit_labels = if !column_order.equal?(PIVOT_UNDEFINED)
+                           pivot_array(column_order)
+                         elsif !columns.equal?(PIVOT_UNDEFINED)
+                           pivot_array(columns)
+                         else
+                           nil
+                         end
+      if explicit_labels && explicit_labels.uniq.size != explicit_labels.size
+        raise ArgumentError, "columns must not contain duplicates"
+      end
+
+      row_headers = row_indices.map { |index| pivot_header_copy(headers[index]) }
+
+      labels = []
+      output_labels = []
+      label_set = {}
+      label_positions = Hash.new { |positions, label| positions[label] = [] }
+      if explicit_labels
+        pivot_array(explicit_labels).each do |label|
+          label_set[label] = true
+          labels << label
+          label_positions[label] << labels.size - 1
+          output_labels << pivot_header_copy(label)
+        end
+      end
+
+      ordered_row_keys = []
+      known_row_keys = {}
+      values_by_row = Hash.new { |values, key| values[key] = {} }
+      label_occurrences = Hash.new { |occurrences, key| occurrences[key] = Hash.new(0) }
+
+      @table.each do |row|
+        next if row.header_row?
+        next unless pivot_field_present?(row, column_index)
+        next unless pivot_field_present?(row, value_index)
+        next unless row_indices.all? { |index| pivot_field_present?(row, index) }
+
+        row_values = row_indices.map { |index| row[index] }
+        label = row[column_index]
+
+        if explicit_columns
+          unless label_set.key?(label)
+            raise ArgumentError, "unexpected pivot column: #{label.inspect}"
+          end
+        elsif !label_set.key?(label)
+          label_set[label] = true
+          labels << label
+          label_positions[label] << labels.size - 1
+          output_labels << pivot_header_copy(label)
+        end
+
+        unless known_row_keys.key?(row_values)
+          known_row_keys[row_values] = true
+          ordered_row_keys << row_values
+        end
+
+        cells = values_by_row[row_values]
+        label_occurrence = label_occurrences[row_values][label]
+        label_position = label_positions[label][label_occurrence] ||
+                         label_positions[label].last
+        label_index = row_headers.size + label_position
+        value = row[value_index]
+        if cells.key?(label_index)
+          if merge_callable
+            value = merge_callable.call(cells[label_index], value)
+          else
+            raise ArgumentError, "multiple values for pivot coordinate #{row_values.inspect}, #{label.inspect}"
+          end
+        end
+        cells[label_index] = value
+        label_occurrences[row_values][label] += 1
+      end
+
+      pivot_headers = row_headers + output_labels
+      rows = ordered_row_keys.map do |row_values|
+        values_by_index = {}
+        row_indices.each_with_index do |_, index|
+          values_by_index[index] = row_values[index]
+        end
+        cells = values_by_row[row_values]
+        cells.each { |index, value| values_by_index[index] = value }
+        PivotRow.new(pivot_headers, values_by_index)
+      end
+
+      self.class.new(rows, headers: pivot_headers)
+    end
+
+    # :call-seq:
+    #   table.unpivot(row_key, value_columns = nil, column_key: "column", value_key: "value") -> csv_table
+    #
+    # Returns a new table reshaped from wide form to long form.
+    #
+    # +row_key+ identifies one or more columns retained on each returned row.
+    # +value_columns+ identifies the columns to unpivot; headers or integer
+    # column indexes may be used. When omitted, all columns not selected by
+    # +row_key+ are unpivoted.
+    #
+    #   source = "account,Jan,Feb\nCash,10,20\n"
+    #   table = CSV.parse(source, headers: true)
+    #   table.unpivot("account", ["Jan", "Feb"],
+    #                column_key: "month", value_key: "value").to_a
+    #   # => [["account", "month", "value"],
+    #   #     ["Cash", "Jan", "10"],
+    #   #     ["Cash", "Feb", "20"]]
+    #
+    # Actual +nil+ values produce rows. Coordinates absent from a sparse pivot
+    # table do not.
+    def unpivot(row_key, value_columns = PIVOT_UNDEFINED,
+                column_name = PIVOT_UNDEFINED, value_name = PIVOT_UNDEFINED,
+                column_key: PIVOT_UNDEFINED, value_key: PIVOT_UNDEFINED)
+      value_columns = PIVOT_UNDEFINED if value_columns.nil?
+      row_indices = resolve_pivot_selectors(row_key)
+      value_indices = if value_columns.equal?(PIVOT_UNDEFINED)
+                        headers.each_index.reject { |index| row_indices.include?(index) }
+                      else
+                        resolve_pivot_selectors(value_columns)
+                      end
+
+      all_indices = row_indices + value_indices
+      unless all_indices.uniq.size == all_indices.size
+        raise ArgumentError, "row_key and value_columns must not select the same column"
+      end
+
+      column_label = if column_key.equal?(PIVOT_UNDEFINED)
+                       column_name.equal?(PIVOT_UNDEFINED) ? "column" : column_name
+                     else
+                       column_key
+                     end
+      value_label = if value_key.equal?(PIVOT_UNDEFINED)
+                      value_name.equal?(PIVOT_UNDEFINED) ? "value" : value_name
+                    else
+                      value_key
+                    end
+
+      row_headers = row_indices.map { |index| pivot_header_copy(headers[index]) }
+      value_headers = value_indices.map { |index| pivot_header_copy(headers[index]) }
+      long_headers = row_headers + [pivot_header_copy(column_label),
+                                    pivot_header_copy(value_label)]
+
+      rows = []
+      @table.each do |row|
+        next if row.header_row?
+        next unless row_indices.all? { |index| pivot_field_present?(row, index) }
+
+        row_values = row_indices.map { |index| row[index] }
+        value_indices.each_with_index do |index, value_header_index|
+          next unless pivot_field_present?(row, index)
+          rows << Row.new(long_headers,
+                         row_values + [value_headers[value_header_index], row[index]])
+        end
+      end
+
+      self.class.new(rows, headers: long_headers)
+    end
+
+    # :call-seq:
     #   table.inspect => string
     #
     # Returns a <tt>US-ASCII</tt>-encoded \String showing table:
@@ -1050,6 +1256,193 @@ class CSV
       summary = to_csv(limit: 5)
       inspected << "\n" << summary if summary.encoding.ascii_compatible?
       inspected
+    end
+
+    private
+
+    def pivot_array(value)
+      value.is_a?(Array) ? value : [value]
+    end
+
+    def pivot_header_copy(header)
+      header.is_a?(String) ? header.dup : header
+    end
+
+    def resolve_pivot_selectors(selectors)
+      pivot_array(selectors).map do |selector|
+        if selector.is_a?(Range)
+          raise ArgumentError, "column ranges are not supported"
+        end
+        resolve_single_pivot_selector(selector, "column")
+      end.tap do |indices|
+        if indices.uniq.size != indices.size
+          raise ArgumentError, "column selectors must not contain duplicates"
+        end
+      end
+    end
+
+    def resolve_single_pivot_selector(selector, argument_name)
+      if selector.is_a?(Array) || selector.is_a?(Range)
+        raise ArgumentError, "#{argument_name} must select one column"
+      end
+
+      index = if selector.is_a?(Integer)
+                selector
+              else
+                headers.index(selector)
+              end
+      index += headers.size if index.is_a?(Integer) && index < 0
+      unless index.is_a?(Integer) && index >= 0 && index < headers.size
+        raise IndexError, "column not found: #{selector.inspect}"
+      end
+      index
+    end
+
+    def pivot_merge_callable(merge, merge_block)
+      if !merge.equal?(PIVOT_UNDEFINED) && merge_block
+        raise ArgumentError, "provide either merge or a block, not both"
+      end
+
+      callable = merge_block || (merge.equal?(PIVOT_UNDEFINED) ? nil : merge)
+      if callable && !callable.respond_to?(:call)
+        raise TypeError, "merge must respond to #call"
+      end
+      callable
+    end
+
+    def pivot_field_present?(row, index)
+      if row.is_a?(PivotRow)
+        row.pivot_field_present?(index)
+      else
+        row.headers.size > index
+      end
+    end
+
+    # A row aligned with the table's full headers while storing only
+    # coordinates that actually have a source value.
+    class PivotRow < Row
+      def initialize(full_headers, values_by_index)
+        @present_indices = values_by_index.keys.select do |index|
+          index >= 0 && index < full_headers.size
+        end
+        super([], [])
+        @row.replace(full_headers.each_index.map do |index|
+          [full_headers[index], values_by_index.fetch(index, nil)]
+        end)
+        full_headers.each { |header| header.freeze if header.is_a?(String) }
+        @full_headers = full_headers
+        @present_indices = @present_indices.sort
+      end
+
+      def initialize_copy(other)
+        super
+        @full_headers = @full_headers.dup
+        @present_indices = @present_indices.dup
+      end
+
+      def headers
+        @full_headers.dup
+      end
+
+      def field(header_or_index, minimum_index = 0)
+        case header_or_index
+        when Integer
+          index = header_or_index
+          index += @full_headers.size if index < 0
+          return nil unless index >= 0 && index < @full_headers.size
+          @row[index].last
+        when Range
+          start_index = range_index(header_or_index.begin)
+          end_index = range_index(header_or_index.end)
+          range = Range.new(start_index, end_index, header_or_index.exclude_end?)
+          @row[range].map(&:last)
+        else
+          minimum_index = minimum_index.is_a?(Integer) ? minimum_index : 0
+          @row.each_with_index do |(candidate_header, value), index|
+            return value if index >= minimum_index && candidate_header == header_or_index
+          end
+          nil
+        end
+      end
+
+      def fields(*specifiers)
+        return @row.map(&:last) if specifiers.empty?
+
+        if specifiers.all? { |specifier| specifier.is_a?(Integer) || specifier.is_a?(Range) }
+          specifiers.flat_map do |specifier|
+            specifier.is_a?(Range) ? field(specifier) : [field(specifier)]
+          end
+        else
+          super
+        end
+      end
+
+      def has_key?(header, minimum_index = 0)
+        if header.is_a?(Integer)
+          pivot_field_present?(header)
+        else
+          minimum_index = 0 unless minimum_index.is_a?(Integer)
+          @present_indices.any? do |index|
+            index >= minimum_index && @row[index].first == header
+          end
+        end
+      end
+      alias_method :include?, :has_key?
+      alias_method :key?, :has_key?
+      alias_method :member?, :has_key?
+      alias_method :header?, :has_key?
+
+      def each(&block)
+        return enum_for(__method__) { size } unless block_given?
+
+        @present_indices.each do |index|
+          yield(@row[index])
+        end
+
+        self
+      end
+      alias_method :each_pair, :each
+
+      def to_h
+        hash = {}
+        if block_given?
+          each do |header, value|
+            key, converted_value = yield(header, value)
+            hash[key] = converted_value unless hash.key?(key)
+          end
+        else
+          each do |header, value|
+            hash[header] = value unless hash.key?(header)
+          end
+        end
+        hash
+      end
+      alias_method :to_hash, :to_h
+
+      def ==(other)
+        return to_a == other.each.to_a if other.is_a?(Row)
+        super
+      end
+
+      def to_a
+        @present_indices.map { |index| @row[index].dup }
+      end
+      alias_method :to_ary, :to_a
+
+      def pivot_field_present?(index)
+        index += @full_headers.size if index < 0
+        @present_indices.include?(index)
+      end
+
+      private
+
+      def range_index(index_or_header)
+        if index_or_header.is_a?(Integer)
+          index_or_header
+        else
+          @full_headers.index(index_or_header)
+        end
+      end
     end
   end
 end
