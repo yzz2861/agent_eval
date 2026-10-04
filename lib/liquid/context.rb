@@ -144,6 +144,18 @@ module Liquid
     # Creates a new context inheriting resource limits, filters, environment etc.,
     # but with an isolated scope.
     def new_isolated_subcontext
+      build_isolated_subcontext(static_environments: static_environments)
+    end
+
+    def new_macro_subcontext(macro)
+      build_isolated_subcontext(static_environments: []).tap do |subcontext|
+        subcontext.instance_variable_set(:@environments, macro.environment_scopes_for_invocation)
+        subcontext.instance_variable_set(:@static_environments, macro.static_environments_for_invocation)
+        subcontext.instance_variable_set(:@scopes, macro.scopes_for_invocation)
+      end
+    end
+
+    def build_isolated_subcontext(static_environments:)
       check_overflow
 
       self.class.build(
