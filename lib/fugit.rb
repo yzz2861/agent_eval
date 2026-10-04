@@ -14,8 +14,8 @@ require 'et-orbi'
 
 require 'fugit/misc'
 require 'fugit/cron'
+require 'fugit/cron_convert'
 require 'fugit/duration'
 require 'fugit/nat'
 require 'fugit/at'
 require 'fugit/parse'
-

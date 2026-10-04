@@ -520,6 +520,31 @@ c = Fugit.parse('* * * * * *') # every second
 c = Fugit.parse('5 * * * * *') # every minute at second 5
 ```
 
+### explicit cron dialect conversion
+
+Importing schedules from different systems should not make `parse` guess whether five fields are Unix cron or six fields are Quartz. `Fugit.convert_cron` requires a source dialect:
+
+```ruby
+result = Fugit.convert_cron('0 0 12 ? * MON-FRI', from: :quartz)
+
+result[:ok]         # ==> true
+result[:expression] # ==> '0 0 12 * * 1,2,3,4,5'
+result[:cron]       # ==> a Fugit::Cron instance
+```
+
+The Quartz entry accepts six fields, or seven fields when the year field is `*`. It preserves the second field, maps Quartz weekdays (`2` is Tuesday, `7`/`SUN` is Sunday), accepts the standard `?` in exactly one day field or concrete values in both fields for AND semantics, and supports `L` for the last day of a month, `nL`/`nameL` for the last weekday, and `n#k`/`name#k` for the nth weekday.
+
+The converter does not silently drop unrepresentable parts. Nearest-weekday (`W`, `LW`), calendar offsets (`C`), finite years, invalid `?` combinations, and other unsupported syntax return a structured failure with the source field and character position.
+
+```ruby
+result = Fugit.convert_cron('0 0 12 15 * ? 2024-2025', from: :quartz)
+
+result[:ok]     # ==> false
+result[:errors] # ==> [{ code: :unsupported_year, field: :year, ... }]
+```
+
+`Fugit.do_convert_cron` raises `Fugit::CronConversionError` instead. `Fugit.parse` keeps its existing behavior for strings that do not explicitly declare a dialect.
+
 
 ## `Fugit::Nat`
 
@@ -713,4 +738,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
