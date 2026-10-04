@@ -562,6 +562,39 @@ Results in the same email as done using the block form
 @mail.retryable?       #=> false
 ```
 
+### Signing an Email with DKIM:
+
+Mail can generate a DKIM-Signature header (RFC 6376) for a message using
+rsa-sha256 with simple or relaxed header/body canonicalization. The
+application supplies the signing domain, selector and private key; the
+matching public key is published in DNS at
+`<selector>._domainkey.<domain>`.
+
+```ruby
+mail = Mail.new do
+  from    "alice@example.com"
+  to      "bob@example.net"
+  subject "hello"
+  body    "signed, sealed, delivered"
+end
+
+mail.dkim_sign(domain: "example.com",
+               selector: "s1",
+               private_key: OpenSSL::PKey::RSA.new(File.read("s1.private")),
+               canonicalization: :relaxed) # default; or :simple, or set
+                                           # :header_canonicalization and
+                                           # :body_canonicalization separately
+
+mail.encoded # => includes a folded DKIM-Signature header at the top
+```
+
+Signing finalizes the message first: the transfer encoding is negotiated
+and required headers (Date, Message-ID, ...) are added before anything is
+hashed, so calling `encoded` afterwards does not change the signed bytes.
+Repeated header fields are signed bottom-most first per RFC 6376, and the
+`:headers` option controls which fields are signed (repeat a name to cover
+multiple instances or to oversign it).
+
 ### Attaching and Detaching Files
 
 You can just read the file off an absolute path, Mail will try

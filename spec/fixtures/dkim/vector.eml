@@ -1,0 +1,22 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com;
+ s=vec; t=1767321845;
+ h=from:to:subject:date:message-id:mime-version:content-type:
+ content-transfer-encoding;
+ bh=OMdRYQvgDnpobtTbWwbmY5NlPp1+Jo/yJhsHQNXUWA4=; b=gnyLVQUYwd2EcbltnM2s
+ knupJCi+2NiG/VggpEDPcWYtnMtGdfxfiKDgE9a2rmSog4oBB2defIJGMbVJl2VB1HVZ6UK
+ 2sKZwTLObEL2hh32Zy8kl+itrpQCW5ror5iHhoQ7XLgnwNrLW9Dz4MmJcX5iwUQAaZDfRDR
+ w0P19KhqnfbxI3C4HZ9czXCpH5tL/NeyeNhUQEEqPsK9Pb1dJ2CCJk7OVukbOmL/52edOZ6
+ rqc27aNW0IO09op+E3JNfrBxernRqD8YxivA6GjZm0KSRTMEcnZ9KrGZfpedA5acPp8UICr
+ piRF+cMJuIpghzfW+gJvV0foc63f/OUhFtFDAw==
+Date: Fri, 02 Jan 2026 03:04:05 +0000
+From: alice@example.com
+To: bob@example.net
+Message-ID: <vector.1@example.com>
+Subject: DKIM vector
+MIME-Version: 1.0
+Content-Type: text/plain;
+ charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Hello, DKIM!
+Second line.

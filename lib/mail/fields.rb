@@ -20,6 +20,7 @@ module Mail
   register_autoload :ContentTransferEncodingField, 'mail/fields/content_transfer_encoding_field'
   register_autoload :ContentTypeField, 'mail/fields/content_type_field'
   register_autoload :DateField, 'mail/fields/date_field'
+  register_autoload :DkimField, 'mail/fields/dkim_field'
   register_autoload :FromField, 'mail/fields/from_field'
   register_autoload :InReplyToField, 'mail/fields/in_reply_to_field'
   register_autoload :KeywordsField, 'mail/fields/keywords_field'

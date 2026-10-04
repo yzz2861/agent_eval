@@ -41,6 +41,7 @@ module Mail # :doc:
 
   require 'mail/message'
   require 'mail/part'
+  require 'mail/dkim'
   require 'mail/header'
   require 'mail/parts_list'
   require 'mail/attachments_list'

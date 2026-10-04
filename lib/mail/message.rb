@@ -1804,6 +1804,19 @@ module Mail
       add_required_fields
     end
 
+    # Signs the message with a DKIM-Signature header field (RFC 6376)
+    # using rsa-sha256. See Mail::Dkim.sign for the available options.
+    #
+    #   mail.dkim_sign(domain: "example.com", selector: "s1",
+    #                  private_key: OpenSSL::PKey::RSA.new(pem))
+    #
+    # Signing finalizes the transfer encoding and required headers first,
+    # so calling #encoded afterwards does not change the signed bytes.
+    # Returns the message.
+    def dkim_sign(options = {})
+      Mail::Dkim.sign(self, options)
+    end
+
     # Outputs an encoded string representation of the mail message including
     # all headers, attachments, etc.  This is an encoded email in US-ASCII,
     # so it is able to be directly sent to an email server.
