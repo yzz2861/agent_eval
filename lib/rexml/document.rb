@@ -12,6 +12,7 @@ require_relative "output"
 require_relative "parsers/baseparser"
 require_relative "parsers/streamparser"
 require_relative "parsers/treeparser"
+require_relative "c14n/exclusive"
 
 module REXML
   # Represents an XML document.
