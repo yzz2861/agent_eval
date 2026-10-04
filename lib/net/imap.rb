@@ -1929,6 +1929,33 @@ module Net
     #
     # The return value is an array of MailboxList.
     #
+    # ==== Selection options and return options
+    #
+    # When the server's capabilities include +LIST-EXTENDED+
+    # {[RFC5258]}[https://www.rfc-editor.org/rfc/rfc5258.html], +select_opts+
+    # may be used to send selection options (for instance
+    # <tt>"SUBSCRIBED"</tt>, <tt>"REMOTE"</tt>, or <tt>"SPECIAL-USE"</tt>),
+    # and +return_opts+ may be used to send return options (for instance
+    # <tt>"SUBSCRIBED"</tt>, or <tt>"STATUS"</tt> with a list of status
+    # attributes).  Each option is given as a string or a symbol, and nested
+    # arrays are sent as parenthesized lists, so a +STATUS+ return option is
+    # written as <tt>["STATUS", %w[MESSAGES UNSEEN]]</tt>.  The
+    # <tt>"RETURN"</tt> keyword itself is added automatically and must not
+    # be included in +return_opts+.
+    #
+    # When the server's capabilities include +LIST-STATUS+
+    # {[RFC5819]}[https://www.rfc-editor.org/rfc/rfc5819.html], a +STATUS+
+    # return option asks the server to also return untagged +STATUS+ responses
+    # for the listed mailboxes, saving the extra round-trips of calling
+    # #status for each mailbox.  The returned +STATUS+ data is correlated to
+    # each listed mailbox by its (decoded) mailbox name---not by response
+    # order---and is available from MailboxList#status.  Requested status
+    # attributes that the server omitted are present with +nil+ values, and
+    # MailboxList#status is +nil+ for mailboxes without any +STATUS+ data.
+    #
+    #   imap.list("", "*", return_opts: ["STATUS", %w[MESSAGES UNSEEN]])
+    #   #=> [#<Net::IMAP::MailboxList attr=[:HasNoChildren], delim="/", name="INBOX">, ...]
+    #
     # Related: #lsub, MailboxList
     #
     # ==== For example:
@@ -1941,12 +1968,23 @@ module Net
     #        #<Net::IMAP::MailboxList attr=[:Noinferiors], delim="/", name="foo/baz">]
     #
     #--
-    # TODO: support LIST-EXTENDED extension [RFC5258].  Needed for IMAP4rev2.
+    # TODO: support the rest of the LIST-EXTENDED extension [RFC5258]
+    # (extended mailbox patterns, child info, "CHILDREN" return option, etc).
+    # Needed for IMAP4rev2.
     #++
-    def list(refname, mailbox)
+    def list(refname, mailbox, select_opts: nil, return_opts: nil)
       synchronize do
-        send_command("LIST", refname, mailbox)
-        clear_responses("LIST")
+        select_opts = select_opts && normalize_list_options(select_opts)
+        return_opts = return_opts && normalize_list_options(return_opts)
+        status_attrs = list_status_return_attrs(return_opts)
+        args = []
+        args << select_opts if select_opts
+        args << refname << mailbox
+        args.concat(["RETURN", return_opts]) if return_opts
+        send_command("LIST", *args)
+        mailboxes = clear_responses("LIST")
+        attach_list_status(mailboxes, status_attrs) if status_attrs
+        mailboxes
       end
     end
 
@@ -4119,6 +4157,60 @@ module Net
           i
         end
       }
+    end
+
+    # Normalizes LIST selection options and return options: symbols become
+    # uppercase strings, and nested arrays are normalized recursively.
+    def normalize_list_options(opts)
+      Array(opts).map do |opt|
+        case opt
+        when Array  then normalize_list_options(opt)
+        when Symbol then opt.to_s.upcase
+        else             opt
+        end
+      end
+    end
+
+    # Returns the requested status attribute names when +return_opts+
+    # contains a STATUS return option [RFC5819], or +nil+ when it does not.
+    def list_status_return_attrs(return_opts)
+      return nil unless return_opts
+      return_opts.each_with_index do |opt, idx|
+        if opt.is_a?(Array)
+          next unless opt.first.to_s.casecmp?("STATUS")
+          return Array(opt[1]).map { _1.to_s.upcase }
+        elsif opt.to_s.casecmp?("STATUS")
+          attrs = return_opts[idx + 1]
+          return attrs.is_a?(Array) ? attrs.map { _1.to_s.upcase } : []
+        end
+      end
+      nil
+    end
+
+    # Correlates the STATUS responses of a LIST command [RFC5819] with the
+    # returned MailboxList objects, by decoded mailbox name (never by
+    # response order).  STATUS responses for other mailboxes are left alone.
+    def attach_list_status(mailboxes, status_attrs)
+      keyed = mailboxes.to_h { |mb| [list_status_key(mb.name), mb] }
+      extract_responses("STATUS") do |data|
+        data.is_a?(StatusData) && keyed.key?(list_status_key(data.mailbox))
+      end.each do |data|
+        attr = data.attr.dup
+        status_attrs.each { |name| attr[name] = nil unless attr.key?(name) }
+        keyed[list_status_key(data.mailbox)].status =
+          StatusData.new(data.mailbox, attr)
+      end
+      mailboxes
+    end
+
+    # Mailbox names may be returned as quoted strings or literals, and may
+    # use modified UTF-7; decode so equivalent names share one identity.
+    # INBOX is case-insensitive [RFC3501 §5.1].
+    def list_status_key(name)
+      decoded = Net::IMAP.decode_utf7(name.to_s)
+      decoded.casecmp?("INBOX") ? "INBOX" : decoded
+    rescue ArgumentError, EncodingError
+      name.to_s
     end
 
     def coerce_search_arg_to_seqset?(obj)

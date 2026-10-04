@@ -461,6 +461,17 @@ module Net
       # :call-seq: name -> string
       #
       # Returns the mailbox name.
+
+      # When the LIST command included a +STATUS+ return option (see
+      # IMAP#list), this returns the StatusData that the server returned for
+      # this mailbox, or +nil+ when the server returned no +STATUS+ data for
+      # it.  Requested status attributes that the server omitted are present
+      # in StatusData#attr with +nil+ values.
+      #
+      # This is not a struct member: it is only set by IMAP#list when a
+      # +STATUS+ return option is used, and does not affect equality,
+      # #to_a, or #to_h.
+      attr_accessor :status
     end
 
     # MailboxQuota represents the data of an untagged +QUOTA+ response.
