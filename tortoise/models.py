@@ -26,7 +26,7 @@ from tortoise.exceptions import (
     ValidationError,
 )
 from tortoise.expressions import Expression
-from tortoise.fields.base import Field
+from tortoise.fields.base import CompositePrimaryKey, Field
 from tortoise.fields.data import IntField
 from tortoise.fields.relational import (
     BackwardFKRelation,
@@ -87,50 +87,78 @@ def prepare_default_ordering(meta: Model.Meta) -> tuple[tuple[str, Order], ...]:
 
 class FkSetterKwargs(TypedDict):
     _key: str
-    relation_field: str
-    to_field: str
+    relation_fields: tuple[str, ...]
+    to_fields: tuple[str, ...]
 
 
 def _fk_setter(
     self: Model,
     value: Model | None,
     _key: str,
-    relation_field: str,
-    to_field: str,
+    relation_fields: tuple[str, ...],
+    to_fields: tuple[str, ...],
 ) -> None:
-    setattr(self, relation_field, getattr(value, to_field) if value else None)
+    if value is not None:
+        pk = tuple(getattr(value, field_name) for field_name in to_fields)
+        pk_values = pk[0] if len(pk) == 1 else pk
+    else:
+        pk_values = None
+    for relation_field in relation_fields:
+        component = pk_values if len(relation_fields) == 1 else None
+        setattr(self, relation_field, component)
+    if len(relation_fields) > 1 and pk_values is not None:
+        for relation_field, component in zip(relation_fields, pk_values, strict=True):
+            setattr(self, relation_field, component)
     setattr(self, _key, value)
 
 
 def _fk_getter(
-    self: Model, _key: str, ftype: type[Model], relation_field: str, to_field: str
+    self: Model,
+    _key: str,
+    ftype: type[Model],
+    relation_fields: tuple[str, ...],
+    to_fields: tuple[str, ...],
 ) -> Awaitable:
     try:
         return getattr(self, _key)
     except AttributeError:
-        value = getattr(self, relation_field)
-        if value is not None:
-            return ftype.filter(**{to_field: value}).first()
+        values = tuple(getattr(self, field_name) for field_name in relation_fields)
+        if all(value is not None for value in values):
+            return ftype.filter(**dict(zip(to_fields, values, strict=True))).first()
         return NoneAwaitable
 
 
 def _rfk_getter(
-    self: Model, _key: str, ftype: type[Model], frelfield: str, from_field: str
+    self: Model,
+    _key: str,
+    ftype: type[Model],
+    frelfields: tuple[str, ...],
+    from_fields: tuple[str, ...],
 ) -> ReverseRelation:
+    frelfields = (frelfields,) if isinstance(frelfields, str) else frelfields
+    from_fields = (from_fields,) if isinstance(from_fields, str) else from_fields
     val = getattr(self, _key, None)
     if val is None:
-        val = ReverseRelation(ftype, frelfield, self, from_field)
+        val = ReverseRelation(ftype, frelfields, self, from_fields)
         setattr(self, _key, val)
     return val
 
 
 def _ro2o_getter(
-    self: Model, _key: str, ftype: type[Model], frelfield: str, from_field: str
+    self: Model,
+    _key: str,
+    ftype: type[Model],
+    frelfields: tuple[str, ...],
+    from_fields: tuple[str, ...],
 ) -> QuerySetSingle[Model | None]:
+    frelfields = (frelfields,) if isinstance(frelfields, str) else frelfields
+    from_fields = (from_fields,) if isinstance(from_fields, str) else from_fields
     if hasattr(self, _key):
         return getattr(self, _key)
 
-    val = ftype.filter(**{frelfield: getattr(self, from_field)}).first()
+    val = ftype.filter(
+        **dict(zip(frelfields, (getattr(self, field) for field in from_fields), strict=True))
+    ).first()
     setattr(self, _key, val)
     return val
 
@@ -205,11 +233,14 @@ class MetaInfo:
         "manager",
         "indexes",
         "pk_attr",
+        "pk_attrs",
         "generated_db_fields",
         "_model",
         "table_description",
         "pk",
+        "pk_fields",
         "db_pk_column",
+        "db_pk_columns",
         "db_native_fields",
         "db_default_fields",
         "db_complex_fields",
@@ -249,11 +280,14 @@ class MetaInfo:
         self.basequery_all_fields: Query = Query()
         self.basetable: Table = Table("")
         self.pk_attr: str = getattr(meta, "pk_attr", "")
+        self.pk_attrs: tuple[str, ...] = ()
         self.generated_db_fields: tuple[str, ...] = None  # type: ignore
         self._model: type[Model] = None  # type: ignore
         self.table_description: str = getattr(meta, "table_description", "")
         self.pk: Field = None  # type: ignore
+        self.pk_fields: tuple[Field, ...] = ()
         self.db_pk_column: str = ""
+        self.db_pk_columns: tuple[str, ...] = ()
         self.db_native_fields: list[tuple[str, str, Field]] = []
         self.db_default_fields: list[tuple[str, str, Field]] = []
         self.db_complex_fields: list[tuple[str, str, Field]] = []
@@ -318,6 +352,26 @@ class MetaInfo:
         self._generate_db_fields()
         self._resolve_index_expressions()
 
+    def get_pk_values(self, value: Any, *, validate: bool = True) -> tuple:
+        if validate and isinstance(self.pk, CompositePrimaryKey):
+            self.pk.validate_pk(value)
+        return tuple(value) if isinstance(value, tuple) else (value,)
+
+    def get_pk_db_values(self, instance: Model) -> tuple:
+        value = instance.pk
+        if isinstance(self.pk, CompositePrimaryKey):
+            return self.pk.to_db_value(value, instance)
+        return (self.pk.to_db_value(value, instance),)
+
+    def pk_is_set(self, instance: Model) -> bool:
+        value = instance.pk
+        if isinstance(self.pk, CompositePrimaryKey):
+            try:
+                return all(component is not None for component in self.pk.validate_pk(value))
+            except ParamsError:
+                return False
+        return value is not None
+
     def _resolve_index_expressions(self) -> None:
         for index in self.indexes:
             if isinstance(index, Index):
@@ -353,7 +407,7 @@ class MetaInfo:
 
         self._ordering_validated = True
         for field_name, _ in self._default_ordering:
-            if field_name.split("__")[0] not in self.fields:
+            if field_name != "pk" and field_name.split("__")[0] not in self.fields:
                 self._ordering_validated = False
                 break
 
@@ -362,12 +416,19 @@ class MetaInfo:
         for key in self.fk_fields:
             _key = f"_{key}"
             fk_field_object: ForeignKeyFieldInstance = self.fields_map[key]  # type: ignore
-            relation_field = cast(str, fk_field_object.source_field)
-            to_field = fk_field_object.to_field_instance.model_field_name
+            relation_fields = cast(tuple[str, ...], fk_field_object.source_fields)
+            to_fields = cast(
+                tuple[str, ...],
+                (
+                    fk_field_object.to_field,
+                )
+                if isinstance(fk_field_object.to_field, str)
+                else fk_field_object.to_field,
+            )
             property_kwargs: FkSetterKwargs = dict(
                 _key=_key,
-                relation_field=relation_field,
-                to_field=to_field,
+                relation_fields=relation_fields,
+                to_fields=to_fields,
             )
             setattr(
                 self._model,
@@ -402,8 +463,12 @@ class MetaInfo:
                         _rfk_getter,
                         _key=_key,
                         ftype=backward_fk_field_object.related_model,
-                        frelfield=backward_fk_field_object.relation_field,
-                        from_field=backward_fk_field_object.to_field_instance.model_field_name,
+                        frelfields=backward_fk_field_object.relation_field,
+                        from_fields=(
+                            backward_fk_field_object.to_field
+                            if isinstance(backward_fk_field_object.to_field, tuple)
+                            else (backward_fk_field_object.to_field or self.pk_attr,)
+                        ),
                     )
                 ),
             )
@@ -412,12 +477,17 @@ class MetaInfo:
         for key in self.o2o_fields:
             _key = f"_{key}"
             o2o_field_object = cast(OneToOneFieldInstance, self.fields_map[key])
-            relation_field = cast(str, o2o_field_object.source_field)
-            to_field = o2o_field_object.to_field_instance.model_field_name
-            property_kwargs = dict(
+            relation_fields = cast(tuple[str, ...], o2o_field_object.source_fields)
+            to_fields = cast(
+                tuple[str, ...],
+                ((o2o_field_object.to_field,))
+                if isinstance(o2o_field_object.to_field, str)
+                else o2o_field_object.to_field,
+            )
+            property_kwargs: FkSetterKwargs = dict(
                 _key=_key,
-                relation_field=relation_field,
-                to_field=to_field,
+                relation_fields=relation_fields,
+                to_fields=to_fields,
             )
             setattr(
                 self._model,
@@ -454,8 +524,12 @@ class MetaInfo:
                         _ro2o_getter,
                         _key=_key,
                         ftype=backward_o2o_field_object.related_model,
-                        frelfield=backward_o2o_field_object.relation_field,
-                        from_field=backward_o2o_field_object.to_field_instance.model_field_name,
+                        frelfields=backward_o2o_field_object.relation_field,
+                        from_fields=(
+                            backward_o2o_field_object.to_field
+                            if isinstance(backward_o2o_field_object.to_field, tuple)
+                            else (backward_o2o_field_object.to_field or self.pk_attr,)
+                        ),
                     ),
                 ),
             )
@@ -508,6 +582,27 @@ class ModelMeta(type):
         fields_db_projection: dict[str, str] = {}
         meta_class: Model.Meta = attrs.get("Meta", type("Meta", (), {}))
         pk_attr: str = "id"
+        pk_attrs: tuple[str, ...] = ()
+        primary_key = getattr(meta_class, "primary_key", None)
+        if primary_key is not None:
+            if not isinstance(primary_key, tuple):
+                raise ConfigurationError(
+                    f"Model {name} Meta.primary_key must be an ordered tuple of field names"
+                )
+            if len(primary_key) < 2:
+                raise ConfigurationError(
+                    f"Model {name} composite primary key must contain at least two fields"
+                )
+            if len(set(primary_key)) != len(primary_key):
+                raise ConfigurationError(
+                    f"Model {name} composite primary key contains duplicate fields"
+                )
+            missing = [field_name for field_name in primary_key if not isinstance(field_name, str)]
+            if missing:
+                raise ConfigurationError(
+                    f"Model {name} composite primary key field names must be strings"
+                )
+            pk_attrs = primary_key
 
         # Start searching for fields in the base classes.
         inherited_attrs: dict = {}
@@ -518,10 +613,35 @@ class ModelMeta(type):
             attrs = {**inherited_attrs, **attrs}
         is_abstract = getattr(meta_class, "abstract", False)
         if name != "Model":
-            attrs, pk_attr = cls._parse_custom_pk(attrs, pk_attr, name, is_abstract)
+            attrs, pk_attr, pk_attrs = cls._parse_custom_pk(
+                attrs, pk_attr, pk_attrs, name, is_abstract
+            )
         fields_map, filters, fk_fields, m2m_fields, o2o_fields = cls._dispatch_fields(
             attrs, fields_db_projection, is_abstract
         )
+        if pk_attrs and not is_abstract:
+            for field_name in pk_attrs:
+                field = fields_map.get(field_name)
+                if field is None or not field.has_db_field:
+                    raise ConfigurationError(
+                        f"Model {name} composite primary key field '{field_name}' "
+                        "does not exist"
+                    )
+                if field.null:
+                    raise ConfigurationError(
+                        f"Model {name} composite primary key field '{field_name}' "
+                        "cannot be nullable"
+                    )
+                if field.generated:
+                    raise ConfigurationError(
+                        f"Model {name} composite primary key field '{field_name}' "
+                        "cannot be DB-generated"
+                    )
+            for field_name, field in fields_map.items():
+                if field.pk and field_name not in pk_attrs:
+                    raise ConfigurationError(
+                        f"Can't create model {name} with a single primary key and a composite primary key"
+                    )
         if name != "Model":
             cls._check_field_name_conflicts(fields_map, name)
 
@@ -537,6 +657,7 @@ class ModelMeta(type):
             o2o_fields,
             m2m_fields,
             pk_attr,
+            pk_attrs,
         )
 
         # Inherit the default ordering from an abstract base model when the
@@ -606,7 +727,30 @@ class ModelMeta(type):
                     attrs[key] = value
 
     @staticmethod
-    def _parse_custom_pk(attrs: dict, pk_attr: str, name: str, is_abstract) -> tuple[dict, str]:
+    def _parse_custom_pk(
+        attrs: dict,
+        pk_attr: str,
+        composite_pk_attrs: tuple[str, ...],
+        name: str,
+        is_abstract,
+    ) -> tuple[dict, str, tuple[str, ...]]:
+        if composite_pk_attrs:
+            missing = [
+                field_name for field_name in composite_pk_attrs if field_name not in attrs
+            ]
+            if missing:
+                raise ConfigurationError(
+                    f"Can't create model {name} with composite primary key field '{missing[0]}': field does not exist"
+                )
+            declared_pk = [
+                key for key, value in attrs.items() if isinstance(value, Field) and value.pk
+            ]
+            if declared_pk:
+                raise ConfigurationError(
+                    f"Can't create model {name} with primary_key fields and Meta.primary_key"
+                )
+            return attrs, "", composite_pk_attrs
+
         custom_pk_present = False
         for key, value in attrs.items():
             if isinstance(value, Field) and value.pk:
@@ -631,7 +775,7 @@ class ModelMeta(type):
                     f"Can't create model {name} without explicit primary key if field 'id'"
                     " already present"
                 )
-        return attrs, pk_attr
+        return attrs, pk_attr, ()
 
     @staticmethod
     def _dispatch_fields(
@@ -699,6 +843,7 @@ class ModelMeta(type):
         o2o_fields: set[str],
         m2m_fields: set[str],
         pk_attr: str,
+        pk_attrs: tuple[str, ...] = (),
     ) -> MetaInfo:
         meta = MetaInfo(meta_class)
         meta.fields_map = fields_map
@@ -707,15 +852,39 @@ class ModelMeta(type):
         meta.fk_fields = fk_fields
         meta.o2o_fields = o2o_fields
         meta.m2m_fields = m2m_fields
-        meta.pk_attr = pk_attr
-        if pk_field := fields_map.get(pk_attr):
+        meta.pk_attrs = pk_attrs
+        if pk_attrs:
+            pk_fields = tuple(fields_map[field_name] for field_name in pk_attrs)
+            composite_pk = CompositePrimaryKey(pk_fields)
+            composite_pk.model = meta._model
+            composite_pk.model_field_name = "pk"
+            meta.pk_attr = ""
+            meta.pk = composite_pk
+            meta.pk_fields = pk_fields
+            db_columns = tuple(
+                field.source_field or field.model_field_name for field in pk_fields
+            )
+            meta.db_pk_columns = db_columns
+            filters.update(
+                get_filters_for_field(
+                    "pk",
+                    composite_pk,
+                    "__composite_pk__",
+                )
+            )
+        elif pk_field := fields_map.get(pk_attr):
+            meta.pk_attr = pk_attr
             meta.pk = pk_field
+            meta.pk_fields = (pk_field,)
             if pk_field.source_field:
                 meta.db_pk_column = pk_field.source_field
             elif isinstance(pk_field, OneToOneFieldInstance):
                 meta.db_pk_column = f"{pk_attr}_id"
             else:
                 meta.db_pk_column = pk_attr
+            meta.db_pk_columns = (meta.db_pk_column,)
+        if not pk_attrs:
+            meta.pk_attr = pk_attr
         meta._inited = False
         if not fields_map:
             meta.abstract = True
@@ -788,7 +957,11 @@ class Model(metaclass=ModelMeta):
                         f"You should first call .save() on {value} before referring to it"
                     )
                 setattr(self, key, value)
-                passed_fields.add(meta.fields_map[key].source_field)
+                relation_source_fields = getattr(meta.fields_map[key], "source_fields", ())
+                if relation_source_fields:
+                    passed_fields.update(relation_source_fields)
+                else:
+                    passed_fields.add(meta.fields_map[key].source_field)
             elif key in meta.fields_db_projection:
                 field_object = meta.fields_map[key]
                 if field_object.pk and field_object.generated:
@@ -884,9 +1057,23 @@ class Model(metaclass=ModelMeta):
         return type(other) is type(self) and self.pk == other.pk  # type: ignore[attr-defined]
 
     def _get_pk_val(self) -> Any:
+        if self._meta.pk_attrs:
+            try:
+                return tuple(getattr(self, field_name) for field_name in self._meta.pk_attrs)
+            except AttributeError:
+                return None
         return getattr(self, self._meta.pk_attr, None)
 
     def _set_pk_val(self, value: Any) -> None:
+        if self._meta.pk_attrs:
+            if value is None:
+                for field_name in self._meta.pk_attrs:
+                    setattr(self, field_name, None)
+                return
+            value = self._meta.pk.to_python_value(value)
+            for field_name, component in zip(self._meta.pk_attrs, value, strict=True):
+                setattr(self, field_name, component)
+            return
         setattr(self, self._meta.pk_attr, value)
 
     pk = property(_get_pk_val, _set_pk_val)
@@ -921,7 +1108,7 @@ class Model(metaclass=ModelMeta):
         try:
             return await cls.get(pk=key)
         except (DoesNotExist, ValueError) as e:
-            raise ObjectDoesNotExistError(cls, cls._meta.pk_attr, key) from e
+            raise ObjectDoesNotExistError(cls, cls._meta.pk_attr or "pk", key) from e
 
     def clone(self: MODEL, pk: Any = EMPTY) -> MODEL:
         """
@@ -935,7 +1122,8 @@ class Model(metaclass=ModelMeta):
         obj = copy(self)
         if pk is EMPTY:
             pk_field: Field = self._meta.pk
-            if pk_field.generated is False and pk_field.default is None:
+            is_composite = isinstance(pk_field, CompositePrimaryKey)
+            if is_composite or (pk_field.generated is False and pk_field.default is None):
                 raise ParamsError(
                     f"{self._meta.full_name} requires explicit primary key. Please use .clone(pk=<value>)"
                 )
@@ -1029,12 +1217,20 @@ class Model(metaclass=ModelMeta):
                 fk_field = meta.fields_map[key]
                 to_field_instance = getattr(fk_field, "to_field_instance", None)
                 if to_field_instance is not None:
-                    source_field = fk_field.source_field
-                    if source_field is not None:
+                    source_fields = getattr(fk_field, "source_fields", ())
+                    if len(source_fields) > 1:
+                        to_field_names = getattr(fk_field, "to_field", ())
+                        for source_field, to_field_name in zip(
+                            source_fields, to_field_names, strict=True
+                        ):
+                            component = getattr(value, to_field_name, None) if value else None
+                            _setattr(self, source_field, component)
+                            populated_source_fields.add(source_field)
+                    elif fk_field.source_field is not None:
                         if value is not None:
                             value = getattr(value, to_field_instance.model_field_name, None)
-                        _setattr(self, source_field, value)
-                        populated_source_fields.add(source_field)
+                        _setattr(self, fk_field.source_field, value)
+                        populated_source_fields.add(fk_field.source_field)
             else:
                 # Data fields, source fields, or unknown fields: store directly
                 _setattr(self, key, value)
@@ -1156,7 +1352,8 @@ class Model(metaclass=ModelMeta):
         if self._partial:
             if update_fields:
                 for field in update_fields:
-                    if not hasattr(self, self._meta.pk_attr):
+                    pk_attrs = self._meta.pk_attrs or (self._meta.pk_attr,)
+                    if any(not hasattr(self, pk_attr) for pk_attr in pk_attrs):
                         raise IncompleteInstanceError(
                             f"{self.__class__.__name__} is a partial model without primary key fetchd. Partial update not available"
                         )
@@ -1180,7 +1377,7 @@ class Model(metaclass=ModelMeta):
             created = False
         else:
             if self._saved_in_db or update_fields:
-                if self.pk is None:
+                if not self._meta.pk_is_set(self):
                     await executor.execute_insert(self)
                     created = True
                 else:
@@ -1728,6 +1925,7 @@ class Model(metaclass=ModelMeta):
                     "unique_together":      [...]   # List of List containing field names that
                                                     #  are unique together
                     "pk_field":             {...}   # Primary key field
+                    "pk_fields":            [...]   # Composite primary key fields, if any
                     "data_fields":          [...]   # Data fields
                     "fk_fields":            [...]   # Foreign Key fields FROM this model
                     "backward_fk_fields":   [...]   # Foreign Key fields TO this model
@@ -1747,11 +1945,19 @@ class Model(metaclass=ModelMeta):
             "docstring": inspect.cleandoc(cls.__doc__ or "") or None,
             "unique_together": cls._meta.unique_together or [],
             "indexes": [cls._describe_index(index, serializable) for index in cls._meta.indexes],
-            "pk_field": cls._meta.fields_map[cls._meta.pk_attr].describe(serializable),
+            "pk_field": cls._meta.pk.describe(serializable),
+            **(
+                {
+                    "pk_fields": [field.describe(serializable) for field in cls._meta.pk_fields]
+                }
+                if len(cls._meta.pk_fields) > 1
+                else {}
+            ),
             "data_fields": [
                 field.describe(serializable)
                 for name, field in cls._meta.fields_map.items()
-                if name != cls._meta.pk_attr and name in (cls._meta.fields - cls._meta.fetch_fields)
+                if name not in set(cls._meta.pk_attrs or (cls._meta.pk_attr,))
+                and name in (cls._meta.fields - cls._meta.fetch_fields)
             ],
             "fk_fields": [
                 field.describe(serializable)

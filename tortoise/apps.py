@@ -173,36 +173,83 @@ class Apps:
                 related_model = get_related_model(related_app_name, related_model_name)
 
             if to_field := fk_object.to_field:
-                related_field = related_model._meta.fields_map.get(to_field)
-                if not related_field:
-                    raise ConfigurationError(
-                        f'there is no field named "{to_field}" in model "{related_model_name}"'
-                    )
-                if not related_field.unique:
-                    raise ConfigurationError(
-                        f'field "{to_field}" in model "{related_model_name}" is not unique'
-                    )
+                if isinstance(to_field, tuple):
+                    related_fields = []
+                    for target_field_name in to_field:
+                        target_field = related_model._meta.fields_map.get(target_field_name)
+                        if not target_field:
+                            raise ConfigurationError(
+                                f'there is no field named "{target_field_name}" '
+                                f'in model "{related_model_name}"'
+                            )
+                        related_fields.append(target_field)
+                    if len(set(to_field)) != len(to_field):
+                        raise ConfigurationError("Composite to_field contains duplicate fields")
+                    related_field = related_fields[0]
+                else:
+                    related_field = related_model._meta.fields_map.get(to_field)
+                    if not related_field:
+                        raise ConfigurationError(
+                            f'there is no field named "{to_field}" in model "{related_model_name}"'
+                        )
+                    if not related_field.unique:
+                        raise ConfigurationError(
+                            f'field "{to_field}" in model "{related_model_name}" is not unique'
+                        )
+                    related_fields = [related_field]
             else:
-                fk_object.to_field = related_model._meta.pk_attr
-                related_field = related_model._meta.pk
-            key_fk_object = copy(related_field)
+                if len(related_model._meta.pk_fields) > 1:
+                    fk_object.to_field = related_model._meta.pk_attrs
+                    related_fields = list(related_model._meta.pk_fields)
+                else:
+                    fk_object.to_field = related_model._meta.pk_attr
+                    related_fields = [related_model._meta.pk]
+                related_field = related_fields[0]
+
+            fk_object.to_field_instances = tuple(related_fields)
             fk_object.to_field_instance = related_field
-            fk_object.field_type = fk_object.to_field_instance.field_type
+            fk_object.field_type = related_field.field_type
+            is_composite_fk = len(related_fields) > 1
 
             key_field = f"{field}_id"
-            key_fk_object.reference = fk_object
-            key_fk_object.source_field = fk_object.source_field or key_field
-            for attr in ("index", "default", "null", "generated", "description", "db_default"):
-                setattr(key_fk_object, attr, getattr(fk_object, attr))
-            if is_o2o:
-                key_fk_object.pk = fk_object.pk
-                key_fk_object.unique = fk_object.unique
-            else:
-                key_fk_object.pk = False
-                key_fk_object.unique = False
-            model._meta.add_field(key_field, key_fk_object)
+            requested_source_field = fk_object.source_field
+            key_fields = []
+            for index, related_field_item in enumerate(related_fields):
+                key_fk_object = copy(related_field_item)
+                component_name = related_field_item.model_field_name
+                component_key_field = (
+                    f"{field}_{component_name}" if is_composite_fk else key_field
+                )
+                if requested_source_field:
+                    if is_composite_fk:
+                        source_column = f"{requested_source_field}_{component_name}"
+                    else:
+                        source_column = requested_source_field
+                else:
+                    source_column = component_key_field
+                key_fk_object.reference = fk_object
+                key_fk_object.source_field = source_column
+                for attr in (
+                    "index",
+                    "default",
+                    "null",
+                    "generated",
+                    "description",
+                    "db_default",
+                ):
+                    setattr(key_fk_object, attr, getattr(fk_object, attr))
+                if is_o2o:
+                    key_fk_object.pk = fk_object.pk
+                    key_fk_object.unique = fk_object.unique
+                else:
+                    key_fk_object.pk = False
+                    key_fk_object.unique = False
+                model._meta.add_field(component_key_field, key_fk_object)
+                key_fields.append(component_key_field)
+
+            fk_object.source_field = tuple(key_fields) if is_composite_fk else key_fields[0]
+            fk_object.source_fields = tuple(key_fields)
             fk_object.related_model = related_model
-            fk_object.source_field = key_field
             if (backward_relation_name := fk_object.related_name) is not False:
                 if not backward_relation_name:
                     backward_relation_name = f"{model._meta.db_table}s"
@@ -215,28 +262,41 @@ class Apps:
                 fk_relation = (
                     BackwardOneToOneRelation(
                         model,
-                        key_field,
-                        key_fk_object.source_field,
+                        fk_object.source_field,
+                        tuple(
+                            model._meta.fields_map[name].source_field for name in key_fields
+                        ),
                         null=True,
                         description=fk_object.description,
                     )
                     if is_o2o
                     else BackwardFKRelation(
                         model,
-                        key_field,
-                        key_fk_object.source_field,
+                        fk_object.source_field,
+                        tuple(
+                            model._meta.fields_map[name].source_field for name in key_fields
+                        ),
                         null=fk_object.null,
                         description=fk_object.description,
                     )
                 )
                 fk_relation.to_field_instance = fk_object.to_field_instance
+                fk_relation.to_field_instances = fk_object.to_field_instances
+                fk_relation.source_fields = fk_object.source_fields
+                fk_relation.to_field = fk_object.to_field
                 related_model._meta.add_field(backward_relation_name, fk_relation)
             if is_o2o and fk_object.pk:
-                model._meta.pk_attr = key_field
+                model._meta.pk_attr = key_fields[0] if not is_composite_fk else ""
+                if is_composite_fk:
+                    model._meta.pk_attrs = tuple(key_fields)
 
         for app_name, app in self.apps.items():
             for model_name, model in app.items():
                 if model._meta._inited:
+                    continue
+                if model._meta.pk_attrs and not all(
+                    field_name in model._meta.fields_map for field_name in model._meta.pk_attrs
+                ):
                     continue
                 model._meta._inited = True
                 if not model._meta.db_table:

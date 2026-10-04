@@ -13,12 +13,14 @@ from pypika_tortoise.queries import QueryBuilder
 from tortoise.exceptions import OperationalError, UnSupportedError
 from tortoise.expressions import Expression, ResolveContext
 from tortoise.fields.base import DatabaseDefault
+from tortoise.fields.base import CompositePrimaryKey
 from tortoise.fields.relational import (
     BackwardFKRelation,
     BackwardOneToOneRelation,
     ManyToManyFieldInstance,
     RelationalField,
 )
+from tortoise.expressions import Q
 from tortoise.query_utils import QueryModifier
 
 if TYPE_CHECKING:  # pragma: nocoverage
@@ -72,9 +74,18 @@ class BaseExecutor:
 
             table = self.model._meta.basetable
             basequery = cast(QueryBuilder, self.model._meta.basequery)
-            self.delete_query = str(
-                basequery.where(table[self.model._meta.db_pk_column] == self.parameter(0)).delete()
-            )
+            if isinstance(self.model._meta.pk, CompositePrimaryKey):
+                criterion = None
+                for position, db_column in enumerate(self.model._meta.db_pk_columns):
+                    condition = table[db_column] == self.parameter(position)
+                    criterion = condition if criterion is None else criterion & condition
+                self.delete_query = str(basequery.where(criterion).delete())
+            else:
+                self.delete_query = str(
+                    basequery.where(
+                        table[self.model._meta.db_pk_column] == self.parameter(0)
+                    ).delete()
+                )
             self.update_cache: dict[str, str] = {}
 
             EXECUTOR_CACHE[key] = (
@@ -387,19 +398,22 @@ class BaseExecutor:
             return
 
         # Need PK to SELECT
-        if instance.pk is None:
+        if not self.model._meta.pk_is_set(instance):
             return
 
         # Build SELECT via pypika for proper quoting
         table = self.model._meta.basetable
-        pk_col = self.model._meta.db_pk_column
-        query = (
-            self.db.query_class.from_(table)
-            .select(*fields_to_fetch)
-            .where(table[pk_col] == self.parameter(0))
-        )
-        pk_value = self.model._meta.pk.to_db_value(instance.pk, instance)
-        _, rows = await self.db.execute_query(str(query), [pk_value])
+        query = self.db.query_class.from_(table).select(*fields_to_fetch)
+        pk_values = self.model._meta.get_pk_db_values(instance)
+        if len(pk_values) == 1:
+            query = query.where(table[self.model._meta.db_pk_column] == self.parameter(0))
+        else:
+            pk_criterion = None
+            for position, column in enumerate(self.model._meta.db_pk_columns):
+                condition = table[column] == self.parameter(position)
+                pk_criterion = condition if pk_criterion is None else pk_criterion & condition
+            query = query.where(pk_criterion)
+        _, rows = await self.db.execute_query(str(query), list(pk_values))
 
         if rows:
             row = rows[0]
@@ -432,7 +446,7 @@ class BaseExecutor:
                 if update_fields:
                     raise OperationalError(f"Can't update generated field {field}")
                 continue
-            if not field_object.pk:
+            if field not in self.model._meta.pk_attrs and not field_object.pk:
                 if field not in expressions.keys():
                     query = query.set(db_column, self.parameter(parameter_idx))
                     parameter_idx += 1
@@ -451,7 +465,18 @@ class BaseExecutor:
                     )
                     query = query.set(db_column, value)
 
-        query = query.where(table[self.model._meta.db_pk_column] == self.parameter(parameter_idx))
+        if isinstance(self.model._meta.pk, CompositePrimaryKey):
+            pk_criterion = None
+            for db_column in self.model._meta.db_pk_columns:
+                condition = table[db_column] == self.parameter(parameter_idx)
+                parameter_idx += 1
+                pk_criterion = condition if pk_criterion is None else pk_criterion & condition
+            query = query.where(pk_criterion)
+        else:
+            query = query.where(
+                table[self.model._meta.db_pk_column] == self.parameter(parameter_idx)
+            )
+            parameter_idx += 1
 
         sql = query.get_sql()
         if not expressions:
@@ -472,7 +497,7 @@ class BaseExecutor:
         effective_fields: list[str] = []
         for field in source_fields:
             field_obj = self.model._meta.fields_map[field]
-            if field_obj.pk:
+            if field in self.model._meta.pk_attrs or field_obj.pk:
                 if user_specified:
                     raise OperationalError(
                         f"Can't update pk field, use `{self.model.__name__}.create` instead."
@@ -500,7 +525,7 @@ class BaseExecutor:
                 field_obj = self.model._meta.fields_map[field]
                 values.append(field_obj.to_db_value(instance_field, instance))
 
-        values.append(self.model._meta.pk.to_db_value(instance.pk, instance))
+        values.extend(self.model._meta.get_pk_db_values(instance))
         return (
             await self.db.execute_query(self.get_update_sql(effective_fields, expressions), values)
         )[0]
@@ -508,7 +533,7 @@ class BaseExecutor:
     async def execute_delete(self, instance: type[Model] | Model) -> int:
         return (
             await self.db.execute_query(
-                self.delete_query, [self.model._meta.pk.to_db_value(instance.pk, instance)]
+                self.delete_query, list(self.model._meta.get_pk_db_values(instance))
             )
         )[0]
 
@@ -519,38 +544,69 @@ class BaseExecutor:
         related_query: tuple[str | None, QuerySet],
     ) -> Iterable[Model]:
         to_attr, related_query = related_query
-        related_objects_for_fetch: dict[str, list] = {}
         related_field: BackwardFKRelation = self.model._meta.fields_map[field]  # type: ignore
-        related_field_name = related_field.to_field_instance.model_field_name
-        relation_field = related_field.relation_field
-
-        for instance in instance_list:
-            if relation_field not in related_objects_for_fetch:
-                related_objects_for_fetch[relation_field] = []
-            related_objects_for_fetch[relation_field].append(
-                instance._meta.fields_map[related_field_name].to_db_value(
-                    getattr(instance, related_field_name), instance
+        relation_fields = (
+            related_field.relation_field
+            if isinstance(related_field.relation_field, tuple)
+            else (related_field.relation_field,)
+        )
+        related_field_names = (
+            (related_field.to_field,)
+            if isinstance(related_field.to_field, str)
+            else (related_field.related_model._meta.pk_attr,)
+        )
+        parent_field_names = (
+            (related_field.to_field,)
+            if isinstance(related_field.to_field, str)
+            else related_field.to_field
+        )
+        if isinstance(related_field.to_field, tuple):
+            related_field_names = related_field.to_field
+            parent_field_names = related_field.to_field
+            conditions = [
+                Q(**dict(zip(relation_fields, instance.pk, strict=True)))
+                for instance in instance_list
+            ]
+            condition = conditions[0]
+            for extra_condition in conditions[1:]:
+                condition |= extra_condition
+        else:
+            related_objects_for_fetch: dict[str, list] = {}
+            for instance in instance_list:
+                relation_field = relation_fields[0]
+                parent_field_name = parent_field_names[0]
+                related_objects_for_fetch.setdefault(relation_field, []).append(
+                    getattr(instance, parent_field_name)
                 )
+            condition = Q(
+                **{f"{key}__in": value for key, value in related_objects_for_fetch.items()}
             )
 
         related_query.resolve_ordering(
             related_query.model, related_query.model._meta.basetable, [], {}
         )
-        related_object_list = await related_query.filter(
-            **{f"{k}__in": v for k, v in related_objects_for_fetch.items()}
-        )
+        related_object_list = await related_query.filter(condition)
 
-        related_object_map: dict[str, list] = {}
+        related_object_map: dict[Any, list] = {}
         for entry in related_object_list:
-            object_id = getattr(entry, relation_field)
+            object_id = (
+                tuple(getattr(entry, name) for name in relation_fields)
+                if len(relation_fields) > 1
+                else getattr(entry, relation_fields[0])
+            )
             if object_id in related_object_map:
                 related_object_map[object_id].append(entry)
             else:
                 related_object_map[object_id] = [entry]
         for instance in instance_list:
+            object_key = (
+                instance.pk
+                if len(relation_fields) > 1
+                else getattr(instance, related_field_names[0])
+            )
             relation_container = getattr(instance, field)
             relation_container._set_result_for_query(
-                related_object_map.get(getattr(instance, related_field_name), []),
+                related_object_map.get(object_key, []),
                 to_attr,
             )
         return instance_list
@@ -562,31 +618,61 @@ class BaseExecutor:
         related_query: tuple[str | None, QuerySet],
     ) -> Iterable[Model]:
         to_attr, related_query = related_query
-        related_objects_for_fetch: dict[str, list] = {}
         related_field: BackwardOneToOneRelation = self.model._meta.fields_map[field]  # type: ignore
-        related_field_name = related_field.to_field_instance.model_field_name
-        relation_field = related_field.relation_field
-
-        for instance in instance_list:
-            if relation_field not in related_objects_for_fetch:
-                related_objects_for_fetch[relation_field] = []
-            related_objects_for_fetch[relation_field].append(
-                instance._meta.fields_map[related_field_name].to_db_value(
-                    getattr(instance, related_field_name), instance
-                )
-            )
-
-        related_object_list = await related_query.filter(
-            **{f"{k}__in": v for k, v in related_objects_for_fetch.items()}
+        relation_fields = (
+            related_field.relation_field
+            if isinstance(related_field.relation_field, tuple)
+            else (related_field.relation_field,)
         )
+        related_field_names = (
+            (related_field.to_field,)
+            if isinstance(related_field.to_field, str)
+            else (related_field.related_model._meta.pk_attr,)
+        )
+        parent_field_names = (
+            (related_field.to_field,)
+            if isinstance(related_field.to_field, str)
+            else related_field.to_field
+        )
+        if isinstance(related_field.to_field, tuple):
+            related_field_names = related_field.to_field
+            parent_field_names = related_field.to_field
+            conditions = [
+                Q(**dict(zip(relation_fields, instance.pk, strict=True)))
+                for instance in instance_list
+            ]
+            condition = conditions[0]
+            for extra_condition in conditions[1:]:
+                condition |= extra_condition
+        else:
+            related_objects_for_fetch = {}
+            for instance in instance_list:
+                related_field_name = related_field_names[0]
+                parent_field_name = parent_field_names[0]
+                related_objects_for_fetch.setdefault(relation_fields[0], []).append(
+                    getattr(instance, parent_field_name)
+                )
+            condition = Q(
+                **{f"{key}__in": value for key, value in related_objects_for_fetch.items()}
+            )
+        related_object_list = await related_query.filter(condition)
 
         related_object_map = {}
         for entry in related_object_list:
-            object_id = getattr(entry, relation_field)
+            object_id = (
+                tuple(getattr(entry, name) for name in relation_fields)
+                if len(relation_fields) > 1
+                else getattr(entry, relation_fields[0])
+            )
             related_object_map[object_id] = entry
 
         for instance in instance_list:
-            obj = related_object_map.get(getattr(instance, related_field_name), None)
+            object_key = (
+                instance.pk
+                if len(relation_fields) > 1
+                else getattr(instance, related_field_names[0])
+            )
+            obj = related_object_map.get(object_key, None)
             setattr(
                 instance,
                 f"_{field}",
@@ -692,17 +778,37 @@ class BaseExecutor:
         to_attr, related_queryset = related_query
         related_objects_for_fetch: dict[str, list] = {}
         relation_key_field = f"{field}_id"
+        relation_key_fields = (
+            getattr(instance_list[0]._meta.fields_map[field], "source_fields", ())
+            if instance_list
+            else ()
+        )
+        composite_related_values: list = []
         model_to_field: dict[type[Model], str] = {}
         for instance in instance_list:
-            if (value := getattr(instance, relation_key_field)) is not None:
+            if len(relation_key_fields) > 1:
+                value = tuple(getattr(instance, key_field) for key_field in relation_key_fields)
+            else:
+                value = getattr(instance, relation_key_field)
+            if value is not None and not (
+                isinstance(value, tuple) and any(component is None for component in value)
+            ):
                 if (model_cls := instance.__class__) in model_to_field:
                     key = model_to_field[model_cls]
                 else:
                     related_field = cast(RelationalField, instance._meta.fields_map[field])
-                    model_to_field[model_cls] = key = related_field.to_field
-                    if key not in related_objects_for_fetch:
-                        related_objects_for_fetch[key] = []
-                if value not in (values := related_objects_for_fetch[key]):
+                    model_to_field[model_cls] = key = (
+                        "pk"
+                        if isinstance(related_field.to_field, tuple)
+                        else related_field.to_field
+                    )
+                if key not in related_objects_for_fetch:
+                    related_objects_for_fetch[key] = []
+                values = related_objects_for_fetch[key]
+                if len(relation_key_fields) > 1:
+                    if value not in composite_related_values:
+                        composite_related_values.append(value)
+                elif value not in values:
                     values.append(value)
             else:
                 setattr(instance, field, None)
@@ -715,15 +821,25 @@ class BaseExecutor:
                 else:
                     k += "__in"
                 conditions[k] = v
+            if composite_related_values:
+                conditions["pk__in"] = composite_related_values
             related_object_list = await related_queryset.filter(**conditions)
             if len(model_to_field) > 1:
                 related_object_map = {
                     getattr(obj, model_to_field[obj.__class__]): obj for obj in related_object_list
                 }
             else:
-                related_object_map = {getattr(obj, key): obj for obj in related_object_list}
+                if len(relation_key_fields) > 1:
+                    related_object_map = {obj.pk: obj for obj in related_object_list}
+                else:
+                    related_object_map = {getattr(obj, key): obj for obj in related_object_list}
             for instance in instance_list:
-                obj = related_object_map.get(getattr(instance, relation_key_field))
+                lookup_value = (
+                    tuple(getattr(instance, key_field) for key_field in relation_key_fields)
+                    if len(relation_key_fields) > 1
+                    else getattr(instance, relation_key_field)
+                )
+                obj = related_object_map.get(lookup_value)
                 setattr(instance, field, obj)
                 if to_attr:
                     setattr(instance, to_attr, obj)

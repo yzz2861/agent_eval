@@ -174,8 +174,7 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
         """
         pk_cols = [
             table[self.model._meta.fields_db_projection[name]]
-            for name, field in self.model._meta.fields_map.items()
-            if field.pk
+            for name in (self.model._meta.pk_attrs or (self.model._meta.pk_attr,))
         ]
         inner = copy(self.query)
         inner._selects = list(pk_cols)
@@ -241,7 +240,20 @@ class AwaitableQuery(_ChooseDBMixin[MODEL], Generic[MODEL]):
         if not orderings and self.model._meta.ordering and not annotations:
             orderings = self.model._meta.ordering
 
+        expanded_orderings = []
         for ordering in orderings:
+            field_name = ordering[0]
+            if field_name == "pk" and len(model._meta.pk_fields) > 1:
+                expanded_orderings.extend(
+                    (pk_field.model_field_name, ordering[1])
+                    for pk_field in model._meta.pk_fields
+                )
+            elif field_name.startswith("pk__"):
+                expanded_orderings.append(ordering)
+            else:
+                expanded_orderings.append(ordering)
+
+        for ordering in expanded_orderings:
             field_name = ordering[0]
             if field_name in model._meta.fetch_fields:
                 raise FieldError(
@@ -485,7 +497,8 @@ class QuerySet(AwaitableQuery[MODEL]):
             field_name, order_type = self._resolve_ordering_string(ordering, reverse=reverse)
 
             if not (
-                field_name.split("__")[0] in self.model._meta.fields
+                field_name == "pk"
+                or field_name.split("__")[0] in self.model._meta.fields
                 or field_name in self._annotations
             ):
                 raise FieldError(f"Unknown field {field_name} for model {self.model.__name__}")
@@ -909,8 +922,11 @@ class QuerySet(AwaitableQuery[MODEL]):
                 (field, Order.desc if order_type == Order.asc else Order.asc)
                 for field, order_type in queryset._orderings
             ]
-        elif pk := self.model._meta.pk:
-            new_ordering = [(pk.model_field_name, Order.desc)]
+        elif self.model._meta.pk:
+            new_ordering = [
+                (pk_field.model_field_name, Order.desc)
+                for pk_field in self.model._meta.pk_fields
+            ]
         else:
             raise FieldError(
                 f"QuerySet has no ordering and model {self.model.__name__} has no pk defined"
@@ -1406,6 +1422,17 @@ class UpdateQuery(AwaitableQuery):
                 raise IntegrityError(f"Field {key} is generated and can not be updated")
             if isinstance(field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
                 self.model._validate_relation_type(key, value)
+                if len(field_object.source_fields) > 1:
+                    for backing_field, target_field in zip(
+                        field_object.source_fields, field_object.to_field, strict=True
+                    ):
+                        db_field = self.model._meta.fields_map[backing_field].source_field
+                        component = getattr(value, target_field, None) if value else None
+                        component = self.model._meta.fields_map[backing_field].to_db_value(
+                            component, None
+                        )
+                        self.query = self.query.set(db_field, component)
+                    continue
                 fk_field: str = field_object.source_field  # type: ignore[assignment]
                 db_field = self.model._meta.fields_map[fk_field].source_field
                 value = self.model._meta.fields_map[fk_field].to_db_value(
@@ -2083,16 +2110,29 @@ class BulkUpdateQuery(UpdateQuery, Generic[MODEL]):
             )
 
         self.resolve_filters()
-        pk_attr = self.model._meta.pk_attr
-        source_pk_attr = self.model._meta.fields_map[pk_attr].source_field or pk_attr
-        pk = Field(source_pk_attr)
+        pk_attrs = self.model._meta.pk_attrs or (self.model._meta.pk_attr,)
+        composite_pk = len(pk_attrs) > 1
+        pk = (
+            Tuple(
+                *(
+                    Field(self.model._meta.fields_map[name].source_field or name)
+                    for name in pk_attrs
+                )
+            )
+            if composite_pk
+            else Field(self.model._meta.fields_map[pk_attrs[0]].source_field or pk_attrs[0])
+        )
         for objects_item in chunk(self._objects, self._batch_size):
             query = copy(self.query)
             for field in self.fields:
                 case = Case()
                 pk_list = []
                 for obj in objects_item:
-                    pk_value = self.model._meta.fields_map[pk_attr].to_db_value(obj.pk, None)
+                    pk_value = (
+                        tuple(self.model._meta.get_pk_db_values(obj))
+                        if composite_pk
+                        else self.model._meta.fields_map[pk_attrs[0]].to_db_value(obj.pk, None)
+                    )
                     field_obj = obj._meta.fields_map[field]
                     field_value = field_obj.to_db_value(getattr(obj, field), obj)
                     case.when(

@@ -97,9 +97,23 @@ In Tortoise ORM, every model must have a primary key.
 That primary key will be accessible through a reserved field ``pk`` which will be an alias of whichever field has been nominated as a primary key.
 That alias field can be used as a field name when doing filtering e.g. ``.filter(pk=...)`` etc…
 
+A composite primary key is declared by setting an ordered tuple of field names in ``Meta.primary_key``. The model's ``pk`` is then a tuple in that order, and each component still uses its own database field conversion.
+
+.. code-block:: python3
+
+    class Reservation(Model):
+        room_id = fields.IntField()
+        day = fields.DateField()
+        guest = fields.CharField(max_length=120)
+
+        class Meta:
+            primary_key = ("room_id", "day")
+
+    reservation = await Reservation.get(pk=(42, date(2026, 4, 27)))
+
 .. note::
 
-    We currently support single (non-composite) primary keys of any indexable field type, but only these field types are recommended:
+    Single primary keys can use any indexable field type, but these field types are recommended:
 
 .. code-block:: python3
 

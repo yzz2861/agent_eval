@@ -6,6 +6,7 @@ from copy import copy
 from typing import TYPE_CHECKING, Any, cast
 
 from pypika_tortoise import Table
+from pypika_tortoise.terms import Tuple
 from pypika_tortoise.terms import (
     Criterion,
     JSONAttributeCriterion,
@@ -53,35 +54,54 @@ def get_joins_for_related_field(
             )
         )
     elif isinstance(related_field, BackwardFKRelation):
-        to_field_source_field = (
-            related_field.to_field_instance.source_field
-            or related_field.to_field_instance.model_field_name
-        )
-
         if table == related_table:
             related_table = related_table.as_(f"{table.get_table_name()}__{related_field_name}")
-        required_joins.append(
-            (
-                related_table,
-                table[to_field_source_field] == related_table[related_field.relation_source_field],
-            )
+        source_fields = (
+            related_field.relation_source_field
+            if isinstance(related_field.relation_source_field, tuple)
+            else (related_field.relation_source_field,)
         )
-    else:
-        to_field_source_field = (
+        target_fields = tuple(
+            field.source_field or field.model_field_name
+            for field in related_field.to_field_instances
+        ) or (
             related_field.to_field_instance.source_field
-            or related_field.to_field_instance.model_field_name
+            or related_field.to_field_instance.model_field_name,
         )
-
-        from_field = related_field.model._meta.fields_map[related_field.source_field]  # type: ignore
-        from_field_source_field = from_field.source_field or from_field.model_field_name
-
-        related_table = related_table.as_(f"{table.get_table_name()}__{related_field_name}")
-        required_joins.append(
-            (
-                related_table,
-                related_table[to_field_source_field] == table[from_field_source_field],
+        if len(source_fields) == 1:
+            criterion = table[target_fields[0]] == related_table[source_fields[0]]
+        else:
+            criterion = Tuple(*(table[field] for field in target_fields)) == Tuple(
+                *(related_table[field] for field in source_fields)
             )
+        required_joins.append((related_table, criterion))
+    else:
+        related_table = related_table.as_(f"{table.get_table_name()}__{related_field_name}")
+        target_fields = tuple(
+            field.source_field or field.model_field_name
+            for field in related_field.to_field_instances
+        ) or (
+            related_field.to_field_instance.source_field
+            or related_field.to_field_instance.model_field_name,
         )
+        source_fields = tuple(
+            related_field.model._meta.fields_map[field_name].source_field or field_name
+            for field_name in related_field.source_fields
+        ) or (
+            (
+                related_field.model._meta.fields_map[
+                    related_field.source_field  # type: ignore[index]
+                ].source_field
+                or related_field.source_field
+            ),
+        )
+        if len(target_fields) == 1:
+            criterion = related_table[target_fields[0]] == table[source_fields[0]]
+        else:
+            criterion = Tuple(*(related_table[field] for field in target_fields)) == Tuple(
+                *(table[field] for field in source_fields)
+            )
+        required_joins.append((related_table, criterion))
     return required_joins
 
 

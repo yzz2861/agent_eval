@@ -14,6 +14,7 @@ from pypika_tortoise.terms import (
     ArithmeticExpression,
     Criterion,
     Term,
+    Tuple,
     ValueWrapper,
 )
 from pypika_tortoise.terms import Function as PypikaFunction
@@ -394,22 +395,49 @@ class Q:
         field_object = None
         if "table" in filter_info:
             # join the table
-            join = (
-                filter_info["table"],
-                table[model._meta.db_pk_column]
-                == filter_info["table"][filter_info["backward_key"]],
-            )
-            if "value_encoder" in filter_info:
-                value = filter_info["value_encoder"](value, model)
+            if filter_info.get("composite_pk"):
+                backward_keys = filter_info["backward_key"]
+                if not isinstance(backward_keys, tuple):
+                    backward_keys = (backward_keys,)
+                join = (
+                    filter_info["table"],
+                    Tuple(*(table[column] for column in model._meta.db_pk_columns))
+                    == Tuple(
+                        *(filter_info["table"][column] for column in backward_keys)
+                    ),
+                )
+                value = filter_info["value_encoder"](
+                    value,
+                    model,
+                    filter_info.get("value_field", model._meta.pk),
+                )
+            else:
+                join = (
+                    filter_info["table"],
+                    table[model._meta.db_pk_column]
+                    == filter_info["table"][filter_info["backward_key"]],
+                )
+                if "value_encoder" in filter_info:
+                    value = filter_info["value_encoder"](value, model)
             table = filter_info["table"]
         elif not isinstance(value, Term):
-            field_object = model._meta.fields_map[filter_info["field"]]
+            field_object = (
+                model._meta.pk
+                if filter_info.get("composite_pk")
+                else model._meta.fields_map[filter_info["field"]]
+            )
             value = (
                 filter_info["value_encoder"](value, model, field_object)
                 if "value_encoder" in filter_info
                 else field_object.to_db_value(value, model)
             )
         op = filter_info["operator"]
+        if filter_info.get("composite_pk"):
+            source_fields = filter_info["source_fields"]
+            terms = [table[source_field] for source_field in source_fields]
+            if op.__name__ == "is_in":
+                return Tuple(*terms).isin([Tuple(*values) for values in value]), None
+            return Tuple(*terms) == Tuple(*value), None
         term: Term = table[filter_info.get("source_field", filter_info["field"])]
         if field_object is not None:
             func = field_object.get_for_dialect(
@@ -424,6 +452,12 @@ class Q:
         self, resolve_context: ResolveContext, key: str, value: Any, table: Table
     ) -> QueryModifier:
         if (
+            key in resolve_context.model._meta.filters
+            and resolve_context.model._meta.filters[key].get("composite_pk")
+            and hasattr(value, "pk")
+        ):
+            filter_value = value.pk
+        elif (
             key not in resolve_context.model._meta.filters
             and key.split("__")[0] in resolve_context.model._meta.fetch_fields
         ):
@@ -443,7 +477,7 @@ class Q:
             or key in resolve_context.model._meta.o2o_fields
         ):
             field_object = resolve_context.model._meta.fields_map[key]
-            filter_key = cast(str, field_object.source_field)
+            filter_key = cast(str | tuple[str, ...], field_object.source_field)
             filter_value = getattr(value, "pk", value)
         elif key in resolve_context.model._meta.m2m_fields:
             filter_value = getattr(value, "pk", value)
@@ -470,6 +504,16 @@ class Q:
         modifier = QueryModifier()
         for raw_key, raw_value in self.filters.items():
             key, value = self._get_actual_filter_params(resolve_context, raw_key, raw_value)
+            if isinstance(key, tuple):
+                if hasattr(value, "pk"):
+                    value = value.pk
+                composite_modifier = QueryModifier()
+                for component_key, component_value in zip(key, value, strict=True):
+                    composite_modifier &= self._resolve_regular_kwarg(
+                        resolve_context, component_key, component_value, resolve_context.table
+                    )
+                modifier &= composite_modifier
+                continue
             if key in resolve_context.custom_filters:
                 filter_modifier = self._resolve_custom_kwarg(
                     resolve_context, key, value, resolve_context.table

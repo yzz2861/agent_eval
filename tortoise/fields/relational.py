@@ -38,9 +38,9 @@ class ReverseRelation(Generic[MODEL]):
     def __init__(
         self,
         remote_model: type[MODEL],
-        relation_field: str,
+        relation_field: str | tuple[str, ...],
         instance: Model,
-        from_field: str,
+        from_field: str | tuple[str, ...],
     ) -> None:
         self.remote_model = remote_model
         self.relation_field = relation_field
@@ -56,9 +56,15 @@ class ReverseRelation(Generic[MODEL]):
             raise OperationalError(
                 "This objects hasn't been instanced, call .save() before calling related queries"
             )
-        return self.remote_model.filter(
-            **{self.relation_field: getattr(self.instance, self.from_field)}
-        )
+        if isinstance(self.relation_field, tuple):
+            from_fields = self.from_field if isinstance(self.from_field, tuple) else (self.from_field,)
+            filters = {
+                relation_field: getattr(self.instance, from_field)
+                for relation_field, from_field in zip(self.relation_field, from_fields, strict=True)
+            }
+        else:
+            filters = {self.relation_field: getattr(self.instance, self.instance._meta.pk_attr)}
+        return self.remote_model.filter(**filters)
 
     def __contains__(self, item: Any) -> bool:
         self._raise_if_not_fetched()
@@ -146,7 +152,12 @@ class ReverseRelation(Generic[MODEL]):
             )
 
         # Inject foreign key relationship automatically
-        kwargs[self.relation_field] = getattr(self.instance, self.from_field)
+        if isinstance(self.relation_field, tuple):
+            from_fields = self.from_field if isinstance(self.from_field, tuple) else (self.from_field,)
+            for relation_field, from_field in zip(self.relation_field, from_fields, strict=True):
+                kwargs[relation_field] = getattr(self.instance, from_field)
+        else:
+            kwargs[self.relation_field] = getattr(self.instance, self.instance._meta.pk_attr)
 
         # Call remote model's create method
         return await self.remote_model.create(using_db=using_db, **kwargs)
@@ -267,14 +278,16 @@ class RelationalField(Field[MODEL]):
     def __init__(
         self,
         related_model: type[MODEL],
-        to_field: str | None = None,
+        to_field: str | tuple[str, ...] | None = None,
         db_constraint: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.related_model: type[MODEL] = related_model
-        self.to_field: str = to_field  # type: ignore
+        self.to_field: str | tuple[str, ...] = to_field  # type: ignore
         self.to_field_instance: Field = None  # type: ignore
+        self.to_field_instances: tuple[Field, ...] = ()
+        self.source_fields: tuple[str, ...] = ()
         self.db_constraint = db_constraint
 
     if TYPE_CHECKING:
@@ -294,6 +307,8 @@ class RelationalField(Field[MODEL]):
     def describe(self, serializable: bool) -> dict:
         desc = super().describe(serializable)
         desc["db_constraint"] = self.db_constraint
+        if isinstance(self.to_field, tuple):
+            desc["to_field"] = self.to_field
         del desc["db_column"]
         return desc
 
@@ -346,7 +361,9 @@ class ForeignKeyFieldInstance(RelationalField[MODEL]):
         # Without this, makemigrations writes the backing field name as the column name
         # and a migrated schema disagrees with generate_schemas().
         model = getattr(self, "model", None)
-        if model is not None and self.source_field:
+        if isinstance(self.source_field, tuple):
+            kwargs.pop("source_field", None)
+        elif model is not None and self.source_field:
             backing_field = model._meta.fields_map.get(self.source_field)
             if backing_field is not None and backing_field.source_field:
                 kwargs["source_field"] = backing_field.source_field
@@ -357,15 +374,15 @@ class BackwardFKRelation(RelationalField[MODEL]):
     def __init__(
         self,
         field_type: type[MODEL],
-        relation_field: str,
-        relation_source_field: str,
+        relation_field: str | tuple[str, ...],
+        relation_source_field: str | tuple[str, ...],
         null: bool,
         description: str | None,
         **kwargs: Any,
     ) -> None:
         super().__init__(field_type, null=null, **kwargs)
-        self.relation_field: str = relation_field
-        self.relation_source_field: str = relation_source_field
+        self.relation_field: str | tuple[str, ...] = relation_field
+        self.relation_source_field: str | tuple[str, ...] = relation_source_field
         self.description: str | None = description
 
 

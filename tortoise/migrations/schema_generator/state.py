@@ -28,7 +28,7 @@ class ModelState(BaseEntityState):
     description: str
     options: dict[str, Any]
     bases: tuple[type, ...]
-    pk_field_name: str
+    pk_field_name: str | tuple[str, ...]
     fields: dict[str, Field]
 
     def clone(self) -> ModelState:
@@ -89,6 +89,8 @@ class ModelState(BaseEntityState):
             options["indexes"] = model._meta.indexes
         if model._meta.pk_attr:
             options["pk_attr"] = model._meta.pk_attr
+        if model._meta.pk_attrs:
+            options["primary_key"] = model._meta.pk_attrs
         if model._meta.table_description:
             options["table_description"] = model._meta.table_description
 
@@ -99,7 +101,7 @@ class ModelState(BaseEntityState):
             abstract=model._meta.abstract,
             description=model._meta.table_description,
             options=options,
-            pk_field_name=model._meta.pk_attr,
+            pk_field_name=model._meta.pk_attrs or model._meta.pk_attr,
             bases=model.__bases__,
             fields=fields,
         )

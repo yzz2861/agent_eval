@@ -15,11 +15,13 @@ from pypika_tortoise.terms import (
     Criterion,
     Equality,
     Term,
+    Tuple,
     ValueWrapper,
 )
 
 from tortoise.contrib.postgres.fields import ArrayField, TSVectorField
 from tortoise.fields import Field, JSONField
+from tortoise.fields.base import CompositePrimaryKey
 from tortoise.fields.relational import BackwardFKRelation, ManyToManyFieldInstance
 
 if sys.version_info >= (3, 11):  # pragma：nocoverage
@@ -68,6 +70,21 @@ def escape_like(val: str) -> str:
 def list_encoder(values: Iterable[Any], instance: Model, field: Field) -> list:
     """Encodes an iterable of a given field into a database-compatible format."""
     return [field.to_db_value(element, instance) for element in values]
+
+
+def composite_pk_list_encoder(
+    values: Iterable[Any], instance: Model, field: CompositePrimaryKey
+) -> list[tuple]:
+    return [
+        field.to_db_value(element.pk if hasattr(element, "pk") else element, instance)
+        for element in values
+    ]
+
+
+def composite_pk_encoder(value: Any, instance: Model, field: CompositePrimaryKey) -> tuple:
+    if hasattr(value, "pk"):
+        value = value.pk
+    return field.to_db_value(value, instance)
 
 
 def related_list_encoder(values: Iterable[Any], instance: Model, field: Field) -> list:
@@ -278,6 +295,31 @@ class FilterInfoDict(TypedDict):
     value_encoder: NotRequired[Callable]
     source_field: NotRequired[str]
     is_tsvector: NotRequired[bool]
+    composite_pk: NotRequired[bool]
+    source_fields: NotRequired[tuple[str, ...]]
+    value_field: NotRequired[Field]
+
+
+def get_composite_pk_filters(field: CompositePrimaryKey) -> dict[str, FilterInfoDict]:
+    source_fields = tuple(
+        component.source_field or component.model_field_name for component in field.fields
+    )
+    return {
+        "pk": {
+            "field": "pk",
+            "source_fields": source_fields,
+            "operator": operator.eq,
+            "composite_pk": True,
+            "value_encoder": composite_pk_encoder,
+        },
+        "pk__in": {
+            "field": "pk",
+            "source_fields": source_fields,
+            "operator": is_in,
+            "composite_pk": True,
+            "value_encoder": composite_pk_list_encoder,
+        },
+    }
 
 
 def get_m2m_filters(field_name: str, field: ManyToManyFieldInstance) -> dict[str, FilterInfoDict]:
@@ -318,6 +360,29 @@ def get_backward_fk_filters(
     field_name: str, field: BackwardFKRelation
 ) -> dict[str, FilterInfoDict]:
     target_table_pk = field.related_model._meta.pk
+    if isinstance(field.relation_field, tuple):
+        return {
+            field_name: {
+                "field": field.related_model._meta.pk_attr,
+                "source_fields": field.relation_source_field,
+                "backward_key": field.relation_source_field,
+                "operator": operator.eq,
+                "table": Table(field.related_model._meta.db_table),
+                "composite_pk": True,
+                "value_field": target_table_pk,
+                "value_encoder": composite_pk_encoder,
+            },
+            f"{field_name}__in": {
+                "field": field.related_model._meta.pk_attr,
+                "source_fields": field.relation_source_field,
+                "backward_key": field.relation_source_field,
+                "operator": is_in,
+                "table": Table(field.related_model._meta.db_table),
+                "composite_pk": True,
+                "value_field": target_table_pk,
+                "value_encoder": composite_pk_list_encoder,
+            },
+        }
     return {
         field_name: {
             "field": field.related_model._meta.pk_attr,
@@ -464,6 +529,8 @@ def get_filters_for_field(
     field_name: str, field: Field | None, source_field: str
 ) -> dict[str, FilterInfoDict]:
     if field is not None:
+        if isinstance(field, CompositePrimaryKey):
+            return get_composite_pk_filters(field)
         if isinstance(field, ManyToManyFieldInstance):
             return get_m2m_filters(field_name, field)
         if isinstance(field, BackwardFKRelation):

@@ -23,6 +23,11 @@ class BaseSchemaEditor(SchemaQuotingMixin):
     CHECK_CONSTRAINT_CREATE_TEMPLATE = 'CONSTRAINT "{name}" CHECK ({check})'
     GENERATED_PK_TEMPLATE = '"{field_name}" {generated_sql}{comment}'
     FK_TEMPLATE = ' REFERENCES {table} ("{field}") ON DELETE {on_delete}{comment}'
+    FK_COMPOSITE_TEMPLATE = (
+        "FOREIGN KEY ({fields}) REFERENCES {table} ({target_fields}) "
+        "ON DELETE {on_delete}{comment}"
+    )
+    PK_CONSTRAINT_CREATE_TEMPLATE = 'CONSTRAINT "{index_name}" PRIMARY KEY ({fields})'
     M2M_TABLE_TEMPLATE = (
         "CREATE TABLE {table_name} (\n"
         '    "{backward_key}" {backward_type} NOT NULL REFERENCES {backward_table}'
@@ -223,6 +228,32 @@ class BaseSchemaEditor(SchemaQuotingMixin):
     def _get_inner_statements(self) -> list[str]:
         return []
 
+    def _get_primary_key_constraint_sql(self, model: type[Model], field_names: list[str]) -> str:
+        return self.PK_CONSTRAINT_CREATE_TEMPLATE.format(
+            index_name=self._generate_index_name("pk", model, list(field_names)),
+            fields=", ".join(self.quote(field) for field in field_names),
+        )
+
+    def _get_composite_fk_constraint_sql(self, reference: ForeignKeyFieldInstance) -> str:
+        model = reference.model
+        fields = [
+            model._meta.fields_map[field_name].source_field or field_name
+            for field_name in reference.source_fields
+        ]
+        target_fields = [
+            field.source_field or field.model_field_name
+            for field in reference.to_field_instances
+        ]
+        return self.FK_COMPOSITE_TEMPLATE.format(
+            fields=", ".join(self.quote(field) for field in fields),
+            table=self._qualify_table_name(
+                reference.related_model._meta.db_table, reference.related_model._meta.schema
+            ),
+            target_fields=", ".join(self.quote(field) for field in target_fields),
+            on_delete=reference.on_delete,
+            comment="",
+        )
+
     def _get_m2m_table_definition(
         self, model: type[Model], field: ManyToManyFieldInstance
     ) -> str | None:
@@ -288,23 +319,25 @@ class BaseSchemaEditor(SchemaQuotingMixin):
             field_type=key_field.get_for_dialect(self.DIALECT, "SQL_TYPE"),
             nullable=key_field.null,
             unique=key_field.unique,
-            is_pk=key_field.pk,
+            is_pk=key_field.pk and len(fk_field.source_fields) == 1,
             comment="",
-        ) + self._get_fk_reference_string(
-            constraint_name=self._generate_fk_name(
-                model._meta.db_table,
-                db_field,
-                related_model._meta.db_table,
-                to_field_name,
-            ),
-            db_field=db_field,
-            table=self._qualify_table_name(
-                related_model._meta.db_table, related_model._meta.schema
-            ),
-            field=to_field_name,
-            on_delete=fk_field.on_delete,
-            comment=comment,
         )
+        if len(fk_field.source_fields) == 1:
+            field_creation_string += self._get_fk_reference_string(
+                constraint_name=self._generate_fk_name(
+                    model._meta.db_table,
+                    db_field,
+                    related_model._meta.db_table,
+                    to_field_name,
+                ),
+                db_field=db_field,
+                table=self._qualify_table_name(
+                    related_model._meta.db_table, related_model._meta.schema
+                ),
+                field=to_field_name,
+                on_delete=fk_field.on_delete,
+                comment=comment,
+            )
         return field_creation_string
 
     def _get_model_sql_data(self, model: type[Model]) -> ModelSqlData:
@@ -392,6 +425,22 @@ class BaseSchemaEditor(SchemaQuotingMixin):
                 in_table_definitions.append(
                     self._get_unique_constraint_sql(model, unique_together_to_create)
                 )
+
+        if len(model._meta.pk_fields) > 1:
+            in_table_definitions.append(
+                self._get_primary_key_constraint_sql(model, list(model._meta.db_pk_columns))
+            )
+
+        composite_foreign_keys = {
+            field.reference
+            for field in model._meta.fields_map.values()
+            if getattr(field, "reference", None) is not None
+            and len(getattr(field.reference, "source_fields", ())) > 1
+            and field.reference.db_constraint
+        }
+        for reference in composite_foreign_keys:
+            references.add(reference.related_model._meta.db_table)
+            in_table_definitions.append(self._get_composite_fk_constraint_sql(reference))
 
         _indexes = [self._get_index_sql(model, [field_name]) for field_name in fields_with_index]
 

@@ -79,11 +79,14 @@ def _field_signature_for_rename(field: Field) -> dict[str, object]:
 
 
 def _model_options_for_compare(options: dict[str, object]) -> dict[str, object]:
-    return {
+    result = {
         key: value
         for key, value in options.items()
         if key not in AlterModelOptions.UNMANAGED_OPTION_KEYS
     }
+    if "primary_key" in options:
+        result["primary_key"] = options["primary_key"]
+    return result
 
 
 def _base_signature(bases: Iterable[type]) -> list[str]:

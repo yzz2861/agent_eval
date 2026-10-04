@@ -476,10 +476,20 @@ class MigrationWriter:
         self, operation: CreateModel, imports: ImportManager, *, indent: str
     ) -> list[str]:
         source_fields = {
-            field.source_field
+            source_field
             for _, field in operation.fields
-            if field is not None and hasattr(field, "source_field") and field.source_field
+            for source_field in getattr(field, "source_fields", ())
+            if field is not None and hasattr(field, "source_fields")
         }
+        source_fields.update(
+            {
+                field.source_field
+                for _, field in operation.fields
+                if field is not None
+                and hasattr(field, "source_field")
+                and isinstance(field.source_field, str)
+            }
+        )
         field_lines = []
         for name, field in operation.fields:
             if field is None:

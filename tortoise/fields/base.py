@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 from pypika_tortoise.terms import Term
 
-from tortoise.exceptions import ConfigurationError, ValidationError
+from tortoise.exceptions import ConfigurationError, ParamsError, ValidationError
 from tortoise.validators import Validator
 
 if TYPE_CHECKING:  # pragma: nocoverage
@@ -596,3 +596,81 @@ class Field(Generic[VALUE], metaclass=_FieldMeta):
                 continue
             kwargs[name] = value
         return path, [], kwargs
+
+
+class CompositePrimaryKey(Field[tuple]):
+    """Virtual field describing an ordered composite primary key."""
+
+    has_db_field = False
+    indexable = False
+    field_type = tuple
+
+    def __init__(self, fields: tuple[Field, ...]) -> None:
+        super().__init__(primary_key=True)
+        self.fields = tuple(fields)
+
+    def validate_pk(self, value: Any) -> tuple:
+        if not isinstance(value, tuple):
+            raise ParamsError(
+                f"Composite primary key must be a tuple, got {type(value).__name__}"
+            )
+        if len(value) != len(self.fields):
+            raise ParamsError(
+                "Composite primary key tuple must have "
+                f"{len(self.fields)} value(s), got {len(value)}"
+            )
+        for index, component in enumerate(value):
+            component_field = self.fields[index]
+            if component is None:
+                raise ParamsError(
+                    f"Composite primary key component {component_field.model_field_name} "
+                    "cannot be null"
+                )
+            if isinstance(component, str) and not component:
+                raise ParamsError(
+                    f"Composite primary key component {component_field.model_field_name} "
+                    "cannot be empty"
+                )
+            if isinstance(component, (bytes, bytearray)) and not component:
+                raise ParamsError(
+                    f"Composite primary key component {component_field.model_field_name} "
+                    "cannot be empty"
+                )
+        return value
+
+    def to_python_value(self, value: Any) -> tuple:
+        value = self.validate_pk(value)
+        return tuple(
+            field.to_python_value(component)
+            for field, component in zip(self.fields, value, strict=True)
+        )
+
+    def to_db_value(self, value: Any, instance: type[Model] | Model) -> tuple:
+        value = self.validate_pk(value)
+        return tuple(
+            field.to_db_value(component, instance)
+            for field, component in zip(self.fields, value, strict=True)
+        )
+
+    def describe(self, serializable: bool) -> dict:
+        return {
+            "name": self.model_field_name,
+            "field_type": self.__class__.__name__ if serializable else self.__class__,
+            "python_type": "tuple" if serializable else tuple,
+            "generated": False,
+            "primary_key": True,
+            "nullable": False,
+            "unique": True,
+            "indexed": True,
+            "default": None,
+            "db_default": "__NOT_SET__" if serializable else DB_DEFAULT_NOT_SET,
+            "description": self.description,
+            "docstring": self.docstring,
+            "constraints": {},
+            "fields": tuple(field.model_field_name for field in self.fields),
+        }
+
+    def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
+        return f"{self.__class__.__module__}.{self.__class__.__name__}", [], {
+            "fields": tuple(field.model_field_name for field in self.fields)
+        }
