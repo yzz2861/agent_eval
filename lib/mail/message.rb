@@ -1541,6 +1541,13 @@ module Mail
       multipart? && /^report$/i.match?(sub_type)
     end
 
+    # Verifies a detached S/MIME multipart/signed message. The supplied
+    # OpenSSL::X509::Store is the only trust source used for certificate
+    # verification.
+    def verify_smime(trust_store)
+      Mail::SMIME.verify(self, trust_store)
+    end
+
     # Returns true if the message is a multipart/report; report-type=delivery-status;
     def delivery_status_report?
       multipart_report? && /^delivery-status$/i.match?(content_type_parameters['report-type'])
