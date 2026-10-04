@@ -1,5 +1,17 @@
 # News
 
+## Unreleased
+
+### New feature
+
+  * Added `REXML::Element#import_subtree` for namespace-safe subtree import
+    between documents. It preserves the expanded name (namespace URI and
+    local name) of every element and attribute, adding namespace
+    declarations or allocating new prefixes when a prefix is bound to a
+    different URI at the destination. Both copy (default) and move
+    ownership are supported, and QName-valued attributes are rewritten only
+    for attributes explicitly listed with the `qname_attributes` option.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement
