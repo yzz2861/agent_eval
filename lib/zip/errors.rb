@@ -130,7 +130,63 @@ module Zip
   class SplitArchiveError < Error
     # The message returned by this error.
     def message
-      'Rubyzip cannot extract from split archives at this time.'
+      'This is a split (multi-volume) archive. To read it, supply its volumes ' \
+        'with a volume provider, e.g. Zip::File.open(name, volume_provider: ...).'
+    end
+  end
+
+  # Error raised when a volume needed to read a multi-volume archive is not
+  # supplied by the volume provider.
+  class MissingVolumeError < Error
+    # The disk number of the missing volume.
+    attr_reader :disk_number
+
+    # Create a new MissingVolumeError with the missing disk number.
+    def initialize(disk_number)
+      super()
+      @disk_number = disk_number
+    end
+
+    # The message returned by this error.
+    def message
+      "Volume #{@disk_number} is required to read this archive, " \
+        'but the volume provider did not supply it.'
+    end
+  end
+
+  # Error raised when a volume provider supplies the same underlying IO or
+  # file for more than one disk number.
+  class DuplicateVolumeError < Error
+    # Create a new DuplicateVolumeError with the two clashing disk numbers.
+    def initialize(disk_number, other_disk_number)
+      super()
+      @disk_number = disk_number
+      @other_disk_number = other_disk_number
+    end
+
+    # The message returned by this error.
+    def message
+      "Volumes #{@disk_number} and #{@other_disk_number} share the same " \
+        'underlying IO or file; each volume of an archive must be distinct.'
+    end
+  end
+
+  # Error raised when an archive structure points outside the bounds of a
+  # volume (or of the whole multi-volume archive).
+  class VolumeOffsetError < Error
+    # Create a new VolumeOffsetError. +disk_number+ may be nil when the
+    # offset is into the archive's logical address space as a whole.
+    def initialize(offset, size, disk_number = nil)
+      super()
+      @offset = offset
+      @size = size
+      @disk_number = disk_number
+    end
+
+    # The message returned by this error.
+    def message
+      location = @disk_number.nil? ? 'the archive' : "volume #{@disk_number}"
+      "Offset #{@offset} is out of bounds for #{location} (#{@size} bytes)."
     end
   end
 

@@ -73,7 +73,12 @@ module Zip
 
     # Opens a zip archive. Pass create: true to create
     # a new archive if it doesn't exist already.
+    #
+    # Pass volume_provider: with a Zip::VolumeProvider to read a split
+    # (multi-volume) archive; the provider supplies an IO for each numbered
+    # volume. Multi-volume archives are read-only.
     def initialize(path_or_io, create: false, buffer: false,
+                   volume_provider: nil,
                    restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
@@ -83,6 +88,8 @@ module Zip
 
       @name    = path_or_io.respond_to?(:path) ? path_or_io.path : path_or_io
       @create  = create ? true : false # allow any truthy value to mean true
+
+      @volume_provider = volume_provider
 
       initialize_cdir(path_or_io, buffer: buffer)
 
@@ -98,12 +105,14 @@ module Zip
       # to the block and is automatically closed afterwards, just as with
       # ruby's builtin File::open method.
       def open(file_name, create: false,
+               volume_provider: nil,
                restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                compression_level: ::Zip.default_compression,
                suppress_extra_fields: false)
         zf = ::Zip::File.new(file_name, create:                create,
+                                        volume_provider:       volume_provider,
                                         restore_ownership:     restore_ownership,
                                         restore_permissions:   restore_permissions,
                                         restore_times:         restore_times,
@@ -398,6 +407,8 @@ module Zip
     def commit
       return if name.kind_of?(StringIO) || !commit_required?
 
+      raise Error, 'Cannot commit changes to a multi-volume archive.' if @segmented_io
+
       on_success_replace do |tmp_file|
         ::Zip::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
           @cdir.each do |e|
@@ -424,6 +435,8 @@ module Zip
     # Closes the zip file committing any changes that has been made.
     def close
       commit
+    ensure
+      @segmented_io&.close
     end
 
     # Returns true if any changes has been made to this archive since
@@ -517,7 +530,13 @@ module Zip
     def initialize_cdir(path_or_io, buffer: false)
       @cdir = ::Zip::CentralDirectory.new
 
-      if ::File.size?(@name.to_s)
+      if @volume_provider
+        # A split (multi-volume) archive: the volumes are read through the
+        # provider as one logical stream. Read-only.
+        @create = false
+        @segmented_io = ::Zip::SegmentedIO.new(@volume_provider)
+        @cdir.read_from_stream(@segmented_io)
+      elsif ::File.size?(@name.to_s)
         # There is a file, which exists, that is associated with this zip.
         @create = false
         @file_permissions = ::File.stat(@name).mode

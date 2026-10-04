@@ -117,9 +117,9 @@ module Zip
       size_of_zip64_e_o_c_d,
       _version_made_by,
       _version_needed_for_extract,
-      _number_of_this_disk,
-      _number_of_disk_with_start_of_cdir,
-      _total_number_of_entries_in_cdir_on_this_disk,
+      @number_of_this_disk,
+      @disk_with_cdir,
+      @entries_on_this_disk,
       @size,
       size_in_bytes,
       @cdir_offset = buffer.unpack('VQ<vvVVQ<Q<Q<Q<')
@@ -140,25 +140,25 @@ module Zip
 
     def unpack_64_eocd_locator(buffer) # :nodoc:
       _, # ZIP64_EOCD_LOCATOR_SIG. We know we have this at this point.
-      _, zip64_eocd_offset, = buffer.unpack('VVQ<V')
+      zip64_eocd_disk, zip64_eocd_offset, = buffer.unpack('VVQ<V')
 
-      zip64_eocd_offset
+      [zip64_eocd_disk, zip64_eocd_offset]
     end
 
     # Unpack the EOCD and return a boolean indicating whether this header is
     # complete without needing Zip64 extensions.
     def unpack_e_o_c_d(buffer) # :nodoc:
       _, # END_OF_CD_SIG. We know we have this at this point.
-      number_of_this_disk,
-      number_of_disk_with_start_of_cdir,
-      total_number_of_entries_in_cdir_on_this_disk,
+      @number_of_this_disk,
+      @disk_with_cdir,
+      @entries_on_this_disk,
       @size,
       size_in_bytes,
       @cdir_offset,
       comment_length = buffer.unpack('VvvvvVVv')
 
-      complete = !([number_of_this_disk, number_of_disk_with_start_of_cdir,
-                    total_number_of_entries_in_cdir_on_this_disk, @size].any?(0xFFFF) ||
+      complete = !([@number_of_this_disk, @disk_with_cdir,
+                    @entries_on_this_disk, @size].any?(0xFFFF) ||
                     size_in_bytes == 0xFFFFFFFF || @cdir_offset == 0xFFFFFFFF)
 
       validate_size!(@size, size_in_bytes) if complete
@@ -196,13 +196,39 @@ module Zip
 
         unless offset.nil?
           io_save = io.tell
-          io.seek(offset, IO::SEEK_SET)
+          io.seek(absolute_offset(io, entry.disk_number_start, offset), IO::SEEK_SET)
           entry.read_extra_field(read_local_extra_field(io), local: true)
           io.seek(io_save, IO::SEEK_SET)
         end
 
         @entry_set << entry
       end
+    end
+
+    # Translates a (disk number, offset within that disk) pair from the
+    # archive's metadata into an offset that can be sought to in +io+. For
+    # a multi-volume IO this is a logical offset across all volumes; for a
+    # plain single-file IO only disk zero is valid.
+    def absolute_offset(io, disk_number, offset)
+      if io.respond_to?(:logical_offset)
+        io.logical_offset(disk_number.to_i, offset)
+      elsif disk_number.to_i.zero?
+        offset
+      else
+        raise SplitArchiveError
+      end
+    end
+
+    def multi_volume?
+      @number_of_this_disk.to_i.positive? || @disk_with_cdir.to_i.positive? ||
+        (!@entries_on_this_disk.nil? && @entries_on_this_disk != @size)
+    end
+
+    def check_multi_volume_support!(io)
+      return unless multi_volume?
+      return if io.respond_to?(:logical_offset)
+
+      raise SplitArchiveError
     end
 
     def read_local_extra_field(io)
@@ -222,9 +248,19 @@ module Zip
       eocd_location = data.rindex([END_OF_CD_SIG].pack('V'))
       raise Error, 'Zip end of central directory signature not found' unless eocd_location
 
-      # Parse the EOCD and return if it is complete without Zip64 extensions.
-      return if unpack_e_o_c_d(data.slice(eocd_location..-1))
+      # Parse the Zip64 EOCD as well, if the plain EOCD on its own is
+      # incomplete without it.
+      unless unpack_e_o_c_d(data.slice(eocd_location..-1))
+        read_zip64_eocd(io, base_location, data, eocd_location)
+      end
 
+      check_multi_volume_support!(io)
+
+      # The central directory offset is relative to the disk it starts on.
+      @cdir_offset = absolute_offset(io, @disk_with_cdir, @cdir_offset)
+    end
+
+    def read_zip64_eocd(io, base_location, data, eocd_location) # :nodoc:
       # Need to read in the Zip64 EOCD locator and then the Zip64 EOCD.
       zip64_eocd_locator = data.rindex([ZIP64_EOCD_LOCATOR_SIG].pack('V'), eocd_location)
       unless zip64_eocd_locator
@@ -240,13 +276,14 @@ module Zip
           data.slice(zip64_eocd_location..zip64_eocd_locator)
         else
           # No. Read its location from the locator and then read it in.
-          zip64_eocd_location = unpack_64_eocd_locator(
+          zip64_eocd_disk, zip64_eocd_offset = unpack_64_eocd_locator(
             data.slice(zip64_eocd_locator..eocd_location)
           )
-          unless zip64_eocd_location
+          unless zip64_eocd_offset
             raise Error, 'Zip64 end of central directory signature not found'
           end
 
+          zip64_eocd_location = absolute_offset(io, zip64_eocd_disk, zip64_eocd_offset)
           io.seek(zip64_eocd_location, IO::SEEK_SET)
           io.read(base_location + zip64_eocd_locator - zip64_eocd_location)
         end

@@ -29,7 +29,8 @@ module Zip
                   :unix_gid, :unix_perms, :unix_uid
 
     attr_accessor :crc, :external_file_attributes, :fstype, :gp_flags,
-                  :internal_file_attributes, :local_header_offset # :nodoc:
+                  :internal_file_attributes, :local_header_offset,
+                  :disk_number_start # :nodoc:
 
     attr_reader :extra, :compression_level, :filepath # :nodoc:
 
@@ -41,6 +42,7 @@ module Zip
 
     def set_default_vars_values # :nodoc:
       @local_header_offset      = 0
+      @disk_number_start        = 0
       @local_header_size        = nil # not known until local entry is created or read
       @internal_file_attributes = 1
       @external_file_attributes = 0
@@ -467,7 +469,7 @@ module Zip
         @name_length,
         @extra_length,
         @comment_length,
-        _, # diskNumberStart
+        @disk_number_start,
         @internal_file_attributes,
         @external_file_attributes,
         @local_header_offset = buf.unpack('VCCvvvvvVVVvvvvvVV')
@@ -683,7 +685,7 @@ module Zip
           raise "unknown @file_type #{ftype}"
         end
       else
-        zis = ::Zip::InputStream.new(@zipfile, offset: local_header_offset, decrypter: decrypter)
+        zis = ::Zip::InputStream.new(@zipfile, offset: stream_offset, decrypter: decrypter)
         zis.instance_variable_set(:@complete_entry, self)
         zis.get_next_entry
         if block
@@ -760,6 +762,18 @@ module Zip
 
     private
 
+    # The offset at which this entry's local header can be found in the
+    # underlying IO. For a multi-volume archive the central directory
+    # records it as an offset within the disk the entry starts on, so it
+    # is translated to a logical offset across all volumes.
+    def stream_offset
+      if @zipfile.respond_to?(:logical_offset)
+        @zipfile.logical_offset(@disk_number_start || 0, local_header_offset)
+      else
+        local_header_offset
+      end
+    end
+
     def read_local_header_fields(io) # :nodoc:
       static_sized_fields_buf = io.read(::Zip::LOCAL_ENTRY_STATIC_HEADER_LENGTH) || ''
 
@@ -830,8 +844,8 @@ module Zip
       if for_local_header
         @size, @compressed_size = @extra[:zip64].parse(@size, @compressed_size)
       else
-        @size, @compressed_size, @local_header_offset = @extra[:zip64].parse(
-          @size, @compressed_size, @local_header_offset
+        @size, @compressed_size, @local_header_offset, @disk_number_start = @extra[:zip64].parse(
+          @size, @compressed_size, @local_header_offset, @disk_number_start
         )
       end
     end
