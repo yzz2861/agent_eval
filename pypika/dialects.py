@@ -10,6 +10,8 @@ from pypika.queries import (
     CreateQueryBuilder,
     Database,
     DropQueryBuilder,
+    JoinType,
+    LateralJoin,
     Query,
     QueryBuilder,
     Selectable,
@@ -418,6 +420,7 @@ class PostgreSQLQuery(Query):
 class PostgreSQLQueryBuilder(QueryBuilder):
     ALIAS_QUOTE_CHAR = '"'
     QUERY_CLS = PostgreSQLQuery
+    SUPPORTS_LATERAL = True
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(dialect=Dialects.POSTGRESQL, **kwargs)
@@ -528,6 +531,14 @@ class PostgreSQLQueryBuilder(QueryBuilder):
                 distinct_on=",".join(term.get_sql(with_alias=True, **kwargs) for term in self._distinct_on)
             )
         return super()._distinct_sql(**kwargs)
+
+    def _lateral_join_sql(self, join: LateralJoin, **kwargs: Any) -> str:
+        lateral = "LATERAL {subquery}".format(subquery=join.item.get_sql(subquery=True, with_alias=True, **kwargs))
+        if join.how == JoinType.cross:
+            return "CROSS JOIN {lateral}".format(lateral=lateral)
+        if join.how == JoinType.left_outer:
+            return "LEFT OUTER JOIN {lateral} ON TRUE".format(lateral=lateral)
+        return "LEFT JOIN {lateral} ON TRUE".format(lateral=lateral)
 
     def _conflict_field_str(self, term: str) -> Field | None:
         if self._insert_table:
@@ -702,6 +713,7 @@ class MSSQLQuery(Query):
 
 class MSSQLQueryBuilder(FetchNextAndOffsetRowsQueryBuilder):
     QUERY_CLS = MSSQLQuery
+    SUPPORTS_LATERAL = True
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(dialect=Dialects.MSSQL, **kwargs)
@@ -758,6 +770,13 @@ class MSSQLQueryBuilder(FetchNextAndOffsetRowsQueryBuilder):
             top=self._top_sql(),
             distinct="DISTINCT " if self._distinct else "",
             select=",".join(term.get_sql(with_alias=True, subquery=True, **kwargs) for term in self._selects),
+        )
+
+    def _lateral_join_sql(self, join: LateralJoin, **kwargs: Any) -> str:
+        apply_type = "OUTER APPLY" if join.how in (JoinType.left, JoinType.left_outer) else "CROSS APPLY"
+        return "{apply_type} {subquery}".format(
+            apply_type=apply_type,
+            subquery=join.item.get_sql(subquery=True, with_alias=True, **kwargs),
         )
 
 
@@ -887,7 +906,7 @@ class ClickHouseQueryBuilder(QueryBuilder):
         return super()._apply_pagination(querystring, **kwargs)
 
     def _limit_by_sql(self, **kwargs: Any) -> str:
-        (n, offset, by) = self._limit_by
+        n, offset, by = self._limit_by
         by = ",".join(term.get_sql(with_alias=True, **kwargs) for term in by)
         if offset != 0:
             return f" LIMIT {n} OFFSET {offset} BY ({by})"

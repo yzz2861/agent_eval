@@ -5,9 +5,13 @@ from pypika import (
     JSON,
     Array,
     Field,
+    JoinException,
+    Order,
+    QmarkParameter,
     QueryException,
     Table,
 )
+from pypika.terms import ParameterValueWrapper
 from pypika.dialects import PostgreSQLQuery
 
 
@@ -269,3 +273,185 @@ class ReturningClauseTests(unittest.TestCase):
             'RETURNING "xyz"."a"',
             str(q),
         )
+
+
+class LateralJoinTests(unittest.TestCase):
+    def test_cross_join_lateral(self):
+        customers = Table("customers")
+        orders = Table("orders")
+        latest_order = (
+            PostgreSQLQuery.from_(orders)
+            .select(orders.total)
+            .where(orders.customer_id == customers.id)
+            .orderby(orders.created_at, order=Order.desc)
+            .limit(1)
+            .as_("latest_order")
+        )
+
+        query = (
+            PostgreSQLQuery.from_(customers).cross_join_lateral(latest_order).select(customers.id, latest_order.total)
+        )
+
+        self.assertEqual(
+            'SELECT "customers"."id","latest_order"."total" FROM "customers" '
+            'CROSS JOIN LATERAL ('
+            'SELECT "orders"."total" FROM "orders" '
+            'WHERE "orders"."customer_id"="customers"."id" '
+            'ORDER BY "orders"."created_at" DESC LIMIT 1) "latest_order"',
+            str(query),
+        )
+
+    def test_left_join_lateral_keeps_outer_join_semantics(self):
+        customers = Table("customers")
+        orders = Table("orders")
+        latest_order = (
+            PostgreSQLQuery.from_(orders)
+            .select(orders.total)
+            .where(orders.customer_id == customers.id)
+            .limit(1)
+            .as_("latest_order")
+        )
+
+        query = (
+            PostgreSQLQuery.from_(customers).left_join_lateral(latest_order).select(customers.id, latest_order.total)
+        )
+        outer_query = (
+            PostgreSQLQuery.from_(customers)
+            .left_outer_join_lateral(latest_order)
+            .select(customers.id, latest_order.total)
+        )
+
+        self.assertIn('LEFT JOIN LATERAL (', str(query))
+        self.assertTrue(str(query).endswith(') "latest_order" ON TRUE'))
+        self.assertIn('LEFT OUTER JOIN LATERAL (', str(outer_query))
+        self.assertTrue(str(outer_query).endswith(') "latest_order" ON TRUE'))
+
+    def test_lateral_can_reference_prior_join_including_self_join(self):
+        customers = Table("customers")
+        account_managers = customers.as_("account_managers")
+        orders = Table("orders")
+        latest_order = (
+            PostgreSQLQuery.from_(orders)
+            .select(orders.total)
+            .where(orders.customer_id == customers.id)
+            .where(orders.manager_id == account_managers.id)
+            .limit(1)
+            .as_("latest_order")
+        )
+
+        query = (
+            PostgreSQLQuery.from_(customers)
+            .join(account_managers)
+            .on(account_managers.id == customers.manager_id)
+            .cross_join_lateral(latest_order)
+            .select(customers.id, latest_order.total)
+        )
+
+        self.assertIn("\"account_managers\".\"id\"=\"customers\".\"manager_id\"", str(query))
+        self.assertIn("CROSS JOIN LATERAL", str(query))
+
+    def test_lateral_cannot_reference_future_relation(self):
+        customers = Table("customers")
+        orders = Table("orders")
+        invoices = Table("invoices")
+        latest_order = (
+            PostgreSQLQuery.from_(orders)
+            .select(orders.total)
+            .where(orders.customer_id == customers.id)
+            .where(orders.invoice_id == invoices.id)
+            .limit(1)
+            .as_("latest_order")
+        )
+
+        query = (
+            PostgreSQLQuery.from_(customers)
+            .cross_join_lateral(latest_order)
+            .join(invoices)
+            .on(invoices.customer_id == customers.id)
+            .select(customers.id)
+        )
+
+        with self.assertRaisesRegex(JoinException, "introduced to the right of this lateral join"):
+            str(query)
+
+    def test_nested_non_lateral_subquery_does_not_inherit_lateral_scope(self):
+        customers = Table("customers")
+        orders = Table("orders")
+        discounts = Table("discounts")
+        discount = (
+            PostgreSQLQuery.from_(discounts)
+            .select(discounts.id, discounts.amount)
+            .where(discounts.id == orders.discount_id)
+            .as_("discount")
+        )
+        latest_order = (
+            PostgreSQLQuery.from_(orders)
+            .join(discount)
+            .on(discount.id == orders.discount_id)
+            .select(discount.amount)
+            .where(orders.customer_id == customers.id)
+            .limit(1)
+        ).as_("latest_order")
+
+        query = (
+            PostgreSQLQuery.from_(customers).cross_join_lateral(latest_order).select(customers.id, latest_order.amount)
+        )
+
+        with self.assertRaisesRegex(JoinException, "non-lateral .* cannot see its outer query"):
+            str(query)
+
+    def test_same_alias_shadows_outer_relation(self):
+        outer_customers = Table("customers")
+        local_customers = Table("customers").as_("customers")
+        orders = Table("orders")
+        latest_order = (
+            PostgreSQLQuery.from_(orders)
+            .join(local_customers)
+            .on(local_customers.id == orders.customer_id)
+            .select(orders.total)
+            .where(orders.old_customer_id == outer_customers.id)
+            .limit(1)
+            .as_("latest_order")
+        )
+
+        query = PostgreSQLQuery.from_(outer_customers).cross_join_lateral(latest_order).select(outer_customers.id)
+
+        with self.assertRaisesRegex(JoinException, "alias is shadowed"):
+            str(query)
+
+    def test_parameters_follow_final_sql_order_and_reuse_does_not_pollute_template(self):
+        customers = Table("customers")
+        orders = Table("orders")
+        latest_order_template = (
+            PostgreSQLQuery.from_(orders)
+            .select(orders.total)
+            .where(orders.customer_id == customers.id)
+            .where(orders.is_active == ParameterValueWrapper(QmarkParameter(), True))
+            .limit(1)
+        )
+
+        latest_order1 = latest_order_template.as_("latest_order")
+        latest_order2 = latest_order_template.as_("latest_order")
+        query1 = (
+            PostgreSQLQuery.from_(customers)
+            .cross_join_lateral(latest_order1)
+            .select(customers.id, latest_order1.total)
+            .where(customers.kind == ParameterValueWrapper(QmarkParameter(), "vip"))
+        )
+        query2 = (
+            PostgreSQLQuery.from_(customers)
+            .left_join_lateral(latest_order2)
+            .select(customers.id, latest_order2.total)
+            .where(customers.kind == ParameterValueWrapper(QmarkParameter(), "regular"))
+        )
+
+        parameter1 = QmarkParameter()
+        sql1 = query1.get_sql(parameter=parameter1)
+        parameter2 = QmarkParameter()
+        sql2 = query2.get_sql(parameter=parameter2)
+
+        self.assertEqual([True, "vip"], parameter1.get_parameters())
+        self.assertEqual([True, "regular"], parameter2.get_parameters())
+        self.assertIsNone(latest_order_template.alias)
+        self.assertIn("CROSS JOIN LATERAL", sql1)
+        self.assertIn("LEFT JOIN LATERAL", sql2)

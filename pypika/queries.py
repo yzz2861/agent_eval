@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
-from copy import copy
+from copy import copy, deepcopy
 from functools import reduce
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -714,6 +714,7 @@ class QueryBuilder(Selectable, Term):
     ALIAS_QUOTE_CHAR = None
     QUERY_ALIAS_QUOTE_CHAR = None
     QUERY_CLS = Query
+    SUPPORTS_LATERAL = False
 
     def __init__(
         self,
@@ -1047,8 +1048,6 @@ class QueryBuilder(Selectable, Term):
             return Joiner(self, item, how, type_label="table")
 
         elif isinstance(item, QueryBuilder):
-            if item.alias is None:
-                self._tag_subquery(item)
             return Joiner(self, item, how, type_label="subquery")
 
         elif isinstance(item, AliasedQuery):
@@ -1085,6 +1084,39 @@ class QueryBuilder(Selectable, Term):
 
     def hash_join(self, item: Table | QueryBuilder | AliasedQuery) -> Joiner[Self]:
         return self.join(item, JoinType.hash)
+
+    def lateral_join(self, item: QueryBuilder, how: JoinType = JoinType.cross) -> QueryBuilder:
+        return self._lateral_join(item, how)
+
+    def cross_join_lateral(self, item: QueryBuilder) -> QueryBuilder:
+        return self._lateral_join(item, JoinType.cross)
+
+    def left_join_lateral(self, item: QueryBuilder) -> QueryBuilder:
+        return self._lateral_join(item, JoinType.left)
+
+    def left_outer_join_lateral(self, item: QueryBuilder) -> QueryBuilder:
+        return self._lateral_join(item, JoinType.left_outer)
+
+    def _lateral_join(self, item: QueryBuilder, how: JoinType) -> QueryBuilder:
+        if not self.SUPPORTS_LATERAL:
+            raise JoinException(
+                "LATERAL joins are not supported by the {dialect} SQL dialect.".format(
+                    dialect=self.dialect.value if self.dialect else "default"
+                )
+            )
+        if not isinstance(item, QueryBuilder):
+            raise ValueError("Cannot lateral join on type '%s'" % type(item))
+        if how not in LateralJoin.SUPPORTED_TYPES:
+            raise JoinException("LATERAL joins only support CROSS and LEFT outer joins.")
+
+        query = copy(self)
+        lateral_item = deepcopy(item)
+        if lateral_item.alias is None:
+            query._tag_subquery(lateral_item)
+
+        query = query.replace_table(item, lateral_item)
+        query.do_join(LateralJoin(lateral_item, how))
+        return query
 
     @builder
     def limit(self, limit: int) -> None:
@@ -1273,6 +1305,9 @@ class QueryBuilder(Selectable, Term):
         if self._update_table and not self._updates:
             return ""
 
+        if any(join.is_lateral for join in self._joins):
+            _validate_lateral_query(self)
+
         has_joins = bool(self._joins)
         has_multiple_from_clauses = 1 < len(self._from)
         has_subquery_from_clause = 0 < len(self._from) and isinstance(self._from[0], QueryBuilder)
@@ -1295,7 +1330,7 @@ class QueryBuilder(Selectable, Term):
             querystring += self._update_sql(**kwargs)
 
             if self._joins:
-                querystring += " " + " ".join(join.get_sql(**kwargs) for join in self._joins)
+                querystring += " " + " ".join(self._join_sql(join, **kwargs) for join in self._joins)
 
             querystring += self._set_sql(**kwargs)
 
@@ -1351,7 +1386,7 @@ class QueryBuilder(Selectable, Term):
             querystring += self._use_index_sql(**kwargs)
 
         if self._joins:
-            querystring += " " + " ".join(join.get_sql(**kwargs) for join in self._joins)
+            querystring += " " + " ".join(self._join_sql(join, **kwargs) for join in self._joins)
 
         if self._prewheres:
             querystring += self._prewhere_sql(**kwargs)
@@ -1464,6 +1499,14 @@ class QueryBuilder(Selectable, Term):
         return " FROM {selectable}".format(
             selectable=",".join(clause.get_sql(subquery=True, with_alias=True, **kwargs) for clause in self._from)
         )
+
+    def _join_sql(self, join: Join, **kwargs: Any) -> str:
+        if join.is_lateral:
+            return self._lateral_join_sql(join, **kwargs)
+        return join.get_sql(**kwargs)
+
+    def _lateral_join_sql(self, join: "LateralJoin", **kwargs: Any) -> str:
+        raise JoinException("LATERAL joins are not supported by this SQL dialect.")
 
     def _using_sql(self, with_namespace: bool = False, **kwargs: Any) -> str:
         return " USING {selectable}".format(
@@ -1625,12 +1668,223 @@ class QueryBuilder(Selectable, Term):
         return func(self, *args, **kwargs)
 
 
+def _relation_label(relation: Selectable | Term | None) -> str | None:
+    if relation is None:
+        return None
+    return relation.get_table_name()
+
+
+def _relation_scope(query: QueryBuilder, joins: Sequence[Join] | None = None) -> dict[str, Selectable | Term]:
+    relations = {}
+    join_relations = joins if joins is not None else query._joins
+    join_items = [join.item if isinstance(join, Join) else join for join in join_relations]
+    for relation in [*query._with, *query._from, *join_items]:
+        label = _relation_label(relation)
+        if label is not None:
+            relations[label] = relation
+    return relations
+
+
+def _query_expression_terms(query: QueryBuilder) -> list[Term]:
+    terms = [*query._selects, *query._groupbys]
+    terms.extend(term for term, _ in query._orderbys)
+    terms.extend(value for values in query._values for value in values)
+    terms.extend(value for _, value in query._updates)
+    for criterion in (query._wheres, query._prewheres, query._havings, query._qualifys):
+        if criterion is not None:
+            terms.append(criterion)
+    return terms
+
+
+def _direct_fields(term: Term) -> set[Field]:
+    fields = set()
+
+    for node in term.nodes_():
+        if isinstance(node, QueryBuilder):
+            continue
+        if isinstance(node, Field):
+            fields.add(node)
+
+    return fields
+
+
+def _nested_queries(term: Term) -> set[QueryBuilder]:
+    return {node for node in term.find_(QueryBuilder)}
+
+
+def _validate_fields_in_scopes(
+    term: Term,
+    visible_scopes: Sequence[dict[str, Selectable | Term]],
+    blocked_scopes: Sequence[tuple[str, dict[str, Selectable | Term]]] = (),
+    location: str = "query",
+) -> None:
+    for field in _direct_fields(term):
+        label = _relation_label(field.table)
+        if label is None:
+            continue
+
+        innermost_labeled_scope = None
+        for scope in visible_scopes:
+            if label in scope:
+                innermost_labeled_scope = scope
+                break
+
+        if innermost_labeled_scope is not None:
+            relation = innermost_labeled_scope[label]
+            if field.table is relation or field.table == relation:
+                continue
+
+            for outer_scope in visible_scopes[1:]:
+                outer_relation = outer_scope.get(label)
+                if (
+                    outer_relation is not None
+                    and (field.table is outer_relation or field.table == outer_relation)
+                    and outer_relation is not relation
+                ):
+                    raise JoinException(
+                        "Invalid lateral reference to '{label}': the alias is shadowed in {location}.".format(
+                            label=label, location=location
+                        )
+                    )
+
+            for reason, scope in blocked_scopes:
+                blocked_relation = scope.get(label)
+                if blocked_relation is not None and (
+                    field.table is blocked_relation or field.table == blocked_relation
+                ):
+                    raise JoinException(
+                        "Invalid lateral reference to '{label}' in {location}: {reason}.".format(
+                            label=label, location=location, reason=reason
+                        )
+                    )
+
+            continue
+
+        for reason, scope in blocked_scopes:
+            blocked_relation = scope.get(label)
+            if blocked_relation is not None and (field.table is blocked_relation or field.table == blocked_relation):
+                raise JoinException(
+                    "Invalid lateral reference to '{label}' in {location}: {reason}.".format(
+                        label=label, location=location, reason=reason
+                    )
+                )
+
+        visible = ", ".join(reversed([label for scope in visible_scopes for label in scope]))
+        raise JoinException(
+            "Invalid lateral reference to '{label}'; it is not visible in the current scope. "
+            "The reference is in {location}. Visible relations are: [{visible}].".format(
+                label=label, location=location, visible=visible
+            )
+        )
+
+
+def _validate_nested_expression(
+    term: Term,
+    visible_scopes: Sequence[dict[str, Selectable | Term]],
+    blocked_scopes: Sequence[tuple[str, dict[str, Selectable | Term]]] = (),
+    location: str = "query",
+) -> None:
+    _validate_fields_in_scopes(term, visible_scopes, blocked_scopes, location)
+    for nested_query in _nested_queries(term):
+        _validate_lateral_query(nested_query, visible_scopes, blocked_scopes=blocked_scopes, location="nested subquery")
+
+
+def _validate_lateral_query(
+    query: QueryBuilder,
+    outer_scopes: Sequence[dict[str, Selectable | Term]] = (),
+    location: str = "query",
+    blocked_scopes: Sequence[tuple[str, dict[str, Selectable | Term]]] = (),
+) -> None:
+    local_scope = _relation_scope(query)
+    expression_scopes = [local_scope, *outer_scopes]
+
+    prior_cte_scope = {}
+    for cte in query._with:
+        cte_query = getattr(cte, "query", None)
+        if isinstance(cte_query, QueryBuilder):
+            blocked_cte_scope = _scope_from_relations(
+                relation for scope in expression_scopes for relation in scope.values()
+            )
+            _validate_lateral_query(
+                cte_query,
+                [prior_cte_scope],
+                "CTE subquery",
+                blocked_scopes=[("a CTE cannot see relations outside its WITH clause", blocked_cte_scope)],
+            )
+        cte_label = _relation_label(cte)
+        if cte_label is not None:
+            prior_cte_scope[cte_label] = cte
+
+    for term in _query_expression_terms(query):
+        _validate_nested_expression(term, expression_scopes, blocked_scopes, location)
+
+    for derived_query in [clause for clause in query._from if isinstance(clause, QueryBuilder)]:
+        blocked_relations = _scope_from_relations([relation for scope in outer_scopes for relation in scope.values()])
+        _validate_lateral_query(
+            derived_query,
+            [],
+            "non-lateral FROM subquery",
+            blocked_scopes=[("a non-lateral FROM subquery cannot see its outer query", blocked_relations)],
+        )
+
+    prior_relations = [*query._with, *query._from]
+    for index, join in enumerate(query._joins):
+        prior_scope = _relation_scope(query, prior_relations)
+        future_relations = [later.item for later in query._joins[index + 1 :]]
+        future_scope = _scope_from_relations(future_relations)
+        join_scopes = [_relation_scope(query, [*prior_relations, join.item]), *outer_scopes]
+
+        if isinstance(join.item, QueryBuilder) and not join.is_lateral:
+            blocked_relations = _scope_from_relations(
+                [relation for scope in [prior_scope, *outer_scopes] for relation in scope.values()]
+            )
+            _validate_lateral_query(
+                join.item,
+                [],
+                "non-lateral joined subquery",
+                blocked_scopes=[("a non-lateral joined subquery cannot see its outer query", blocked_relations)],
+            )
+
+        if join.is_lateral:
+            lateral_scopes = [prior_scope, *outer_scopes]
+            lateral_blocked = [
+                ("the relation is introduced to the right of this lateral join", future_scope),
+                *blocked_scopes,
+            ]
+            _validate_lateral_query(
+                join.item,
+                lateral_scopes,
+                "lateral subquery",
+                blocked_scopes=lateral_blocked,
+            )
+        elif hasattr(join, "criterion"):
+            _validate_nested_expression(
+                join.criterion,
+                join_scopes,
+                [
+                    ("the relation is introduced later in the join chain", future_scope),
+                    *blocked_scopes,
+                ],
+                location=location,
+            )
+
+        prior_relations.append(join.item)
+
+
+def _scope_from_relations(relations: Sequence[Selectable | Term]) -> dict[str, Selectable | Term]:
+    return {_relation_label(relation): relation for relation in relations if _relation_label(relation) is not None}
+
+
 class Joiner(Generic[QB]):
     def __init__(self, query: QB, item: Table | QueryBuilder | AliasedQuery, how: JoinType, type_label: str) -> None:
         self.query = query
         self.item = item
         self.how = how
         self.type_label = type_label
+
+    def _tag_item_if_needed(self) -> None:
+        if isinstance(self.item, QueryBuilder) and self.item.alias is None:
+            self.query._tag_subquery(self.item)
 
     def on(self, criterion: Criterion | None, collate: str | None = None) -> QB:
         if criterion is None:
@@ -1639,6 +1893,7 @@ class Joiner(Generic[QB]):
                 "{type} JOIN but was not supplied.".format(type=self.type_label)
             )
 
+        self._tag_item_if_needed()
         self.query.do_join(JoinOn(self.item, self.how, criterion, collate))
         return self.query
 
@@ -1653,6 +1908,7 @@ class Joiner(Generic[QB]):
             constituent = Field(field, table=self.query._from[0]) == Field(field, table=self.item)
             criterion = constituent if criterion is None else criterion & constituent
 
+        self._tag_item_if_needed()
         self.query.do_join(JoinOn(self.item, self.how, criterion))
         return self.query
 
@@ -1660,17 +1916,26 @@ class Joiner(Generic[QB]):
         if not fields:
             raise JoinException("Parameter 'fields' is required when joining with a using clause but was not supplied.")
 
+        self._tag_item_if_needed()
         self.query.do_join(JoinUsing(self.item, self.how, [Field(field) for field in fields]))
         return self.query
 
     def cross(self) -> QB:
         """Return cross join"""
+        self._tag_item_if_needed()
         self.query.do_join(Join(self.item, JoinType.cross))
 
         return self.query
 
+    def lateral(self) -> QB:
+        if not isinstance(self.item, QueryBuilder):
+            raise ValueError("Cannot lateral join on type '%s'" % type(self.item))
+        return self.query.lateral_join(self.item, self.how)
+
 
 class Join:
+    is_lateral = False
+
     def __init__(self, item: Term, how: JoinType) -> None:
         self.item = item
         self.how = how
@@ -1701,6 +1966,14 @@ class Join:
             A copy of the join with the tables replaced.
         """
         self.item = self.item.replace_table(current_table, new_table)
+
+
+class LateralJoin(Join):
+    is_lateral = True
+    SUPPORTED_TYPES = (JoinType.cross, JoinType.left, JoinType.left_outer)
+
+    def get_sql(self, **kwargs: Any) -> str:
+        raise JoinException("LATERAL joins are not supported by this SQL dialect.")
 
 
 class JoinOn(Join):

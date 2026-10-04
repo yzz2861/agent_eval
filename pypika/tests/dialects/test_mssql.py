@@ -1,9 +1,9 @@
 import unittest
 
-from pypika import Table
+from pypika import Order, Table, JoinType
 from pypika.analytics import Count
 from pypika.dialects import MSSQLQuery
-from pypika.utils import QueryException
+from pypika.utils import JoinException, QueryException
 
 
 class SelectTests(unittest.TestCase):
@@ -79,3 +79,53 @@ class SelectTests(unittest.TestCase):
         self.assertEqual(
             'SELECT "sq0"."abc" "a",COUNT(\'*\') FROM (SELECT "abc" FROM "table1") "sq0" GROUP BY "sq0"."abc"', str(q)
         )
+
+
+class ApplyJoinTests(unittest.TestCase):
+    def test_cross_apply(self):
+        customers = Table("customers")
+        orders = Table("orders")
+        latest_order = (
+            MSSQLQuery.from_(orders)
+            .select(orders.total)
+            .where(orders.customer_id == customers.id)
+            .orderby(orders.created_at, order=Order.desc)
+            .top(1)
+            .as_("latest_order")
+        )
+
+        query = MSSQLQuery.from_(customers).cross_join_lateral(latest_order).select(customers.id, latest_order.total)
+
+        self.assertEqual(
+            'SELECT "customers"."id","latest_order"."total" FROM "customers" CROSS APPLY ('
+            'SELECT TOP (1) "orders"."total" FROM "orders" '
+            'WHERE "orders"."customer_id"="customers"."id" '
+            'ORDER BY "orders"."created_at" DESC) "latest_order"',
+            str(query),
+        )
+
+    def test_outer_apply_preserves_empty_result_semantics(self):
+        customers = Table("customers")
+        orders = Table("orders")
+        latest_order = (
+            MSSQLQuery.from_(orders)
+            .select(orders.total)
+            .where(orders.customer_id == customers.id)
+            .top(1)
+            .as_("latest_order")
+        )
+
+        query = (
+            MSSQLQuery.from_(customers).left_outer_join_lateral(latest_order).select(customers.id, latest_order.total)
+        )
+
+        self.assertIn("OUTER APPLY", str(query))
+        self.assertNotIn("CROSS APPLY", str(query))
+
+    def test_inner_lateral_is_rejected(self):
+        customers = Table("customers")
+        orders = Table("orders")
+        latest_order = MSSQLQuery.from_(orders).select(orders.total).as_("latest_order")
+
+        with self.assertRaisesRegex(JoinException, "only support CROSS and LEFT"):
+            MSSQLQuery.from_(customers).lateral_join(latest_order, JoinType.inner)

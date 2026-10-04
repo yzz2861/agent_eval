@@ -498,6 +498,12 @@ class JoinBehaviorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Query.from_(self.table_abc).join("this is a string")
 
+    def test_lateral_is_rejected_by_unsupported_dialect(self):
+        subquery = Query.from_(self.table_efg).select(self.table_efg.id)
+
+        with self.assertRaisesRegex(JoinException, "LATERAL joins are not supported"):
+            MySQLQuery.from_(self.table_abc).cross_join_lateral(subquery)
+
     def test_immutable__tables(self):
         query1 = Query.from_(self.table_abc).select(self.table_abc.foo)
         query2 = (
