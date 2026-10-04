@@ -64,10 +64,10 @@ describe Protocol::WebSocket::Extension::Compression do
 					to_s: be =~ /window_bits=15 context_takeover=true/
 				)
 				
-				client.send_text("Hello World")
+				client.send_text("Hello World " * 20)
 				client.flush
 				
-				expect(client.read).to be == "Hello World"
+				expect(client.read).to be == "Hello World " * 20
 			end
 		end
 		
