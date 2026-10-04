@@ -1638,6 +1638,27 @@ module Mail
       !attachments.empty?
     end
 
+    # Selects a part suitable for display from the MIME tree.
+    #
+    # Types are checked in caller-defined order. multipart/alternative is
+    # selected by that preference, multipart/related uses its start parameter
+    # or first part as the display root, and message/rfc822 boundaries are
+    # not crossed. The returned object also contains CID resources associated
+    # with the selected related branch.
+    def display_body_part(*preferred_types)
+      preferred_types.flatten!
+      preferred_types = preferred_types
+        .compact
+        .map(&:to_s)
+      preferred_types.reject! { |type| Mail::Utilities.blank?(type) }
+      if preferred_types.empty?
+        raise ArgumentError, 'at least one supported display MIME type is required'
+      end
+
+      Mail::DisplayPartSelector.new(self, preferred_types).select
+    end
+    alias_method :display_part, :display_body_part
+
     # Accessor for html_part
     def html_part(&block)
       if block_given?

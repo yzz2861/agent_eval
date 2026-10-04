@@ -12,6 +12,7 @@ module Mail # :doc:
   require 'mail/version'
 
   require 'mail/indifferent_hash'
+  require 'mail/display_part_selection'
 
   require 'mail/multibyte'
 
@@ -41,6 +42,7 @@ module Mail # :doc:
 
   require 'mail/message'
   require 'mail/part'
+  require 'mail/display_part_selector'
   require 'mail/header'
   require 'mail/parts_list'
   require 'mail/attachments_list'
