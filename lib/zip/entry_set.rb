@@ -7,9 +7,10 @@ module Zip
     attr_reader :entry_set
     protected   :entry_set
 
-    def initialize(an_enumerable = [])
+    def initialize(an_enumerable = [], preserve_duplicate_names: false)
       super()
       @entry_set = {}
+      @preserve_duplicate_names = preserve_duplicate_names
       an_enumerable.each { |o| push(o) }
     end
 
@@ -35,7 +36,7 @@ module Zip
       return unless entry
 
       key = to_key(entry)
-      if ::Zip.allow_duplicate_entry_names
+      if @preserve_duplicate_names || ::Zip.allow_duplicate_entry_names
         (@entry_set[key] ||= []) << entry
       else
         @entry_set[key] = [entry]
@@ -89,7 +90,10 @@ module Zip
       # Zip.sort_entries-dependent #entries, so the copy's internal storage
       # order doesn't end up depending on the sort flag's value at the
       # moment of duping.
-      EntrySet.new(@entry_set.values.flatten(1).map(&:dup))
+      EntrySet.new(
+        @entry_set.values.flatten(1).map(&:dup),
+        preserve_duplicate_names: @preserve_duplicate_names
+      )
     end
 
     def ==(other)

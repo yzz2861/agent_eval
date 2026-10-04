@@ -34,9 +34,12 @@ module Zip
       @comment   = comment
     end
 
-    def read_from_stream(io)
+    def read_from_stream(io, preserve_duplicate_names: false)
       read_eocds(io)
-      read_central_directory_entries(io)
+      entry_set = EntrySet.new(
+        [], preserve_duplicate_names: preserve_duplicate_names
+      )
+      read_central_directory_entries(io, entry_set)
     end
 
     def write_to_stream(io, suppress_extra_fields: false) # :nodoc:
@@ -172,7 +175,7 @@ module Zip
       complete
     end
 
-    def read_central_directory_entries(io) # :nodoc:
+    def read_central_directory_entries(io, entry_set = EntrySet.new) # :nodoc:
       # `StringIO` doesn't raise `EINVAL` if you seek beyond the current end,
       # so we need to catch that *and* query `io#eof?` here.
       eof = false
@@ -183,7 +186,7 @@ module Zip
       end
       raise Error, 'Zip consistency problem while reading central directory entry' if eof || io.eof?
 
-      @entry_set = EntrySet.new
+      @entry_set = entry_set
       @size.times do
         entry = Entry.read_c_dir_entry(io)
         break unless entry

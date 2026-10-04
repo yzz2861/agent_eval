@@ -85,6 +85,7 @@ module Zip
       @create  = create ? true : false # allow any truthy value to mean true
 
       initialize_cdir(path_or_io, buffer: buffer)
+      @closed = false
 
       @restore_ownership     = restore_ownership
       @restore_permissions   = restore_permissions
@@ -423,7 +424,16 @@ module Zip
 
     # Closes the zip file committing any changes that has been made.
     def close
-      commit
+      return if @closed
+
+      result = commit
+      @closed = true
+      result
+    end
+
+    # Returns true if the archive has been closed.
+    def closed?
+      @closed
     end
 
     # Returns true if any changes has been made to this archive since

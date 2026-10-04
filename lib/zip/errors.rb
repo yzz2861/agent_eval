@@ -134,6 +134,17 @@ module Zip
     end
   end
 
+  # Error raised when a read-only archive overlay is malformed.
+  class OverlayError < Error; end
+
+  # Error raised when entries in one overlay layer cannot occupy one final tree.
+  class OverlayConflictError < OverlayError
+    # Create the error for the conflicting +path+.
+    def initialize(path, message = 'duplicate or conflicting overlay path')
+      super("#{message}: #{path}")
+    end
+  end
+
   # Error raised if there is not enough metadata for the entry to be streamed.
   class StreamingError < Error
     # The entry that has caused this error.
