@@ -1,5 +1,25 @@
 # News
 
+## Next
+
+### New feature
+
+  * Added experimental `REXML::XInclude.expand` for explicit
+    [XInclude 1.0](https://www.w3.org/TR/xinclude/) expansion.
+    * Only `parse="xml"` (default) and `parse="text"` are supported.
+    * Included resources are fetched through a caller supplied
+      resolver; the library itself never accesses the network or
+      arbitrary local paths.
+    * The `xpointer` attribute and fragment identifiers in `href` are
+      rejected explicitly as unsupported.
+    * Relative references are resolved against the base URI of the
+      including document (including `xml:base`), and inserted top
+      level elements are given an appropriate `xml:base` and namespace
+      declarations.
+    * Recursive include chains are detected and reported as a fatal
+      error. Malformed XML of an included resource is fatal too; it is
+      not swallowed by `xi:fallback` the way a missing resource is.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement
