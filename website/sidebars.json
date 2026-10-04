@@ -74,6 +74,7 @@
       "plugins/determine_mime_type",
       "plugins/infer_extension",
       "plugins/metadata_attributes",
+      "plugins/metadata_evidence",
       "plugins/refresh_metadata",
       "plugins/restore_cached_data",
       "plugins/signature",

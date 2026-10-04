@@ -1,3 +1,15 @@
+## Unreleased
+
+* Add `metadata_evidence` plugin for recording the source of file metadata
+
+  For each tracked field (`filename`, `size`, `mime_type`) it keeps the
+  client-declared value, the server-probed value, and the adopted value in a
+  versioned `evidence` metadata key, so differences remain visible after
+  metadata is overwritten (e.g. when restoring cached data). The
+  `validate_metadata_source` validation helper can require values to come
+  from trusted sources only, without falling back to declared values when
+  probed values are missing.
+
 ## 3.10.0 (2026-09-20)
 
 * Add `fallback_storage` plugin for reading files from a secondary storage when they're missing in the primary storage (@yegorov, @janko)
