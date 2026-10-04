@@ -67,12 +67,12 @@ module Mail
       decoded
     end
 
-    def parameters
+    def parameters(strict: false)
       unless defined? @parameters
         @parameters = ParameterHash.new
         element.parameters.each { |p| @parameters.merge!(p) }
       end
-      @parameters
+      strict ? @parameters.strict_decode : @parameters
     end
 
     def value

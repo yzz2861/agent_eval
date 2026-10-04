@@ -21,10 +21,10 @@ module Mail
       element.disposition_type
     end
 
-    def parameters
+    def parameters(strict: false)
       @parameters = ParameterHash.new
       element.parameters.each { |p| @parameters.merge!(p) } unless element.parameters.nil?
-      @parameters
+      strict ? @parameters.strict_decode : @parameters
     end
 
     def filename

@@ -110,4 +110,27 @@ RSpec.describe Mail::ContentDispositionField do
       expect(c.filename).to eq "Eelanalüüsi päring.jpg"
     end
   end
+
+  describe "strict RFC 2231 parsing" do
+    it "returns decoded parameters and diagnostics" do
+      field = Mail::ContentDispositionField.new(
+        "attachment; filename*0*=utf-8''%E4%BD; filename*1=%A0; filename*2=%E5%A5%BD"
+      )
+      loose = field.parameters
+      strict = field.parameters(strict: true)
+
+      expect(loose).to be_a Mail::ParameterHash
+      expect(strict.parameters['filename']).to eq '你好'
+      expect(strict.diagnostics).to be_empty
+    end
+
+    it "locates broken parameter sections on the field" do
+      field = Mail::ContentDispositionField.new("attachment; filename*0*=utf-8''first; filename*2=third")
+      result = field.parameters(strict: true)
+
+      expect(result.parameters).to be_empty
+      expect(result.diagnostics.first.type).to eq :broken_sections
+      expect(result.diagnostics.first.parameter).to eq 'filename'
+    end
+  end
 end
