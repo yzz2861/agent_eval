@@ -8,6 +8,7 @@
 # Copyright, 2026, by William T. Nelson.
 
 require_relative "error"
+require "securerandom"
 
 module Protocol
 	module WebSocket

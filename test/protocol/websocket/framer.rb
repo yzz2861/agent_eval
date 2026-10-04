@@ -9,6 +9,7 @@ require "protocol/websocket/framer"
 describe Protocol::WebSocket::Framer do
 	let(:stream) {StringIO.new}
 	let(:framer) {subject.new(stream)}
+	let(:mask_key) {"mask"}
 	
 	with "#write_frame" do
 		it "fails with invalid mask size" do
@@ -20,6 +21,33 @@ describe Protocol::WebSocket::Framer do
 			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Invalid mask length/)
 		end
 		
+		it "requires client frames to be masked" do
+			frame = Protocol::WebSocket::TextFrame.new(true, "Hello")
+
+			expect do
+				subject.new(stream, role: :client).write_frame(frame)
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Client frames must be masked/)
+		end
+
+		it "requires server frames to be unmasked" do
+			frame = Protocol::WebSocket::TextFrame.new(true, "Hello", mask: true)
+
+			expect do
+				subject.new(stream, role: :server).write_frame(frame)
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Server frames must not be masked/)
+		end
+
+		it "writes correctly masked client and unmasked server frames" do
+			client_stream = StringIO.new
+			server_stream = StringIO.new
+
+			subject.new(client_stream, role: :client).write_frame(Protocol::WebSocket::TextFrame.new(true, mask: true).tap{|frame| frame.pack("Hello")})
+			subject.new(server_stream, role: :server).write_frame(Protocol::WebSocket::TextFrame.new(true, "Hello"))
+
+			expect(client_stream.string.getbyte(1) & 0b1000_0000).not.to be(:zero?)
+			expect(server_stream.string.getbyte(1) & 0b1000_0000).to be(:zero?)
+		end
+
 		it "writes a text frame and reads it back" do
 			output = StringIO.new
 			writer = Protocol::WebSocket::Framer.new(output)
@@ -35,6 +63,32 @@ describe Protocol::WebSocket::Framer do
 	end
 	
 	with "#read_frame" do
+		it "rejects unmasked frames from a client when acting as a server" do
+			stream.string = "\x81\x05Hello"
+			stream.rewind
+
+			expect do
+				subject.new(stream, role: :server).read_frame
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /unmasked frame from client/) do |error|
+				expect(error.code).to be == Protocol::WebSocket::Error::PROTOCOL_ERROR
+			end
+
+			expect(stream.pos).to be == 2
+		end
+
+		it "rejects masked frames from a server when acting as a client" do
+			stream.string = "\x81\x85#{mask_key}\x25\x05\x19\x0B\x17"
+			stream.rewind
+
+			expect do
+				subject.new(stream, role: :client).read_frame
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /masked frame from server/) do |error|
+				expect(error.code).to be == Protocol::WebSocket::Error::PROTOCOL_ERROR
+			end
+
+			expect(stream.pos).to be == 2
+		end
+
 		it "fails if it can't read the frame header" do
 			expect do
 				framer.read_frame
@@ -60,13 +114,15 @@ describe Protocol::WebSocket::Framer do
 		end
 		
 		it "rejects invalid control frame payload length" do
-			# FIN=1, opcode=0x8 (close), MASK=1, length=127 → violates max 125 for control frames
-			stream.string = "\x88\xFF"
+			# FIN=1, opcode=0x8 (close), MASK=0, length=127 → violates max 125 for control frames
+			stream.string = "\x88\x7F"
 			stream.rewind
 			
 			expect do
 				framer.read_frame
 			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Invalid control frame payload length/)
+
+			expect(stream.pos).to be == 2
 		end
 		
 		it "rejects fragmented control frames" do
@@ -79,6 +135,52 @@ describe Protocol::WebSocket::Framer do
 			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Fragmented control frame/)
 		end
 		
+		it "rejects reserved flags that were not negotiated" do
+			stream.string = "\xC1\x05Hello"
+			stream.rewind
+
+			expect do
+				framer.read_frame
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /reserved flags set/)
+
+			expect(stream.pos).to be == 2
+		end
+
+		it "accepts reserved flags that were negotiated" do
+			stream.string = "\xC1\x05Hello"
+			stream.rewind
+
+			frame = framer.read_frame(reserved: Protocol::WebSocket::Frame::RESERVED & ~Protocol::WebSocket::Frame::RSV1)
+
+			expect(frame.flags & Protocol::WebSocket::Frame::RSV1).not.to be(:zero?)
+		end
+
+		it "uses message too large as the close code for oversized payloads" do
+			stream.string = "\x82\x7D"
+			stream.rewind
+
+			expect do
+				framer.read_frame(124)
+			end.to raise_exception(Protocol::WebSocket::ProtocolError) do |error|
+				expect(error.code).to be == Protocol::WebSocket::Error::MESSAGE_TOO_LARGE
+			end
+
+			expect(stream.pos).to be == 2
+		end
+
+		it "uses protocol error for payloads larger than the protocol limit" do
+			stream.string = "\x82\x7F\x80\x00\x00\x00\x00\x00\x00\x00"
+			stream.rewind
+
+			expect do
+				framer.read_frame
+			end.to raise_exception(Protocol::WebSocket::ProtocolError) do |error|
+				expect(error.code).to be == Protocol::WebSocket::Error::PROTOCOL_ERROR
+			end
+
+			expect(stream.pos).to be == 10
+		end
+
 		it "rejects frames bigger than the maximum frame size" do
 			# FIN=1, opcode=0x2 (binary), MASK=0, length=125
 			stream.string = "\x82\x7D"

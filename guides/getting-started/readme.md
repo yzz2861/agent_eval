@@ -30,8 +30,8 @@ require 'socket'
 
 sockets = Socket.pair(Socket::PF_UNIX, Socket::SOCK_STREAM)
 
-client = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.first))
-server = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.last))
+client = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.first), role: :client)
+server = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.last), role: :server)
 
 client.send_text("Hello World")
 server.read
@@ -41,6 +41,10 @@ client.send_binary("Hello World")
 server.read
 #<Protocol::WebSocket::BinaryMessage:0x000000011d371db0 @buffer="Hello World">
 ~~~
+
+The explicit role enables strict frame validation. Client-to-server frames must be masked, server-to-client frames must be unmasked, and invalid frames are closed with status code `1002` (protocol error). Frames that exceed a configured size limit use status code `1009`.
+
+For compatibility, constructing a connection without `role:` retains the previous permissive behavior: the connection does not infer its role from the configured outbound mask, and it accepts either masked or unmasked inbound frames. New code should specify `role: :client` or `role: :server`.
 
 ## Messages
 
@@ -53,8 +57,8 @@ require 'socket'
 
 sockets = Socket.pair(Socket::PF_UNIX, Socket::SOCK_STREAM)
 
-client = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.first))
-server = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.last))
+client = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.first), role: :client)
+server = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.last), role: :server)
 
 # Encode a value using JSON:
 message = Protocol::WebSocket::TextMessage.generate({hello: "world"})

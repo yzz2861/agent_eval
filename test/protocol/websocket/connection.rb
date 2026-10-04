@@ -106,6 +106,129 @@ describe Protocol::WebSocket::Connection do
 		expect(connection.mask).to be == nil
 	end
 	
+	with "explicit roles" do
+		it "defaults to masking outbound client frames" do
+			client_connection = subject.new(client, role: :client)
+
+			expect(client_connection.role).to be == :client
+
+			client_connection.send_text("Hello")
+			frame = server.read_frame
+
+			expect(frame.mask).to be(:kind_of?, String)
+			expect(frame.unpack).to be == "Hello"
+		end
+
+		it "does not mask outbound server frames" do
+			server_connection = subject.new(server, role: :server)
+
+			expect(server_connection.role).to be == :server
+
+			server_connection.send_text("Hello")
+			frame = client.read_frame
+
+			expect(frame.mask).to be == false
+			expect(frame.unpack).to be == "Hello"
+		end
+
+		it "rejects masked outbound server frames before writing them" do
+			server_connection = subject.new(server, role: :server)
+			frame = Protocol::WebSocket::TextFrame.new(true, mask: true)
+			frame.pack("Hello")
+
+			expect do
+				server_connection.write_frame(frame)
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Server frames must not be masked/)
+		end
+
+		it "rejects unmasked outbound client frames before writing them" do
+			client_connection = subject.new(client, role: :client)
+			frame = Protocol::WebSocket::TextFrame.new(true)
+			frame.pack("Hello")
+
+			expect do
+				client_connection.write_frame(frame)
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /Client frames must be masked/)
+		end
+
+		it "rejects incompatible mask configuration" do
+			expect do
+				subject.new(server, role: :client, mask: false)
+			end.to raise_exception(ArgumentError, message: be =~ /Client connections must mask/)
+
+			expect do
+				subject.new(server, role: :server, mask: true)
+			end.to raise_exception(ArgumentError, message: be =~ /Server connections must not mask/)
+
+			expect do
+				subject.new(server, role: :proxy)
+			end.to raise_exception(ArgumentError, message: be =~ /Invalid role/)
+		end
+
+		it "rejects unmasked client frames before reading the payload and closes with 1002" do
+			server_connection = subject.new(server, role: :server)
+			client.write_frame(Protocol::WebSocket::TextFrame.new(true).tap{|frame| frame.pack("Hello")})
+
+			expect do
+				server_connection.read_frame
+			end.to raise_exception(Protocol::WebSocket::ProtocolError) do |error|
+				expect(error.code).to be == Protocol::WebSocket::Error::PROTOCOL_ERROR
+			end
+
+			frame = client.read_frame
+			code, reason = frame.unpack
+
+			expect(frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(frame.mask).to be == false
+			expect(code).to be == Protocol::WebSocket::Error::PROTOCOL_ERROR
+		end
+
+		it "rejects masked server frames before reading the payload and closes with 1002" do
+			client_connection = subject.new(client, role: :client)
+			server.write_frame(Protocol::WebSocket::TextFrame.new(true, mask: true).tap{|frame| frame.pack("Hello")})
+
+			expect do
+				client_connection.read_frame
+			end.to raise_exception(Protocol::WebSocket::ProtocolError) do |error|
+				expect(error.code).to be == Protocol::WebSocket::Error::PROTOCOL_ERROR
+			end
+
+			frame = server.read_frame
+			code, reason = frame.unpack
+
+			expect(frame).to be_a(Protocol::WebSocket::CloseFrame)
+			expect(frame.mask).to be(:kind_of?, String)
+			expect(code).to be == Protocol::WebSocket::Error::PROTOCOL_ERROR
+		end
+
+		it "accepts RSV bits only after they have been negotiated" do
+			server_connection = subject.new(server, role: :server)
+			frame = Protocol::WebSocket::TextFrame.new(true, flags: Protocol::WebSocket::Frame::RSV1)
+			frame.pack("Hello")
+
+			client.write_frame(frame)
+
+			expect do
+				server_connection.read_frame
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /reserved flags/)
+
+			client.read_frame
+		end
+
+		it "accepts an RSV bit reserved by a negotiated extension" do
+			server_connection = subject.new(server, role: :server)
+			server_connection.reserve!(Protocol::WebSocket::Frame::RSV1)
+
+			masked_frame = Protocol::WebSocket::TextFrame.new(true, mask: true, flags: Protocol::WebSocket::Frame::RSV1)
+			masked_frame.pack("Hello")
+			client.write_frame(masked_frame)
+
+			frame = server_connection.read_frame
+
+			expect(frame.flag?(Protocol::WebSocket::Frame::RSV1)).to be == true
+		end
+	end
+
 	with "masked connection" do
 		let(:connection) {subject.new(server, mask: true)}
 		

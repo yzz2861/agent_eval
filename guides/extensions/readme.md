@@ -61,8 +61,8 @@ require 'socket'
 
 sockets = Socket.pair(Socket::PF_UNIX, Socket::SOCK_STREAM)
 
-client = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.first))
-server = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.last))
+client = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.first), role: :client)
+server = Protocol::WebSocket::Connection.new(Protocol::WebSocket::Framer.new(sockets.last), role: :server)
 
 client_extensions.apply(client)
 server_extensions.apply(server)
@@ -79,6 +79,8 @@ client.send_text("Hello World")
 server.read
 # => #<Protocol::WebSocket::TextMessage:0x000000011e1e5248 @buffer="Hello World">
 ~~~
+
+RSV bits are accepted only for extensions that negotiated them during the handshake. Frames that set an unnegotiated RSV bit are rejected as protocol errors before the payload is read.
 
 It's possible to disable compression on a per-message basis:
 
