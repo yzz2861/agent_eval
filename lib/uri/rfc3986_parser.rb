@@ -29,8 +29,12 @@ module URI
 
     SCHEME = %r[[A-Za-z][+\-.0-9A-Za-z]*+].source
     SEG = %r[(?:%\h\h|[!$&-.0-9:;=@A-Z_a-z~/])].source
+    TEL_NUMBER = /(?:%\h\h|[!#$&-;=?@A-Z_a-z~\[\]])++/.source
+    TEL_PARAM = /(?:%\h\h|[!$&-;=?@A-Z_a-z~\[\]])*+/.source
+    TEL_OPAQUE = /#{TEL_NUMBER}(?:;#{TEL_PARAM})*+/.source
     SEG_NC = %r[(?:%\h\h|[!$&-.0-9;=@A-Z_a-z~])].source
     FRAGMENT = %r[(?:%\h\h|[!$&-.0-9:;=@A-Z_a-z~/?])*+].source
+    TEL_URI = %r[\A(?<scheme>#{SCHEME}):(?<opaque>#{TEL_OPAQUE})(?:\#(?<fragment>#{FRAGMENT}))?\z]ix
 
     RFC3986_URI = %r[\A
     (?<seg>#{SEG}){0}
@@ -82,6 +86,12 @@ module URI
       end
       uri.ascii_only? or
         raise InvalidURIError, "URI must be ascii only #{uri.dump}"
+      if (m = TEL_URI.match(uri)) && m["scheme"].downcase == 'tel'
+        return [
+          m["scheme"].downcase, nil, nil, nil, nil, nil,
+          m["opaque"], nil, m["fragment"]
+        ]
+      end
       if m = RFC3986_URI.match(uri)
         query = m["query"]
         scheme = m["scheme"]
