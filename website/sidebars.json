@@ -105,6 +105,7 @@
       "plugins/instrumentation",
       "plugins/fallback_storage",
       "plugins/keep_files",
+      "plugins/deletion_protection",
       "plugins/mirroring"
     ]
   },

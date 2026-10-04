@@ -1,3 +1,7 @@
+## HEAD
+
+* Add `deletion_protection` plugin, which separates "no longer referenced" from "allowed to be physically deleted" via explicit holds, retention deadlines and an explicit pending-deletion state
+
 ## 3.10.0 (2026-09-20)
 
 * Add `fallback_storage` plugin for reading files from a secondary storage when they're missing in the primary storage (@yegorov, @janko)
