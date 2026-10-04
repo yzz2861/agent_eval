@@ -6,3 +6,4 @@ coverage/
 node_modules
 .docusaurus
 gemfiles/*.lock
+tmp/

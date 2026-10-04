@@ -53,7 +53,8 @@
     "Flow": [
       "plugins/backgrounding",
       "plugins/presign_endpoint",
-      "plugins/upload_endpoint"
+      "plugins/upload_endpoint",
+      "plugins/resumable_uploads"
     ],
     "Processing": [
       "plugins/derivation_endpoint",
