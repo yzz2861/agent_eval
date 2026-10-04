@@ -53,6 +53,37 @@ How to implement these methods (efficiently!) depends on your backend and how yo
 - {{ "GraphQL::Pagination::SequelDatasetConnection" | api_doc }}
 - {{ "GraphQL::Pagination::MongoidRelationConnection" | api_doc }}
 
+### Merging Sorted Sources
+
+Use {{ "GraphQL::Pagination::MergedConnection" | api_doc }} when a connection is backed by several sources that are already sorted independently. It performs a k-way merge, reading only a small batch from each source as needed. Ties are resolved deterministically with the stable source ID and a source-local node identity, and merged cursors bind both the source set and sort definition.
+
+```ruby
+recent_source = GraphQL::Pagination::MergedConnection::Source.new(
+  "recent",
+  identity: ->(post) { post.id },
+  cursor_for: ->(post) { post.public_id },
+) do |after:, limit:, context:|
+  scope = Post.order(:created_at, :id)
+  scope = scope.where("public_id > ?", after) if after
+  scope.limit(limit).to_a
+end
+
+field :timeline, Types::Post.connection_type, null: false
+
+def timeline
+  GraphQL::Pagination::MergedConnection.new(
+    [recent_source, scheduled_source],
+    context: context,
+    first: arguments[:first],
+    after: arguments[:after],
+    comparison_key: ->(post) { post.created_at.iso8601 },
+    sort_definition: { "attribute" => "created_at", "direction" => "asc" },
+  )
+end
+```
+
+Only forward pagination (`first` and `after`) is supported. Passing `last` or `before` raises an execution error so unsupported combinations are not silently reordered.
+
 ### Using a Custom Connection
 
 To integrate your custom connection wrapper with GraphQL, you have two options:
