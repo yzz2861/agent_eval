@@ -110,7 +110,11 @@ module Liquid
 
     def render_to_output_buffer(context, output)
       obj = render(context)
-      render_obj_to_output(obj, output)
+      if (mode = context.output_mode)
+        render_obj_to_output_with_mode(obj, output, mode)
+      else
+        render_obj_to_output(obj, output)
+      end
       output
     end
 
@@ -124,6 +128,23 @@ module Liquid
         end
       else
         output << Liquid::Utils.to_s(obj)
+      end
+    end
+
+    # In an explicit output mode, every value is escaped for the active
+    # context unless it is a SafeValue whose guarantee covers that context.
+    def render_obj_to_output_with_mode(obj, output, mode)
+      case obj
+      when NilClass
+        # Do nothing
+      when Array
+        obj.each do |o|
+          render_obj_to_output_with_mode(o, output, mode)
+        end
+      when SafeValue
+        output << (obj.safe_for?(mode) ? obj.to_s : SafeOutput.escape(obj.to_s, mode))
+      else
+        output << SafeOutput.escape(Liquid::Utils.to_s(obj), mode)
       end
     end
 

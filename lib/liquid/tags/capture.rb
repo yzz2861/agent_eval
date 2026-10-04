@@ -52,6 +52,9 @@ module Liquid
     def render_to_output_buffer(context, output)
       context.resource_limits.with_capture do
         capture_output = render(context)
+        # The captured body was already escaped for the active output mode
+        # while rendering, so the result is safe to reuse in that mode.
+        capture_output = SafeValue.new(capture_output, context.output_mode) if context.output_mode
         context.scopes.last[@to] = capture_output
       end
       output

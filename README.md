@@ -156,6 +156,46 @@ integer-range `for` and `tablerow` loops, including loops with empty bodies. Thi
 iteration work when a score limit is configured; `render_length_limit` only bounds generated
 output and does not by itself limit CPU work for output-free loops.
 
+### Safe output modes
+
+By default Liquid renders values verbatim, exactly as they are. When the same
+engine is used to generate different formats, you can opt into an explicit
+output mode per render, and every value written to the output is escaped for
+that context automatically:
+
+```ruby
+template = Liquid::Template.parse("{{ name }}")
+template.render({ 'name' => '<b>' }, output_mode: :html)           #=> '&lt;b&gt;'
+template.render({ 'name' => '<b>' }, output_mode: :html_attribute) #=> '&lt;b&gt;' (also escapes quotes)
+template.render({ 'name' => 'a"b' }, output_mode: :json)           #=> 'a\"b'
+template.render({ 'name' => '<b>' })                               #=> '<b>' (default, unchanged)
+```
+
+Escaped values carry a purpose-specific guarantee (`Liquid::SafeValue`) rather
+than a generic "safe" flag: a value escaped for HTML text is not trusted in an
+HTML attribute or a JSON string, and is escaped again if it lands there.
+
+Filters keep a guarantee only when they declare it. A filter module can declare
+that a filter produces output safe for a context, or that it preserves the
+guarantees of its input:
+
+```ruby
+module MyFilters
+  extend Liquid::FilterGuarantees
+
+  guarantees_output :escape, context: :html
+  preserves_output_guarantees :upcase, contexts: [:html, :html_attribute]
+end
+```
+
+Undeclared filters — including plain concatenation such as `append` — always
+return an unmarked value, so a single safe fragment can never mark a whole
+concatenation safe. The standard filters declare guarantees for `escape`,
+`escape_once`, `escape_attribute`, `json_escape`, `url_encode` and
+`base64_encode`, and preserve them through case mappings and whitespace
+stripping. Values returned by Drops are treated as untrusted and are escaped
+unless the Drop explicitly returns a `Liquid::SafeValue`.
+
 ### Usage tracking
 
 To help track usages of a feature or code path in production, we have released opt-in usage tracking. To enable this, we provide an empty `Liquid:: Usage.increment` method which you can customize to your needs. The feature is well suited to https://github.com/Shopify/statsd-instrument. However, the choice of implementation is up to you.

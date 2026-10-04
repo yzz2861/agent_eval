@@ -5,6 +5,21 @@ require 'base64'
 require 'bigdecimal'
 module Liquid
   module StandardFilters
+    extend FilterGuarantees
+
+    # Output-safety declarations, consulted only when rendering with an
+    # explicit output mode. Filters not listed here (notably concatenating
+    # ones like +append+ or +prepend+) always return an unmarked value, so
+    # a single safe fragment can never mark a whole concatenation safe.
+    guarantees_output :escape, :h, :escape_once, context: :html
+    guarantees_output :escape_attribute, context: :html_attribute
+    guarantees_output :json_escape, context: :json
+    guarantees_output :url_encode, :base64_encode, context: :html_attribute
+    # Case mapping keeps HTML entities intact but breaks JSON \uXXXX
+    # escapes, so it only preserves HTML guarantees.
+    preserves_output_guarantees :upcase, :downcase, :capitalize, contexts: %i[html html_attribute]
+    preserves_output_guarantees :strip, :lstrip, :rstrip, :strip_newlines
+
     MAX_I32 = (1 << 31) - 1
     private_constant :MAX_I32
 
@@ -108,6 +123,28 @@ module Liquid
       CGI.escapeHTML(Utils.to_s(input)) unless input.nil?
     end
     alias_method :h, :escape
+
+    # @liquid_public_docs
+    # @liquid_type filter
+    # @liquid_category string
+    # @liquid_summary
+    #   Escapes special characters in HTML, including single quotes, so the result is safe to embed in a quoted HTML attribute.
+    # @liquid_syntax string | escape_attribute
+    # @liquid_return [string]
+    def escape_attribute(input)
+      SafeOutput.escape_html_attribute(Utils.to_s(input)) unless input.nil?
+    end
+
+    # @liquid_public_docs
+    # @liquid_type filter
+    # @liquid_category string
+    # @liquid_summary
+    #   Escapes a string for embedding inside a JSON string literal. The surrounding quotes are provided by the template.
+    # @liquid_syntax string | json_escape
+    # @liquid_return [string]
+    def json_escape(input)
+      SafeOutput.escape_json(Utils.to_s(input)) unless input.nil?
+    end
 
     # @liquid_public_docs
     # @liquid_type filter

@@ -137,6 +137,11 @@ module Liquid
     #  * <tt>filters</tt> : array with local filters
     #  * <tt>registers</tt> : hash with register variables. Those can be accessed from
     #    filters and tags and might be useful to integrate liquid more with its host application
+    #  * <tt>output_mode</tt> : <tt>:html</tt>, <tt>:html_attribute</tt>, or <tt>:json</tt>.
+    #    When set, every value written to the output is escaped for that
+    #    context unless it carries a matching safety guarantee (see
+    #    Liquid::SafeValue). When omitted, Liquid renders values verbatim,
+    #    as it always has.
     #
     def render(*args)
       return '' if @root.nil?
@@ -244,6 +249,7 @@ module Liquid
       context.exception_renderer = options[:exception_renderer] if options[:exception_renderer]
       context.strict_variables   = options[:strict_variables] if options[:strict_variables]
       context.strict_filters     = options[:strict_filters] if options[:strict_filters]
+      context.output_mode        = options[:output_mode] if options[:output_mode]
     end
   end
 end

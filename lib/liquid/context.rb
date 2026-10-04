@@ -16,6 +16,7 @@ module Liquid
   class Context
     attr_reader :scopes, :errors, :registers, :environments, :resource_limits, :static_registers, :static_environments
     attr_accessor :exception_renderer, :template_name, :partial, :global_filter, :strict_variables, :strict_filters, :environment
+    attr_reader :output_mode
 
     # rubocop:disable Metrics/ParameterLists
     def self.build(environment: Environment.default, environments: {}, outer_scope: {}, registers: {}, rethrow_errors: false, resource_limits: nil, static_environments: {}, &block)
@@ -34,6 +35,7 @@ module Liquid
       @partial             = false
       @strict_variables    = false
       @resource_limits     = resource_limits || ResourceLimits.new(environment.default_resource_limits)
+      @output_mode         = nil
       @base_scope_depth    = 0
       @interrupts          = []
       @filters             = []
@@ -80,6 +82,21 @@ module Liquid
 
     def apply_global_filter(obj)
       global_filter.nil? ? obj : global_filter.call(obj)
+    end
+
+    # The explicit output mode for this render (:html, :html_attribute, or
+    # :json), or nil for the default mode where nothing is auto-escaped.
+    def output_mode=(mode)
+      if mode.nil?
+        @output_mode = nil
+        return
+      end
+
+      mode = mode.to_sym
+      unless SafeValue::OUTPUT_MODES.include?(mode)
+        raise ArgumentError, "unknown output mode: #{mode.inspect} (expected one of #{SafeValue::OUTPUT_MODES.map(&:inspect).join(', ')})"
+      end
+      @output_mode = mode
     end
 
     # are there any not handled interrupts?
@@ -159,6 +176,7 @@ module Liquid
         subcontext.errors   = errors
         subcontext.warnings = warnings
         subcontext.disabled_tags = @disabled_tags
+        subcontext.output_mode = @output_mode
       end
     end
 
