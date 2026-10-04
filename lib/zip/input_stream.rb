@@ -49,13 +49,15 @@ module Zip
     # if the specified offset in the specified filename is
     # not a local zip entry header.
     #
-    # @param context [String||IO||StringIO] file path or IO/StringIO object
-    # @param offset [Integer] offset in the IO/StringIO
+    # @param context [String||IO||StringIO||Zip::VolumeProvider] file path,
+    #   IO/StringIO object, or volume provider
+    # @param disk [Integer] zero-based disk containing the local entry header
+    # @param offset [Integer] offset within that disk
     # This method also accepts the standard IO encoding options:
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
-    def initialize(context, offset: 0, decrypter: nil, **opts)
+    def initialize(context, disk: 0, offset: 0, decrypter: nil, **opts)
       super(**opts)
-      @archive_io = get_io(context, offset)
+      @archive_io = get_io(context, disk, offset)
       @decompressor = ::Zip::NullDecompressor
       @decrypter = decrypter
       @current_entry = nil
@@ -75,7 +77,7 @@ module Zip
       unless @current_entry.nil?
         raise StreamingError, @current_entry if @current_entry.incomplete?
 
-        @archive_io.seek(@current_entry.next_header_offset, IO::SEEK_SET)
+        seek_to_next_header
       end
 
       open_entry
@@ -87,7 +89,7 @@ module Zip
 
       @lineno = 0
       @pos    = 0
-      @archive_io.seek(@current_entry.local_header_offset, IO::SEEK_SET)
+      seek_to_entry_header
       open_entry
     end
 
@@ -127,8 +129,8 @@ module Zip
       # Same as #initialize but if a block is passed the opened
       # stream is passed to the block and closed when the block
       # returns.
-      def open(filename_or_io, offset: 0, decrypter: nil, **opts)
-        zio = new(filename_or_io, offset: offset, decrypter: decrypter, **opts)
+      def open(filename_or_io, disk: 0, offset: 0, decrypter: nil, **opts)
+        zio = new(filename_or_io, disk: disk, offset: offset, decrypter: decrypter, **opts)
         return zio unless block_given?
 
         begin
@@ -141,15 +143,75 @@ module Zip
 
     protected
 
-    def get_io(io_or_file, offset = 0) # :nodoc:
-      if io_or_file.respond_to?(:seek)
+    def get_io(io_or_file, disk = 0, offset = 0) # :nodoc:
+      if io_or_file.respond_to?(:volume_provider?) && io_or_file.volume_provider?
+        io_or_file.open_io(disk, offset)
+      elsif io_or_file.respond_to?(:seek)
         io = io_or_file.dup
-        io.seek(offset, ::IO::SEEK_SET)
+        seek_initial_position(io, disk, offset)
         io
       else
         file = ::File.open(io_or_file, 'rb')
-        file.seek(offset, ::IO::SEEK_SET)
+        seek_initial_position(file, disk, offset)
         file
+      end
+    end
+
+    def seek_initial_position(io, disk, offset)
+      if io.respond_to?(:multi_volume?) && io.multi_volume?
+        io.seek_to(disk, offset)
+      elsif disk.nonzero?
+        raise ::Zip::VolumeOffsetError.new(disk, offset)
+      else
+        io.seek(offset, ::IO::SEEK_SET)
+      end
+    end
+
+    def seek_to_entry_header
+      seek_to_volume_offset(
+        @current_entry.disk_start_number,
+        @current_entry.local_header_offset
+      )
+    end
+
+    def seek_to_next_header
+      if @archive_io.respond_to?(:multi_volume?) && @archive_io.multi_volume?
+        @archive_io.seek_from_disk_offset(
+          @current_entry.disk_start_number,
+          local_data_end_offset
+        )
+        descriptor_length = data_descriptor_length
+        @archive_io.seek_from_disk_offset(
+          @current_entry.disk_start_number,
+          local_data_end_offset + descriptor_length
+        )
+      else
+        @archive_io.seek(@current_entry.next_header_offset, ::IO::SEEK_SET)
+      end
+    end
+
+    def data_descriptor_length
+      return 0 unless @current_entry.gp_flags & 8 == 8
+
+      marker = @archive_io.read(4)
+      if marker == [::Zip::SPLIT_FILE_SIGNATURE].pack('V')
+        ::Zip::LOCAL_ENTRY_TRAILING_DESCRIPTOR_LENGTH + 4
+      else
+        ::Zip::LOCAL_ENTRY_TRAILING_DESCRIPTOR_LENGTH
+      end
+    end
+
+    def local_data_end_offset
+      @current_entry.calculate_local_header_size + @current_entry.compressed_size
+    end
+
+    def seek_to_volume_offset(disk, offset)
+      if @archive_io.respond_to?(:multi_volume?) && @archive_io.multi_volume?
+        @archive_io.seek_to(disk, offset)
+      elsif disk.nonzero?
+        raise ::Zip::VolumeOffsetError.new(disk, offset)
+      else
+        @archive_io.seek(offset, ::IO::SEEK_SET)
       end
     end
 

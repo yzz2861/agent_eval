@@ -127,10 +127,52 @@ module Zip
 
   # Error raised if a split archive is read. Rubyzip does not support reading
   # split archives.
-  class SplitArchiveError < Error
+class SplitArchiveError < Error
     # The message returned by this error.
     def message
       'Rubyzip cannot extract from split archives at this time.'
+    end
+  end
+
+  # Error raised when a volume provider cannot supply a requested disk.
+  class MissingVolumeError < Error
+    def initialize(disk_number)
+      super()
+      @disk_number = disk_number
+    end
+
+    def message
+      "Missing ZIP volume for disk #{@disk_number}."
+    end
+  end
+
+  # Error raised when a volume provider supplies the same volume twice.
+  class DuplicateVolumeError < Error
+    def initialize(disk_number, other_disk_number)
+      super()
+      @disk_number = disk_number
+      @other_disk_number = other_disk_number
+    end
+
+    def message
+      "ZIP volume on disk #{@disk_number} is the same as disk #{@other_disk_number}."
+    end
+  end
+
+  # Error raised when a disk number or offset is outside its volume.
+  class VolumeOffsetError < Error
+    def initialize(disk_number, offset, maximum_offset = nil)
+      super()
+      @disk_number = disk_number
+      @offset = offset
+      @maximum_offset = maximum_offset
+    end
+
+    def message
+      message = "Invalid ZIP volume offset #{@offset} on disk #{@disk_number}."
+      return message if @maximum_offset.nil?
+
+      "#{message} The volume is #{@maximum_offset} bytes long."
     end
   end
 

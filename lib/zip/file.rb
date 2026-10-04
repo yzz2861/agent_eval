@@ -74,6 +74,7 @@ module Zip
     # Opens a zip archive. Pass create: true to create
     # a new archive if it doesn't exist already.
     def initialize(path_or_io, create: false, buffer: false,
+                   volume_provider: nil, volume_count: nil,
                    restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
@@ -84,7 +85,12 @@ module Zip
       @name    = path_or_io.respond_to?(:path) ? path_or_io.path : path_or_io
       @create  = create ? true : false # allow any truthy value to mean true
 
-      initialize_cdir(path_or_io, buffer: buffer)
+      @archive_io = initialize_cdir(
+        path_or_io,
+        buffer: buffer,
+        volume_provider: volume_provider,
+        volume_count: volume_count
+      )
 
       @restore_ownership     = restore_ownership
       @restore_permissions   = restore_permissions
@@ -97,13 +103,15 @@ module Zip
       # Similar to ::new. If a block is passed the Zip::File object is passed
       # to the block and is automatically closed afterwards, just as with
       # ruby's builtin File::open method.
-      def open(file_name, create: false,
+      def open(file_name, create: false, volume_provider: nil, volume_count: nil,
                restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                compression_level: ::Zip.default_compression,
                suppress_extra_fields: false)
         zf = ::Zip::File.new(file_name, create:                create,
+                                        volume_provider:       volume_provider,
+                                        volume_count:          volume_count,
                                         restore_ownership:     restore_ownership,
                                         restore_permissions:   restore_permissions,
                                         restore_times:         restore_times,
@@ -177,6 +185,28 @@ module Zip
           end
         else
           cdir.count_entries(path_or_io)
+        end
+      end
+
+      # Opens a standard multi-volume archive.
+      #
+      # +provider+ receives a zero-based disk number and returns an opened
+      # binary IO. IOs returned this way are owned and closed by the archive;
+      # use Zip::VolumeProvider.borrow for IOs owned by the caller.
+
+      def open_volume(provider, volume_count: nil, &block)
+        provider = VolumeProvider.new(volume_count, &provider) if provider.respond_to?(:call)
+        unless provider.is_a?(VolumeProvider)
+          raise ArgumentError, 'expected a Zip::VolumeProvider or a callable'
+        end
+
+        zf = new(provider)
+        return zf unless block_given?
+
+        begin
+          yield zf
+        ensure
+          zf.close
         end
       end
 
@@ -424,6 +454,8 @@ module Zip
     # Closes the zip file committing any changes that has been made.
     def close
       commit
+    ensure
+      @archive_io&.close
     end
 
     # Returns true if any changes has been made to this archive since
@@ -514,10 +546,16 @@ module Zip
       end
     end
 
-    def initialize_cdir(path_or_io, buffer: false)
+    def initialize_cdir(path_or_io, buffer: false, volume_provider: nil, volume_count: nil)
       @cdir = ::Zip::CentralDirectory.new
+      archive_io = archive_io_for(path_or_io, buffer, volume_provider, volume_count)
 
-      if ::File.size?(@name.to_s)
+      if archive_io
+        @name = 'multi-volume zip'
+        @create = false
+        @cdir.read_from_stream(archive_io)
+        return archive_io
+      elsif ::File.size?(@name.to_s)
         # There is a file, which exists, that is associated with this zip.
         @create = false
         @file_permissions = ::File.stat(@name).mode
@@ -544,6 +582,23 @@ module Zip
         # everything is wrong.
         raise Error, "File #{@name} not found"
       end
+
+      nil
+    end
+
+    def archive_io_for(path_or_io, buffer, volume_provider, volume_count)
+      provider = if volume_provider
+                   volume_provider.respond_to?(:call) ?
+                     VolumeProvider.new(volume_count, &volume_provider) : volume_provider
+                 elsif path_or_io.is_a?(VolumeProvider)
+                   path_or_io
+                 elsif path_or_io.respond_to?(:multi_volume?) && path_or_io.multi_volume?
+                   return path_or_io
+                 end
+
+      return if provider.nil?
+
+      provider.open_multi_volume_io
     end
 
     def check_entry_exists(entry_name, continue_on_exists_proc, proc_name)

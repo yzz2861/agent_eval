@@ -36,6 +36,7 @@ module Zip
 
     def read_from_stream(io)
       read_eocds(io)
+      set_volume_count(io)
       read_central_directory_entries(io)
     end
 
@@ -60,6 +61,7 @@ module Zip
     # very quick entry count.
     def count_entries(io)
       read_eocds(io)
+      set_volume_count(io)
       @size
     end
 
@@ -124,7 +126,10 @@ module Zip
       size_in_bytes,
       @cdir_offset = buffer.unpack('VQ<vvVVQ<Q<Q<Q<')
 
-      validate_size!(@size, size_in_bytes)
+      @eocd_disk = _number_of_this_disk
+      @cdir_disk_start = _number_of_disk_with_start_of_cdir
+      @total_volumes = 1
+      validate_archive!(size_in_bytes)
 
       zip64_extensible_data_size =
         size_of_zip64_e_o_c_d - ZIP64_STATIC_EOCD_SIZE + 12
@@ -140,9 +145,9 @@ module Zip
 
     def unpack_64_eocd_locator(buffer) # :nodoc:
       _, # ZIP64_EOCD_LOCATOR_SIG. We know we have this at this point.
-      _, zip64_eocd_offset, = buffer.unpack('VVQ<V')
+      zip64_eocd_disk, zip64_eocd_offset, total_volumes = buffer.unpack('VVQ<V')
 
-      zip64_eocd_offset
+      [zip64_eocd_disk, zip64_eocd_offset, total_volumes]
     end
 
     # Unpack the EOCD and return a boolean indicating whether this header is
@@ -157,11 +162,15 @@ module Zip
       @cdir_offset,
       comment_length = buffer.unpack('VvvvvVVv')
 
+      @eocd_disk = number_of_this_disk
+      @cdir_disk_start = number_of_disk_with_start_of_cdir
+      @total_volumes = nil
+
       complete = !([number_of_this_disk, number_of_disk_with_start_of_cdir,
                     total_number_of_entries_in_cdir_on_this_disk, @size].any?(0xFFFF) ||
                     size_in_bytes == 0xFFFFFFFF || @cdir_offset == 0xFFFFFFFF)
 
-      validate_size!(@size, size_in_bytes) if complete
+      validate_archive!(size_in_bytes) if complete
 
       @comment = if comment_length.positive?
                    buffer.slice(STATIC_EOCD_SIZE, comment_length)
@@ -177,7 +186,7 @@ module Zip
       # so we need to catch that *and* query `io#eof?` here.
       eof = false
       begin
-        io.seek(@cdir_offset, IO::SEEK_SET)
+        seek_to_disk_offset(io, @cdir_disk_start || 0, @cdir_offset)
       rescue Errno::EINVAL
         eof = true
       end
@@ -196,7 +205,7 @@ module Zip
 
         unless offset.nil?
           io_save = io.tell
-          io.seek(offset, IO::SEEK_SET)
+          seek_to_disk_offset(io, entry.disk_start_number, offset)
           entry.read_extra_field(read_local_extra_field(io), local: true)
           io.seek(io_save, IO::SEEK_SET)
         end
@@ -217,7 +226,7 @@ module Zip
     end
 
     def read_eocds(io) # :nodoc:
-      base_location, data = eocd_data(io)
+      data = eocd_data(io).last
 
       eocd_location = data.rindex([END_OF_CD_SIG].pack('V'))
       raise Error, 'Zip end of central directory signature not found' unless eocd_location
@@ -231,38 +240,83 @@ module Zip
         raise Error, 'Zip64 end of central directory locator signature expected but not found'
       end
 
-      # Do we already have the Zip64 EOCD in the data we've read?
-      zip64_eocd_location = data.rindex([ZIP64_END_OF_CD_SIG].pack('V'), zip64_eocd_locator)
+      zip64_eocd_disk, zip64_eocd_offset, @total_volumes =
+        unpack_64_eocd_locator(data.slice(zip64_eocd_locator...eocd_location))
+      validate_disk_offset!(io, zip64_eocd_disk, zip64_eocd_offset)
 
-      zip64_eocd_data =
-        if zip64_eocd_location
-          # Yes.
-          data.slice(zip64_eocd_location..zip64_eocd_locator)
-        else
-          # No. Read its location from the locator and then read it in.
-          zip64_eocd_location = unpack_64_eocd_locator(
-            data.slice(zip64_eocd_locator..eocd_location)
-          )
-          unless zip64_eocd_location
-            raise Error, 'Zip64 end of central directory signature not found'
-          end
+      seek_to_disk_offset(io, zip64_eocd_disk, zip64_eocd_offset)
+      zip64_eocd_data = io.read(ZIP64_STATIC_EOCD_SIZE)
+      unless zip64_eocd_data&.unpack1('V') == ZIP64_END_OF_CD_SIG
+        raise Error, 'Zip64 end of central directory signature not found'
+      end
 
-          io.seek(zip64_eocd_location, IO::SEEK_SET)
-          io.read(base_location + zip64_eocd_locator - zip64_eocd_location)
-        end
+      record_size = zip64_eocd_data.unpack1('x4Q<')
+      extensible_data_size = record_size - (ZIP64_STATIC_EOCD_SIZE - 12)
+      if extensible_data_size.positive?
+        zip64_eocd_data << io.read(extensible_data_size)
+      end
 
       # Finally, unpack the Zip64 EOCD.
       unpack_64_e_o_c_d(zip64_eocd_data)
     end
 
     def eocd_data(io)
-      begin
-        io.seek(-MAX_END_OF_CD_SIZE, IO::SEEK_END)
-      rescue Errno::EINVAL
-        io.seek(0, IO::SEEK_SET)
+      if io.respond_to?(:multi_volume?) && io.multi_volume?
+        last_disk = io.volume_count - 1
+        offset = [0, io.volume_size(last_disk) - MAX_END_OF_CD_SIZE].max
+        io.seek_to(last_disk, offset)
+      else
+        begin
+          io.seek(-MAX_END_OF_CD_SIZE, IO::SEEK_END)
+        rescue Errno::EINVAL
+          io.seek(0, IO::SEEK_SET)
+        end
       end
 
       [io.tell, io.read]
+    end
+
+    def seek_to_disk_offset(io, disk_number, offset)
+      if io.respond_to?(:multi_volume?) && io.multi_volume?
+        io.seek_to(disk_number, offset)
+      elsif disk_number.to_i.nonzero?
+        raise VolumeOffsetError.new(disk_number, offset)
+      else
+        io.seek(offset, IO::SEEK_SET)
+      end
+    end
+
+    def validate_archive!(size_in_bytes)
+      validate_size!(@size, size_in_bytes)
+      return if @total_volumes.nil? || @total_volumes <= 1
+
+      expected_last_disk = @total_volumes - 1
+      if @eocd_disk != expected_last_disk
+        raise Error,
+              "Zip end of central directory is on disk #{@eocd_disk}, " \
+              "but the archive has #{@total_volumes} volumes"
+      end
+
+      return unless @cdir_disk_start >= @total_volumes
+
+      raise VolumeOffsetError.new(@cdir_disk_start, @cdir_offset)
+    end
+
+    def set_volume_count(io)
+      return unless io.respond_to?(:multi_volume?) && io.multi_volume?
+
+      @total_volumes = io.volume_count
+    end
+
+    def validate_disk_offset!(io, disk_number, offset)
+      return unless io.respond_to?(:multi_volume?) && io.multi_volume?
+
+      unless disk_number.is_a?(Integer) && disk_number >= 0 &&
+             disk_number < io.volume_count &&
+             offset.is_a?(Integer) && offset >= 0 &&
+             offset <= io.volume_size(disk_number)
+        raise VolumeOffsetError.new(disk_number, offset)
+      end
     end
 
     def validate_size!(size, size_in_bytes)

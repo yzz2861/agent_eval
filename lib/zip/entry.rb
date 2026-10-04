@@ -29,7 +29,8 @@ module Zip
                   :unix_gid, :unix_perms, :unix_uid
 
     attr_accessor :crc, :external_file_attributes, :fstype, :gp_flags,
-                  :internal_file_attributes, :local_header_offset # :nodoc:
+                  :internal_file_attributes, :local_header_offset,
+                  :disk_start_number # :nodoc:
 
     attr_reader :extra, :compression_level, :filepath # :nodoc:
 
@@ -41,6 +42,7 @@ module Zip
 
     def set_default_vars_values # :nodoc:
       @local_header_offset      = 0
+      @disk_start_number        = 0
       @local_header_size        = nil # not known until local entry is created or read
       @internal_file_attributes = 1
       @external_file_attributes = 0
@@ -380,11 +382,21 @@ module Zip
       read_local_header_fields(io)
 
       if @header_signature == SPLIT_FILE_SIGNATURE
-        raise SplitArchiveError if current_offset.zero?
+        if current_offset.is_a?(::Zip::MultiVolumeIO::Position)
+          raise SplitArchiveError if current_offset.disk.zero? && current_offset.offset.zero?
+        else
+          raise SplitArchiveError if current_offset.zero?
+        end
 
-        # Rewind, skipping the data descriptor, then try to read the local header again.
-        current_offset += 16
-        io.seek(current_offset)
+        # The spanning marker is shared with optional data descriptors.
+        if current_offset.is_a?(::Zip::MultiVolumeIO::Position)
+          io.seek_from_disk_offset(
+            current_offset.disk, current_offset.offset + 16
+          )
+        else
+          io.seek(current_offset + 16)
+        end
+        current_offset = io.tell
         read_local_header_fields(io)
       end
 
@@ -393,6 +405,12 @@ module Zip
       end
 
       @local_header_offset = current_offset
+      @disk_start_number =
+        if current_offset.is_a?(::Zip::MultiVolumeIO::Position)
+          current_offset.disk
+        else
+          0
+        end
 
       set_time(@last_mod_date, @last_mod_time)
 
@@ -467,7 +485,7 @@ module Zip
         @name_length,
         @extra_length,
         @comment_length,
-        _, # diskNumberStart
+        @disk_start_number, # disk number start
         @internal_file_attributes,
         @external_file_attributes,
         @local_header_offset = buf.unpack('VCCvvvvvVVVvvvvvVV')
@@ -613,7 +631,11 @@ module Zip
         name_size,
         @extra ? @extra.c_dir_size : 0,
         comment_size,
-        zip64 && zip64.disk_start_number ? 0xFFFF : 0, # disk number start
+        if zip64 && zip64.disk_start_number
+          0xFFFF
+        else
+          @disk_start_number
+        end, # disk number start
         @internal_file_attributes, # file type (binary=0, text=1)
         @external_file_attributes, # native filesystem attributes
         zip64 && zip64.relative_header_offset ? 0xFFFFFFFF : @local_header_offset
@@ -683,7 +705,12 @@ module Zip
           raise "unknown @file_type #{ftype}"
         end
       else
-        zis = ::Zip::InputStream.new(@zipfile, offset: local_header_offset, decrypter: decrypter)
+        zis = ::Zip::InputStream.new(
+          @zipfile,
+          disk: disk_start_number,
+          offset: local_header_offset,
+          decrypter: decrypter
+        )
         zis.instance_variable_set(:@complete_entry, self)
         zis.get_next_entry
         if block
@@ -830,9 +857,10 @@ module Zip
       if for_local_header
         @size, @compressed_size = @extra[:zip64].parse(@size, @compressed_size)
       else
-        @size, @compressed_size, @local_header_offset = @extra[:zip64].parse(
-          @size, @compressed_size, @local_header_offset
-        )
+        @size, @compressed_size, @local_header_offset, @disk_start_number =
+          @extra[:zip64].parse(
+            @size, @compressed_size, @local_header_offset, @disk_start_number
+          )
       end
     end
 
@@ -900,7 +928,7 @@ module Zip
       return unless ::Zip.write_zip64_support
 
       if (@size && @size >= 0xFFFFFFFF) || @compressed_size >= 0xFFFFFFFF ||
-         @local_header_offset >= 0xFFFFFFFF
+         @local_header_offset >= 0xFFFFFFFF || @disk_start_number >= 0xFFFF
         @version_needed_to_extract =
           [@version_needed_to_extract, VERSION_NEEDED_TO_EXTRACT_ZIP64].max
         zip64 = @extra[:zip64] || @extra.create(:zip64)
@@ -909,6 +937,7 @@ module Zip
         zip64.original_size = @size if @size && @size >= 0xFFFFFFFF
         zip64.compressed_size = @compressed_size if @compressed_size >= 0xFFFFFFFF
         zip64.relative_header_offset = @local_header_offset if @local_header_offset >= 0xFFFFFFFF
+        zip64.disk_start_number = @disk_start_number if @disk_start_number >= 0xFFFF
       end
     end
     # rubocop:enable Style/GuardClause
