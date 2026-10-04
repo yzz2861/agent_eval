@@ -1,0 +1,9 @@
+=== Option +projection+
+
+Expects a column index, header, or an array of them. Only the specified
+columns are included in parsed rows. Column indices are zero-based positions
+in the original source. Headers may be used when header parsing is enabled.
+
+Ignored columns are still scanned for CSV syntax errors and +max_field_size+
+checks, but their field values are not materialized and field converters are
+not called for them.

@@ -51,6 +51,27 @@ class CSV
     #
     class Scanner < StringScanner
       alias_method :scan_all, :scan
+      alias_method :current_eos?, :eos?
+      alias_method :check_current, :check
+      alias_method :scan_current, :scan
+      def advance_to_next_chunk
+        false
+      end
+      def scan_size_no_keep(pattern, cross_chunk: true, &block)
+        value = scan(pattern)
+        return nil unless value
+
+        block&.call(value)
+        [value.size, false]
+      end
+
+      def check_next_current(pattern)
+        check(pattern)
+      end
+
+      def consume_checked(pattern)
+        scan(pattern)
+      end
 
       def initialize(*args)
         super
@@ -104,6 +125,9 @@ class CSV
         @chunk_size = chunk_size
         @last_scanner = @inputs.empty?
         @keeps = []
+        @pending_bytes = nil
+        @check_next_moved = false
+        @scanner = StringScanner.new("".encode(@encoding))
         read_chunk
       end
 
@@ -180,8 +204,73 @@ class CSV
         value
       end
 
+      def scan_size_no_keep(pattern, cross_chunk: true)
+        value = @scanner.scan(pattern)
+        if cross_chunk
+          while value.nil? and @scanner.eos? and not @last_scanner and
+                read_chunk(adjust_keep: false)
+            value = @scanner.scan(pattern)
+          end
+        end
+        return nil if value.nil?
+
+        size = value.size
+        yield(value) if block_given?
+        stopped_after_reading_chunk = false
+        while cross_chunk and @scanner.eos? and not @last_scanner and
+              read_chunk(adjust_keep: false)
+          sub_value = @scanner.scan(pattern)
+          break if sub_value.nil?
+          size += sub_value.size
+          stopped_after_reading_chunk = !@scanner.eos?
+          yield(sub_value) if block_given?
+        end
+        [size, stopped_after_reading_chunk]
+      end
+
       def eos?
         @last_scanner and @scanner.eos?
+      end
+
+      def current_eos?
+        @scanner.eos?
+      end
+
+      def check_current(pattern)
+        return nil if @scanner.eos?
+
+        @scanner.check(pattern)
+      end
+
+      def check_next_current(pattern)
+        @check_next_moved = false
+        value = check_current(pattern)
+        return value if value
+        if @scanner.eos? and advance_to_next_chunk
+          @check_next_moved = true
+        else
+          return nil
+        end
+
+        @scanner.check(pattern)
+      end
+
+      def consume_checked(pattern)
+        if @check_next_moved
+          @scanner.scan_current(pattern)
+        else
+          scan(pattern)
+        end
+      end
+
+      def scan_current(pattern)
+        @scanner.scan(pattern)
+      end
+
+      def advance_to_next_chunk
+        return false unless @scanner.eos?
+
+        read_chunk(adjust_keep: false)
       end
 
       def keep_start
@@ -304,17 +393,20 @@ class CSV
         # trace(__method__, :done)
       end
 
-      def read_chunk
+      def read_chunk(adjust_keep: true)
         return false if @last_scanner
 
-        adjust_last_keep
+        adjust_last_keep if adjust_keep
 
         input = @inputs.first
         case input
         when StringIO
           string = input.read
-          raise InvalidEncoding unless string.valid_encoding?
-          # trace(__method__, :stringio, string)
+          if @pending_bytes
+            string = @pending_bytes << string
+            @pending_bytes = nil
+          end
+          string = prepare_chunk_encoding(string)
           @scanner = StringScanner.new(string)
           @inputs.shift
           @last_scanner = @inputs.empty?
@@ -322,8 +414,11 @@ class CSV
         else
           chunk = input.gets(@row_separator, @chunk_size)
           if chunk
-            raise InvalidEncoding unless chunk.valid_encoding?
-            # trace(__method__, :chunk, chunk)
+            if @pending_bytes
+              chunk = @pending_bytes << chunk
+              @pending_bytes = nil
+            end
+            chunk = prepare_chunk_encoding(chunk)
             @scanner = StringScanner.new(chunk)
             if Parser.eof?(input)
               @inputs.shift
@@ -331,7 +426,6 @@ class CSV
             end
             true
           else
-            # trace(__method__, :no_chunk)
             @scanner = StringScanner.new("".encode(@encoding))
             @inputs.shift
             @last_scanner = @inputs.empty?
@@ -343,6 +437,27 @@ class CSV
           end
         end
       end
+
+      def prepare_chunk_encoding(chunk)
+        unless chunk.valid_encoding?
+          pending_bytes = 0
+          while !chunk.valid_encoding? and pending_bytes < 4
+            pending_bytes += 1
+            prefix = chunk.byteslice(0, chunk.bytesize - pending_bytes)
+            if prefix.valid_encoding?
+              @pending_bytes =
+                chunk.byteslice(chunk.bytesize - pending_bytes,
+                                pending_bytes).dup
+              chunk = prefix
+              break
+            end
+          end
+        end
+        raise InvalidEncoding unless chunk.valid_encoding?
+        @scanner = StringScanner.new(chunk)
+        chunk
+      end
+
     end
 
     def initialize(input, options)
@@ -379,6 +494,10 @@ class CSV
 
     def unconverted_fields?
       @unconverted_fields
+    end
+
+    def projection?
+      @projection
     end
 
     def headers
@@ -467,6 +586,7 @@ class CSV
       prepare_unquoted
       prepare_line
       prepare_header
+      prepare_projection
       prepare_parser
     end
 
@@ -492,6 +612,10 @@ class CSV
       @skip_blanks = @options[:skip_blanks]
       @fields_converter = @options[:fields_converter]
       @header_fields_converter = @options[:header_fields_converter]
+      @projection = false
+      @projection_selectors = []
+      @selected_column_indices = []
+      @selected_column_index_map = {}
     end
 
     def prepare_quote_character
@@ -558,19 +682,15 @@ class CSV
         end
         @strip = @strip.encode(@encoding)
         @escaped_strip = Regexp.escape(@strip)
-        if @quote_character
-          @strip_value = Regexp.new(@escaped_strip +
-                                    "+".encode(@encoding))
-          @rstrip_value = Regexp.new(@escaped_strip +
-                                     "+\\z".encode(@encoding))
-        end
+        @strip_value = Regexp.new(@escaped_strip +
+                                  "+".encode(@encoding))
+        @rstrip_value = Regexp.new(@escaped_strip +
+                                   "+\\z".encode(@encoding))
       elsif @strip
         strip_values = " \t\f\v"
         @escaped_strip = strip_values.encode(@encoding)
-        if @quote_character
-          @strip_value = Regexp.new("[#{strip_values}]+".encode(@encoding))
-          @rstrip_value = Regexp.new("[#{strip_values}]+\\z".encode(@encoding))
-        end
+        @strip_value = Regexp.new("[#{strip_values}]+".encode(@encoding))
+        @rstrip_value = Regexp.new("[#{strip_values}]+\\z".encode(@encoding))
       end
     end
 
@@ -678,11 +798,9 @@ class CSV
     end
 
     def prepare_unquoted
-      return if @quote_character.nil?
-
       no_unquoted_values = Regexp.escape(@row_separator).encode(@encoding)
       no_unquoted_values << @escaped_first_column_separator
-      unless @liberal_parsing
+      if @quote_character and not @liberal_parsing
         no_unquoted_values << @escaped_quote_character
       end
       @unquoted_value = Regexp.new("[^".encode(@encoding) +
@@ -712,14 +830,16 @@ class CSV
               #
               break unless sample = @input.gets(nil, chunk_size)
 
-              # extend sample if we're unsure of the line ending
-              if sample.end_with?(cr)
-                sample << (@input.gets(nil, 1) || "")
+              unless @projection
+                # extend sample if we're unsure of the line ending
+                if sample.end_with?(cr)
+                  sample << (@input.gets(nil, 1) || "")
+                end
+                @samples << sample
               end
 
-              @samples << sample
-
               separator = detect_row_separator(sample, cr, lf)
+              break if @projection
             end
           rescue IOError
             # do nothing:  ensure will set default
@@ -794,6 +914,98 @@ class CSV
       end
     end
 
+    def prepare_projection
+      projection = @options[:projection]
+      return if projection.nil?
+
+      selectors = Array(projection)
+      unless selectors.is_a?(Array)
+        raise ArgumentError, ":projection must be an Integer, String, Range, or Array"
+      end
+      selectors = selectors.flat_map do |selector|
+        case selector
+        when Range
+          selector.to_a
+        when Integer, String, Symbol
+          selector
+        else
+          raise ArgumentError, ":projection must contain Integers or Strings"
+        end
+      end
+
+      @projection = true
+      @projection_selectors = selectors
+      validate_projection_selectors
+
+      if @headers
+        resolve_projection_headers(@headers, @raw_headers)
+      else
+        use_projection_indices(@projection_selectors)
+      end
+    end
+
+    def validate_projection_selectors
+      @projection_selectors.each do |selector|
+        if selector.is_a?(Integer)
+          if selector < 0
+            message = ":projection doesn't support negative column indices"
+            raise ArgumentError, message
+          end
+        elsif not @use_headers
+          message = ":projection header requires :headers"
+          raise ArgumentError, message
+        end
+      end
+    end
+
+    def resolve_projection_headers(headers, raw_headers=nil)
+      indices = []
+      @projection_selectors.each do |selector|
+        case selector
+        when Integer
+          indices << selector
+        else
+          positions = headers.each_index.find_all do |index|
+            headers[index] == selector
+          end
+          if positions.empty? and raw_headers
+            raw_headers.each_with_index do |raw_header, index|
+              positions << index if raw_header == selector
+            end
+          end
+          indices.concat(positions)
+        end
+      end
+      use_projection_indices(indices)
+      @headers = project_array(headers, @selected_column_indices)
+      if @raw_headers
+        @raw_headers = project_array(@raw_headers, @selected_column_indices)
+      end
+    end
+
+    def use_projection_indices(indices)
+      @selected_column_indices = indices
+      @selected_column_index_map = {}
+      @selected_column_indices.each do |index|
+        @selected_column_index_map[index] = true
+      end
+    end
+
+    def project_array(values, indices=@selected_column_indices)
+      indices.map do |index|
+        values[index] if index < values.size
+      end
+    end
+
+    def projected_row(row, quoted_fields)
+      return [row, quoted_fields] unless @projection
+
+      [
+        project_array(row),
+        project_array(quoted_fields).map { |quoted| quoted == true },
+      ]
+    end
+
     def parse_headers(row)
       quoted_fields = []
       converter = lambda do |field, info|
@@ -816,9 +1028,9 @@ class CSV
 
     def prepare_parser
       @may_quoted = may_quoted?
-      if @quote_character.nil?
+      if @quote_character.nil? and not @projection
         @parse_method = :parse_no_quote
-      elsif @liberal_parsing or @strip
+      elsif @projection or @liberal_parsing or @strip
         @parse_method = :parse_quotable_robust
       else
         @parse_method = :parse_quotable_loose
@@ -940,14 +1152,21 @@ class CSV
     end
 
     def validate_field_size(field)
+      size = field.size
+      validate_field_size!(size)
+    end
+
+    def validate_field_size!(size)
       return unless @max_field_size
-      return if field.size <= @max_field_size
+      return if size <= @max_field_size
       ignore_broken_line
-      message = "Field size exceeded: #{field.size} > #{@max_field_size}"
+      message = "Field size exceeded: #{size} > #{@max_field_size}"
       raise MalformedCSVError.new(message, @lineno)
     end
 
     def parse_no_quote(&block)
+      return parse_no_quote_projection(&block) if @projection
+
       @scanner.each_line(@row_separator) do |line|
         next if @skip_lines and skip_line?(line)
         original_line = line
@@ -974,6 +1193,70 @@ class CSV
         @last_line = original_line
         emit_row(row, &block)
       end
+    end
+
+    def parse_no_quote_projection(&block)
+      row = []
+      @column_index = 0
+      start_row
+
+      while true
+        skip_scan(@strip_value) if @strip_value
+        selected = column_selected?
+        size = 0
+        if selected
+          value = +""
+          while part = @scanner.scan_all(@unquoted_value)
+            value << part
+          end
+          if @rstrip_value
+            value.gsub!(@rstrip_value, "")
+          end
+          value = nil if value.empty?
+          validate_field_size(value) if value
+        else
+          loop do
+            part_size_and_boundary =
+              scan_piece_size_with_boundary(@unquoted_value)
+            part_size = part_size_and_boundary&.first
+            break if part_size.nil?
+
+            size += part_size
+          end
+          if @strip_value
+            size -= skip_scan(@strip_value)
+          end
+          validate_field_size!(size)
+          value = nil
+        end
+
+        if parse_projected_column_end_no_quote?
+          row << value
+          @column_index += 1
+        elsif parse_projected_row_end?
+          unless row.empty? and value.nil?
+            row << value
+            emit_row(row, &block)
+          end
+          row = []
+          @column_index = 0
+          start_row
+        elsif @scanner.eos?
+          break if row.empty? and value.nil?
+
+          row << value
+          emit_row(row, &block)
+          break
+        end
+      end
+    end
+
+    def parse_projected_column_end_no_quote?
+      if @scanner.check_next_current(@row_end)
+        return false
+      end
+
+      @scanner.consume_checked(@column_end) ? true : false
     end
 
     def parse_quotable_loose(&block)
@@ -1040,21 +1323,33 @@ class CSV
     def parse_quotable_robust(&block)
       row = []
       quoted_fields = []
+      @column_index = 0
       skip_needless_lines
       start_row
       while true
         @quoted_column_value = false
         @unquoted_column_value = false
-        @scanner.scan_all(@strip_value) if @strip_value
-        value = parse_column_value
-        if value
-          @scanner.scan_all(@strip_value) if @strip_value
-          validate_field_size(value)
+        skip_scan(@strip_value) if @strip_value
+        if column_selected?
+          value = parse_column_value
+          if value
+            skip_scan(@strip_value) if @strip_value
+            validate_field_size(value)
+          end
+        else
+          skipped_size = skip_column_value || 0
+          if @strip_value
+            stripped_size = skip_scan(@strip_value)
+            skipped_size -= stripped_size if @unquoted_column_value
+          end
+          validate_field_size!(skipped_size)
+          value = nil
         end
         if parse_column_end
           row << value
           quoted_fields << @quoted_column_value
-        elsif parse_row_end
+          @column_index += 1
+        elsif parse_projected_row_end? or (!@projection and parse_row_end)
           if row.empty? and value.nil?
             emit_row([], &block) unless @skip_blanks
           else
@@ -1063,14 +1358,15 @@ class CSV
             emit_row(row, quoted_fields, &block)
             row = []
             quoted_fields.clear
+            @column_index = 0
           end
           skip_needless_lines
           start_row
         elsif @scanner.eos?
           break if row.empty? and value.nil?
-          row << value
-          quoted_fields << @quoted_column_value
-          emit_row(row, quoted_fields, &block)
+            row << value
+            quoted_fields << @quoted_column_value
+            emit_row(row, quoted_fields, &block)
           break
         else
           if @quoted_column_value
@@ -1089,7 +1385,7 @@ class CSV
             message = "Unquoted fields do not allow new line " +
                       "<#{new_line.inspect}>"
             raise MalformedCSVError.new(message, @lineno)
-          elsif @scanner.rest.start_with?(@quote_character)
+          elsif @quote_character and @scanner.rest.start_with?(@quote_character)
             ignore_broken_line
             message = "Illegal quoting"
             raise MalformedCSVError.new(message, @lineno)
@@ -1104,6 +1400,169 @@ class CSV
                                         @lineno)
           end
         end
+      end
+    end
+
+    def column_selected?
+      return true unless @projection
+      return true if @use_headers and @headers.nil?
+
+      @selected_column_index_map.key?(@column_index)
+    end
+
+    def parse_projected_row_end?
+      return false unless @projection
+      if @row_ends
+        return parse_row_end
+      end
+
+      @scanner.consume_checked(@row_end) ? true : false
+    end
+
+    def scan_piece_size(pattern, cross_chunk: true, &block)
+      return nil unless pattern
+
+      size, = @scanner.scan_size_no_keep(pattern,
+                                         cross_chunk: cross_chunk,
+                                         &block)
+      size.nil? ? nil : size
+    end
+
+    def scan_piece_size_with_boundary(pattern, &block)
+      @scanner.scan_size_no_keep(pattern, cross_chunk: false, &block)
+    end
+
+    def skip_scan(pattern)
+      return 0 unless pattern
+
+      size = 0
+      while piece = @scanner.scan(pattern)
+        size += piece.size
+      end
+      size
+    end
+
+    def skip_column_value
+      if @liberal_parsing
+        quoted_size = skip_quoted_column_value
+        if quoted_size
+          skip_scan(@strip_value)
+          unquoted_size = skip_unquoted_column_value
+          if unquoted_size
+            if @double_quote_outside_quote
+              unquoted_size -= @skipped_quote_count / 2
+              if quoted_size.zero?
+                return @quote_character.size + unquoted_size
+              end
+            end
+            @quote_character.size + quoted_size + @quote_character.size + unquoted_size
+          else
+            quoted_size
+          end
+        else
+          skip_unquoted_column_value
+        end
+      elsif @may_quoted
+        skip_quoted_column_value ||
+          skip_unquoted_column_value
+      else
+        skip_unquoted_column_value ||
+          skip_quoted_column_value
+      end
+    end
+
+    def skip_unquoted_column_value
+      @unquoted_column_value = true
+      @skipped_quote_count = 0
+      pending_backslashes = 0
+      size = 0
+      count_skipped_unquoted_part = lambda do |part|
+        @skipped_quote_count += part.count(@quote_character) if @double_quote_outside_quote
+        if @backslash_quote
+          size -= part.scan(@backslash_quote_character).size
+          if pending_backslashes.odd? and part.start_with?(@quote_character)
+            size -= 1
+          end
+          trailing_backslashes = 0
+          backslash_bytesize = @backslash_character.bytesize
+          index = part.bytesize - 1
+          while index >= backslash_bytesize - 1 and
+                part.byteslice(index - backslash_bytesize + 1,
+                                backslash_bytesize) == @backslash_character
+            trailing_backslashes += 1
+            index -= backslash_bytesize
+          end
+          pending_backslashes = trailing_backslashes
+        end
+      end
+
+      first_size = scan_piece_size(@unquoted_value, &count_skipped_unquoted_part)
+      return nil unless first_size
+      size += first_size
+
+      if @first_column_separators
+        while true
+          @scanner.keep_start
+          is_column_end = @column_ends.all? do |column_end|
+            @scanner.scan(column_end)
+          end
+          @scanner.keep_back
+          break if is_column_end
+          sub_separator_size = scan_piece_size(@first_column_separators)
+          break if sub_separator_size.nil?
+          size += sub_separator_size
+          sub_value_size = scan_piece_size(@unquoted_value,
+                                           &count_skipped_unquoted_part)
+          break if sub_value_size.nil?
+          size += sub_value_size
+        end
+      end
+      size
+    end
+
+    def skip_quoted_column_value
+      return nil unless @quotes
+
+      quote_count = scan_piece_size(@quotes)
+      return nil unless quote_count
+
+      @quoted_column_value = true
+      if quote_count.even?
+        (quote_count - 2) / 2
+      else
+        size = quote_count / 2
+        while true
+          quoted_size, quoted_boundary =
+            scan_piece_size_with_boundary(@quoted_value)
+          size += quoted_size.to_i
+          quotes = scan_piece_size(@quotes, cross_chunk: false)
+          unless quotes
+            if !quoted_boundary and
+                @scanner.current_eos? and @scanner.advance_to_next_chunk
+              next
+            end
+            ignore_broken_line
+            message = "Unclosed quoted field"
+            raise MalformedCSVError.new(message, @lineno)
+          end
+          if @backslash_quote
+            if @scanner.scan(@escaped_backslash)
+              if @scanner.scan(@escaped_quote)
+                size += 1
+              else
+                size += 1
+              end
+              next
+            end
+          end
+          if quotes == 1
+            break
+          else
+            size += quotes / 2
+            break if quotes.odd?
+          end
+        end
+        size
       end
     end
 
@@ -1128,6 +1587,8 @@ class CSV
         else
           parse_unquoted_column_value
         end
+      elsif @quote_character.nil?
+        parse_unquoted_column_value
       elsif @may_quoted
         parse_quoted_column_value ||
           parse_unquoted_column_value
@@ -1208,7 +1669,16 @@ class CSV
     end
 
     def parse_column_end
-      return true if @scanner.scan(@column_end)
+      if @projection
+        return false if @column_ends
+        return false if @scanner.check_current(@row_end)
+      end
+      if @projection
+        if @scanner.check_next_current(@row_end)
+          return true
+        end
+      end
+      return true if @scanner.consume_checked(@column_end)
       return false unless @column_ends
 
       @scanner.keep_start
@@ -1259,7 +1729,9 @@ class CSV
     end
 
     def start_row
-      if @last_line
+      if @projection
+        @last_line = nil
+      elsif @last_line
         @last_line = nil
       else
         @scanner.keep_drop
@@ -1273,16 +1745,28 @@ class CSV
       raw_row = row
       if @use_headers
         if @headers.nil?
-          @headers = adjust_headers(row, quoted_fields)
+          adjusted_headers = adjust_headers(row, quoted_fields)
+          if @projection
+            resolve_projection_headers(adjusted_headers, row)
+            raw_row, quoted_fields = projected_row(row, quoted_fields)
+            row = Row.new(@headers, raw_row, true)
+          else
+            @headers = adjusted_headers
+            row = Row.new(@headers, row, true)
+          end
           return unless @return_headers
-          row = Row.new(@headers, row, true)
         else
+          raw_row, projected_quoted_fields = projected_row(row, quoted_fields)
           row = Row.new(@headers,
-                        @fields_converter.convert(raw_row, @headers, @lineno, quoted_fields))
+                        @fields_converter.convert(raw_row, @headers, @lineno,
+                                                  projected_quoted_fields,
+                                                  @projection ? @selected_column_indices : nil))
         end
       else
+        raw_row, quoted_fields = projected_row(row, quoted_fields)
         # convert fields, if needed...
-        row = @fields_converter.convert(raw_row, nil, @lineno, quoted_fields)
+        row = @fields_converter.convert(raw_row, nil, @lineno, quoted_fields,
+                                        @projection ? @selected_column_indices : nil)
       end
 
       # inject unconverted fields and accessor, if requested...

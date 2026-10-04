@@ -51,10 +51,12 @@ class CSV
       @converters.empty?
     end
 
-    def convert(fields, headers, lineno, quoted_fields=NO_QUOTED_FIELDS)
+    def convert(fields, headers, lineno, quoted_fields=NO_QUOTED_FIELDS,
+                field_indices=nil)
       return fields unless need_convert?
 
       fields.collect.with_index do |field, index|
+        original_index = field_indices ? field_indices[index] : index
         if field.nil?
           field = @nil_value
         elsif field.is_a?(String) and field.empty?
@@ -71,7 +73,7 @@ class CSV
               header = nil
             end
             quoted = quoted_fields[index]
-            field = converter[field, FieldInfo.new(index, lineno, header, quoted)]
+            field = converter[field, FieldInfo.new(original_index, lineno, header, quoted)]
           end
           break unless field.is_a?(String)  # short-circuit pipeline for speed
         end
