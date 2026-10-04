@@ -78,6 +78,13 @@ module Liquid
       @strainer = nil
     end
 
+    # Whether any filters beyond those registered on the environment were added
+    # to this context. Such contexts opt out of reusing folded constants, since
+    # the extra filters could override a filter's implementation.
+    def custom_filters?
+      !@filters.empty?
+    end
+
     def apply_global_filter(obj)
       global_filter.nil? ? obj : global_filter.call(obj)
     end

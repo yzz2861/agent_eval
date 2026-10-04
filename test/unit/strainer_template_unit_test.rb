@@ -84,4 +84,57 @@ class StrainerTemplateUnitTest < Minitest::Test
     strainer.class.add_filter(mod)
     assert_equal(1, mod.include_count)
   end
+
+  module ExplicitPureFilter
+    extend Liquid::PureFilters
+
+    def declared_pure(input)
+      input.to_s.upcase
+    end
+    pure_filter :declared_pure
+
+    def not_declared(input)
+      input
+    end
+  end
+
+  def test_pure_filter_methods_track_only_explicit_declarations
+    strainer_class = Class.new(StrainerTemplate)
+    initial_version = strainer_class.filter_registry_version
+
+    strainer_class.add_filter(ExplicitPureFilter)
+
+    assert(strainer_class.pure_filter?('declared_pure'))
+    refute(strainer_class.pure_filter?('not_declared'))
+    assert_operator(strainer_class.filter_registry_version, :>, initial_version)
+  end
+
+  module PurityOverrideFilter
+    def declared_pure(input)
+      "#{input}!"
+    end
+  end
+
+  def test_overriding_a_pure_filter_without_declaration_drops_purity
+    strainer_class = Class.new(StrainerTemplate)
+    strainer_class.add_filter(ExplicitPureFilter)
+    assert(strainer_class.pure_filter?('declared_pure'))
+
+    strainer_class.add_filter(PurityOverrideFilter)
+
+    refute(strainer_class.pure_filter?('declared_pure'))
+  end
+
+  def test_pure_filter_set_and_version_are_inherited_by_subclasses
+    parent = Class.new(StrainerTemplate)
+    parent.add_filter(ExplicitPureFilter)
+
+    child = Class.new(parent)
+    assert(child.pure_filter?('declared_pure'))
+    assert_equal(parent.filter_registry_version, child.filter_registry_version)
+
+    child.add_filter(PurityOverrideFilter)
+    refute(child.pure_filter?('declared_pure'))
+    assert(parent.pure_filter?('declared_pure'))
+  end
 end

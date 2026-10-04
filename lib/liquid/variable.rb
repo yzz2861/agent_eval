@@ -31,6 +31,7 @@ module Liquid
       @line_number   = parse_context.line_number
 
       strict_parse_with_error_mode_fallback(markup)
+      @constant_fold = ConstantFold.fold(@name, @filters, parse_context.environment)
     end
 
     def raw
@@ -98,11 +99,16 @@ module Liquid
     end
 
     def render(context)
-      obj = context.evaluate(@name)
+      fold = @constant_fold
+      if fold && ConstantFold.reusable?(fold, context)
+        obj = fold[:value].to_liquid
+      else
+        obj = context.evaluate(@name)
 
-      @filters.each do |filter_name, filter_args, filter_kwargs|
-        filter_args = evaluate_filter_expressions(context, filter_args, filter_kwargs)
-        obj = context.invoke(filter_name, obj, *filter_args)
+        @filters.each do |filter_name, filter_args, filter_kwargs|
+          filter_args = evaluate_filter_expressions(context, filter_args, filter_kwargs)
+          obj = context.invoke(filter_name, obj, *filter_args)
+        end
       end
 
       context.apply_global_filter(obj)

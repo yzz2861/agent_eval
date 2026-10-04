@@ -3,8 +3,11 @@
 require 'cgi'
 require 'base64'
 require 'bigdecimal'
+require_relative 'pure_filters'
 module Liquid
   module StandardFilters
+    extend Liquid::PureFilters
+
     MAX_I32 = (1 << 31) - 1
     private_constant :MAX_I32
 
@@ -1054,6 +1057,19 @@ module Liquid
         a.nil? ? 1 : -1
       end
     end
+
+    # Filters below are context-independent and side-effect free, so they are
+    # safe to evaluate at compile time when all their arguments are literals.
+    # Filters that rely on render context (e.g. InputIterator for Drops) or that
+    # observe global state (e.g. date's clock/timezone behavior) are omitted.
+    pure_filter :size, :downcase, :upcase, :capitalize, :escape, :h,
+      :escape_once, :url_encode, :url_decode,
+      :base64_encode, :base64_decode, :base64_url_safe_encode, :base64_url_safe_decode,
+      :slice, :truncate, :truncatewords, :split, :squish, :strip, :lstrip, :rstrip,
+      :strip_html, :strip_newlines, :replace, :replace_first, :replace_last,
+      :remove, :remove_first, :remove_last, :append, :prepend, :newline_to_br,
+      :first, :last, :abs, :plus, :minus, :times, :divided_by, :modulo,
+      :round, :ceil, :floor, :at_least, :at_most, :default
 
     class InputIterator
       include Enumerable
