@@ -6,6 +6,7 @@ require "graphql/execution/lazy"
 require "graphql/execution/lookahead"
 require "graphql/execution/multiplex"
 require "graphql/execution/errors"
+require "graphql/execution/step_session"
 
 module GraphQL
   module Execution
