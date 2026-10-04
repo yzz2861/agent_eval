@@ -95,6 +95,7 @@ require "time"
 require "stringio"
 
 require_relative "csv/fields_converter"
+require_relative "csv/dialect"
 require_relative "csv/input_record_separator"
 require_relative "csv/parser"
 require_relative "csv/row"
@@ -1390,6 +1391,40 @@ class CSV
       return to_enum(__method__, path_or_io, mode, **options) unless block_given?
       open(path_or_io, mode, **options) do |csv|
         csv.each(&block)
+      end
+    end
+
+    # :call-seq:
+    #   CSV.detect_dialect(string_or_io, read_limit: 4096, **options) -> CSV::Dialect
+    #   CSV.detect_dialect(string_or_io, read_limit: 4096, **options) {|csv| ...} -> object
+    #
+    # Detects likely column separators, quote characters, and row separators
+    # from at most +read_limit+ bytes. The consumed prefix is available as
+    # CSV::Dialect#prefix and replayed by CSV::Dialect#csv, so non-seekable
+    # streams do not lose their first record.
+    def detect_dialect(string_or_io,
+                       read_limit: 4096,
+                       col_seps: DialectDetector::DEFAULT_COLUMN_SEPARATORS,
+                       quote_chars: DialectDetector::DEFAULT_QUOTE_CHARACTERS,
+                       &block)
+      unless read_limit.is_a?(Integer) && read_limit > 0
+        raise ArgumentError, "read_limit must be a positive Integer"
+      end
+
+      input =
+        if string_or_io.is_a?(String)
+          StringIO.new(string_or_io)
+        else
+          string_or_io
+        end
+      result = DialectDetector.new(input,
+                                   read_limit,
+                                   col_seps: col_seps,
+                                   quote_chars: quote_chars).detect
+      if block
+        result.csv(&block)
+      else
+        result
       end
     end
 
