@@ -13,6 +13,34 @@ module Net
       end
     end
 
+    # Error raised when a QRESYNC request cannot be satisfied.
+    class QResyncError < Error
+    end
+
+    # Error raised when the caller required QRESYNC but the server does not
+    # support or enable it.
+    class QResyncNotSupportedError < QResyncError
+      def initialize(msg = "server does not support QRESYNC")
+        super
+      end
+    end
+
+    # Error raised when a mailbox's UIDVALIDITY has changed.
+    class UIDValidityError < QResyncError
+      attr_reader :mailbox, :expected_uidvalidity, :uidvalidity, :result
+
+      def initialize(mailbox, expected_uidvalidity, uidvalidity, result = nil)
+        @mailbox = mailbox
+        @expected_uidvalidity = expected_uidvalidity
+        @uidvalidity = uidvalidity
+        @result = result
+        super(
+          "UIDVALIDITY for #{mailbox} changed from #{expected_uidvalidity} " \
+          "to #{uidvalidity}; cached UIDs must be discarded and rebuilt"
+        )
+      end
+    end
+
     # Error raised when data is in the incorrect format.
     class DataFormatError < Error
     end

@@ -117,6 +117,10 @@ class Net::IMAP::FakeServer
       state.authenticated? or return resp.fail_bad_state(state)
       resp.args&.any? or return resp.fail_bad_args
       enabled = (resp.args & config.capabilities_enablable) - state.enabled
+      enablable = config.capabilities_enablable.map(&:to_s)
+      if enabled.include?("QRESYNC") && enablable.include?("CONDSTORE")
+        enabled |= %w[CONDSTORE] - state.enabled
+      end
       state.enabled.concat enabled
       resp.untagged :ENABLED, enabled
       resp.done_ok
@@ -151,10 +155,34 @@ class Net::IMAP::FakeServer
       if mbox[:uidnotsticky]
         resp.untagged "NO [UIDNOTSTICKY] Non-persistent UIDs"
       end
+      select_params = parse_select_params(resp.command.raw)
+      condstore = mbox[:condstore] != false &&
+                  (select_params.any? { _1.first == "CONDSTORE" } ||
+                   state.enabled.intersect?(%w[CONDSTORE QRESYNC]))
       resp.untagged "FLAGS (%s)" % [flags(attrs[:flags])]
       resp.untagged "OK [PERMANENTFLAGS (%s)] Limited" % [
         flags(attrs[:permanentflags])
       ]
+      if condstore && mbox.key?(:highestmodseq)
+        resp.untagged "OK [HIGHESTMODSEQ %{highestmodseq}] Current" % attrs
+      elsif mbox[:nomodseq]
+        resp.untagged "OK [NOMODSEQ] Modification sequences unavailable"
+      end
+      qresync_data = select_params.find {|param| param.first == "QRESYNC" }
+      if qresync_data && state.enabled.include?("QRESYNC")
+        _, uidvalidity = qresync_data
+        if uidvalidity == attrs[:uidvalidity].to_s
+          Array(mbox[:vanished_earlier]).each do |uids|
+            resp.untagged "VANISHED (EARLIER) #{uids}"
+          end
+          Array(mbox[:vanished]).each do |uids|
+            resp.untagged "VANISHED #{uids}"
+          end
+          Array(mbox[:fetch_changes]).each do |fetch|
+            resp.puts fetch
+          end
+        end
+      end
       code = command == "SELECT" ? "READ-WRITE" : "READ-ONLY"
       resp.done_ok code: code
     end
@@ -176,6 +204,24 @@ class Net::IMAP::FakeServer
       flags.map { [Symbol === _1 ? "\\" : "", _1].join }.join(" ")
     end
 
+    def parse_select_params(raw)
+      params = []
+      depth = 0
+      start = nil
+      raw.each_char.with_index do |char, index|
+        if char == "("
+          start = index + 1 if depth.zero?
+          depth += 1
+        elsif char == ")" && depth.positive?
+          depth -= 1
+          if depth.zero?
+            content = raw[start...index].gsub(/[()]/, " ")
+            params << content.split(/\s+/).reject(&:empty?)
+          end
+        end
+      end
+      params
+    end
+
   end
 end
-

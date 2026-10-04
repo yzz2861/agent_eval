@@ -953,6 +953,7 @@ module Net
     autoload :SASLAdapter,            "#{dir}/sasl_adapter"
     autoload :SequenceSet,            "#{dir}/sequence_set"
     autoload :StringPrep,             "#{dir}/stringprep"
+    autoload :QResyncResult,          "#{dir}/qresync_result"
 
     include MonitorMixin
 
@@ -1804,6 +1805,19 @@ module Net
     # #select and all +FETCH+ responses will include FetchData#modseq.
     # Otherwise, the +NOMODSEQ+ ResponseCode will be sent.
     #
+    # When +qresync+ is a Hash or an Array containing the previously saved
+    # +UIDVALIDITY+, +HIGHESTMODSEQ+, and known UID set, QRESYNC is enabled (if
+    # necessary) and the command is sent with a QRESYNC parameter.  The return
+    # value is then a QResyncResult.  Set +qresync_required+ to +false+ to open
+    # the mailbox without QRESYNC when the server does not support it; by
+    # default, QResyncNotSupportedError is raised.  If the mailbox's
+    # +UIDVALIDITY+ changed, UIDValidityError is raised and the incremental
+    # +VANISHED+ and +FETCH+ responses are not returned to the caller.
+    #
+    #   result = imap.select("inbox", qresync: [uidvalidity, modseq, known_uids])
+    #   result.vanished_earlier # removals before this SELECT/EXAMINE
+    #   result.vanished         # removals while the command was processed
+    #
     # A Net::IMAP::NoResponseError is raised if the mailbox does not
     # exist or is for some reason non-selectable.
     #
@@ -1821,15 +1835,8 @@ module Net
     # the +condstore+ keyword parameter may be used.
     #   imap.select("mbox", condstore: true)
     #   modseq = imap.responses("HIGHESTMODSEQ", &:last)
-    def select(mailbox, condstore: false)
-      args = ["SELECT", mailbox]
-      args << ["CONDSTORE"] if condstore
-      synchronize do
-        state_unselected! # implicitly closes current mailbox
-        @responses.clear
-        send_command(*args)
-          .tap do state_selected! end
-      end
+    def select(mailbox, condstore: false, qresync: nil, qresync_required: true)
+      select_mailbox("SELECT", mailbox, condstore:, qresync:, qresync_required:)
     end
 
     # Sends a {EXAMINE command [IMAP4rev1 §6.3.2]}[https://www.rfc-editor.org/rfc/rfc3501#section-6.3.2]
@@ -1837,20 +1844,171 @@ module Net
     # Behaves the same as #select, except that the selected +mailbox+ is
     # identified as read-only.
     #
+    # See #select for the +condstore+, +qresync+, and +qresync_required+
+    # keyword arguments and the QResyncResult return value.
+    #
     # A Net::IMAP::NoResponseError is raised if the mailbox does not
     # exist or is for some reason non-examinable.
     #
     # Related: #select
-    def examine(mailbox, condstore: false)
-      args = ["EXAMINE", mailbox]
-      args << ["CONDSTORE"] if condstore
+    def examine(mailbox, condstore: false, qresync: nil, qresync_required: true)
+      select_mailbox("EXAMINE", mailbox, condstore:, qresync:, qresync_required:)
+    end
+
+    private
+
+    def select_mailbox(command, mailbox, condstore:, qresync:, qresync_required:)
+      qresync = normalize_qresync_param(qresync) if qresync
       synchronize do
+        if qresync
+          supported = enabled?("QRESYNC") || capable?("QRESYNC")
+          if qresync_required && !supported
+            raise QResyncNotSupportedError
+          end
+        end
+
         state_unselected! # implicitly closes current mailbox
         @responses.clear
-        send_command(*args)
-          .tap do state_selected! end
+        degraded = false
+
+        if qresync && !enabled?("QRESYNC")
+          begin
+            enabled = enable("QRESYNC")
+            unless enabled.any? { _1.to_s.casecmp?("QRESYNC") }
+              raise QResyncNotSupportedError, "QRESYNC was not enabled"
+            end
+            @responses.clear
+          rescue ResponseError, QResyncNotSupportedError
+            raise if qresync_required
+            degraded = true
+            @responses.clear
+          end
+        end
+
+        args = [command, mailbox]
+        args << ["CONDSTORE"] if condstore
+        if qresync && !degraded
+          args << ["QRESYNC", qresync_command_param(qresync)]
+        end
+
+        tagged = send_command(*args)
+        state_selected!
+
+        if qresync
+          build_qresync_result(mailbox, command, tagged, qresync, degraded)
+        else
+          tagged
+        end
       end
     end
+
+    def normalize_qresync_param(qresync)
+      case qresync
+      when Array
+        raise ArgumentError, "qresync requires uidvalidity and modseq" unless
+          (2..3) === qresync.length
+        uidvalidity, modseq, known_uids = qresync
+      when Hash
+        uidvalidity = qresync.fetch(:uidvalidity) do
+          qresync.fetch(:uid_validity) do
+            qresync.fetch("uidvalidity") { qresync.fetch("uid_validity") }
+          end
+        end
+        modseq = qresync.fetch(:highestmodseq) do
+          qresync.fetch(:modseq) do
+            qresync.fetch("highestmodseq") { qresync.fetch("modseq") }
+          end
+        end
+        known_uids = qresync.fetch(:known_uids) do
+          qresync.fetch(:uids) do
+            qresync.fetch("known_uids") { qresync.fetch("uids", nil) }
+          end
+        end
+      else
+        raise TypeError, "expected qresync to be an Array or a Hash, got #{qresync.class}"
+      end
+
+      uidvalidity = Integer(uidvalidity)
+      modseq = Integer(modseq)
+      NumValidator.ensure_nz_number(uidvalidity)
+      NumValidator.ensure_number64(modseq)
+      known_uids = SequenceSet.new(known_uids) unless known_uids.nil?
+      if known_uids&.include_star?
+        raise DataFormatError, "known UIDs cannot contain '*'"
+      end
+
+      {uidvalidity:, highestmodseq: modseq, known_uids:}
+    rescue KeyError => error
+      raise ArgumentError, "missing qresync parameter: #{error.key}"
+    rescue TypeError => error
+      raise ArgumentError, error.message, cause: error
+    end
+
+    def qresync_command_param(qresync)
+      param = [qresync[:uidvalidity], qresync[:highestmodseq]]
+      known_uids = qresync[:known_uids]
+      param << known_uids unless known_uids.nil? || known_uids.empty?
+      param
+    end
+
+    def build_qresync_result(mailbox, command, tagged, requested, degraded)
+      uidvalidity = @responses["UIDVALIDITY"].last
+      if uidvalidity != requested[:uidvalidity]
+        clear_responses("VANISHED")
+        clear_responses("EXPUNGE")
+        clear_responses("FETCH")
+        clear_responses("UIDFETCH")
+        result = QResyncResult.new(
+          **select_result_attrs(mailbox, command, tagged, degraded:),
+          vanished_earlier: merge_vanished([], true),
+          vanished:         merge_vanished([], false),
+        )
+        raise UIDValidityError.new(
+          mailbox.to_str, requested[:uidvalidity], uidvalidity, result
+        )
+      end
+
+      vanished = clear_responses("VANISHED")
+      earlier = vanished.select(&:earlier?)
+      current = vanished.reject(&:earlier?)
+      attrs = select_result_attrs(mailbox, command, tagged, degraded: degraded)
+      attrs.merge!(
+        vanished_earlier: merge_vanished(earlier, true),
+        vanished:         merge_vanished(current, false),
+        expunged:        clear_responses("EXPUNGE"),
+        fetches:         clear_responses("UIDFETCH") + clear_responses("FETCH"),
+      )
+      QResyncResult.new(**attrs)
+    end
+
+    def select_result_attrs(mailbox, command, tagged, degraded)
+      code_name = tagged.data.code&.name
+      {
+        mailbox:         mailbox.to_str,
+        response:        tagged,
+        read_only:       command == "EXAMINE" || code_name == "READ-ONLY",
+        exists:          @responses["EXISTS"].last,
+        recent:          @responses["RECENT"].last,
+        unseen:          @responses["UNSEEN"].last,
+        uidnext:         @responses["UIDNEXT"].last,
+        uidvalidity:     @responses["UIDVALIDITY"].last,
+        highestmodseq:   @responses["HIGHESTMODSEQ"].last,
+        nomodseq:        @responses.key?("NOMODSEQ"),
+        flags:           @responses["FLAGS"].last,
+        permanent_flags: @responses["PERMANENTFLAGS"].last,
+        degraded:        degraded,
+      }
+    end
+
+    def merge_vanished(responses, earlier)
+      return VanishedData[uids: SequenceSet.empty, earlier:] if responses.empty?
+      VanishedData[
+        uids: SequenceSet[*responses.map(&:uids)],
+        earlier:,
+      ]
+    end
+
+    public
 
     # Sends a {CREATE command [IMAP4rev1 §6.3.3]}[https://www.rfc-editor.org/rfc/rfc3501#section-6.3.3]
     # to create a new +mailbox+.
