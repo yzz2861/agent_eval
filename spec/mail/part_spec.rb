@@ -180,6 +180,93 @@ ENDPART
         expect(@delivery_report.diagnostic_code).to be_nil
       end
     end
+
+    describe "per-recipient interface" do
+      before do
+        @multi_recipient_report = Mail::Part.new(Mail::Utilities.to_crlf(<<ENDPART))
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; mx.example.org
+X-Postfix-Queue-ID: 1A2B3C
+Arrival-Date: Mon, 24 Dec 2007 10:03:47 +1100
+
+Final-Recipient: rfc822; first@example.org
+Action: failed
+Status: 5.1.1
+Diagnostic-Code: smtp; 550 unknown user
+X-Local-Tag: one
+
+Final-Recipient: rfc822; second@example.org
+Action: delayed
+Status: 4.2.2
+X-Local-Tag: two
+ENDPART
+      end
+
+      it "returns a parsed delivery status" do
+        expect(@multi_recipient_report.delivery_status).to be_a(Mail::DeliveryStatusParser)
+      end
+
+      it "returns one object per recipient with grouped fields" do
+        recipients = @multi_recipient_report.delivery_status_recipients
+
+        expect(recipients.length).to eq 2
+        expect(recipients.map(&:address)).to eq %w[first@example.org second@example.org]
+        expect(recipients.first.action).to eq 'failed'
+        expect(recipients.first.status).to eq '5.1.1'
+        expect(recipients.first.diagnostic_code).to eq 'smtp; 550 unknown user'
+        expect(recipients[1].action).to eq 'delayed'
+        expect(recipients[1].status).to eq '4.2.2'
+        expect(recipients[1].diagnostic_code).to be_nil
+      end
+
+      it "keeps recipient extension fields in their own block" do
+        recipients = @multi_recipient_report.delivery_status_recipients
+
+        expect(recipients.first.fields['x-local-tag']).to eq 'one'
+        expect(recipients[1].fields['x-local-tag']).to eq 'two'
+      end
+
+      it "exposes report level fields including extensions" do
+        fields = @multi_recipient_report.delivery_status_report_fields
+
+        expect(fields['reporting-mta']).to eq 'dns; mx.example.org'
+        expect(fields['x-postfix-queue-id']).to eq '1A2B3C'
+        expect(fields['arrival-date']).to eq 'Mon, 24 Dec 2007 10:03:47 +1100'
+      end
+
+      it "distinguishes a missing field from a syntactically invalid one" do
+        recipients = @multi_recipient_report.delivery_status_recipients
+
+        expect(recipients[1].diagnostic_code).to be_nil
+        expect(recipients[1].errors).to eq []
+        expect(recipients.first.errors).to eq []
+      end
+
+      it "keeps the legacy single value accessors working" do
+        expect(@multi_recipient_report.action).to eq %w[failed delayed]
+        expect(@multi_recipient_report.error_status).to eq %w[5.1.1 4.2.2]
+        expect(@multi_recipient_report.final_recipient).to eq ['rfc822; first@example.org', 'rfc822; second@example.org']
+        expect(@multi_recipient_report.diagnostic_code).to eq 'smtp; 550 unknown user'
+      end
+    end
+
+    describe "syntax errors" do
+      it "returns the invalid value and records an error" do
+        report = Mail::Part.new(Mail::Utilities.to_crlf(<<ENDPART))
+Content-Type: message/delivery-status
+
+Final-Recipient: rfc822; user@example.org
+Action: bounced
+Status: 9.9.9
+ENDPART
+        recipient = report.delivery_status_recipients.first
+
+        expect(recipient.action).to eq 'bounced'
+        expect(recipient.status).to eq '9.9.9'
+        expect(recipient.errors.map(&:first)).to match_array %w[action status]
+      end
+    end
   end
 
   it "should correctly parse plain text raw source and not truncate after newlines - issue 208" do

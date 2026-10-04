@@ -51,6 +51,28 @@ module Mail
       delivery_status_report_part? ? parse_delivery_status_report : {}
     end
 
+    # Parsed message/delivery-status body with report level fields and one
+    # object per recipient block, preserving the boundary between each group.
+    #
+    # Returns nil for parts that are not delivery status reports.
+    def delivery_status
+      parse_delivery_status if delivery_status_report_part?
+    end
+
+    # Report level (per-message) fields from the delivery status body.  Unknown
+    # extension fields are kept alongside the standard fields.
+    def delivery_status_report_fields
+      delivery_status ? delivery_status.report_fields : {}
+    end
+
+    # Array of Mail::DeliveryStatusRecipient objects, one for each recipient
+    # block in the delivery status body.  Each recipient carries its own
+    # address, action, status and diagnostic code, so callers do not have to
+    # line up parallel arrays themselves.
+    def delivery_status_recipients
+      delivery_status ? delivery_status.recipients : []
+    end
+
     def bounced?
       if action.is_a?(Array)
         !!(action.first =~ /failed/i)
@@ -110,8 +132,23 @@ module Mail
       end
     end
 
+    def parse_delivery_status
+      @parsed_delivery_status ||= Mail::DeliveryStatusParser.new(body.to_s)
+    end
+
     def parse_delivery_status_report
-      @delivery_status_data ||= Header.new(body.to_s.gsub("\r\n\r\n", "\r\n"))
+      @delivery_status_data ||= Header.new(flattened_delivery_status_source)
+    end
+
+    # Join the per-message and every per-recipient field group into one flat
+    # header for the legacy single value accessors.  Grouping information is
+    # not lost: it stays available through #delivery_status_recipients.
+    def flattened_delivery_status_source
+      dsn = parse_delivery_status
+      groups = []
+      groups << dsn.report_group if dsn.report_group
+      groups.concat(dsn.recipients.map { |recipient| recipient.field_group })
+      groups.compact.map { |group| group.field_objects.map(&:to_s).join("\r\n") }.join("\r\n")
     end
 
   end

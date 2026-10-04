@@ -562,6 +562,27 @@ Results in the same email as done using the block form
 @mail.retryable?       #=> false
 ```
 
+A single bounce may report a different result for each recipient.  The
+per-recipient interface keeps each recipient block's fields together instead
+of returning parallel arrays you have to line up yourself:
+
+```ruby
+@mail.delivery_status_report_fields
+#=> { "reporting-mta" => "dns; mx.example.org", "x-postfix-queue-id" => "...", ... }
+
+@mail.delivery_status_recipients.each do |recipient|
+  recipient.address         #=> "user@example.org"
+  recipient.action          #=> "failed"
+  recipient.status          #=> "5.1.1"
+  recipient.diagnostic_code #=> "smtp; 550 ..." (nil when absent)
+  recipient.fields          #=> all fields of the block, incl. extensions
+end
+```
+
+A field that is absent returns `nil`.  A field that is present but malformed
+is still returned and is additionally listed in `recipient.errors`, so missing
+fields and syntax errors stay distinguishable.
+
 ### Attaching and Detaching Files
 
 You can just read the file off an absolute path, Mail will try

@@ -1582,6 +1582,23 @@ module Mail
       delivery_status_part and delivery_status_part.remote_mta
     end
 
+    # Parsed delivery status body with the per-message fields and one object
+    # per recipient block.  Returns nil unless this is a delivery status report.
+    def delivery_status
+      delivery_status_part and delivery_status_part.delivery_status
+    end
+
+    # Per-message fields from the delivery status body, including unknown
+    # extension fields.
+    def delivery_status_report_fields
+      delivery_status_part and delivery_status_part.delivery_status_report_fields
+    end
+
+    # Array of Mail::DeliveryStatusRecipient objects, one per recipient block.
+    def delivery_status_recipients
+      delivery_status_part ? delivery_status_part.delivery_status_recipients : []
+    end
+
     def retryable?
       delivery_status_part and delivery_status_part.retryable?
     end

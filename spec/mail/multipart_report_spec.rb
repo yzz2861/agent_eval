@@ -51,6 +51,53 @@ RSpec.describe "multipart/report emails" do
         expect(mail1).to be_bounced
         expect(mail2).to be_bounced
       end
+
+      describe "recipient oriented interface" do
+        let(:mail) { read_fixture('emails', 'multipart_report_emails', 'multi_address_bounce1.eml') }
+
+        it "returns one recipient object per recipient block" do
+          recipients = mail.delivery_status_recipients
+
+          expect(recipients.length).to eq 5
+          expect(recipients.first).to be_a(Mail::DeliveryStatusRecipient)
+          expect(recipients.map(&:address)).to eq %w[
+            bbbbvhvbbvkjbhfbvbvjhb@gmail.com
+            bscdbcjhasbcjhbdscbhbsdhcbj@gmail.com
+            egyfefsdvsfvvhjsd@gmail.com
+            kfhejkfbsjkjsbhds@gmail.com
+            qfvhgsvhgsduiohncdhcvhsdfvsfygusd@gmail.com
+          ]
+        end
+
+        it "groups action, status and diagnostic code with the right recipient" do
+          recipient = mail.delivery_status_recipients[2]
+
+          expect(recipient.address).to eq 'egyfefsdvsfvvhjsd@gmail.com'
+          expect(recipient.action).to eq 'failed'
+          expect(recipient.status).to eq '5.1.1'
+          expect(recipient.diagnostic_code).to include '550-5.1.1'
+        end
+
+        it "keeps report level fields" do
+          fields = mail.delivery_status_report_fields
+
+          expect(fields['reporting-mta']).to eq 'dns; lvmail01.LL.com'
+          expect(fields['arrival-date']).to eq 'Tue, 23 Feb 2010 22:16:15 -0800 (PST)'
+          expect(fields['x-postfix-queue-id']).to eq '9B7841BC027'
+        end
+
+        it "exposes the parsed delivery status object" do
+          expect(mail.delivery_status).to be_a(Mail::DeliveryStatusParser)
+        end
+      end
+    end
+
+    describe "non report email" do
+      it "returns an empty recipient list" do
+        mail = Mail.new
+        expect(mail.delivery_status_recipients).to eq []
+        expect(mail.delivery_status).to be_nil
+      end
     end
 
     describe "temporary failure" do
@@ -126,4 +173,3 @@ RSpec.describe "multipart/report emails" do
   end
 
 end
-

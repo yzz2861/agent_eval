@@ -2,6 +2,7 @@
 module Mail
   register_autoload :Address, 'mail/elements/address'
   register_autoload :AddressList, 'mail/elements/address_list'
+  register_autoload :DeliveryStatusParser, 'mail/elements/delivery_status_parser'
   register_autoload :ContentDispositionElement, 'mail/elements/content_disposition_element'
   register_autoload :ContentLocationElement, 'mail/elements/content_location_element'
   register_autoload :ContentTransferEncodingElement, 'mail/elements/content_transfer_encoding_element'

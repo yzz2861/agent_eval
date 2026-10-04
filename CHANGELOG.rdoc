@@ -11,6 +11,11 @@ Features:
 
 * Updated README to improve around sending multipart mail @kapfenho
 * Add delivery_interceptors method to Mail class to fetch registered interceptors @ghousemohamed
+* Add a recipient oriented interface for message/delivery-status reports:
+  Mail::DeliveryStatusParser, Message#delivery_status_recipients and
+  Message#delivery_status_report_fields.  Report level fields and each
+  recipient block are kept separate, with missing fields and syntax errors
+  distinguished.
 
 Code Improvements:
 
