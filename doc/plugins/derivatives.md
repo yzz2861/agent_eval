@@ -239,6 +239,63 @@ attacher.create_derivatives(:crop)
 attacher.derivatives #=> { large: ..., medium: ..., small: ..., cropped: ... }
 ```
 
+### Rebuilding derivatives
+
+When a derivative is generated through an intermediate format, processors can
+declare their recipe version and which other derivative nodes they depend on:
+
+```rb
+Attacher.derivatives :master, version: 2 do |original|
+  { master: convert_to_intermediate(original) }
+end
+
+Attacher.derivatives :large, version: 1, depends: [:master] do |original, master:|
+  { large: generate_large(master[:master]) }
+end
+
+Attacher.derivatives :small, version: 1, depends: [:master] do |original, master:|
+  { small: generate_small(master[:master]) }
+end
+```
+
+`Attacher#rebuild_derivatives` processes the nodes in topological order. Each
+dependent node receives the dependency's uploaded derivatives hash as a keyword
+argument named after the dependency. Only the nodes affected since the last
+rebuild are reprocessed:
+
+* the node has never been built for the current source file,
+* the source file identity (`storage/id`) has changed,
+* the processor's recipe `version:` has changed, or
+* a dependency was rebuilt and produced different content.
+
+```rb
+attacher.attach(original)
+attacher.rebuild_derivatives      # builds :master, :large and :small
+attacher.rebuild_derivatives      # no-op, nothing is affected
+
+# bump the master recipe: :master, :large and :small are rebuilt
+attacher.rebuild_derivatives
+```
+
+You can inspect the affected set without running any processors:
+
+```rb
+attacher.derivative_rebuild_plan       #=> { nodes: [:master, :large, :small], rebuild: [...] }
+attacher.derivative_rebuild_plan(:small)
+#=> { nodes: [:master, :small], rebuild: [...] }
+```
+
+The new results are uploaded to a temporary set first and are published as a
+group: the previously stored derivatives stay readable and referenced until
+the whole batch is ready. If any processor fails, the files uploaded during
+this run are deleted, while existing derivatives and their references are left
+untouched.
+
+The rebuild metadata (source identity, recipe versions, dependency results and
+output paths) is stored alongside the derivatives in the attachment data, so
+incremental rebuilds also work after the attacher is reloaded from the
+record.
+
 ### Derivatives storage
 
 By default, derivatives are uploaded to the permanent storage of the attacher.

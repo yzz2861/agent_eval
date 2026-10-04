@@ -1461,6 +1461,326 @@ describe Shrine::Plugins::Derivatives do
     end
   end
 
+  describe "#rebuild_derivatives" do
+    before do
+      calls = @calls = []
+
+      @attacher.class.derivatives :upper, version: 1 do |original|
+        calls << :upper
+        { upper: StringIO.new(original.read.upcase) }
+      end
+
+      @attacher.class.derivatives :exclaim, version: 1, depends: [:upper] do |original, upper:|
+        calls << :exclaim
+        { exclaim: StringIO.new(upper[:upper].read + "!") }
+      end
+    end
+
+    it "processes dependency nodes before their dependents" do
+      @attacher.attach fakeio("hello")
+      @attacher.rebuild_derivatives
+
+      assert_equal [:upper, :exclaim], @calls
+      assert_equal "HELLO",  @attacher.derivatives[:upper].read
+      assert_equal "HELLO!", @attacher.derivatives[:exclaim].read
+    end
+
+    it "passes uploaded dependency derivatives as keyword arguments" do
+      received = nil
+      @attacher.class.derivatives :consumer, version: 1, depends: [:upper] do |original, upper:|
+        received = upper
+        { consumer: StringIO.new(upper[:upper].read.downcase) }
+      end
+
+      @attacher.attach fakeio("HELLO")
+      @attacher.rebuild_derivatives(:consumer)
+
+      assert_kind_of Shrine::UploadedFile, received[:upper]
+      assert_equal "hello", @attacher.derivatives[:consumer].read
+    end
+
+    it "builds all nodes on the first run" do
+      @attacher.attach fakeio("hello")
+
+      result = @attacher.rebuild_derivatives
+
+      assert_equal [:upper, :exclaim], @calls
+      assert_equal %i[upper exclaim], result.keys
+    end
+
+    it "skips unaffected nodes on subsequent runs" do
+      @attacher.attach fakeio("hello")
+      @attacher.rebuild_derivatives
+
+      @calls.clear
+      result = @attacher.rebuild_derivatives
+
+      assert_equal [], @calls
+      assert_equal({}, result)
+    end
+
+    it "rebuilds every node when the source file changes" do
+      @attacher.attach fakeio("one")
+      @attacher.rebuild_derivatives
+
+      @attacher.attach fakeio("two")
+      @calls.clear
+      @attacher.rebuild_derivatives
+
+      assert_equal [:upper, :exclaim], @calls
+      assert_equal "TWO",  @attacher.derivatives[:upper].read
+      assert_equal "TWO!", @attacher.derivatives[:exclaim].read
+    end
+
+    it "rebuilds a node and its dependents when the recipe version changes" do
+      @attacher.attach fakeio("hello")
+      @attacher.rebuild_derivatives
+
+      calls = @calls
+      @attacher.class.derivatives :upper, version: 2 do |original|
+        calls << :upper
+        { upper: StringIO.new(original.read.upcase + "?") }
+      end
+
+      @calls.clear
+      @attacher.rebuild_derivatives
+
+      assert_equal [:upper, :exclaim], @calls
+      assert_equal "HELLO?",  @attacher.derivatives[:upper].read
+      assert_equal "HELLO?!", @attacher.derivatives[:exclaim].read
+    end
+
+    it "does not rebuild dependents when a rebuilt dependency produces the same result" do
+      @attacher.attach fakeio("hello")
+      @attacher.rebuild_derivatives
+
+      calls = @calls
+      @attacher.class.derivatives :upper, version: 2 do |original|
+        calls << :upper
+        { upper: StringIO.new(original.read.upcase) }
+      end
+
+      @calls.clear
+      @attacher.rebuild_derivatives
+
+      assert_equal [:upper], @calls
+    end
+
+    it "limits the rebuild to requested nodes and their transitive dependencies" do
+      calls = @calls
+      @attacher.class.derivatives :other, version: 1 do |original|
+        calls << :other
+        { other: StringIO.new(original.read) }
+      end
+
+      @attacher.attach fakeio("hello")
+      @attacher.rebuild_derivatives(:upper)
+
+      assert_equal [:upper], @calls
+      assert_nil @attacher.derivatives[:other]
+    end
+
+    it "topologically sorts a dependency diamond" do
+      calls = @calls
+      @attacher.class.derivatives :left,  version: 1, depends: [:upper] do |original, upper:|
+        calls << :left
+        { left: StringIO.new(upper[:upper].read) }
+      end
+      @attacher.class.derivatives :right, version: 1, depends: [:upper] do |original, upper:|
+        calls << :right
+        { right: StringIO.new(upper[:upper].read) }
+      end
+      @attacher.class.derivatives :join, version: 1, depends: %i[left right] do |original, left:, right:|
+        calls << :join
+        { join: StringIO.new(left[:left].read + right[:right].read) }
+      end
+
+      @attacher.attach fakeio("hi")
+      @attacher.rebuild_derivatives
+
+      assert_equal :upper, @calls.first
+      assert_equal :join,  @calls.last
+      assert_equal "HIHI",  @attacher.derivatives[:join].read
+    end
+
+    it "fails on cyclic node dependencies" do
+      @attacher.class.derivatives :cycle_a, version: 1, depends: [:cycle_b] do |original, cycle_b:|
+        { cycle_a: StringIO.new("a") }
+      end
+      @attacher.class.derivatives :cycle_b, version: 1, depends: [:cycle_a] do |original, cycle_a:|
+        { cycle_b: StringIO.new("b") }
+      end
+
+      @attacher.attach fakeio("hi")
+
+      error = assert_raises(Shrine::Error) { @attacher.rebuild_derivatives(:cycle_a) }
+      assert_match(/cyclic derivative node dependency/, error.message)
+    end
+
+    it "fails when a dependency node is not registered" do
+      @attacher.class.derivatives :orphan, version: 1, depends: [:missing] do |original|
+        { orphan: StringIO.new("") }
+      end
+
+      @attacher.attach fakeio("hi")
+
+      assert_raises(Shrine::Error) { @attacher.rebuild_derivatives(:orphan) }
+    end
+
+    it "keeps previous derivatives available until the whole batch is ready" do
+      @attacher.attach fakeio("hello")
+      @attacher.rebuild_derivatives
+
+      attacher          = @attacher
+      published_upper   = attacher.derivatives[:upper]
+      published_exclaim = attacher.derivatives[:exclaim]
+      checks            = self
+
+      @attacher.class.derivatives :upper, version: 2 do |original|
+        { upper: StringIO.new(original.read.upcase + "?") }
+      end
+      @attacher.class.derivatives :exclaim, version: 2, depends: [:upper] do |original, upper:|
+        # The newly staged dependency is not visible before publication.
+        checks.refute_equal upper[:upper].id, published_upper.id
+        checks.assert_equal published_upper.id,   attacher.derivatives[:upper].id
+        checks.assert_equal published_exclaim.id, attacher.derivatives[:exclaim].id
+        { exclaim: StringIO.new(upper[:upper].read + "?") }
+      end
+
+      attacher.rebuild_derivatives
+
+      refute_equal published_upper.id,   attacher.derivatives[:upper].id
+      refute_equal published_exclaim.id, attacher.derivatives[:exclaim].id
+      assert_equal "HELLO??", attacher.derivatives[:exclaim].read
+    end
+
+    it "deletes staged uploads and preserves old references when a node fails" do
+      @attacher.attach fakeio("hello")
+      @attacher.rebuild_derivatives
+
+      old_upper   = @attacher.derivatives[:upper]
+      old_exclaim = @attacher.derivatives[:exclaim]
+      old_manifest = @attacher.derivatives_manifest.dup
+
+      @attacher.class.derivatives :upper, version: 2 do |original|
+        { upper: StringIO.new(original.read.upcase + "?") }
+      end
+      @attacher.class.derivatives :exclaim, version: 2, depends: [:upper] do |original, upper:|
+        raise "processing failed"
+      end
+
+      store = @shrine.storages[:store]
+      before = store.store.size
+
+      error = assert_raises(RuntimeError) { @attacher.rebuild_derivatives }
+      assert_equal "processing failed", error.message
+
+      assert_equal before, store.store.size
+      assert_equal old_upper,   @attacher.derivatives[:upper]
+      assert_equal old_exclaim, @attacher.derivatives[:exclaim]
+      assert_equal "HELLO",  old_upper.read
+      assert_equal "HELLO!", old_exclaim.read
+      assert_equal old_manifest, @attacher.derivatives_manifest
+    end
+
+    it "supports a raw source with a content-based identity" do
+      @attacher.attach fakeio("ignored")
+      @attacher.rebuild_derivatives(source: StringIO.new("hello"))
+
+      assert_equal "HELLO!", @attacher.derivatives[:exclaim].read
+
+      @calls.clear
+      @attacher.rebuild_derivatives(source: StringIO.new("hello"))
+      assert_equal [], @calls
+
+      @attacher.rebuild_derivatives(source: StringIO.new("world"))
+      assert_equal [:upper, :exclaim], @calls
+    end
+
+    describe "#derivative_rebuild_plan" do
+      it "lists nodes in topological order and the directly affected set" do
+        @attacher.attach fakeio("hello")
+
+        assert_equal({ nodes: [:upper, :exclaim], rebuild: [:upper, :exclaim] },
+                     @attacher.derivative_rebuild_plan)
+
+        @attacher.rebuild_derivatives
+
+        assert_equal({ nodes: [:upper, :exclaim], rebuild: [] },
+                     @attacher.derivative_rebuild_plan)
+      end
+
+      it "marks nodes with changed recipe versions for rebuild" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        @attacher.class.derivatives :upper, version: 2 do |original|
+          { upper: StringIO.new(original.read.upcase + "?") }
+        end
+
+        plan = @attacher.derivative_rebuild_plan
+
+        assert_equal [:upper], plan[:rebuild]
+      end
+
+      it "restricts the plan to requested nodes and dependencies" do
+        @attacher.attach fakeio("hello")
+
+        plan = @attacher.derivative_rebuild_plan(:exclaim)
+
+        assert_equal [:upper, :exclaim], plan[:nodes]
+      end
+    end
+
+    describe "manifest persistence" do
+      it "records source, recipe version, dependency signatures and output paths" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        manifest = @attacher.derivatives_manifest
+
+        assert_equal "store/#{@attacher.file.id}", manifest["upper"]["source"]
+        assert_equal "1", manifest["upper"]["version"]
+        assert_equal "1", manifest["exclaim"]["version"]
+        assert_equal(%w[upper], manifest["exclaim"]["depends"].keys)
+        assert_equal [["upper"]],    manifest["upper"]["outputs"]
+        assert_equal [["exclaim"]],  manifest["exclaim"]["outputs"]
+        assert_equal manifest["upper"]["signature"],
+                     manifest["exclaim"]["depends"]["upper"]
+      end
+
+      it "persists the manifest through attacher data" do
+        @attacher.attach fakeio("hello")
+        @attacher.rebuild_derivatives
+
+        new_attacher = @shrine::Attacher.new
+        new_attacher.load_data(@attacher.data)
+
+        assert_equal @attacher.derivatives, new_attacher.derivatives
+        assert_equal @attacher.derivatives_manifest, new_attacher.derivatives_manifest
+
+        @calls.clear
+        new_attacher.rebuild_derivatives
+        assert_equal [], @calls
+      end
+
+      it "omits an empty manifest from data" do
+        @attacher.attach fakeio("hello")
+
+        refute_includes @attacher.data.keys, "derivatives_manifest"
+      end
+
+      it "resets the manifest when the attachment changes" do
+        @attacher.attach fakeio("one")
+        @attacher.rebuild_derivatives
+
+        @attacher.attach fakeio("two")
+
+        assert_equal({}, @attacher.derivatives_manifest)
+      end
+    end
+  end
+
   describe "Shrine" do
     describe ".derivatives" do
       it "loads derivatives from Hash" do

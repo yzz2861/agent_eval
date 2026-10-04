@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "digest"
+
 class Shrine
   module Plugins
     # Documentation can be found on https://shrinerb.com/docs/plugins/derivatives
@@ -62,10 +64,28 @@ class Shrine
         # This can be useful if you'd like to defer or avoid a possibly
         # expensive download operation for processor logic that does not
         # require it.
-        def derivatives_processor(name = :default, download: true, &block)
+        #
+        # A processor can declare an explicit recipe version and a list of
+        # other derivative nodes it depends on. This makes it eligible for
+        # incremental rebuilds via Attacher#rebuild_derivatives: the node is
+        # rebuilt only when the source changes, its recipe version changes,
+        # or one of its dependencies produces different results.
+        #
+        #     Attacher.derivatives_processor :large, version: 2 do |original|
+        #       { large: processor.resize_to_limit!(800, 800) }
+        #     end
+        #
+        #     Attacher.derivatives_processor :small, version: 1, depends: [:large] do |original, large:|
+        #       { small: processor.source(large[:large]).resize_to_limit!(300, 300) }
+        #     end
+        def derivatives_processor(name = :default, download: true, version: nil, depends: nil, &block)
           if block
+            settings = { download: download }
+            settings[:version]    = version.to_s if version
+            settings[:depends]    = Array(depends).map(&:to_sym) if depends
+
             shrine_class.derivatives_options[:processors][name.to_sym] = block
-            shrine_class.derivatives_options[:processor_settings][name.to_sym] = { download: download }
+            shrine_class.derivatives_options[:processor_settings][name.to_sym] = settings
           else
             shrine_class.derivatives_options[:processors].fetch(name.to_sym) do
               fail Error, "derivatives processor #{name.inspect} not registered" unless name == :default
@@ -102,13 +122,14 @@ class Shrine
       end
 
       module AttacherMethods
-        attr_reader :derivatives
+        attr_reader :derivatives, :derivatives_manifest
 
         # Adds the ability to accept derivatives.
-        def initialize(derivatives: {}, **options)
+        def initialize(derivatives: {}, derivatives_manifest: {}, **options)
           super(**options)
 
-          @derivatives       = derivatives
+          @derivatives          = derivatives
+          @derivatives_manifest = derivatives_manifest
           @derivatives_mutex = Mutex.new if shrine_class.derivatives_options[:mutex]
         end
 
@@ -199,6 +220,134 @@ class Shrine
         def create_derivatives(*args, storage: nil, **options)
           files = process_derivatives(*args, **options)
           add_derivatives(files, storage: storage)
+        end
+
+        # Rebuilds derivative nodes according to the graph declared with
+        # `version:` and `depends:` on their processors.
+        #
+        # A node is rebuilt only when it is affected since the last rebuild,
+        # i.e. when:
+        #
+        #   * it has never been built for the current source,
+        #   * the source file identity changed,
+        #   * the processor's recipe version changed, or
+        #   * one of its dependencies was rebuilt and produced new results.
+        #
+        # Dependencies are processed in topological order, and rebuilt nodes
+        # receive each dependency's uploaded derivatives hash as a keyword
+        # argument named after the dependency.
+        #
+        #     Attacher.derivatives_processor :large, version: 1 do |original|
+        #       { large: StringIO.new(original.read.upcase) }
+        #     end
+        #
+        #     Attacher.derivatives_processor :small, version: 1, depends: [:large] do |original, large:|
+        #       { small: StringIO.new(large[:large].read.downcase) }
+        #     end
+        #
+        #     attacher.attach(StringIO.new("content"))
+        #     attacher.rebuild_derivatives
+        #     #=> { large: ..., small: ... }
+        #
+        # Only the requested nodes (and their transitive dependencies) are
+        # considered; by default every registered processor is considered.
+        # Returns a Hash of newly built derivatives (empty when nothing was
+        # affected). New results are published as a group: previously stored
+        # derivatives stay available until the whole batch is ready, and if a
+        # processor fails, the files uploaded during this run are deleted
+        # while existing derivatives are left untouched.
+        def rebuild_derivatives(*node_names, source: nil, force: false, storage: nil, **options)
+          node_names = derivative_node_names if node_names.empty?
+          node_names = node_names.map(&:to_sym)
+
+          source    ||= file!
+          source_id   = derivative_source_identity(source)
+          staged      = {}
+          order       = derivative_node_order(node_names)
+
+          rebuilt      = []
+          new_manifest = {}
+
+          build_node = -> (node_name, settings) do
+            dependencies = settings[:depends] || []
+            inputs       = derivative_dependency_inputs(staged, dependencies)
+
+            node_files = begin
+              process_derivatives(node_name, source, **inputs, **options)
+            ensure
+              inputs.each_value { |outputs| rewind_derivative_uploads(outputs) }
+            end
+            uploaded  = upload_derivatives(node_files, storage: storage)
+
+            staged[node_name] = uploaded
+            rebuilt          << node_name
+            new_manifest[node_name.to_s] = {
+              "source"    => source_id,
+              "version"   => (settings[:version] || "").to_s,
+              "depends"   => derivative_dependency_signatures(dependencies, new_manifest),
+              "outputs"   => derivative_output_paths(uploaded),
+              "signature" => derivative_output_signature(uploaded),
+            }
+
+            uploaded
+          end
+
+          order.each do |node_name|
+            settings      = self.class.derivatives_processor_settings(node_name)
+            dependencies  = settings[:depends] || []
+            direct_dirty =
+              (force && node_names.include?(node_name)) ||
+                !derivative_manifest_fresh?(node_name, settings, source_id)
+
+            if direct_dirty
+              build_node.call(node_name, settings)
+            else
+              stale_dependency = dependencies.any? do |dependency|
+                next false unless rebuilt.include?(dependency)
+
+                expected = derivatives_manifest.dig(node_name.to_s, "depends", dependency.to_s)
+                current  = new_manifest.dig(dependency.to_s, "signature")
+
+                expected != current
+              end
+
+              build_node.call(node_name, settings) if stale_dependency
+            end
+          end
+
+          publish_derivative_rebuild(staged, rebuilt, new_manifest)
+        rescue => error
+          cleanup_staged_derivatives(staged)
+          raise error
+        end
+
+        # Computes the rebuild set without executing any processors, based on
+        # the source file identity, declared recipe versions and the results
+        # the nodes were built from.
+        #
+        #     attacher.derivative_rebuild_plan
+        #     #=> { nodes: [:large, :small], rebuild: [:large] }
+        #
+        # Cascading rebuilds caused by changed dependency results can only be
+        # observed after those dependencies are rebuilt; the returned plan
+        # covers the directly affected nodes.
+        def derivative_rebuild_plan(*node_names, source: nil, force: false)
+          node_names = derivative_node_names if node_names.empty?
+          node_names = node_names.map(&:to_sym)
+
+          source ||= file!
+
+          order   = derivative_node_order(node_names)
+          rebuild = order.select do |node_name|
+            settings = self.class.derivatives_processor_settings(node_name)
+
+            (force && node_names.include?(node_name)) ||
+              !derivative_manifest_fresh?(
+                node_name, settings, derivative_source_identity(source),
+              )
+          end
+
+          { nodes: order, rebuild: rebuild }
         end
 
         # Uploads given hash of files and adds uploaded files to the
@@ -423,6 +572,11 @@ class Shrine
             end
           end
 
+          if derivatives_manifest.any?
+            result ||= {}
+            result["derivatives_manifest"] = JSON.parse(JSON.generate(derivatives_manifest))
+          end
+
           result
         end
 
@@ -446,8 +600,10 @@ class Shrine
           data ||= {}
           data   = data.dup
 
-          derivatives_data = data.delete("derivatives") || data.delete(:derivatives) || {}
-          @derivatives     = shrine_class.derivatives(derivatives_data)
+          derivatives_data  = data.delete("derivatives") || data.delete(:derivatives) || {}
+          manifest_data     = data.delete("derivatives_manifest") || data.delete("derivatives_manifest".to_sym) || {}
+          @derivatives       = shrine_class.derivatives(derivatives_data)
+          @derivatives_manifest = manifest_data
 
           data = nil if data.empty?
 
@@ -465,7 +621,10 @@ class Shrine
         #     attacher.derivatives #=> { thumb: #<Shrine::UploadedFile> }
         def change(*)
           result = super
-          set_derivatives({}) unless shrine_class.derivatives_options[:keep_derivatives]
+          unless shrine_class.derivatives_options[:keep_derivatives]
+            @derivatives_manifest = {}
+            set_derivatives({})
+          end
           result
         end
 
@@ -491,6 +650,249 @@ class Shrine
         end
 
         private
+
+        # All processors that have been registered as graph nodes.
+        def derivative_node_names
+          shrine_class.derivatives_options[:processors].keys
+        end
+
+        # Returns the nodes in dependency-first topological order, restricted
+        # to the requested nodes and their transitive dependencies.
+        def derivative_node_order(node_names)
+          selected = {}
+
+          select_node = lambda do |node_name|
+            unless shrine_class.derivatives_options[:processors].key?(node_name)
+              fail Error, "derivatives processor #{node_name.inspect} not registered"
+            end
+
+            return if selected[node_name]
+
+            selected[node_name] = true
+
+            dependencies = self.class.derivatives_processor_settings(node_name)[:depends] || []
+            dependencies.each { |dependency| select_node.call(dependency) }
+          end
+
+          node_names.each { |node_name| select_node.call(node_name) }
+
+          order   = []
+          visited = {}
+
+          visit_node = lambda do |node_name, stack:|
+            case visited[node_name]
+            when :in_progress
+              cycle = [*stack, node_name].map(&:inspect).join(" -> ")
+              fail Error, "cyclic derivative node dependency detected: #{cycle}"
+            when :done
+              return
+            end
+
+            visited[node_name] = :in_progress
+
+            dependencies = self.class.derivatives_processor_settings(node_name)[:depends] || []
+            dependencies.each do |dependency|
+              visit_node.call(dependency, stack: [*stack, node_name])
+            end
+
+            visited[node_name] = :done
+            order << node_name
+          end
+
+          selected.each_key { |node_name| visit_node.call(node_name, stack: []) }
+
+          order
+        end
+
+        # Stable identity of the file a set of derivatives is based on.
+        def derivative_source_identity(source)
+          if source.respond_to?(:storage_key) && source.respond_to?(:id)
+            "#{source.storage_key}/#{source.id}"
+          else
+            Digest::SHA1.hexdigest(source.read.to_s).tap { source.rewind if source.respond_to?(:rewind) }
+          end
+        end
+
+        # Whether a node's manifest entry still matches the current source and
+        # recipe and points to the same dependency results.
+        def derivative_manifest_fresh?(node_name, settings, source_id)
+          entry = derivatives_manifest[node_name.to_s]
+
+          return false unless entry.is_a?(Hash)
+          return false unless entry["source"]  == source_id
+          return false unless entry["version"] == (settings[:version] || "").to_s
+
+          (settings[:depends] || []).each do |dependency|
+            return false unless entry.dig("depends", dependency.to_s) ==
+              derivatives_manifest.dig(dependency.to_s, "signature")
+          end
+
+          true
+        end
+
+        # Builds the keyword arguments carrying each dependency's uploaded
+        # derivatives hash.
+        def derivative_dependency_inputs(staged, dependencies)
+          dependencies.each_with_object({}) do |dependency, inputs|
+            outputs = staged[dependency] || extract_node_derivatives(dependency)
+
+            unless outputs
+              fail Error, "derivative node #{dependency.inspect} has no results to depend on"
+            end
+
+            inputs[dependency] = rewind_derivative_uploads(outputs)
+          end
+        end
+
+        # Rewinds uploaded derivatives before handing them to a dependent
+        # processor, so a freshly built dependency is readable even though
+        # its IO was consumed during the upload.
+        def rewind_derivative_uploads(object)
+          map_derivative(object) do |_, derivative|
+            derivative.close if derivative.respond_to?(:opened?) && derivative.opened?
+            derivative
+          end
+        end
+
+        # Reads a node's previously published derivatives from the hash using
+        # the output paths recorded in its manifest entry.
+        def extract_node_derivatives(node_name)
+          paths = derivatives_manifest.dig(node_name.to_s, "outputs")
+
+          return nil unless paths.is_a?(Array) && paths.any?
+
+          paths.each_with_object({}) do |path, extracted|
+            lookup_path = path.map { |key| key.is_a?(String) ? key.to_sym : key }
+            value = derivatives.dig(*lookup_path)
+            next unless value
+
+            set_derivative_path(extracted, lookup_path, value)
+          end
+        end
+
+        # Assigns a value at the given path within a nested hash.
+        def set_derivative_path(hash, path, value)
+          key = path.first
+
+          if path.one?
+            hash[key] = value
+          else
+            set_derivative_path(hash[key] ||= {}, path[1..], value)
+          end
+        end
+
+        # Lists the leaf paths contained in a node's output hash. Paths are
+        # stored as arrays so that nested derivatives survive serialization.
+        def derivative_output_paths(uploaded)
+          paths = []
+
+          collect_leaves = lambda do |object, path|
+            if object.is_a?(Hash)
+              object.each { |key, value| collect_leaves.call(value, [*path, key]) }
+            elsif object.is_a?(Array)
+              object.each_with_index { |value, index| collect_leaves.call(value, [*path, index]) }
+            else
+              paths << path
+            end
+          end
+
+          collect_leaves.call(uploaded, [])
+          paths.map { |path| path.map { |key| key.is_a?(Symbol) ? key.to_s : key } }
+        end
+
+        # Signatures of the dependencies a newly built node consumed.
+        def derivative_dependency_signatures(dependencies, new_manifest)
+          dependencies.each_with_object({}) do |dependency, signatures|
+            signature =
+              new_manifest.dig(dependency.to_s, "signature") ||
+              derivatives_manifest.dig(dependency.to_s, "signature")
+
+            signatures[dependency.to_s] = signature
+          end
+        end
+
+        # Deterministic, content-based signature of a node's uploaded
+        # derivatives. Re-processing a node that produces identical content
+        # therefore doesn't force its dependents to rebuild.
+        def derivative_output_signature(uploaded)
+          leaves = []
+
+          collect_leaves = lambda do |object, path|
+            if object.is_a?(Hash)
+              object.each { |key, value| collect_leaves.call(value, [*path, key.to_s]) }
+            elsif object.is_a?(Array)
+              object.each_with_index { |value, index| collect_leaves.call(value, [*path, index.to_s]) }
+            else
+              leaves << [path, object.storage_key.to_s, derivative_file_digest(object)]
+            end
+          end
+
+          collect_leaves.call(uploaded, [])
+
+          Digest::SHA1.hexdigest(leaves.map(&:inspect).join("\n"))
+        end
+
+        # Streams an uploaded derivative into a content digest without
+        # loading it into memory.
+        def derivative_file_digest(derivative)
+          digest = Digest::SHA1.new
+
+          if derivative.respond_to?(:stream)
+            writer = Object.new
+            writer.define_singleton_method(:write) { |chunk| digest.update(chunk); chunk.bytesize }
+            derivative.stream(writer)
+          else
+            digest.update(derivative.read)
+          end
+
+          digest.hexdigest
+        end
+
+        # Publishes a finished batch as a group: removes the node paths being
+        # replaced, merges the newly uploaded derivatives and writes the
+        # updated manifest together with them.
+        def publish_derivative_rebuild(staged, rebuilt, new_manifest)
+          return {} if rebuilt.empty?
+
+          derivatives_synchronize do
+            merged_derivatives = deep_merge_derivatives({}, derivatives)
+
+            rebuilt.each do |node_name|
+              paths = new_manifest.dig(node_name.to_s, "outputs") || []
+              paths.each do |path|
+                lookup_path = path.map { |key| key.is_a?(String) ? key.to_sym : key }
+
+                if lookup_path.one?
+                  merged_derivatives.delete(lookup_path.first)
+                else
+                  parent = merged_derivatives.dig(*lookup_path[0..-2])
+                  parent.delete(lookup_path.last) if parent.is_a?(Hash)
+                end
+              end
+            end
+
+            staged.each_value do |uploaded|
+              merged_derivatives = deep_merge_derivatives(merged_derivatives, uploaded)
+            end
+
+            merged_manifest = derivatives_manifest.merge(new_manifest)
+
+            @derivatives_manifest = merged_manifest
+            set_derivatives(merged_derivatives)
+          end
+
+          rebuilt.each_with_object({}) do |node_name, published|
+            published.replace(deep_merge_derivatives(published, staged[node_name]))
+          end
+        end
+
+        # Deletes derivatives uploaded during a failed rebuild run. Existing
+        # derivatives and their references are never touched.
+        def cleanup_staged_derivatives(staged)
+          staged.each_value do |uploaded|
+            map_derivative(uploaded) { |_, derivative| derivative.delete }
+          end
+        end
 
         # Calls the derivatives processor with the source file and options.
         def _process_derivatives(processor_name, source, **options)
