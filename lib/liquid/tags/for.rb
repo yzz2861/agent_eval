@@ -17,36 +17,47 @@ module Liquid
   #   {% for variable in array %}
   #     expression
   #   {% endfor %}
-  # @liquid_syntax_keyword variable The current item in the array.
-  # @liquid_syntax_keyword array The array to iterate over.
-  # @liquid_syntax_keyword expression The expression to render for each iteration.
+  #   {% for label: variable in array %}
+  #     {% break label %}
+  #     {% continue label %}
+  #   {% endfor %}
+# @liquid_syntax_keyword variable The current item in the array.
+# @liquid_syntax_keyword array The array to iterate over.
+# @liquid_syntax_keyword expression The expression to render for each iteration.
+  # @liquid_syntax_keyword label An optional label used by `break` or `continue` to target the loop.
   # @liquid_optional_param limit: [number] The number of iterations to perform.
   # @liquid_optional_param offset: [number] The 1-based index to start iterating at.
   # @liquid_optional_param range [untyped] A custom numeric range to iterate over.
   # @liquid_optional_param reversed [untyped] Iterate in reverse order.
   class For < Block
-    Syntax = /\A(#{VariableSegment}+)\s+in\s+(#{QuotedFragment}+)\s*(reversed)?/o
+    Syntax = /\A(?:(#{VariableSegment}+)\s*:\s*)?(#{VariableSegment}+)\s+in\s+(#{QuotedFragment}+)\s*(reversed)?/o
 
-    attr_reader :collection_name, :variable_name, :limit, :from
+    attr_reader :collection_name, :variable_name, :limit, :from, :label
 
     def initialize(tag_name, markup, options)
       super
       @from = @limit = nil
+      @label = nil
       parse_with_selected_parser(markup)
       @for_block = new_body
       @else_block = nil
     end
 
     def parse(tokens)
-      if parse_body(@for_block, tokens)
-        parse_body(@else_block, tokens)
+      parse_context.push_loop_label(@label)
+      begin
+        if parse_body(@for_block, tokens)
+          parse_body(@else_block, tokens)
+        end
+        if blank?
+          @else_block&.remove_blank_strings
+          @for_block.remove_blank_strings
+        end
+        @else_block&.freeze
+        @for_block.freeze
+      ensure
+        parse_context.pop_loop_label(@label)
       end
-      if blank?
-        @else_block&.remove_blank_strings
-        @for_block.remove_blank_strings
-      end
-      @else_block&.freeze
-      @for_block.freeze
     end
 
     def nodelist
@@ -74,12 +85,14 @@ module Liquid
 
     def lax_parse(markup)
       if markup =~ Syntax
-        @variable_name   = Regexp.last_match(1)
-        collection_name  = Regexp.last_match(2)
-        @reversed        = !!Regexp.last_match(3)
+        @label           = Regexp.last_match(1)
+        @variable_name   = Regexp.last_match(2)
+        collection_name  = Regexp.last_match(3)
+        @reversed        = !!Regexp.last_match(4)
         @name            = "#{@variable_name}-#{collection_name}"
         @collection_name = parse_expression(collection_name)
-        markup.scan(TagAttributes) do |key, value|
+        attributes_markup = @label ? Regexp.last_match.post_match : markup
+        attributes_markup.scan(TagAttributes) do |key, value|
           set_attribute(key, value)
         end
       else
@@ -89,6 +102,11 @@ module Liquid
 
     def strict_parse(markup)
       p = @parse_context.new_parser(markup)
+      if p.look(:id) && p.look(:colon, 1)
+        @label = p.consume(:id)
+        p.consume(:colon)
+      end
+
       @variable_name = p.consume(:id)
       raise SyntaxError, options[:locale].t("errors.syntax.for_invalid_in") unless p.id?('in')
 
@@ -110,6 +128,20 @@ module Liquid
     end
 
     private
+
+    def handle_interrupt(context)
+      return unless context.interrupt?
+
+      interrupt = context.pop_interrupt
+      return unless interrupt
+
+      targets_current_loop = interrupt.label.nil? || interrupt.label == @label
+      throw :interrupt if interrupt.is_a?(BreakInterrupt) && targets_current_loop
+      return if interrupt.is_a?(ContinueInterrupt) && targets_current_loop
+
+      context.push_interrupt(interrupt)
+      throw :interrupt
+    end
 
     def strict2_parse(markup)
       strict_parse(markup)
@@ -153,26 +185,24 @@ module Liquid
       length    = segment.length
 
       context.stack do
-        loop_vars = Liquid::ForloopDrop.new(@name, length, for_stack[-1])
+        catch(:interrupt) do
+          loop_vars = Liquid::ForloopDrop.new(@name, length, for_stack[-1])
 
-        for_stack.push(loop_vars)
+          for_stack.push(loop_vars)
 
-        begin
-          context['forloop'] = loop_vars
+          begin
+            context['forloop'] = loop_vars
 
-          segment.each do |item|
-            context[@variable_name] = item
-            @for_block.render_to_output_buffer(context, output)
-            loop_vars.send(:increment!)
+            segment.each do |item|
+              context[@variable_name] = item
+              @for_block.render_to_output_buffer(context, output)
+              loop_vars.send(:increment!)
 
-            # Handle any interrupts if they exist.
-            next unless context.interrupt?
-            interrupt = context.pop_interrupt
-            break if interrupt.is_a?(BreakInterrupt)
-            next if interrupt.is_a?(ContinueInterrupt)
+              handle_interrupt(context)
+            end
+          ensure
+            for_stack.pop
           end
-        ensure
-          for_stack.pop
         end
       end
 

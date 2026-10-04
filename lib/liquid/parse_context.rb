@@ -26,6 +26,7 @@ module Liquid
 
       self.depth   = 0
       self.partial = false
+      @loop_labels = []
     end
 
     def [](option_key)
@@ -67,6 +68,38 @@ module Liquid
       end
 
       Expression.parse(markup, @string_scanner, @expression_cache)
+    end
+
+    def push_loop_label(label)
+      return if label.nil?
+
+      if @loop_labels.include?(label)
+        raise SyntaxError, locale.t("errors.syntax.for_duplicate_label", label: label)
+      end
+
+      @loop_labels.push(label)
+    end
+
+    def pop_loop_label(label)
+      @loop_labels.pop if label && @loop_labels.last == label
+    end
+
+    def validate_loop_label!(label, tag_name)
+      return if label.nil? || @loop_labels.include?(label)
+
+      raise SyntaxError, locale.t(
+        "errors.syntax.loop_label_unknown",
+        tag: tag_name,
+        label: label,
+      )
+    end
+
+    def with_isolated_loop_labels
+      previous_loop_labels = @loop_labels
+      @loop_labels = []
+      yield
+    ensure
+      @loop_labels = previous_loop_labels
     end
 
     def partial=(value)

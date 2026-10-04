@@ -281,6 +281,124 @@ HERE
     assert_template_result("1-1,1-2,after", source)
   end
 
+  def test_for_with_labeled_break
+    assigns = { 'array' => [[1, 2], [3, 4], [5, 6]] }
+    markup = '{% for outer: item in array %}' \
+             '{% for value in item %}' \
+               '{% if value == 3 %}{% break outer %}{% endif %}' \
+               '{{ value }}' \
+             '{% endfor %}' \
+           '{% endfor %}'
+
+    assert_template_result('12', markup, assigns)
+  end
+
+  def test_for_with_labeled_continue_restores_shadowed_context_and_forloop
+    assigns = {
+      'array' => [
+        { 'name' => 'first', 'values' => ['a', 'b'] },
+        { 'name' => 'second', 'values' => ['c', 'd'] },
+      ],
+    }
+    markup = '{% for outer: item in array %}' \
+             '{% for item in item.values %}' \
+               '{{ forloop.parentloop.index }}{{ item }}' \
+               '{% if item == "b" %}{% continue outer %}{% endif %}' \
+             '{% endfor %}' \
+             '[{{ item.name }}]' \
+           '{% endfor %}'
+
+    assert_template_result('1a1b2c2d[second]', markup, assigns)
+  end
+
+  def test_for_with_labeled_continue_and_loop_else
+    assigns = {
+      'array' => [
+        { 'name' => 'empty', 'values' => [] },
+        { 'name' => 'present', 'values' => ['c', 'd'] },
+      ],
+    }
+    markup = '{% for outer: item in array %}' \
+             '{% for value in item.values %}' \
+               '{{ value }}' \
+             '{% else %}' \
+               '[{{ forloop.index }}]{% continue outer %}' \
+             '{% endfor %}after;' \
+           '{% endfor %}done'
+
+    assert_template_result('[1]cdafter;done', markup, assigns)
+  end
+
+  def test_labeled_continue_preserves_offset_continue_state
+    assigns = {
+      'array' => [
+        { 'name' => 'first', 'values' => ['a', 'b'] },
+        { 'name' => 'second', 'values' => ['c'] },
+        { 'name' => 'third', 'values' => ['d'] },
+      ],
+    }
+    markup = '{% for outer: item in array limit:1 %}' \
+             '{% for value in item.values %}' \
+               '{% if value == "b" %}{% continue outer %}{% endif %}' \
+               '{{ value }}' \
+             '{% endfor %}' \
+           '{% endfor %}' \
+           '{% for item in array offset:continue limit:2 %}{{ item.name }}{% endfor %}'
+
+    assert_template_result('asecondthird', markup, assigns)
+  end
+
+  def test_labeled_break_cannot_see_label_in_rendered_template
+    partials = { 'break_outer' => '{% break outer %}' }
+    template = Template.parse(
+      '{% for outer: item in (1..3) %}{% render "break_outer" %}{% endfor %}',
+    )
+    file_system = StubFileSystem.new(partials)
+
+    assert_raises(Liquid::SyntaxError) do
+      template.render!({}, registers: { file_system: file_system })
+    end
+  end
+
+  def test_loop_labels_are_independent_across_render_boundary
+    partials = {
+      'inner' => '{% for outer: value in (1..3) %}{{ value }}{% break outer %}{% endfor %}!',
+    }
+    markup = '{% for outer: item in (1..3) %}{{ item }}{% render "inner" %}{% endfor %}'
+
+    assert_template_result('11!21!31!', markup, {}, partials: partials)
+  end
+
+  def test_loop_labels_reject_duplicates_and_unknown_references
+    assert_raises(Liquid::SyntaxError) do
+      Template.parse('{% for outer: item in items %}{% for outer: value in item %}{% endfor %}{% endfor %}')
+    end
+
+    assert_raises(Liquid::SyntaxError) do
+      Template.parse('{% for item in items %}{% break outer %}{% endfor %}')
+    end
+  end
+
+  def test_loop_label_syntax_errors_in_all_error_modes
+    with_error_modes(:lax, :strict, :strict2) do
+      assert_raises(Liquid::SyntaxError) do
+        Template.parse('{% for outer: item in items %}{% break outer extra %}{% endfor %}')
+      end
+
+      assert_raises(Liquid::SyntaxError) do
+        Template.parse('{% for outer: item in items %}{% continue outer extra %}{% endfor %}')
+      end
+    end
+  end
+
+  def test_sibling_loops_can_reuse_labels
+    assigns = { 'first' => [1, 2], 'second' => [3, 4] }
+    markup = '{% for shared: item in first %}{{ item }}{% endfor %}' \
+             '{% for shared: item in second %}{% break shared %}{{ item }}{% endfor %}'
+
+    assert_template_result('12', markup, assigns)
+  end
+
   def test_for_with_continue
     assigns = { 'array' => { 'items' => [1, 2, 3, 4, 5] } }
 

@@ -17,7 +17,9 @@ module Liquid
       template = template_factory.for(template_name)
 
       begin
-        partial = template.parse(source, parse_context)
+        partial = parse_context.with_isolated_loop_labels do
+          template.parse(source, parse_context)
+        end
       rescue Liquid::Error => e
         e.template_name = template&.name || template_name
         raise e
