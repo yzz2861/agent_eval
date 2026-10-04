@@ -1794,6 +1794,339 @@ group Fugit::Cron do
     end
   end
 
+  group '#intersection' do
+
+    test 'returns a lazy enumerable of the common trigger points' do
+
+      in_zone 'UTC' do
+
+        i =
+          Fugit.parse_cron('0 0 * * mon')
+            .intersection('0 0 1 * *', '2024-01-01'..'2025-06-30')
+
+        assert(i.is_a?(Fugit::Cron::CronIntersection))
+        assert(i.is_a?(Enumerable))
+
+        assert(
+          i.to_a.map(&:to_s),
+          [ '2024-01-01 00:00:00 Z', # Monday
+            '2024-04-01 00:00:00 Z', # Monday
+            '2024-07-01 00:00:00 Z' ]) # Monday
+
+        assert(i.complete?)
+        assert_false(i.unfinished?)
+        assert(i.matched_count, 3)
+      end
+    end
+
+    test 'is lazy, it computes one common point at a time' do
+
+      in_zone 'UTC' do
+
+        seen = []
+
+        Fugit.parse_cron('0 0 * * *')
+          .intersection('0 0 * * *', '2024-01-01'..'2024-12-31')
+          .each { |t| seen << t; break }
+
+        assert(seen.collect(&:to_s), [ '2024-01-01 00:00:00 Z' ])
+      end
+    end
+
+    test 'accepts a start time and an end time as the finite window' do
+
+      in_zone 'UTC' do
+
+        i =
+          Fugit.parse_cron('0 12 * * *')
+            .intersection(
+              Fugit.parse_cron('0 12 * * *'),
+              '2024-02-01 12:00:00',
+              '2024-02-04 12:00:00')
+
+        assert(
+          i.to_a.map(&:to_s),
+          [ '2024-02-01 12:00:00 Z',
+            '2024-02-02 12:00:00 Z',
+            '2024-02-03 12:00:00 Z',
+            '2024-02-04 12:00:00 Z' ])
+      end
+    end
+
+    test 'hits the window start boundary (it is inclusive)' do
+
+      in_zone 'UTC' do
+
+        i =
+          Fugit.parse_cron('0 0 * * *')
+            .intersection('0 0 * * *', '2024-01-01 00:00'..'2024-01-02 00:00')
+
+        assert(
+          i.to_a.map(&:to_s),
+          [ '2024-01-01 00:00:00 Z',
+            '2024-01-02 00:00:00 Z' ])
+      end
+    end
+
+    test 'respects an exclusive window end (...)' do
+
+      in_zone 'UTC' do
+
+        i =
+          Fugit.parse_cron('0 0 * * *')
+            .intersection('0 0 * * *', '2024-01-01'...'2024-01-04')
+
+        assert_true(i.exclude_end?)
+
+        assert(
+          i.to_a.map(&:to_s),
+          [ '2024-01-01 00:00:00 Z',
+            '2024-01-02 00:00:00 Z',
+            '2024-01-03 00:00:00 Z' ])
+      end
+    end
+
+    test 'includes a common trigger exactly at an inclusive window end' do
+
+      in_zone 'UTC' do
+
+        i =
+          Fugit.parse_cron('0 0 * * *')
+            .intersection('0 0 * * *', '2024-01-01'..'2024-01-04')
+
+        assert(
+          i.to_a.map(&:to_s),
+          [ '2024-01-01 00:00:00 Z',
+            '2024-01-02 00:00:00 Z',
+            '2024-01-03 00:00:00 Z',
+            '2024-01-04 00:00:00 Z' ])
+      end
+    end
+
+    test 'compares real instants, not local wall clocks, across zones' do
+
+      in_zone 'UTC' do
+
+        c1 = Fugit.parse_cron('0 9 * * * America/New_York')
+        c2 = Fugit.parse_cron('0 22 * * * Asia/Shanghai')
+
+        i = c1.intersection(c2, '2024-01-01'...'2024-01-08')
+
+        assert(
+          i.to_a.map(&:to_s),
+          [ '2024-01-01 14:00:00 Z',
+            '2024-01-02 14:00:00 Z',
+            '2024-01-03 14:00:00 Z',
+            '2024-01-04 14:00:00 Z',
+            '2024-01-05 14:00:00 Z',
+            '2024-01-06 14:00:00 Z',
+            '2024-01-07 14:00:00 Z' ])
+      end
+    end
+
+    test 'does not match wall clock coincidences that are not the same instant' do
+
+      in_zone 'UTC' do
+
+        # 09:00 in New York is 14:00 UTC, 09:00 in Shanghai is 01:00 UTC
+
+        c1 = Fugit.parse_cron('0 9 13 * * America/New_York')
+        c2 = Fugit.parse_cron('0 9 13 * * Asia/Shanghai')
+
+        i = c1.intersection(c2, '2024-01-01'..'2024-12-31')
+
+        assert_empty(i.to_a)
+        assert(i.complete?)
+      end
+    end
+
+    test 'handles DST, the common instant shifts with the offset change' do
+
+      in_zone 'UTC' do
+
+        # 02:30 in New York and 08:30 in Berlin are the same real
+        # instant in winter (07:30 UTC) and in summer (06:30 UTC).
+        # New York springs forward on 2024-03-10, Berlin on 2024-03-31.
+        # Between the two transitions the rules no longer share an
+        # instant, then they meet again. Comparison is on real instants,
+        # not on the identical-looking local "02:30 vs 08:30".
+
+        a = Fugit.parse_cron('30 2 * * * America/New_York')
+        b = Fugit.parse_cron('30 8 * * * Europe/Berlin')
+
+        i = a.intersection(b, '2024-03-06'..'2024-04-03')
+
+        assert(
+          i.to_a.map(&:to_s),
+          [ '2024-03-06 07:30:00 Z', # EST / CET
+            '2024-03-07 07:30:00 Z',
+            '2024-03-08 07:30:00 Z',
+            '2024-03-09 07:30:00 Z',
+            # 03-10..03-30, New York is EDT, Berlin is still CET
+            '2024-03-31 06:30:00 Z', # EDT / CEST
+            '2024-04-01 06:30:00 Z',
+            '2024-04-02 06:30:00 Z' ])
+
+        assert_true(i.advance_count < 100) # sparse, no second scan
+      end
+    end
+
+    test 'returns no common point for always disjoint monthly rules' do
+
+      in_zone 'UTC' do
+
+        # "day 31" and "February only" never coincide, even in leap
+        # years (February never has 31 days)
+
+        i =
+          Fugit.parse_cron('0 0 31 * *')
+            .intersection('0 0 * 2 *', '2020-01-01'..'2026-01-01')
+
+        assert_empty(i.to_a)
+        assert(i.complete?)
+        assert(i.matched_count, 0)
+      end
+    end
+
+    test 'counts candidate advances and stays sparse across years' do
+
+      in_zone 'UTC' do
+
+        # sparse month rules, years apart, the enumeration must not
+        # degenerate into a second-by-second scan
+
+        # "Feb 29th that is a Monday" (the trailing & is fugit's
+        # day-of-month AND day-of-week extension) intersected with
+        # plain "Feb 29th", Feb 29 2016 was a Monday, 2044 is next.
+
+        i =
+          Fugit.parse_cron('0 0 29 2 1&')
+            .intersection('0 0 29 2 *', '2000-01-01'..'2024-12-31')
+
+        assert(i.to_a.map(&:to_s), [ '2016-02-29 00:00:00 Z' ])
+
+          #
+          # 25 years window, each cron advances once per matching
+          # month at most, so the work stays tiny
+
+        assert_true(i.advance_count < 200)
+      end
+    end
+
+    test 'stops at the work cap and reports itself as unfinished' do
+
+      in_zone 'UTC' do
+
+        # the minute cron would need hundreds of advances over a year,
+        # cap it hard at 5
+
+        i =
+          Fugit.parse_cron('* * * * *')
+            .intersection(
+              '0 0 * * *', '2024-01-01'..'2024-12-31', max_advances: 5)
+
+        points = i.to_a
+
+        assert(points.map(&:to_s), [ '2024-01-01 00:00:00 Z' ])
+        assert(i.advance_count, 5)
+        assert_true(i.unfinished?)
+        assert_true(i.truncated?)
+        assert_false(i.complete?)
+      end
+    end
+
+    test 'does not raise past the work cap, the iteration simply ends' do
+
+      in_zone 'UTC' do
+
+        i =
+          Fugit.parse_cron('* * * * *')
+            .intersection(
+              '0 0 * * *', '2024-01-01'..'2024-12-31', max_advances: 3)
+
+        assert_not_error(lambda { i.to_a })
+        assert_true(i.unfinished?)
+      end
+    end
+
+    test 'does not modify the input cron strings' do
+
+      in_zone 'UTC' do
+
+        s = '0 9 * * * America/New_York'
+
+        c1 = Fugit.parse_cron(s)
+        c2 = s.dup
+
+        c1.intersection(c2, '2024-01-01'..'2024-01-03').to_a
+
+        assert(s, '0 9 * * * America/New_York')
+        assert(c2, '0 9 * * * America/New_York')
+        assert(c1.original, '0 9 * * * America/New_York')
+      end
+    end
+
+    test 'rejects an endless window' do
+
+      assert_error(
+        lambda {
+          Fugit.parse_cron('0 0 * * *')
+            .intersection('0 0 * * *', '2024-01-01'..nil)
+        },
+        ArgumentError, /finite end/)
+    end
+
+    test 'rejects a beginless window' do
+
+      assert_error(
+        lambda {
+          Fugit.parse_cron('0 0 * * *')
+            .intersection('0 0 * * *', (nil..'2024-01-01'))
+        },
+        ArgumentError, /finite beginning/)
+    end
+
+    test 'rejects a missing window end' do
+
+      assert_error(
+        lambda {
+          Fugit.parse_cron('0 0 * * *')
+            .intersection('0 0 * * *', '2024-01-01')
+        },
+        ArgumentError, /finite window/)
+    end
+
+    test 'rejects a non-cron other argument' do
+
+      assert_error(
+        lambda {
+          Fugit.parse_cron('0 0 * * *')
+            .intersection(12, '2024-01-01'..'2024-02-01')
+        },
+        ArgumentError, /Fugit::Cron/)
+    end
+
+    test 'rejects an invalid cron string other argument' do
+
+      assert_error(
+        lambda {
+          Fugit.parse_cron('0 0 * * *')
+            .intersection('nada', '2024-01-01'..'2024-02-01')
+        },
+        ArgumentError, /invalid cron/)
+    end
+
+    test 'rejects a non positive max_advances' do
+
+      assert_error(
+        lambda {
+          Fugit.parse_cron('0 0 * * *')
+            .intersection('0 0 * * *', '2024-01-01'..'2024-02-01', max_advances: 0)
+        },
+        ArgumentError, /max_advances/)
+    end
+  end
+
   group 'the module % extension' do
 
     # mostly about 2025-09-26 gh-114
@@ -1974,4 +2307,3 @@ group Fugit do
     end
   end
 end
-

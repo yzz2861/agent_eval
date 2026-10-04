@@ -2,6 +2,15 @@
 # CHANGELOG.md
 
 
+## fugit (unreleased)
+
+* Add `Fugit::Cron#intersection`, a lazy enumeration of the common
+  trigger points of two cron rules over a finite time window. Rules
+  may use different timezones, comparison is on real instants. The
+  sparse-friendly enumeration is bounded by `max_advances:` and exposes
+  `advance_count`, `matched_count`, `unfinished?`/`truncated?` and
+  `complete?`.
+
 ## fugit 1.14.0 released 2026-09-14
 
 * Reject input when length > 256
@@ -362,4 +371,3 @@
 ## fugit 0.9.0  released 2017-01-03
 
 * Initial release
-

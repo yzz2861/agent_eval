@@ -179,6 +179,38 @@ c.within(Time.parse('2024-02-16 12:00')..Time.parse('2024-08-01 12:00'))
     #      '2024-06-10 12:00:00',
     #      '2024-07-08 12:00:00' ]
 
+  # `#intersection` returns a lazy Enumerable of the instants at which
+  # two cron rules trigger together, within a finite time window.
+  #
+  # The rules may live in different timezones, occurrences are compared
+  # as real instants (not as local wall-clock strings).
+  #
+c0 = Fugit.parse_cron('0 9 * * * America/New_York')
+c1 = Fugit.parse_cron('0 22 * * * Asia/Shanghai')
+
+c0.intersection(c1, '2024-01-01'...'2024-01-04').to_a.map(&:to_s)
+  # => [ '2024-01-01 14:00:00 Z',
+  #      '2024-01-02 14:00:00 Z',
+  #      '2024-01-03 14:00:00 Z' ]
+    # 09:00 New York and 22:00 Shanghai are the same real instant
+
+  # The window is a finite Range (`..` inclusive, `...` exclusive) or
+  # a start/end pair. The enumeration never scans second by second,
+  # it advances each cron cursor straight to its next trigger, so
+  # sparse monthly rules stay cheap over many years:
+  #
+i = Fugit.parse_cron('0 0 29 2 1&')      # Feb 29th that is a Monday
+  .intersection('0 0 29 2 *', '2000-01-01'..'2024-12-31')
+i.to_a
+i.advance_count  # => candidate advances performed (calls to #next_time)
+i.matched_count  # => number of common trigger points yielded
+i.unfinished?    # => true if the work cap was hit before the window end
+  #
+  # The work cap is set with `max_advances:` (defaults to 10_000).
+  # When it is reached the lazy iteration simply ends, the input crons
+  # are never modified, and `unfinished?` (aliased as `truncated?`)
+  # reports that the result is partial. `complete?` is its opposite.
+
 p c.brute_frequency  # => [ 604800, 604800, 53 ]
                      #    [ delta min, delta max, occurrence count ]
 p c.rough_frequency  # => 7 * 24 * 3600 (7d rough frequency)
@@ -713,4 +745,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-

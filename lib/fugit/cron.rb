@@ -403,6 +403,198 @@ module Fugit
         .take_while { |eot| eot.to_t < ned }
     end
 
+    # Lazy enumeration of the instants at which two cron rules trigger
+    # at the same real instant, within a finite time window.
+    #
+    # The two crons may each carry their own timezone, candidates are
+    # compared on their real instants (seconds since Epoch), not on
+    # their local wall clock components.
+    #
+    # The enumeration is sparse-friendly. It never scans second by
+    # second, it walks each cron with #next_time (which itself jumps
+    # month by month when possible). See CronIntersection for the
+    # inspectable work cap and the "unfinished" status.
+    #
+    #   c1 = Fugit.parse_cron('0 9 13 * * America/New_York')
+    #   c2 = Fugit.parse_cron('0 21 13 * * Asia/Shanghai')
+    #
+    #   c1.intersection(c2, '2024-01-01'..'2025-01-01').to_a
+    #     # both trigger at the same instant, within the window
+    #
+    # The window is a finite time Range (inclusive `..` or exclusive
+    # `...`) or a start/end pair:
+    #
+    #   c1.intersection(c2, '2024-01-01', '2025-01-01')
+    #
+    # `max_advances` caps the number of candidate advances (calls to
+    # #next_time) the enumeration is allowed to perform. If the cap is
+    # reached before the window end, the enumeration simply stops and
+    # its `unfinished?` method returns true.
+    #
+    def intersection(other, time_range, time_end=nil,
+                     max_advances: CronIntersection::DEFAULT_MAX_ADVANCES)
+
+      other = CronIntersection.parse_cron(other)
+      sta, ned, exclude_end =
+        CronIntersection.bounds(time_range, time_end)
+
+      unless max_advances.is_a?(::Integer) && max_advances > 0
+        fail ArgumentError.new(
+          "max_advances must be a positive Integer, got " +
+          max_advances.inspect)
+      end
+
+      CronIntersection.new(
+        [ self, other ], sta, ned, exclude_end, max_advances)
+    end
+
+    class CronIntersection
+
+      include ::Enumerable
+
+      DEFAULT_MAX_ADVANCES = 10_000
+
+      attr_reader :crons, :start_at, :end_at
+      attr_reader :max_advances, :advance_count, :matched_count
+
+      def exclude_end?; @exclude_end; end
+
+      class << self
+
+        def parse_cron(c)
+
+          return c if c.is_a?(::Fugit::Cron)
+
+          return ::Fugit.do_parse_cron(c) if c.is_a?(::String)
+
+          fail ArgumentError.new(
+            "expected a Fugit::Cron or a cron String, got #{c.class}")
+        end
+
+        def bounds(time_range, time_end)
+
+          if time_range.is_a?(::Range)
+
+            fail ArgumentError.new(
+              'intersection window must have a finite beginning, ' +
+              'a beginless Range is not allowed'
+            ) if time_range.begin.nil?
+
+            fail ArgumentError.new(
+              'intersection window must have a finite end, ' +
+              'an endless Range is not allowed'
+            ) if time_range.end.nil?
+
+            [ ::EtOrbi.make_time(time_range.begin),
+              ::EtOrbi.make_time(time_range.end),
+              time_range.exclude_end? ]
+          else
+
+            if time_end.nil?
+              fail ArgumentError.new(
+                'intersection needs a finite window, pass a Range or ' +
+                'a start time and an end time')
+            end
+
+            [ ::EtOrbi.make_time(time_range),
+              ::EtOrbi.make_time(time_end),
+              false ]
+          end
+        end
+      end
+
+      def initialize(crons, start_at, end_at, exclude_end, max_advances)
+
+        @crons = crons
+        @start_at = start_at
+        @end_at = end_at
+        @exclude_end = exclude_end
+        @max_advances = max_advances
+
+        @advance_count = 0
+        @matched_count = 0
+        @unfinished = false
+      end
+
+      # True when the work cap was hit before the whole window could be
+      # examined. The enumeration is then partial, some common trigger
+      # points may be missing.
+      #
+      def unfinished?; @unfinished; end
+      def truncated?; @unfinished; end
+
+      # The opposite of #unfinished?, true when the whole window was
+      # examined (or the caller stopped the iteration early).
+      #
+      def complete?; ! @unfinished; end
+
+      # Yields each common trigger point, as an EtOrbi::EoTime in the
+      # timezone of the window start time, lazily.
+      #
+      def each
+
+        return enum_for(:each) unless block_given?
+
+        @advance_count = 0
+        @matched_count = 0
+        @unfinished = false
+
+        end_i = @end_at.to_i
+        end_i -= 1 if @exclude_end
+
+        return self if @start_at.to_i > end_i
+
+          #
+          # one cursor per cron, seeded with the first trigger at or
+          # after the window start (start - 1 so that a trigger
+          # exactly at the window start is included)
+          #
+        step = ->(cron, cursor) {
+          if @advance_count >= @max_advances
+            @unfinished = true
+            :cap_reached
+          else
+            @advance_count += 1
+            cron.next_time(cursor)
+          end
+        }
+
+        cursors = @crons.collect { |c| step.call(c, @start_at - 1) }
+
+        return self if @unfinished
+
+        loop do
+
+          instants = cursors.collect(&:to_i)
+
+          if instants.uniq.length == 1
+
+            if instants.first <= end_i
+              yield(cursors.first)
+              @matched_count += 1
+            end
+          end
+
+          min_i = instants.min
+
+          break if min_i > end_i
+            #
+            # the earliest cursor is past the window end, no common
+            # trigger point can remain in the window
+
+          cursors =
+            @crons.each_with_index.collect { |c, i|
+              instants[i] == min_i ? step.call(c, cursors[i]) : cursors[i] }
+            #
+            # advance every lagging or matching cursor, never scan
+
+          break if @unfinished
+        end
+
+        self
+      end
+    end
+
     # Mostly used as a #next_time sanity check.
     # Avoid for "business" use, it's slow.
     #
@@ -985,4 +1177,3 @@ module Fugit
     end
   end
 end
-
