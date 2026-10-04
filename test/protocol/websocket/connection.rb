@@ -106,6 +106,114 @@ describe Protocol::WebSocket::Connection do
 		expect(connection.mask).to be == nil
 	end
 	
+	with "explicit role" do
+		it "can act as a client with a generated mask" do
+			client_connection = subject.new(client, role: :client)
+			
+			expect(client_connection).to be(:client?)
+			expect(client_connection).not.to be(:server?)
+			expect(client_connection).to be(:strict?)
+			expect(client_connection.mask).to be == true
+			expect(client.role).to be == :client
+			
+			# The actual random key is generated when a frame is packed:
+			frame = client_connection.pack_text_frame("Hi")
+			expect(frame.mask).to be(:kind_of?, String)
+			expect(frame.mask.bytesize).to be == 4
+		end
+		
+		it "can act as a server without a mask" do
+			server_connection = subject.new(server, role: :server)
+			
+			expect(server_connection).to be(:server?)
+			expect(server_connection.mask).to be == nil
+			expect(server.role).to be == :server
+		end
+		
+		it "rejects an invalid role" do
+			expect do
+				subject.new(server, role: :peer)
+			end.to raise_exception(ArgumentError, message: be =~ /Invalid role/)
+		end
+		
+		it "rejects a mask for a server" do
+			expect do
+				subject.new(server, role: :server, mask: true)
+			end.to raise_exception(ArgumentError, message: be =~ /server must not mask/)
+		end
+		
+		it "rejects an explicit false mask for a client" do
+			expect do
+				subject.new(client, role: :client, mask: false)
+			end.to raise_exception(ArgumentError, message: be =~ /client must mask/i)
+		end
+		
+		it "accepts an explicit mask key for a client" do
+			mask = "\x01\x02\x03\x04".b
+			client_connection = subject.new(client, role: :client, mask: mask)
+			
+			expect(client_connection.mask).to be == mask
+		end
+		
+		it "defaults to legacy mode without enforcement" do
+			expect(connection).not.to be(:strict?)
+			expect(connection.role).to be == nil
+			expect(connection).not.to be(:client?)
+			expect(connection).not.to be(:server?)
+		end
+	end
+	
+	with "strict masking over a real connection" do
+		it "rejects unmasked frames read by a server and closes with 1002" do
+			server_connection = subject.new(server, role: :server)
+			
+			# The client (violating the spec) sends an unmasked text frame:
+			client.write_frame(Protocol::WebSocket::TextFrame.new(true, "bad"))
+			
+			error = nil
+			begin
+				server_connection.read_frame
+			rescue Protocol::WebSocket::ProtocolError => error
+			end
+			
+			expect(error).to be_a(Protocol::WebSocket::ProtocolError)
+			expect(error.code).to be == Protocol::WebSocket::Error::PROTOCOL_ERROR
+			expect(server_connection).to be(:closed?)
+			
+			close_frame = client.read_frame
+			expect(close_frame).to be_a(Protocol::WebSocket::CloseFrame)
+			code, _ = close_frame.unpack
+			expect(code).to be == Protocol::WebSocket::Error::PROTOCOL_ERROR
+		end
+		
+		it "rejects masked frames read by a client" do
+			client_connection = subject.new(client, role: :client)
+			
+			frame = Protocol::WebSocket::TextFrame.new(true, mask: true)
+			frame.pack("bad")
+			server.write_frame(frame)
+			
+			expect do
+				client_connection.read_frame
+			end.to raise_exception(Protocol::WebSocket::ProtocolError, message: be =~ /masked frame from server/)
+		end
+		
+		it "communicates with matching masks between client and server" do
+			client_connection = subject.new(client, role: :client)
+			server_connection = subject.new(server, role: :server)
+			
+			thread = Thread.new do
+				client_connection.send_text("Hello World")
+				client_connection.flush
+			end
+			
+			message = server_connection.read
+			expect(message).to be == "Hello World"
+			
+			thread.join
+		end
+	end
+	
 	with "masked connection" do
 		let(:connection) {subject.new(server, mask: true)}
 		

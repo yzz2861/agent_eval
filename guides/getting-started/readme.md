@@ -42,6 +42,25 @@ server.read
 #<Protocol::WebSocket::BinaryMessage:0x000000011d371db0 @buffer="Hello World">
 ~~~
 
+## Client And Server Roles
+
+RFC 6455 requires frames sent by a *client* to be masked and frames sent by a *server* to be unmasked. Pass the `role:` keyword to {ruby Protocol::WebSocket::Connection} to enable strict enforcement in both directions:
+
+~~~ ruby
+client = Protocol::WebSocket::Connection.new(framer, role: :client)
+server = Protocol::WebSocket::Connection.new(framer, role: :server)
+~~~
+
+- `role: :client` generates a random 4-byte outgoing mask (you can also pass an explicit `mask:`) and requires every *incoming* frame to be unmasked.
+- `role: :server` sends unmasked frames and requires every *incoming* frame to be masked.
+- When a violating frame is received, a {ruby Protocol::WebSocket::ProtocolError} is raised *before* the payload is read, and the connection is closed with the error's `code` (e.g. `1002` for a protocol error or `1009` for an oversized frame). You can inspect that code via `ProtocolError#code`.
+
+The role is never inferred from whether an outgoing mask happens to be configured; it must be stated explicitly.
+
+### Compatibility Mode
+
+Omitting `role:` (the default, `role: nil`) preserves the legacy behaviour used by older callers: no masking is enforced on either read or write, even though all structural frame validation (FIN, RSV, reserved opcodes, control frame length and length encoding) still applies. This mode is kept for backwards compatibility and for custom transports; new connections should pass `role: :client` or `role: :server`.
+
 ## Messages
 
 We can also use the {ruby Protocol::WebSocket::Message} class to read and write messages:

@@ -9,6 +9,8 @@
 
 require_relative "error"
 
+require "securerandom"
+
 module Protocol
 	module WebSocket
 		# Represents a single WebSocket frame as defined by RFC 6455.

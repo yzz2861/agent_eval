@@ -16,6 +16,10 @@ Please see the [project documentation](https://socketry.github.io/protocol-webso
 
 Please see the [project releases](https://socketry.github.io/protocol-websocket/releases/index) for all releases.
 
+### v0.22.0
+
+  - Add an explicit `role:` (`:client`/`:server`) option for strict RFC 6455 masking enforcement; the role is no longer inferred from the outgoing mask. Incoming frame headers (FIN, control length, reserved opcodes, RSV, length encoding) are fully validated before the payload is read, and oversized frames report `1009` while structural errors report `1002`. Omitting `role:` keeps the legacy lenient mode.
+
 ### v0.21.2
 
   - Fix JSON 3 compatibility by applying `symbolize_names` only when parsing incoming messages. `Coder::JSON` is now a module with fixed parsing and generation behavior; pass a different coder to customize serialization.

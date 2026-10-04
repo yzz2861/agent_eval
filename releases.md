@@ -1,5 +1,12 @@
 # Releases
 
+## v0.22.0
+
+  - Add an explicit `role:` (`:client`/`:server`) option to `Connection` and `Framer` which strictly enforces RFC 6455 masking: client frames must be masked and server frames must not be masked. The role is no longer guessed from the outgoing mask configuration.
+  - Unify header validation for incoming frames: FIN on control frames, control frame payload length, reserved opcodes, non-minimal/overflowing length encodings, and RSV bits that were not negotiated by an extension. All of these are detected before the (potentially huge) payload is read.
+  - Report a `1009` (`MESSAGE_TOO_LARGE`) close code for oversized payloads; structural protocol errors remain `1002` (`PROTOCOL_ERROR`). The code is available on `ProtocolError#code`.
+  - Keep the previous behaviour available as legacy mode: omit `role:` to disable masking enforcement (structural validation still applies).
+
 ## v0.21.2
 
   - Fix JSON 3 compatibility by applying `symbolize_names` only when parsing incoming messages. `Coder::JSON` is now a module with fixed parsing and generation behavior; pass a different coder to customize serialization.
