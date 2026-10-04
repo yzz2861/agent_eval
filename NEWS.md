@@ -1,5 +1,21 @@
 # News
 
+## Unreleased
+
+### Improvements
+
+  * Added `CSV#checkpoint` and `CSV#resume`: they capture and restore
+    the position and parser state needed to resume parsing a seekable
+    input at the next undelivered record. This is useful for batch
+    imports that must continue after a restart. A checkpoint records
+    the resolved parse options (including the auto-detected row
+    separator), the headers already read from the input, and an
+    identity fingerprint of the input; `CSV#resume` raises
+    `CSV::CheckpointError` when the options or the input changed.
+    Resuming only manages the read position; it does not provide
+    exactly-once semantics for consumer side effects such as database
+    writes.
+
 ## 3.3.6 - 2026-07-27
 
 ### Improvements

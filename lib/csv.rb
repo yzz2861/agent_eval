@@ -100,6 +100,7 @@ require_relative "csv/parser"
 require_relative "csv/row"
 require_relative "csv/table"
 require_relative "csv/writer"
+require_relative "csv/checkpoint"
 
 # == \CSV
 #
@@ -2110,6 +2111,7 @@ class CSV
       strip: strip,
     }
     @parser = nil
+    @pre_resume_parser_options = nil
 
     @writer_options = {
       encoding: @encoding,
@@ -2435,6 +2437,10 @@ class CSV
   # Rewinds the underlying IO object and resets CSV's lineno() counter.
   def rewind
     @parser = nil
+    if @pre_resume_parser_options
+      @parser_options = @pre_resume_parser_options
+      @pre_resume_parser_options = nil
+    end
     @writer.rewind if @writer
     @io.rewind
   end
@@ -2791,6 +2797,104 @@ class CSV
   alias_method :readline, :shift
 
   # :call-seq:
+  #   csv.checkpoint -> csv_checkpoint
+  #
+  # Returns a CSV::Checkpoint that captures how to resume parsing this
+  # CSV at the next undelivered record. This is useful for batch
+  # imports: persist the checkpoint after each batch is processed, and
+  # use CSV#resume to continue where you left off, even after a
+  # restart:
+  #   csv = CSV.open(path, headers: true)
+  #   csv.each_slice(100) do |batch|
+  #     import(batch)                      # e.g. insert into a database
+  #     File.write("checkpoint", csv.checkpoint.dump)
+  #   end
+  #
+  # A checkpoint can only be taken after a complete record has been
+  # delivered; it never relies on the raw IO position, because the
+  # parser may have buffered data beyond the last delivered record.
+  # The checkpoint records the resolved parse options (including the
+  # auto-detected row separator), the headers already read from the
+  # input, and an identity fingerprint of the input, so that CSV#resume
+  # can refuse stale checkpoints.
+  #
+  # The input must be seekable (a StringIO, File, or similar object
+  # that responds to +pos+ and +seek+) and must not be transcoded while
+  # reading. Raises CSV::CheckpointError otherwise.
+  #
+  # Note that resuming only manages the read position of the CSV
+  # input; it does not provide exactly-once semantics for side effects
+  # such as database writes performed by the consumer.
+  def checkpoint
+    ensure_checkpointable!
+    unless parser.at_record_boundary?
+      raise CheckpointError,
+            "a checkpoint can only be taken after " \
+            "a complete record was delivered"
+    end
+    headers = parser.headers if parser.use_headers?
+    headers = headers.dup if headers
+    Checkpoint.new(position: parser.next_record_position,
+                   lineno: parser.lineno,
+                   headers: headers,
+                   options: Checkpoint.normalize_options(
+                     checkpoint_options_fingerprint),
+                   input: Checkpoint.capture_input(@io))
+  end
+
+  # :call-seq:
+  #   csv.resume(checkpoint) -> self
+  #
+  # Resumes parsing at the record that follows the last record
+  # delivered before the given CSV::Checkpoint was taken. Accepts a
+  # CSV::Checkpoint, a Hash built with CSV::Checkpoint#to_h, or a
+  # String built with CSV::Checkpoint#dump:
+  #   csv = CSV.open(path, headers: true)
+  #   csv.resume(CSV::Checkpoint.load(File.read("checkpoint")))
+  #   csv.each {|row| ... } # continues with the next record
+  #
+  # The checkpoint is validated before anything is read: if the parse
+  # options of this CSV differ from the ones the checkpoint was created
+  # with, or if the input no longer looks like the checkpointed input
+  # (its path, size, modification time, or content digest changed),
+  # CSV::CheckpointError is raised and the CSV is left untouched.
+  def resume(checkpoint)
+    checkpoint = Checkpoint.load(checkpoint) if checkpoint.is_a?(String)
+    checkpoint = Checkpoint.from_h(checkpoint) if checkpoint.is_a?(Hash)
+    ensure_checkpointable!
+    parser # build the parser to resolve the parse options
+    normalized_options = Checkpoint.normalize_options(
+      checkpoint_options_fingerprint)
+    unless checkpoint.options_match?(normalized_options)
+      raise CheckpointError,
+            "checkpoint was created with different parse options"
+    end
+    unless checkpoint.input_matches?(@io)
+      raise CheckpointError,
+            "checkpoint was created for a different input"
+    end
+    @pre_resume_parser_options ||= @parser_options.dup
+    begin
+      @io.seek(checkpoint.position)
+    rescue IOError, SystemCallError => error
+      raise CheckpointError,
+            "cannot seek to checkpoint position: #{error.message}"
+    end
+    # Parse the rest of the input with the row separator resolved when
+    # the checkpoint was created: auto-detection must not run again
+    # from the middle of the input.
+    @parser_options[:row_separator] = checkpoint.options["row_separator"]
+    if @parser_options[:headers] == true and checkpoint.headers
+      @parser_options[:resumed_headers] = checkpoint.headers
+    else
+      @parser_options.delete(:resumed_headers)
+    end
+    @parser_options[:resumed_lineno] = checkpoint.lineno
+    @parser = nil
+    self
+  end
+
+  # :call-seq:
   #   csv.inspect -> string
   #
   # Returns a \String showing certain properties of +self+:
@@ -2837,6 +2941,50 @@ class CSV
   end
 
   private
+
+  # Checkpointing requires a seekable input whose position can be
+  # mapped back to the bytes the parser consumed. Inputs that are
+  # transcoded while reading are rejected, because the byte positions
+  # seen by the parser no longer correspond to positions in the
+  # underlying stream.
+  def ensure_checkpointable!
+    if @writer
+      raise CheckpointError,
+            "checkpointing is not supported for a CSV opened for writing"
+    end
+    unless @io.respond_to?(:pos) and @io.respond_to?(:seek)
+      raise CheckpointError, "checkpointing requires a seekable input"
+    end
+    begin
+      @io.pos
+    rescue IOError, SystemCallError => error
+      raise CheckpointError,
+            "checkpointing requires a seekable input: #{error.message}"
+    end
+    if (@io.respond_to?(:internal_encoding) and @io.internal_encoding) or
+       Encoding.default_internal
+      raise CheckpointError,
+            "checkpointing is not supported when transcoding is enabled"
+    end
+  end
+
+  # The parse options that determine where record boundaries lie. A
+  # checkpoint can only be resumed with the same options.
+  def checkpoint_options_fingerprint
+    {
+      column_separator: parser.column_separator,
+      row_separator: parser.row_separator,
+      quote_character: parser.quote_character,
+      encoding: @encoding,
+      skip_blanks: parser.skip_blanks?,
+      skip_lines: @parser_options[:skip_lines],
+      liberal_parsing: @parser_options[:liberal_parsing],
+      strip: @parser_options[:strip],
+      max_field_size: parser.max_field_size,
+      headers: @parser_options[:headers],
+      return_headers: @parser_options[:return_headers],
+    }
+  end
 
   def determine_encoding(encoding, internal_encoding)
     # honor the IO encoding if we can, otherwise default to ASCII-8BIT

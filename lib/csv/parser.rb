@@ -82,6 +82,12 @@ class CSV
       def keep_drop
         @keeps.pop
       end
+
+      # The number of bytes that have been pulled from the input but
+      # not yet consumed by the parser.
+      def pending_bytes
+        rest.bytesize
+      end
     end
 
     #
@@ -267,6 +273,23 @@ class CSV
         @scanner.rest
       end
 
+      # The number of bytes that have been pulled from the inputs but
+      # not yet consumed by the parser: the unconsumed rest of the
+      # current chunk plus any queued chunks (for example samples read
+      # while detecting the row separator, or data pushed back while
+      # reparsing).
+      def pending_bytes
+        bytes = @scanner.rest.bytesize
+        @inputs.each do |input|
+          if input.is_a?(StringIO)
+            bytes += input.string.bytesize - input.pos
+          elsif input.respond_to?(:remaining_bytes)
+            bytes += input.remaining_bytes
+          end
+        end
+        bytes
+      end
+
       def check(pattern)
         @scanner.check(pattern)
       end
@@ -407,6 +430,30 @@ class CSV
 
     def line
       last_line
+    end
+
+    # Returns true if the parser is positioned exactly at a record
+    # boundary, that is, right after a complete record (or skippable
+    # line) has been delivered and before the next record has started
+    # being consumed. A checkpoint may only be taken at a record
+    # boundary.
+    def at_record_boundary?
+      @record_boundary
+    end
+
+    # Returns the byte offset in the input at which the next record
+    # starts. This is not simply the IO position: the parser may have
+    # buffered data beyond the last delivered record, so the unconsumed
+    # buffered bytes are subtracted from the input position.
+    def next_record_position
+      consumed = @input.pos
+      buffered =
+        if @scanner
+          @scanner.pending_bytes
+        else
+          @samples.inject(0) {|sum, sample| sum + sample.bytesize}
+        end
+      consumed - buffered
     end
 
     def parse(&block)
@@ -755,9 +802,10 @@ class CSV
     end
 
     def prepare_line
-      @lineno = 0
+      @lineno = @options[:resumed_lineno] || 0
       @last_line = nil
       @scanner = nil
+      @record_boundary = true
     end
 
     def last_line
@@ -791,6 +839,16 @@ class CSV
         @headers = adjust_headers(@raw_headers, quoted_fields)
       else
         @headers = nil
+      end
+      resumed_headers = @options[:resumed_headers]
+      if resumed_headers
+        # Resuming from a checkpoint: the headers were already read
+        # from the input (and already converted) before the checkpoint
+        # was taken, so they must neither be re-read nor re-emitted.
+        @use_headers = true
+        @raw_headers = nil
+        @headers = resumed_headers
+        @return_headers = false
       end
     end
 
@@ -854,6 +912,10 @@ class CSV
 
       def eof?
         @io.eof?
+      end
+
+      def remaining_bytes
+        @io.string.bytesize - @io.pos
       end
     end
 
@@ -1259,6 +1321,7 @@ class CSV
     end
 
     def start_row
+      @record_boundary = false
       if @last_line
         @last_line = nil
       else
@@ -1268,6 +1331,10 @@ class CSV
     end
 
     def emit_row(row, quoted_fields=FieldsConverter::NO_QUOTED_FIELDS, &block)
+      # A complete record has been parsed and is being delivered: the
+      # parser is at a record boundary until the next record starts
+      # being consumed.
+      @record_boundary = true
       @lineno += 1
 
       raw_row = row
