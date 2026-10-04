@@ -464,6 +464,18 @@ module Zip
       selected_entry
     end
 
+    # Returns a human-readable report of how each entry's name is recorded
+    # across this archive's local headers, central directory and Unicode
+    # Path extra fields, along with any inconsistencies found. Entries are
+    # only audited when `Zip.name_audit_mode` is `:lenient` or `:strict`;
+    # see `Zip::Entry#name_audit` for programmatic access.
+    def name_audit_report
+      @cdir.entries.map do |entry|
+        audit = entry.name_audit
+        "Entry #{entry.name.inspect}:\n" + (audit ? audit.to_s : '  (name auditing is off)')
+      end.join("\n")
+    end
+
     # Creates a directory
     def mkdir(entry_name, permission = 0o755)
       raise Errno::EEXIST, "File exists - #{entry_name}" if @cdir.include?(entry_name)

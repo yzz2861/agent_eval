@@ -410,6 +410,22 @@ Zip.force_entry_names_encoding = 'UTF-8'
 
 Allowed encoding names are the same as accepted by `String#force_encoding`
 
+### Auditing Entry Names
+
+The same entry name can appear, byte-for-byte differently, in a zip archive's local file header, its central directory, and the Info-ZIP Unicode Path extra field (0x7075). When reading archives from untrusted sources you can ask rubyzip to audit all three locations:
+
+```ruby
+Zip.name_audit_mode = :lenient
+```
+
+In `:lenient` mode each entry read by `Zip::File` or `Zip::InputStream` collects a `Zip::NameAudit` (via `Zip::Entry#name_audit`) recording the raw bytes, declared encoding and decoded name from each location, along with any inconsistencies found: local/central name mismatches, invalid UTF-8 where UTF-8 is declared, Unicode Path extra fields whose CRC32 does not match the accompanying header name, and several entries normalising to the same name. Reading otherwise behaves exactly as before. `Zip::File#name_audit_report` returns the collected audits as a human-readable report.
+
+```ruby
+Zip.name_audit_mode = :strict
+```
+
+In `:strict` mode a `Zip::EntryNameMismatchError` is raised as soon as any of these inconsistencies is detected, instead of silently trusting whichever name was read last. The default is `:off`, which skips auditing entirely.
+
 ### Date Validation
 
 Some zip files might have an invalid date format, which will raise a warning. You can hide this warning with the following setting:

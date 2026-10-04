@@ -4,6 +4,7 @@ require 'pathname'
 
 require_relative 'constants'
 require_relative 'dirtyable'
+require_relative 'name_audit'
 
 module Zip
   # Zip::Entry represents an entry in a Zip archive.
@@ -34,6 +35,12 @@ module Zip
     attr_reader :extra, :compression_level, :filepath # :nodoc:
 
     attr_writer :size # :nodoc:
+
+    # The name audit collected for this entry while it was read, when
+    # `Zip.name_audit_mode` is `:lenient` or `:strict`. A `Zip::NameAudit`
+    # recording how this entry's name appears in each part of the archive,
+    # or `nil` when name auditing is off.
+    attr_reader :name_audit
 
     mark_dirty :comment=, :compressed_size=, :external_file_attributes=,
                :fstype=, :gp_flags=, :name=, :size=,
@@ -396,11 +403,9 @@ module Zip
 
       set_time(@last_mod_date, @last_mod_time)
 
-      @name = io.read(@name_length)
-      if ::Zip.force_entry_names_encoding
-        @name.force_encoding(::Zip.force_entry_names_encoding)
-      end
-      @name.tr!('\\', '/') # Normalise filepath separators after encoding set.
+      raw_name = io.read(@name_length)
+      @name = decode_entry_name(raw_name)
+      record_name_audit(:local_header, @gp_flags, raw_name)
 
       # We need to do this here because `initialize` has so many side-effects.
       # :-(
@@ -411,6 +416,7 @@ module Zip
         raise ::Zip::Error, 'Truncated local zip entry header'
       end
 
+      audit_extra_fields(extra, :local_header)
       read_extra_field(extra, local: true)
       parse_zip64_extra(true)
       parse_aes_extra
@@ -529,6 +535,87 @@ module Zip
       end
     end
 
+    def decode_entry_name(raw_name) # :nodoc:
+      name = raw_name.dup
+      if ::Zip.force_entry_names_encoding
+        name.force_encoding(::Zip.force_entry_names_encoding)
+      end
+      name.tr!('\\', '/') # Normalise filepath separators after encoding set.
+      name
+    end
+
+    # Records local header name metadata read by `Zip::CentralDirectory`,
+    # so that it can be audited against the central directory record.
+    def audit_local_header(gp_flags, raw_name, extra) # :nodoc:
+      return if ::Zip.name_audit_mode == :off
+
+      record_name_audit(:local_header, gp_flags, raw_name)
+      audit_extra_fields(extra, :local_header)
+    end
+
+    # Raises Zip::EntryNameMismatchError if name auditing is in strict
+    # mode and this entry's recorded names are inconsistent.
+    def raise_if_name_audit_failed! # :nodoc:
+      return unless ::Zip.name_audit_mode == :strict
+      return if @name_audit.nil? || @name_audit.consistent?
+
+      raise EntryNameMismatchError.new(@name, @name_audit.issues)
+    end
+
+    def record_name_audit(source, gp_flags, raw_name) # :nodoc:
+      return if ::Zip.name_audit_mode == :off
+      return if raw_name.nil?
+
+      name_audit_store.add_record(
+        NameAudit::Record.new(
+          source: source,
+          raw_bytes: raw_name.dup.force_encoding(Encoding::BINARY),
+          declared_encoding: (gp_flags & EFS).zero? ? nil : 'UTF-8',
+          applied_encoding: ::Zip.force_entry_names_encoding,
+          decoded_name: decode_entry_name(raw_name)
+        )
+      )
+    end
+
+    def audit_extra_fields(buf, context) # :nodoc:
+      return if ::Zip.name_audit_mode == :off
+      return if buf.nil? || buf.empty?
+
+      i = 0
+      while i + 4 <= buf.bytesize
+        id = buf[i, 2]
+        len = buf[i + 2, 2].unpack1('v')
+        break if i + 4 + len > buf.bytesize
+
+        if id == ExtraField::UnicodePath::HEADER_ID
+          audit_unicode_path_field(buf[i + 4, len], context)
+        end
+        i += 4 + len
+      end
+    end
+
+    def audit_unicode_path_field(content, context) # :nodoc:
+      return if content.bytesize < 5
+
+      _version, name_crc32 = content.unpack('CV')
+      raw_bytes = content[5..].dup.force_encoding(Encoding::BINARY)
+      name_audit_store.add_record(
+        NameAudit::Record.new(
+          source: :unicode_path_extra,
+          context: context,
+          raw_bytes: raw_bytes,
+          declared_encoding: 'UTF-8',
+          applied_encoding: 'UTF-8',
+          decoded_name: raw_bytes.dup.force_encoding('UTF-8'),
+          name_crc32: name_crc32
+        )
+      )
+    end
+
+    def name_audit_store # :nodoc:
+      @name_audit ||= NameAudit.new
+    end
+
     def read_c_dir_entry(io) # :nodoc:
       @dirty = false # No changes at this point.
       static_sized_fields_buf = io.read(::Zip::CDIR_ENTRY_STATIC_HEADER_LENGTH)
@@ -537,13 +624,13 @@ module Zip
       check_c_dir_entry_signature
       set_time(@last_mod_date, @last_mod_time)
 
-      @name = io.read(@name_length)
-      if ::Zip.force_entry_names_encoding
-        @name.force_encoding(::Zip.force_entry_names_encoding)
-      end
-      @name.tr!('\\', '/') # Normalise filepath separators after encoding set.
+      raw_name = io.read(@name_length)
+      @name = decode_entry_name(raw_name)
+      record_name_audit(:central_directory, @gp_flags, raw_name)
 
-      read_extra_field(io.read(@extra_length))
+      extra = io.read(@extra_length)
+      audit_extra_fields(extra, :central_directory)
+      read_extra_field(extra)
       @comment = io.read(@comment_length)
       check_c_dir_entry_comment_size
       set_ftype_from_c_dir_entry

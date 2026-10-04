@@ -183,25 +183,86 @@ module Zip
       end
       raise Error, 'Zip consistency problem while reading central directory entry' if eof || io.eof?
 
+      auditing = ::Zip.name_audit_mode != :off
+      seen_names = {} if auditing
       @entry_set = EntrySet.new
       @size.times do
         entry = Entry.read_c_dir_entry(io)
         break unless entry
 
-        offset = if entry.zip64?
-                   entry.extra[:zip64].relative_header_offset
-                 else
-                   entry.local_header_offset
-                 end
-
-        unless offset.nil?
-          io_save = io.tell
-          io.seek(offset, IO::SEEK_SET)
-          entry.read_extra_field(read_local_extra_field(io), local: true)
-          io.seek(io_save, IO::SEEK_SET)
-        end
+        read_entry_local_header(entry, io, auditing)
+        audit_entry_name(entry, seen_names) if auditing
 
         @entry_set << entry
+      end
+    end
+
+    def read_entry_local_header(entry, io, auditing) # :nodoc:
+      offset = if entry.zip64?
+                 entry.extra[:zip64].relative_header_offset
+               else
+                 entry.local_header_offset
+               end
+
+      unless offset.nil?
+        io_save = io.tell
+        io.seek(offset, IO::SEEK_SET)
+        if auditing
+          read_local_header_for_audit(entry, io)
+        else
+          entry.read_extra_field(read_local_extra_field(io), local: true)
+        end
+        io.seek(io_save, IO::SEEK_SET)
+      end
+
+      # The zip64 extra field only carries the local header offset when
+      # it needs 64 bits; otherwise the central directory's own offset
+      # field is authoritative, so fall back to it when auditing.
+      audit_local_header_at(entry, io, entry.local_header_offset) if auditing && offset.nil?
+    end
+
+    def audit_local_header_at(entry, io, offset) # :nodoc:
+      return if offset.nil?
+
+      io_save = io.tell
+      io.seek(offset, IO::SEEK_SET)
+      details = read_local_header_details(io)
+      entry.audit_local_header(*details) unless details.nil?
+      io.seek(io_save, IO::SEEK_SET)
+    end
+
+    # Reads the gp flags, name and extra field from the local header at
+    # the current position. Returns nil if there is no valid local header.
+    def read_local_header_details(io) # :nodoc:
+      buf = io.read(::Zip::LOCAL_ENTRY_STATIC_HEADER_LENGTH) || ''
+      return nil unless buf.bytesize == ::Zip::LOCAL_ENTRY_STATIC_HEADER_LENGTH
+
+      head, _ver, gp_flags, _meth, _time, _date, _crc, _csize, _size, n_len, e_len =
+        buf.unpack('VvvvvvVVVvv')
+      return nil unless head == ::Zip::LOCAL_ENTRY_SIGNATURE
+
+      [gp_flags, io.read(n_len), io.read(e_len)]
+    end
+
+    def read_local_header_for_audit(entry, io) # :nodoc:
+      details = read_local_header_details(io)
+      return if details.nil?
+
+      entry.read_extra_field(details[2], local: true)
+      entry.audit_local_header(*details)
+    end
+
+    def audit_entry_name(entry, seen_names) # :nodoc:
+      entry.raise_if_name_audit_failed!
+      key = entry.name.to_s.chomp('/')
+      key.downcase! if ::Zip.case_insensitive_match
+      if (first = seen_names[key])
+        message = "normalized entry name '#{key}' is used by more than one entry in this archive"
+        first.name_audit.add_issue(:duplicate_name, message)
+        entry.name_audit.add_issue(:duplicate_name, message)
+        entry.raise_if_name_audit_failed!
+      else
+        seen_names[key] = entry
       end
     end
 

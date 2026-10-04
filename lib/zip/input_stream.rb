@@ -157,6 +157,8 @@ module Zip
       @current_entry = ::Zip::Entry.read_local_entry(@archive_io)
       return if @current_entry.nil?
 
+      @current_entry.raise_if_name_audit_failed!
+
       if @current_entry.incomplete? && @current_entry.compressed_size == 0 && !@complete_entry
         raise StreamingError, @current_entry
       end

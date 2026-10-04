@@ -59,6 +59,12 @@ module Zip
                 :validate_declared_number_of_entries,
                 :inflater_chunk_size
 
+  # The current name audit mode. See `Zip.name_audit_mode=` for details.
+  attr_reader :name_audit_mode
+
+  # Valid values for `Zip.name_audit_mode`.
+  NAME_AUDIT_MODES = %i[off lenient strict].freeze
+
   DEFAULT_RESTORE_OPTIONS = {
     restore_ownership:   false,
     restore_permissions: true,
@@ -84,6 +90,33 @@ module Zip
     @validate_entry_sizes = true
     @validate_declared_number_of_entries = false # Set this to `true` in v4.0.0?
     @inflater_chunk_size = 4096
+    @name_audit_mode = :off
+  end
+
+  # Sets how strictly rubyzip audits entry names while reading archives.
+  #
+  # The same entry name can appear, byte-for-byte differently, in a zip
+  # archive's local file header, its central directory, and the Info-ZIP
+  # Unicode Path extra field (0x7075). The available modes are:
+  #
+  # * `:off` (default) - no auditing; historical behaviour.
+  # * `:lenient` - collect a `Zip::NameAudit` for each entry (exposed via
+  #   `Zip::Entry#name_audit`) recording the raw bytes, declared encoding
+  #   and decoded result from each location, but keep reading exactly as
+  #   before.
+  # * `:strict` - like `:lenient`, but raise `Zip::EntryNameMismatchError`
+  #   when inconsistencies are found (local/central name mismatch, invalid
+  #   UTF-8 where UTF-8 is declared, a Unicode Path extra field whose CRC32
+  #   does not match the accompanying header name, or several entries
+  #   normalising to the same name), instead of silently trusting whichever
+  #   name was read last.
+  def name_audit_mode=(mode)
+    mode = mode.to_sym if mode.respond_to?(:to_sym)
+    return @name_audit_mode = mode if NAME_AUDIT_MODES.include?(mode)
+
+    raise ArgumentError,
+          "invalid name audit mode #{mode.inspect} " \
+          "(expected one of: #{NAME_AUDIT_MODES.join(', ')})"
   end
 
   # Set options for RubyZip in one block.

@@ -125,6 +125,28 @@ module Zip
     end
   end
 
+  # Error raised, in strict name-audit mode (`Zip.name_audit_mode = :strict`),
+  # when an entry's name is recorded inconsistently across a zip archive's
+  # local header, central directory and Unicode Path extra field, or when
+  # several entries normalise to the same name.
+  class EntryNameMismatchError < Error
+    # The inconsistencies that were found (Array of Zip::NameAudit::Issue).
+    attr_reader :issues
+
+    # Create a new EntryNameMismatchError for the given entry name and issues.
+    def initialize(entry_name, issues)
+      super()
+      @entry_name = entry_name
+      @issues = issues
+    end
+
+    # The message returned by this error.
+    def message
+      "Inconsistent name metadata for entry '#{@entry_name}': " \
+        "#{@issues.map(&:message).join('; ')}"
+    end
+  end
+
   # Error raised if a split archive is read. Rubyzip does not support reading
   # split archives.
   class SplitArchiveError < Error
