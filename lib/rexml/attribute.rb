@@ -17,6 +17,9 @@ module REXML
 
     NEEDS_A_SECOND_CHECK = /(<|&((#{Entity::NAME});|(#0*((?:\d+)|(?:x[a-fA-F0-9]+)));)?)/um
 
+    alias_method :_rexml_assign_name, :name=
+    private :_rexml_assign_name
+
     # Constructor.
     # FIXME: The parser doesn't catch illegal characters in attributes
     #
@@ -42,7 +45,7 @@ module REXML
     def initialize( first, second=nil, parent=nil )
       @normalized = @unnormalized = @element = nil
       if first.kind_of? Attribute
-        self.name = first.expanded_name
+        _rexml_assign_name(first.expanded_name)
         @unnormalized = first.value
         if second.kind_of? Element
           @element = second
@@ -51,7 +54,7 @@ module REXML
         end
       elsif first.kind_of? String
         @element = parent
-        self.name = first
+        _rexml_assign_name(first)
         @normalized = second.to_s
       else
         raise "illegal argument #{first.class.name} to Attribute constructor"
@@ -153,8 +156,25 @@ module REXML
     # The normalized value of this attribute.  That is, the attribute with
     # entities intact.
     def normalized=(new_normalized)
+      return @normalized = new_normalized unless attached_to_element?
+      index = @element.document&.id_index
+      index&.unindex_element(@element)
       @normalized = new_normalized
       @unnormalized = nil
+      index&.index_element(@element)
+    end
+
+    def name=(name)
+      old_name = defined?(@expanded_name) ? @expanded_name : nil
+      return _rexml_assign_name(name) unless attached_to_element?
+      index = @element.document&.id_index
+      index&.unindex_element(@element)
+      _rexml_assign_name(name)
+      if old_name && old_name != expanded_name && @element.attributes.key?(old_name)
+        Hash.instance_method(:delete).bind(@element.attributes).call(old_name)
+        Hash.instance_method(:store).bind(@element.attributes).call(expanded_name, self)
+      end
+      index&.index_element(@element)
     end
 
     # Returns a copy of this attribute
@@ -167,6 +187,9 @@ module REXML
     #
     # Returns this attribute
     def element=( element )
+      if @element.kind_of?(Element) && attached_to_element?
+        @element.document&.id_index&.unindex_element(@element)
+      end
       @element = element
 
       if @normalized
@@ -213,6 +236,13 @@ module REXML
     #   "foo:xmlns" => false
     def namespace_declaration?
       prefix == 'xmlns' || (prefix.empty? && name == 'xmlns')
+    end
+
+    private
+
+    def attached_to_element?
+      @element.kind_of?(Element) &&
+        @element.attributes.any? { |_name, attribute| attribute.equal?(self) }
     end
   end
 end

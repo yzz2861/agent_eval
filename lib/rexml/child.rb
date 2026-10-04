@@ -51,8 +51,14 @@ module REXML
     # Returns:: The parent added
     def parent=( other )
       return @parent if @parent == other
-      @parent.delete self if defined? @parent and @parent
+      old_parent = @parent
+      if old_parent
+        old_parent.delete(self)
+        return @parent if @parent.equal?(old_parent)
+      end
       @parent = other
+      document&.id_index&.index_node(self) if other
+      @parent
     end
 
     alias :next_sibling :next_sibling_node
@@ -85,6 +91,12 @@ module REXML
     def document
       parent&.document
     end
+
+    def detach_from_parent_index
+      @parent = nil
+    end
+
+    protected :detach_from_parent_index
 
     # This doesn't yet handle encodings
     def bytes

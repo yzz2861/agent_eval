@@ -2,6 +2,8 @@
 #vim:ts=2 sw=2 noexpandtab:
 require_relative 'child'
 require_relative 'source'
+require_relative 'xmltokens'
+require 'strscan'
 
 module REXML
   # This class needs:
@@ -17,6 +19,7 @@ module REXML
   # for anything to make DTDs more palateable.
   class AttlistDecl < Child
     include Enumerable
+    include XMLTokens
 
     # What is this?  Got me.
     attr_reader :element_name
@@ -49,6 +52,30 @@ module REXML
     #  attlist_decl.each { |attribute_name, attribute_value| ... }
     def each(&block)
       @pairs.each(&block)
+    end
+
+    def attribute_types
+      return {} unless @contents
+
+      scanner = StringScanner.new(@contents)
+      scanner.skip(/\s*<!ATTLIST/) or return {}
+      scanner.scan(/\s+#{NAME_STR}(?=\s)/) or return {}
+
+      types = {}
+      type_pattern = /CDATA|IDREFS|IDREF|ID|ENTITIES|ENTITY|NMTOKENS|NMTOKEN|NOTATION\s*\([^)]*\)|\([^)]*\)/
+      until scanner.eos?
+        scanner.scan(/\s+/)
+        name = scanner.scan(/#{NAME_STR}(?=\s)/)
+        break if name.nil?
+
+        scanner.scan(/\s+/)
+        type = scanner.scan(type_pattern)
+        break if type.nil?
+
+        types[name] = type.strip
+        scanner.scan_until(/(?=\s+#{NAME_STR}\s+(?:CDATA|IDREFS|IDREF|ID|ENTITIES|ENTITY|NMTOKENS|NMTOKEN|NOTATION|\())/m)
+      end
+      types
     end
 
     # Write out exactly what we got in.

@@ -389,12 +389,11 @@ module REXML
               pairs = {}
               values = md[0].strip.scan( ATTDEF_RE )
               values.each do |attdef|
-                unless attdef[3] == "#IMPLIED"
-                  attdef.compact!
-                  val = attdef[3]
-                  val = attdef[4] if val == "#FIXED "
+                default_declaration = attdef[4]
+                unless ["#IMPLIED", "#REQUIRED"].include?(default_declaration)
+                  val = attdef[6] || attdef[7]
                   pairs[attdef[0]] = val
-                  if attdef[0] =~ /^xmlns:(.*)/
+                  if attdef[0] =~ /\Axmlns:(.*)/
                     @namespaces[$1] = val
                   end
                 end

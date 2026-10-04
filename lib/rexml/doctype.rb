@@ -80,6 +80,7 @@ module REXML
     def initialize( first, parent=nil )
       @entities = DEFAULT_ENTITIES
       @long_name = @uri = nil
+      @id_attribute_mappings = nil
       if first.kind_of? String
         super()
         @name = first
@@ -135,6 +136,24 @@ module REXML
       mapping
     end
 
+    def id_attribute?(element_name, attribute_name)
+      id_attribute_mappings.dig(element_name, attribute_name)
+    end
+
+    def id_attributes_for(element)
+      names = id_attribute_mappings[element.expanded_name]
+      return {} unless names
+
+      names.each_key.with_object({}) do |name, attributes|
+        value = attribute_of(element.expanded_name, name)
+        attributes[name] = value unless value.nil?
+      end
+    end
+
+    def clear_id_attribute_mapping_cache
+      @id_attribute_mappings = nil
+    end
+
     def clone
       DocType.new self
     end
@@ -183,8 +202,16 @@ module REXML
 
     def add child
       super(child)
+      clear_id_attribute_mapping_cache if child.kind_of?(AttlistDecl)
       @entities = DEFAULT_ENTITIES.dup if @entities == DEFAULT_ENTITIES
       @entities[ child.name ] = child if child.kind_of? Entity
+    end
+
+    def delete(child)
+      deleted = super
+      clear_id_attribute_mapping_cache if deleted.kind_of?(AttlistDecl)
+      id_index&.rebuild if deleted.kind_of?(AttlistDecl)
+      deleted
     end
 
     # This method retrieves the public identifier identifying the document's
@@ -229,6 +256,23 @@ module REXML
       notations.find { |notation_decl|
         notation_decl.name == name
       }
+    end
+
+    def id_index
+      @parent&.id_index
+    end
+
+    private
+
+    def id_attribute_mappings
+      @id_attribute_mappings ||= grep(AttlistDecl).each_with_object({}) do |declaration, mapping|
+        element_mapping = mapping[declaration.element_name] ||= {}
+        declaration.attribute_types.each do |attribute_name, attribute_type|
+          if attribute_type == "ID" && !element_mapping.key?(attribute_name)
+            element_mapping[attribute_name] = true
+          end
+        end
+      end
     end
   end
 

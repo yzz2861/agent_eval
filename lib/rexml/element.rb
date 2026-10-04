@@ -334,6 +334,13 @@ module REXML
       end
     end
 
+    def name=(name)
+      index = document&.id_index
+      index&.unindex_element(self)
+      super
+      document&.id_index&.index_element(self)
+    end
+
     # :call-seq:
     #   inspect -> string
     #
@@ -2371,8 +2378,11 @@ module REXML
         end
         value = Attribute.new(name, value)
       end
+      document = @element.document
+      document&.id_index&.unindex_element(@element)
       value.element = @element
       store name, value
+      document&.id_index&.index_element(@element)
       @element
     end
 
@@ -2435,9 +2445,71 @@ module REXML
     def delete(attribute_or_name)
       key = attribute_or_name
       key = attribute_or_name.expanded_name if attribute_or_name.kind_of? Attribute
+      old_attribute = fetch(key, nil)
+      document = @element.document
+      document&.id_index&.unindex_element(@element)
       super(key)
 
+      if old_attribute
+        @element.document&.id_index&.index_element(@element)
+      end
+
       @element
+    end
+
+    def store(name, value)
+      unless value.kind_of?(Attribute)
+        doctype = @element.document&.doctype
+        value = Text.normalize(value, doctype)
+        value = Attribute.new(name, value)
+      end
+      value.element = @element
+      document = @element.document
+      document&.id_index&.unindex_element(@element)
+      Hash.instance_method(:store).bind(self).call(value.expanded_name, value)
+      document&.id_index&.index_element(@element)
+      value
+    end
+
+    def clear
+      document = @element.document
+      document&.id_index&.unindex_element(@element)
+      super
+      document&.id_index&.index_element(@element) if document
+      self
+    end
+
+    def replace(attributes)
+      document = @element.document
+      document&.id_index&.unindex_element(@element)
+      super
+      document&.id_index&.index_element(@element) if document
+      self
+    end
+
+    def merge!(attributes)
+      document = @element.document
+      document&.id_index&.unindex_element(@element)
+      result = super
+      document&.id_index&.index_element(@element) if document
+      result
+    end
+    alias update merge!
+
+    def delete_if(&block)
+      document = @element.document
+      document&.id_index&.unindex_element(@element)
+      result = super
+      document&.id_index&.index_element(@element) if document
+      result
+    end
+
+    def keep_if(&block)
+      document = @element.document
+      document&.id_index&.unindex_element(@element)
+      result = super
+      document&.id_index&.index_element(@element) if document
+      result
     end
 
     # :call-seq:

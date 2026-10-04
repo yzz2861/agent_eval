@@ -68,11 +68,31 @@ module REXML
       node_set.size
     end
 
-    # Since REXML is non-validating, this method is not implemented as it
-    # requires a DTD
-    def id( object )
-      []
+    def id(object)
+      context_node = @context[:node]
+      root_node = context_node.respond_to?(:root_node) ? context_node.root_node : nil
+      document = root_node.kind_of?(Document) ? root_node : nil
+      return [] unless document
+
+      ids = id_values(object)
+      ids.each_with_object([]) do |id, elements|
+        element = document.element_by_id(id)
+        elements << element if element
+      end
     end
+
+    private
+
+    def id_values(object)
+      case object
+      when Array
+        object.flat_map { |node| id_values(string(node)) }
+      else
+        string(object).split(/\s+/)
+      end
+    end
+
+    public
 
     def local_name(node_set=nil)
       target_named_node(node_set)&.local_name || ""

@@ -1,6 +1,7 @@
 # frozen_string_literal: false
 require_relative "security"
 require_relative "element"
+require_relative "id_index"
 require_relative "xmldecl"
 require_relative "source"
 require_relative "comment"
@@ -93,6 +94,7 @@ module REXML
       @entity_expansion_count = 0
       @entity_expansion_limit = Security.entity_expansion_limit
       @entity_expansion_text_limit = Security.entity_expansion_text_limit
+      @id_index = IDIndex.new(self)
       super()
       @context = context
       # `source = ""` is an invalid usage because no root element XML is an invalid XML.
@@ -188,7 +190,9 @@ module REXML
         }
         if insert_before_index # Not null = not end of list
           if @children[ insert_before_index ].kind_of? DocType
+            old_doctype = @children[insert_before_index]
             @children[ insert_before_index ] = child
+            old_doctype.detach_from_parent_index
           else
             @children[ insert_before_index-1, 0 ] = child
           end
@@ -243,6 +247,15 @@ module REXML
     def doctype
       @children.find { |item| item.kind_of? DocType }
     end
+
+    def id_index
+      @id_index
+    end
+
+    def element_by_id(id)
+      @id_index[id]
+    end
+    alias get_element_by_id element_by_id
 
     # :call-seq:
     #   xml_decl -> xml_decl

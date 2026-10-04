@@ -18,6 +18,7 @@ module REXML
     def add( object )
       object.parent = self
       @children << object
+      update_id_index_after_declaration_change(object)
       object
     end
 
@@ -26,13 +27,18 @@ module REXML
 
     def unshift( object )
       object.parent = self
-      @children.unshift object
+      result = @children.unshift(object)
+      update_id_index_after_declaration_change(object)
+      result
     end
 
     def delete( object )
       found = false
       @children.delete_if {|c| c.equal?(object) and found = true }
-      object.parent = nil if found
+      if found
+        object.detach_from_parent_index
+        document&.id_index&.unindex_node(object)
+      end
       found ? object : nil
     end
 
@@ -41,11 +47,29 @@ module REXML
     end
 
     def delete_if( &block )
-      @children.delete_if(&block)
+      removed = []
+      @children.delete_if do |child|
+        if block.call(child)
+          removed << child
+          true
+        else
+          false
+        end
+      end
+      removed.each do |child|
+        child.detach_from_parent_index
+        document&.id_index&.unindex_node(child)
+      end
+      @children
     end
 
     def delete_at( index )
-      @children.delete_at index
+      child = @children.delete_at(index)
+      if child
+        child.detach_from_parent_index
+        document&.id_index&.unindex_node(child)
+      end
+      child
     end
 
     def each_index( &block )
@@ -68,8 +92,21 @@ module REXML
     # @param child if opt is an Integer, this is the child to set
     # @return the parent (self)
     def []=( *args )
-      args[-1].parent = self
-      @children[*args[0..-2]] = args[-1]
+      replacement = args[-1]
+      old_children = @children[*args[0..-2]]
+      old_children = [old_children].compact unless old_children.is_a?(Array)
+      old_document = document
+
+      @children[*args[0..-2]] = replacement
+      old_children.each do |child|
+        child.detach_from_parent_index unless child.equal?(replacement)
+      end
+      replacement.parent = self
+
+      old_children.each do |child|
+        old_document&.id_index&.unindex_node(child) unless child.equal?(replacement)
+      end
+      self
     end
 
     # Inserts an child before another child
@@ -88,6 +125,7 @@ module REXML
         child2.parent.delete(child2) if child2.parent
         @children[ind,0] = child2
         child2.parent = self
+        update_id_index_after_declaration_change(child2)
       end
       self
     end
@@ -108,6 +146,7 @@ module REXML
         child2.parent.delete(child2) if child2.parent
         @children[ind,0] = child2
         child2.parent = self
+        update_id_index_after_declaration_change(child2)
       end
       self
     end
@@ -136,9 +175,12 @@ module REXML
     # @param replacement the child to insert into the nodelist (must be a
     # Child)
     def replace_child( to_replace, replacement )
+      old_document = document
       @children.map! {|c| c.equal?( to_replace ) ? replacement : c }
-      to_replace.parent = nil
+      to_replace.detach_from_parent_index
       replacement.parent = self
+      old_document&.id_index&.unindex_node(to_replace)
+      self
     end
 
     # Deeply clones this object.  This creates a complete duplicate of this
@@ -159,6 +201,18 @@ module REXML
 
     def parent?
       true
+    end
+
+    private
+
+    def update_id_index_after_declaration_change(child)
+      type = child.node_type if child.respond_to?(:node_type)
+      if type == :doctype || type == :attlistdecl
+        clear_id_attribute_mapping_cache if type == :attlistdecl &&
+                                             respond_to?(:clear_id_attribute_mapping_cache)
+        index_document = document || child.document
+        index_document&.id_index&.rebuild
+      end
     end
   end
 end
