@@ -1,5 +1,11 @@
 # News
 
+## Unreleased
+
+### Improvement
+
+  * Added `REXML::XPath.compile` for reusing a compiled XPath expression.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement

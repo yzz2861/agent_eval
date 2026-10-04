@@ -76,19 +76,27 @@ module REXML
       @namespaces = namespaces
     end
 
-    def variables=(vars)
+    def variables=(vars={})
       @variables = vars.transform_values { |v| coerce_variable(v) }
     end
 
-    def parse path, node
-      path_stack = @parser.parse( path )
+    def compile(path)
+      path = "*" unless path
+      @parser.parse(path)
+    end
+
+    def match_compiled(path_stack, node)
       if node.is_a?(Array)
         Kernel.warn("REXML::XPath.each, REXML::XPath.first, REXML::XPath.match dropped support for nodeset...", uplevel: 1)
         return [] if node.empty?
         node = node.first
       end
 
-      match(path_stack, node)
+      match(path_stack.dclone, node)
+    end
+
+    def parse path, node
+      match_compiled(compile(path), node)
     end
 
     def get_first path, node
@@ -105,7 +113,6 @@ module REXML
     def []=( variable_name, value )
       @variables[variable_name] = coerce_variable(value)
     end
-
 
     # Performs a depth-first (document order) XPath search, and returns the
     # first match.  This is the fastest, lightest way to return a single result.

@@ -10,6 +10,52 @@ module REXML
     # TODO: either set the namespaces=EMPTY_HASH, or deprecate this.
     EMPTY_HASH = {}
 
+    # A compiled XPath expression.
+    class Plan
+      def initialize(path=nil, **options)
+        parser = XPathParser.new(**options)
+        @path_stack = parser.compile(path)
+        @options = options.dup
+      end
+
+      # Evaluates the compiled XPath and returns the matching nodes.
+      def match(element, namespaces=nil, variables={})
+        validate_arguments(namespaces, variables)
+        parser = XPathParser.new(**@options)
+        parser.namespaces = namespaces
+        parser.variables = variables
+        parser.match_compiled(@path_stack, element)
+      end
+
+      # Iterates over nodes that match the compiled XPath.
+      def each(element, namespaces=nil, variables={}, &block)
+        match(element, namespaces, variables).each(&block)
+      end
+
+      # Returns the first node that matches the compiled XPath.
+      def first(element, namespaces=nil, variables={})
+        match(element, namespaces, variables).flatten[0]
+      end
+
+      alias_method :call, :match
+
+      private
+
+      def validate_arguments(namespaces, variables)
+        unless namespaces.nil? or namespaces.kind_of?(Hash)
+          raise "The namespaces argument, if supplied, must be a hash object."
+        end
+        unless variables.kind_of?(Hash)
+          raise "The variables argument, if supplied, must be a hash object."
+        end
+      end
+    end
+
+    # Compiles an XPath expression for repeated evaluation.
+    def XPath::compile(path=nil, **options)
+      Plan.new(path, **options)
+    end
+
     # Finds and returns the first node that matches the supplied xpath.
     # element::
     #   The context element
@@ -59,11 +105,7 @@ module REXML
 
     # Returns an array of nodes matching a given XPath.
     def XPath::match(element, path=nil, namespaces=nil, variables={}, options={})
-      parser = XPathParser.new(**options)
-      parser.namespaces = namespaces
-      parser.variables = variables
-      path = "*" unless path
-      parser.parse(path,element)
+      compile(path, **options).match(element, namespaces, variables)
     end
   end
 end
