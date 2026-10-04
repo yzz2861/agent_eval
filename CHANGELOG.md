@@ -2,6 +2,11 @@
 # CHANGELOG.md
 
 
+## fugit HEAD
+
+* Add `Fugit.cron_intersection` (alias `Fugit.intersect_crons`) and `Fugit::Cron#intersection`: lazy enumeration of the common trigger instants of two crons over a finite window, with an inspectable candidate-advancement bound and an `#incomplete?`/`#unfinished?` status. Crons may carry distinct timezones, comparison happens on the real instant.
+
+
 ## fugit 1.14.0 released 2026-09-14
 
 * Reject input when length > 256
@@ -362,4 +367,3 @@
 ## fugit 0.9.0  released 2017-01-03
 
 * Initial release
-

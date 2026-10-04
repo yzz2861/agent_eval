@@ -179,6 +179,29 @@ c.within(Time.parse('2024-02-16 12:00')..Time.parse('2024-08-01 12:00'))
     #      '2024-06-10 12:00:00',
     #      '2024-07-08 12:00:00' ]
 
+  # `Fugit.cron_intersection` (alias `Fugit.intersect_crons`) returns
+  # a lazy Enumerable of the instants at which two crons trigger
+  # together inside a finite window. The two crons may live in
+  # different timezones, comparison is done on the real (UTC) instant.
+  #
+i0 = Fugit.parse_cron('0 6 * * * America/New_York')
+i1 = Fugit.parse_cron('0 11 * * * Europe/London')
+
+Fugit.cron_intersection(i0, i1, Time.utc(2024, 1, 1)...Time.utc(2024, 1, 8))
+  .to_a
+  .collect { |t| t.utc.strftime('%F %T') }
+    # => [ '2024-01-01 11:00:00', ..., '2024-01-07 11:00:00' ]
+
+i0.intersection(i1, Time.utc(2024, 1, 1), Time.utc(2024, 1, 8))
+  .first
+    # first common instant, nothing is computed past it
+
+  # The work is bounded by a number of candidate advancements, not by
+  # a per-second scan. `#advances` exposes the count and `#incomplete?`
+  # (aliased `#unfinished?`) reports whether the budget was reached
+  # before the end of the window. A custom bound can be given via the
+  # `max_advances:` keyword.
+
 p c.brute_frequency  # => [ 604800, 604800, 53 ]
                      #    [ delta min, delta max, occurrence count ]
 p c.rough_frequency  # => 7 * 24 * 3600 (7d rough frequency)
@@ -713,4 +736,3 @@ The gem [nice_hash](https://github.com/MarioRuiz/nice_hash) gets in the way of `
 ## LICENSE
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
