@@ -152,4 +152,9 @@ module Zip
         'uncompress it. Please use `Zip::File` instead of `Zip::InputStream`.'
     end
   end
+
+  # Error raised when a Zip::Overlay cannot present a consistent merged view
+  # of its layers - for example when a single layer contains two entries with
+  # the same name, or a file and another entry beneath it.
+  class OverlayError < Error; end
 end

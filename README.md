@@ -271,6 +271,19 @@ end # The `InputStream` is closed at the end of the block.
 
 Any attempt to move about in a zip file opened with `Zip::InputStream` could result in the incorrect entry being accessed and/or Zlib buffer errors. If you need random access in a zip file, use `Zip::File`.
 
+### Reading layered archives with `Zip::Overlay`
+
+`Zip::Overlay` presents a read-only, merged view of several zip archives - for example a base deployment package plus a series of incremental update packages - without extracting or recompressing anything. Layers are listed base-first; entries in later layers override entries with the same name in earlier layers, and deletions are expressed through a caller-supplied manifest of tombstone names (`'name'` removes a file, `'name/'` removes a directory and everything beneath it):
+
+```ruby
+Zip::Overlay.open(['base.zip', 'patch-1.zip'], deletes: ['obsolete.txt', 'old-assets/']) do |overlay|
+  overlay.read('app/config.yml')   # => contents from the topmost layer that has the file
+  overlay.dir_entries('app')       # => merged immediate children of 'app'
+end
+```
+
+A file in a higher layer replaces a directory (and its contents) at the same name in lower layers, and a directory in a higher layer replaces a file at the same name in lower layers, while directory contents merge across layers. Two entries with the same name within a single layer raise `Zip::OverlayError` rather than being resolved arbitrarily. See the `Zip::Overlay` RDoc for the full merge rules and the layered (per-boundary) form of the deletes manifest.
+
 ### Encryption and Password Protection (experimental)
 
 Rubyzip supports reading and writing zip files with AES encryption (reading: version 3.1 and later; writing: version 3.7 and later), and reading and writing zip files with traditional zip encryption (a.k.a. "ZipCrypto"). Encryption is currently only available with the stream API, with either files or buffers, e.g.:
