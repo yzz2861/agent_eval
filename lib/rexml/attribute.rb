@@ -153,8 +153,11 @@ module REXML
     # The normalized value of this attribute.  That is, the attribute with
     # entities intact.
     def normalized=(new_normalized)
+      document = @element&.document
+      document._unregister_attribute_id(@element, self) if document
       @normalized = new_normalized
       @unnormalized = nil
+      document._register_attribute_id(@element, self) if document
     end
 
     # Returns a copy of this attribute

@@ -18,6 +18,22 @@ module REXML
   class AttlistDecl < Child
     include Enumerable
 
+    # Patterns used to extract attribute types from the raw declaration
+    # contents.  These mirror REXML::Parsers::BaseParser; they are
+    # duplicated here so that this file does not need to load the parser.
+    NAMECHAR = '[\-\w\.:]' # :nodoc:
+    NAME = "([\\w:]#{NAMECHAR}*)" # :nodoc:
+    NMTOKEN = "(?:#{NAMECHAR})+" # :nodoc:
+    REFERENCE = "&(?:#{NAME};|#\\d+;|#x[0-9a-fA-F]+;)" # :nodoc:
+    ENUMERATION = "\\(\\s*#{NMTOKEN}(?:\\s*\\|\\s*#{NMTOKEN})*\\s*\\)" # :nodoc:
+    NOTATIONTYPE = "NOTATION\\s+\\(#{NAME}(?:\\s*\\|\\s*#{NAME})*\\s*\\)" # :nodoc:
+    ENUMERATEDTYPE = "(?:(?:#{NOTATIONTYPE})|(?:#{ENUMERATION}))" # :nodoc:
+    ATTTYPE = "(CDATA|ID|IDREF|IDREFS|ENTITY|ENTITIES|NMTOKEN|NMTOKENS|#{ENUMERATEDTYPE})" # :nodoc:
+    ATTVALUE = "(?:\"((?:[^<&\"]|#{REFERENCE})*)\")|(?:'((?:[^<&']|#{REFERENCE})*)')" # :nodoc:
+    DEFAULTDECL = "(#REQUIRED|#IMPLIED|(?:(#FIXED\\s+)?#{ATTVALUE}))" # :nodoc:
+    ATTDEF = "\\s+#{NAME}\\s+#{ATTTYPE}\\s+#{DEFAULTDECL}" # :nodoc:
+    ATTDEF_RE = /#{ATTDEF}/ # :nodoc:
+
     # What is this?  Got me.
     attr_reader :element_name
 
@@ -43,6 +59,27 @@ module REXML
     #  if attlist_decl.include? "xmlns:foobar"
     def include?(key)
       @pairs.keys.include? key
+    end
+
+    # Returns a Hash mapping each attribute name declared in this
+    # declaration to its declared type.  For example, the declaration:
+    #
+    #   <!ATTLIST item uid ID #IMPLIED label CDATA #REQUIRED>
+    #
+    # gives:
+    #
+    #   {"uid" => "ID", "label" => "CDATA"}
+    #
+    # An AttlistDecl built by hand from an attribute name/value list
+    # carries no type information and returns an empty Hash.
+    def attribute_types
+      @attribute_types ||= begin
+        types = {}
+        @contents.to_s.scan(ATTDEF_RE) do |name, type, *|
+          types[name] = type
+        end
+        types
+      end
     end
 
     # Iterate over the key/value pairs:

@@ -2358,21 +2358,22 @@ module REXML
         return
       end
 
+      document = @element.document
       if value.kind_of? Attribute
         # Use attribute's expanded name to avoid inconsistency.
         # TODO: Explicitly document that inconsistent names are allowed, or raise/warn about inconsistency.
         name = value.expanded_name
       else
-        doctype = @element.document&.doctype
-        if doctype
-          value = Text::normalize( value, doctype )
-        else
-          value = Text::normalize( value, nil )
-        end
+        value = Text::normalize( value, document&.doctype )
         value = Attribute.new(name, value)
       end
+      previous = fetch(name, nil)
       value.element = @element
       store name, value
+      if document
+        document._unregister_attribute_id(@element, previous) if previous
+        document._register_attribute_id(@element, value)
+      end
       @element
     end
 
@@ -2435,7 +2436,11 @@ module REXML
     def delete(attribute_or_name)
       key = attribute_or_name
       key = attribute_or_name.expanded_name if attribute_or_name.kind_of? Attribute
-      super(key)
+      removed = super(key)
+      if removed
+        document = @element.document
+        document._unregister_attribute_id(@element, removed) if document
+      end
 
       @element
     end

@@ -14,6 +14,19 @@ require_relative "parsers/streamparser"
 require_relative "parsers/treeparser"
 
 module REXML
+  # Raised when an ID lookup matches more than one element in a document.
+  # Carries the conflicting ID and the elements that share it.
+  class IDConflictError < StandardError
+    attr_reader :id, :elements
+
+    def initialize(id, elements)
+      @id = id
+      @elements = elements
+      super("ID #{id.inspect} is not unique: " \
+            "#{elements.size} elements declare it")
+    end
+  end
+
   # Represents an XML document.
   #
   # A document may have:
@@ -33,6 +46,10 @@ module REXML
   # {tasks for documents}[../doc/rexml/tasks/rdoc/toc_rdoc.html#label-Document].
   #
   class Document < Element
+    # The name of the attribute that is always an ID attribute,
+    # per the xml:id specification.
+    XML_ID_ATTRIBUTE = "xml:id" # :nodoc:
+
     # A convenient default XML declaration. Use:
     #
     #   mydoc << XMLDecl.default
@@ -93,6 +110,9 @@ module REXML
       @entity_expansion_count = 0
       @entity_expansion_limit = Security.entity_expansion_limit
       @entity_expansion_text_limit = Security.entity_expansion_text_limit
+      @id_index = {}
+      @dtd_id_attributes = nil
+      @id_index_dirty = false
       super()
       @context = context
       # `source = ""` is an invalid usage because no root element XML is an invalid XML.
@@ -447,7 +467,205 @@ module REXML
       self
     end
 
+    # :call-seq:
+    #   get_element_by_id(id) -> element or nil
+    #
+    # Returns the element in this document that carries the given ID,
+    # or +nil+ if no element carries it.
+    #
+    # An attribute counts as an ID attribute when it is either:
+    #
+    # - An +xml:id+ attribute (per the xml:id specification).
+    # - An attribute explicitly declared with type +ID+ in an ATTLIST
+    #   declaration of the document's DTD.
+    #
+    # An attribute that is merely named +id+ is *not* an ID attribute
+    # unless the DTD declares it as one.
+    #
+    # The lookup is backed by a document-level index that is kept
+    # up-to-date as attributes and subtrees are added, changed, moved,
+    # or removed; it does not rescan the tree.
+    #
+    # Raises REXML::IDConflictError if more than one element carries
+    # the given ID; use #get_elements_by_id to inspect the conflict:
+    #
+    #   d = REXML::Document.new('<root><a xml:id="x"/><b xml:id="y"/></root>')
+    #   d.get_element_by_id("y")       # => <b xml:id='y'/>
+    #   d.get_element_by_id("nosuch")  # => nil
+    #
+    def get_element_by_id(id)
+      _sync_id_index
+      entry = @id_index[id]
+      if entry.kind_of?(Array)
+        raise IDConflictError.new(id, entry.dup)
+      end
+      entry
+    end
+
+    # :call-seq:
+    #   get_elements_by_id(id) -> array_of_elements
+    #
+    # Returns all elements in this document that carry the given ID.
+    # The array is empty if no element carries it, and contains more
+    # than one element when the ID is declared by multiple elements:
+    #
+    #   d = REXML::Document.new('<root><a xml:id="x"/><b xml:id="x"/></root>')
+    #   d.get_elements_by_id("x").size # => 2
+    #
+    # See #get_element_by_id for what counts as an ID attribute.
+    #
+    def get_elements_by_id(id)
+      _sync_id_index
+      entry = @id_index[id]
+      return [] if entry.nil?
+      entry.kind_of?(Array) ? entry.dup : [entry]
+    end
+
+    def _register_subtree_ids(node) # :nodoc:
+      case node
+      when DocType, AttlistDecl
+        # The set of DTD-declared ID attributes may have changed.  The
+        # node may not be linked into its parent's child list yet, so
+        # rebuilding is deferred until the index is next used.
+        @id_index_dirty = true
+      when Element
+        # An Element still under construction (Element#initialize links
+        # the node to its parent before its containers exist) has
+        # nothing to register yet; attributes added to it afterwards
+        # are tracked individually.
+        return if node.instance_variable_get(:@children).nil?
+        _sync_id_index
+        _register_element_ids(node)
+        node.each_recursive do |element|
+          _register_element_ids(element)
+        end
+      end
+    end
+
+    def _unregister_subtree_ids(node) # :nodoc:
+      case node
+      when DocType, AttlistDecl
+        @id_index_dirty = true
+      when Element
+        return if node.instance_variable_get(:@children).nil?
+        _sync_id_index
+        _unregister_element_ids(node)
+        node.each_recursive do |element|
+          _unregister_element_ids(element)
+        end
+      end
+    end
+
+    def _register_attribute_id(element, attribute) # :nodoc:
+      _sync_id_index
+      return unless _id_attribute_name?(element, attribute.expanded_name)
+      _index_add(attribute.value, element)
+    end
+
+    def _unregister_attribute_id(element, attribute) # :nodoc:
+      _sync_id_index
+      return unless _id_attribute_name?(element, attribute.expanded_name)
+      _index_remove(attribute.value, element)
+    end
+
+    # Brings the index up-to-date if the DTD structure changed since
+    # the index was last (re)built.  Called before every index read or
+    # write, so a rebuild happens at most once per DTD change, never
+    # on every query.
+    def _sync_id_index # :nodoc:
+      return unless @id_index_dirty
+      @id_index_dirty = false
+      @id_index.clear
+      @dtd_id_attributes = nil
+      root_element = root
+      return unless root_element
+      _register_element_ids(root_element)
+      root_element.each_recursive do |element|
+        _register_element_ids(element)
+      end
+    end
+
     private
+
+    # Whether +name+ names an ID attribute for +element+: either the
+    # xml:id attribute, or an attribute declared with type ID for the
+    # element's name in the DTD.
+    def _id_attribute_name?(element, name)
+      return true if name == XML_ID_ATTRIBUTE
+      names = _dtd_id_attributes[element.expanded_name]
+      !names.nil? && names.include?(name)
+    end
+
+    # A Hash mapping element names to the attribute names declared with
+    # type ID in the DTD.  Memoized; invalidated by _sync_id_index,
+    # which runs whenever the DocType or an AttlistDecl is attached to
+    # or detached from this document.
+    def _dtd_id_attributes
+      @dtd_id_attributes ||= begin
+        map = {}
+        doc_type = doctype
+        if doc_type
+          doc_type.grep(AttlistDecl).each do |decl|
+            decl.attribute_types.each do |attr_name, type|
+              next unless type == "ID"
+              names = (map[decl.element_name] ||= [])
+              names << attr_name unless names.include?(attr_name)
+            end
+          end
+        end
+        map
+      end
+    end
+
+    def _register_element_ids(element)
+      attributes = element.attributes
+      xml_id = attributes.fetch(XML_ID_ATTRIBUTE, nil)
+      _index_add(xml_id.value, element) if xml_id
+      names = _dtd_id_attributes[element.expanded_name]
+      return unless names
+      names.each do |name|
+        attribute = attributes.fetch(name, nil)
+        _index_add(attribute.value, element) if attribute
+      end
+    end
+
+    def _unregister_element_ids(element)
+      attributes = element.attributes
+      xml_id = attributes.fetch(XML_ID_ATTRIBUTE, nil)
+      _index_remove(xml_id.value, element) if xml_id
+      names = _dtd_id_attributes[element.expanded_name]
+      return unless names
+      names.each do |name|
+        attribute = attributes.fetch(name, nil)
+        _index_remove(attribute.value, element) if attribute
+      end
+    end
+
+    def _index_add(id, element)
+      entry = @id_index[id]
+      if entry.nil?
+        @id_index[id] = element
+      elsif entry.kind_of?(Array)
+        entry << element unless entry.any? { |e| e.equal?(element) }
+      elsif !entry.equal?(element)
+        @id_index[id] = [entry, element]
+      end
+    end
+
+    def _index_remove(id, element)
+      entry = @id_index[id]
+      if entry.kind_of?(Array)
+        entry.delete_if { |e| e.equal?(element) }
+        case entry.size
+        when 0
+          @id_index.delete(id)
+        when 1
+          @id_index[id] = entry[0]
+        end
+      elsif entry.equal?(element)
+        @id_index.delete(id)
+      end
+    end
 
     def build( source )
       Parsers::TreeParser.new( source, self ).parse

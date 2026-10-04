@@ -1,5 +1,20 @@
 # News
 
+## Unreleased
+
+### Improvement
+
+  * Added a document-level ID index. `REXML::Document#get_element_by_id`
+    finds an element by its ID in constant time, without rescanning the
+    tree. An attribute counts as an ID attribute when it is an `xml:id`
+    attribute or is explicitly declared with type `ID` in an ATTLIST
+    declaration of the document's DTD; an attribute merely named `id`
+    does not qualify. The index is kept up-to-date as attributes are
+    set or deleted and as subtrees are added, removed, or moved,
+    including moves across documents. Looking up a duplicated ID raises
+    `REXML::IDConflictError`; `REXML::Document#get_elements_by_id`
+    returns all elements that declare a given ID.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement

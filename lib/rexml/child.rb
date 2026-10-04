@@ -51,8 +51,16 @@ module REXML
     # Returns:: The parent added
     def parent=( other )
       return @parent if @parent == other
+      old_document = document
       @parent.delete self if defined? @parent and @parent
       @parent = other
+      new_document = document
+      # Keep the document-level ID indexes in sync.  A reparenting may
+      # detach this subtree from one document and attach it to another
+      # (or the same one at a different place), so both sides are
+      # notified; each notification is idempotent.
+      old_document._unregister_subtree_ids(self) if old_document
+      new_document._register_subtree_ids(self) if new_document
     end
 
     alias :next_sibling :next_sibling_node
