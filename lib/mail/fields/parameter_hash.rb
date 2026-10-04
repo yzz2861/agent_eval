@@ -13,6 +13,22 @@ module Mail
   #
   # Parameters are defined in RFC2045. Split keys are in RFC2231.
   class ParameterHash < IndifferentHash #:nodoc:
+    class << self
+      # Strict RFC 2231 decode of an ordered list of parameter pairs (the
+      # parser output format, e.g. <tt>[{"name*0*" => "v0"}]</tt>).
+      # Returns a Mail::ParameterDecodeResult with the decoded parameters
+      # and structured diagnostics.
+      def decode_pairs(parameter_pairs, field: nil)
+        ParameterDecoder.decode(parameter_pairs, strict: true, field: field)
+      end
+
+      # Like .decode_pairs but raises Mail::ParameterError when any
+      # diagnostic is present.
+      def decode_pairs!(parameter_pairs, field: nil)
+        ParameterDecoder.decode!(parameter_pairs, field: field)
+      end
+    end
+
     def [](key_name)
       key_pattern = Regexp.escape(key_name.to_s)
       pairs = []

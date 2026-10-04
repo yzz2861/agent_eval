@@ -547,6 +547,29 @@ module Mail
       convert_to_encoding(encoding)
     end
 
+    # Whether Ruby can decode the named MIME charset. Mirrors the fallback
+    # aliases used by BestEffortCharsetEncoder and reports true for the
+    # binary/8bit pseudo charsets.
+    def Utilities.charset_supported?(charset)
+      return false if charset.nil?
+
+      name = charset.to_s
+      aliased = case name
+                when /ansi_x3.110-1983/
+                  'ISO-8859-1'
+                when /Windows-?1258/i
+                  'Windows-1252'
+                else
+                  name
+                end
+      begin
+        picked = pick_encoding(aliased)
+        name.downcase == '8bit' || !picked.equal?(Encoding::ASCII_8BIT)
+      rescue ArgumentError
+        false
+      end
+    end
+
     def Utilities.string_byteslice(str, *args)
       str.byteslice(*args)
     end

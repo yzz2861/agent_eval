@@ -42,4 +42,8 @@ module Mail
   register_autoload :ToField, 'mail/fields/to_field'
 
   register_autoload :ParameterHash, 'mail/fields/parameter_hash'
+  register_autoload :ParameterDecoder, 'mail/fields/parameter_decoder'
+  register_autoload :ParameterDecodeResult, 'mail/fields/parameter_decoder'
+  register_autoload :ParameterDiagnostic, 'mail/fields/parameter_decoder'
+  register_autoload :ParameterError, 'mail/fields/parameter_decoder'
 end

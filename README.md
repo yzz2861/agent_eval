@@ -161,6 +161,39 @@ I have tried to simplify it some:
    provide encoded parameter values when you call the parameter names through the
    <code>object.parameters['<parameter_name>']</code> method call.
 
+### Strict RFC 2231 parameter decoding
+
+Parameter parsing is lenient by default: gapped or duplicated RFC 2231 continuation
+segments (`name*0=...`, `name*1=...`), bad percent escapes and unknown charsets are
+all tolerated. To get explicit validation together with the decoded values, pass
+<code>strict: true</code> to <code>#decoded_parameters</code> on a Content-Type or
+Content-Disposition field:
+
+```ruby
+result = field.decoded_parameters(strict: true)
+result.valid?        #=> false if anything was wrong
+result.parameters    #=> best effort decoded values
+result.diagnostics   #=> [Mail::ParameterDiagnostic, ...]
+
+result.diagnostics.each do |diag|
+  diag.code           #=> :duplicate_segment, :segment_gap,
+                      #   :invalid_percent_encoding, :unsupported_charset,
+                      #   or :parameter_conflict
+  diag.parameter      #=> the affected parameter name
+  diag.position       #=> 0-based position in the parameter list
+  diag.segment        #=> RFC 2231 section index, when applicable
+  diag.offset         #=> byte offset in the merged value
+  diag.raw_segments   #=> conflicting raw "key=value" fragments
+end
+```
+
+`Mail::ParameterDecoder.decode(pairs, strict: true)` and
+`Mail::ParameterHash.decode_pairs(pairs)` accept the ordered parameter pairs from a
+parsed field. `ParameterDecoder.decode!` / `ParameterHash.decode_pairs!` raise
+`Mail::ParameterError` (with the result attached) instead of returning diagnostics.
+Character decoding always happens after the byte-level segments are joined, so a
+multi-byte character split across a segment boundary decodes correctly.
+
 ## Contributing
 
 Please do!  Contributing is easy in Mail.  Please read the [CONTRIBUTING.md](CONTRIBUTING.md) document for more info.

@@ -27,6 +27,16 @@ module Mail
       @parameters
     end
 
+    # Decodes the RFC 2183/RFC 2231 parameters. In lenient mode (the
+    # default, identical to #parameters) returns an IndifferentHash. With
+    # <tt>strict: true</tt> returns a Mail::ParameterDecodeResult holding
+    # the decoded parameters plus structured diagnostics for duplicate or
+    # gapped RFC 2231 segments, invalid percent escapes, unsupported
+    # charsets and plain/extended parameter conflicts.
+    def decoded_parameters(strict: false)
+      ParameterDecoder.decode(element.parameters || [], strict: strict, field: NAME)
+    end
+
     def filename
       @filename ||= parameters['filename'] || parameters['name']
     end
