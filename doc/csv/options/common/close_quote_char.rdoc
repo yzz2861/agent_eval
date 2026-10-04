@@ -1,0 +1,17 @@
+====== Option +close_quote_char+
+
+Specifies the character (\String of length 1) used as the
+<em>closing</em> quote for fields in both parsing and generating.
+This String will be transcoded into the data's \Encoding before use.
+
+Default value: +nil+.
+
+This option is used together with +open_quote_char+; see
+{Option +open_quote_char+}[#class-CSV-label-Option+open_quote_char]
+for the complete description of asymmetric quote pairs, including escaping
+rules and restrictions.
+
+Raises an exception unless the value is a single character String.
+
+Raises +ArgumentError+ if the quote character is included in +col_sep+ or
++row_sep+.

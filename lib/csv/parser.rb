@@ -365,6 +365,18 @@ class CSV
       @quote_character
     end
 
+    def open_quote_character
+      @open_quote_character
+    end
+
+    def close_quote_character
+      @close_quote_character
+    end
+
+    def asymmetric_quote?
+      @asymmetric_quote
+    end
+
     def field_size_limit
       @max_field_size&.succ
     end
@@ -457,11 +469,11 @@ class CSV
     # A set of tasks to prepare the file in order to parse it
     def prepare
       prepare_variable
+      prepare_separators
       prepare_quote_character
       prepare_backslash
       prepare_skip_lines
       prepare_strip
-      prepare_separators
       validate_strip_and_col_sep_options
       prepare_quoted
       prepare_unquoted
@@ -495,18 +507,56 @@ class CSV
     end
 
     def prepare_quote_character
-      @quote_character = @options[:quote_character]
-      if @quote_character.nil?
-        @escaped_quote_character = nil
-        @escaped_quote = nil
+      @open_quote_character,
+      @close_quote_character,
+      @asymmetric_quote =
+        CSV::QuoteOption.resolve_quote_characters(@options[:quote_character],
+                                                  @options[:open_quote_character],
+                                                  @options[:close_quote_character])
+      if @open_quote_character
+        @open_quote_character =
+          @open_quote_character.encode(@encoding)
+        @close_quote_character =
+          @close_quote_character.encode(@encoding)
+        validate_quote_character_separators
+      end
+      # Backward-compatible alias for the symmetric opening character.
+      @quote_character = @open_quote_character
+      if @close_quote_character
+        @escaped_open_quote_character =
+          Regexp.escape(@open_quote_character)
+        @escaped_close_quote_character =
+          Regexp.escape(@close_quote_character)
       else
-        @quote_character = @quote_character.to_s.encode(@encoding)
-        if @quote_character.length != 1
-          message = ":quote_char has to be nil or a single character String"
-          raise ArgumentError, message
+        @escaped_open_quote_character = nil
+        @escaped_close_quote_character = nil
+      end
+      # Kept for backslash escape handling in the symmetric case.
+      @escaped_quote_character = @escaped_close_quote_character
+      @escaped_quote =
+        if @escaped_close_quote_character
+          Regexp.new(@escaped_close_quote_character)
+        else
+          nil
         end
-        @escaped_quote_character = Regexp.escape(@quote_character)
-        @escaped_quote = Regexp.new(@escaped_quote_character)
+    end
+
+    def validate_quote_character_separators
+      if @column_separator.include?(@open_quote_character) or
+         @column_separator.include?(@close_quote_character)
+        message =
+          "Quote characters (#{@open_quote_character.inspect}, " \
+          "#{@close_quote_character.inspect}) and col_sep " \
+          "(#{@column_separator.inspect}) are incompatible."
+        raise ArgumentError, message
+      end
+      if @row_separator.include?(@open_quote_character) or
+         @row_separator.include?(@close_quote_character)
+        message =
+          "Quote characters (#{@open_quote_character.inspect}, " \
+          "#{@close_quote_character.inspect}) and row_sep " \
+          "(#{@row_separator.inspect}) are incompatible."
+        raise ArgumentError, message
       end
     end
 
@@ -517,11 +567,11 @@ class CSV
 
       @escaped_backslash_character = Regexp.escape(@backslash_character)
       @escaped_backslash = Regexp.new(@escaped_backslash_character)
-      if @quote_character.nil?
+      if @close_quote_character.nil?
         @backslash_quote_character = nil
       else
         @backslash_quote_character =
-          @backslash_character + @escaped_quote_character
+          @backslash_character + @escaped_close_quote_character
       end
     end
 
@@ -651,10 +701,21 @@ class CSV
     end
 
     def prepare_quoted
-      if @quote_character
-        @quotes = Regexp.new(@escaped_quote_character +
-                             "+".encode(@encoding))
-        no_quoted_values = @escaped_quote_character.dup
+      if @close_quote_character
+        if @asymmetric_quote
+          # An opening quote only starts a quoted field; it never needs to
+          # be escaped inside a quoted field.
+          @open_quotes = Regexp.new(@escaped_open_quote_character)
+          @close_quotes = Regexp.new(@escaped_close_quote_character +
+                                     "+".encode(@encoding))
+          no_quoted_values = @escaped_close_quote_character.dup
+        else
+          @open_quotes = nil
+          @close_quotes = nil
+          @quotes = Regexp.new(@escaped_close_quote_character +
+                               "+".encode(@encoding))
+          no_quoted_values = @escaped_close_quote_character.dup
+        end
         if @backslash_quote
           no_quoted_values << @escaped_backslash_character
         end
@@ -678,12 +739,12 @@ class CSV
     end
 
     def prepare_unquoted
-      return if @quote_character.nil?
+      return if @close_quote_character.nil?
 
       no_unquoted_values = Regexp.escape(@row_separator).encode(@encoding)
       no_unquoted_values << @escaped_first_column_separator
       unless @liberal_parsing
-        no_unquoted_values << @escaped_quote_character
+        no_unquoted_values << @escaped_close_quote_character
       end
       @unquoted_value = Regexp.new("[^".encode(@encoding) +
                                    no_unquoted_values +
@@ -804,6 +865,8 @@ class CSV
                                col_sep:    @column_separator,
                                row_sep:    @row_separator,
                                quote_char: @quote_character,
+                               open_quote_char: @options[:open_quote_character],
+                               close_quote_char: @options[:close_quote_character],
                                converters: [converter])
       [headers, quoted_fields]
     end
@@ -816,9 +879,9 @@ class CSV
 
     def prepare_parser
       @may_quoted = may_quoted?
-      if @quote_character.nil?
+      if @open_quote_character.nil?
         @parse_method = :parse_no_quote
-      elsif @liberal_parsing or @strip
+      elsif @asymmetric_quote or @liberal_parsing or @strip
         @parse_method = :parse_quotable_robust
       else
         @parse_method = :parse_quotable_loose
@@ -826,7 +889,8 @@ class CSV
     end
 
     def may_quoted?
-      return false if @quote_character.nil?
+      return false if @open_quote_character.nil?
+      return true if @asymmetric_quote
 
       if @input.is_a?(StringIO)
         pos = @input.pos
@@ -1089,9 +1153,14 @@ class CSV
             message = "Unquoted fields do not allow new line " +
                       "<#{new_line.inspect}>"
             raise MalformedCSVError.new(message, @lineno)
-          elsif @scanner.rest.start_with?(@quote_character)
+          elsif @scanner.rest.start_with?(@close_quote_character)
             ignore_broken_line
-            message = "Illegal quoting"
+            message =
+              if @asymmetric_quote
+                "Illegal close quote character"
+              else
+                "Illegal quoting"
+              end
             raise MalformedCSVError.new(message, @lineno)
           elsif (new_line = @scanner.scan(@line_end))
             ignore_broken_line
@@ -1109,6 +1178,29 @@ class CSV
 
     def parse_column_value
       if @liberal_parsing
+        if @asymmetric_quote
+          quoted_value = parse_asymmetric_quoted_column_value
+          if quoted_value
+            @scanner.scan_all(@strip_value) if @strip_value
+            unquoted_value = parse_unquoted_column_value
+            if unquoted_value
+              if @double_quote_outside_quote
+                unquoted_value =
+                  unquoted_value.gsub(@close_quote_character * 2,
+                                      @close_quote_character)
+                if quoted_value.empty? # %Q{«»...} case
+                  return @open_quote_character + unquoted_value
+                end
+              end
+              return(@open_quote_character + quoted_value +
+                     @close_quote_character + unquoted_value)
+            else
+              return quoted_value
+            end
+          else
+            return parse_unquoted_column_value
+          end
+        end
         quoted_value = parse_quoted_column_value
         if quoted_value
           @scanner.scan_all(@strip_value) if @strip_value
@@ -1129,11 +1221,19 @@ class CSV
           parse_unquoted_column_value
         end
       elsif @may_quoted
-        parse_quoted_column_value ||
+        quoted_column_value ||
           parse_unquoted_column_value
       else
         parse_unquoted_column_value ||
-          parse_quoted_column_value
+          quoted_column_value
+      end
+    end
+
+    def quoted_column_value
+      if @asymmetric_quote
+        parse_asymmetric_quoted_column_value
+      else
+        parse_quoted_column_value
       end
     end
 
@@ -1158,7 +1258,9 @@ class CSV
           value << sub_value
         end
       end
-      value.gsub!(@backslash_quote_character, @quote_character) if @backslash_quote
+      if @backslash_quote
+        value.gsub!(@backslash_quote_character, @close_quote_character)
+      end
       if @rstrip_value
         value.gsub!(@rstrip_value, "")
       end
@@ -1205,6 +1307,48 @@ class CSV
         end
         value
       end
+    end
+
+    def parse_asymmetric_quoted_column_value
+      # Only a single opening quote starts a quoted field. A bare opening
+      # quote inside an unquoted field is ordinary text.
+      return nil unless @scanner.scan(@open_quotes)
+
+      @quoted_column_value = true
+      value = +""
+      while true
+        quoted_value = @scanner.scan_all(@quoted_value)
+        value << quoted_value if quoted_value
+        if @backslash_quote
+          if @scanner.scan(@escaped_backslash)
+            if @scanner.scan(@escaped_quote)
+              value << @close_quote_character
+            else
+              value << @backslash_character
+            end
+            next
+          end
+        end
+
+        close_quotes = @scanner.scan_all(@close_quotes)
+        unless close_quotes
+          ignore_broken_line
+          message = "Unclosed quoted field"
+          raise MalformedCSVError.new(message, @lineno)
+        end
+        n_close_quotes = close_quotes.size
+        if n_close_quotes == 1
+          break
+        elsif (n_close_quotes % 2) == 0
+          # An even run represents doubled (escaped) close quotes;
+          # the quoted field continues.
+          value << close_quotes[0, n_close_quotes / 2]
+        else
+          value << close_quotes[0, n_close_quotes / 2]
+          break
+        end
+      end
+      value
     end
 
     def parse_column_end

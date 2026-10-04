@@ -1,5 +1,19 @@
 # News
 
+## Unreleased
+
+### Improvements
+
+  * Added support for asymmetric quote pairs: new options
+    `open_quote_char` and `close_quote_char` may be passed together to
+    specify distinct opening and closing quote characters (for example
+    `«` and `»`). `quote_char` remains the symmetric shorthand and is
+    used when both new options are `nil` (the default). Inside a quoted
+    field, a literal close quote is written and parsed as a doubled
+    close quote; the open quote does not need escaping and a bare open
+    quote in unquoted text is treated as an ordinary character. Both
+    options are validated against `col_sep` and `row_sep`.
+
 ## 3.3.6 - 2026-07-27
 
 ### Improvements

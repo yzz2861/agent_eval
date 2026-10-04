@@ -1,0 +1,44 @@
+====== Option +open_quote_char+
+
+Specifies the character (\String of length 1) used as the
+<em>opening</em> quote for fields in both parsing and generating.
+This String will be transcoded into the data's \Encoding before use.
+
+Default value: +nil+.
+
+This option is only used together with +close_quote_char+. When both
++open_quote_char+ and +close_quote_char+ are given, they define a pair of
+distinct opening and closing quote characters, which is useful for data
+produced by legacy systems that use guillemets or similar paired marks:
+  open_quote_char = "\u00ab" # «
+  close_quote_char = "\u00bb" # »
+  str = CSV.generate(open_quote_char: open_quote_char,
+                     close_quote_char: close_quote_char) do |csv|
+    csv << ["a,b", "line1\nline2", "he said \u{bb}hi\u{bb}"]
+  end
+  str # => "\u{ab}a,b\u{bb},\u{ab}line1\nline2\u{bb},\u{ab}he said \u{bb}\u{bb}hi\u{bb}\u{bb}\u{bb}\n"
+  ary = CSV.parse(str,
+                 open_quote_char: open_quote_char,
+                 close_quote_char: close_quote_char)
+  ary # => [["a,b", "line1\nline2", "he said \u{bb}hi\u{bb}"]]
+
+Rules used with an asymmetric quote pair:
+- A quoted field starts with the opening quote character at the beginning of
+  the field. An opening quote character appearing inside unquoted text is
+  treated as an ordinary character and does not start a quoted field.
+- The closing quote character ends a quoted field. To include a literal
+  closing quote character inside a quoted field, double it, exactly as a
+  symmetric quote character is doubled.
+- The opening quote character never needs escaping inside a quoted field.
+
+The two options must always be passed together: passing only one of them
+raises +ArgumentError+. When both are +nil+ (the default), the +quote_char+
+option is used as a symmetric quote character. When both are given, they take
+precedence over +quote_char+.
+
+Raises an exception unless the value is a single character String:
+  # Raises ArgumentError
+  CSV.new('', open_quote_char: '««', close_quote_char: '»')
+
+Raises +ArgumentError+ if the quote character is included in +col_sep+ or
++row_sep+.

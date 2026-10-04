@@ -84,7 +84,9 @@ class CSV
         @headers = CSV.parse_line(headers,
                                   col_sep: @options[:column_separator],
                                   row_sep: @options[:row_separator],
-                                  quote_char: @options[:quote_character])
+                                  quote_char: @options[:quote_character],
+                                  open_quote_char: @options[:open_quote_character],
+                                  close_quote_char: @options[:close_quote_character])
         @use_headers = true
       when true
         @headers = nil
@@ -137,7 +139,20 @@ class CSV
       else
         @row_separator = row_separator.to_s.encode(@encoding)
       end
-      @quote_character = @options[:quote_character]
+      @open_quote_character,
+      @close_quote_character,
+      @asymmetric_quote =
+        CSV::QuoteOption.resolve_quote_characters(@options[:quote_character],
+                                                  @options[:open_quote_character],
+                                                  @options[:close_quote_character])
+      if @open_quote_character
+        @open_quote_character =
+          @open_quote_character.encode(@encoding)
+        @close_quote_character =
+          @close_quote_character.encode(@encoding)
+        validate_quote_character_separators
+      end
+      @quote_character = @open_quote_character
       force_quotes = @options[:force_quotes]
       if force_quotes.is_a?(Array)
         prepare_force_quotes_fields(force_quotes)
@@ -149,14 +164,36 @@ class CSV
         @force_quotes_fields = nil
         @force_quotes = false
       end
-      unless @force_quotes
+      unless @force_quotes or @open_quote_character.nil?
         @quotable_pattern =
           Regexp.new("[\r\n".encode(@encoding) +
                      Regexp.escape(@column_separator) +
-                     Regexp.escape(@quote_character.encode(@encoding)) +
+                     [@open_quote_character,
+                      @close_quote_character].uniq.collect do |character|
+                       Regexp.escape(character)
+                     end.join +
                      "]".encode(@encoding))
       end
       @quote_empty = @options.fetch(:quote_empty, true)
+    end
+
+    def validate_quote_character_separators
+      if @column_separator.include?(@open_quote_character) or
+         @column_separator.include?(@close_quote_character)
+        message =
+          "Quote characters (#{@open_quote_character.inspect}, " \
+          "#{@close_quote_character.inspect}) and col_sep " \
+          "(#{@column_separator.inspect}) are incompatible."
+        raise ArgumentError, message
+      end
+      if @row_separator.include?(@open_quote_character) or
+         @row_separator.include?(@close_quote_character)
+        message =
+          "Quote characters (#{@open_quote_character.inspect}, " \
+          "#{@close_quote_character.inspect}) and row_sep " \
+          "(#{@row_separator.inspect}) are incompatible."
+        raise ArgumentError, message
+      end
     end
 
     def prepare_output
@@ -179,11 +216,14 @@ class CSV
 
     def quote_field(field)
       field = String(field)
-      encoded_quote_character = @quote_character.encode(field.encoding)
-      encoded_quote_character +
-        field.gsub(encoded_quote_character,
-                   encoded_quote_character * 2) +
-        encoded_quote_character
+      encoded_open_quote_character =
+        @open_quote_character.encode(field.encoding)
+      encoded_close_quote_character =
+        @close_quote_character.encode(field.encoding)
+      encoded_open_quote_character +
+        field.gsub(encoded_close_quote_character,
+                   encoded_close_quote_character * 2) +
+        encoded_close_quote_character
     end
 
     def quote(field, i)
@@ -196,6 +236,9 @@ class CSV
           ""
         else
           field = String(field)  # Stringify fields
+          if @open_quote_character.nil?
+            return field
+          end
           # represent empty fields as empty quoted fields
           if (@quote_empty and field.empty?) or (field.valid_encoding? and @quotable_pattern.match?(field))
             quote_field(field)
