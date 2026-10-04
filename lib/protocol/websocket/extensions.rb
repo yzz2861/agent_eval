@@ -5,6 +5,7 @@
 # Copyright, 2026, by William T. Nelson.
 
 require_relative "extension/compression"
+require_relative "extension/plan"
 require_relative "headers"
 
 module Protocol
@@ -44,13 +45,20 @@ module Protocol
 				# @parameter extensions [Array] The list of extensions to offer, each as `[klass, options]`.
 				def initialize(extensions = [])
 					@extensions = extensions
-					@accepted = []
+					@plan = Extension::Plan.new(:client)
 				end
 				
 				# @attribute [Array] The list of extensions to offer.
 				attr :extensions
-				# @attribute [Array] The extensions accepted after negotiation.
-				attr :accepted
+				
+				# @attribute [Extension::Plan] The negotiation plan built while accepting the server response.
+				attr :plan
+				
+				# The extensions accepted after negotiation, as `[klass, options]` pairs.
+				# @returns [Array(Array(Module, Hash))]
+				def accepted
+					@plan.to_a
+				end
 				
 				# Build a lookup table of extensions keyed by their name.
 				# @returns [Hash] A hash mapping extension names to their `[klass, options]` pairs.
@@ -71,32 +79,44 @@ module Protocol
 					end
 				end
 				
-				# Accept server extension responses and record the negotiated extensions.
+				# Accept server extension responses and build the negotiation plan.
+				#
+				# The server may only accept extensions that were offered, may only accept each extension once, and the negotiated parameters are validated by the extension. Two accepted extensions contending for the same reserved frame bit is also rejected.
+				#
 				# @parameter headers [Array(String)] The `Sec-WebSocket-Extensions` response header values.
-				# @returns [Array] The accepted extensions as `[klass, options]` pairs.
+				# @raises [NegotiationError] If an unoffered or duplicate extension is accepted, or reserved bits conflict.
+				# @returns [Extension::Plan] The complete negotiation plan.
 				def accept(headers)
-					named = self.named
+					available = self.named
+					offered_names = available.keys
+					plan = Extension::Plan.new(:client)
 					
-					# Each response header should map to at least one extension.
 					Extensions.parse(headers) do |name, arguments|
-						if extension = named.delete(name)
-							klass, options = extension
-							
-							options = klass.accept(arguments, **options)
-							
-							@accepted << [klass, options]
+						extension = available.delete(name)
+						
+						if extension.nil?
+							if offered_names.include?(name)
+								raise NegotiationError, "Server accepted extension #{name.inspect} more than once!"
+							else
+								raise NegotiationError, "Server accepted extension #{name.inspect} which was not offered!"
+							end
 						end
+						
+						klass, options = extension
+						options = klass.accept(arguments, **options)
+						
+						plan.add(klass, options)
 					end
 					
-					return @accepted
+					@plan = plan
+					
+					return @plan
 				end
 				
-				# Apply all accepted extensions to the given connection as a client.
+				# Apply the negotiated plan to the given connection as a client.
 				# @parameter connection [Connection] The WebSocket connection to configure.
 				def apply(connection)
-					@accepted.each do |(klass, options)|
-						klass.client(connection, **options)
-					end
+					@plan.apply(connection)
 				end
 			end
 			
@@ -114,13 +134,20 @@ module Protocol
 				# @parameter extensions [Array] The list of supported extensions, each as `[klass, options]`.
 				def initialize(extensions)
 					@extensions = extensions
-					@accepted = []
+					@plan = Extension::Plan.new(:server)
 				end
 				
 				# @attribute [Array] The list of supported extensions.
 				attr :extensions
-				# @attribute [Array] The extensions accepted after negotiation.
-				attr :accepted
+				
+				# @attribute [Extension::Plan] The negotiation plan built while accepting client offers.
+				attr :plan
+				
+				# The extensions accepted after negotiation, as `[klass, options]` pairs.
+				# @returns [Array(Array(Module, Hash))]
+				def accepted
+					@plan.to_a
+				end
 				
 				# Build a lookup table of extensions keyed by their name.
 				# @returns [Hash] A hash mapping extension names to their `[klass, options]` pairs.
@@ -130,41 +157,57 @@ module Protocol
 					end.to_h
 				end
 				
-				# Negotiate client extension offers and yield accepted response headers.
+				# Negotiate client extension offers and build the negotiation plan.
+				#
+				# Each supported extension is accepted at most once, negotiated parameters are validated by the extension, and two accepted extensions contending for the same reserved frame bit is rejected.
+				#
 				# @parameter headers [Array(String)] The `Sec-WebSocket-Extensions` request header values.
 				# @yields {|header| ...} Each accepted extension header to include in the response.
 				# 	@parameter header [Array(String)] The negotiated extension header tokens.
-				# @returns [Array] The accepted extensions as `[klass, options]` pairs.
+				# @raises [NegotiationError] If an extension is offered twice or two accepted extensions contend for the same reserved frame bit.
+				# @returns [Extension::Plan] The complete negotiation plan.
 				def accept(headers)
-					named = self.named
+					supported = self.named
+					selected = {}
+					plan = Extension::Plan.new(:server)
 					
-					# Each response header should map to at least one extension.
 					Extensions.parse(headers) do |name, arguments|
-						if extension = named[name]
-							klass, options = extension
-							
-							if result = klass.negotiate(arguments, **options)
-								header, options = result
-								
-								# The extension is accepted and no further offers will be considered:
-								named.delete(name)
-								
-								yield header if block_given?
-								
-								@accepted << [klass, options]
+						extension = supported[name]
+						
+						if extension.nil?
+							if selected.key?(name)
+								raise NegotiationError, "Extension #{name.inspect} was offered more than once!"
 							end
+							
+							# The extension is unknown to this server, so ignore the offer:
+							next
+						end
+						
+						klass, options = extension
+						
+						if result = klass.negotiate(arguments, **options)
+							header, options = result
+							
+							# Record the selection first: this raises a clear error if the extension contends for a reserved bit already in use:
+							entry = plan.add(klass, options, header)
+							
+							# The extension is accepted and no further offers will be considered:
+							supported.delete(name)
+							selected[name] = entry
+							
+							yield entry.header if block_given?
 						end
 					end
 					
-					return @accepted
+					@plan = plan
+					
+					return @plan
 				end
 				
-				# Apply all accepted extensions to the given connection as a server.
+				# Apply the negotiated plan to the given connection as a server.
 				# @parameter connection [Connection] The WebSocket connection to configure.
 				def apply(connection)
-					@accepted.reverse_each do |(klass, options)|
-						klass.server(connection, **options)
-					end
+					@plan.apply(connection)
 				end
 			end
 		end

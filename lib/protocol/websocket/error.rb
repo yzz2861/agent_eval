@@ -61,5 +61,13 @@ module Protocol
 		# When the frame payload does not match expectations.
 		class FrameSizeError < ProtocolError
 		end
+		
+		# Raised when a WebSocket extension cannot be negotiated or installed.
+		class ExtensionError < Error
+		end
+		
+		# Raised when extension negotiation fails, e.g. the remote end accepts an extension that was not offered, selects it more than once, or multiple extensions contend for the same reserved frame bit.
+		class NegotiationError < ExtensionError
+		end
 	end
 end
