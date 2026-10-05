@@ -37,7 +37,7 @@ module Faraday
   #   #   @return [Hash] free-form storage carried alongside the request
   #   #
   #   # @!attribute on_data
-  #   #   @return [Proc] callback invoked with each chunk when streaming the response
+  #   #   @return [#call] callback invoked with each chunk when streaming the response
   #   class RequestOptions < Options; end
   RequestOptions = Options.new(:params_encoder, :proxy, :bind,
                                :timeout, :open_timeout, :read_timeout,
@@ -52,7 +52,7 @@ module Faraday
     end
 
     def stream_response?
-      on_data.is_a?(Proc)
+      on_data.respond_to?(:call)
     end
   end
 end

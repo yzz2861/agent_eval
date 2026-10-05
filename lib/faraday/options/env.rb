@@ -24,7 +24,7 @@ module Faraday
   #   #                        the server (Integer in seconds)
   #   #   - `:write_timeout` - time limit for the client to send the request to the
   #   #                        server (Integer in seconds)
-  #   #   - `:on_data`       - Proc for streaming
+  #   #   - `:on_data`       - callable handler for streaming
   #   #   - `:proxy`         - Hash of proxy options
   #   #       - `:uri`         - Proxy server URI
   #   #       - `:user`        - Proxy server username

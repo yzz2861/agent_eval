@@ -54,6 +54,7 @@ module Faraday
       raise 'response already finished' if finished?
 
       @env = env.is_a?(Env) ? env : Env.from(env)
+      finalize_streaming_response(@env)
       @on_complete_callbacks.each { |callback| callback.call(@env) }
       self
     end
@@ -86,6 +87,15 @@ module Faraday
 
       @env = Env.from(request_env).update(@env)
       self
+    end
+
+    private
+
+    def finalize_streaming_response(env)
+      return unless env.request&.stream_response?
+
+      on_data = env.request.on_data
+      on_data.finish if on_data.respond_to?(:finish)
     end
   end
 end

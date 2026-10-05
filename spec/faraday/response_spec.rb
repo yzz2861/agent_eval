@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'zlib'
+
 RSpec.describe Faraday::Response do
   subject { Faraday::Response.new(env) }
 
@@ -79,6 +81,36 @@ RSpec.describe Faraday::Response do
       subject.finish({})
 
       expect(subject.env).to eq(callback_env)
+    end
+  end
+
+  describe 'streaming finalization' do
+    subject { Faraday::Response.new }
+
+    it 'finishes an EventStream decoder when the response completes' do
+      frame = [16, 0].pack('NN')
+      frame << [Zlib.crc32(frame)].pack('N')
+      frame << [Zlib.crc32(frame)].pack('N')
+      decoder = Faraday::EventStream::Decoder.new {}
+      decoder.call(frame.byteslice(0, 8))
+
+      env = Faraday::Env.from(status: 200, request: { on_data: decoder })
+
+      expect { subject.finish(env) }.to raise_error(
+        Faraday::EventStream::TruncatedMessageError
+      ) do |error|
+        expect(error.message_number).to eq(1)
+        expect(error.byte_position).to eq(0)
+      end
+    end
+
+    it 'does not require a finish method on ordinary streaming callbacks' do
+      called = false
+      on_data = proc { called = true }
+      env = Faraday::Env.from(status: 200, request: { on_data: on_data })
+
+      subject.finish(env)
+      expect(called).to be(false)
     end
   end
 end

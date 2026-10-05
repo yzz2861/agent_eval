@@ -16,4 +16,16 @@ RSpec.describe Faraday::RequestOptions do
     expect(options.proxy).to be_nil
     expect(options.inspect).to eq('#<Faraday::RequestOptions (empty)>')
   end
+
+  describe '#stream_response?' do
+    it 'accepts Proc and other callable on_data handlers' do
+      expect(options.stream_response?).to be(false)
+
+      options.on_data = proc {}
+      expect(options.stream_response?).to be(true)
+
+      options.on_data = Faraday::EventStream::Decoder.new {}
+      expect(options.stream_response?).to be(true)
+    end
+  end
 end

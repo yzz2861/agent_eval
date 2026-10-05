@@ -32,4 +32,31 @@ To see which ones, please refer to [Awesome Faraday][awesome] comparative table 
 Moreover, the `env` parameter was only recently added, which means some adapters may only have partial support
 (i.e. only `chunk` and `overall_received_bytes` will be passed to your block).
 
+## Amazon EventStream
+
+For Amazon EventStream responses, use `Faraday::EventStream::Decoder` as the
+`on_data` handler. It buffers chunks split at arbitrary byte boundaries and
+only yields a message after validating the prelude CRC, frame lengths, typed
+headers, and message CRC. Faraday calls `finish` automatically when the
+response completes, so a truncated final frame raises an error.
+
+```ruby
+decoder = Faraday::EventStream::Decoder.new do |message, env|
+  message.headers.each do |name, header|
+    puts "#{name}: #{header.value} (#{header.type})"
+  end
+  process(message.payload)
+end
+
+connection.get('/events') do |request|
+  request.options.on_data = decoder
+end
+```
+
+Protocol errors subclass `Faraday::EventStream::Error` and expose
+`message_number` (1-based) and `byte_position` (0-based). Error messages do
+not include payload data. Unrecognized header type bytes in the reserved
+legal range raise `UnknownHeaderTypeError`; invalid type bytes raise
+`InvalidHeaderTypeError`.
+
 [awesome]:      https://github.com/lostisland/awesome-faraday/#adapters
