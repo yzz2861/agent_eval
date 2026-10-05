@@ -101,6 +101,45 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Decimal Mode
+~~~~~~~~~~~~
+
+JSON numeric literals normally follow Python's ``int`` and ``float``
+rules.  To evaluate financial expressions without binary float rounding,
+set ``decimal_mode=True``:
+
+.. code:: python
+
+    >>> import jmespath
+    >>> options = jmespath.Options(decimal_mode=True)
+    >>> jmespath.search('sum(`[0.1, 0.2]`)', {}, options)
+    Decimal('0.3')
+
+In this mode, numeric JSON literals become ``Decimal`` values, including
+integer literals.  Bare expression numbers remain integers because they are
+syntactic indices.  Parsed ``int`` data also remains an integer, while
+``int`` and ``Decimal`` values promote using Python's normal arithmetic
+rules.  Finite ``float`` inputs are normalized as
+``Decimal(str(value))``, and booleans remain booleans rather than numbers.
+``NaN`` and infinite values are rejected by numeric functions and ordering
+comparisons.
+
+An optional ``decimal.Context`` controls arithmetic such as ``avg``:
+
+.. code:: python
+
+    >>> import decimal
+    >>> options = jmespath.Options(
+    ...     decimal_mode=True,
+    ...     decimal_context=decimal.Context(prec=2))
+    >>> jmespath.search('avg(`[1, 200]`)', {}, options)
+    Decimal('1E+2')
+
+Expressions compiled in normal and Decimal mode use separate compilation
+cache entries, and custom function ``number`` signatures apply the active
+mode during validation.
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 

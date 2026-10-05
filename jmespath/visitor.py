@@ -1,8 +1,22 @@
 import operator
+from decimal import Decimal, InvalidOperation
 
 from jmespath import functions
 from jmespath.compat import string_type
 from numbers import Number
+
+
+def to_decimal_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def is_finite_number(value):
+    return _is_actual_number(value) and value == value and value not in (
+        Decimal('Infinity'), Decimal('-Infinity'))
 
 
 def _equals(x, y):
@@ -35,12 +49,16 @@ def _is_special_number_case(x, y):
         return isinstance(x, bool)
 
 
-def _is_comparable(x):
+def _is_comparable(x, decimal_mode=False):
     # The spec doesn't officially support string types yet,
     # but enough people are relying on this behavior that
     # it's been added back.  This should eventually become
     # part of the official spec.
-    return _is_actual_number(x) or isinstance(x, string_type)
+    if not (_is_actual_number(x) or isinstance(x, string_type)):
+        return False
+    if decimal_mode and _is_actual_number(x) and not is_finite_number(x):
+        return False
+    return True
 
 
 def _is_actual_number(x):
@@ -58,7 +76,8 @@ def _is_actual_number(x):
 
 class Options(object):
     """Options to control how a JMESPath function is evaluated."""
-    def __init__(self, dict_cls=None, custom_functions=None):
+    def __init__(self, dict_cls=None, custom_functions=None,
+                 decimal_mode=False, decimal_context=None):
         #: The class to use when creating a dict.  The interpreter
         #  may create dictionaries during the evaluation of a JMESPath
         #  expression.  For example, a multi-select hash will
@@ -69,6 +88,8 @@ class Options(object):
         #  have predictable key ordering.
         self.dict_cls = dict_cls
         self.custom_functions = custom_functions
+        self.decimal_mode = decimal_mode
+        self.decimal_context = decimal_context
 
 
 class _Expression(object):
@@ -120,7 +141,9 @@ class TreeInterpreter(Visitor):
         if options.custom_functions is not None:
             self._functions = self._options.custom_functions
         else:
-            self._functions = functions.Functions()
+            self._functions = functions.Functions(
+                decimal_mode=options.decimal_mode,
+                decimal_context=options.decimal_context)
 
     def default_visit(self, node, *args, **kwargs):
         raise NotImplementedError(node['type'])
@@ -141,19 +164,26 @@ class TreeInterpreter(Visitor):
         # Common case: comparator is == or !=
         comparator_func = self.COMPARATOR_FUNC[node['value']]
         if node['value'] in self._EQUALITY_OPS:
-            return comparator_func(
-                self.visit(node['children'][0], value),
-                self.visit(node['children'][1], value)
-            )
+            left = self.visit(node['children'][0], value)
+            right = self.visit(node['children'][1], value)
+            if (self._options.decimal_mode and
+                    node['value'] in self._EQUALITY_OPS):
+                left = self._decimal_number(left)
+                right = self._decimal_number(right)
+            return comparator_func(left, right)
         else:
             # Ordering operators are only valid for numbers.
             # Evaluating any other type with a comparison operator
             # will yield a None value.
             left = self.visit(node['children'][0], value)
             right = self.visit(node['children'][1], value)
-            num_types = (int, float)
-            if not (_is_comparable(left) and
-                    _is_comparable(right)):
+            if self._options.decimal_mode:
+                if not (_is_comparable(left, True) and
+                        _is_comparable(right, True)):
+                    return None
+                left = self._decimal_number(left)
+                right = self._decimal_number(right)
+            elif not (_is_comparable(left) and _is_comparable(right)):
                 return None
             return comparator_func(left, right)
 
@@ -168,6 +198,11 @@ class TreeInterpreter(Visitor):
         for child in node['children']:
             current = self.visit(child, value)
             resolved_args.append(current)
+        if self._options.decimal_mode:
+            return self._functions.call_function(
+                node['value'], resolved_args,
+                decimal_mode=True,
+                decimal_context=self._options.decimal_context)
         return self._functions.call_function(node['value'], resolved_args)
 
     def visit_filter_projection(self, node, value):
@@ -302,6 +337,15 @@ class TreeInterpreter(Visitor):
 
     def _is_true(self, value):
         return not self._is_false(value)
+
+    def _decimal_number(self, value):
+        if (isinstance(value, bool) or not _is_actual_number(value) or
+                not is_finite_number(value)):
+            return value
+        try:
+            return to_decimal_number(value)
+        except (InvalidOperation, ValueError, ArithmeticError):
+            return None
 
 
 class GraphvizVisitor(Visitor):

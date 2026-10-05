@@ -1,5 +1,8 @@
 import math
 import json
+import threading
+from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation, localcontext
 
 from jmespath import exceptions
 from jmespath.compat import string_type as STRING_TYPE
@@ -69,7 +72,41 @@ class Functions(metaclass=FunctionRegistry):
     FUNCTION_TABLE = {
     }
 
-    def call_function(self, function_name, resolved_args):
+    def __init__(self, decimal_mode=False, decimal_context=None):
+        self.decimal_mode = decimal_mode
+        self.decimal_context = decimal_context
+        self._decimal_state = threading.local()
+
+    @property
+    def _active_decimal_mode(self):
+        state = getattr(self, '_decimal_state', None)
+        if state is None:
+            state = threading.local()
+            self._decimal_state = state
+        return getattr(state, 'mode', getattr(self, 'decimal_mode', False))
+
+    @contextmanager
+    def _decimal_runtime(self, decimal_mode=False, decimal_context=None):
+        state = getattr(self, '_decimal_state', None)
+        if state is None:
+            state = threading.local()
+            self._decimal_state = state
+        old_mode = getattr(self._decimal_state, 'mode', None)
+        self._decimal_state.mode = decimal_mode
+        try:
+            if decimal_mode and decimal_context is not None:
+                with localcontext(decimal_context):
+                    yield
+            else:
+                yield
+        finally:
+            if old_mode is None:
+                del self._decimal_state.mode
+            else:
+                self._decimal_state.mode = old_mode
+
+    def call_function(self, function_name, resolved_args,
+                      decimal_mode=None, decimal_context=None):
         try:
             spec = self.FUNCTION_TABLE[function_name]
         except KeyError:
@@ -77,8 +114,66 @@ class Functions(metaclass=FunctionRegistry):
                 "Unknown function: %s()" % function_name)
         function = spec['function']
         signature = spec['signature']
-        self._validate_arguments(resolved_args, signature, function_name)
-        return function(self, *resolved_args)
+        if decimal_mode is None:
+            decimal_mode = self._active_decimal_mode
+        if decimal_context is None:
+            decimal_context = getattr(self, 'decimal_context', None)
+        with self._decimal_runtime(decimal_mode, decimal_context):
+            if decimal_mode:
+                try:
+                    resolved_args = self._decimal_arguments(
+                        resolved_args, signature)
+                except exceptions.JMESPathTypeError as e:
+                    if not e.function_name:
+                        e.function_name = function_name
+                    raise
+                except ValueError:
+                    raise exceptions.JMESPathTypeError(
+                        function_name, resolved_args[0], 'number',
+                        signature[0]['types'])
+            self._validate_arguments(
+                resolved_args, signature, function_name)
+            return function(self, *resolved_args)
+
+    def _decimal_arguments(self, args, signature):
+        converted = []
+        variadic = bool(signature and signature[-1].get('variadic'))
+        for i, arg in enumerate(args):
+            if i < len(signature) or variadic:
+                arg = self._decimal_argument(
+                    arg, signature[min(i, len(signature) - 1)]['types'])
+            converted.append(arg)
+        return converted
+
+    def _decimal_argument(self, arg, types):
+        if not types or 'number' not in types and not any(
+                t.startswith('array-number') for t in types):
+            return arg
+        if isinstance(arg, list):
+            converted = []
+            for element in arg:
+                try:
+                    converted.append(self._decimal_number(element))
+                except ValueError:
+                    raise exceptions.JMESPathTypeError(
+                        '', element, 'number', ['array-number'])
+            return converted
+        return self._decimal_number(arg)
+
+    def _decimal_number(self, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, Decimal):
+            decimal_value = value
+        elif isinstance(value, float):
+            decimal_value = Decimal(str(value))
+        elif isinstance(value, int):
+            return value
+        else:
+            return value
+        if not decimal_value.is_finite():
+            raise ValueError('Non-finite number: %s' % value)
+        return decimal_value
 
     def _validate_arguments(self, args, signature, function_name):
         if signature and signature[-1].get('variadic'):
@@ -91,11 +186,13 @@ class Functions(metaclass=FunctionRegistry):
         return self._type_check(args, signature, function_name)
 
     def _type_check(self, actual, signature, function_name):
-        for i in range(len(signature)):
-            allowed_types = signature[i]['types']
+        variadic = bool(signature and signature[-1].get('variadic'))
+        for i in range(len(actual)):
+            signature_index = min(i, len(signature) - 1)
+            allowed_types = signature[signature_index]['types']
             if allowed_types:
-                self._type_check_single(actual[i], allowed_types,
-                                        function_name)
+                self._type_check_single(
+                    actual[i], allowed_types, function_name)
 
     def _type_check_single(self, current, types, function_name):
         # Type checking involves checking the top level type,
@@ -127,10 +224,16 @@ class Functions(metaclass=FunctionRegistry):
             type_ = t.split('-', 1)
             if len(type_) == 2:
                 type_, subtype = type_
-                allowed_subtypes.append(REVERSE_TYPES_MAP[subtype])
+                pytypes = list(REVERSE_TYPES_MAP[subtype])
+                if subtype == 'number' and self._active_decimal_mode:
+                    pytypes.append('Decimal')
+                allowed_subtypes.append(pytypes)
             else:
                 type_ = type_[0]
-            allowed_types.extend(REVERSE_TYPES_MAP[type_])
+            pytypes = list(REVERSE_TYPES_MAP[type_])
+            if type_ == 'number' and self._active_decimal_mode:
+                pytypes.append('Decimal')
+            allowed_types.extend(pytypes)
         return allowed_types, allowed_subtypes
 
     def _subtype_check(self, current, allowed_subtypes, types, function_name):
@@ -168,6 +271,8 @@ class Functions(metaclass=FunctionRegistry):
     @signature({'types': ['array-number']})
     def _func_avg(self, arg):
         if arg:
+            if self._active_decimal_mode:
+                return sum(arg, Decimal(0)) / Decimal(len(arg))
             return sum(arg) / len(arg)
         else:
             return None
@@ -195,20 +300,34 @@ class Functions(metaclass=FunctionRegistry):
 
     @signature({'types': []})
     def _func_to_number(self, arg):
+        decimal_mode = self._active_decimal_mode
         if isinstance(arg, (list, dict, bool)):
             return None
         elif arg is None:
             return None
+        elif decimal_mode and isinstance(arg, Decimal):
+            return arg if arg.is_finite() else None
         elif isinstance(arg, (int, float)):
+            if decimal_mode:
+                try:
+                    return self._decimal_number(arg)
+                except ValueError:
+                    return None
             return arg
         else:
             try:
+                if decimal_mode:
+                    decimal_value = Decimal(arg)
+                    return decimal_value if decimal_value.is_finite() else None
                 return int(arg)
-            except ValueError:
-                try:
-                    return float(arg)
-                except ValueError:
-                    return None
+            except (ValueError, ArithmeticError, InvalidOperation):
+                pass
+            try:
+                if decimal_mode:
+                    return self._decimal_number(float(arg))
+                return float(arg)
+            except (ValueError, ArithmeticError):
+                return None
 
     @signature({'types': ['array', 'string']}, {'types': []})
     def _func_contains(self, subject, search):
@@ -301,6 +420,9 @@ class Functions(metaclass=FunctionRegistry):
             return "array"
         elif isinstance(arg, dict):
             return "object"
+        elif isinstance(arg, Decimal):
+            if self._active_decimal_mode:
+                return "number"
         elif isinstance(arg, (float, int)):
             return "number"
         elif arg is None:
@@ -349,6 +471,12 @@ class Functions(metaclass=FunctionRegistry):
     def _create_key_func(self, expref, allowed_types, function_name):
         def keyfunc(x):
             result = expref.visit(expref.expression, x)
+            if self._active_decimal_mode and 'number' in allowed_types:
+                try:
+                    result = self._decimal_number(result)
+                except ValueError:
+                    raise exceptions.JMESPathTypeError(
+                        function_name, result, 'number', allowed_types)
             actual_typename = type(result).__name__
             jmespath_type = self._convert_to_jmespath_type(actual_typename)
             # allowed_types is in term of jmespath types, not python types.
@@ -359,4 +487,6 @@ class Functions(metaclass=FunctionRegistry):
         return keyfunc
 
     def _convert_to_jmespath_type(self, pyobject):
+        if pyobject == 'Decimal' and self._active_decimal_mode:
+            return 'number'
         return TYPES_MAP.get(pyobject, 'unknown')

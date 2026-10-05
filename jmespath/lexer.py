@@ -1,8 +1,13 @@
 import string
 import warnings
 from json import loads
+from decimal import Decimal
 
 from jmespath.exceptions import LexerError, EmptyExpressionError
+
+
+class _NonFiniteNumber(ValueError):
+    pass
 
 
 class Lexer(object):
@@ -22,6 +27,9 @@ class Lexer(object):
         '{': 'lbrace',
         '}': 'rbrace',
     }
+
+    def __init__(self, decimal_mode=False):
+        self.decimal_mode = decimal_mode
 
     def tokenize(self, expression):
         self._initialize_for_expression(expression)
@@ -160,7 +168,18 @@ class Lexer(object):
         lexeme = self._consume_until('`').replace('\\`', '`')
         try:
             # Assume it is valid JSON and attempt to parse.
-            parsed_json = loads(lexeme)
+            if self.decimal_mode:
+                parsed_json = loads(
+                    lexeme,
+                    parse_float=Decimal,
+                    parse_int=Decimal,
+                    parse_constant=self._reject_json_constant)
+            else:
+                parsed_json = loads(lexeme)
+        except _NonFiniteNumber:
+            raise LexerError(lexer_position=start,
+                             lexer_value=self._expression[start:],
+                             message="Bad token %s" % lexeme)
         except ValueError:
             try:
                 # Invalid JSON values should be converted to quoted
@@ -175,6 +194,9 @@ class Lexer(object):
         token_len = self._position - start
         return {'type': 'literal', 'value': parsed_json,
                 'start': start, 'end': token_len}
+
+    def _reject_json_constant(self, value):
+        raise _NonFiniteNumber('Non-finite number: %s' % value)
 
     def _consume_quoted_identifier(self):
         start = self._position

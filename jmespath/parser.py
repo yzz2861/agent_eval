@@ -73,18 +73,22 @@ class Parser(object):
     _CACHE = {}
     _MAX_SIZE = 512
 
-    def __init__(self, lookahead=2):
+    def __init__(self, lookahead=2, decimal_mode=False):
         self.tokenizer = None
         self._tokens = [None] * lookahead
         self._buffer_size = lookahead
         self._index = 0
+        self.decimal_mode = decimal_mode
 
-    def parse(self, expression):
+    def parse(self, expression, decimal_mode=None):
+        if decimal_mode is None:
+            decimal_mode = self.decimal_mode
+        cache_key = (expression, decimal_mode) if decimal_mode else expression
         try:
-            return self._CACHE[expression]
+            return self._CACHE[cache_key]
         except KeyError:
             pass
-        parsed_result = self._do_parse(expression)
+        parsed_result = self._do_parse(expression, decimal_mode)
         if len(self._CACHE) >= self._MAX_SIZE:
             try:
                 del self._CACHE[next(iter(self._CACHE))]
@@ -99,12 +103,12 @@ class Parser(object):
                 # an element from the cache, otherwise this can grow
                 # unbounded.
                 return parsed_result
-        self._CACHE[expression] = parsed_result
+        self._CACHE[cache_key] = parsed_result
         return parsed_result
 
-    def _do_parse(self, expression):
+    def _do_parse(self, expression, decimal_mode=False):
         try:
-            return self._parse(expression)
+            return self._parse(expression, decimal_mode)
         except exceptions.LexerError as e:
             e.expression = expression
             raise
@@ -115,8 +119,9 @@ class Parser(object):
             e.expression = expression
             raise
 
-    def _parse(self, expression):
-        self.tokenizer = lexer.Lexer().tokenize(expression)
+    def _parse(self, expression, decimal_mode=False):
+        self.tokenizer = lexer.Lexer(
+            decimal_mode=decimal_mode).tokenize(expression)
         self._tokens = list(self.tokenizer)
         self._index = 0
         parsed = self._expression(binding_power=0)
@@ -124,7 +129,7 @@ class Parser(object):
             t = self._lookahead_token(0)
             raise exceptions.ParseError(t['start'], t['value'], t['type'],
                                         "Unexpected token: %s" % t['value'])
-        return ParsedResult(expression, parsed)
+        return ParsedResult(expression, parsed, decimal_mode=decimal_mode)
 
     def _expression(self, binding_power=0):
         left_token = self._lookahead_token(0)
@@ -507,11 +512,18 @@ class Parser(object):
 
 @with_repr_method
 class ParsedResult(object):
-    def __init__(self, expression, parsed):
+    def __init__(self, expression, parsed, decimal_mode=False):
         self.expression = expression
         self.parsed = parsed
+        self.decimal_mode = decimal_mode
 
     def search(self, value, options=None):
+        if options is None:
+            options = visitor.Options(decimal_mode=self.decimal_mode)
+        decimal_mode = options.decimal_mode
+        if decimal_mode != self.decimal_mode:
+            parsed = Parser(decimal_mode=decimal_mode).parse(self.expression)
+            return parsed.search(value, options=options)
         interpreter = visitor.TreeInterpreter(options)
         result = interpreter.visit(self.parsed, value)
         return result

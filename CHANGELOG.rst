@@ -1,7 +1,8 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add ``Options(decimal_mode=True)`` for Decimal numeric literals,
+  comparisons, ``to_number`` validation, and numeric aggregations.
 
 
 1.1.0
