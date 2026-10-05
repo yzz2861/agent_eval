@@ -151,6 +151,13 @@ def get_currency_symbol(currency: str, locale: Locale | str | None = None) -> st
     return Locale.parse(locale or LC_MONETARY).currency_symbols.get(currency, currency)
 
 
+def _get_currency_fraction(currency: str, cash: bool = False) -> tuple[int, int]:
+    fractions = get_global('currency_fractions')
+    fraction = fractions.get(currency, fractions['DEFAULT'])
+    offset = 2 if cash else 0
+    return fraction[offset], fraction[offset + 1]
+
+
 def get_currency_precision(currency: str) -> int:
     """Return currency's precision.
 
@@ -161,8 +168,53 @@ def get_currency_precision(currency: str) -> int:
 
     :param currency: the currency code.
     """
-    precisions = get_global('currency_fractions')
-    return precisions.get(currency, precisions['DEFAULT'])[0]
+    return _get_currency_fraction(currency)[0]
+
+
+def _get_currency_quantum(currency: str, cash: bool = False) -> decimal.Decimal:
+    digits, increment = _get_currency_fraction(currency, cash=cash)
+    unit = decimal.Decimal(1).scaleb(-digits)
+    if increment:
+        return unit * increment
+    return unit
+
+
+def _get_cash_quantum_digits(quantum: decimal.Decimal) -> int:
+    return max(-quantum.as_tuple().exponent, 0)
+
+
+def _quantize_currency_number(
+    number: float | decimal.Decimal | str,
+    quantum: decimal.Decimal,
+    rounding: str | None,
+) -> decimal.Decimal:
+    value = number if isinstance(number, decimal.Decimal) else decimal.Decimal(str(number))
+    if not value.is_finite():
+        return value
+    quantum_tuple = quantum.as_tuple()
+    fraction_digits = max(-quantum_tuple.exponent, 0)
+    integer_digits = max(value.scaleb(fraction_digits).adjusted() + 1, 1)
+    with decimal.localcontext() as context:
+        context.prec = max(context.prec, integer_digits + 1)
+        return _quantize_to_quantum(value, quantum, rounding)
+
+
+def _quantize_to_quantum(
+    value: decimal.Decimal,
+    quantum: decimal.Decimal,
+    rounding: str | None,
+) -> decimal.Decimal:
+    quantum_tuple = quantum.as_tuple()
+    fraction_digits = max(-quantum_tuple.exponent, 0)
+    scaled_value = value.scaleb(fraction_digits)
+    increment = int(''.join(map(str, quantum_tuple.digits)) or '0')
+    if increment <= 1:
+        return scaled_value.to_integral_value(rounding=rounding).scaleb(-fraction_digits)
+    rounded_value = (
+        scaled_value
+        / decimal.Decimal(increment)
+    ).to_integral_value(rounding=rounding) * decimal.Decimal(increment)
+    return rounded_value.scaleb(-fraction_digits)
 
 
 def get_currency_unit_pattern(
@@ -712,6 +764,8 @@ def format_currency(
     decimal_quantization: bool = True,
     group_separator: bool = True,
     *,
+    cash: bool = False,
+    rounding: str | None = None,
     numbering_system: Literal["default"] | str = "latn",
 ) -> str:
     """Return formatted currency value.
@@ -720,6 +774,8 @@ def format_currency(
     '$1,099.98'
     >>> format_currency(1099.98, 'USD', locale='es_CO')
     'US$1.099,98'
+    >>> format_currency(0.025, 'CHF', locale='de_CH', cash=True)
+    'CHF\xa00.05'
     >>> format_currency(1099.98, 'EUR', locale='de_DE')
     '1.099,98\\xa0\\u20ac'
     >>> format_currency(1099.98, 'EGP', locale='ar_EG', numbering_system='default')
@@ -750,6 +806,16 @@ def format_currency(
     '\\xa51,099.98'
     >>> format_currency(1099.98, 'COP', '#,##0.00', locale='es_ES', currency_digits=False)
     '1.099,98'
+
+    Set ``cash=True`` to use the CLDR cash fraction data instead. It applies
+    both the cash digit count and cash rounding increment, even when a custom
+    format or ``currency_digits=False`` is given:
+
+    >>> format_currency(0.025, 'CHF', '\xa4 #,##0.00', locale='de_CH', cash=True)
+    'CHF 0.05'
+    >>> format_currency(0.025, 'CHF', locale='de_CH', cash=True,
+    ...                 rounding=decimal.ROUND_HALF_DOWN)
+    'CHF\xa00.00'
 
     If a format is not specified the type of currency format to use
     from the locale can be specified:
@@ -791,6 +857,14 @@ def format_currency(
     >>> format_currency(1099.9876, 'USD', locale='en_US', decimal_quantization=False)
     '$1,099.9876'
 
+    Cash rounding is a separate, explicit quantization and is therefore still
+    applied when ``decimal_quantization=False``. Unknown currencies use the
+    CLDR default cash fraction: two digits and a one-cent increment. Cash
+    rounding takes precedence over ``currency_digits`` and the fraction width
+    of a custom format, while that format still controls symbols, grouping,
+    and placement. The ``rounding`` mode does not change ordinary currency
+    formatting when ``cash`` is false.
+
     :param number: the number to format
     :param currency: the currency code
     :param format: the format string to use
@@ -800,6 +874,9 @@ def format_currency(
     :param format_type: the currency format type to use
     :param decimal_quantization: Truncate and round high-precision numbers to
                                  the format pattern. Defaults to `True`.
+    :param cash: use the currency's CLDR cash digits and cash rounding increment
+    :param rounding: the decimal rounding mode to use for cash rounding; the
+                     default is symmetric half-up rounding
     :param group_separator: Boolean to switch group separator on/off in a locale's
                             number format.
     :param numbering_system: The numbering system used for formatting number symbols. Defaults to "latn".
@@ -807,6 +884,10 @@ def format_currency(
     :raise `UnsupportedNumberingSystemError`: If the numbering system is not supported by the locale.
     """
     locale = Locale.parse(locale or LC_MONETARY)
+    cash_quantum = _get_currency_quantum(currency, cash=cash) if cash else None
+    cash_rounding = rounding or decimal.ROUND_HALF_UP
+    if cash_quantum is not None:
+        number = _quantize_currency_number(number, cash_quantum, cash_rounding)
 
     if format_type == 'name':
         return _format_currency_long_name(
@@ -817,6 +898,8 @@ def format_currency(
             currency_digits=currency_digits,
             decimal_quantization=decimal_quantization,
             group_separator=group_separator,
+            cash_quantum=cash_quantum,
+            rounding=cash_rounding,
             numbering_system=numbering_system,
         )
 
@@ -837,6 +920,8 @@ def format_currency(
         currency_digits=currency_digits,
         decimal_quantization=decimal_quantization,
         group_separator=group_separator,
+        cash_quantum=cash_quantum,
+        rounding=cash_rounding,
         numbering_system=numbering_system,
     )
 
@@ -850,6 +935,8 @@ def _format_currency_long_name(
     currency_digits: bool,
     decimal_quantization: bool,
     group_separator: bool,
+    cash_quantum: decimal.Decimal | None,
+    rounding: str,
     numbering_system: Literal["default"] | str,
 ) -> str:
     # Algorithm described here:
@@ -882,6 +969,8 @@ def _format_currency_long_name(
         currency_digits=currency_digits,
         decimal_quantization=decimal_quantization,
         group_separator=group_separator,
+        cash_quantum=cash_quantum,
+        rounding=rounding,
         numbering_system=numbering_system,
     )
 
@@ -1450,6 +1539,8 @@ class NumberPattern:
         force_frac: tuple[int, int] | None = None,
         group_separator: bool = True,
         *,
+        cash_quantum: decimal.Decimal | None = None,
+        rounding: str | None = None,
         numbering_system: Literal["default"] | str = "latn",
     ):
         """Renders into a string a number following the defined pattern.
@@ -1467,6 +1558,8 @@ class NumberPattern:
                                      quantized to produce a formatted output
                                      strictly matching the CLDR definition for
                                      the locale.
+        :param cash_quantum: The currency cash rounding quantum to apply.
+        :param rounding: The rounding mode to use when applying a cash quantum.
         :param force_frac: DEPRECATED - a forced override for `self.frac_prec`
                            for a single formatting invocation.
         :param group_separator: Whether to use the locale's number group separator.
@@ -1503,6 +1596,9 @@ class NumberPattern:
                 stacklevel=2,
             )
             frac_prec = force_frac
+        elif cash_quantum is not None:
+            cash_digits = _get_cash_quantum_digits(cash_quantum)
+            frac_prec = (cash_digits, cash_digits)
         elif currency and currency_digits:
             frac_prec = (get_currency_precision(currency),) * 2
         else:
@@ -1514,20 +1610,36 @@ class NumberPattern:
         # notation pattern has a missing mandatory fractional part (as in the
         # default '#E0' pattern). This special case has been extensively
         # discussed at https://github.com/python-babel/babel/pull/494#issuecomment-307649969 .
-        if not decimal_quantization or (self.exp_prec and frac_prec == (0, 0)):
+        if (not decimal_quantization and cash_quantum is None) or (
+            self.exp_prec and frac_prec == (0, 0)
+        ):
             frac_prec = (frac_prec[0], max([frac_prec[1], get_decimal_precision(value)]))
 
         # Render scientific notation.
         if self.exp_prec:
+            scientific_rounding = rounding if cash_quantum is not None else None
+            scientific_quantum = (
+                cash_quantum.scaleb(exp)
+                if cash_quantum is not None
+                else get_decimal_quantum(frac_prec[1])
+            )
             number = ''.join([
-                self._quantize_value(value, locale, frac_prec, group_separator, numbering_system=numbering_system),
+                self._quantize_value(
+                    value,
+                    locale,
+                    frac_prec,
+                    group_separator,
+                    quantum=scientific_quantum,
+                    rounding=scientific_rounding,
+                    numbering_system=numbering_system,
+                ),
                 get_exponential_symbol(locale, numbering_system=numbering_system),
                 exp_sign,  # type: ignore  # exp_sign is always defined here
                 self._format_int(str(exp), self.exp_prec[0], self.exp_prec[1], locale, numbering_system=numbering_system),  # type: ignore  # exp is always defined here
             ])  # fmt: skip
 
         # Is it a significant digits pattern?
-        elif '@' in self.pattern:
+        elif '@' in self.pattern and cash_quantum is None:
             text = self._format_significant(value, self.int_prec[0], self.int_prec[1])
             a, sep, b = text.partition(".")
             number = self._format_int(a, 0, 1000, locale, numbering_system=numbering_system)
@@ -1536,11 +1648,15 @@ class NumberPattern:
 
         # A normal number pattern.
         else:
+            quantum = cash_quantum or get_decimal_quantum(frac_prec[1])
+            value_rounding = rounding if cash_quantum is not None else None
             number = self._quantize_value(
                 value,
                 locale,
                 frac_prec,
                 group_separator,
+                quantum=quantum,
+                rounding=value_rounding,
                 numbering_system=numbering_system,
             )
 
@@ -1630,13 +1746,20 @@ class NumberPattern:
         frac_prec: tuple[int, int],
         group_separator: bool,
         *,
+        quantum: decimal.Decimal,
+        rounding: str | None,
         numbering_system: Literal["default"] | str,
     ) -> str:
         # If the number is +/-Infinity, we can't quantize it
         if value.is_infinite():
             return get_infinity_symbol(locale, numbering_system=numbering_system)
-        quantum = get_decimal_quantum(frac_prec[1])
-        rounded = value.quantize(quantum)
+        if rounding is None:
+            rounded = value.quantize(quantum)
+        else:
+            integer_digits = max(value.scaleb(_get_cash_quantum_digits(quantum)).adjusted() + 1, 1)
+            with decimal.localcontext() as context:
+                context.prec = max(context.prec, integer_digits + 1)
+                rounded = _quantize_to_quantum(value, quantum, rounding)
         a, sep, b = f"{rounded:f}".partition(".")
         integer_part = a
         if group_separator:

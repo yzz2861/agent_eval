@@ -307,6 +307,81 @@ def test_format_currency_format_type():
             == '1.099,98')
 
 
+@pytest.mark.parametrize(("amount", "expected"), [
+    ('0.024', 'CHF\xa00.00'),
+    ('0.025', 'CHF\xa00.05'),
+    ('0.026', 'CHF\xa00.05'),
+])
+def test_format_cash_currency_chf(amount, expected):
+    assert numbers.format_currency(
+        decimal.Decimal(amount), 'CHF', locale='de_CH', cash=True,
+    ) == expected
+    assert numbers.format_currency(float(amount), 'CHF', locale='de_CH', cash=True) == expected
+
+
+def test_format_cash_currency_rounding_and_priority():
+    assert numbers.format_currency(
+        decimal.Decimal('0.025'),
+        'CHF',
+        '\xa4 #,##0',
+        locale='de_CH',
+        cash=True,
+        currency_digits=False,
+    ) == 'CHF 0.05'
+    assert numbers.format_currency(
+        decimal.Decimal('0.025'),
+        'CHF',
+        locale='de_CH',
+        cash=True,
+        decimal_quantization=False,
+    ) == 'CHF\xa00.05'
+    assert numbers.format_currency(
+        decimal.Decimal('0.025'),
+        'CHF',
+        locale='de_CH',
+        cash=True,
+        rounding=decimal.ROUND_HALF_DOWN,
+    ) == 'CHF\xa00.00'
+    assert numbers.format_currency(
+        decimal.Decimal('-0.025'),
+        'CHF',
+        locale='en_US',
+        cash=True,
+        rounding=decimal.ROUND_HALF_DOWN,
+    ) == '-CHF0.00'
+
+
+def test_format_cash_currency_special_cases():
+    assert numbers.format_currency(
+        decimal.Decimal('-0.025'), 'CHF', locale='en_US', format_type='accounting', cash=True,
+    ) == '(CHF0.05)'
+    assert numbers.format_currency(decimal.Decimal('1234.50'), 'JPY', locale='en_US', cash=True) == '\xa51,235'
+    assert numbers.format_currency(decimal.Decimal('1234.50'), 'HUF', locale='en_US', cash=True) == 'HUF1,235'
+    assert numbers.format_currency(
+        decimal.Decimal('12345678901234567890.025'), 'CHF', locale='en_US', cash=True,
+    ) == 'CHF12,345,678,901,234,567,890.05'
+    assert numbers.format_currency(
+        decimal.Decimal('0.005'), 'XAB', locale='en_US', cash=True,
+    ) == 'XAB0.01'
+
+
+def test_format_cash_currency_long_name():
+    assert numbers.format_currency(
+        decimal.Decimal('0.025'), 'CHF', locale='en_US', format_type='name', cash=True,
+    ) == '0.05 Swiss francs'
+
+
+def test_format_cash_currency_does_not_change_normal_mode():
+    assert numbers.format_currency(decimal.Decimal('0.025'), 'CHF', locale='de_CH') == 'CHF\xa00.02'
+    assert numbers.format_currency(
+        decimal.Decimal('0.025'), 'CHF', locale='de_CH', decimal_quantization=False,
+    ) == 'CHF\xa00.025'
+    assert numbers.format_currency(decimal.Decimal('0.025'), 'CHF', '¤ #,##0', locale='de_CH') == 'CHF 0.02'
+    assert numbers.format_currency(
+        decimal.Decimal('0.025'), 'CHF', '¤0.00E0', locale='en_US', rounding=decimal.ROUND_HALF_UP,
+    ) == 'CHF2.50E-2'
+
+
 def test_format_compact_currency():
     assert numbers.format_compact_currency(1, 'USD', locale='en_US', format_type="short") == '$1'
     assert numbers.format_compact_currency(999, 'USD', locale='en_US', format_type="short") == '$999'
