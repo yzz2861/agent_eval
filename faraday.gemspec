@@ -24,6 +24,7 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'faraday-net_http', '>= 2.0', '< 3.5'
   spec.add_dependency 'json'
   spec.add_dependency 'logger'
+  spec.add_dependency 'rexml'
 
   # Includes `examples` and `spec` to allow external adapter gems to run Faraday unit and integration tests
   spec.files = Dir['CHANGELOG.md', '{examples,lib,spec}/**/*', 'LICENSE.md', 'Rakefile', 'README.md']

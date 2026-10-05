@@ -15,6 +15,7 @@
     * [Authentication](middleware/included/authentication.md)
     * [URL Encoding](middleware/included/url-encoding.md)
     * [JSON Encoding/Decoding](middleware/included/json.md)
+    * [Multistatus (WebDAV)](middleware/included/multistatus.md)
     * [Instrumentation](middleware/included/instrumentation.md)
     * [Logging](middleware/included/logging.md)
     * [Raising Errors](middleware/included/raising-errors.md)

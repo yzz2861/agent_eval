@@ -24,6 +24,7 @@ content type.
 before returning it.
 
 * [`Json Response`][json-response] parses response body into a hash of key/value pairs.
+* [`Multistatus`][multistatus] parses WebDAV `207 Multi-Status` responses into resources keyed by href.
 * [`Logger`][logger] logs both the request and the response body and headers.
 * [`RaiseError`][raise_error] checks the response HTTP code and raises an exception if it is a 4xx or 5xx code.
 
@@ -33,5 +34,6 @@ before returning it.
 [json-request]:         middleware/included/json#json-requests
 [instrumentation]:      middleware/included/instrumentation
 [json-response]:        middleware/included/json#json-responses
+[multistatus]:          middleware/included/multistatus
 [logger]:               middleware/included/logging
 [raise_error]:          middleware/included/raising-errors
