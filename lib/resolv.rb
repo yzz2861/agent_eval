@@ -2833,8 +2833,93 @@ class Resolv
         end
       end
 
+      ##
+      # Resource Record Signature resource.
+
+      class RRSIG < Resource
+        TypeValue = 46
+
+        def initialize(type_covered, algorithm, labels, original_ttl,
+                       expiration, inception, key_tag, signer, signature)
+          @type_covered = type_covered
+          @algorithm = algorithm
+          @labels = labels
+          @original_ttl = original_ttl
+          @expiration = expiration
+          @inception = inception
+          @key_tag = key_tag
+          @signer = Resolv::DNS::Name.create(signer)
+          @signature = signature
+        end
+
+        attr_reader :type_covered, :algorithm, :labels, :original_ttl,
+                    :expiration, :inception, :key_tag, :signer, :signature
+
+        def encode_rdata(msg) # :nodoc:
+          msg.put_pack('nCCNNNn',
+            @type_covered, @algorithm, @labels, @original_ttl,
+            @expiration, @inception, @key_tag)
+          msg.put_name(@signer, compress: false)
+          msg.put_bytes(@signature)
+        end
+
+        def self.decode_rdata(msg) # :nodoc:
+          type_covered, algorithm, labels, original_ttl,
+            expiration, inception, key_tag = msg.get_unpack('nCCNNNn')
+          signer = msg.get_name
+          signature = msg.get_bytes
+          return self.new(type_covered, algorithm, labels, original_ttl,
+                          expiration, inception, key_tag, signer, signature)
+        end
+      end
+
+      ##
+      # DNS Public Key resource.
+
+      class DNSKEY < Resource
+        TypeValue = 48
+
+        def initialize(flags, protocol, algorithm, key)
+          @flags = flags
+          @protocol = protocol
+          @algorithm = algorithm
+          @key = key
+        end
+
+        attr_reader :flags, :protocol, :algorithm, :key
+
+        def key_tag # :nodoc:
+          rdata = Resolv::DNS::Message::MessageEncoder.new {|msg|
+            msg.put_pack('nCC', @flags, @protocol, @algorithm)
+            msg.put_bytes(@key)
+          }.to_s
+          accumulator = 0
+          rdata.each_byte.with_index do |byte, index|
+            accumulator += if index.even?
+                             byte
+                           else
+                             byte << 8
+                           end
+          end
+          accumulator += accumulator >> 16
+          accumulator & 0xffff
+        end
+
+        def encode_rdata(msg) # :nodoc:
+          msg.put_pack('nCC', @flags, @protocol, @algorithm)
+          msg.put_bytes(@key)
+        end
+
+        def self.decode_rdata(msg) # :nodoc:
+          flags, protocol, algorithm = msg.get_unpack('nCC')
+          key = msg.get_bytes
+          return self.new(flags, protocol, algorithm, key)
+        end
+      end
+
       ClassInsensitiveTypes = [ # :nodoc:
-        NS, CNAME, SOA, PTR, HINFO, MINFO, MX, TXT, LOC, ANY, CAA
+        NS, CNAME, SOA, PTR, HINFO, MINFO, MX, TXT, LOC, ANY, CAA,
+        RRSIG, DNSKEY
       ]
 
       ##
@@ -3110,7 +3195,291 @@ class Resolv
           ClassHash[[TypeValue, ClassValue]] = self # :nodoc:
         end
       end
+
+      ##
+      # Offline DNSSEC RRset validation.
+
+      module DNSSEC
+        RSASHA256 = 8
+
+        class Error < ResolvError; end
+        class MalformedRRset < Error; end
+        class UnsupportedAlgorithm < Error; end
+        class ExpiredSignature < Error; end
+        class SignatureNotYetValid < Error; end
+        class SignatureMismatch < Error; end
+
+        ##
+        # Verifies +rrset+ against +rrsig+ using +dnskey+ at +current_time+.
+        #
+        # This performs cryptographic RRset validation only. It never queries
+        # the network and does not establish that +dnskey+ is trusted or
+        # chained to a trust anchor.
+        #
+        # Records are represented as [name, ttl, resource] tuples, as used by
+        # Resolv::DNS::Message. Returns +true+ or raises a DNSSEC error.
+
+        def self.verify_rrset(rrset, rrsig, dnskey, current_time = Time.now)
+          require 'openssl'
+          rrset = normalize_rrset(rrset)
+          name, _ttl, rrsig = normalize_record(rrsig)
+          _key_name, _key_ttl, dnskey = normalize_record(dnskey)
+
+          raise MalformedRRset, 'RRSIG owner does not match RRset owner' unless name == rrset.first[0]
+          raise MalformedRRset, 'RRSIG record is not an RRSIG resource' unless Resource::RRSIG === rrsig
+          raise MalformedRRset, 'DNSKEY record is not a DNSKEY resource' unless Resource::DNSKEY === dnskey
+
+          owner = rrset.first[0]
+          first_resource = rrset.first[2]
+          type_value = first_resource.class::TypeValue
+          class_value = first_resource.class::ClassValue
+
+          raise MalformedRRset, 'RRSIG class does not match RRset class' unless rrsig.class::ClassValue == class_value
+          raise MalformedRRset, 'DNSKEY class does not match RRset class' unless dnskey.class::ClassValue == class_value
+          raise SignatureMismatch, 'RRSIG type does not match RRset type' unless rrsig.type_covered == type_value
+
+          rrset.each do |rr_name, _rr_ttl, resource|
+            raise MalformedRRset, 'RRset contains multiple owner names' unless rr_name == owner
+            raise MalformedRRset, 'RRset contains multiple record types' unless resource.class::TypeValue == type_value
+            raise MalformedRRset, 'RRset contains multiple record classes' unless resource.class::ClassValue == class_value
+            raise MalformedRRset, 'RRset must not contain RRSIG records' if Resource::RRSIG === resource
+          end
+
+          validate_rrsig_fields(rrsig)
+          unless valid_unsigned8?(dnskey.protocol) &&
+                 valid_unsigned8?(dnskey.algorithm) &&
+                 valid_unsigned16?(dnskey.flags)
+            raise MalformedRRset, 'DNSKEY flags, protocol, or algorithm are out of range'
+          end
+          unless dnskey.key.respond_to?(:b)
+            raise MalformedRRset, 'DNSKEY key blob must be a String'
+          end
+          canonical_owner = canonical_wildcard_owner(owner, rrsig)
+
+          unless rrsig.algorithm == dnskey.algorithm
+            raise SignatureMismatch, 'RRSIG algorithm does not match DNSKEY algorithm'
+          end
+          unless rrsig.algorithm == RSASHA256
+            raise UnsupportedAlgorithm, "DNSSEC algorithm #{rrsig.algorithm} is not supported"
+          end
+          unless dnskey.protocol == 3
+            raise SignatureMismatch, 'DNSKEY protocol must be 3'
+          end
+          if dnskey.key.empty?
+            raise SignatureMismatch, 'DNSKEY key blob must not be empty'
+          end
+
+          verify_time(rrsig, current_time)
+
+          unless rrsig.key_tag == dnskey.key_tag
+            raise SignatureMismatch, 'RRSIG key tag does not match DNSKEY key tag'
+          end
+
+          signed_data = build_signed_data(rrset, rrsig, canonical_owner)
+          public_key = rsa_public_key(dnskey.key)
+
+          valid = public_key.verify(OpenSSL::Digest::SHA256.new, rrsig.signature.b, signed_data)
+          raise SignatureMismatch, 'RRSIG signature does not match RRset' unless valid
+
+          true
+        rescue OpenSSL::PKey::PKeyError, OpenSSL::ASN1::ASN1Error,
+               OpenSSL::BNError
+          raise SignatureMismatch, 'RRSIG signature or DNSKEY RSA key is malformed'
+        end
+
+        def self.normalize_rrset(rrset)
+          raise MalformedRRset, 'RRset must be an Array' unless Array === rrset
+          records = rrset.map {|record| normalize_record(record) }
+          raise MalformedRRset, 'RRset is empty' if records.empty?
+          records
+        end
+        private_class_method :normalize_rrset
+
+        def self.normalize_record(record)
+          name = nil
+          ttl = nil
+          resource = nil
+
+          if Array === record && record.length == 3
+            name, ttl, resource = record
+          elsif Resource === record
+            resource = record
+          else
+            raise MalformedRRset, 'record must be a Resource or [name, ttl, resource] tuple'
+          end
+
+          name = Resolv::DNS::Name.create(name || '.')
+          raise MalformedRRset, 'DNS names in an RRset must be absolute' unless name.absolute?
+
+          ttl = ttl || 0
+          ttl = ttl.to_int
+          unless ttl >= 0 && ttl <= 0xffffffff
+            raise MalformedRRset, 'TTL must be an unsigned 32-bit integer'
+          end
+
+          unless Resource === resource
+            raise MalformedRRset, 'third tuple element must be a Resource'
+          end
+
+          [name, ttl, resource]
+        end
+        private_class_method :normalize_record
+
+        def self.validate_rrsig_fields(rrsig)
+          unsigned8 = proc {|value| value.respond_to?(:to_int) && (0..255).include?(value.to_int) }
+          unsigned16 = proc {|value| value.respond_to?(:to_int) && (0..0xffff).include?(value.to_int) }
+          unsigned32 = proc {|value| value.respond_to?(:to_int) && (0..0xffffffff).include?(value.to_int) }
+
+          raise MalformedRRset, 'RRSIG type covered must be an unsigned 16-bit integer' unless unsigned16.call(rrsig.type_covered)
+          raise MalformedRRset, 'RRSIG algorithm must be an unsigned 8-bit integer' unless unsigned8.call(rrsig.algorithm)
+          raise MalformedRRset, 'RRSIG labels must be an unsigned 8-bit integer' unless unsigned8.call(rrsig.labels)
+          raise MalformedRRset, 'RRSIG original TTL must be an unsigned 32-bit integer' unless unsigned32.call(rrsig.original_ttl)
+          raise MalformedRRset, 'RRSIG expiration must be an unsigned 32-bit integer' unless unsigned32.call(rrsig.expiration)
+          raise MalformedRRset, 'RRSIG inception must be an unsigned 32-bit integer' unless unsigned32.call(rrsig.inception)
+          raise MalformedRRset, 'RRSIG key tag must be an unsigned 16-bit integer' unless unsigned16.call(rrsig.key_tag)
+          raise MalformedRRset, 'RRSIG signer must be absolute' unless rrsig.signer.absolute?
+          raise MalformedRRset, 'RRSIG signature must not be empty' if rrsig.signature.empty?
+        end
+        private_class_method :validate_rrsig_fields
+
+        def self.valid_unsigned8?(value)
+          value.respond_to?(:to_int) && (0..255).include?(value.to_int)
+        end
+        private_class_method :valid_unsigned8?
+
+        def self.valid_unsigned16?(value)
+          value.respond_to?(:to_int) && (0..0xffff).include?(value.to_int)
+        end
+        private_class_method :valid_unsigned16?
+
+        def self.canonical_wildcard_owner(owner, rrsig)
+          labels = rrsig.labels
+          owner_labels = owner.to_a
+
+          if labels > owner_labels.length
+            raise MalformedRRset, 'RRSIG labels value is larger than owner name length'
+          end
+
+          suffix_offset = owner_labels.length - labels
+          suffix = owner_labels[suffix_offset, labels]
+          if suffix != rrsig.signer.to_a
+            raise MalformedRRset, 'RRSIG signer does not match wildcard owner name suffix'
+          end
+
+          if suffix_offset > 0
+            Resolv::DNS::Name.new([Resolv::DNS::Label::Str.new('*')] + rrsig.signer.to_a, true)
+          else
+            owner
+          end
+        end
+        private_class_method :canonical_wildcard_owner
+
+        def self.verify_time(rrsig, current_time)
+          time = if current_time.respond_to?(:to_int)
+                   current_time.to_int
+                 elsif current_time.respond_to?(:to_i)
+                   current_time.to_i
+                 else
+                   raise ArgumentError, 'current time must be a Time or integer Unix timestamp'
+                 end
+
+          if time < rrsig.inception
+            raise SignatureNotYetValid, 'RRSIG signature is not yet valid'
+          end
+          if time > rrsig.expiration
+            raise ExpiredSignature, 'RRSIG signature has expired'
+          end
+        end
+        private_class_method :verify_time
+
+        def self.build_signed_data(rrset, rrsig, canonical_owner)
+          prefix = String.new(encoding: Encoding::BINARY)
+          prefix << [rrsig.type_covered, rrsig.algorithm].pack('nC')
+          prefix << [rrsig.labels, rrsig.original_ttl].pack('CN')
+          prefix << [rrsig.expiration, rrsig.inception, rrsig.key_tag].pack('NNn')
+          prefix << canonical_name(rrsig.signer).b
+
+          canonical_rrs = rrset.map do |_name, _ttl, resource|
+            build_canonical_rr(canonical_owner, rrsig.original_ttl, resource).b
+          end
+          prefix << canonical_rrs.sort.join
+        end
+        private_class_method :build_signed_data
+
+        def self.build_canonical_rr(name, ttl, resource)
+          encoder = canonical_encoder
+          encoder.put_name(name, compress: false)
+          encoder.put_pack('nnN', resource.class::TypeValue, resource.class::ClassValue, ttl)
+          encoder.put_length16 { resource.encode_rdata(encoder) }
+          encoder.to_s
+        end
+        private_class_method :build_canonical_rr
+
+        def self.canonical_name(name)
+          encoder = canonical_encoder
+          encoder.put_name(name, compress: false)
+          encoder.to_s
+        end
+        private_class_method :canonical_name
+
+        def self.canonical_encoder
+          encoder_class = Class.new(Resolv::DNS::Message::MessageEncoder) do
+            def put_name(d, compress: false)
+              super(d, compress: false)
+            end
+
+            def put_label(label)
+              super(Resolv::DNS::Label::Str.new(label.to_s.b.downcase))
+            end
+          end
+          encoder_class.new {}
+        end
+        private_class_method :canonical_encoder
+
+        def self.rsa_public_key(rfc3110_key)
+          key = rfc3110_key.b
+          raise MalformedRRset, 'RSA exponent length is missing' if key.empty?
+
+          exponent_length = key.getbyte(0)
+          offset = 1
+          if exponent_length == 0
+            raise MalformedRRset, 'RSA exponent length is truncated' if key.bytesize < 3
+            exponent_length = key.byteslice(1, 2).unpack1('n')
+            offset = 3
+          end
+
+          raise MalformedRRset, 'RSA exponent length is zero' if exponent_length.zero?
+          unless key.bytesize >= offset + exponent_length + 1
+            raise MalformedRRset, 'RSA exponent or modulus is truncated'
+          end
+
+          exponent = key.byteslice(offset, exponent_length)
+          modulus = key.byteslice(offset + exponent_length, key.bytesize - offset - exponent_length)
+          raise MalformedRRset, 'RSA modulus must not be empty' if modulus.empty?
+
+          begin
+            rsa_public_key = OpenSSL::ASN1::Sequence.new([
+              OpenSSL::ASN1::Integer.new(OpenSSL::BN.new(modulus, 2)),
+              OpenSSL::ASN1::Integer.new(OpenSSL::BN.new(exponent, 2))
+            ]).to_der
+            algorithm_identifier = OpenSSL::ASN1::Sequence.new([
+              OpenSSL::ASN1::ObjectId.new('rsaEncryption'),
+              OpenSSL::ASN1::Null.new(nil)
+            ])
+            subject_public_key = OpenSSL::ASN1::BitString.new(rsa_public_key)
+            subject_public_key_info = OpenSSL::ASN1::Sequence.new([
+              algorithm_identifier,
+              subject_public_key
+            ]).to_der
+            OpenSSL::PKey.read(subject_public_key_info)
+          rescue OpenSSL::PKey::PKeyError, OpenSSL::ASN1::ASN1Error, OpenSSL::BNError
+            raise SignatureMismatch, 'DNSKEY RSA key is malformed'
+          end
+        end
+        private_class_method :rsa_public_key
+      end
     end
+    DNSSEC = Resource::DNSSEC
   end
 
   ##
