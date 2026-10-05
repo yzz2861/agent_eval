@@ -101,6 +101,52 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Decimal Mode
+~~~~~~~~~~~~
+
+By default JMESPath follows the JSON number convention and uses Python's
+``int`` and ``float`` types.  When working with data parsed with
+``decimal.Decimal`` (for example financial data loaded with
+``json.loads(data, parse_float=decimal.Decimal)``), pass
+``decimal_mode=True`` so numeric literals, ``to_number``, comparisons and
+aggregate functions all use ``Decimal`` instead of converting values to
+``float``:
+
+.. code:: python
+
+    >>> import jmespath
+    >>> from decimal import Decimal
+    >>> data = {'price': Decimal('0.1'), 'tax': Decimal('0.2')}
+    >>> jmespath.search('sum([price, tax])', data,
+    ...                 jmespath.Options(decimal_mode=True))
+    Decimal('0.3')
+
+Behavior in decimal mode:
+
+* Float literals such as `` `0.1` `` become ``Decimal``; integer
+  literals remain Python ``int`` and are promoted to ``Decimal`` when
+  mixed into arithmetic or aggregate operations such as ``sum`` and
+  ``avg``.
+* ``int`` input keeps exact precision (including arbitrarily large
+  integers), while finite ``float`` input is converted through its
+  shortest decimal representation (``Decimal(str(value))``).
+* Non-finite values (``NaN``, ``Infinity``, ``-Infinity``) are
+  rejected: literals raise a lexer error and non-finite values in the
+  data raise a ``JMESPathValueError``.
+* Arithmetic follows the active :mod:`decimal` context, so set a local
+  context with ``decimal.localcontext()`` to control precision and
+  rounding.
+* Booleans are still not numbers, and ``type(Decimal('1'))`` returns
+  ``"number"``.  Custom functions can read ``self.decimal_mode`` and
+  use ``jmespath.functions.to_decimal``.
+
+The flag can also be passed directly to ``jmespath.search`` and
+``jmespath.compile``.  The expression compilation cache keeps normal and
+decimal compilations separate, so queries in one mode never affect the
+other.  Compiled expressions must be searched with the same mode they
+were compiled with.
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 

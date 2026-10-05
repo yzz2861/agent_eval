@@ -58,7 +58,8 @@ def _is_actual_number(x):
 
 class Options(object):
     """Options to control how a JMESPath function is evaluated."""
-    def __init__(self, dict_cls=None, custom_functions=None):
+    def __init__(self, dict_cls=None, custom_functions=None,
+                 decimal_mode=False):
         #: The class to use when creating a dict.  The interpreter
         #  may create dictionaries during the evaluation of a JMESPath
         #  expression.  For example, a multi-select hash will
@@ -69,6 +70,12 @@ class Options(object):
         #  have predictable key ordering.
         self.dict_cls = dict_cls
         self.custom_functions = custom_functions
+        #: When true, numeric literals, ``to_number``, ordering and
+        #: equality comparisons, and the aggregate functions use
+        #: ``decimal.Decimal`` semantics.  All arithmetic follows the
+        #: current :mod:`decimal` context, so results are rounded using
+        #: its precision and rounding mode.
+        self.decimal_mode = decimal_mode
 
 
 class _Expression(object):
@@ -120,7 +127,12 @@ class TreeInterpreter(Visitor):
         if options.custom_functions is not None:
             self._functions = self._options.custom_functions
         else:
-            self._functions = functions.Functions()
+            self._functions = functions.Functions(
+                decimal_mode=options.decimal_mode)
+        # Custom function registries are responsible for their own
+        # initialization, but the type checks still need to know which
+        # numeric mode is active.
+        self._functions.decimal_mode = options.decimal_mode
 
     def default_visit(self, node, *args, **kwargs):
         raise NotImplementedError(node['type'])
@@ -141,21 +153,36 @@ class TreeInterpreter(Visitor):
         # Common case: comparator is == or !=
         comparator_func = self.COMPARATOR_FUNC[node['value']]
         if node['value'] in self._EQUALITY_OPS:
-            return comparator_func(
-                self.visit(node['children'][0], value),
-                self.visit(node['children'][1], value)
-            )
+            left = self.visit(node['children'][0], value)
+            right = self.visit(node['children'][1], value)
+            if self._options.decimal_mode:
+                left = self._normalize_number(left)
+                right = self._normalize_number(right)
+            return comparator_func(left, right)
         else:
             # Ordering operators are only valid for numbers.
             # Evaluating any other type with a comparison operator
             # will yield a None value.
             left = self.visit(node['children'][0], value)
             right = self.visit(node['children'][1], value)
+            if self._options.decimal_mode:
+                left = self._normalize_number(left)
+                right = self._normalize_number(right)
             num_types = (int, float)
             if not (_is_comparable(left) and
                     _is_comparable(right)):
                 return None
             return comparator_func(left, right)
+
+    def _normalize_number(self, value):
+        # Booleans remain booleans; every other numeric type is expressed
+        # as a Decimal so comparisons and aggregates share the same set
+        # of numeric rules.
+        if isinstance(value, bool):
+            return value
+        if _is_actual_number(value):
+            return functions.to_decimal(value)
+        return value
 
     def visit_current(self, node, value):
         return value

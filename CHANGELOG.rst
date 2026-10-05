@@ -1,7 +1,12 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Added an opt-in decimal mode (``Options(decimal_mode=True)``) that
+  keeps numeric literals, ``to_number``, comparisons and aggregate
+  functions on ``decimal.Decimal`` semantics instead of converting
+  numbers to ``float``.  Integer mixing, float input, non-finite values
+  and the active decimal context have defined behavior, booleans remain
+  distinct from numbers, and the compilation cache is isolated per mode.
 
 
 1.1.0

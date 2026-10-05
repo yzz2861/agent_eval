@@ -1,6 +1,7 @@
 import string
 import warnings
 from json import loads
+from decimal import Decimal
 
 from jmespath.exceptions import LexerError, EmptyExpressionError
 
@@ -22,6 +23,9 @@ class Lexer(object):
         '{': 'lbrace',
         '}': 'rbrace',
     }
+
+    def __init__(self, decimal_mode=False):
+        self._decimal_mode = decimal_mode
 
     def tokenize(self, expression):
         self._initialize_for_expression(expression)
@@ -158,23 +162,66 @@ class Lexer(object):
     def _consume_literal(self):
         start = self._position
         lexeme = self._consume_until('`').replace('\\`', '`')
-        try:
-            # Assume it is valid JSON and attempt to parse.
-            parsed_json = loads(lexeme)
-        except ValueError:
+        if self._decimal_mode:
             try:
-                # Invalid JSON values should be converted to quoted
-                # JSON strings during the JEP-12 deprecation period.
-                parsed_json = loads('"%s"' % lexeme.lstrip())
-                warnings.warn("deprecated string literal syntax",
-                              PendingDeprecationWarning)
+                parsed_json = self._loads_decimal(lexeme, start)
+            except LexerError:
+                # Non-finite numbers are hard errors and must not be
+                # converted into strings by the deprecation fallback.
+                raise
             except ValueError:
-                raise LexerError(lexer_position=start,
-                                 lexer_value=self._expression[start:],
-                                 message="Bad token %s" % lexeme)
+                try:
+                    parsed_json = loads('"%s"' % lexeme.lstrip())
+                    warnings.warn("deprecated string literal syntax",
+                                  PendingDeprecationWarning)
+                except ValueError:
+                    raise LexerError(
+                        lexer_position=start,
+                        lexer_value=self._expression[start:],
+                        message="Bad token %s" % lexeme)
+        else:
+            try:
+                # Assume it is valid JSON and attempt to parse.
+                parsed_json = loads(lexeme)
+            except ValueError:
+                try:
+                    # Invalid JSON values should be converted to quoted
+                    # JSON strings during the JEP-12 deprecation period.
+                    parsed_json = loads('"%s"' % lexeme.lstrip())
+                    warnings.warn("deprecated string literal syntax",
+                                  PendingDeprecationWarning)
+                except ValueError:
+                    raise LexerError(lexer_position=start,
+                                     lexer_value=self._expression[start:],
+                                     message="Bad token %s" % lexeme)
         token_len = self._position - start
         return {'type': 'literal', 'value': parsed_json,
                 'start': start, 'end': token_len}
+
+    def _loads_decimal(self, lexeme, start):
+        def _reject_non_finite(value):
+            raise LexerError(
+                lexer_position=start,
+                lexer_value=lexeme,
+                message='Bad token %s' % lexeme)
+        parsed_json = loads(
+            lexeme, parse_float=Decimal,
+            parse_constant=_reject_non_finite)
+        self._validate_finite_numbers(parsed_json, start, lexeme)
+        return parsed_json
+
+    def _validate_finite_numbers(self, value, start, lexeme):
+        if isinstance(value, Decimal) and not value.is_finite():
+            raise LexerError(
+                lexer_position=start,
+                lexer_value=lexeme,
+                message='Bad token %s' % lexeme)
+        elif isinstance(value, list):
+            for element in value:
+                self._validate_finite_numbers(element, start, lexeme)
+        elif isinstance(value, dict):
+            for element in value.values():
+                self._validate_finite_numbers(element, start, lexeme)
 
     def _consume_quoted_identifier(self):
         start = self._position

@@ -73,18 +73,21 @@ class Parser(object):
     _CACHE = {}
     _MAX_SIZE = 512
 
-    def __init__(self, lookahead=2):
+    def __init__(self, lookahead=2, decimal_mode=False):
         self.tokenizer = None
         self._tokens = [None] * lookahead
         self._buffer_size = lookahead
         self._index = 0
+        self._decimal_mode = decimal_mode
 
     def parse(self, expression):
+        cache_key = (expression, self._decimal_mode)
         try:
-            return self._CACHE[expression]
+            return self._CACHE[cache_key]
         except KeyError:
             pass
         parsed_result = self._do_parse(expression)
+        parsed_result.decimal_mode = self._decimal_mode
         if len(self._CACHE) >= self._MAX_SIZE:
             try:
                 del self._CACHE[next(iter(self._CACHE))]
@@ -99,7 +102,7 @@ class Parser(object):
                 # an element from the cache, otherwise this can grow
                 # unbounded.
                 return parsed_result
-        self._CACHE[expression] = parsed_result
+        self._CACHE[cache_key] = parsed_result
         return parsed_result
 
     def _do_parse(self, expression):
@@ -116,7 +119,8 @@ class Parser(object):
             raise
 
     def _parse(self, expression):
-        self.tokenizer = lexer.Lexer().tokenize(expression)
+        self.tokenizer = lexer.Lexer(
+            decimal_mode=self._decimal_mode).tokenize(expression)
         self._tokens = list(self.tokenizer)
         self._index = 0
         parsed = self._expression(binding_power=0)
@@ -507,11 +511,23 @@ class Parser(object):
 
 @with_repr_method
 class ParsedResult(object):
-    def __init__(self, expression, parsed):
+    def __init__(self, expression, parsed, decimal_mode=False):
         self.expression = expression
         self.parsed = parsed
+        self.decimal_mode = decimal_mode
 
     def search(self, value, options=None):
+        if options is not None and getattr(
+                options, 'decimal_mode', False) != self.decimal_mode:
+            raise exceptions.JMESPathError(
+                'Parsed expression was compiled with decimal_mode=%s but '
+                'is being searched with decimal_mode=%s. Use '
+                'jmespath.compile(expression, decimal_mode=...) or '
+                'jmespath.search(...) so the compile cache matches the '
+                'search options.' % (
+                    self.decimal_mode, options.decimal_mode))
+        if options is None:
+            options = visitor.Options(decimal_mode=self.decimal_mode)
         interpreter = visitor.TreeInterpreter(options)
         result = interpreter.visit(self.parsed, value)
         return result

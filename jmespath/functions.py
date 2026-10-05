@@ -1,9 +1,36 @@
 import math
 import json
+from decimal import Decimal, InvalidOperation
 
 from jmespath import exceptions
 from jmespath.compat import string_type as STRING_TYPE
 from jmespath.compat import get_methods
+
+
+def to_decimal(value, function_name=''):
+    """Normalize a JMESPath number to ``decimal.Decimal``.
+
+    Booleans are intentionally not considered numbers and are left out of
+    the conversion (callers are responsible for the boolean check).  Finite
+    floats are converted through their shortest decimal representation so
+    binary artifacts do not leak into Decimal arithmetic, while non-finite
+    values are rejected.
+    """
+    if isinstance(value, Decimal):
+        converted = value
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise exceptions.JMESPathValueError(
+                function_name, value,
+                'non-finite numbers are not supported in decimal mode')
+        converted = Decimal(str(value))
+    else:
+        converted = Decimal(value)
+    if not converted.is_finite():
+        raise exceptions.JMESPathValueError(
+            function_name, value,
+            'non-finite numbers are not supported in decimal mode')
+    return converted
 
 
 # python types -> jmespath types
@@ -69,6 +96,13 @@ class Functions(metaclass=FunctionRegistry):
     FUNCTION_TABLE = {
     }
 
+    def __init__(self, decimal_mode=False):
+        #: When true, numbers are treated as ``decimal.Decimal`` values
+        #: instead of relying on Python's default ``int``/``float``
+        #: semantics.  Custom subclasses can read this attribute from
+        #: their functions and type checks.
+        self.decimal_mode = decimal_mode
+
     def call_function(self, function_name, resolved_args):
         try:
             spec = self.FUNCTION_TABLE[function_name]
@@ -127,10 +161,18 @@ class Functions(metaclass=FunctionRegistry):
             type_ = t.split('-', 1)
             if len(type_) == 2:
                 type_, subtype = type_
-                allowed_subtypes.append(REVERSE_TYPES_MAP[subtype])
+                allowed_pytypes = tuple(REVERSE_TYPES_MAP[subtype])
+                has_number = (
+                    'float' in allowed_pytypes or 'int' in allowed_pytypes)
+                if self.decimal_mode and has_number:
+                    allowed_pytypes = allowed_pytypes + ('Decimal',)
+                allowed_subtypes.append(allowed_pytypes)
             else:
                 type_ = type_[0]
             allowed_types.extend(REVERSE_TYPES_MAP[type_])
+        if self.decimal_mode:
+            if 'float' in allowed_types or 'int' in allowed_types:
+                allowed_types.append('Decimal')
         return allowed_types, allowed_subtypes
 
     def _subtype_check(self, current, allowed_subtypes, types, function_name):
@@ -168,6 +210,11 @@ class Functions(metaclass=FunctionRegistry):
     @signature({'types': ['array-number']})
     def _func_avg(self, arg):
         if arg:
+            if self.decimal_mode:
+                total = sum(
+                    (to_decimal(element, 'avg') for element in arg),
+                    Decimal(0))
+                return total / Decimal(len(arg))
             return sum(arg) / len(arg)
         else:
             return None
@@ -195,13 +242,25 @@ class Functions(metaclass=FunctionRegistry):
 
     @signature({'types': []})
     def _func_to_number(self, arg):
+        if self.decimal_mode and isinstance(arg, Decimal):
+            return arg if arg.is_finite() else None
         if isinstance(arg, (list, dict, bool)):
             return None
         elif arg is None:
             return None
         elif isinstance(arg, (int, float)):
+            if self.decimal_mode:
+                return to_decimal(arg, 'to_number')
             return arg
         else:
+            if self.decimal_mode:
+                try:
+                    converted = Decimal(arg)
+                except (InvalidOperation, ValueError):
+                    return None
+                if not converted.is_finite():
+                    return None
+                return converted
             try:
                 return int(arg)
             except ValueError:
@@ -255,6 +314,8 @@ class Functions(metaclass=FunctionRegistry):
     @signature({"types": ['array-number', 'array-string']})
     def _func_max(self, arg):
         if arg:
+            if self.decimal_mode and self._is_number_array(arg):
+                return max(arg, key=lambda x: to_decimal(x, 'max'))
             return max(arg)
         else:
             return None
@@ -269,17 +330,35 @@ class Functions(metaclass=FunctionRegistry):
     @signature({"types": ['array-number', 'array-string']})
     def _func_min(self, arg):
         if arg:
+            if self.decimal_mode and self._is_number_array(arg):
+                return min(arg, key=lambda x: to_decimal(x, 'min'))
             return min(arg)
         else:
             return None
 
     @signature({"types": ['array-string', 'array-number']})
     def _func_sort(self, arg):
+        if self.decimal_mode and self._is_number_array(arg):
+            return list(sorted(
+                arg, key=lambda x: to_decimal(x, 'sort')))
         return list(sorted(arg))
 
     @signature({"types": ['array-number']})
     def _func_sum(self, arg):
+        if self.decimal_mode:
+            if not arg:
+                return Decimal(0)
+            return sum(
+                (to_decimal(element, 'sum') for element in arg),
+                Decimal(0))
         return sum(arg)
+
+    def _is_number_array(self, arg):
+        for element in arg:
+            if isinstance(element, bool) or not isinstance(
+                    element, (int, float, Decimal)):
+                return False
+        return True
 
     @signature({"types": ['object']})
     def _func_keys(self, arg):
@@ -301,6 +380,8 @@ class Functions(metaclass=FunctionRegistry):
             return "array"
         elif isinstance(arg, dict):
             return "object"
+        elif self.decimal_mode and isinstance(arg, Decimal):
+            return "number"
         elif isinstance(arg, (float, int)):
             return "number"
         elif arg is None:
@@ -355,8 +436,12 @@ class Functions(metaclass=FunctionRegistry):
             if jmespath_type not in allowed_types:
                 raise exceptions.JMESPathTypeError(
                     function_name, result, jmespath_type, allowed_types)
+            if self.decimal_mode and jmespath_type == 'number':
+                return to_decimal(result, function_name)
             return result
         return keyfunc
 
     def _convert_to_jmespath_type(self, pyobject):
+        if self.decimal_mode and pyobject == 'Decimal':
+            return 'number'
         return TYPES_MAP.get(pyobject, 'unknown')
