@@ -1,0 +1,54 @@
+====== Option +bad_record+
+
+Specifies a handler to invoke when the parser encounters a malformed
+record whose boundary (the start of the record that follows it) can be
+located reliably.
+
+The default value is +nil+, which selects strict mode: the first
+malformed record raises a CSV::MalformedCSVError, as before.
+
+  CSV::DEFAULT_OPTIONS.fetch(:bad_record) # => nil
+
+When a callable is given, recovery mode is enabled. For each
+recoverable malformed record the handler is called with:
+
+- The CSV::MalformedCSVError that strict mode would have raised.
+- The malformed record's raw, unparsed original text (including its
+  row separator when present).
+- Keyword +lineno+:: the record's (1-based) line number.
+- Keyword +byte_offset+:: the record's starting byte offset from the
+  beginning of the input.
+- Keyword +byte_range+:: a half-open byte Range covering exactly the
+  raw record (<tt>byte_offset...end_offset</tt>).
+
+After the handler returns, parsing continues with the record that
+follows the malformed one. The handler may raise an exception to
+terminate parsing.
+
+The parser never jumps blindly to the next newline: a newline can be
+content inside a quoted field. Recovery is attempted only when the
+start of the next record can be confirmed by scanning with quote
+awareness. When a stray quote could both open a quoted field (hiding a
+row separator inside it) and be ordinary content, and those readings
+disagree, parsing stops with a CSV::MalformedCSVError explaining that
+the boundary cannot be determined reliably.
+
+Recoverable example (a quote that both interpretations place before a
+confirmed row boundary):
+  bad_records = []
+  data = "ok,1\nbad\"x\"y,2\nnext,3\n"
+  CSV.parse(data, bad_record: ->(error, raw, lineno:, byte_offset:, byte_range:) {
+    bad_records << [raw, lineno, byte_range]
+  }) # => [["ok", "1"], ["next", "3"]]
+  bad_records
+  # => [["bad\"x\"y,2\n", 2, 5...15]]
+
+Unrecoverable example (the quote may open a field that contains a row
+separator, so the next record is unknown):
+  data = "good,1\nx\"a\nb\",2\nnext,3\n"
+  # Raises CSV::MalformedCSVError (the record boundary cannot be
+  # determined reliably in line 2.)
+  CSV.parse(data, bad_record: ->(error, raw, **) { })
+
+Handler raising to abort:
+  CSV.parse(data, bad_record: ->(error, raw, **) { raise error }) # raises

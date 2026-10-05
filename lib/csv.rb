@@ -329,6 +329,7 @@ require_relative "csv/writer"
 #     skip_blanks:        false,
 #     skip_lines:         nil,
 #     liberal_parsing:    false,
+#     bad_record:         nil,
 #     nil_value:          nil,
 #     empty_value:        "",
 #     strip:              false,
@@ -363,6 +364,9 @@ require_relative "csv/writer"
 #   then an +ArgumentError+ exception will be raised.
 # - +liberal_parsing+: Specifies whether \CSV should attempt to parse
 #   non-compliant data.
+# - +bad_record+: Specifies a handler for malformed records whose next
+#   record start can be located reliably; when +nil+ (the default), the
+#   first malformed record raises an exception.
 # - +nil_value+: Specifies the object that is to be substituted for each null (no-text) field.
 # - +empty_value+: Specifies the object that is to be substituted for each empty field.
 #
@@ -391,6 +395,8 @@ require_relative "csv/writer"
 # :include: ../doc/csv/options/parsing/strip.rdoc
 #
 # :include: ../doc/csv/options/parsing/liberal_parsing.rdoc
+#
+# :include: ../doc/csv/options/parsing/bad_record.rdoc
 #
 # :include: ../doc/csv/options/parsing/nil_value.rdoc
 #
@@ -967,6 +973,7 @@ class CSV
     skip_blanks:        false,
     skip_lines:         nil,
     liberal_parsing:    false,
+    bad_record:         nil,
     nil_value:          nil,
     empty_value:        "",
     strip:              false,
@@ -2047,6 +2054,7 @@ class CSV
                  force_quotes: false,
                  skip_lines: nil,
                  liberal_parsing: false,
+                 bad_record: nil,
                  internal_encoding: nil,
                  external_encoding: nil,
                  encoding: nil,
@@ -2104,6 +2112,7 @@ class CSV
       skip_blanks: skip_blanks,
       skip_lines: skip_lines,
       liberal_parsing: liberal_parsing,
+      bad_record: bad_record,
       encoding: @encoding,
       nil_value: nil_value,
       empty_value: empty_value,
@@ -2314,6 +2323,17 @@ class CSV
   #   CSV.new('').liberal_parsing? # => false
   def liberal_parsing?
     parser.liberal_parsing?
+  end
+
+  # :call-seq:
+  #   csv.bad_record -> callable or nil
+  #
+  # Returns the handler invoked for recoverable malformed records, or
+  # +nil+ (the default) for strict parsing that raises on the first
+  # malformed record; see {Option +bad_record+}[#class-CSV-label-Option+bad_record]:
+  #   CSV.new('').bad_record # => nil
+  def bad_record
+    parser.bad_record
   end
 
   # :call-seq:

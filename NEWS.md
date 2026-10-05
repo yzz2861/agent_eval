@@ -2,6 +2,19 @@
 
 ## 3.3.6 - 2026-07-27
 
+### CSV
+
+* Added the `bad_record` parsing option. When set to a callable, a
+  malformed record whose boundary can be confirmed is passed to it
+  (the `CSV::MalformedCSVError`, the record's raw text, its line
+  number, byte offset, and byte range) and parsing resumes at the
+  next record. Without it the behavior is unchanged: the first
+  malformed record raises `CSV::MalformedCSVError`. Recovery is
+  refused, with an explanatory error, when the start of the next
+  record cannot be determined reliably (a stray quote that could open
+  a quoted field containing a row separator, or an unclosed quoted
+  field at end of input).
+
 ### Improvements
 
   * `CSV::Row#to_h`: Added support for block.

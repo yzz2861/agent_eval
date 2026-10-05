@@ -50,7 +50,24 @@ class CSV
     # https://docs.ruby-lang.org/en/master/StringScanner.html
     #
     class Scanner < StringScanner
-      alias_method :scan_all, :scan
+
+      # StringScanner#scan_all mirrors consumed bytes into the capture
+      # buffer (the in-memory scanner treats scan and scan_all alike).
+      def scan_all(pattern)
+        scan(pattern)
+      end
+
+      # When enabled, every consumed byte is mirrored into the capture
+      # buffer. Used by bad-record recovery, which needs a malformed
+      # record's exact raw bytes even when chunk boundaries make the
+      # keep stack unable to replay the record's first bytes.
+      attr_accessor :capture
+
+      def mirror_capture(value)
+        return unless @capture and value
+        @capture << value
+      end
+
 
       def initialize(*args)
         super
@@ -82,6 +99,36 @@ class CSV
       def keep_drop
         @keeps.pop
       end
+
+      # Mirrors consumed bytes into the capture buffer when capturing.
+      def scan(pattern)
+        value = super
+        mirror_capture(value) if @capture
+        value
+      end
+
+      # Absolute byte position of the scan pointer from the
+      # beginning of the input.
+      def absolute_pos
+        pos
+      end
+
+      # Enumerates raw bytes located after the current scan pointer.
+      def recover_remaining_chunks
+        remaining = rest
+        Enumerator.new do |yielder|
+          yielder.yield(remaining) unless remaining.empty?
+        end
+      end
+
+      # Positions the scan pointer at +target_absolute+.
+      def recover_consume_to(target_absolute, _tail_string, _pending_inputs)
+        self.pos = target_absolute
+      end
+
+      def recovery_pending_inputs
+        []
+      end
     end
 
     #
@@ -104,6 +151,7 @@ class CSV
         @chunk_size = chunk_size
         @last_scanner = @inputs.empty?
         @keeps = []
+        @absolute_pos = 0
         read_chunk
       end
 
@@ -127,6 +175,9 @@ class CSV
                 position += buffer.bytesize + offset
                 @scanner.pos = position
                 offset = 0
+                # Exactly one logical line (the buffered prefix plus
+                # this separator's first character) is finalized.
+                @absolute_pos += buffer.bytesize
                 yield(buffer)
                 buffer = nil
                 next if line.empty?
@@ -140,6 +191,7 @@ class CSV
               position += line.bytesize + offset
               @scanner.pos = position
               offset = 0
+              @absolute_pos += line.bytesize
               yield(line)
             else
               buffer = line
@@ -157,6 +209,8 @@ class CSV
         # trace(__method__, pattern, :start)
         value = @scanner.scan(pattern)
         # trace(__method__, pattern, :done, :last, value) if @last_scanner
+        @absolute_pos += value.bytesize if value
+        mirror_capture(value)
         return value if @last_scanner
 
         read_chunk if value and @scanner.eos?
@@ -168,6 +222,12 @@ class CSV
         # trace(__method__, pattern, :start)
         value = @scanner.scan(pattern)
         # trace(__method__, pattern, :done, :last, value) if @last_scanner
+        if value
+          @absolute_pos += value.bytesize
+          mirror_capture(value)
+        else
+          return nil if @last_scanner
+        end
         return value if @last_scanner
 
         # trace(__method__, pattern, :done, :nil) if value.nil?
@@ -175,6 +235,8 @@ class CSV
         while @scanner.eos? and read_chunk and (sub_value = @scanner.scan(pattern))
           # trace(__method__, pattern, :sub, sub_value)
           value << sub_value
+          @absolute_pos += sub_value.bytesize
+          mirror_capture(sub_value)
         end
         # trace(__method__, pattern, :done, value)
         value
@@ -184,16 +246,99 @@ class CSV
         @last_scanner and @scanner.eos?
       end
 
+      # Capture buffer for bad-record recovery; see Scanner#capture.
+      attr_accessor :capture
+
+      def mirror_capture(value)
+        return unless @capture and value
+        @capture << value
+      end
+
+      # Absolute byte position of the scan pointer counted from the
+      # beginning of the logical input stream.
+      def absolute_pos
+        @absolute_pos
+      end
+
+      # Enumerates raw chunks starting at the current scan pointer
+      # (the error position). Reading consumes the underlying IO; the
+      # caller retains the bytes so they can be replayed when the
+      # pointer is positioned. Lazy: breaking early leaves unread
+      # inputs queued.
+      def recover_remaining_chunks
+        initial_tail = @scanner.rest.dup
+        inputs = @inputs.dup
+        @recovery_read_ahead = +"".encode(@encoding)
+        Enumerator.new do |yielder|
+          @recover_pending_inputs = inputs
+          unless initial_tail.empty?
+            @recovery_read_ahead << initial_tail
+            yielder.yield(initial_tail)
+          end
+          while (input = inputs.first)
+            if input.is_a?(StringIO)
+              chunk = input.read
+              inputs.shift
+              unless chunk.empty?
+                @recovery_read_ahead << chunk
+                yielder.yield(chunk)
+              end
+            else
+              chunk = input.gets(@row_separator, @chunk_size)
+              if chunk
+                @recovery_read_ahead << chunk
+                yielder.yield(chunk)
+                inputs.shift if Parser.eof?(input)
+              else
+                inputs.shift
+              end
+            end
+            @recover_pending_inputs = inputs
+          end
+        end
+      end
+
+      # Positions the scan pointer at the boundary of the current
+      # record. +record_relative_pos+ is the byte offset of that
+      # boundary from the record start; +prefix_length+ bytes from the
+      # record start have already been consumed (the capture prefix),
+      # so the pointer currently sits at that offset.
+      def recovery_pending_inputs
+        @recover_pending_inputs || []
+      end
+
+      # Positions the scan pointer at +target_absolute+ by rebuilding
+      # the input queue from +tail_string+ (bytes already enumerated
+      # that follow the boundary) and the still-pending inputs.
+      def recover_consume_to(target_absolute, tail_string, pending_inputs)
+        # Discard StringIO inputs used internally by the line/keep
+        # machinery; their bytes are replayed through +tail_string+.
+        # Keep the real (non-StringIO) input streams, which the line
+        # reader has already advanced past the recovered record.
+        @inputs = pending_inputs.reject { |input| input.is_a?(StringIO) }
+        if tail_string and not tail_string.empty?
+          @inputs.unshift(StringIO.new(tail_string))
+          @last_scanner = false
+        end
+        @scanner = StringScanner.new("".encode(@encoding))
+        if @inputs.empty?
+          @last_scanner = true
+        else
+          read_chunk
+        end
+        @absolute_pos = target_absolute
+      end
+
       def keep_start
         # trace(__method__, :start)
         adjust_last_keep
-        @keeps.push([@scanner, @scanner.pos, nil])
+        @keeps.push([@scanner, @scanner.pos, nil, @absolute_pos])
         # trace(__method__, :done)
       end
 
       def keep_end
         # trace(__method__, :start)
-        scanner, start, buffer = @keeps.pop
+        scanner, start, buffer, = @keeps.pop
         if scanner == @scanner
           keep = @scanner.string.byteslice(start, @scanner.pos - start)
         else
@@ -209,7 +354,8 @@ class CSV
 
       def keep_back
         # trace(__method__, :start)
-        scanner, start, buffer = @keeps.pop
+        scanner, start, buffer, keep_absolute_pos = @keeps.pop
+        @absolute_pos = keep_absolute_pos
         if buffer
           # trace(__method__, :rescan, start, buffer)
           string = @scanner.string
@@ -247,7 +393,7 @@ class CSV
       end
 
       def keep_drop
-        _, _, buffer = @keeps.pop
+        _, _, buffer, = @keeps.pop
         # trace(__method__, :done, :empty) unless buffer
         return unless buffer
 
@@ -266,6 +412,7 @@ class CSV
       def rest
         @scanner.rest
       end
+
 
       def check(pattern)
         @scanner.check(pattern)
@@ -401,6 +548,10 @@ class CSV
       @liberal_parsing
     end
 
+    def bad_record
+      @bad_record_handler
+    end
+
     def lineno
       @lineno
     end
@@ -492,6 +643,11 @@ class CSV
       @skip_blanks = @options[:skip_blanks]
       @fields_converter = @options[:fields_converter]
       @header_fields_converter = @options[:header_fields_converter]
+      @bad_record_handler = @options[:bad_record]
+      if @bad_record_handler and not @bad_record_handler.respond_to?(:call)
+        raise ArgumentError,":bad_record has to respond to #call: " +
+                            @bad_record_handler.inspect
+      end
     end
 
     def prepare_quote_character
@@ -661,6 +817,28 @@ class CSV
         @quoted_value = Regexp.new("[^".encode(@encoding) +
                                    no_quoted_values +
                                    "]+".encode(@encoding))
+
+        # Regexes used solely by the bad-record recovery boundary scan.
+        # Unquoted content stops at a quote, a line ending, or the first
+        # character of the column separator (handled separately).
+        no_resync_unquoted =
+          @escaped_quote_character + "\r\n".encode(@encoding) +
+          @escaped_first_column_separator
+        @resync_unquoted_value =
+          Regexp.new("[^".encode(@encoding) +
+                     no_resync_unquoted +
+                     "]+".encode(@encoding))
+        @resync_quoted_value =
+          Regexp.new("[^".encode(@encoding) +
+                     @escaped_quote_character +
+                     "]+".encode(@encoding))
+        @resync_buffer_row_end = @row_end
+        @resync_buffer_col_end =
+          if @column_separator.size == 1 and STRING_SCANNER_SCAN_ACCEPT_STRING
+            @column_separator
+          else
+            @column_end
+          end
       end
       if @escaped_strip
         @split_column_separator = Regexp.new(@escaped_strip +
@@ -997,6 +1175,10 @@ class CSV
           quoted_fields = FieldsConverter::NO_QUOTED_FIELDS
         elsif line.include?(@cr) or line.include?(@lf)
           @scanner.keep_back
+          if @bad_record_handler
+            # Raw text of the line that begins this (delegated) record.
+            @delegated_raw_line = original_line
+          end
           @parse_method = :parse_quotable_robust
           return parse_quotable_robust(&block)
         else
@@ -1038,71 +1220,79 @@ class CSV
     end
 
     def parse_quotable_robust(&block)
+      @scanner.capture ||= +"".encode(@encoding) if @bad_record_handler
       row = []
       quoted_fields = []
       skip_needless_lines
       start_row
       while true
-        @quoted_column_value = false
-        @unquoted_column_value = false
-        @scanner.scan_all(@strip_value) if @strip_value
-        value = parse_column_value
-        if value
+        status = catch(:csv_bad_record) do
+          @quoted_column_value = false
+          @unquoted_column_value = false
           @scanner.scan_all(@strip_value) if @strip_value
-          validate_field_size(value)
-        end
-        if parse_column_end
-          row << value
-          quoted_fields << @quoted_column_value
-        elsif parse_row_end
-          if row.empty? and value.nil?
-            emit_row([], &block) unless @skip_blanks
-          else
+          value = parse_column_value
+          if value
+            @scanner.scan_all(@strip_value) if @strip_value
+            validate_field_size(value)
+          end
+          if parse_column_end
+            row << value
+            quoted_fields << @quoted_column_value
+          elsif parse_row_end
+            if row.empty? and value.nil?
+              emit_row([], &block) unless @skip_blanks
+            else
+              row << value
+              quoted_fields << @quoted_column_value
+              emit_row(row, quoted_fields, &block)
+              row = []
+              quoted_fields.clear
+            end
+            skip_needless_lines
+            start_row
+          elsif @scanner.eos?
+            if row.empty? and value.nil?
+              throw(:csv_bad_record, :done)
+            end
             row << value
             quoted_fields << @quoted_column_value
             emit_row(row, quoted_fields, &block)
-            row = []
-            quoted_fields.clear
+            throw(:csv_bad_record, :done)
+          else
+            if @quoted_column_value
+              if liberal_parsing? and (new_line = @scanner.check(@line_end))
+                message =
+                  "Illegal end-of-line sequence outside of a quoted field " +
+                  "<#{new_line.inspect}>"
+              else
+                message = "Any value after quoted field isn't allowed"
+              end
+              malformed!(message)
+            elsif @unquoted_column_value and
+                  (new_line = @scanner.scan(@line_end))
+              message = "Unquoted fields do not allow new line " +
+                        "<#{new_line.inspect}>"
+              malformed!(message, :new_line_after_unquoted)
+            elsif @scanner.rest.start_with?(@quote_character)
+              malformed!("Illegal quoting", :illegal_quote)
+            elsif (new_line = @scanner.scan(@line_end))
+              message = "New line must be <#{@row_separator.inspect}> " +
+                        "not <#{new_line.inspect}>"
+              malformed!(message, :new_line_after_unquoted)
+            else
+              malformed!("TODO: Meaningful message")
+            end
           end
+          :ok
+        end
+        case status
+        when :done
+          break
+        when :recovered
+          row = []
+          quoted_fields = []
           skip_needless_lines
           start_row
-        elsif @scanner.eos?
-          break if row.empty? and value.nil?
-          row << value
-          quoted_fields << @quoted_column_value
-          emit_row(row, quoted_fields, &block)
-          break
-        else
-          if @quoted_column_value
-            if liberal_parsing? and (new_line = @scanner.check(@line_end))
-              message =
-                "Illegal end-of-line sequence outside of a quoted field " +
-                "<#{new_line.inspect}>"
-            else
-              message = "Any value after quoted field isn't allowed"
-            end
-            ignore_broken_line
-            raise MalformedCSVError.new(message, @lineno)
-          elsif @unquoted_column_value and
-                (new_line = @scanner.scan(@line_end))
-            ignore_broken_line
-            message = "Unquoted fields do not allow new line " +
-                      "<#{new_line.inspect}>"
-            raise MalformedCSVError.new(message, @lineno)
-          elsif @scanner.rest.start_with?(@quote_character)
-            ignore_broken_line
-            message = "Illegal quoting"
-            raise MalformedCSVError.new(message, @lineno)
-          elsif (new_line = @scanner.scan(@line_end))
-            ignore_broken_line
-            message = "New line must be <#{@row_separator.inspect}> " +
-                      "not <#{new_line.inspect}>"
-            raise MalformedCSVError.new(message, @lineno)
-          else
-            ignore_broken_line
-            raise MalformedCSVError.new("TODO: Meaningful message",
-                                        @lineno)
-          end
         end
       end
     end
@@ -1191,9 +1381,7 @@ class CSV
 
           quotes = @scanner.scan_all(@quotes)
           unless quotes
-            ignore_broken_line
-            message = "Unclosed quoted field"
-            raise MalformedCSVError.new(message, @lineno)
+            malformed!("Unclosed quoted field", :unclosed_quote)
           end
           n_quotes = quotes.size
           if n_quotes == 1
@@ -1258,6 +1446,203 @@ class CSV
       @lineno += 1
     end
 
+    # Called at every point where the parser detects malformed CSV.
+    #
+    # In strict mode (the default; no :bad_record handler) this keeps
+    # the historical behavior: advance to the next physical line and
+    # raise MalformedCSVError.
+    #
+    # In recovery mode the malformed record is reported to the handler
+    # together with its raw text, line number and exact byte range, and
+    # parsing resumes at the following record. Parsing is aborted with a
+    # MalformedCSVError when the boundary cannot be located reliably.
+    def malformed!(message, kind = nil)
+      line_number = @lineno + 1
+      unless @bad_record_handler
+        ignore_broken_line
+        raise MalformedCSVError.new(message, line_number)
+      end
+
+      raw_record, start_pos, end_pos = recover_malformed_record(kind)
+      error = MalformedCSVError.new(message, line_number)
+      @bad_record_handler.call(error,
+                               raw_record,
+                               lineno: line_number,
+                               byte_offset: start_pos,
+                               byte_range: start_pos...end_pos)
+      @lineno += 1
+      throw(:csv_bad_record, :recovered)
+    end
+
+    # Tries to find the byte at which the record following the current
+    # (malformed) record starts.
+    #
+    # Returns [raw_record, start_pos, end_pos].
+    # Raises MalformedCSVError with an explanatory message when the
+    # next record's start cannot be located reliably.
+    def recover_malformed_record(kind)
+      # The scanner mirrors every byte consumed since the record's
+      # start (see #start_row and Scanner#capture). That prefix is
+      # authoritative: it survives chunk boundaries even when the keep
+      # stack cannot replay the record's first bytes.
+      start_pos = @record_start_abs
+      end_offset, raw_record = analyze_record_boundary(kind)
+      end_pos = start_pos + end_offset
+      [raw_record, start_pos, end_pos]
+    end
+
+    # Analyzes the malformed record's boundary using the captured raw
+    # prefix plus bytes read lazily beyond the error position. Leaves
+    # the scanner positioned at the start of the next record.
+    def analyze_record_boundary(kind)
+      ambiguous_quote = (kind == :illegal_quote)
+
+      # The capture mirrors bytes since the record start. For the
+      # streaming scanner, where a chunk boundary can hide the first
+      # bytes during a loose->robust delegation, the raw line supplied
+      # by the line reader is used instead when capture is incomplete.
+      capture = @scanner.capture || +"".encode(@encoding)
+      error_rel = @scanner.absolute_pos - @record_start_abs
+      # When the robust parser took over from the line-oriented parser
+      # the yielded raw line is authoritative for the record start.
+      prefix = @delegated_raw_line ? @delegated_raw_line.dup : capture
+      @delegated_raw_line = nil
+      buffer = prefix.dup
+      result = nil
+      chunks = @scanner.recover_remaining_chunks
+      exhausted = false
+      first_chunk = true
+      loop do
+        begin
+          chunk = chunks.next
+        rescue StopIteration
+          exhausted = true
+        end
+        unless exhausted or chunk.nil?
+          if first_chunk
+            # The first chunk begins at the error position. Skip the
+            # leading bytes already covered by the record prefix.
+            overlap = buffer.bytesize - error_rel
+            overlap = 0 if overlap < 0
+            buffer << chunk.byteslice(overlap, chunk.bytesize - overlap) if overlap < chunk.bytesize
+            first_chunk = false
+          else
+            buffer << chunk
+          end
+        end
+        opener = boundary_in_buffer(buffer, true, exhausted)
+        stray = ambiguous_quote ? boundary_in_buffer(buffer, false, exhausted) : opener
+        if opener.is_a?(Array) and
+           (not ambiguous_quote or stray.is_a?(Array))
+          if ambiguous_quote and opener != stray
+            raise_unrecoverable(
+              "a quote inside the malformed record could open a " \
+              "quoted field containing a row separator, so the " \
+              "beginning of the next record cannot be identified " \
+              "reliably")
+          end
+          result = opener
+          break
+        end
+        break if exhausted
+      end
+
+      if result.nil?
+        # End of input without a boundary outside a closed field. The
+        # record may run to EOF inside a quoted field, so its end
+        # cannot be confirmed.
+        raise_unrecoverable(
+          "the malformed record reaches end of input inside a quoted " \
+          "field or at an ambiguous quote, so the end of the record " \
+          "cannot be confirmed")
+      end
+
+      end_offset, _line_count = result
+      raw_record = buffer.byteslice(0, end_offset)
+      tail_after = buffer.byteslice(end_offset, buffer.bytesize - end_offset)
+      @scanner.recover_consume_to(@record_start_abs + end_offset,
+                                  tail_after,
+                                  @scanner.recovery_pending_inputs)
+      [end_offset, raw_record]
+    end
+
+    # Analyzes a buffered record under one quote interpretation.
+    # Returns [byte_offset_of_next_record, physical_line_count],
+    # :need_more when the buffer ends before a boundary is reached with
+    # an open quoted field, or :unrecoverable when the record cannot be
+    # bounded under this interpretation.
+    def boundary_in_buffer(string, honor_quotes, input_exhausted)
+      scanner = StringScanner.new(string)
+      line_count = 1
+      in_quote = false
+      quote_just_closed = false
+      loop do
+        if scanner.eos?
+          # EOF ends the record only when no quoted field is open and
+          # the input really ends here. A partial buffer that can be
+          # extended needs more data.
+          return :need_more unless input_exhausted
+          return in_quote ? :need_more : [scanner.pos, line_count]
+        end
+
+        if in_quote
+          if scanner.scan(@resync_quoted_value)
+            next
+          elsif (quotes = scanner.scan(@quotes))
+            if quotes.size.odd?
+              in_quote = false
+              quote_just_closed = true
+            end
+          else
+            scanner.getch
+          end
+          next
+        end
+
+        # Outside a quoted field: a row separator ends the record
+        # unless we are directly after a closing quote, where trailing
+        # content belongs to the same field.
+        unless quote_just_closed
+          if (row_sep = scanner.scan(@resync_buffer_row_end))
+            line_count += row_sep.count(@cr) + row_sep.count(@lf) - 1
+            return [scanner.pos, line_count]
+          end
+          if scanner.scan(@resync_buffer_col_end)
+            quote_just_closed = false
+            next
+          end
+        end
+
+        if (content = scanner.scan(@resync_unquoted_value))
+          quote_just_closed = false
+          next
+        end
+
+        if (quotes = scanner.scan(@quotes))
+          in_quote = true if honor_quotes and quotes.size.odd?
+          quote_just_closed = false
+          next
+        end
+
+        if (new_line = scanner.scan(@line_end))
+          # A raw line ending different from the configured row
+          # separator is malformed content, not a record boundary.
+          line_count += new_line.count(@cr) + new_line.count(@lf) - 1
+          quote_just_closed = false
+        else
+          scanner.getch
+        end
+      end
+    end
+
+    def raise_unrecoverable(reason)
+      message =
+        "Malformed CSV cannot be recovered: #{reason}. " \
+        "Stopping instead of guessing a record boundary; a row " \
+        "separator inside a quoted field is not a record boundary"
+      raise MalformedCSVError.new(message, @lineno + 1)
+    end
+
     def start_row
       if @last_line
         @last_line = nil
@@ -1265,6 +1650,8 @@ class CSV
         @scanner.keep_drop
       end
       @scanner.keep_start
+      @scanner.capture = +"".encode(@encoding) if @bad_record_handler
+      @record_start_abs = @scanner.absolute_pos
     end
 
     def emit_row(row, quoted_fields=FieldsConverter::NO_QUOTED_FIELDS, &block)
