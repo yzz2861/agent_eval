@@ -8,6 +8,7 @@ from math import floor
 
 import limits.typing
 from limits.storage.base import (
+    DistinctWindowSupport,
     MovingWindowSupport,
     SlidingWindowCounterSupport,
     Storage,
@@ -22,7 +23,11 @@ class Entry:
 
 
 class MemoryStorage(
-    Storage, MovingWindowSupport, SlidingWindowCounterSupport, TimestampedSlidingWindow
+    Storage,
+    MovingWindowSupport,
+    SlidingWindowCounterSupport,
+    DistinctWindowSupport,
+    TimestampedSlidingWindow,
 ):
     """
     rate limit storage using :class:`collections.Counter`
@@ -38,6 +43,7 @@ class MemoryStorage(
         self.locks: defaultdict[str, threading.RLock] = defaultdict(threading.RLock)
         self.expirations: dict[str, float] = {}
         self.events: dict[str, list[Entry]] = {}
+        self.distinct_events: dict[str, dict[str | bytes, float]] = {}
         self._timer_lock = threading.Lock()
         self.timer: threading.Timer = threading.Timer(0.01, self.__expire_events)
         self.timer.start()
@@ -72,6 +78,16 @@ class MemoryStorage(
                 self.storage.pop(key, None)
                 self.expirations.pop(key, None)
                 self.locks.pop(key, None)
+        for key in list(self.distinct_events.keys()):
+            with self.locks[key]:
+                now = time.time()
+                if entries := self.distinct_events.get(key):
+                    for resource, resource_expiry in list(entries.items()):
+                        if resource_expiry <= now:
+                            entries.pop(resource, None)
+                if not self.distinct_events.get(key, None):
+                    self.distinct_events.pop(key, None)
+                    self.locks.pop(key, None)
 
     def __schedule_expiry(self) -> None:
         with self._timer_lock:
@@ -134,6 +150,7 @@ class MemoryStorage(
         self.storage.pop(key, None)
         self.expirations.pop(key, None)
         self.events.pop(key, None)
+        self.distinct_events.pop(key, None)
         self.locks.pop(key, None)
 
     def acquire_entry(self, key: str, limit: int, expiry: int, amount: int = 1) -> bool:
@@ -247,6 +264,58 @@ class MemoryStorage(
         self.clear(previous_key)
         self.clear(current_key)
 
+    def acquire_distinct_entry(
+        self, key: str, resource: str | bytes, limit: int, expiry: int
+    ) -> bool:
+        """
+        :param key: rate limit key to acquire an entry in
+        :param resource: the distinct resource identifier being accessed
+        :param limit: amount of distinct resources allowed
+        :param expiry: expiry of an entry, counted from its last successful access
+        """
+        self.__schedule_expiry()
+        timestamp = time.time()
+        with self.locks[key]:
+            entries = self.distinct_events.setdefault(key, {})
+            for tracked, tracked_expiry in list(entries.items()):
+                if tracked_expiry <= timestamp:
+                    entries.pop(tracked, None)
+            if resource in entries:
+                entries[resource] = timestamp + expiry
+                return True
+            if len(entries) >= limit:
+                return False
+            entries[resource] = timestamp + expiry
+            return True
+
+    def get_distinct_window(
+        self, key: str, limit: int, expiry: int
+    ) -> tuple[int, float]:
+        """
+        returns the number of distinct resources currently within the window
+        and the earliest moment a new distinct resource may be admitted.
+
+        :param key: rate limit key
+        :param limit: amount of distinct resources allowed
+        :param expiry: expiry of an entry
+        :return: (number of distinct resources in the window,
+         earliest admission time for a new resource)
+        """
+        timestamp = time.time()
+        with self.locks[key]:
+            entries = self.distinct_events.get(key)
+            if entries:
+                for tracked, tracked_expiry in list(entries.items()):
+                    if tracked_expiry <= timestamp:
+                        entries.pop(tracked, None)
+                if not entries:
+                    self.distinct_events.pop(key, None)
+                    entries = None
+        if not entries:
+            return 0, timestamp
+        count = len(entries)
+        return count, timestamp if count < limit else min(entries.values())
+
     def check(self) -> bool:
         """
         check if storage is healthy
@@ -255,9 +324,10 @@ class MemoryStorage(
         return True
 
     def reset(self) -> int | None:
-        num_items = max(len(self.storage), len(self.events))
+        num_items = max(len(self.storage), len(self.events), len(self.distinct_events))
         self.storage.clear()
         self.expirations.clear()
         self.events.clear()
+        self.distinct_events.clear()
         self.locks.clear()
         return num_items

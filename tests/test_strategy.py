@@ -10,14 +10,16 @@ from limits.limits import (
     RateLimitItemPerMinute,
     RateLimitItemPerSecond,
 )
-from limits.storage import storage_from_string
+from limits.storage import MemoryStorage, Storage, storage_from_string
 from limits.storage.base import TimestampedSlidingWindow
 from limits.strategies import (
+    DistinctWindowRateLimiter,
     FixedWindowRateLimiter,
     MovingWindowRateLimiter,
     SlidingWindowCounterRateLimiter,
 )
 from tests.utils import (
+    FakeClock,
     all_storage,
     fixed_start,
     moving_window_storage,
@@ -340,3 +342,131 @@ class TestMovingWindow:
         assert limiter.hit(limit)
         assert not limiter.test(limit)
         assert not limiter.hit(limit)
+
+
+class TestDistinctWindow:
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        clock = FakeClock()
+        monkeypatch.setattr(time, "time", clock)
+        return clock
+
+    def test_same_resource_renews_expiry(self, clock):
+        storage = MemoryStorage()
+        limiter = DistinctWindowRateLimiter(storage)
+        limit = RateLimitItemPerMinute(2, 10)
+        assert limiter.hit(limit, "res-a", "account")
+        clock.advance(599)
+        # still within the window: allowed and expiry is refreshed
+        assert limiter.hit(limit, "res-a", "account")
+        # past the original expiry: the stale expiry record is no longer
+        # in effect, the renewal from the last successful access is
+        clock.advance(2)
+        assert limiter.hit(limit, "res-a", "account")
+        stats = limiter.get_window_stats(limit, "account")
+        assert stats.remaining == 1
+        # without further renewals the resource expires and frees its slot
+        clock.advance(601)
+        stats = limiter.get_window_stats(limit, "account")
+        assert stats.remaining == 2
+        assert stats.reset_time == clock.now
+
+    def test_repeated_access_keeps_single_record(self, clock):
+        storage = MemoryStorage()
+        limiter = DistinctWindowRateLimiter(storage)
+        limit = RateLimitItemPerMinute(5, 10)
+        for _ in range(20):
+            assert limiter.hit(limit, "res-a", "account")
+            clock.advance(10)
+        # 20 hits on the same resource still count as a single distinct one
+        assert limiter.get_window_stats(limit, "account").remaining == 4
+        # and don't accumulate stale expiry records internally
+        assert len(storage.distinct_events[limit.key_for("account")]) == 1
+
+    def test_new_resources_compete_for_last_slot(self, clock):
+        storage = MemoryStorage()
+        limiter = DistinctWindowRateLimiter(storage)
+        limit = RateLimitItemPerMinute(2, 10)
+        assert limiter.hit(limit, "res-a", "account")
+        clock.advance(1)
+        # res-b wins the last slot, res-c is turned away
+        assert limiter.hit(limit, "res-b", "account")
+        assert not limiter.hit(limit, "res-c", "account")
+        # a rejected resource leaves no record behind
+        entries = storage.distinct_events[limit.key_for("account")]
+        assert set(entries) == {"res-a", "res-b"}
+        stats = limiter.get_window_stats(limit, "account")
+        assert stats.remaining == 0
+        # the earliest a new resource may be admitted is when the oldest
+        # tracked resource (res-a) expires
+        assert stats.reset_time == clock.now + 599
+        assert not limiter.test(limit, "account")
+        # res-a expires while res-b is still tracked: res-c can now
+        # take the freed slot, but there is no room for res-d
+        clock.advance(599)
+        assert limiter.test(limit, "account")
+        assert limiter.hit(limit, "res-c", "account")
+        assert not limiter.hit(limit, "res-d", "account")
+        assert limiter.get_window_stats(limit, "account").remaining == 0
+
+    def test_str_and_bytes_identifiers_are_distinct(self, clock):
+        storage = MemoryStorage()
+        limiter = DistinctWindowRateLimiter(storage)
+        limit = RateLimitItemPerMinute(2, 10)
+        assert limiter.hit(limit, "resource", "account")
+        assert limiter.hit(limit, b"resource", "account")
+        assert limiter.get_window_stats(limit, "account").remaining == 0
+        assert not limiter.hit(limit, "other", "account")
+        # each representation renews its own entry
+        assert limiter.hit(limit, "resource", "account")
+        assert limiter.hit(limit, b"resource", "account")
+
+    def test_window_stats_empty(self, clock):
+        storage = MemoryStorage()
+        limiter = DistinctWindowRateLimiter(storage)
+        limit = RateLimitItemPerMinute(5, 10)
+        stats = limiter.get_window_stats(limit, "account")
+        assert stats.remaining == 5
+        assert stats.reset_time == clock.now
+        assert limiter.test(limit, "account")
+
+    def test_clear(self, clock):
+        storage = MemoryStorage()
+        limiter = DistinctWindowRateLimiter(storage)
+        limit = RateLimitItemPerMinute(2, 10)
+        assert limiter.hit(limit, "res-a", "account")
+        assert limiter.hit(limit, "res-b", "account")
+        assert not limiter.hit(limit, "res-c", "account")
+        limiter.clear(limit, "account")
+        assert limit.key_for("account") not in storage.distinct_events
+        assert limiter.get_window_stats(limit, "account").remaining == 2
+        assert limiter.hit(limit, "res-c", "account")
+
+    def test_unsupported_storage(self):
+        class BareStorage(Storage):
+            STORAGE_SCHEME = None
+
+            @property
+            def base_exceptions(self):
+                return ValueError
+
+            def incr(self, key, expiry, amount=1):
+                return 0
+
+            def get(self, key):
+                return 0
+
+            def get_expiry(self, key):
+                return time.time()
+
+            def check(self):
+                return True
+
+            def reset(self):
+                return None
+
+            def clear(self, key):
+                return None
+
+        with pytest.raises(NotImplementedError):
+            DistinctWindowRateLimiter(BareStorage())

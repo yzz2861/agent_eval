@@ -18,6 +18,21 @@ ASYNC_MEMCACHED_IMPLEMENTATION = os.environ.get(
 )
 
 
+class FakeClock:
+    """
+    A virtual clock to substitute :func:`time.time` in tests.
+    """
+
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def fixed_start(fn):
     @functools.wraps(fn)
     def __inner(*a, **k):

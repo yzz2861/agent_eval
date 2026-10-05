@@ -222,6 +222,59 @@ class SlidingWindowCounterSupport(ABC):
         ...
 
 
+class DistinctWindowSupport(ABC):
+    """
+    Abstract base class for storages that support
+    the :ref:`strategies:distinct window` strategy
+    """
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # type: ignore[explicit-any]
+        for method in {
+            "acquire_distinct_entry",
+            "get_distinct_window",
+        }:
+            setattr(
+                cls,
+                method,
+                _wrap_errors(getattr(cls, method)),
+            )
+        super().__init_subclass__(**kwargs)
+
+    @abstractmethod
+    def acquire_distinct_entry(
+        self, key: str, resource: str | bytes, limit: int, expiry: int
+    ) -> bool:
+        """
+        Acquire an entry for a distinct resource if it is either already
+        tracked within the window or a slot is still available.
+
+        A successful acquisition for an already tracked resource refreshes
+        its expiry, while a rejected acquisition leaves no trace.
+
+        :param key: rate limit key to acquire an entry in
+        :param resource: the distinct resource identifier being accessed
+        :param limit: amount of distinct resources allowed
+        :param expiry: expiry of an entry, counted from its last successful access
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_distinct_window(
+        self, key: str, limit: int, expiry: int
+    ) -> tuple[int, float]:
+        """
+        returns the number of distinct resources currently within the window
+        and the earliest moment a new distinct resource may be admitted.
+
+        :param key: rate limit key
+        :param limit: amount of distinct resources allowed
+        :param expiry: expiry of an entry
+        :return: (number of distinct resources in the window,
+         earliest admission time for a new resource)
+        """
+        raise NotImplementedError
+
+
 class TimestampedSlidingWindow:
     """Helper class for storage that support the sliding window counter, with timestamp based keys."""
 

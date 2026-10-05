@@ -17,6 +17,11 @@ TL;DR: How to choose a strategy
   smooths transitions between time periods with less overhead than a full moving window,
   though it may trade off some precision near bucket boundaries.
 
+- **Distinct Window:**
+  Use when the number of *distinct* resources a client may touch within a window
+  needs to be capped (e.g. at most 5 different resources per 10 minutes),
+  regardless of how many times each resource is accessed.
+
 Fixed Window
 ============
 
@@ -127,8 +132,39 @@ Suppose:
 .. note::
    Some storage implementations use fixed bucket boundaries (e.g., aligning buckets with
    clock intervals), while others adjust buckets dynamically based on the first hit.
-   This difference can allow an attacker to bypass limits during the initial sampling
-   period. The affected implementations are ``memcached`` and ``in-memory``.
+  This difference can allow an attacker to bypass limits during the initial sampling
+  period. The affected implementations are ``memcached`` and ``in-memory``.
 
 
+Distinct Window
+===============
+
+This strategy limits how many *distinct* resources a client may access within a
+window, rather than how many requests they may make. Each hit carries a resource
+identifier: the first access to a resource takes up one of the available slots,
+while repeated accesses to a resource already tracked in the window are always
+allowed and refresh its expiry. Once every slot is taken, accesses to new
+resources are rejected and leave no record behind. A resource expires from the
+window based on its last successful access.
+
+For example, with a rate limit of 2 distinct resources per 10 minutes:
+
+- At **00:00:00**, a client accesses resource ``A`` for the first time, taking
+  the first slot (``A`` now expires at **00:10:00**).
+- At **00:01:00**, the client accesses resource ``B``, taking the second (last)
+  slot.
+- At **00:02:00**, the client accesses resource ``A`` again. ``A`` is already
+  tracked, so the access is allowed and ``A``'s expiry is refreshed to
+  **00:12:00**.
+- At **00:03:00**, the client accesses resource ``C``. Both slots are taken, so
+  the access is rejected and no record of ``C`` is kept.
+- At **00:11:01**, ``B`` has expired (its last successful access was at
+  **00:01:00**), freeing a slot. The client may now access resource ``C``.
+
+The window statistics report the number of distinct resource slots remaining
+and the earliest moment a new distinct resource may be admitted.
+
+.. note::
+   ``str`` and ``bytes`` resource identifiers are treated as distinct resources,
+   e.g. ``"resource"`` and ``b"resource"`` each occupy their own slot.
 

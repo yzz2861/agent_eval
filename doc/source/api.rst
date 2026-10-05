@@ -30,6 +30,7 @@ Provided by :mod:`limits.strategies`
 .. autoclass:: FixedWindowRateLimiter
 .. autoclass:: MovingWindowRateLimiter
 .. autoclass:: SlidingWindowCounterRateLimiter
+.. autoclass:: DistinctWindowRateLimiter
 
 All strategies implement the same abstract base class:
 
@@ -48,6 +49,7 @@ Provided by :mod:`limits.aio.strategies`
 .. autoclass:: FixedWindowRateLimiter
 .. autoclass:: MovingWindowRateLimiter
 .. autoclass:: SlidingWindowCounterRateLimiter
+.. autoclass:: DistinctWindowRateLimiter
 
 All strategies implement the same abstract base class:
 
@@ -143,6 +145,7 @@ Abstract storage classes
 .. autoclass:: limits.storage.Storage
 .. autoclass:: limits.storage.MovingWindowSupport
 .. autoclass:: limits.storage.SlidingWindowCounterSupport
+.. autoclass:: limits.storage.DistinctWindowSupport
 
 
 Async Abstract storage classes
@@ -151,6 +154,7 @@ Async Abstract storage classes
 .. autoclass:: limits.aio.storage.Storage
 .. autoclass:: limits.aio.storage.MovingWindowSupport
 .. autoclass:: limits.aio.storage.SlidingWindowCounterSupport
+.. autoclass:: limits.aio.storage.DistinctWindowSupport
 
 
 Rate Limits

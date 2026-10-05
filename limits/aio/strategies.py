@@ -15,7 +15,7 @@ from ..storage import StorageTypes
 from ..typing import cast
 from ..util import WindowStats
 from .storage import MovingWindowSupport, Storage
-from .storage.base import SlidingWindowCounterSupport
+from .storage.base import DistinctWindowSupport, SlidingWindowCounterSupport
 
 
 class RateLimiter(ABC):
@@ -324,8 +324,92 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
         ).clear_sliding_window(item.key_for(*identifiers), item.get_expiry())
 
 
+class DistinctWindowRateLimiter(RateLimiter):
+    """
+    Reference: :ref:`strategies:distinct window`
+    """
+
+    def __init__(self, storage: StorageTypes):
+        if not (
+            hasattr(storage, "acquire_distinct_entry")
+            and hasattr(storage, "get_distinct_window")
+        ):
+            raise NotImplementedError(
+                "DistinctWindowRateLimiting is not implemented for storage "
+                f"of type {storage.__class__}"
+            )
+        super().__init__(storage)
+
+    async def hit(
+        self, item: RateLimitItem, resource: str | bytes, *identifiers: str
+    ) -> bool:
+        """
+        Consume the rate limit for a distinct resource.
+
+        The first access to ``resource`` within the window takes up one of the
+        ``item.amount`` available slots. Repeated accesses to a resource already
+        tracked in the window are always allowed and refresh its expiry, while
+        accesses to new resources once every slot is taken are rejected without
+        leaving any record.
+
+        :param item: the rate limit item
+        :param resource: the distinct resource identifier being accessed.
+         ``str`` and ``bytes`` identifiers are treated as distinct resources.
+        :param identifiers: variable list of strings to uniquely identify the
+         limit
+
+        :return: True if the resource could be admitted into the window
+        """
+        return await cast(
+            DistinctWindowSupport, self.storage
+        ).acquire_distinct_entry(
+            item.key_for(*identifiers), resource, item.amount, item.get_expiry()
+        )
+
+    async def test(self, item: RateLimitItem, *identifiers: str) -> bool:
+        """
+        Check if a new distinct resource could be admitted into the window
+        without consuming from the rate limit.
+
+        Note that resources already tracked in the window can always be
+        consumed with :meth:`hit`, even when this returns False.
+
+        :param item: the rate limit item
+        :param identifiers: variable list of strings to uniquely identify the
+         limit
+
+        :return: True if a slot for a new distinct resource is available
+        """
+        _, admission = await cast(
+            DistinctWindowSupport, self.storage
+        ).get_distinct_window(
+            item.key_for(*identifiers), item.amount, item.get_expiry()
+        )
+        return admission <= time.time()
+
+    async def get_window_stats(
+        self, item: RateLimitItem, *identifiers: str
+    ) -> WindowStats:
+        """
+        Query the earliest time a new distinct resource may be admitted and
+        the number of distinct resource slots remaining for the limit.
+
+        :param item: the rate limit item
+        :param identifiers: variable list of strings to uniquely identify the
+         limit
+        :return: (reset time, remaining)
+        """
+        count, admission = await cast(
+            DistinctWindowSupport, self.storage
+        ).get_distinct_window(
+            item.key_for(*identifiers), item.amount, item.get_expiry()
+        )
+        return WindowStats(admission, item.amount - count)
+
+
 STRATEGIES = {
     "sliding-window-counter": SlidingWindowCounterRateLimiter,
     "fixed-window": FixedWindowRateLimiter,
     "moving-window": MovingWindowRateLimiter,
+    "distinct-window": DistinctWindowRateLimiter,
 }
