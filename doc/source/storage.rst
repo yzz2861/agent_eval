@@ -132,6 +132,22 @@ In-Memory Storage
 -----------------
 The in-memory storage (:class:`~limits.storage.MemoryStorage`) takes no parameters so the only relevant value is :code:`memory://`
 
+SQLite Storage
+--------------
+
+The SQLite storage (:class:`~limits.storage.SQLiteStorage`) uses Python's standard
+library and needs no separate database server. Point it at a file path to share
+state between worker processes, for example :code:`sqlite:///var/lib/limits/limits.db`
+or :code:`sqlite:////absolute/path/limits.db`.
+
+Use :code:`sqlite://` for a private in-memory database. File based databases use
+WAL journaling and immediate write transactions so that the quota check and the
+corresponding accounting update are atomic across processes. Expired rows are
+deleted in indexed batches.
+
+Async SQLite is available with the :code:`async+sqlite://` scheme; blocking
+database operations are executed in worker threads.
+
 Memcached Storage
 -----------------
 

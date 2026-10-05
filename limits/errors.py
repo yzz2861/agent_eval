@@ -21,6 +21,19 @@ class ConcurrentUpdateError(Exception):
         super().__init__(f"Unable to update {key} after {attempts} retries")
 
 
+class LockTimeoutError(Exception):
+    """
+    Error raised when a storage backend cannot acquire a lock within
+    the configured waiting period.
+
+    Any transaction in progress is rolled back before this exception is
+    raised.
+    """
+
+
+SQLiteLockTimeoutError = LockTimeoutError
+
+
 class StorageError(Exception):
     """
     Error raised when an error is encountered in a storage

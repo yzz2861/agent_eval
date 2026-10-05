@@ -99,6 +99,11 @@ MongoDB Storage
 
 .. autoclass:: MongoDBStorage
 
+SQLite Storage
+^^^^^^^^^^^^^
+
+.. autoclass:: SQLiteStorage
+
 
 Async Storage
 -------------
@@ -136,6 +141,11 @@ Async MongoDB Storage
 ^^^^^^^^^^^^^^^^^^^^^
 
 .. autoclass:: MongoDBStorage
+
+Async SQLite Storage
+^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: SQLiteStorage
 
 Abstract storage classes
 ------------------------
@@ -194,6 +204,8 @@ Exceptions
 .. autoexception:: limits.errors.ConfigurationError
    :no-inherited-members:
 .. autoexception:: limits.errors.ConcurrentUpdateError
+   :no-inherited-members:
+.. autoexception:: limits.errors.LockTimeoutError
    :no-inherited-members:
 .. autoexception:: limits.errors.StorageError
    :no-inherited-members:
