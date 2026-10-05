@@ -165,6 +165,28 @@ module Dry
         callable_option?(options[:memoize])
       end
 
+      # Returns the component's lifecycle.
+      #
+      # A +lifecycle:+ magic comment (or the component dir's lifecycle policy)
+      # takes precedence. When none is configured, the legacy +memoize+ policy
+      # is honored: memoized components are +:singleton+, everything else is
+      # +:transient+.
+      #
+      # @return [Lifecycle]
+      #
+      # @api private
+      def lifecycle
+        configured = evaluate_option(options[:lifecycle])
+
+        if configured
+          Lifecycle[configured]
+        elsif memoize?
+          Lifecycle::SINGLETON
+        else
+          Lifecycle::TRANSIENT
+        end
+      end
+
       private
 
       def path_in_namespace
@@ -184,6 +206,10 @@ module Dry
         else
           !!value
         end
+      end
+
+      def evaluate_option(value)
+        value.respond_to?(:call) ? value.call(self) : value
       end
     end
   end

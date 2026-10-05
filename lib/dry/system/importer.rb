@@ -94,7 +94,8 @@ module Dry
       end
 
       def import_keys(other, namespace, keys)
-        merge(container, build_merge_container(other, keys), namespace: namespace)
+        merge_container = build_merge_container(other, keys)
+        merge(container, merge_container, other: other, keys: keys, namespace: namespace)
       end
 
       def import_all(other, namespace)
@@ -105,14 +106,42 @@ module Dry
             build_merge_container(other.finalize!, other.keys)
           end
 
-        merge(container, merge_container, namespace: namespace)
+        merge(
+          container,
+          merge_container,
+          other: other,
+          keys: merge_container.keys,
+          namespace: namespace
+        )
       end
 
       # Merges `other` into `container`, favoring the container's existing registrations
-      def merge(container, other, namespace:)
-        container.merge(other, namespace: namespace) { |_key, old_item, new_item|
+      def merge(container, merge_container, other:, keys:, namespace:)
+        register_imported_lifecycles(other, keys, namespace)
+
+        container.merge(merge_container, namespace: namespace) { |_key, old_item, new_item|
           old_item || new_item
         }
+      end
+
+      # Registers the lifecycle of each imported component on the target
+      # container (under its namespaced key) so that singleton/scoped semantics
+      # and release hooks are preserved across containers.
+      def register_imported_lifecycles(other, keys, namespace)
+        return unless other.respond_to?(:lifecycles)
+
+        keys.each do |key|
+          lifecycle = other.lifecycles.lifecycle_for(key)
+          next unless lifecycle
+
+          target_key = [namespace, key].compact.join(KEY_SEPARATOR)
+          options = other.lifecycles.options_for(key)
+          container.lifecycles.register(
+            target_key,
+            lifecycle: lifecycle,
+            release: options[:release]
+          )
+        end
       end
 
       def build_merge_container(other, keys)

@@ -151,7 +151,8 @@ module Dry
           auto_register: auto_register,
           loader: loader,
           instance: instance,
-          memoize: memoize
+          memoize: memoize,
+          lifecycle: lifecycle
         }
       end
 

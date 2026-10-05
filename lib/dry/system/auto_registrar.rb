@@ -31,7 +31,9 @@ module Dry
         component_dir.each_component do |component|
           next unless register_component?(component)
 
-          container.register(component.key, memoize: component.memoize?) { component.instance }
+          container.register(component.key, lifecycle: component.lifecycle) {
+            component.instance
+          }
         end
       end
 

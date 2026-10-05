@@ -9,6 +9,7 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Explicit component lifecycles: `:singleton`, `:scoped`, and `:transient`. A lifecycle can be configured per component directory (`config.component_dirs.dir.lifecycle = ...`, including a proc for per-component policies), declared with a `# lifecycle: ...` magic comment, or passed to `register(..., lifecycle: ...)`. Scoped components are shared within a scope opened by the framework-independent `MyContainer.scope { ... }` entry point; scopes are isolated per thread and fiber (use `Scope#activate` to carry a scope into a fiber you start yourself), can be nested, and release their owned components on exit (even on exceptions), invoking `#close` or a configured `release:` hook. Singletons are released in reverse order on `shutdown!`. A longer-lived component capturing a shorter-lived dependency now raises `CaptiveDependencyError` with the full dependency chain; resolving a scoped component outside a scope raises `ScopedComponentWithoutScopeError`. The `memoize:` option continues to work as an alias for the singleton lifecycle.
 - The Zeitwerk plugin accepts an `enable_reloading:` option, which enables reloading on the loader ahead of `setup`, so Zeitwerk tracks the constants it defines and they can be unloaded later. Applied from the plugin's `after(:configure)` hook, so it is in time whether the loader is set up by the plugin or by the integrating library. (@afomera in #297)
 
 ### Changed

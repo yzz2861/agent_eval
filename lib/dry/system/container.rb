@@ -380,7 +380,12 @@ module Dry
 
         # @api public
         def shutdown!
-          providers.shutdown
+          begin
+            lifecycles.shutdown!
+          ensure
+            providers.shutdown
+          end
+
           self
         end
 
@@ -480,20 +485,94 @@ module Dry
           config.root
         end
 
+        # @overload register(key, contents, options = nil, lifecycle: nil, release: nil, **kwargs, &block)
+        #   Registers a component with the container.
+        #
+        #   In addition to the registration options supported by the underlying
+        #   container, a +lifecycle+ may be given as +:singleton+, +:scoped+, or
+        #   +:transient+ (see {Lifecycle}). Components registered with a block are
+        #   always built via the block when first resolved.
+        #
+        #   @param lifecycle [Symbol, String] the component's lifecycle
+        #   @param release [Proc, Symbol, nil] used to release the component when
+        #     its owning scope closes (or the container shuts down): a callable
+        #   receiving the instance, or the name of the method to call on it. When
+        #   nil, the instance's +#close+ method is called if it responds to it.
+        #
+        #   @see Lifecycle
+        #
         # @api public
-        def register(key, *)
-          super
+        def register(key, contents = nil, options = nil, lifecycle: nil, release: nil, **kwargs, &block)
+          if block_given?
+            item = block
+            call_options = contents.is_a?(::Hash) ? contents.merge(kwargs) : kwargs.dup
+          else
+            item = contents
+            call_options = (options || {}).merge(kwargs)
+          end
+
+          if lifecycle
+            register_lifecycle(key, lifecycle, release: release)
+            call_options.delete(:memoize)
+          elsif call_options[:memoize]
+            register_lifecycle(key, Lifecycle::SINGLETON, release: release)
+            call_options.delete(:memoize)
+          end
+
+          super(key, item, **call_options)
 
           hooks[:after_register].each { |hook| instance_exec(key, &hook) }
 
           self
         end
 
+        # Opens a scope for the duration of the block, providing a sharing and
+        # lifetime boundary for +scoped+ components.
+        #
+        # Every scoped component resolved within the block (including from
+        # nested method calls) shares a single instance for this scope. Scopes
+        # may be nested: a nested scope reuses instances already created by
+        # enclosing scopes, and takes ownership of (and later releases) any
+        # scoped instances it creates itself.
+        #
+        # Scopes are isolated per thread and per fiber: a new thread or fiber
+        # does not see the current scope. Call {Scope#activate} inside a fiber
+        # you start yourself if you need to carry the scope into it.
+        #
+        # When the block exits, even via an exception, every component owned by
+        # the scope is released in the reverse order of creation: its +#close+
+        # method is called, or its configured +release:+ hook is invoked.
+        #
+        # This provides a framework-independent request scope entry point:
+        #
+        # @example
+        #   MyApp.scope do |scope|
+        #     MyApp["operations.create_user"].call(params)
+        #   end
+        #
+        # @yieldparam scope [Scope] the newly opened scope
+        #
+        # @return [Object] the return value of the block
+        #
+        # @see Scope
+        #
         # @api public
-        def resolve(key)
+        def scope(&block)
+          scope = Scope.new(container: self, parent: lifecycles.current_scope)
+          lifecycles.with_scope(scope, &block)
+        end
+
+        # @api public
+        def resolve(key, &fallback)
           load_component(key) unless finalized?
 
-          super
+          if lifecycles.managed?(key)
+            lifecycles.resolve(key) { super(key) }
+          elsif fallback
+            super(key, &fallback)
+          else
+            super
+          end
         end
 
         alias_method :registered?, :key?
@@ -529,6 +608,11 @@ module Dry
         # @api private
         def providers
           @providers ||= config.provider_registrar.new(self)
+        end
+
+        # @api private
+        def lifecycles
+          @lifecycle_registry ||= LifecycleRegistry.new(self)
         end
 
         # @api private
@@ -600,6 +684,7 @@ module Dry
 
           klass.instance_variable_set(:@__configured__, false)
           klass.instance_variable_set(:@__finalized__, false)
+          klass.instance_variable_set(:@lifecycle_registry, lifecycles.dup)
 
           super
         end
@@ -637,9 +722,20 @@ module Dry
 
         private
 
+        # @api private
+        def _with_scope(scope, &block)
+          lifecycles.with_scope(scope, &block)
+        end
+
+        def register_lifecycle(key, lifecycle, release: nil)
+          lifecycles.register(key, lifecycle: lifecycle, release: release)
+        end
+
         def load_local_component(component)
           if component.auto_register?
-            register(component.identifier, memoize: component.memoize?) { component.instance }
+            register(component.identifier, lifecycle: component.lifecycle) {
+              component.instance
+            }
           end
         end
 

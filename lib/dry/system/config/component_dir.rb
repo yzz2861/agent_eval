@@ -154,6 +154,45 @@ module Dry
         #   @api public
         setting :memoize, default: false
 
+        # @!method lifecycle=(lifecycle)
+        #
+        #   Sets the lifecycle for components from the dir: one of +:singleton+,
+        #   +:scoped+, or +:transient+ (see {Dry::System::Lifecycle}).
+        #
+        #   This may be a simple lifecycle name (or string) for all components,
+        #   or a proc accepting a {Dry::System::Component} and returning a
+        #   lifecycle name, allowing per-component configuration. When nil (the
+        #   default), the {memoize=} setting determines whether components are
+        #   singletons or transients, preserving the previous behavior.
+        #
+        #   A +lifecycle:+ magic comment in a component file takes precedence
+        #   over this setting.
+        #
+        #   @param lifecycle [Symbol, String, Proc, nil]
+        #   @return [Symbol, String, Proc, nil]
+        #
+        #   @example
+        #     dir.lifecycle = :scoped
+        #
+        #   @example
+        #     dir.lifecycle = proc do |component|
+        #       component.key.start_with?("operations.") ? :scoped : :singleton
+        #     end
+        #
+        #   @see lifecycle
+        #   @see Dry::System::Lifecycle
+        #   @api public
+        #
+        # @!method lifecycle
+        #
+        #   Returns the configured lifecycle policy.
+        #
+        #   @return [Symbol, String, Proc, nil]
+        #
+        #   @see lifecycle=
+        #   @api public
+        setting :lifecycle
+
         # @!method namespaces
         #
         #   Returns the configured namespaces for the component dir.

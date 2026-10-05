@@ -128,5 +128,50 @@ module Dry
         super(message.join("\n"))
       end
     end
+
+    # Error raised when an invalid lifecycle name is configured for a component
+    #
+    # @api public
+    InvalidLifecycleError = Class.new(ArgumentError) do
+      def initialize(value)
+        valid = Dry::System::Lifecycle::NAMES.map(&:inspect).join(", ")
+        super("Invalid lifecycle #{value.inspect}; must be one of #{valid}")
+      end
+    end
+
+    # Error raised when a scoped component is resolved outside of any scope
+    #
+    # @api public
+    ScopedComponentWithoutScopeError = Class.new(StandardError) do
+      def initialize(key)
+        super(
+          "Cannot resolve scoped component #{key.inspect} outside of a scope. " \
+          "Wrap the work that uses it in the container's scope block: " \
+          "MyContainer.scope { |scope| ... }"
+        )
+      end
+    end
+
+    # Error raised when a longer-lived component depends on a shorter-lived one
+    #
+    # A singleton component must only depend on other singletons, and a scoped
+    # component must only depend on singleton or scoped components. Otherwise the
+    # shorter-lived dependency would be captured ("leaked") past the end of its
+    # scope.
+    #
+    # @api public
+    CaptiveDependencyError = Class.new(StandardError) do
+      def initialize(chain)
+        labels = chain.map { |key, lifecycle| "#{key} (#{lifecycle})" }
+
+        super(
+          "Captive dependency detected: a longer-lived component cannot capture " \
+          "a shorter-lived dependency.\n" \
+          "Dependency chain: #{labels.join(" -> ")}\n" \
+          "A component may only depend on components with an equal or longer " \
+          "lifecycle (#{Dry::System::Lifecycle::NAMES.join(" > ")})."
+        )
+      end
+    end
   end
 end
