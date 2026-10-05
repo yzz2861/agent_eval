@@ -7,6 +7,7 @@ require "money/money/constructors"
 require "money/money/formatter"
 require "money/money/allocation"
 require "money/money/locale_backend"
+require "money/money/localized_parser"
 
 # "Money is any object or record that is generally accepted as payment for
 # goods and services and repayment of debts in a given socio-economic context
@@ -24,6 +25,7 @@ class Money
 
   # Raised when smallest denomination of a currency is not defined
   class UndefinedSmallestDenomination < StandardError; end
+  class LocalizedParsingError < ArgumentError; end
 
   # Convenience method for fractional part of the amount. Synonym of #fractional
   #
@@ -321,6 +323,44 @@ class Money
 
     value = amount.to_d * currency.subunit_to_unit
     new(value, currency, options)
+  end
+
+  # Parses a localized amount using an explicit locale with a region.
+  #
+  # @param [String] input The localized monetary amount.
+  # @param [String, Symbol] locale BCP 47 locale including a region, such as :en-US.
+  # @param [Currency, String, Symbol, nil] currency Optional explicit currency.
+  # @param [Hash] options Optional settings passed to the new Money instance.
+  #
+  # @return [Money]
+  def self.parse_localized(
+    input,
+    given_locale = nil,
+    given_currency = nil,
+    locale: nil,
+    region: nil,
+    currency: nil,
+    **options
+  )
+    begin
+      if (locale && region) && locale != region
+        raise LocalizedParsingError, "provide either locale: or region:, not both"
+      end
+      LocalizedParser.parse(
+        input,
+        given_locale,
+        given_currency,
+        locale: locale || region,
+        currency: currency || given_currency,
+        **options,
+      )
+    rescue LocalizedParser::InvalidAmount => error
+      raise LocalizedParsingError, error.message
+    end
+  end
+
+  class << self
+    alias parse_localized_amount parse_localized
   end
 
   # DEPRECATED.

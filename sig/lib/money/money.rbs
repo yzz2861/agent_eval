@@ -18,6 +18,9 @@ class Money
   class UndefinedSmallestDenomination < StandardError
   end
 
+  class LocalizedParsingError < ArgumentError
+  end
+
   @default_currency: Money::Currency
   @fractional: BigDecimal
 
@@ -288,6 +291,13 @@ class Money
   #
   # @see #initialize
   def self.from_amount: (Numeric amount, ?(Money::Currency | string | Symbol) currency, ?::Hash[untyped, untyped] options) -> Money
+
+  def self.parse_localized:
+    (String input, ?(String | Symbol) locale, ?(Money::Currency | string | Symbol) currency,
+     ?locale: (String | Symbol | nil), ?region: (String | Symbol | nil),
+     ?currency: (Money::Currency | string | Symbol | nil), **untyped options) -> Money
+
+  alias self.parse_localized_amount self.parse_localized
 
   # DEPRECATED.
   #

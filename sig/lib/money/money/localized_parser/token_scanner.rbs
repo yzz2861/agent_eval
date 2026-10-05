@@ -1,0 +1,14 @@
+class Money
+  class LocalizedParser
+    module TokenScanner
+      private def tokenize: (String) -> Hash[Symbol, untyped]
+      private def remove_outer_parentheses!: (String) -> boolish
+      private def scan_ends: (String) -> [String?, String?, String?]
+      private def trim_spaces: (String) -> String?
+      private def consume_leading_sign: (String) -> String?
+      private def consume_trailing_sign: (String) -> String?
+      private def consume_leading_marker: (String) -> String?
+      private def consume_trailing_marker: (String) -> String?
+    end
+  end
+end

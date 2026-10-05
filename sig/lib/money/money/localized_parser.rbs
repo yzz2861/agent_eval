@@ -1,0 +1,15 @@
+class Money
+  class LocalizedParser
+    include RegionRules
+    include TokenScanner
+
+    class InvalidAmount < ArgumentError
+    end
+
+    def self.parse:
+      (String input, ?(String | Symbol) locale, ?untyped currency, ?locale: (String | Symbol | nil),
+       ?region: (String | Symbol | nil), ?currency: untyped, **untyped options) -> Money
+    def initialize: (String input, locale: (String | Symbol | nil), ?currency: untyped, **untyped options) -> void
+    def parse: () -> Money
+  end
+end

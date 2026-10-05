@@ -1,0 +1,15 @@
+class Money
+  class LocalizedParser
+    module RegionRules
+      NBSP: String
+      NNBSP: String
+      SPACE_CHARS: String
+      SPACES: String
+      RULES: Hash[Symbol, Hash[Symbol, untyped]]
+      LOCALES: Hash[String, Hash[untyped, untyped]]
+      ALIASES: Hash[String, String]
+
+      def self.find: (String | Symbol) -> Hash[untyped, untyped]
+    end
+  end
+end
