@@ -164,11 +164,21 @@ class TreeInterpreter(Visitor):
         return _Expression(node['children'][0], self)
 
     def visit_function_expression(self, node, value):
+        function_name = node['value']
+        if self._functions.is_lazy_function(function_name):
+            argument_evaluators = [
+                self._create_argument_evaluator(child, value)
+                for child in node['children']
+            ]
+            return self._functions.call_lazy_function(
+                function_name, argument_evaluators)
         resolved_args = []
         for child in node['children']:
-            current = self.visit(child, value)
-            resolved_args.append(current)
-        return self._functions.call_function(node['value'], resolved_args)
+            resolved_args.append(self.visit(child, value))
+        return self._functions.call_function(function_name, resolved_args)
+
+    def _create_argument_evaluator(self, child, value):
+        return lambda: self.visit(child, value)
 
     def visit_filter_projection(self, node, value):
         base = self.visit(node['children'][0], value)

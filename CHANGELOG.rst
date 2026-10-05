@@ -1,7 +1,7 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add support for registering lazy custom functions.
 
 
 1.1.0

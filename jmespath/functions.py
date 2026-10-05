@@ -35,11 +35,41 @@ REVERSE_TYPES_MAP = {
 }
 
 
-def signature(*arguments):
+def signature(*arguments, lazy=False):
     def _record_signature(func):
         func.signature = arguments
+        func.lazy = lazy
         return func
     return _record_signature
+
+
+def lazy_signature(*arguments):
+    return signature(*arguments, lazy=True)
+
+
+class LazyArgument(object):
+    def __init__(self, evaluator):
+        self._evaluator = evaluator
+        self._evaluated = False
+        self._value = None
+        self._exception = None
+
+    def resolve(self):
+        if not self._evaluated:
+            self._evaluated = True
+            try:
+                self._value = self._evaluator()
+            except Exception as exc:
+                self._exception = exc
+        if self._exception is not None:
+            raise self._exception
+        return self._value
+
+    def __call__(self):
+        return self.resolve()
+
+    def get(self):
+        return self.resolve()
 
 
 class FunctionRegistry(type):
@@ -60,6 +90,7 @@ class FunctionRegistry(type):
                 function_table[name[6:]] = {
                     'function': method,
                     'signature': signature,
+                    'lazy': getattr(method, 'lazy', False),
                 }
         cls.FUNCTION_TABLE = function_table
 
@@ -77,10 +108,51 @@ class Functions(metaclass=FunctionRegistry):
                 "Unknown function: %s()" % function_name)
         function = spec['function']
         signature = spec['signature']
-        self._validate_arguments(resolved_args, signature, function_name)
+        self._validate_argument_count(
+            resolved_args, signature, function_name)
+        if spec.get('lazy', False):
+            argument_evaluators = []
+            for arg in resolved_args:
+                if isinstance(arg, LazyArgument):
+                    argument_evaluators.append(arg.resolve)
+                else:
+                    argument_evaluators.append(lambda arg=arg: arg)
+            return self.call_lazy_function(
+                function_name, argument_evaluators)
+        else:
+            self._type_check(resolved_args, signature, function_name)
         return function(self, *resolved_args)
 
-    def _validate_arguments(self, args, signature, function_name):
+    def call_lazy_function(self, function_name, argument_evaluators):
+        try:
+            spec = self.FUNCTION_TABLE[function_name]
+        except KeyError:
+            raise exceptions.UnknownFunctionError(
+                "Unknown function: %s()" % function_name)
+        function = spec['function']
+        signature = spec['signature']
+        self._validate_argument_count(
+            argument_evaluators, signature, function_name)
+        lazy_args = []
+        for i, evaluator in enumerate(argument_evaluators):
+            argument_signature = signature[min(i, len(signature) - 1)]
+            allowed_types = argument_signature['types']
+
+            def evaluate(evaluator=evaluator, allowed_types=allowed_types):
+                value = evaluator()
+                if allowed_types:
+                    self._type_check_single(
+                        value, allowed_types, function_name)
+                return value
+
+            lazy_args.append(LazyArgument(evaluate))
+        return function(self, *lazy_args)
+
+    def is_lazy_function(self, function_name):
+        spec = self.FUNCTION_TABLE.get(function_name)
+        return spec is not None and spec.get('lazy', False)
+
+    def _validate_argument_count(self, args, signature, function_name):
         if signature and signature[-1].get('variadic'):
             if len(args) < len(signature):
                 raise exceptions.VariadictArityError(
@@ -88,6 +160,9 @@ class Functions(metaclass=FunctionRegistry):
         elif len(args) != len(signature):
             raise exceptions.ArityError(
                 len(signature), len(args), function_name)
+
+    def _validate_arguments(self, args, signature, function_name):
+        self._validate_argument_count(args, signature, function_name)
         return self._type_check(args, signature, function_name)
 
     def _type_check(self, actual, signature, function_name):

@@ -122,6 +122,8 @@ To create custom functions:
 * Create a method with the name ``_func_<your function name>``.
 * Apply the ``jmespath.functions.signature`` decorator that indicates
   the expected types of the function arguments.
+* Apply ``jmespath.functions.lazy_signature`` instead when the function
+  should receive callable arguments and evaluate them itself.
 * Provide an instance of your subclass in a ``jmespath.Options`` object.
 
 Below are a few examples:
@@ -173,6 +175,22 @@ Below are a few examples:
             {'foo': {'bar': 'ccbbadd'}},
             options=options)
     )
+
+Lazy functions receive ``LazyArgument`` objects. Calling the argument,
+or invoking its ``get()`` method, evaluates the expression with the
+current JMESPath node and context, and repeated calls reuse that value.
+Arguments that are never called are not evaluated, so they do not raise
+type errors or trigger custom function side effects. For example:
+
+.. code:: python
+
+    class BranchFunctions(functions.Functions):
+        @functions.lazy_signature(
+            {'types': ['boolean']}, {'types': []}, {'types': []})
+        def _func_choose(self, condition, left, right):
+            if condition():
+                return left()
+            return right()
 
 Again, if you come up with useful functions that you think make
 sense in the JMESPath language (and make sense to implement in all
