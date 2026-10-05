@@ -18,11 +18,11 @@ import pytest
 from babel import __version__ as VERSION
 from babel.core import Locale, UnknownLocaleError
 from babel.dates import format_datetime
-from babel.messages import Message, checkers
+from babel.messages import Catalog, Message, checkers
 from babel.messages.catalog import TranslationError
-from babel.messages.checkers import _validate_format, python_format
+from babel.messages.checkers import _validate_format, icu_format, python_format
 from babel.messages.plurals import PLURALS
-from babel.messages.pofile import read_po
+from babel.messages.pofile import read_po, write_po
 from babel.util import LOCALTZ
 
 # the last msgstr[idx] is always missing except for singular plural forms
@@ -416,3 +416,146 @@ def test__validate_format_invalid(msgid, msgstr, error):
 )
 def test__validate_format_valid(msgid, msgstr):
     _validate_format(msgid, msgstr)
+
+
+@pytest.mark.parametrize(
+    ('msgid', 'msgstr', 'flags'),
+    [
+        # simple message with target-language-specific extra plural category
+        (
+            '{count, plural, one {# apple} other {# apples}}',
+            '{count, plural, one {# apfel} few {# apfel} other {# apfel}}',
+            {'icu-format'},
+        ),
+        # select branches may freely differ between languages
+        (
+            '{gender, select, male {his} female {her} other {their}}',
+            '{gender, select, female {ihr} other {sein}}',
+            {'icu-format'},
+        ),
+        # selectordinal with nested argument
+        (
+            '{n, selectordinal, one {#st} other {#th}} place',
+            '{n, selectordinal, one {#er} other {#ten}} Ort',
+            {'icu-format'},
+        ),
+        # pluralizable catalog message
+        (
+            ('{count, plural, one {# apple} other {# apples}}',
+             '{count, plural, one {# apples} other {# apples}}'),
+            ('{count, plural, one {# apfel} other {# apfel}}',
+             '{count, plural, one {# apfel} few {# apfel} other {# apfel}}'),
+            {'icu-format'},
+        ),
+    ],
+)
+def test_icu_format_valid(msgid, msgstr, flags):
+    msg = Message(msgid, msgstr, flags=flags)
+    icu_format(None, msg)
+
+
+@pytest.mark.parametrize(
+    ('msgid', 'msgstr', 'error'),
+    [
+        # missing required 'other' branch in translation
+        (
+            '{count, plural, other {# apples}}',
+            '{count, plural, one {# apfel}}',
+            "'other'",
+        ),
+        # unknown argument in translation
+        (
+            '{count, plural, other {# apples}}',
+            '{count, plural, other {# apfel}} {extra}',
+            'unknown argument',
+        ),
+        # parameter kind mismatch, with a nested parameter path
+        (
+            '{a, plural, other {{b, select, other {x}}}}',
+            '{a, plural, other {{b, plural, other {#}}}}',
+            'parameter path: a.other.b',
+        ),
+        # '#' outside of plural scope
+        (
+            '{g, select, other {x}}',
+            '{g, select, other {#}}',
+            "'#'",
+        ),
+        # unterminated quoting in translation
+        (
+            "It''s fine",
+            "it '{breaks",
+            'unterminated quoted section',
+        ),
+        # invalid plural in the second plural form
+        (
+            ('{n, plural, other {#}}', '{n, plural, other {#}}'),
+            ('{n, plural, other {#}}', '{n, plural, one {#}}'),
+            "'other'",
+        ),
+    ],
+)
+def test_icu_format_invalid(msgid, msgstr, error):
+    msg = Message(msgid, msgstr, flags={'icu-format'})
+    with pytest.raises(TranslationError, match=error):
+        icu_format(None, msg)
+
+
+def test_icu_format_not_guessed_without_flag():
+    # Malformed-looking but ordinary strings are left alone.
+    msg = Message(
+        '{count, plural, one {apple}}',
+        '{count, plural, other {# broken}',
+    )
+    assert 'icu-format' not in msg.flags
+    icu_format(None, msg)  # must not raise
+
+
+def test_icu_format_through_catalog_check(tmp_path):
+    po_file = tmp_path / 'messages.po'
+    po_file.write_text(
+        '''\
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=utf-8\\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\\n"
+"Language: de\\n"
+
+#, icu-format
+msgid "{count, plural, one {# apple} other {# apples}}"
+msgstr "{count, plural, one {# apfel} other {# apfel}}"
+
+msgid "plain {not-icu"
+msgstr "einfach {nicht-icu"
+
+#, icu-format
+msgid "{gender, select, other {them}}"
+msgid_plural "{gender, select, other {them}}"
+msgstr[0] "{gender, select, other {sie}}"
+msgstr[1] "{gender, plural, one {#} other {#}}"
+''',
+        encoding='utf-8',
+    )
+    catalog = read_po(open(po_file, 'rb'))
+    bad = list(catalog.check())
+    assert len(bad) == 1
+    message, errors = bad[0]
+    assert 'icu-format' in message.flags
+    assert len(errors) == 1
+    text = str(errors[0])
+    assert 'plural form 1' in text
+    assert 'incompatible kind' in text
+
+
+def test_icu_format_flag_roundtrip():
+    catalog = Catalog()
+    catalog.add(
+        '{n, plural, other {#}}',
+        '{n, plural, one {#} other {#}}',
+        flags={'icu-format'},
+    )
+    buffer = BytesIO()
+    write_po(buffer, catalog)
+    buffer.seek(0)
+    reread = read_po(buffer)
+    assert 'icu-format' in reread['{n, plural, other {#}}'].flags

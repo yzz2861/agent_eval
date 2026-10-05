@@ -63,6 +63,40 @@ def python_format(catalog: Catalog | None, message: Message) -> None:
                 _validate_format(msgids[1], msgstr)
 
 
+def icu_format(catalog: Catalog | None, message: Message) -> None:
+    """Verify the ICU MessageFormat syntax and arguments of the translation.
+
+    This checker only runs for messages explicitly flagged with
+    'icu-format'; ordinary strings are never guessed to be ICU.
+    """
+    if 'icu-format' not in message.flags:
+        return
+
+    from babel.messages.icu import compare
+
+    msgids = message.id
+    if not isinstance(msgids, (list, tuple)):
+        msgids = (msgids,)
+    msgstrs = message.string
+    if not isinstance(msgstrs, (list, tuple)):
+        msgstrs = (msgstrs,)
+
+    def _check(prefix: str, msgid: str, msgstr: str) -> None:
+        for error in compare(msgid, msgstr):
+            raise TranslationError(prefix + ': ' + str(error)) from error
+
+    if msgstrs and msgstrs[0]:
+        _check('invalid ICU message format in the translation', msgids[0], msgstrs[0])
+    if message.pluralizable:
+        for index, msgstr in enumerate(msgstrs[1:], start=1):
+            if msgstr:
+                _check(
+                    'invalid ICU message format in plural form ' + str(index),
+                    msgids[1],
+                    msgstr,
+                )
+
+
 def _validate_format(format: str, alternative: str) -> None:
     """Test format string `alternative` against `format`.  `format` can be the
     msgid of a message and `alternative` one of the `msgstr`\\s.  The two
@@ -169,7 +203,7 @@ def _find_checkers() -> list[Callable[[Catalog | None, Message], object]]:
     if len(checkers) == 0:
         # if entrypoints are not available or no usable egg-info was found
         # (see #230), just resort to hard-coded checkers
-        return [num_plurals, python_format]
+        return [num_plurals, python_format, icu_format]
     return checkers
 
 

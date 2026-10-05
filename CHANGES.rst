@@ -19,6 +19,7 @@ Features
 * Messages: Merge in per-format keywords and auto_comments by @akx in :gh:`1243`
 * Messages: Update keywords for extraction of dpgettext and dnpgettext by @mardiros in :gh:`1235`
 * Messages: Validate all plurals in Python format checker by @tomasr8 in :gh:`1188`
+* Messages: Add an icu-format flag and static checker for ICU MessageFormat patterns (plural, select and selectordinal), validating nesting, offset:, quoting, the scope of '#', required other branches and argument names/kinds between source and translation
 * Time: Use standard library `timezone` instead of `FixedOffsetTimezone` by @akx in :gh:`1203`
 
 Bugfixes

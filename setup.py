@@ -104,6 +104,7 @@ setup(
     [babel.checkers]
     num_plurals = babel.messages.checkers:num_plurals
     python_format = babel.messages.checkers:python_format
+    icu_format = babel.messages.checkers:icu_format
 
     [babel.extractors]
     ignore = babel.messages.extract:extract_nothing
