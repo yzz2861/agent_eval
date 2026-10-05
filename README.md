@@ -38,6 +38,25 @@ Resolv::DNS.open do |dns|
 end
 ```
 
+### Offline DNSSEC RRset verification
+
+`Resolv::DNS::DNSSEC.verify_rrset` verifies an RRset against a supplied RRSIG
+and DNSKEY without performing any network query. RSASHA256 (algorithm 8) is
+supported. It builds the signed data with lower-case, uncompressed canonical
+names, sorted RDATA, wildcard owner reconstruction, and the RRSIG original TTL.
+
+```ruby
+result = Resolv::DNS::DNSSEC.verify_rrset(
+  rrset: rrset,
+  rrsig: rrsig_rdata,
+  dnskey: dnskey_rdata,
+  time: Time.now
+)
+
+result.valid?   # The RRset matches the signature from the supplied key
+result.trusted? # Always false; this method does not build a chain of trust
+```
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
