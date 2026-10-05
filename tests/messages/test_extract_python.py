@@ -505,3 +505,394 @@ _('Armin'))
     assert messages[6][3] == []
     assert messages[7][2] == 'Armin'
     assert messages[7][3] == []
+
+
+SCOPE_AWARE_OPTIONS = {'scope_aware': True}
+
+
+def test_scope_aware_function_import_alias():
+    # Paired same-named symbols: `tr` is a gettext alias at module level
+    # (extracted), but the function parameter `tr` shadows it (skipped).
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+tr('yes-alias')
+
+
+def render(tr):
+    tr('no-parameter')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(3, 'gettext', 'yes-alias', [])]
+
+
+def test_scope_aware_module_import_alias():
+    # `gt` aliases the gettext module (extracted); rebinding `gt`
+    # afterwards disables extraction (skipped).
+    buf = BytesIO(b"""\
+import gettext as gt
+
+gt.gettext('yes-module-alias')
+
+gt = object()
+gt.gettext('no-rebound')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(3, 'gettext', 'yes-module-alias', [])]
+
+
+def test_scope_aware_plain_module_import():
+    buf = BytesIO(b"""\
+import gettext
+
+gettext.gettext('yes-plain-module')
+gettext.ngettext('yes-one', 'yes-many', 2)
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [
+        (3, 'gettext', 'yes-plain-module', []),
+        (4, 'ngettext', ('yes-one', 'yes-many', None), []),
+    ]
+
+
+def test_scope_aware_local_assignment_shadowing():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+
+def f():
+    tr = lambda s: s
+    tr('no-local-assignment')
+
+
+def g():
+    tr('yes-outer-alias')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(10, 'gettext', 'yes-outer-alias', [])]
+
+
+def test_scope_aware_local_definition_shadowing():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+
+def f():
+    def tr(s):
+        return s
+    tr('no-local-def')
+
+
+def g():
+    class tr:
+        pass
+    tr('no-local-class')
+
+
+tr('yes-module-level')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(16, 'gettext', 'yes-module-level', [])]
+
+
+def test_scope_aware_non_gettext_import_shadowing():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+tr('yes-alias')
+
+from myapp.utils import tr
+
+tr('no-other-import')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(3, 'gettext', 'yes-alias', [])]
+
+
+def test_scope_aware_nested_scopes():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+
+def outer():
+    def inner():
+        tr('yes-nested')
+
+
+def other(tr=None):
+    def inner():
+        tr('no-enclosing-parameter')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(6, 'gettext', 'yes-nested', [])]
+
+
+def test_scope_aware_class_scope():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+
+class Page:
+    tr = staticmethod(lambda s: s)
+    label = tr('no-class-attribute')
+
+    def render(self):
+        # Class attributes are not visible to methods, so this resolves
+        # to the module-level gettext alias again.
+        return tr('yes-method')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(11, 'gettext', 'yes-method', [])]
+
+
+def test_scope_aware_rebinding_after_import():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+tr('yes-before-rebind')
+tr = str
+tr('no-after-rebind')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(3, 'gettext', 'yes-before-rebind', [])]
+
+
+def test_scope_aware_builtin_keyword_shadowing():
+    buf = BytesIO(b"""\
+_('yes-builtin')
+
+
+def f(_):
+    _('no-parameter')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(1, '_', 'yes-builtin', [])]
+
+
+def test_scope_aware_context_and_plural():
+    buf = BytesIO(b"""\
+from gettext import pgettext as pg
+from gettext import npgettext as ngp
+
+pg('button', 'yes-context')
+ngp('button', 'yes-singular', 'yes-plural', n)
+""")
+    messages = list(extract.extract(
+        'python', buf, comment_tags=[], options=SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [
+        (4, 'yes-context', [], 'button'),
+        (5, ('yes-singular', 'yes-plural'), [], 'button'),
+    ]
+
+
+def test_scope_aware_keyword_arguments():
+    buf = BytesIO(b"""\
+from gettext import pgettext as pg
+
+pg(context='button', message='yes-kwarg')
+""")
+    messages = list(extract.extract(
+        'python', buf, comment_tags=[], options=SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(3, 'yes-kwarg', [], 'button')]
+
+
+def test_scope_aware_translator_comments():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+# NOTE: this comment is attached
+# NOTE: and so is this one
+tr('yes-comment')
+
+# NOTE: this comment is not adjacent
+
+tr('no-comment')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), ['NOTE:'], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [
+        (5, 'gettext', 'yes-comment', [
+            'NOTE: this comment is attached',
+            'NOTE: and so is this one',
+        ]),
+        (9, 'gettext', 'no-comment', []),
+    ]
+
+
+def test_scope_aware_multiline_call_lineno():
+    buf = BytesIO(b"""\
+from gettext import ngettext as ng
+
+count = 3
+msg = ng(
+    'yes-singular',
+    'yes-plural',
+    count,
+)
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(5, 'ngettext', ('yes-singular', 'yes-plural', None), [])]
+
+
+def test_scope_aware_dynamic_messages():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+name = 'world'
+tr('yes-static-' 'concatenation')
+tr('yes-plus-' + 'concatenation')
+tr(f'yes-static-fstring')
+tr(f'no-dynamic-{name}')
+tr(name)
+""")
+    messages = list(extract.extract(
+        'python', buf, comment_tags=[], options=SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [
+        (4, 'yes-static-concatenation', [], None),
+        (5, 'yes-plus-concatenation', [], None),
+        (6, 'yes-static-fstring', [], None),
+    ]
+
+
+def test_scope_aware_star_import():
+    buf = BytesIO(b"""\
+from gettext import *
+
+gettext('yes-star')
+ngettext('yes-one', 'yes-many', 2)
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [
+        (3, 'gettext', 'yes-star', []),
+        (4, 'ngettext', ('yes-one', 'yes-many', None), []),
+    ]
+
+
+def test_scope_aware_lambda_parameter_shadowing():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+fn = lambda tr: tr('no-lambda-parameter')
+result = tr('yes-alias')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(4, 'gettext', 'yes-alias', [])]
+
+
+def test_scope_aware_comprehension_scope():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+yes = [tr('yes-comprehension') for item in items]
+no = [tr('no-comprehension-target') for tr in items]
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(3, 'gettext', 'yes-comprehension', [])]
+
+
+def test_scope_aware_loop_and_with_targets():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+def f():
+    for tr in items:
+        tr('no-loop-target')
+
+    with open('x') as tr:
+        tr('no-with-target')
+
+
+tr('yes-alias')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(11, 'gettext', 'yes-alias', [])]
+
+
+def test_scope_aware_global_rebinding():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+tr('yes-before')
+
+
+def reset():
+    global tr
+    tr = str
+
+
+tr('no-after-global-rebind')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(3, 'gettext', 'yes-before', [])]
+
+
+def test_scope_aware_unknown_name_not_extracted():
+    buf = BytesIO(b"""\
+tr('no-unknown-name')
+gettext('yes-keyword')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], SCOPE_AWARE_OPTIONS,
+    ))
+    assert messages == [(2, 'gettext', 'yes-keyword', [])]
+
+
+def test_scope_aware_string_option_value():
+    # Mapping configuration files provide option values as strings.
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+tr('yes-alias')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], {'scope_aware': 'true'},
+    ))
+    assert messages == [(3, 'gettext', 'yes-alias', [])]
+
+
+def test_scope_aware_disabled_by_default():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+tr('no-not-a-keyword')
+""")
+    messages = list(extract.extract_python(
+        buf, extract.DEFAULT_KEYWORDS.keys(), [], {},
+    ))
+    assert messages == []

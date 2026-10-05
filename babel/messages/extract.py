@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
     class _PyOptions(TypedDict, total=False):
         encoding: str
+        scope_aware: bool
 
     class _JSOptions(TypedDict, total=False):
         encoding: str
@@ -563,8 +564,18 @@ def extract_python(
     :param comment_tags: a list of translator tags to search for and include
                          in the results
     :param options: a dictionary of additional options (optional)
+                    Supported options are:
+                    * `scope_aware` -- if `True`, use scope-aware extraction
+                    that resolves gettext import aliases and respects local
+                    shadowing of translation function names.
     :rtype: ``iterator``
     """
+    if _parse_bool_option(options.get('scope_aware')):
+        yield from extract_python_scope_aware(
+            fileobj, keywords, comment_tags, options,
+        )
+        return
+
     funcname = lineno = message_lineno = None
     call_stack = []  # line numbers of calls
     buf = []
@@ -696,6 +707,424 @@ def extract_python(
             # And if it's FSTRING_END, we've already handled it above.
             # Let's forget that we're in an f-string.
             current_fstring_start = None
+
+
+def _parse_bool_option(value: Any) -> bool:
+    """Interpret an extractor option value as a boolean.
+
+    Mapping configuration files provide option values as strings, so
+    common truthy strings are accepted in addition to real booleans.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return bool(value)
+
+
+def _static_string_value(node: ast.AST) -> str | None:
+    """Return the static string value of an expression, or None if dynamic.
+
+    Mirrors what the token-based extractor accepts: plain string literals,
+    implicitly concatenated strings, '+' concatenation of static strings
+    and f-strings consisting solely of constant parts.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for value in node.values:
+            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                return None
+            parts.append(value.value)
+        return ''.join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_string_value(node.left)
+        right = _static_string_value(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _find_translator_comment_blocks(
+    source: str,
+    comment_tags: Collection[str],
+) -> list[list[tuple[int, str]]]:
+    """Collect blocks of translator comments from Python source code.
+
+    A block starts at a comment beginning with one of the comment tags and
+    continues over directly adjacent comment lines. Comments nested inside
+    parenthesized expressions are ignored, matching the token-based
+    extractor.
+    """
+    blocks = []
+    current_block = None
+    depth = 0
+    tokens = generate_tokens(io.StringIO(source).readline)
+    for tok, value, (lineno, _), _, _ in tokens:
+        if tok == OP and value in '([{':
+            depth += 1
+        elif tok == OP and value in ')]}':
+            depth = max(0, depth - 1)
+        elif tok == COMMENT and depth == 0:
+            value = value[1:].strip()
+            if current_block is not None and current_block[-1][0] == lineno - 1:
+                # Continue an adjacent block of translator comments.
+                current_block.append((lineno, value))
+                continue
+            current_block = None
+            if any(value.startswith(tag) for tag in comment_tags):
+                current_block = [(lineno, value)]
+                blocks.append(current_block)
+    return blocks
+
+
+class _ExtractionScope:
+    """A lexical scope for the scope-aware Python extractor.
+
+    The bindings map names to one of:
+      * ('func', canonical) -- an alias of a gettext function
+      * ('module', None) -- an alias of the gettext module itself
+      * ('other', None) -- any other binding, shadowing the names above
+    """
+
+    __slots__ = ('kind', 'bindings', 'global_names', 'nonlocal_names')
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind  # 'module', 'class' or 'function'
+        self.bindings: dict[str, tuple[str, str | None]] = {}
+        self.global_names: set[str] = set()
+        self.nonlocal_names: set[str] = set()
+
+
+class _ScopeAwarePythonVisitor(ast.NodeVisitor):
+    """AST visitor extracting gettext messages with lexical scope awareness.
+
+    Recognizes calls to functions imported from the gettext module
+    (including import aliases and attribute access on the module) as well
+    as unbound names listed in the keywords. Names rebound by parameters,
+    assignments, local definitions or other imports shadow the gettext
+    meaning for the remainder of their scope.
+    """
+
+    def __init__(
+        self,
+        keywords: Collection[str],
+        comment_blocks: list[list[tuple[int, str]]],
+    ) -> None:
+        self.keywords = set(keywords)
+        self.comment_blocks = comment_blocks
+        self.scopes = [_ExtractionScope('module')]
+        self.results: list[_ExtractionResult] = []
+
+    # -- scope and binding handling --------------------------------------
+
+    def _bind(self, name: str, binding: tuple[str, str | None]) -> None:
+        scope = self.scopes[-1]
+        if name in scope.global_names:
+            self.scopes[0].bindings[name] = binding
+            return
+        if name in scope.nonlocal_names:
+            for outer in reversed(self.scopes[:-1]):
+                if outer.kind == 'function':
+                    outer.bindings[name] = binding
+                    return
+        scope.bindings[name] = binding
+
+    def _resolve(self, name: str) -> tuple[str, str | None] | None:
+        innermost = len(self.scopes) - 1
+        for index in range(innermost, -1, -1):
+            scope = self.scopes[index]
+            if name in scope.global_names:
+                return self.scopes[0].bindings.get(name)
+            if name in scope.nonlocal_names:
+                continue
+            # Class scopes are not visible to nested code blocks.
+            if scope.kind == 'class' and index != innermost:
+                continue
+            if name in scope.bindings:
+                return scope.bindings[name]
+        return None
+
+    def _bind_target(self, target: ast.AST) -> None:
+        if isinstance(target, ast.Name):
+            self._bind(target.id, ('other', None))
+        elif isinstance(target, ast.Starred):
+            self._bind_target(target.value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._bind_target(element)
+        else:
+            self.visit(target)
+
+    def _bind_parameters(self, args: ast.arguments) -> None:
+        parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+        if args.vararg is not None:
+            parameters.append(args.vararg)
+        if args.kwarg is not None:
+            parameters.append(args.kwarg)
+        for parameter in parameters:
+            self._bind(parameter.arg, ('other', None))
+
+    # -- message recording ------------------------------------------------
+
+    def _record_call(self, node: ast.Call, canonical: str) -> None:
+        args = list(node.args)
+        args.extend(keyword.value for keyword in node.keywords)
+        values = [_static_string_value(arg) for arg in args]
+        if not values:
+            messages = None
+        elif len(values) == 1:
+            messages = values[0]
+        else:
+            messages = tuple(values)
+        lineno = args[0].lineno if args else node.lineno
+        paren_lineno = node.func.end_lineno or node.lineno
+        comments = self._find_comments(lineno, paren_lineno)
+        self.results.append((lineno, canonical, messages, comments))
+
+    def _find_comments(self, message_lineno: int, paren_lineno: int) -> list[str]:
+        threshold = min(message_lineno, paren_lineno) - 1
+        for block in reversed(self.comment_blocks):
+            last_lineno = block[-1][0]
+            if last_lineno > message_lineno:
+                continue
+            if last_lineno >= threshold:
+                return [text for _, text in block]
+            break
+        return []
+
+    # -- calls and imports -------------------------------------------------
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        canonical = None
+        if isinstance(func, ast.Name):
+            binding = self._resolve(func.id)
+            if binding is None:
+                # Unbound name; may be a keyword installed as a builtin.
+                if func.id in self.keywords:
+                    canonical = func.id
+            elif binding[0] == 'func':
+                canonical = binding[1]
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            binding = self._resolve(func.value.id)
+            if (
+                binding is not None
+                and binding[0] == 'module'
+                and func.attr in self.keywords
+            ):
+                canonical = func.attr
+        if canonical is not None:
+            self._record_call(node, canonical)
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if alias.name == 'gettext':
+                self._bind(alias.asname or 'gettext', ('module', None))
+            else:
+                top_level = alias.name.split('.')[0]
+                self._bind(alias.asname or top_level, ('other', None))
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        is_gettext = node.level == 0 and node.module == 'gettext'
+        for alias in node.names:
+            if alias.name == '*':
+                if is_gettext:
+                    for keyword in self.keywords:
+                        self._bind(keyword, ('func', keyword))
+                continue
+            bound_name = alias.asname or alias.name
+            if is_gettext and alias.name in self.keywords:
+                self._bind(bound_name, ('func', alias.name))
+            else:
+                self._bind(bound_name, ('other', None))
+
+    # -- definitions and scopes --------------------------------------------
+
+    def _visit_function_def(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+        self._bind(node.name, ('other', None))
+        self.scopes.append(_ExtractionScope('function'))
+        self._bind_parameters(node.args)
+        for statement in node.body:
+            self.visit(statement)
+        self.scopes.pop()
+
+    visit_FunctionDef = _visit_function_def
+    visit_AsyncFunctionDef = _visit_function_def
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword)
+        self._bind(node.name, ('other', None))
+        self.scopes.append(_ExtractionScope('class'))
+        for statement in node.body:
+            self.visit(statement)
+        self.scopes.pop()
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+        self.scopes.append(_ExtractionScope('function'))
+        self._bind_parameters(node.args)
+        self.visit(node.body)
+        self.scopes.pop()
+
+    def _visit_comprehension(self, node: ast.AST, result_exprs: tuple) -> None:
+        self.scopes.append(_ExtractionScope('function'))
+        for generator in node.generators:
+            self.visit(generator.iter)
+            self._bind_target(generator.target)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for expression in result_exprs:
+            self.visit(expression)
+        self.scopes.pop()
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node, (node.elt,))
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node, (node.elt,))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node, (node.elt,))
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node, (node.key, node.value))
+
+    # -- statements that bind names -----------------------------------------
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        for target in node.targets:
+            self._bind_target(target)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+        self._bind_target(node.target)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.value)
+        self._bind_target(node.target)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._bind_target(node.target)
+
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
+        self.visit(node.iter)
+        self._bind_target(node.target)
+        for statement in [*node.body, *node.orelse]:
+            self.visit(statement)
+
+    visit_AsyncFor = visit_For
+
+    def visit_With(self, node: ast.With | ast.AsyncWith) -> None:
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._bind_target(item.optional_vars)
+        for statement in node.body:
+            self.visit(statement)
+
+    visit_AsyncWith = visit_With
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.type is not None:
+            self.visit(node.type)
+        if node.name:
+            self._bind(node.name, ('other', None))
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        for case in node.cases:
+            for pattern_node in ast.walk(case.pattern):
+                name = None
+                if isinstance(pattern_node, (ast.MatchAs, ast.MatchStar)):
+                    name = pattern_node.name
+                elif isinstance(pattern_node, ast.MatchMapping):
+                    name = pattern_node.rest
+                if name:
+                    self._bind(name, ('other', None))
+            if case.guard is not None:
+                self.visit(case.guard)
+            for statement in case.body:
+                self.visit(statement)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            self._bind_target(target)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.scopes[-1].global_names.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.scopes[-1].nonlocal_names.update(node.names)
+
+
+def extract_python_scope_aware(
+    fileobj: IO[bytes],
+    keywords: Mapping[str, _Keyword],
+    comment_tags: Collection[str],
+    options: _PyOptions,
+) -> Generator[_ExtractionResult, None, None]:
+    """Extract messages from Python source code with scope awareness.
+
+    Unlike the token-based default extractor, this extractor parses the
+    source into an AST (without executing it) and tracks lexical scopes.
+    It recognizes:
+
+    * aliases of the gettext module (e.g. "import gettext as gt") used via
+      static attribute calls such as "gt.gettext('...')"
+    * aliases of gettext functions (e.g. "from gettext import gettext as
+      tr") called under their alias
+    * unbound names listed in the keywords (e.g. "_" installed as a
+      builtin by gettext.install())
+
+    Bindings that shadow those names -- function parameters, assignments,
+    local function or class definitions, and non-gettext imports -- disable
+    extraction for the remainder of the scope in which they appear, as does
+    rebinding a name after its gettext import.
+
+    Only statically determinable message expressions are accepted (string
+    literals, implicit or '+' concatenation of static strings, and
+    f-strings with constant parts only); dynamic arguments are reported as
+    None and handled by the usual keyword specification rules.
+
+    It returns an iterator yielding tuples in the following form
+    ``(lineno, funcname, message, comments)``, where ``funcname`` is
+    the canonical keyword name (not the alias used at the call site).
+
+    :param fileobj: the seekable, file-like object the messages should be
+                    extracted from
+    :param keywords: a list of keywords (i.e. function names) that should be
+                     recognized as translation functions
+    :param comment_tags: a list of translator tags to search for and include
+                         in the results
+    :param options: a dictionary of additional options (optional)
+    :rtype: ``iterator``
+    """
+    encoding = parse_encoding(fileobj) or options.get('encoding', 'UTF-8')
+    source = fileobj.read().decode(encoding)
+    tree = ast.parse(source)
+    comment_blocks = _find_translator_comment_blocks(source, comment_tags)
+    visitor = _ScopeAwarePythonVisitor(keywords, comment_blocks)
+    visitor.visit(tree)
+    yield from visitor.results
 
 
 def _parse_python_string(value: str, encoding: str, future_flags: int) -> str | None:

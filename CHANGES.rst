@@ -1,6 +1,19 @@
 Babel Changelog
 ===============
 
+Version 2.19.0
+--------------
+
+(Unreleased)
+
+Features
+~~~~~~~~
+
+* Messages: Add an optional scope-aware Python extraction mode
+  (``scope_aware`` option) that resolves gettext module and function
+  import aliases, static attribute calls, and local shadowing of
+  translation function names
+
 Version 2.18.0
 --------------
 

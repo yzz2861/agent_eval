@@ -226,6 +226,34 @@ You can reference custom extractors in both formats. In TOML:
     pattern = "**.ctm"
     some_option = "foo"
 
+Python Options
+^^^^^^^^^^^^^^
+
+The ``python`` extraction method supports the following options:
+
+``encoding``
+  The encoding of the source files (defaults to UTF-8, or the encoding
+  declared in the source file itself).
+
+``scope_aware``
+  If set to a true value (e.g. ``scope_aware = true``), the source is
+  parsed into an AST (without executing it) instead of being scanned
+  token by token, and lexical scopes are taken into account when
+  deciding which calls are translation calls:
+
+  * aliases of the ``gettext`` module (``import gettext as gt``) are
+    recognized via static attribute calls such as ``gt.gettext('...')``
+  * aliases of gettext functions (``from gettext import gettext as tr``)
+    are recognized under their alias
+  * unbound keyword names (e.g. ``_`` installed by ``gettext.install()``)
+    are still recognized
+
+  Names shadowed by function parameters, assignments, local function or
+  class definitions, or non-gettext imports -- as well as names rebound
+  after their gettext import -- are not extracted. Only statically
+  determinable message expressions are accepted, as with the default
+  token-based extractor.
+
 Common Options
 ^^^^^^^^^^^^^^
 
