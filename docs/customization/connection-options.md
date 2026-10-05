@@ -14,6 +14,7 @@ All these options are optional.
 | `:headers`          | Hash              | nil             | Hash of unencoded HTTP header key/value pairs.                                                                |
 | `:builder_class`    | Class             | RackBuilder     | A custom class to use as the middleware stack builder.                                                        |
 | `:builder`          | Object            | Rackbuilder.new | An instance of a custom class to use as the middleware stack builder.                                         |
+| `:required_capabilities` | Array&lt;Symbol&gt; | `[]`        | Capabilities the configured adapter must declare. Checked when the connection is built. See [Capabilities].   |
 
 ## Example
 
@@ -41,8 +42,19 @@ options = {
 conn = Faraday.new(options) do |faraday|
   # ...
 end
+
+# Fixed capability requirements are checked when the connection is built:
+Faraday.new(required_capabilities: [Faraday::Adapter::TLS_MIN_VERSION]) do |f|
+  f.adapter :net_http
+end
+# Or inside the block:
+Faraday.new do |f|
+  f.require_capabilities Faraday::Adapter::TLS_MIN_VERSION
+  f.adapter :net_http
+end
 ```
 
 [RequestOptions]: /customization/request-options.md
 [ProxyOptions]: /customization/proxy-options.md
 [SSLOptions]: /customization/ssl-options.md
+[Capabilities]: /advanced/adapter-capabilities.md

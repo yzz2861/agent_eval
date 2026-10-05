@@ -144,6 +144,23 @@ class FlorpHttp < Faraday::Adapter
 end
 ```
 
+## Declaring capabilities
+
+Adapters declare the features they support with
+`supports_capabilities`. Declarations are inherited by subclasses. An adapter
+that does not declare a capability is treated as not supporting it, so that
+options relying on it fail loudly instead of being silently ignored.
+
+```ruby
+class FlorpHttp < Faraday::Adapter
+  supports_capabilities Faraday::Adapter::STREAMING_RESPONSES,
+                       Faraday::Adapter::TLS_MIN_VERSION
+end
+```
+
+See [Adapter Capabilities][capabilities] for the list of standard capabilities
+and how users require them on connections and requests.
+
 ## Register your adapter
 
 Like middleware, you may register a nickname for your adapter.
@@ -159,3 +176,4 @@ Faraday::Adapter.register_middleware(florp_http: FlorpHttp)
 ```
 
 [env-object]: /getting-started/env-object.md
+[capabilities]: /advanced/adapter-capabilities.md

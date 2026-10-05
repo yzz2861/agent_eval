@@ -38,11 +38,16 @@ module Faraday
   #   #
   #   # @!attribute on_data
   #   #   @return [Proc] callback invoked with each chunk when streaming the response
+  #   #
+  #   # @!attribute required_capabilities
+  #   #   @return [Array<Symbol>] capabilities the adapter must declare for this
+  #   #           request. An error is raised before the request reaches the
+  #   #           adapter if any of them is missing.
   #   class RequestOptions < Options; end
   RequestOptions = Options.new(:params_encoder, :proxy, :bind,
                                :timeout, :open_timeout, :read_timeout,
                                :write_timeout, :boundary, :oauth,
-                               :context, :on_data) do
+                               :context, :on_data, :required_capabilities) do
     def []=(key, value)
       if key && key.to_sym == :proxy
         super(key, value ? ProxyOptions.from(value) : nil)
@@ -53,6 +58,39 @@ module Faraday
 
     def stream_response?
       on_data.is_a?(Proc)
+    end
+
+    def required_capabilities=(value)
+      self[:required_capabilities] = Array(value).map(&:to_sym)
+    end
+
+    def required_capabilities
+      self[:required_capabilities] || []
+    end
+
+    # Hidden from +inspect+ when unset, so requests without capability
+    # requirements still render as (empty).
+    def inspect
+      values = []
+      members.each do |member|
+        value = member == :required_capabilities ? self[member] : send(member)
+        values << "#{member}=#{value.inspect}" if value
+      end
+      values = values.empty? ? '(empty)' : values.join(', ')
+
+      %(#<#{self.class} #{values}>)
+    end
+
+    # Declares capabilities that the adapter must support for this request.
+    # Values are appended to any previously declared ones.
+    #
+    # @param capabilities [Array<Symbol>] required capabilities.
+    # @return [Array<Symbol>] the full list of required capabilities.
+    def require_capabilities(*capabilities)
+      current = self[:required_capabilities] || []
+      merged = current.concat(capabilities.flatten.map(&:to_sym))
+      merged.uniq!
+      self[:required_capabilities] = merged
     end
   end
 end

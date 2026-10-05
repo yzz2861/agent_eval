@@ -173,3 +173,24 @@ RSpec.describe Faraday::Error do
     end
   end
 end
+
+RSpec.describe Faraday::MissingCapabilitiesError do
+  it 'names the adapter and the missing capabilities' do
+    error = described_class.new('Faraday::Adapter::Patron',
+                                [Faraday::Adapter::TLS_MIN_VERSION,
+                                 Faraday::Adapter::STREAMING_RESPONSES])
+    expect(error.message)
+      .to include('adapter Faraday::Adapter::Patron')
+      .and include('tls_min_version')
+      .and include('streaming_responses')
+  end
+
+  it 'mentions the scope when provided' do
+    error = described_class.new('MyAdapter', :tls_ciphers, scope: 'request')
+    expect(error.message).to include('for this request')
+  end
+
+  it 'is a Faraday::Error' do
+    expect(described_class.new('MyAdapter', :x)).to be_a(Faraday::Error)
+  end
+end

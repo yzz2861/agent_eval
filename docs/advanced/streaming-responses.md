@@ -32,4 +32,9 @@ To see which ones, please refer to [Awesome Faraday][awesome] comparative table 
 Moreover, the `env` parameter was only recently added, which means some adapters may only have partial support
 (i.e. only `chunk` and `overall_received_bytes` will be passed to your block).
 
+To get a clear error instead of silently receiving a non-streamed response,
+require the `Faraday::Adapter::STREAMING_RESPONSES` capability for the request
+and let the adapter declare it. See [Adapter Capabilities][capabilities].
+
 [awesome]:      https://github.com/lostisland/awesome-faraday/#adapters
+[capabilities]: /advanced/adapter-capabilities.md

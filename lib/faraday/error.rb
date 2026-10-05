@@ -199,4 +199,22 @@ module Faraday
   # Raised by Faraday::Middleware and subclasses when invalid default_options are used
   class InitializationError < Error
   end
+
+  # Raised when an adapter does not declare support for a capability that a
+  # connection or request requires. The message identifies the adapter and the
+  # capabilities it lacks. Adapters that do not declare anything are treated as
+  # having unknown (not supported) capabilities.
+  class MissingCapabilitiesError < Error
+    def initialize(adapter, capabilities, scope: nil)
+      adapter_name = adapter.is_a?(String) ? adapter : adapter.to_s
+      scope_text = scope ? " for this #{scope}" : ''
+      capabilities = Array(capabilities).map(&:to_sym).uniq
+      capabilities_list = capabilities.join(', ')
+      message = "adapter #{adapter_name} does not support the following " \
+                "required capabilities#{scope_text}: " \
+                "#{capabilities_list}. Update the adapter, declare the " \
+                'capabilities, or use a different adapter.'
+      super(message)
+    end
+  end
 end

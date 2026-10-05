@@ -66,6 +66,7 @@ module Faraday
     def initialize(&block)
       @adapter = nil
       @handlers = []
+      @required_capabilities = []
       build(&block)
     end
 
@@ -73,6 +74,7 @@ module Faraday
       super
       @adapter = original.adapter
       @handlers = original.handlers.dup
+      @required_capabilities = original.required_capabilities.dup
     end
 
     def build
@@ -117,6 +119,31 @@ module Faraday
 
       klass = Faraday::Adapter.lookup_middleware(klass) if klass.is_a?(Symbol)
       @adapter = self.class::Handler.new(klass, *args, **kwargs, &block)
+      @adapter
+    end
+
+    # @return [Array<Symbol>] capabilities the configured adapter must declare.
+    attr_reader :required_capabilities
+
+    # Declares capabilities the adapter must support for the lifetime of
+    # the connection. Fixed requirements are validated once the connection
+    # (and its adapter) has been configured.
+    #
+    # @param capabilities [Array<Symbol>] required capabilities.
+    # @return [Array<Symbol>] the full list of required capabilities.
+    def require_capabilities(*capabilities)
+      @required_capabilities.concat(capabilities.flatten.map(&:to_sym)).uniq!
+      @required_capabilities
+    end
+
+    # Validates that the configured adapter declares all fixed connection
+    # capabilities. Called when the connection is built and again lazily when
+    # the stack is compiled.
+    #
+    # @raise [Faraday::MissingCapabilitiesError] if a required capability is
+    #   not declared by the adapter.
+    def verify_capabilities!
+      ensure_capabilities!(@required_capabilities, scope: 'connection')
     end
 
     ## methods to push onto the various positions in the stack:
@@ -155,6 +182,7 @@ module Faraday
     #
     # @return [Faraday::Response]
     def build_response(connection, request)
+      ensure_capabilities!(request_capabilities(request), scope: 'request')
       app.call(build_env(connection, request))
     end
 
@@ -169,6 +197,7 @@ module Faraday
       @app ||= begin
         lock!
         ensure_adapter!
+        ensure_capabilities!(required_capabilities, scope: 'connection')
         to_app
       end
     end
@@ -215,6 +244,30 @@ module Faraday
     end
 
     private
+
+    def adapter_klass
+      @adapter&.klass
+    end
+
+    # Extracts the per-request required capabilities, tolerating request
+    # option objects that predate the capability feature.
+    def request_capabilities(request)
+      options = request.options
+      return [] unless options.respond_to?(:required_capabilities, true)
+
+      options.required_capabilities || []
+    end
+
+    def ensure_capabilities!(capabilities, scope:)
+      return if Array(capabilities).empty?
+
+      ensure_adapter!
+      missing = adapter_klass.missing_capabilities(capabilities)
+      return if missing.empty?
+
+      raise Faraday::MissingCapabilitiesError.new(@adapter.name, missing,
+                                                 scope: scope)
+    end
 
     def raise_if_locked
       raise StackLocked, LOCK_ERR if locked?

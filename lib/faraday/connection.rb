@@ -42,6 +42,11 @@ module Faraday
     # @return [Hash] proxy options.
     attr_reader :proxy
 
+    # @return [Array<Symbol>] capabilities the connection adapter must declare.
+    def required_capabilities
+      builder.required_capabilities
+    end
+
     # Initializes a new Faraday::Connection.
     #
     # @param url [URI, String] URI or String base URL to use as a prefix for all
@@ -88,9 +93,31 @@ module Faraday
 
       initialize_proxy(url, options)
 
+      connection_capabilities = options.required_capabilities
+      builder.require_capabilities(connection_capabilities) if connection_capabilities
+
       yield(self) if block_given?
 
       @headers[:user_agent] ||= USER_AGENT
+
+      builder.verify_capabilities!
+    end
+
+    # Declares capabilities that the adapter configured on this connection
+    # must support. Fixed connection requirements are checked as soon as the
+    # adapter is available (or when the first request is built), so switching
+    # adapters fails early instead of silently ignoring options.
+    #
+    # @example
+    #   Faraday.new do |f|
+    #     f.require_capabilities Faraday::Adapter::TLS_MIN_VERSION
+    #     f.adapter :net_http
+    #   end
+    #
+    # @param capabilities [Array<Symbol>] required capabilities.
+    # @return [Array<Symbol>] the full list of required capabilities.
+    def require_capabilities(*capabilities)
+      builder.require_capabilities(*capabilities)
     end
 
     def initialize_proxy(url, options)
@@ -505,7 +532,8 @@ module Faraday
                      params: params.dup,
                      builder: builder.dup,
                      ssl: ssl.dup,
-                     request: options.dup)
+                     request: options.dup,
+                     required_capabilities: required_capabilities)
     end
 
     # Yields username and password extracted from a URI if they both exist.

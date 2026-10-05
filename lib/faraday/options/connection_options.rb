@@ -29,12 +29,16 @@ module Faraday
   #   # @!attribute headers
   #   #   @return [Hash] default headers for the connection
   #   #
+  #   # @!attribute required_capabilities
+  #   #   @return [Array<Symbol>] capabilities the connection adapter must
+  #   #           declare. Checked when the connection is built.
+  #   #
   #   # @!attribute builder_class
   #   #   @return [Class] the class used to build the middleware stack
   #   class ConnectionOptions < Options; end
   ConnectionOptions = Options.new(:request, :proxy, :ssl, :builder, :url,
                                   :parallel_manager, :params, :headers,
-                                  :builder_class) do
+                                  :builder_class, :required_capabilities) do
     options request: RequestOptions, ssl: SSLOptions
 
     memoized(:request) { self.class.options_for(:request).new }

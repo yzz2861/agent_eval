@@ -15,6 +15,7 @@ All these options are optional.
 | `:boundary`       | String            | nil                                                            | The boundary string for multipart requests.                             |
 | `:context`        | Hash              | nil                                                            | Arbitrary data that you can pass to your request.                       |
 | `:on_data`        | Proc              | nil                                                            | A callback that will be called when data is received. See [Streaming]   |
+| `:required_capabilities` | Array&lt;Symbol&gt; | `[]`                                                  | Capabilities the adapter must declare for this request. See [Capabilities]. |
 
 ## Example
 
@@ -33,7 +34,13 @@ end
 conn.get('/foo') do |req|
   req.options.timeout = 10
 end
+
+# Require capabilities for a single request; checked before the adapter runs.
+conn.get('/events') do |req|
+  req.options.require_capabilities Faraday::Adapter::STREAMING_RESPONSES
+end
 ```
 
 [ProxyOptions]: /customization/proxy-options.md
 [Streaming]: /advanced/streaming-responses.md
+[Capabilities]: /advanced/adapter-capabilities.md
