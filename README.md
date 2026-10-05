@@ -13,6 +13,18 @@ Behind the scenes, Ruby objects are stored to the data store file with
 Marshal.  That carries the usual limitations.  Proc objects cannot be
 marshalled, for example.
 
+Alternatively, PStore can store data in a versioned, type-tagged JSON
+format that is human-inspectable and never instantiates arbitrary Ruby
+classes when loading.  Pass +format: :json+ to PStore.new to use it.
+Only simple data is supported in this format: String, Symbol, Integer,
+finite Float, +true+, +false+, +nil+, Array and Hash.  String keys and
+Symbol keys are kept distinct; unsupported objects and cyclic
+structures are rejected, and decoding enforces limits on nesting depth
+and total node count.  An existing Marshal-format file is never
+converted implicitly; call PStore.migrate_to_json to convert it
+explicitly (the file is fully validated first, then atomically
+replaced, so a failed migration leaves the original file untouched).
+
 ## Installation
 
 Add this line to your application's Gemfile:

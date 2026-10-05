@@ -9,6 +9,7 @@
 # See PStore for documentation.
 
 require "digest"
+require "json"
 
 # \PStore implements a file based persistence mechanism based on a Hash.
 # User code can store hierarchies of Ruby objects (values)
@@ -339,6 +340,213 @@ class PStore
   class Error < StandardError
   end
 
+  # Supported on-disk formats for PStore.new (keyword argument +format+):
+  #
+  # - FORMAT_MARSHAL (the default): the historical Marshal-based format.
+  # - FORMAT_JSON: a versioned, type-tagged JSON format that is
+  #   human-inspectable and never instantiates arbitrary Ruby classes
+  #   when loading.  See JSONCodec for the supported value types.
+  FORMAT_MARSHAL = :marshal
+  FORMAT_JSON = :json
+  FORMATS = [FORMAT_MARSHAL, FORMAT_JSON].freeze
+  private_constant :FORMATS
+
+  # :stopdoc:
+  #
+  # Encoder/decoder for the type-tagged JSON format (FORMAT_JSON).
+  #
+  # The file contains a single JSON document:
+  #
+  #   {"format":"pstore-json","version":1,"data":<encoded table>}
+  #
+  # Values are encoded as follows:
+  #
+  # - String, Integer, finite Float, +true+, +false+ and +nil+
+  #   map to their native JSON counterparts.
+  # - Symbol maps to a tagged object: <tt>{"$sym":"name"}</tt>.
+  # - Array maps to a JSON array of encoded elements.
+  # - Hash maps to a tagged object holding an array of encoded
+  #   key/value pairs, so that string keys and symbol keys
+  #   (and any other supported key type) stay distinct:
+  #   <tt>{"$hash":[[key1, value1], [key2, value2]]}</tt>.
+  #
+  # Any other object is rejected, cyclic structures are rejected,
+  # and decoding enforces limits on nesting depth and total node count.
+  module JSONCodec
+    FORMAT_NAME = "pstore-json"
+    FORMAT_VERSION = 1
+    MAGIC = %({"format":"#{FORMAT_NAME}").freeze
+    MARSHAL_MAGIC = "\x04\x08".b.freeze
+    SYMBOL_TAG = "$sym"
+    HASH_TAG = "$hash"
+
+    # Default upper bound on container nesting when encoding or decoding.
+    DEFAULT_MAX_DEPTH = 100
+    # Default upper bound on the total number of values when encoding or decoding.
+    DEFAULT_MAX_NODES = 1_000_000
+
+    module_function
+
+    # Whether +data+ looks like a file written in the JSON format.
+    def json_data?(data)
+      data.start_with?(MAGIC)
+    end
+
+    # Whether +data+ looks like a Marshal-format PStore file.
+    def marshal_data?(data)
+      data.start_with?(MARSHAL_MAGIC)
+    end
+
+    # Encodes +table+ (a Hash) into the versioned JSON document.
+    # The whole structure is validated before anything is returned:
+    # unsupported objects, non-finite floats, cyclic structures and
+    # structures exceeding +max_depth+ or +max_nodes+ raise PStore::Error.
+    def dump(table, max_depth: DEFAULT_MAX_DEPTH, max_nodes: DEFAULT_MAX_NODES)
+      state = {nodes: 0, seen: {}.compare_by_identity}
+      data = encode_value(table, 0, max_depth, max_nodes, state)
+      envelope = {"format" => FORMAT_NAME, "version" => FORMAT_VERSION, "data" => data}
+      JSON.generate(envelope)
+    rescue JSON::GeneratorError => error
+      raise PStore::Error, "cannot encode data in JSON format: #{error.message}"
+    end
+
+    # Decodes a JSON document previously written by JSONCodec.dump.
+    # Raises PStore::Error if the document is not in the expected format
+    # or version, or exceeds +max_depth+ or +max_nodes+.
+    # Raises EOFError for empty input (mirroring Marshal.load).
+    def load(content, max_depth: DEFAULT_MAX_DEPTH, max_nodes: DEFAULT_MAX_NODES)
+      content = content.read unless content.is_a?(String)
+      raise EOFError, "empty PStore JSON data" if content.empty?
+      content = content.dup.force_encoding(Encoding::UTF_8)
+      unless content.valid_encoding?
+        raise PStore::Error, "PStore JSON data is not valid UTF-8"
+      end
+      envelope =
+        begin
+          # Tagged hashes add JSON nesting levels beyond the logical
+          # depth, so allow some slack over the logical limit.
+          JSON.parse(content, max_nesting: max_depth * 4 + 16)
+        rescue JSON::ParserError => error
+          raise PStore::Error, "PStore file is not valid JSON: #{error.message}"
+        end
+      unless envelope.is_a?(Hash) && envelope["format"] == FORMAT_NAME
+        raise PStore::Error, "PStore file is not in #{FORMAT_NAME} format"
+      end
+      version = envelope["version"]
+      unless version == FORMAT_VERSION
+        raise PStore::Error, "unsupported PStore JSON format version: #{version.inspect}"
+      end
+      state = {nodes: 0}
+      decode_value(envelope["data"], 0, max_depth, max_nodes, state)
+    end
+
+    def encode_value(value, depth, max_depth, max_nodes, state)
+      state[:nodes] += 1
+      if state[:nodes] > max_nodes
+        raise PStore::Error, "data exceeds the maximum of #{max_nodes} nodes"
+      end
+      case value
+      when String, Integer, true, false, nil
+        value
+      when Float
+        unless value.finite?
+          raise PStore::Error, "cannot store non-finite Float: #{value}"
+        end
+        value
+      when Symbol
+        {SYMBOL_TAG => value.to_s}
+      when Array
+        enter_container(value, depth, max_depth, state)
+        begin
+          value.map {|element| encode_value(element, depth + 1, max_depth, max_nodes, state) }
+        ensure
+          state[:seen].delete(value)
+        end
+      when Hash
+        enter_container(value, depth, max_depth, state)
+        begin
+          pairs = value.map do |key, element|
+            [encode_value(key, depth + 1, max_depth, max_nodes, state),
+             encode_value(element, depth + 1, max_depth, max_nodes, state)]
+          end
+          {HASH_TAG => pairs}
+        ensure
+          state[:seen].delete(value)
+        end
+      else
+        raise PStore::Error, "unsupported object type for JSON format: #{value.class}"
+      end
+    end
+    private_class_method :encode_value
+
+    def enter_container(value, depth, max_depth, state)
+      if depth >= max_depth
+        raise PStore::Error, "data exceeds the maximum nesting depth of #{max_depth}"
+      end
+      if state[:seen].key?(value)
+        raise PStore::Error, "cannot store cyclic data structure"
+      end
+      state[:seen][value] = true
+    end
+    private_class_method :enter_container
+
+    def decode_value(node, depth, max_depth, max_nodes, state)
+      state[:nodes] += 1
+      if state[:nodes] > max_nodes
+        raise PStore::Error, "data exceeds the maximum of #{max_nodes} nodes"
+      end
+      case node
+      when String, Integer, true, false, nil
+        node
+      when Float
+        unless node.finite?
+          raise PStore::Error, "non-finite Float in PStore JSON data"
+        end
+        node
+      when Array
+        check_depth(depth, max_depth)
+        node.map {|element| decode_value(element, depth + 1, max_depth, max_nodes, state) }
+      when Hash
+        check_depth(depth, max_depth)
+        if node.size == 1 && node.key?(SYMBOL_TAG)
+          name = node[SYMBOL_TAG]
+          unless name.is_a?(String)
+            raise PStore::Error, "invalid Symbol encoding in PStore JSON data"
+          end
+          name.to_sym
+        elsif node.size == 1 && node.key?(HASH_TAG)
+          pairs = node[HASH_TAG]
+          unless pairs.is_a?(Array)
+            raise PStore::Error, "invalid Hash encoding in PStore JSON data"
+          end
+          result = {}
+          pairs.each do |pair|
+            unless pair.is_a?(Array) && pair.size == 2
+              raise PStore::Error, "invalid Hash encoding in PStore JSON data"
+            end
+            key = decode_value(pair[0], depth + 1, max_depth, max_nodes, state)
+            result[key] = decode_value(pair[1], depth + 1, max_depth, max_nodes, state)
+          end
+          result
+        else
+          raise PStore::Error, "invalid tagged object in PStore JSON data"
+        end
+      else
+        raise PStore::Error, "unsupported value in PStore JSON data"
+      end
+    end
+    private_class_method :decode_value
+
+    def check_depth(depth, max_depth)
+      if depth >= max_depth
+        raise PStore::Error, "data exceeds the maximum nesting depth of #{max_depth}"
+      end
+    end
+    private_class_method :check_depth
+  end
+  private_constant :JSONCodec
+  # :startdoc:
+
   # Whether \PStore should do its best to prevent file corruptions,
   # even when an unlikely error (such as memory-error or filesystem error) occurs:
   #
@@ -372,7 +580,35 @@ class PStore
   #
   #   store = PStore.new(path, true)
   #
-  def initialize(file, thread_safe = false)
+  # ==== Storage Format
+  #
+  # Optional keyword argument +format+ selects the on-disk format:
+  #
+  # - +:marshal+ (the default): the historical format based on module
+  #   \Marshal.  Loading a Marshal file can instantiate arbitrary Ruby
+  #   classes, so only open files you trust.
+  # - +:json+: a versioned, type-tagged JSON format that is
+  #   human-inspectable and never instantiates arbitrary Ruby classes
+  #   when loading.  Only simple data can be stored: String, Symbol,
+  #   Integer, finite Float, +true+, +false+, +nil+, Array and Hash.
+  #   String keys and Symbol keys are kept distinct.  Unsupported
+  #   objects and cyclic structures are rejected with PStore::Error.
+  #
+  #   store = PStore.new(path, format: :json)
+  #
+  # A Marshal-format file is _not_ converted implicitly; use the
+  # explicit migration entry point PStore.migrate_to_json to convert
+  # an existing file.
+  #
+  # Optional keyword arguments +max_depth+ and +max_nodes+ bound the
+  # nesting depth and the total number of values accepted when
+  # encoding or decoding JSON-format data (defaults: 100 and
+  # 1_000_000).  They have no effect on the Marshal format.
+  #
+  def initialize(file, thread_safe = false,
+                 format: FORMAT_MARSHAL,
+                 max_depth: JSONCodec::DEFAULT_MAX_DEPTH,
+                 max_nodes: JSONCodec::DEFAULT_MAX_NODES)
     dir = File::dirname(file)
     unless File::directory? dir
       raise PStore::Error, format("directory %s does not exist", dir)
@@ -380,11 +616,83 @@ class PStore
     if File::exist? file and not File::readable? file
       raise PStore::Error, format("file %s not readable", file)
     end
+    unless FORMATS.include?(format)
+      raise ArgumentError, format("unknown PStore format: %s", format.inspect)
+    end
     @filename = File.path(file)
     @abort = false
     @ultra_safe = false
     @thread_safe = thread_safe
+    @format = format
+    @max_depth = max_depth
+    @max_nodes = max_nodes
     @lock = Thread::Mutex.new
+  end
+
+  # Explicit migration entry point: converts the Marshal-format PStore
+  # file at +file+ to the JSON format (see PStore.new, keyword +format+).
+  #
+  # The whole content of the file is validated and encoded _before_ the
+  # file is touched; the file is then replaced atomically (via a
+  # temporary file and rename).  If validation or writing fails, the
+  # original file is left unchanged.
+  #
+  # Optional keyword arguments +max_depth+ and +max_nodes+ bound the
+  # nesting depth and total number of values accepted in the data,
+  # exactly as for PStore.new.
+  #
+  # Raises PStore::Error if the file does not exist, is not a
+  # Marshal-format PStore file, is already in JSON format, or contains
+  # data that cannot be represented in the JSON format.
+  #
+  # Returns +true+ on success.
+  def self.migrate_to_json(file,
+                           max_depth: JSONCodec::DEFAULT_MAX_DEPTH,
+                           max_nodes: JSONCodec::DEFAULT_MAX_NODES)
+    path = File.path(file)
+    unless File.exist?(path)
+      raise Error, format("file %s does not exist", path)
+    end
+    data = File.binread(path)
+    if data.empty?
+      # A zero-length file is a valid, empty PStore file.
+      table = {}
+    else
+      if JSONCodec.json_data?(data)
+        raise Error, format("file %s is already in JSON format", path)
+      end
+      table =
+        begin
+          Marshal.load(data)
+        rescue StandardError => error
+          raise Error, format("file %s is not a valid Marshal PStore file: %s",
+                              path, error.message)
+        end
+      raise Error, "PStore file seems to be corrupted." unless table.is_a?(Hash)
+    end
+    # Fully validate and encode before touching the existing file.
+    json_data = JSONCodec.dump(table, max_depth: max_depth, max_nodes: max_nodes)
+    # Atomically replace the file only after successful validation.
+    temp_filename = "#{path}.tmp.#{Process.pid}.#{rand 1000000}"
+    begin
+      File.open(temp_filename, File::WRONLY | File::CREAT | File::TRUNC | File::BINARY, 0o600) do |temp_file|
+        temp_file.write(json_data)
+        temp_file.flush
+        begin
+          temp_file.fsync
+        rescue SystemCallError
+        end
+      end
+      begin
+        File.chmod(File.stat(path).mode, temp_filename)
+      rescue SystemCallError
+      end
+      File.rename(temp_filename, path)
+    rescue Exception
+      File.unlink(temp_filename) rescue nil
+      raise
+    end
+    true
   end
 
   # Raises PStore::Error if the calling code is not in a PStore#transaction.
@@ -596,6 +904,10 @@ class PStore
   private
   # :stopdoc:
 
+  def json_format?
+    @format == FORMAT_JSON
+  end
+
   # Constant for relieving Ruby's garbage collector.
   CHECKSUM_ALGO = %w[SHA512 SHA384 SHA256 SHA1 RMD160 MD5].each do |algo|
     begin
@@ -664,8 +976,8 @@ class PStore
       if data.empty?
         # This seems to be a newly-created file.
         table = {}
-        checksum = empty_marshal_checksum
-        size = empty_marshal_data.bytesize
+        checksum = empty_checksum
+        size = empty_data.bytesize
       else
         table = load(data)
         checksum = CHECKSUM_ALGO.digest(data)
@@ -720,16 +1032,55 @@ class PStore
   end
 
 
-  # This method is just a wrapped around Marshal.dump
-  # to allow subclass overriding used in YAML::Store.
+  # This method is just a wrapper around Marshal.dump (or the JSON
+  # codec, for JSON-format stores) to allow subclass overriding used
+  # in YAML::Store.
   def dump(table)  # :nodoc:
-    Marshal::dump(table)
+    if json_format?
+      JSONCodec.dump(table, max_depth: @max_depth, max_nodes: @max_nodes)
+    else
+      Marshal::dump(table)
+    end
   end
 
-  # This method is just a wrapped around Marshal.load.
-  # to allow subclass overriding used in YAML::Store.
+  # This method is just a wrapper around Marshal.load (or the JSON
+  # codec, for JSON-format stores) to allow subclass overriding used
+  # in YAML::Store.
   def load(content)  # :nodoc:
-    Marshal::load(content)
+    if json_format?
+      data = content.is_a?(String) ? content : content.read
+      if JSONCodec.marshal_data?(data)
+        raise Error, format("PStore file %s is in Marshal format; " \
+                            "migrate it with PStore.migrate_to_json", @filename)
+      end
+      JSONCodec.load(data, max_depth: @max_depth, max_nodes: @max_nodes)
+    else
+      if content.is_a?(String)
+        if JSONCodec.json_data?(content)
+          raise Error, format("PStore file %s is in JSON format; " \
+                              "open it with PStore.new(file, format: :json)", @filename)
+        end
+        Marshal::load(content)
+      else
+        # Peek at the IO without disturbing Marshal.load's behavior.
+        pos = content.pos
+        head = content.read(JSONCodec::MAGIC.bytesize) || ""
+        content.pos = pos
+        if JSONCodec.json_data?(head)
+          raise Error, format("PStore file %s is in JSON format; " \
+                              "open it with PStore.new(file, format: :json)", @filename)
+        end
+        Marshal::load(content)
+      end
+    end
+  end
+
+  def empty_data
+    json_format? ? JSONCodec.dump({}) : empty_marshal_data
+  end
+
+  def empty_checksum
+    json_format? ? CHECKSUM_ALGO.digest(empty_data) : empty_marshal_checksum
   end
 
   def empty_marshal_data
