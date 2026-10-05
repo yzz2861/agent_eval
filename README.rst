@@ -1190,6 +1190,51 @@ Unbounded ranges use ``an.Preceding()`` or ``an.Following()`` without arguments.
 
     SELECT "date","amount",SUM("amount") OVER(PARTITION BY "account_id" ORDER BY "date" ROWS BETWEEN 7 PRECEDING AND CURRENT ROW) "rolling_7_day" FROM "transactions"
 
+Named Windows
+"""""""""""""
+
+When several analytic functions share the same partitioning and ordering, the \`\`WINDOW\`\` clause lets the query define
+the window once and reference it by name. Named windows are supported for PostgreSQL and SQLite (and the generic
+\`\`Query\`\`); dialects without support raise a \`\`QueryException\`\`.
+
+.. code-block:: python
+
+    from pypika import PostgreSQLQuery, Table, Window, analytics as an
+
+    t = Table('transactions')
+    q = (
+        PostgreSQLQuery.from_(t)
+        .select(
+            an.Rank().over_window('w'),
+            an.Sum(t.amount).over_window('w'),
+        )
+        .window('w', Window().partition_by(t.account_id).orderby(t.date))
+    )
+
+.. code-block:: sql
+
+    SELECT RANK() OVER "w",SUM("amount") OVER "w" FROM "transactions" WINDOW "w" AS (PARTITION BY "account_id" ORDER BY "date")
+
+A reference may legally extend the named window with an \`\`ORDER BY\`\` or frame clause when the definition does not
+already specify one, and a window definition may itself extend another named window of the same query.
+
+.. code-block:: python
+
+    q = (
+        PostgreSQLQuery.from_(t)
+        .select(an.Sum(t.amount).over_window('w2').rows(an.Preceding(1), an.CURRENT_ROW))
+        .window('w', Window().partition_by(t.account_id))
+        .window('w2', Window('w').orderby(t.date))
+    )
+
+.. code-block:: sql
+
+    SELECT SUM("amount") OVER("w2" ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM "transactions" WINDOW "w" AS (PARTITION BY "account_id"),"w2" AS ("w" ORDER BY "date")
+
+Window names resolve within the current query only; subqueries define their own scope. Unknown references, reference
+cycles, and illegal overrides (adding \`\`PARTITION BY\`\`, or redefining an existing \`\`ORDER BY\`\` or frame) raise a
+\`\`QueryException\`\`. Anonymous \`\`OVER\`\` clauses and named windows can be mixed freely in one query.
+
 
 Parametrized Queries
 ^^^^^^^^^^^^^^^^^^^^

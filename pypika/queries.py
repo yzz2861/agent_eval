@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pypika.enums import Dialects, JoinType, ReferenceOption, SetOperation
 from pypika.terms import (
+    AnalyticFunction,
     ArithmeticExpression,
     Criterion,
     EmptyCriterion,
@@ -21,6 +22,7 @@ from pypika.terms import (
     Term,
     Tuple,
     ValueWrapper,
+    Window,
 )
 from pypika.utils import (
     JoinException,
@@ -714,6 +716,7 @@ class QueryBuilder(Selectable, Term):
     ALIAS_QUOTE_CHAR = None
     QUERY_ALIAS_QUOTE_CHAR = None
     QUERY_CLS = Query
+    WINDOW_CLAUSE_SUPPORTED = True
 
     def __init__(
         self,
@@ -748,6 +751,7 @@ class QueryBuilder(Selectable, Term):
         self._with_totals = False
         self._havings = None
         self._qualifys = None
+        self._windows = {}
         self._orderbys = []
         self._joins = []
         self._unions = []
@@ -784,6 +788,7 @@ class QueryBuilder(Selectable, Term):
         newone._columns = copy(self._columns)
         newone._values = copy(self._values)
         newone._groupbys = copy(self._groupbys)
+        newone._windows = copy(self._windows)
         newone._orderbys = copy(self._orderbys)
         newone._joins = copy(self._joins)
         newone._unions = copy(self._unions)
@@ -851,6 +856,7 @@ class QueryBuilder(Selectable, Term):
         self._orderbys = [
             (orderby[0].replace_table(current_table, new_table), orderby[1]) for orderby in self._orderbys
         ]
+        self._windows = {name: window.replace_table(current_table, new_table) for name, window in self._windows.items()}
         self._joins = [join.replace_table(current_table, new_table) for join in self._joins]
 
         if current_table in self._select_star_tables:
@@ -861,6 +867,26 @@ class QueryBuilder(Selectable, Term):
     def with_(self, selectable: Selectable, name: str) -> None:
         t = AliasedQuery(name, selectable)
         self._with.append(t)
+
+    @builder
+    def window(self, name: str, window: Window | None = None) -> None:
+        """
+        Adds a named window definition to the query's WINDOW clause. Analytic functions can reference the definition
+        by name via AnalyticFunction.over_window instead of repeating an anonymous OVER clause, and may extend it
+        with an ORDER BY or frame clause where the definition does not already specify one.
+
+        :param name:
+            The name of the window, resolvable within this query only.
+        :param window:
+            A Window definition. May itself extend another named window of this query.
+        """
+        if not self.WINDOW_CLAUSE_SUPPORTED:
+            raise QueryException("WINDOW clause is not supported by this dialect")
+
+        if name in self._windows:
+            raise QueryException('Window "{name}" is already defined'.format(name=name))
+
+        self._windows[name] = window if window is not None else Window()
 
     @builder
     def into(self, table: str | Table) -> None:
@@ -1273,6 +1299,8 @@ class QueryBuilder(Selectable, Term):
         if self._update_table and not self._updates:
             return ""
 
+        self._validate_windows()
+
         has_joins = bool(self._joins)
         has_multiple_from_clauses = 1 < len(self._from)
         has_subquery_from_clause = 0 < len(self._from) and isinstance(self._from[0], QueryBuilder)
@@ -1369,6 +1397,9 @@ class QueryBuilder(Selectable, Term):
 
         if self._qualifys:
             querystring += self._qualify_sql(**kwargs)
+
+        if self._windows:
+            querystring += self._window_sql(**kwargs)
 
         if self._orderbys:
             querystring += self._orderby_sql(**kwargs)
@@ -1559,6 +1590,76 @@ class QueryBuilder(Selectable, Term):
 
     def _qualify_sql(self, quote_char: str | None = None, **kwargs: Any) -> str:
         return " QUALIFY {qualify}".format(qualify=self._qualifys.get_sql(quote_char=quote_char, **kwargs))
+
+    def _window_sql(self, **kwargs: Any) -> str:
+        return " WINDOW " + ",".join(
+            "{name} AS {spec}".format(
+                name=format_quotes(name, kwargs.get("quote_char")),
+                spec=window.get_sql(**kwargs),
+            )
+            for name, window in self._windows.items()
+        )
+
+    def _resolved_window_spec(self, name: str, _resolving: tuple = ()) -> tuple:
+        """
+        Resolves a named window to its effective (partition, orderbys, frame, bound) spec, following base window
+        references. Raises a QueryException for unknown names, reference cycles and illegal clause overrides.
+        """
+        if name not in self._windows:
+            raise QueryException('Window "{name}" does not exist'.format(name=name))
+
+        if name in _resolving:
+            cycle = " -> ".join([*_resolving, name])
+            raise QueryException("Window reference cycle detected: {cycle}".format(cycle=cycle))
+
+        window = self._windows[name]
+        partition, orderbys, frame, bound = [], [], None, None
+
+        if window.base is not None:
+            partition, orderbys, frame, bound = self._resolved_window_spec(window.base, (*_resolving, name))
+
+            if window._partition:
+                raise QueryException('Cannot override PARTITION BY clause of window "{name}"'.format(name=window.base))
+            if window._orderbys and orderbys:
+                raise QueryException('Cannot override ORDER BY clause of window "{name}"'.format(name=window.base))
+            if frame or bound:
+                raise QueryException('Cannot override frame clause of window "{name}"'.format(name=window.base))
+
+        return (
+            window._partition or partition,
+            window._orderbys or orderbys,
+            window.frame or frame,
+            window.bound or bound,
+        )
+
+    def _validate_windows(self) -> None:
+        for name in self._windows:
+            self._resolved_window_spec(name)
+
+        for term in self._selects:
+            for function in term.find_(AnalyticFunction):
+                window_name = function._window_name
+                if window_name is None:
+                    continue
+
+                if function._partition:
+                    raise QueryException(
+                        'Cannot override PARTITION BY clause of window "{name}"'.format(name=window_name)
+                    )
+
+                extends_window = (
+                    function._orderbys or getattr(function, "frame", None) or getattr(function, "bound", None)
+                )
+                if not extends_window:
+                    if window_name not in self._windows:
+                        raise QueryException('Window "{name}" does not exist'.format(name=window_name))
+                    continue
+
+                _, orderbys, frame, bound = self._resolved_window_spec(window_name)
+                if function._orderbys and orderbys:
+                    raise QueryException('Cannot override ORDER BY clause of window "{name}"'.format(name=window_name))
+                if frame or bound:
+                    raise QueryException('Cannot override frame clause of window "{name}"'.format(name=window_name))
 
     def _offset_sql(self) -> str:
         return f" OFFSET {self._offset}"

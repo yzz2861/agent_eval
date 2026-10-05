@@ -52,6 +52,7 @@ class SnowflakeQueryBuilder(QueryBuilder):
     ALIAS_QUOTE_CHAR = '"'
     QUERY_ALIAS_QUOTE_CHAR = ''
     QUERY_CLS = SnowflakeQuery
+    WINDOW_CLAUSE_SUPPORTED = False
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(dialect=Dialects.SNOWFLAKE, **kwargs)
@@ -259,6 +260,7 @@ class VerticaQuery(Query):
 
 class VerticaQueryBuilder(QueryBuilder):
     QUERY_CLS = VerticaQuery
+    WINDOW_CLAUSE_SUPPORTED = False
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(dialect=Dialects.VERTICA, **kwargs)
@@ -384,6 +386,7 @@ class OracleQuery(Query):
 class OracleQueryBuilder(FetchNextAndOffsetRowsQueryBuilder):
     QUOTE_CHAR = None
     QUERY_CLS = OracleQuery
+    WINDOW_CLAUSE_SUPPORTED = False
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(dialect=Dialects.ORACLE, **kwargs)
@@ -688,6 +691,7 @@ class RedshiftQuery(Query):
 
 class RedShiftQueryBuilder(QueryBuilder):
     QUERY_CLS = RedshiftQuery
+    WINDOW_CLAUSE_SUPPORTED = False
 
 
 class MSSQLQuery(Query):
@@ -702,6 +706,7 @@ class MSSQLQuery(Query):
 
 class MSSQLQueryBuilder(FetchNextAndOffsetRowsQueryBuilder):
     QUERY_CLS = MSSQLQuery
+    WINDOW_CLAUSE_SUPPORTED = False
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(dialect=Dialects.MSSQL, **kwargs)
@@ -799,6 +804,7 @@ class ClickHouseQuery(Query):
 
 class ClickHouseQueryBuilder(QueryBuilder):
     QUERY_CLS = ClickHouseQuery
+    WINDOW_CLAUSE_SUPPORTED = False
 
     _distinct_on: list[Term]
     _limit_by: tuple[int, int, list[Term]] | None
@@ -1008,6 +1014,7 @@ class JiraQueryBuilder(QueryBuilder):
     QUOTE_CHAR = ""
     SECONDARY_QUOTE_CHAR = '"'
     QUERY_CLS = JiraQuery
+    WINDOW_CLAUSE_SUPPORTED = False
 
     def __init__(self, **kwargs) -> None:
         super().__init__(dialect=Dialects.JIRA, **kwargs)

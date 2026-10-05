@@ -104,6 +104,7 @@ from pypika.terms import (
     Rollup,
     SystemTimeValue,
     Tuple,
+    Window,
 )
 
 # noinspection PyUnresolvedReferences
@@ -166,6 +167,7 @@ __all__ = (
     'PyformatParameter',
     'Rollup',
     'Tuple',
+    'Window',
     'CustomFunction',
     'CaseException',
     'GroupingException',

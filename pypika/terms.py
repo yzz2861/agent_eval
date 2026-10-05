@@ -13,6 +13,7 @@ from pypika.enums import Arithmetic, Boolean, Comparator, Dialects, Equality, JS
 from pypika.utils import (
     CaseException,
     FunctionException,
+    QueryException,
     builder,
     format_alias_sql,
     format_quotes,
@@ -1520,6 +1521,7 @@ class AnalyticFunction(AggregateFunction):
         self._filters = []
         self._partition = []
         self._orderbys = []
+        self._window_name = None
         self._include_filter = False
         self._include_over = False
 
@@ -1527,6 +1529,15 @@ class AnalyticFunction(AggregateFunction):
     def over(self, *terms: Any) -> None:
         self._include_over = True
         self._partition += terms
+
+    @builder
+    def over_window(self, name: str) -> None:
+        """
+        References a named window defined in the query's WINDOW clause. Additional ORDER BY or frame clauses may be
+        appended with orderby and rows/range as long as the referenced window does not already define them.
+        """
+        self._include_over = True
+        self._window_name = name
 
     @builder
     def orderby(self, *terms: Any, **kwargs: Any) -> None:
@@ -1544,6 +1555,9 @@ class AnalyticFunction(AggregateFunction):
 
     def get_partition_sql(self, **kwargs: Any) -> str:
         terms = []
+        if self._window_name is not None:
+            terms.append(format_quotes(self._window_name, kwargs.get("quote_char")))
+
         if self._partition:
             terms.append(
                 "PARTITION BY {args}".format(
@@ -1560,13 +1574,29 @@ class AnalyticFunction(AggregateFunction):
 
         return " ".join(terms)
 
+    def _is_pure_window_reference(self) -> bool:
+        return (
+            self._window_name is not None
+            and not self._partition
+            and not self._orderbys
+            and not getattr(self, "frame", None)
+            and not getattr(self, "bound", None)
+        )
+
     def get_function_sql(self, **kwargs: Any) -> str:
+        if self._window_name is not None and self._partition:
+            raise QueryException(
+                'Cannot override PARTITION BY clause of window "{name}"'.format(name=self._window_name)
+            )
+
         function_sql = super().get_function_sql(**kwargs)
-        partition_sql = self.get_partition_sql(**kwargs)
 
         sql = function_sql
         if self._include_over:
-            sql += f" OVER({partition_sql})"
+            if self._is_pure_window_reference():
+                sql += " OVER {name}".format(name=format_quotes(self._window_name, kwargs.get("quote_char")))
+            else:
+                sql += f" OVER({self.get_partition_sql(**kwargs)})"
 
         return sql
 
@@ -1640,6 +1670,103 @@ class IgnoreNullsAnalyticFunction(AnalyticFunction):
 
         # No special params unless ignoring nulls
         return None
+
+
+class Window(Node):
+    """
+    A named window definition for a query's WINDOW clause.
+
+    A window may extend another named window (its base), inheriting the base's PARTITION BY and ORDER BY clauses.
+    When a base is given, PARTITION BY cannot be redefined, ORDER BY may only be added when the base does not define
+    one, and the base must not define a frame.
+    """
+
+    def __init__(self, base: str | None = None) -> None:
+        self.base = base
+        self._partition = []
+        self._orderbys = []
+        self.frame = None
+        self.bound = None
+
+    def __copy__(self) -> Window:
+        newone = type(self).__new__(type(self))
+        newone.__dict__.update(self.__dict__)
+        newone._partition = list(self._partition)
+        newone._orderbys = list(self._orderbys)
+        return newone
+
+    @builder
+    def partition_by(self, *terms: Any) -> None:
+        self._partition += terms
+
+    @builder
+    def orderby(self, *terms: Any, **kwargs: Any) -> None:
+        self._orderbys += [(term, kwargs.get("order")) for term in terms]
+
+    def _set_frame_and_bounds(self, frame: str, bound: Any, and_bound: Any | None) -> None:
+        if self.frame or self.bound:
+            raise AttributeError()
+
+        self.frame = frame
+        self.bound = (bound, and_bound) if and_bound else bound
+
+    @builder
+    def rows(self, bound: Any, and_bound: Any | None = None) -> None:
+        self._set_frame_and_bounds("ROWS", bound, and_bound)
+
+    @builder
+    def range(self, bound: Any, and_bound: Any | None = None) -> None:
+        self._set_frame_and_bounds("RANGE", bound, and_bound)
+
+    @builder
+    def replace_table(self, current_table: Table | None, new_table: Table | None) -> None:
+        self._partition = [term.replace_table(current_table, new_table) for term in self._partition]
+        self._orderbys = [(term.replace_table(current_table, new_table), orient) for term, orient in self._orderbys]
+
+    def _orderby_field(self, field: Field, orient: Order | None, **kwargs: Any) -> str:
+        if orient is None:
+            return field.get_sql(**kwargs)
+
+        return "{field} {orient}".format(
+            field=field.get_sql(**kwargs),
+            orient=orient.value,
+        )
+
+    def get_frame_sql(self) -> str:
+        if not isinstance(self.bound, tuple):
+            return "{frame} {bound}".format(frame=self.frame, bound=self.bound)
+
+        lower, upper = self.bound
+        return "{frame} BETWEEN {lower} AND {upper}".format(
+            frame=self.frame,
+            lower=lower,
+            upper=upper,
+        )
+
+    def get_sql(self, **kwargs: Any) -> str:
+        terms = []
+
+        if self.base is not None:
+            terms.append(format_quotes(self.base, kwargs.get("quote_char")))
+
+        if self._partition:
+            terms.append(
+                "PARTITION BY {args}".format(
+                    args=",".join(p.get_sql(**kwargs) if hasattr(p, "get_sql") else str(p) for p in self._partition)
+                )
+            )
+
+        if self._orderbys:
+            terms.append(
+                "ORDER BY {orderby}".format(
+                    orderby=",".join(self._orderby_field(field, orient, **kwargs) for field, orient in self._orderbys)
+                )
+            )
+
+        if self.frame or self.bound:
+            terms.append(self.get_frame_sql())
+
+        return "({spec})".format(spec=" ".join(terms))
 
 
 class Interval(Term):
