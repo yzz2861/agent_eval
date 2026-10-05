@@ -38,6 +38,15 @@ module Dry
       end
 
       # @api private
+      def scoped_copy(target_container)
+        self.class.new(target_container).tap do |copy|
+          providers.each_value do |provider|
+            copy.providers[provider.name] = provider.scoped_dup(target_container)
+          end
+        end
+      end
+
+      # @api private
       def freeze
         providers.freeze
         super

@@ -2,6 +2,15 @@
 
 module Dry
   module System
+    # Error raised when finalizing a container while scoped overrides are active
+    #
+    # @api public
+    ScopedOverridesFinalizationError = Class.new(StandardError) do
+      def initialize
+        super("cannot finalize a container while scoped overrides are active")
+      end
+    end
+
     # Error raised when import is called on an already finalized container
     #
     # @api public

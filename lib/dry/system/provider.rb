@@ -127,11 +127,15 @@ module Dry
       attr_reader :source
 
       # @api private
+      attr_reader :source_options
+
+      # @api private
       # rubocop:disable Style/KeywordParametersOrder
       def initialize(name:, namespace: nil, target_container:, source_class:, source_options: {}, &)
         @name = name
         @namespace = namespace
         @target_container = target_container
+        @source_options = source_options
 
         @provider_container = build_provider_container
         @statuses = []
@@ -145,6 +149,17 @@ module Dry
         )
       end
       # rubocop:enable Style/KeywordParametersOrder
+
+      # @api private
+      def scoped_dup(target_container)
+        self.class.new(
+          name: name,
+          namespace: namespace,
+          target_container: target_container,
+          source_class: source.class,
+          source_options: source_options
+        )
+      end
 
       # Runs the `prepare` lifecycle step.
       #

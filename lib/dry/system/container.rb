@@ -313,6 +313,8 @@ module Dry
         def finalize!(freeze: true, &)
           return self if finalized?
 
+          raise ScopedOverridesFinalizationError if current_scope
+
           configured!
 
           run_hooks(:finalize) do
@@ -481,8 +483,19 @@ module Dry
         end
 
         # @api public
-        def register(key, *)
-          super
+        def register(key, *args, &block)
+          registry = current_scope&.registry
+
+          if registry
+            config.registry.call(
+              registry,
+              key,
+              extract_register_item(args, block),
+              extract_register_options(args, block)
+            )
+          else
+            super
+          end
 
           hooks[:after_register].each { |hook| instance_exec(key, &hook) }
 
@@ -490,10 +503,111 @@ module Dry
         end
 
         # @api public
-        def resolve(key)
-          load_component(key) unless finalized?
+        alias_method :resolve_without_dependency_tracking, :resolve
+        private :resolve_without_dependency_tracking
 
-          super
+        def _container
+          current_scope&.registry || super
+        end
+
+        # @api public
+        def resolve(key, &)
+          scope = current_scope
+
+          if scope
+            resolve_in_scope(key, scope, &)
+          else
+            resolve_with_dependency_tracking(key, &)
+          end
+        end
+
+        # Runs the block with scoped component overrides.
+        #
+        # The overrides are visible only while the block is running. Already resolved
+        # components that depend, directly or transitively, on overridden keys are removed
+        # from the scope's local component graph and rebuilt on demand. Components resolved
+        # outside the scope continue to use their original graph.
+        #
+        # @example
+        #   container.override("clients.http", fake_client) do
+        #     container["orders.create_order"].client
+        #   end
+        #
+        # @param overrides [Hash] component keys and their replacement values
+        #
+        # @return [Object] the block's return value
+        #
+        # @api public
+        def override(key = nil, value = nil, **overrides, &)
+          raise ArgumentError, "a block is required" unless block_given?
+
+          case key
+          when nil
+            nil
+          when Hash
+            overrides = key.merge(overrides)
+          else
+            overrides[key] = value
+          end
+
+          previous_scope = active_scopes.last
+          scope = ScopedOverrides.new(
+            container: self,
+            parent_registry: previous_scope ? previous_scope.registry : base_container,
+            parent_registrar: previous_scope ? previous_scope.subsystem(:@providers) : providers,
+            parent_scope: previous_scope
+          )
+
+          scope.activate(overrides)
+          active_scopes.push(scope)
+
+          begin
+            yield(self)
+          rescue Exception
+            scope.discard
+            raise
+          ensure
+            scope.shutdown
+            active_scopes.pop
+          end
+        end
+
+        alias_method :scoped_overrides, :override
+        alias_method :with_overrides, :override
+        alias_method :scoped_override, :override
+
+        # @api private
+        def component_dependencies
+          @__component_dependencies__ ||= Hash.new { |dependencies, key| dependencies[key] = [] }
+        end
+
+        # @api private
+        def active_scopes
+          Thread.current[scope_key] ||= []
+        end
+
+        # @api private
+        def current_scope
+          active_scopes.last
+        end
+
+        # @api private
+        def remember_component_dependency(parent_key, child_key)
+          component_dependencies[child_key] << parent_key
+        end
+
+        # @api private
+        def dependent_component_keys(*keys)
+          remaining = keys.map(&:to_s)
+          dependent = Set.new
+
+          while (key = remaining.shift)
+            next unless dependent.add?(key)
+
+            remaining.concat(component_dependencies.fetch(key, EMPTY_ARRAY))
+          end
+
+          dependent
         end
 
         alias_method :registered?, :key?
@@ -513,6 +627,8 @@ module Dry
         #
         # @api public
         def key?(key)
+          return current_scope.key?(key) if current_scope
+
           if finalized?
             registered?(key)
           else
@@ -528,7 +644,12 @@ module Dry
 
         # @api private
         def providers
-          @providers ||= config.provider_registrar.new(self)
+          if current_scope
+            current_scope.subsystem(:@providers)
+          else
+            instance_variable_get(:@providers) ||
+              instance_variable_set(:@providers, config.provider_registrar.new(self))
+          end
         end
 
         # @api private
@@ -600,6 +721,7 @@ module Dry
 
           klass.instance_variable_set(:@__configured__, false)
           klass.instance_variable_set(:@__finalized__, false)
+          klass.instance_variable_set(:@__component_dependencies__, component_dependencies.dup)
 
           super
         end
@@ -636,6 +758,75 @@ module Dry
         # rubocop:enable Metrics/AbcSize, Metrics/PerceivedComplexity
 
         private
+
+        def scope_key
+          @__scope_key__ ||= "__dry_system_scopes_#{object_id}__".to_sym
+        end
+
+        def extract_register_item(args, block)
+          if block
+            block
+          else
+            args.fetch(0)
+          end
+        end
+
+        def extract_register_options(args, block)
+          if block
+            args.last.is_a?(::Hash) ? args.last : EMPTY_HASH
+          elsif args.length > 1
+            args.last
+          else
+            EMPTY_HASH
+          end
+        end
+
+        def base_container
+          Dry::Core::Container::Mixin.instance_method(:_container).bind_call(self)
+        end
+
+        def resolve_with_dependency_tracking(key, &)
+          dependencies = Thread.current[:__dry_system_resolution_keys__] ||= []
+          parent_key = dependencies.last
+          resolved_key = key.to_s
+
+          begin
+            dependencies << resolved_key
+            load_component(key) unless finalized?
+            result = resolve_without_dependency_tracking(key, &)
+          ensure
+            dependencies.pop
+          end
+
+          remember_component_dependency(parent_key, resolved_key) if parent_key
+          result
+        end
+
+        def resolve_in_scope(key, scope, &)
+          dependencies = Thread.current[:__dry_system_resolution_keys__] ||= []
+          parent_key = dependencies.last
+          resolved_key = key.to_s
+          construction_snapshot = nil
+
+          begin
+            dependencies << resolved_key
+
+            unless registered?(key)
+              construction_snapshot = scope.begin_construction
+              load_component(key)
+            end
+
+            result = resolve_without_dependency_tracking(key, &)
+          rescue Exception
+            if construction_snapshot
+              scope.rollback_construction(construction_snapshot)
+            end
+            raise
+          end
+
+          scope.remember_dependency(parent_key, resolved_key) if parent_key
+          result
+        end
 
         def load_local_component(component)
           if component.auto_register?
