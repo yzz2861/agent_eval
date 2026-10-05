@@ -189,6 +189,8 @@ module Flipper
 end
 
 require 'flipper/actor'
+require 'flipper/actor_index'
+require 'flipper/actor_membership'
 require 'flipper/adapter'
 require 'flipper/adapters/wrapper'
 require 'flipper/adapters/actor_limit'
