@@ -530,6 +530,52 @@ class Resolv
       }
     end
 
+    ##
+    # Transfers the zone +zone+ from a nameserver with an AXFR query
+    # over TCP.  [RFC 5936]
+    #
+    # +zone+ must be a Resolv::DNS::Name or a String.
+    #
+    # Yields each resource record of the zone as it arrives, as a
+    # <tt>|name, ttl, data|</tt> triple, starting and ending with the
+    # zone's SOA record.  Returns true when the closing SOA record was
+    # received and the zone transferred completely.
+    #
+    # Raises Resolv::DNS::ZoneTransferError when the server reports an
+    # error, sends a response that does not match the query, or closes
+    # the connection before the closing SOA record arrives.
+    #
+    #   dns.transfer_zone('example.com') {|name, ttl, data| p data }
+    #
+    # +nameserver+ and +port+ default to the first configured
+    # nameserver.  +max_message_size+ bounds the size of a single
+    # received DNS message and +max_records+ bounds the total number of
+    # resource records accepted for the zone.
+    #
+    # Without a block, returns the Resolv::DNS::ZoneTransfer object,
+    # which can be enumerated and closed explicitly to abort the
+    # transfer.
+
+    def transfer_zone(zone, nameserver: nil, port: nil,
+                      max_records: ZoneTransfer::DEFAULT_MAX_RECORDS,
+                      max_message_size: ZoneTransfer::DEFAULT_MAX_MESSAGE_SIZE)
+      lazy_initialize
+      unless nameserver
+        nameserver, config_port = @config.nameserver_port.first
+        port ||= config_port
+      end
+      port ||= Port
+      transfer = ZoneTransfer.new(nameserver, port, zone,
+                                  max_records: max_records,
+                                  max_message_size: max_message_size)
+      return transfer unless block_given?
+      begin
+        transfer.each {|name, ttl, data| yield name, ttl, data}
+      ensure
+        transfer.close
+      end
+    end
+
     # :stopdoc:
 
     def fetch_resource(name, typeclass)
@@ -1076,6 +1122,249 @@ class Resolv
       # Indicates a problem with the DNS request.
 
       class RequestError < StandardError
+      end
+    end
+
+    ##
+    # Indicates a problem with a zone transfer: the server reported an
+    # error, sent a response that does not match the query, or closed
+    # the connection before the zone transferred completely.
+
+    class ZoneTransferError < ResolvError
+    end
+
+    ##
+    # A DNS zone transfer (AXFR) over TCP.  [RFC 5936]
+    #
+    # Created by Resolv::DNS#transfer_zone.  Use #each to stream the
+    # resource records of the zone and #close to abort the transfer and
+    # release the connection.
+
+    class ZoneTransfer
+      include Enumerable
+
+      ##
+      # Default upper bound for the size of a single received DNS
+      # message, in octets.
+
+      DEFAULT_MAX_MESSAGE_SIZE = 65535
+
+      ##
+      # Default upper bound for the number of resource records accepted
+      # for a zone.
+
+      DEFAULT_MAX_RECORDS = 65536
+
+      def initialize(nameserver, port, zone, # :nodoc:
+                     max_records: DEFAULT_MAX_RECORDS,
+                     max_message_size: DEFAULT_MAX_MESSAGE_SIZE)
+        unless max_records.is_a?(Integer) && max_records > 0
+          raise ArgumentError, "max_records must be a positive Integer"
+        end
+        unless max_message_size.is_a?(Integer) && max_message_size > 0
+          raise ArgumentError, "max_message_size must be a positive Integer"
+        end
+        @nameserver = nameserver
+        @port = port
+        # Names on the wire are absolute, so the zone is normalized to
+        # an absolute name for the response records to compare against.
+        zone = Name.create(zone)
+        @zone = zone.absolute? ? zone : Name.new(zone.to_a)
+        @max_records = max_records
+        @max_message_size = max_message_size
+        @sock = nil
+        @request_id = nil
+        @closed = false
+        @complete = false
+      end
+
+      ##
+      # The zone being transferred, as a Resolv::DNS::Name.
+
+      attr_reader :zone
+
+      ##
+      # Whether this transfer has been closed, either by #close or by
+      # #each finishing.
+
+      def closed?
+        @closed
+      end
+
+      ##
+      # Whether the transfer ran to completion, i.e. the closing SOA
+      # record of the zone was received.
+
+      def complete?
+        @complete
+      end
+
+      ##
+      # Closes the connection used by this transfer and aborts an #each
+      # running in another thread.  Does nothing when the transfer is
+      # already closed.
+
+      def close
+        @closed = true
+        if sock = @sock
+          @sock = nil
+          begin
+            sock.close
+          rescue IOError, SystemCallError
+          end
+        end
+        if id = @request_id
+          @request_id = nil
+          DNS.free_request_id(@nameserver, @port, id)
+        end
+        nil
+      end
+
+      ##
+      # Connects to the nameserver, sends the AXFR query, and yields
+      # each resource record of the zone as a <tt>|name, ttl, data|</tt>
+      # triple as it arrives.  Returns true when the closing SOA record
+      # was received and the zone transferred completely, false when
+      # the transfer was aborted with #close.
+      #
+      # Raises Resolv::DNS::ZoneTransferError when the server reports
+      # an error, sends a response that does not match the query, or
+      # closes the connection before the closing SOA record arrives.
+      #
+      # A transfer can be streamed only once.
+
+      def each
+        return enum_for(:each) unless block_given?
+        raise ZoneTransferError, "zone transfer is closed" if @closed
+        raise ZoneTransferError, "zone transfer already completed" if @complete
+
+        @request_id = DNS.allocate_request_id(@nameserver, @port)
+        begin
+          query = Message.new(@request_id)
+          query.add_question(@zone, Resource::IN::AXFR)
+          encoded = query.encode
+          sock = TCPSocket.new(@nameserver, @port)
+          @sock = sock
+          sock.write([encoded.bytesize].pack('n') << encoded)
+
+          record_count = 0
+          seen_soa = false
+          first_message = true
+          until @complete || @closed
+            message = read_message(sock)
+            check_response(message, first_message)
+            first_message = false
+            message.each_answer do |name, ttl, data|
+              record_count += 1
+              if record_count > @max_records
+                raise ZoneTransferError,
+                  "zone transfer for #{@zone} exceeded #{@max_records} records"
+              end
+              unless seen_soa
+                unless Resource::IN::SOA === data && name == @zone
+                  raise ZoneTransferError,
+                    "zone transfer for #{@zone} did not start with its SOA record"
+                end
+                seen_soa = true
+                yield name, ttl, data
+                next
+              end
+              if Resource::IN::SOA === data
+                unless name == @zone
+                  raise ZoneTransferError,
+                    "unexpected SOA record for #{name} in zone transfer for #{@zone}"
+                end
+                yield name, ttl, data
+                @complete = true
+                break
+              end
+              yield name, ttl, data
+              break if @closed
+            end
+          end
+          @complete
+        rescue IOError, SystemCallError => e
+          # An intentional #close shuts the socket down from under a
+          # blocked read; anything else is a broken connection and the
+          # zone is incomplete.
+          unless @closed
+            raise ZoneTransferError,
+              "zone transfer for #{@zone} failed: #{e.message}"
+          end
+          @complete
+        ensure
+          close
+        end
+      end
+
+      private
+
+      # Reads one length prefixed DNS message from +sock+.
+      def read_message(sock)
+        len = read_bytes(sock, 2).unpack1('n')
+        if len > @max_message_size
+          raise ZoneTransferError,
+            "zone transfer message of #{len} octets exceeds " \
+            "the #{@max_message_size} octet limit"
+        end
+        Message.decode(read_bytes(sock, len))
+      rescue DecodeError => e
+        raise ZoneTransferError,
+          "zone transfer received a malformed message: #{e.message}"
+      end
+
+      # Reads exactly +len+ bytes from +sock+.  A shorter result means
+      # the server closed the connection before the zone transferred
+      # completely.
+      def read_bytes(sock, len)
+        data = String.new
+        while data.bytesize < len
+          chunk = sock.read(len - data.bytesize)
+          unless chunk
+            raise ZoneTransferError,
+              "connection closed before the zone transfer for #{@zone} completed"
+          end
+          data << chunk
+        end
+        data
+      end
+
+      def check_response(message, first_message)
+        unless message.id == @request_id
+          raise ZoneTransferError,
+            "zone transfer response id #{message.id} does not match " \
+            "query id #{@request_id}"
+        end
+        unless message.qr == 1
+          raise ZoneTransferError,
+            "zone transfer received a message that is not a response"
+        end
+        unless message.rcode == RCode::NoError
+          raise ZoneTransferError,
+            "zone transfer for #{@zone} failed: " \
+            "server returned #{ZoneTransfer.rcode_name(message.rcode)}"
+        end
+        question = message.question
+        if question.empty?
+          if first_message
+            raise ZoneTransferError,
+              "zone transfer response does not echo the question"
+          end
+        else
+          qname, qtypeclass = question.first
+          unless question.length == 1 && qname == @zone &&
+                 Resource::Generic.type_class_equal?(qtypeclass, Resource::IN::AXFR)
+            raise ZoneTransferError,
+              "zone transfer response question does not match the query"
+          end
+        end
+      end
+
+      def self.rcode_name(rcode) # :nodoc:
+        @rcode_names ||= RCode.constants.each_with_object({}) {|name, names|
+          names[RCode.const_get(name)] ||= name
+        }.freeze
+        @rcode_names[rcode] || rcode
       end
     end
 
@@ -2772,6 +3061,13 @@ class Resolv
       end
 
       ##
+      # A Query type requesting a zone transfer.  [RFC 5936]
+
+      class AXFR < Query
+        TypeValue = 252 # :nodoc:
+      end
+
+      ##
       # CAA resource record defined in RFC 8659
       #
       # These records identify certificate authority allowed to issue
@@ -2834,7 +3130,7 @@ class Resolv
       end
 
       ClassInsensitiveTypes = [ # :nodoc:
-        NS, CNAME, SOA, PTR, HINFO, MINFO, MX, TXT, LOC, ANY, CAA
+        NS, CNAME, SOA, PTR, HINFO, MINFO, MX, TXT, LOC, ANY, AXFR, CAA
       ]
 
       ##

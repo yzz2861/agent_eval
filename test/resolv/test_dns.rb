@@ -1615,4 +1615,277 @@ class TestResolvDNS < Test::Unit::TestCase
       end
     end
   end
+
+  # Builds an SOA record for the example.test zone used by the zone
+  # transfer tests.
+  def make_test_soa
+    Resolv::DNS::Resource::IN::SOA.new(
+      Resolv::DNS::Name.create('ns1.example.test.'),
+      Resolv::DNS::Name.create('hostmaster.example.test.'),
+      2026100201, 7200, 3600, 1209600, 3600)
+  end
+
+  # Builds the encoded AXFR response to +query+ carrying +records+,
+  # each a [name, ttl, data] triple.
+  def axfr_response(query, records, id: query.id, rcode: 0, echo_question: true)
+    msg = Resolv::DNS::Message.new(id)
+    msg.qr = 1
+    msg.aa = 1
+    msg.rcode = rcode
+    query.each_question {|name, typeclass|
+      msg.add_question(name, typeclass)
+    } if echo_question
+    records.each {|name, ttl, data| msg.add_answer(name, ttl, data) }
+    msg.encode
+  end
+
+  # Runs a fake AXFR server which answers one query with the encoded
+  # messages returned by +frames_for+, dribbling each frame (length
+  # prefix included) out in +chunk_size+ byte writes.  Yields the
+  # server address and port to the block and returns the received
+  # query.
+  def with_axfr_server(frames_for, chunk_size: 3)
+    query = nil
+    with_tcp('127.0.0.1', 0) do |t|
+      _, server_port, _, server_address = t.addr
+      server_thread = Thread.new do
+        ct = accept_within_timeout(t)
+        begin
+          query = read_framed_query(ct)
+          frames_for.call(query).each do |frame|
+            framed(frame).bytes.each_slice(chunk_size) do |slice|
+              ct.write(slice.pack('C*'))
+            end
+          end
+        rescue SystemCallError, IOError
+          # The client went away in the middle of the transfer.
+        ensure
+          ct.close
+        end
+      end
+      begin
+        yield server_address, server_port
+      ensure
+        server_thread.join
+      end
+    end
+    query
+  end
+
+  def test_transfer_zone_complete
+    soa = make_test_soa
+    ns = Resolv::DNS::Resource::IN::NS.new(
+      Resolv::DNS::Name.create('ns1.example.test.'))
+    a = Resolv::DNS::Resource::IN::A.new('192.0.2.1')
+    expected = [
+      ['example.test', 3600, soa],
+      ['example.test', 3600, ns],
+      ['www.example.test', 3600, a],
+      ['example.test', 3600, soa],
+    ]
+    query = with_axfr_server(->(q) {
+      [axfr_response(q, expected[0, 2]), axfr_response(q, expected[2, 2])]
+    }, :chunk_size => 2) do |server_address, server_port|
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      yielded = []
+      complete = dns.transfer_zone('example.test') {|name, ttl, data|
+        yielded << [name.to_s, ttl, data]
+      }
+      assert_equal(true, complete)
+      assert_equal(expected, yielded)
+    end
+    qname, qtypeclass = query.question.first
+    assert_equal(Resolv::DNS::Name.create('example.test.'), qname)
+    assert_equal(Resolv::DNS::Resource::IN::AXFR, qtypeclass)
+  end
+
+  def test_transfer_zone_server_error
+    with_axfr_server(->(q) {
+      [axfr_response(q, [], :rcode => Resolv::DNS::RCode::Refused)]
+    }) do |server_address, server_port|
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      error = assert_raise(Resolv::DNS::ZoneTransferError) do
+        dns.transfer_zone('example.test') {|*| flunk('no records expected') }
+      end
+      assert_include(error.message, 'Refused')
+    end
+  end
+
+  def test_transfer_zone_incomplete_when_server_closes_early
+    soa = make_test_soa
+    with_axfr_server(->(q) {
+      [axfr_response(q, [['example.test', 3600, soa]])]
+    }) do |server_address, server_port|
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      yielded = []
+      error = assert_raise(Resolv::DNS::ZoneTransferError) do
+        dns.transfer_zone('example.test') {|name, ttl, data| yielded << data }
+      end
+      assert_include(error.message, 'closed')
+      assert_equal([soa], yielded)
+    end
+  end
+
+  def test_transfer_zone_partial_length_prefix_then_close
+    with_tcp('127.0.0.1', 0) do |t|
+      _, server_port, _, server_address = t.addr
+      server_thread = Thread.new do
+        ct = accept_within_timeout(t)
+        begin
+          read_framed_query(ct)
+          ct.write("\x00") # half of a length prefix
+        ensure
+          ct.close
+        end
+      end
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      assert_raise(Resolv::DNS::ZoneTransferError) do
+        dns.transfer_zone('example.test') {|*| }
+      end
+      server_thread.join
+    end
+  end
+
+  def test_transfer_zone_malformed_message
+    with_tcp('127.0.0.1', 0) do |t|
+      _, server_port, _, server_address = t.addr
+      server_thread = Thread.new do
+        ct = accept_within_timeout(t)
+        begin
+          read_framed_query(ct)
+          ct.write(framed("\xff" * 10))
+        ensure
+          ct.close
+        end
+      end
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      error = assert_raise(Resolv::DNS::ZoneTransferError) do
+        dns.transfer_zone('example.test') {|*| }
+      end
+      assert_include(error.message, 'malformed')
+      server_thread.join
+    end
+  end
+
+  def test_transfer_zone_response_id_mismatch
+    soa = make_test_soa
+    with_axfr_server(->(q) {
+      [axfr_response(q, [['example.test', 3600, soa]], :id => (q.id + 1) & 0xffff)]
+    }) do |server_address, server_port|
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      error = assert_raise(Resolv::DNS::ZoneTransferError) do
+        dns.transfer_zone('example.test') {|*| }
+      end
+      assert_include(error.message, 'id')
+    end
+  end
+
+  def test_transfer_zone_question_mismatch
+    soa = make_test_soa
+    with_axfr_server(->(q) {
+      msg = Resolv::DNS::Message.new(q.id)
+      msg.qr = 1
+      msg.add_question('other.test', Resolv::DNS::Resource::IN::AXFR)
+      msg.add_answer('example.test', 3600, soa)
+      [msg.encode]
+    }) do |server_address, server_port|
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      error = assert_raise(Resolv::DNS::ZoneTransferError) do
+        dns.transfer_zone('example.test') {|*| }
+      end
+      assert_include(error.message, 'question')
+    end
+  end
+
+  def test_transfer_zone_missing_initial_soa
+    a = Resolv::DNS::Resource::IN::A.new('192.0.2.1')
+    with_axfr_server(->(q) {
+      [axfr_response(q, [['www.example.test', 3600, a],
+                         ['example.test', 3600, make_test_soa]])]
+    }) do |server_address, server_port|
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      error = assert_raise(Resolv::DNS::ZoneTransferError) do
+        dns.transfer_zone('example.test') {|*| }
+      end
+      assert_include(error.message, 'SOA')
+    end
+  end
+
+  def test_transfer_zone_message_size_limit
+    soa = make_test_soa
+    with_axfr_server(->(q) {
+      [axfr_response(q, [['example.test', 3600, soa]])]
+    }) do |server_address, server_port|
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      error = assert_raise(Resolv::DNS::ZoneTransferError) do
+        dns.transfer_zone('example.test', :max_message_size => 12) {|*| }
+      end
+      assert_include(error.message, 'octet limit')
+    end
+  end
+
+  def test_transfer_zone_record_limit
+    soa = make_test_soa
+    a = Resolv::DNS::Resource::IN::A.new('192.0.2.1')
+    records = [['example.test', 3600, soa]]
+    5.times {|i| records << ["www#{i}.example.test", 3600, a] }
+    records << ['example.test', 3600, soa]
+    with_axfr_server(->(q) { [axfr_response(q, records)] }) do |server_address, server_port|
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      error = assert_raise(Resolv::DNS::ZoneTransferError) do
+        dns.transfer_zone('example.test', :max_records => 3) {|*| }
+      end
+      assert_include(error.message, 'exceeded')
+    end
+  end
+
+  def test_transfer_zone_abort_with_close
+    soa = make_test_soa
+    a = Resolv::DNS::Resource::IN::A.new('192.0.2.1')
+    records = [['example.test', 3600, soa]]
+    10.times {|i| records << ["www#{i}.example.test", 3600, a] }
+    records << ['example.test', 3600, soa]
+    with_axfr_server(->(q) { [axfr_response(q, records)] }, :chunk_size => 1) do |server_address, server_port|
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      transfer = dns.transfer_zone('example.test')
+      yielded = []
+      complete = transfer.each {|name, ttl, data|
+        yielded << data
+        transfer.close if yielded.length == 2
+      }
+      assert_equal(false, complete)
+      assert_equal(false, transfer.complete?)
+      assert_equal(true, transfer.closed?)
+      assert_equal(2, yielded.length)
+    end
+  end
+
+  def test_transfer_zone_close_aborts_blocked_transfer
+    soa = make_test_soa
+    with_tcp('127.0.0.1', 0) do |t|
+      _, server_port, _, server_address = t.addr
+      server_thread = Thread.new do
+        ct = accept_within_timeout(t)
+        begin
+          query = read_framed_query(ct)
+          ct.write(framed(axfr_response(query, [['example.test', 3600, soa]])))
+          ct.read # wait until the client closes the connection
+        ensure
+          ct.close
+        end
+      end
+      dns = Resolv::DNS.new(:nameserver_port => [[server_address, server_port]])
+      transfer = dns.transfer_zone('example.test')
+      received = Thread::Queue.new
+      client_thread = Thread.new do
+        transfer.each {|name, ttl, data| received << data }
+      end
+      # The first SOA arrived; the client now blocks reading.
+      Timeout.timeout(EnvUtil.apply_timeout_scale(10)) { received.pop }
+      transfer.close
+      assert_equal(false, client_thread.value)
+      assert_equal(false, transfer.complete?)
+      server_thread.join
+    end
+  end
 end
