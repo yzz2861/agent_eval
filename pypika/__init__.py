@@ -117,6 +117,19 @@ from pypika.utils import (
     SetOperationException,
 )
 
+# noinspection PyUnresolvedReferences
+from pypika.rewrite import (
+    AmbiguousRelationError,
+    IncompatibleColumnsError,
+    RelationNotFoundError,
+    RelationRef,
+    RelationRewriteError,
+    UnboundRelationError,
+    find_relation,
+    iter_relations,
+    replace_relation,
+)
+
 __author__ = "Timothy Heys"
 __email__ = "theys@kayak.com"
 __version__ = "0.51.1"
@@ -177,4 +190,13 @@ __all__ = (
     'FunctionException',
     'NULL',
     'SYSTEM_TIME',
+    'RelationRef',
+    'RelationRewriteError',
+    'RelationNotFoundError',
+    'AmbiguousRelationError',
+    'UnboundRelationError',
+    'IncompatibleColumnsError',
+    'iter_relations',
+    'find_relation',
+    'replace_relation',
 )
