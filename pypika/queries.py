@@ -518,6 +518,18 @@ class Query:
         return cls._builder(**kwargs).update(table)
 
     @classmethod
+    def merge(
+        cls,
+        target: Table | str,
+        source: Selectable | str | None = None,
+        on_criterion: Criterion | None = None,
+        **kwargs: Any,
+    ):
+        from pypika.merge import MergeQueryBuilder
+
+        return MergeQueryBuilder().merge(target, source, on_criterion)
+
+    @classmethod
     def Table(cls, table_name: str, **kwargs) -> _TableClass:
         """
         Convenience method for creating a Table that uses this Query class.

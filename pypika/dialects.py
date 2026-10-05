@@ -6,6 +6,10 @@ from copy import copy
 from typing import Any
 
 from pypika.enums import Dialects
+from pypika.merge import (
+    MSSQLMergeQueryBuilder,
+    PostgreSQLMergeQueryBuilder,
+)
 from pypika.queries import (
     CreateQueryBuilder,
     Database,
@@ -414,6 +418,16 @@ class PostgreSQLQuery(Query):
     def _builder(cls, **kwargs) -> PostgreSQLQueryBuilder:
         return PostgreSQLQueryBuilder(**kwargs)
 
+    @classmethod
+    def merge(
+        cls,
+        target: Table | str,
+        source: Selectable | str | None = None,
+        on_criterion: Criterion | None = None,
+        **kwargs: Any,
+    ) -> PostgreSQLMergeQueryBuilder:
+        return PostgreSQLMergeQueryBuilder().merge(target, source, on_criterion)
+
 
 class PostgreSQLQueryBuilder(QueryBuilder):
     ALIAS_QUOTE_CHAR = '"'
@@ -698,6 +712,16 @@ class MSSQLQuery(Query):
     @classmethod
     def _builder(cls, **kwargs: Any) -> MSSQLQueryBuilder:
         return MSSQLQueryBuilder(**kwargs)
+
+    @classmethod
+    def merge(
+        cls,
+        target: Table | str,
+        source: Selectable | str | None = None,
+        on_criterion: Criterion | None = None,
+        **kwargs: Any,
+    ) -> MSSQLMergeQueryBuilder:
+        return MSSQLMergeQueryBuilder().merge(target, source, on_criterion)
 
 
 class MSSQLQueryBuilder(FetchNextAndOffsetRowsQueryBuilder):

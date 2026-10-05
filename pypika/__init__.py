@@ -80,6 +80,13 @@ from pypika.queries import (
 from pypika.queries import (
     make_tables as Tables,
 )
+from pypika.merge import (
+    MergeQueryBuilder,
+    MergeWhenClause,
+    MergeWhenMatched,
+    MergeWhenNotMatched,
+    MergeWhenNotMatchedBySource,
+)
 
 # noinspection PyUnresolvedReferences
 from pypika.terms import (
@@ -146,6 +153,11 @@ __all__ = (
     'Database',
     'Tables',
     'Columns',
+    'MergeQueryBuilder',
+    'MergeWhenClause',
+    'MergeWhenMatched',
+    'MergeWhenNotMatched',
+    'MergeWhenNotMatchedBySource',
     'Array',
     'Bracket',
     'Case',
