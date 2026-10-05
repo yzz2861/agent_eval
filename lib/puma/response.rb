@@ -59,6 +59,13 @@ module Puma
 
       return :close if closed_socket?(socket)
 
+      # A header_admission hook rejected this request before its body was
+      # read; serve the hook's bounded rejection response instead of
+      # calling the Rack application.
+      if (rejection = client.admission_rejection)
+        return prepare_response(rejection[0], rejection[1], rejection[2], requests, client)
+      end
+
       if @early_hints
         env[EARLY_HINTS] = lambda { |headers|
           begin

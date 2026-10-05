@@ -1564,6 +1564,50 @@ module Puma
       @options[:http_content_length_limit] = limit
     end
 
+    # Use +obj+ or +block+ as the header admission hook. The hook is called
+    # once per request, right after the request headers have been parsed,
+    # before +100 Continue+ is sent and before any of the request body is
+    # read. This allows cheaply rejecting requests (e.g. large uploads)
+    # without receiving their body.
+    #
+    # The hook is called with a frozen {Puma::AdmissionRequest}, a read-only
+    # snapshot of the request's start line and headers. It exposes no socket,
+    # so the hook cannot consume the request body.
+    #
+    # The hook must be lightweight and must not block. Its return value
+    # decides how the request proceeds:
+    #
+    # * +nil+ or +true+ - the request is admitted and passed to the Rack app.
+    # * <tt>[status, headers, body]</tt> - the request is rejected with this
+    #   response. +status+ must be an Integer between 400 and 599, +headers+
+    #   a Hash, and +body+ a String or an Array of Strings. The response is
+    #   bounded: at most {Puma::Client::MAX_ADMISSION_RESPONSE_HEADERS}
+    #   headers and a body of at most
+    #   {Puma::Client::MAX_ADMISSION_RESPONSE_BODY} bytes.
+    #
+    # Anything else, an oversized rejection response, or an exception raised
+    # by the hook results in a 500 response and the connection being closed.
+    #
+    # When a request is rejected, already-received body bytes are handled so
+    # they cannot be mistaken for the next request: if the whole body has
+    # already arrived it is discarded and the keep-alive connection stays
+    # open, otherwise the connection is closed after the rejection response.
+    #
+    # @example
+    #   header_admission do |request|
+    #     if request.content_length.to_i > 1_000_000
+    #       [413, { 'content-type' => 'text/plain' }, ['Upload too large']]
+    #     else
+    #       true
+    #     end
+    #   end
+    #
+    def header_admission(obj=nil, &block)
+      obj ||= block
+      raise "Provide either a #call'able or a block" unless obj
+      @options[:header_admission] = obj
+    end
+
     # Supported http methods, which will replace `Puma::Const::SUPPORTED_HTTP_METHODS`.
     # The value of `:any` will allow all methods, otherwise, the value must be
     # an array of strings. Note that methods are all uppercase.

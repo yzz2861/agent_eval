@@ -108,6 +108,7 @@ module Puma
       @io_selector_backend       = @options[:io_selector_backend]
       @http_content_length_limit = @options[:http_content_length_limit]
       @allow_underscore_headers  = @options.fetch(:allow_underscore_headers, true)
+      @header_admission          = @options[:header_admission]
       @cluster_accept_loop_delay = ClusterAcceptLoopDelay.new(
         workers: @options[:workers],
         max_delay: @options[:wait_for_less_busy_worker] || 0 # Real default is in Configuration::DEFAULTS, this is for unit testing
@@ -457,6 +458,7 @@ module Puma
       client.http_content_length_limit = @http_content_length_limit
       client.supported_http_methods = @supported_http_methods
       client.allow_underscore_headers = @allow_underscore_headers
+      client.header_admission = @header_admission
       client
     end
 

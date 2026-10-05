@@ -754,6 +754,22 @@ class TestConfigFile < PumaTest
     assert_equal 10000, conf.final_options[:http_content_length_limit]
   end
 
+  def test_header_admission
+    conf = Puma::Configuration.new
+    conf.clamp
+
+    assert_nil conf.options.default_options[:header_admission]
+
+    conf = Puma::Configuration.new do |c|
+      c.header_admission { |request| request.path == "/" }
+    end
+    conf.clamp
+
+    hook = conf.final_options[:header_admission]
+    assert_kind_of Proc, hook
+    assert_equal true, hook.call(Struct.new(:path).new("/"))
+  end
+
   def test_options_raises_not_clamped_error_when_not_clamped
     conf = Puma::Configuration.new
 

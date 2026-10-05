@@ -4,6 +4,7 @@ require_relative 'detect'
 require_relative 'io_buffer'
 require_relative 'client_env'
 require_relative 'null_io'
+require_relative 'admission_request'
 require 'tempfile'
 
 if Puma::IS_JRUBY
@@ -18,6 +19,11 @@ module Puma
   class ConnectionError < RuntimeError; end
 
   class HttpParserError501 < IOError; end
+
+  # Raised when a +header_admission+ hook raises an error or returns an
+  # invalid rejection response. Results in a 500 response and the connection
+  # being closed.
+  class HeaderAdmissionError < RuntimeError; end
 
   #———————————————————————— DO NOT USE — this class is for internal use only ———
 
@@ -62,6 +68,12 @@ module Puma
     # Content-Length header value validation
     CONTENT_LENGTH_VALUE_INVALID = /[^\d]/.freeze
 
+    # Limits applied to the rejection response returned by a +header_admission+
+    # hook, keeping it a lightweight, bounded response.
+    MAX_ADMISSION_RESPONSE_HEADERS = 32
+    MAX_ADMISSION_RESPONSE_HEADER_FIELD = 8 * 1024
+    MAX_ADMISSION_RESPONSE_BODY = 16 * 1024
+
     TE_ERR_MSG = 'Invalid Transfer-Encoding'
 
     # See:
@@ -75,10 +87,10 @@ module Puma
 
     attr_reader :env, :to_io, :body, :io, :timeout_at, :ready, :hijacked,
                 :tempfile, :io_buffer, :http_content_length_limit_exceeded,
-                :requests_served, :error_status_code
+                :requests_served, :error_status_code, :admission_rejection
 
     attr_writer :peerip, :http_content_length_limit, :supported_http_methods,
-                :allow_underscore_headers
+                :allow_underscore_headers, :header_admission
 
     attr_accessor :remote_addr_header, :listener, :env_set_http_version
 
@@ -109,6 +121,8 @@ module Puma
       @http_content_length_limit_exceeded = nil
       @allow_underscore_headers = true
       @error_status_code = nil
+      @header_admission = nil
+      @admission_rejection = nil
 
       @peerip = nil
       @peer_family = nil
@@ -175,6 +189,7 @@ module Puma
       @in_last_chunk = false
       @http_content_length_limit_exceeded = nil
       @error_status_code = nil
+      @admission_rejection = nil
     end
 
     # only used with back-to-back requests contained in the buffer
@@ -439,15 +454,18 @@ module Puma
 
       @body_read_start = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_millisecond)
 
+      parser_body = @parser.body
+
+      # Give the header_admission hook (if any) a chance to reject the
+      # request before 100 Continue is sent or any of the body is read.
+      return true if @header_admission && reject_via_header_admission(parser_body)
+
       if @env[HTTP_EXPECT] == CONTINUE
-        # TODO allow a hook here to check the headers before going forward
         @io << HTTP_11_100
         @io.flush
       end
 
       @read_header = false
-
-      parser_body = @parser.body
 
       te = @env[TRANSFER_ENCODING2]
       if te
@@ -771,6 +789,112 @@ module Puma
       @error_status_code = 413
       @env[HTTP_CONNECTION] = 'close'
       raise HttpParserError, "Payload Too Large"
+    end
+
+    # Runs the +header_admission+ hook against a read-only snapshot of the
+    # request headers. Called after the headers are fully parsed, but before
+    # +100 Continue+ is sent and before any of the request body is read.
+    #
+    # When the hook rejects the request, the bounded rejection response is
+    # stored in +@admission_rejection+ (served instead of calling the app),
+    # and body bytes that already arrived are dealt with so they cannot be
+    # mistaken for the next request on a keep-alive connection:
+    #
+    # * no declared body - buffered bytes belong to the next pipelined request
+    # * whole body already buffered - it is discarded, keep-alive is safe
+    # * body incomplete, chunked, or invalid Content-Length - the connection
+    #   is closed after the response, since the end of the body is unknown
+    #
+    # @param parser_body [String] bytes already read past the request headers
+    # @return [Boolean] true if the request was rejected
+    #
+    def reject_via_header_admission(parser_body)
+      result = @header_admission.call AdmissionRequest.new(@env)
+
+      return false if result.nil? || result == true
+
+      @admission_rejection = normalize_admission_rejection(result)
+
+      te = @env[TRANSFER_ENCODING2]
+      cl = @env[CONTENT_LENGTH]
+
+      if te || (cl && (cl.empty? || CONTENT_LENGTH_VALUE_INVALID.match?(cl)))
+        # Chunked or invalid framing: the end of the body cannot be determined
+        # without reading it, so close after the rejection response.
+        @buffer = nil
+        @env[HTTP_CONNECTION] = CLOSE
+      elsif cl && (content_length = cl.to_i) > 0
+        if parser_body.bytesize >= content_length
+          # The whole body already arrived; discard it so it cannot be parsed
+          # as the next request. Bytes past it belong to a pipelined request.
+          @buffer = parser_body.byteslice(content_length..-1)
+          @buffer = nil if @buffer.nil? || @buffer.empty?
+        else
+          # More body bytes may still arrive; close the connection so they
+          # cannot become the next request on this connection.
+          @buffer = nil
+          @env[HTTP_CONNECTION] = CLOSE
+        end
+      else
+        # No request body; buffered bytes belong to the next request.
+        @buffer = parser_body.empty? ? nil : parser_body
+      end
+
+      @body = EmptyBody
+      set_ready
+      true
+    rescue => e
+      # Deterministic failure: a 500 response and a closed connection, so a
+      # misbehaving hook can never leave the connection in an unknown state.
+      @buffer = nil
+      @env[HTTP_CONNECTION] = CLOSE
+      raise e if HeaderAdmissionError === e
+      raise HeaderAdmissionError, "header_admission hook raised #{e.class}: #{e.message}"
+    end
+
+    # Validates and normalizes the rejection response returned by the
+    # +header_admission+ hook into a +[status, headers, body]+ triple.
+    # The response is kept bounded; anything invalid or oversized raises
+    # +HeaderAdmissionError+, which results in a 500 and a closed connection.
+    # @return [Array(Integer, Hash, Array<String>)]
+    #
+    def normalize_admission_rejection(result)
+      unless result.is_a?(Array) && result.size == 3
+        raise HeaderAdmissionError, "header_admission must return nil, true, or [status, headers, body], got #{result.class}"
+      end
+
+      status, headers, body = result
+
+      unless status.is_a?(Integer) && status >= 400 && status <= 599
+        raise HeaderAdmissionError, "header_admission rejection status must be an Integer between 400 and 599, got #{status.inspect}"
+      end
+
+      headers ||= {}
+      unless headers.is_a?(Hash) && headers.size <= MAX_ADMISSION_RESPONSE_HEADERS
+        raise HeaderAdmissionError, "header_admission rejection headers must be a Hash with at most #{MAX_ADMISSION_RESPONSE_HEADERS} entries"
+      end
+
+      headers.each do |key, value|
+        key = key.to_s
+        value = value.to_s
+        if key.bytesize > MAX_ADMISSION_RESPONSE_HEADER_FIELD ||
+            value.bytesize > MAX_ADMISSION_RESPONSE_HEADER_FIELD
+          raise HeaderAdmissionError, "header_admission rejection header field exceeds #{MAX_ADMISSION_RESPONSE_HEADER_FIELD} bytes"
+        end
+        if ILLEGAL_HEADER_KEY_REGEX.match?(key) || ILLEGAL_HEADER_VALUE_REGEX.match?(value)
+          raise HeaderAdmissionError, "header_admission rejection header contains illegal characters"
+        end
+      end
+
+      body = [body] if body.is_a?(String)
+      unless body.is_a?(Array) && body.all? { |part| part.is_a?(String) }
+        raise HeaderAdmissionError, "header_admission rejection body must be a String or an Array of Strings"
+      end
+      if body.sum(&:bytesize) > MAX_ADMISSION_RESPONSE_BODY
+        raise HeaderAdmissionError, "header_admission rejection body exceeds #{MAX_ADMISSION_RESPONSE_BODY} bytes"
+      end
+
+      [status, headers, body]
     end
   end
 end
