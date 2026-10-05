@@ -448,6 +448,18 @@ class ValueWrapper(Term):
             return "null"
         return str(value)
 
+    @classmethod
+    def get_parameter_value(cls, value: Any, **kwargs):
+        if isinstance(value, Term):
+            return value.get_sql(**kwargs)
+        if isinstance(value, Enum):
+            return cls.get_parameter_value(value.value, **kwargs)
+        if isinstance(value, (date, datetime, time)):
+            return value.isoformat()
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        return value
+
     def _get_param_data(self, parameter: Parameter, **kwargs) -> tuple[str, str]:
         param_sql = parameter.get_sql(**kwargs)
         param_key = parameter.get_param_key(placeholder=param_sql)
@@ -465,11 +477,9 @@ class ValueWrapper(Term):
             sql = self.get_value_sql(quote_char=quote_char, secondary_quote_char=secondary_quote_char, **kwargs)
             return format_alias_sql(sql, self.alias, quote_char=quote_char, **kwargs)
 
-        # Don't stringify numbers when using a parameter
-        if isinstance(self.value, (int, float)):
-            value_sql = self.value
-        else:
-            value_sql = self.get_value_sql(quote_char=quote_char, **kwargs)
+        value_sql = self.get_parameter_value(
+            self.value, quote_char=quote_char, secondary_quote_char=secondary_quote_char, **kwargs
+        )
         param_sql, param_key = self._get_param_data(parameter, **kwargs)
         parameter.update_parameters(param_key=param_key, value=value_sql, **kwargs)
 
