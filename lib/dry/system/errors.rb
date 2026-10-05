@@ -2,6 +2,56 @@
 
 module Dry
   module System
+    # Error raised when import is called using a namespace that has already been
+    # registered on the importing container
+    #
+    # @api public
+    ImportNamespaceConflictError = Class.new(StandardError) do
+      def initialize(namespace)
+        ns = namespace.nil? ? "nil (root)" : namespace.inspect
+        super("Import namespace #{ns} has already been registered")
+      end
+    end
+
+    # Error raised when a borrowed component key is not included in the source
+    # container's configured exports
+    #
+    # @api public
+    BorrowNotExportedError = Class.new(StandardError) do
+      def initialize(key:, source:, exports:)
+        source_name = source.config.name ? source.config.name.inspect : source.inspect
+        msg = +"Cannot borrow key #{key.inspect} from #{source_name}: it is not "
+        msg << if exports
+                 "included in the source container's exports (#{Array(exports).inspect})"
+               else
+                 "exported; the source container does not configure any exports"
+               end
+        super(msg)
+      end
+    end
+
+    # Error raised when a borrowed component cannot be resolved because the source
+    # container has not yet been started (finalized)
+    #
+    # @api public
+    BorrowSourceNotStartedError = Class.new(StandardError) do
+      def initialize(source)
+        source_name = source.config.name ? source.config.name.inspect : source.inspect
+        super("Cannot resolve borrowed component: source container #{source_name} has not been started")
+      end
+    end
+
+    # Error raised when a borrowed component cannot be resolved because the source
+    # container has been shut down
+    #
+    # @api public
+    BorrowSourceShutdownError = Class.new(StandardError) do
+      def initialize(source)
+        source_name = source.config.name ? source.config.name.inspect : source.inspect
+        super("Cannot resolve borrowed component: source container #{source_name} has been shut down")
+      end
+    end
+
     # Error raised when import is called on an already finalized container
     #
     # @api public

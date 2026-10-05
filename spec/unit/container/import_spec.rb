@@ -31,6 +31,51 @@ RSpec.describe Dry::System::Container, ".import" do
     end
   end
 
+  context "borrow" do
+    let(:source) do
+      Class.new(Dry::System::Container) do
+        configure do |config|
+          config.name = :source
+          config.exports = %w[users]
+        end
+
+        register("users", %w[jane joe])
+        register("secret", :hidden)
+      end
+    end
+
+    it "raises when a borrowed key is not exported" do
+      expect {
+        app.import(from: source, as: :src, keys: %w[secret], borrow: true)
+      }.to raise_error(
+        Dry::System::BorrowNotExportedError,
+        /Cannot borrow key "secret" from :source/
+      )
+    end
+
+    it "raises on a duplicate import namespace at configuration time" do
+      app.import(from: source, as: :src, keys: %w[users], borrow: true)
+
+      expect {
+        app.import(from: source, as: :src, keys: %w[users], borrow: true)
+      }.to raise_error(Dry::System::ImportNamespaceConflictError, /:src has already been registered/)
+    end
+
+    it "raises when the source has not been started" do
+      app.import(from: source, as: :src, keys: %w[users], borrow: true)
+
+      expect { app["src.users"] }
+        .to raise_error(Dry::System::BorrowSourceNotStartedError, /has not been started/)
+    end
+
+    it "serves the live object from the started source" do
+      app.import(from: source, as: :src, keys: %w[users], borrow: true)
+      source.finalize!
+
+      expect(app["src.users"]).to be(source["users"])
+    end
+  end
+
   describe "import module" do
     it "loads system when it was not loaded in the imported container yet" do
       class Test::Other < Dry::System::Container

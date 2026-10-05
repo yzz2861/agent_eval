@@ -11,16 +11,23 @@ module Dry
     # container to another. This is used in cases where an application is split
     # into multiple sub-systems.
     #
+    # Components can also be *borrowed* from a container: rather than copying the
+    # component registrations into the target container, the target holds live,
+    # delegating references to a fixed list of the source container's exported
+    # keys. The source remains the lifecycle owner of any borrowed components, so
+    # shutting down the target never stops the source's resources.
+    #
     # @api private
     class Importer
       # @api private
       class Item
-        attr_reader :namespace, :container, :import_keys
+        attr_reader :namespace, :container, :import_keys, :borrow_keys
 
-        def initialize(namespace:, container:, import_keys:)
+        def initialize(namespace:, container:, import_keys:, borrow_keys:)
           @namespace = namespace
           @container = container
           @import_keys = import_keys
+          @borrow_keys = borrow_keys
         end
       end
 
@@ -35,11 +42,23 @@ module Dry
       end
 
       # @api private
-      def register(namespace:, container:, keys: nil)
-        registry[namespace_key(namespace)] = Item.new(
+      def register(namespace:, container:, keys: nil, borrow: false)
+        ns_key = namespace_key(namespace)
+
+        raise ImportNamespaceConflictError, namespace if registry.key?(ns_key)
+
+        borrow_keys = Array(keys).map(&:to_s) if borrow
+
+        if borrow
+          validate_borrow_keys(container, borrow_keys)
+          register_borrows(container, namespace, borrow_keys)
+        end
+
+        registry[ns_key] = Item.new(
           namespace: namespace,
           container: container,
-          import_keys: keys
+          import_keys: keys,
+          borrow_keys: borrow ? borrow_keys : nil
         )
       end
 
@@ -63,10 +82,13 @@ module Dry
       # @api private
       def import(namespace, keys: Undefined)
         item = self[namespace]
-        keys = Undefined.default(keys, item.import_keys)
 
-        if keys
-          import_keys(item.container, namespace, keys_to_import(keys, item))
+        return self if item.borrow_keys
+
+        requested_keys = Undefined.default(keys, item.import_keys)
+
+        if requested_keys
+          import_keys(item.container, namespace, keys_to_import(requested_keys, item))
         else
           import_all(item.container, namespace)
         end
@@ -75,6 +97,30 @@ module Dry
       end
 
       private
+
+      def validate_borrow_keys(source, keys)
+        exports = source.config.exports
+
+        keys.each do |key|
+          allowed = Array(exports).map(&:to_s).include?(key)
+          raise BorrowNotExportedError.new(key: key, source: source, exports: exports) unless allowed
+        end
+      end
+
+      # Registers live, delegating references to the source container's exported
+      # components. Unlike ordinary imports, the components are not copied: every
+      # resolution is served by the source, which remains the lifecycle owner.
+      def register_borrows(source, namespace, keys)
+        keys.each do |key|
+          namespaced_key = namespace ? "#{namespace}.#{key}" : key
+
+          next if container.registered?(namespaced_key)
+
+          container.register(namespaced_key, imported: true, borrowed: true) {
+            container.resolve_borrowed(source, key)
+          }
+        end
+      end
 
       # Returns nil if given a nil (i.e. root) namespace. Otherwise, converts the namespace to a
       # string.

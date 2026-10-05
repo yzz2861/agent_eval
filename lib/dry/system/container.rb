@@ -170,15 +170,20 @@ module Dry
         # @param keys [Array<String>] Keys for the components to import
         # @param from [Class] The container to import from
         # @param as [Symbol] Namespace to use for the components of the imported container
+        # @param borrow [Boolean] When true, borrow live references to the components in
+        #   `keys` from the source container instead of copying them into this
+        #   container. The source remains the lifecycle owner: shutting down this
+        #   container will not stop the source's resources. Every key must be included
+        #   in the source container's configured `exports`.
         #
         # @raise [Dry::System::ContainerAlreadyFinalizedError] if the container has already
         #  been finalized
         #
         # @api public
-        def import(from:, as:, keys: nil)
+        def import(from:, as:, keys: nil, borrow: false)
           raise Dry::System::ContainerAlreadyFinalizedError if finalized?
 
-          importer.register(container: from, namespace: as, keys: keys)
+          importer.register(container: from, namespace: as, keys: keys, borrow: borrow)
 
           self
         end
@@ -321,11 +326,34 @@ module Dry
             [providers, auto_registrar, manifest_registrar, importer].each(&:finalize!)
 
             @__finalized__ = true
+            lifecycle_state[:started] = true
+            lifecycle_state[:shutdown] = false
           end
 
           self.freeze if freeze
 
           self
+        end
+
+        # Returns true when the container has been started (finalized)
+        #
+        # A source container for borrowed components must be started before the
+        # borrowed components can be resolved.
+        #
+        # @return [Boolean]
+        #
+        # @api public
+        def started?
+          !!lifecycle_state[:started]
+        end
+
+        # Returns true when the container has been shut down via {#shutdown!}
+        #
+        # @return [Boolean]
+        #
+        # @api public
+        def shutdown?
+          !!lifecycle_state[:shutdown]
         end
 
         # Starts a provider
@@ -381,7 +409,29 @@ module Dry
         # @api public
         def shutdown!
           providers.shutdown
+          lifecycle_state[:shutdown] = true
           self
+        end
+
+        # @api private
+        def lifecycle_state
+          @__lifecycle_state__ ||= {}
+        end
+
+        # Resolves a key that was borrowed from another container, ensuring the
+        # source container is in a state from which its components can be served.
+        #
+        # The source container remains the lifecycle owner of the resolved object.
+        #
+        # @raise [BorrowSourceNotStartedError] if the source has not been started
+        # @raise [BorrowSourceShutdownError] if the source has been shut down
+        #
+        # @api private
+        def resolve_borrowed(source, key)
+          raise BorrowSourceShutdownError, source if source.shutdown?
+          raise BorrowSourceNotStartedError, source unless source.started?
+
+          source[key]
         end
 
         # Adds the directories (relative to the container's root) to the Ruby load path
