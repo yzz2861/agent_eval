@@ -1,7 +1,16 @@
 Development Version
 -------------------
 
-Nothing yet.
+Enhancements
+
+* Add `LexerConfig`, a mutable builder for independent lexing rules. It can
+  combine keyword dictionaries and lexing regular expressions and be frozen
+  into a standalone lexer. The frozen lexer is accepted as the keyword-only
+  `lexer_config` argument of `parse`, `parsestream`, `split` and `format`,
+  so multiple SQL dialects can be analyzed in the same process (and from
+  concurrent threads) without mutating or locking the shared default
+  instance. A call freezes the configuration when it starts, so modifying
+  the builder while a parse is running does not affect it.
 
 
 Release 0.6.0 (Aug 13, 2026)

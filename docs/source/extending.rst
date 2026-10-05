@@ -84,3 +84,43 @@ a keyword to the lexer:
 
     # no configuration is passed here. The lexer is used as a singleton.
     sqlparse.parse("select * from foo zorder by bar;")
+
+Independent lexer configurations
+--------------------------------
+
+Modifying the singleton as shown above affects every parse in the process,
+which makes it unsuitable when several SQL dialects are analyzed at the same
+time (for example from different threads). For that use case build an
+independent rule set with :class:`~sqlparse.lexer.LexerConfig` and pass it to
+``parse``, ``parsestream``, ``split`` or ``format`` as the keyword-only
+``lexer_config`` argument:
+
+..  code-block:: python
+
+    import sqlparse
+    from sqlparse import tokens
+    from sqlparse.lexer import LexerConfig
+
+    config = LexerConfig.default()
+    config.add_keywords({'BACON': tokens.Keyword})
+
+    sqlparse.parse("select bacon from t", lexer_config=config)
+
+The entry point freezes the builder when the call starts and keeps using that
+snapshot for tokenizing, grouping, filtering and formatting. Mutating the
+builder afterwards never changes a call that is already running, and separate
+configurations do not interfere with each other. Reusing one frozen lexer for
+many concurrent queries is safe and needs no global serialization:
+
+..  code-block:: python
+
+    lex = config.freeze()
+    sqlparse.parse(sql, lexer_config=lex)
+    sqlparse.split(sql, lexer_config=lex)
+    sqlparse.format(sql, reindent=True, lexer_config=lex)
+
+Use ``LexerConfig.empty()`` instead of ``LexerConfig.default()`` to compose a
+reduced rule set from scratch, ``set_SQL_REGEX()`` to replace the lexing
+rules and ``add_sql_regex()`` to append further rules. Calling ``freeze()``
+again after modifying the builder returns a new lexer; previously frozen
+lexers are left untouched.
