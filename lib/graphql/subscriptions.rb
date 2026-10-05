@@ -5,6 +5,9 @@ require "graphql/subscriptions/event"
 require "graphql/subscriptions/serialize"
 require "graphql/subscriptions/action_cable_subscriptions"
 require "graphql/subscriptions/default_subscription_resolve_extension"
+require "graphql/subscriptions/filter"
+require "graphql/subscriptions/filtered_registry"
+require "graphql/subscriptions/in_memory"
 
 module GraphQL
   class Subscriptions
@@ -56,8 +59,11 @@ module GraphQL
     # @param object [Object]
     # @param scope [Symbol, String]
     # @param context [Hash]
+    # @param attributes [Hash, nil] event properties used by subscription
+    #   filters (in addition to the trigger arguments). Useful for filtering on
+    #   payload fields, such as a price amount, that aren't subscription arguments.
     # @return [void]
-    def trigger(event_name, args, object, scope: nil, context: {})
+    def trigger(event_name, args, object, scope: nil, context: {}, attributes: nil)
       # Make something as context-like as possible, even though there isn't a current query:
       dummy_query = @schema.query_class.new(@schema, "{ __typename }", validate: false, context: context)
       context = dummy_query.context
@@ -88,6 +94,7 @@ module GraphQL
         field: field,
         scope: scope,
         context: context,
+        attributes: normalized_args.merge(attributes || {}),
       )
       execute_all(event, object)
     end

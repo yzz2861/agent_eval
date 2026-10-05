@@ -18,10 +18,14 @@ module GraphQL
       # @return [String] An opaque string which identifies this event, derived from `name` and `arguments`
       attr_reader :topic
 
-      def initialize(name:, arguments:, field: nil, context: nil, scope: nil)
+      # @return [Hash] normalized trigger arguments merged with explicit event attributes
+      attr_reader :attributes
+
+      def initialize(name:, arguments:, field: nil, context: nil, scope: nil, attributes: nil)
         @name = name
         @arguments = self.class.arguments_without_field_extras(arguments: arguments, field: field)
         @context = context
+        @attributes = attributes || @arguments
         field ||= context.field
         scope_key = field.subscription_scope
         scope_val = scope || (context && scope_key && context[scope_key])
