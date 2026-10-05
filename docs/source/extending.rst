@@ -18,6 +18,39 @@ contributing it back to the community by opening a PR on
 Configuring the Lexer
 ---------------------
 
+Independent configurations
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For applications that analyze more than one SQL dialect in one process,
+``parse``, ``parsestream``, ``split`` and ``format`` accept a
+``lexer_config`` argument. Use :class:`~sqlparse.lexer.LexerConfigBuilder` to
+combine lexical rules and keyword dictionaries. The resulting
+:class:`~sqlparse.lexer.LexerConfig` is immutable, and passing a builder to an
+entry point freezes a snapshot before parsing begins. Mutating the builder
+afterwards cannot affect a call that already started, and separate configs can
+be used concurrently without a global parser lock.
+
+.. code-block:: python
+
+    import sqlparse
+    from sqlparse import tokens
+    from sqlparse.lexer import LexerConfigBuilder
+
+    config = (
+        LexerConfigBuilder()
+        .add_regex(r"ZORDER\s+BY\b", tokens.Keyword)
+        .add_keyword("BAR", tokens.Keyword)
+        .build()
+    )
+    sqlparse.parse("select * from foo zorder by bar", lexer_config=config)
+
+The active configuration is also available to grouping and formatting code
+that recursively calls ``parse`` or ``format`` while one statement is being
+processed, so such nested calls use the same lexical rules.
+
+Mutable default instance
+~~~~~~~~~~~~~~~~~~~~~~~~
+
 The lexer is a singleton class that breaks down the stream of characters into language
 tokens. It does this by using a sequence of regular expressions and keywords that are
 listed in the file ``sqlparse.keywords``. Instead of applying these fixed grammar

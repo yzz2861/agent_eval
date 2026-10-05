@@ -15,11 +15,12 @@ from sqlparse.filters import StripTrailingSemicolonFilter
 
 
 class FilterStack:
-    def __init__(self, strip_semicolon=False):
+    def __init__(self, strip_semicolon=False, lexer_config=None):
         self.preprocess = []
         self.stmtprocess = []
         self.postprocess = []
         self._grouping = False
+        self.lexer_config = lexer_config
         if strip_semicolon:
             self.stmtprocess.append(StripTrailingSemicolonFilter())
 
@@ -27,25 +28,35 @@ class FilterStack:
         self._grouping = True
 
     def run(self, sql, encoding=None):
+        lexer_config = lexer.prepare_lexer_config(self.lexer_config)
+        previous_config = lexer._active_lexer_config.get()
+        lexer._active_lexer_config.set(lexer_config)
         try:
-            stream = lexer.tokenize(sql, encoding)
-            # Process token stream
-            for filter_ in self.preprocess:
-                stream = filter_.process(stream)
+            try:
+                stream = lexer.tokenize(sql, encoding, lexer_config)
+                # Process token stream
+                for filter_ in self.preprocess:
+                    stream = filter_.process(stream)
 
-            stream = StatementSplitter().process(stream)
+                stream = StatementSplitter().process(stream)
 
-            # Output: Stream processed Statements
-            for stmt in stream:
-                if self._grouping:
-                    stmt = grouping.group(stmt)
+                # Output: Stream processed Statements
+                for stmt in stream:
+                    if self._grouping:
+                        stmt = grouping.group(stmt)
 
-                for filter_ in self.stmtprocess:
-                    filter_.process(stmt)
+                    for filter_ in self.stmtprocess:
+                        filter_.process(stmt)
 
-                for filter_ in self.postprocess:
-                    stmt = filter_.process(stmt)
+                    for filter_ in self.postprocess:
+                        stmt = filter_.process(stmt)
 
-                yield stmt
-        except RecursionError as err:
-            raise SQLParseError('Maximum recursion depth exceeded') from err
+                    lexer._active_lexer_config.set(previous_config)
+                    yield stmt
+                    lexer._active_lexer_config.set(lexer_config)
+            except RecursionError as err:
+                raise SQLParseError(
+                    'Maximum recursion depth exceeded'
+                ) from err
+        finally:
+            lexer._active_lexer_config.set(previous_config)

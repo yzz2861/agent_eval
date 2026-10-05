@@ -1,7 +1,12 @@
 Development Version
 -------------------
 
-Nothing yet.
+Enhancements
+~~~~~~~~~~~~
+
+* Add immutable ``LexerConfig`` and ``LexerConfigBuilder`` for passing
+  independent keyword and lexical-rule configurations to ``parse``,
+  ``parsestream``, ``split`` and ``format``.
 
 
 Release 0.6.0 (Aug 13, 2026)
