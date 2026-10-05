@@ -11,6 +11,9 @@ module Flipper
     # Private: What is being used to instrument all the things.
     attr_reader :instrumenter
 
+    # Public: Where confirmed exposure events are recorded.
+    attr_reader :exposure_collector
+
     def_delegators :@adapter, :memoize=, :memoizing?, :import, :export, :adapter_stack
 
     # Public: Returns a new instance of the DSL.
@@ -19,8 +22,12 @@ module Flipper
     # options - The Hash of options.
     #           :instrumenter - What should be used to instrument all the things.
     #           :memoize - Should adapter be wrapped by memoize adapter or not.
+    #           :exposure_collector - Where confirmed exposure events are
+    #                                 recorded. Defaults to an in-memory
+    #                                 collector.
     def initialize(adapter, options = {})
       @instrumenter = options.fetch(:instrumenter, Instrumenters::Noop)
+      @exposure_collector = options.fetch(:exposure_collector) { Exposure::Collectors::Memory.new }
       memoize = options.fetch(:memoize, true)
       adapter = Adapters::Memoizable.new(adapter) if memoize
       @adapter = adapter
@@ -38,6 +45,20 @@ module Flipper
     # Returns true if feature is enabled, false if not.
     def enabled?(name, *args)
       feature(name).enabled?(*args)
+    end
+
+    # Public: Evaluate a feature and return an exposure credential.
+    #
+    # Nothing is recorded by this call. When the caller actually uses the
+    # decision, it should call confirm on the returned decision to submit an
+    # exposure event to the exposure collector.
+    #
+    # name - The String or Symbol name of the feature.
+    # args - The args passed through to the evaluation.
+    #
+    # Returns an instance of Flipper::Exposure::Decision.
+    def evaluate(name, *args)
+      feature(name).evaluate(*args)
     end
 
     # Public: Enable a feature.
@@ -223,7 +244,7 @@ module Flipper
       end
 
       @memoized_features.compute_if_absent(name.to_sym) do
-        Feature.new(name, @adapter, instrumenter: instrumenter)
+        Feature.new(name, @adapter, instrumenter: instrumenter, exposure_collector: @exposure_collector)
       end
     end
 

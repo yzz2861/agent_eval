@@ -1,8 +1,10 @@
+require 'digest'
 require 'flipper/errors'
 require 'flipper/type'
 require 'flipper/gate'
 require 'flipper/feature_check_context'
 require 'flipper/gate_values'
+require 'flipper/exposure'
 
 module Flipper
   class Feature
@@ -33,6 +35,7 @@ module Flipper
       @name = name
       @key = name.to_s
       @instrumenter = options.fetch(:instrumenter, Instrumenters::Noop)
+      @exposure_collector = options.fetch(:exposure_collector) { Exposure::Collectors::Memory.new }
       @adapter = adapter
     end
 
@@ -108,6 +111,35 @@ module Flipper
           false
         end
       end
+    end
+
+    # Public: Evaluate this feature for zero or more actors and return an
+    # exposure credential instead of a bare boolean.
+    #
+    # The returned Flipper::Exposure::Decision binds the feature name, actor
+    # identity, decision and a config version digest captured right now, so
+    # confirming it later never re-evaluates and cannot change attribution.
+    # Nothing is recorded until Decision#confirm is called, which makes this
+    # safe for pre-reading features that may end up unused.
+    #
+    # Returns an instance of Flipper::Exposure::Decision.
+    def evaluate(*actors)
+      actors = wrap_actors(actors)
+      values = gate_values
+
+      context = FeatureCheckContext.new(
+        feature_name: @name,
+        values: values,
+        actors: actors
+      )
+
+      Exposure::Decision.new(
+        feature_name: @name,
+        actor_id: actors && actors.first && actors.first.value,
+        enabled: !gates.detect { |gate| gate.open?(context) }.nil?,
+        config_version: self.class.config_version(@name, values),
+        collector: @exposure_collector
+      )
     end
 
     # Public: Enables an expression_to_add for a feature.
@@ -435,6 +467,20 @@ module Flipper
     # Raises Flipper::GateNotFound if no gate found for actor
     def gate_for(actor)
       gates.detect { |gate| gate.protects?(actor) } || raise(GateNotFound, actor)
+    end
+
+    # Internal: Stable digest of a feature's gate values, used as the config
+    # version bound into exposure credentials.
+    def self.config_version(feature_name, values)
+      Digest::SHA256.hexdigest([
+        feature_name.to_s,
+        values.boolean,
+        values.actors.to_a.sort,
+        values.groups.to_a.sort,
+        values.expression,
+        values.percentage_of_actors,
+        values.percentage_of_time,
+      ].inspect)
     end
 
     private
