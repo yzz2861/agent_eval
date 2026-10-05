@@ -30,36 +30,43 @@ module REXML
         # entity string
         while true
           event = @parser.pull
-          case event[0]
-          when :end_document
-            return
-          when :start_element
-            attrs = event[2].each do |n, v|
-              event[2][n] = @parser.unnormalize( v )
-            end
-            @listener.tag_start( event[1], attrs )
-          when :end_element
-            @listener.tag_end( event[1] )
-          when :text
-            unnormalized = @parser.unnormalize( event[1], @entities )
-            @listener.text( unnormalized )
-          when :processing_instruction
-            @listener.instruction( *event[1,2] )
-          when :start_doctype
-            @listener.doctype( *event[1..-1] )
-          when :end_doctype
-            # FIXME: remove this condition for milestone:3.2
-            @listener.doctype_end if @listener.respond_to? :doctype_end
-          when :comment, :attlistdecl, :cdata, :xmldecl, :elementdecl
-            @listener.send( event[0].to_s, *event[1..-1] )
-          when :entitydecl, :notationdecl
-            @entities[ event[1] ] = event[2] if event.size == 3
-            @listener.send( event[0].to_s, event[1..-1] )
-          when :externalentity
-            entity_reference = event[1]
-            content = entity_reference.gsub(/\A%|;\z/, "")
-            @listener.entity(content)
+          return if event[0] == :end_document
+          process(event)
+        end
+      end
+
+      private
+      # Sends a single pull event to the listener.  Shared with the
+      # incremental feed/finish parser so both APIs emit events in
+      # exactly the same order.
+      def process(event)
+        case event[0]
+        when :start_element
+          attrs = event[2].each do |n, v|
+            event[2][n] = @parser.unnormalize( v )
           end
+          @listener.tag_start( event[1], attrs )
+        when :end_element
+          @listener.tag_end( event[1] )
+        when :text
+          unnormalized = @parser.unnormalize( event[1], @entities )
+          @listener.text( unnormalized )
+        when :processing_instruction
+          @listener.instruction( *event[1,2] )
+        when :start_doctype
+          @listener.doctype( *event[1..-1] )
+        when :end_doctype
+          # FIXME: remove this condition for milestone:3.2
+          @listener.doctype_end if @listener.respond_to? :doctype_end
+        when :comment, :attlistdecl, :cdata, :xmldecl, :elementdecl
+          @listener.send( event[0].to_s, *event[1..-1] )
+        when :entitydecl, :notationdecl
+          @entities[ event[1] ] = event[2] if event.size == 3
+          @listener.send( event[0].to_s, event[1..-1] )
+        when :externalentity
+          entity_reference = event[1]
+          content = entity_reference.gsub(/\A%|;\z/, "")
+          @listener.entity(content)
         end
       end
     end

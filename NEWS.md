@@ -1,5 +1,18 @@
 # News
 
+## Unreleased
+
+### Features
+
+* Added `REXML::Parsers::FeedParser`, an event (SAX style) parser for
+  input that arrives incrementally.  Data is pushed in with `feed` and
+  the document is completed with `finish`; parsing returns control
+  whenever more input is needed instead of blocking on an IO.  Tags,
+  attribute quotes, entity references and multi byte characters may all
+  span chunk boundaries, and the emitted event order matches the
+  existing `StreamParser`.  `REXML::Document.feed_parser` is provided
+  as a convenient entry point.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement

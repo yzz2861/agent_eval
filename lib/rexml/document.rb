@@ -11,6 +11,7 @@ require_relative "parseexception"
 require_relative "output"
 require_relative "parsers/baseparser"
 require_relative "parsers/streamparser"
+require_relative "parsers/feedparser"
 require_relative "parsers/treeparser"
 
 module REXML
@@ -402,6 +403,22 @@ module REXML
 
     def Document::parse_stream( source, listener )
       Parsers::StreamParser.new( source, listener ).parse
+    end
+
+    # Creates an incremental event parser.
+    #
+    # Data is pushed to the parser with +feed+ instead of being read
+    # from an IO, so parsing never blocks while waiting for more input:
+    #
+    #   parser = REXML::Document.feed_parser(listener)
+    #   while chunk = socket.readpartial(4096)
+    #     parser.feed(chunk)
+    #   end
+    #   parser.finish
+    #
+    # See REXML::Parsers::FeedParser for details.
+    def Document::feed_parser( listener, initial_data=nil )
+      Parsers::FeedParser.new( listener, initial_data )
     end
 
     # Set the entity expansion limit. By default the limit is set to 10000.

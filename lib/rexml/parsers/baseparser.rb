@@ -258,6 +258,33 @@ module REXML
         end
       end
 
+      # Captures the parser state (including the source buffer) so a
+      # speculative parse that runs out of input can be retried after
+      # more data is available.  Used by the feed/finish parser.
+      def checkpoint
+        [
+          @closed, @have_root, @document_status,
+          @tags.dup, @stack.dup, @entities.dup,
+          @namespaces.dup,
+          @namespaces_restore_stack.collect { |item| item.dup },
+          @prefixes.dup,
+          @version,
+          @source.checkpoint,
+        ]
+      end
+
+      def restore(checkpoint)
+        (@closed, @have_root, @document_status,
+          @tags, @stack, @entities,
+          @namespaces,
+          namespaces_restore_stack,
+          @prefixes,
+          @version,
+          source_state) = checkpoint
+        @namespaces_restore_stack = namespaces_restore_stack
+        @source.restore(source_state)
+      end
+
       def pull_event
         if @closed
           x, @closed = @closed, nil
