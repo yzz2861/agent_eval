@@ -3114,6 +3114,186 @@ class Resolv
   end
 
   ##
+  # Resolv::SRVSelector orders SRV resource records into a candidate
+  # sequence following the server selection rules of RFC 2782:
+  #
+  # * Records are grouped by priority; groups are tried lowest-numbered
+  #   priority first.
+  # * Within one priority group, records are chosen by weighted random
+  #   sampling without replacement, so each record appears exactly once.
+  # * A record whose target is the root (".") marks the service as
+  #   decidedly not available at this domain and is never selected.
+  #
+  # Weight handling inside a priority group:
+  #
+  # * While records with a positive weight remain, one of them is chosen
+  #   with probability proportional to its weight; records with weight 0
+  #   are not eligible yet.
+  # * Once only weight-0 records remain (or every weight was 0 to begin
+  #   with), one is chosen uniformly at random.
+  #
+  # The random source is injected by the caller.  It must respond to
+  # +rand(limit)+ with a non-negative integer below +limit+, like
+  # Random.rand or Random#rand.  No random numbers are drawn for a group
+  # holding a single record.
+  #
+  # Example:
+  #
+  #   records = dns.getresources("_sip._tcp.example.com",
+  #                              Resolv::DNS::Resource::IN::SRV)
+  #   selector = Resolv::SRVSelector.new(records)
+  #   selector.each_result(->(target) { Resolv.getaddresses(target) }) {|result|
+  #     if result.success?
+  #       result.addresses.each {|address| connect(result.port, address) }
+  #     else
+  #       warn "skipping #{result.target}: #{result.error.class}"
+  #     end
+  #   }
+  #
+  class SRVSelector
+
+    ##
+    # A single SRV candidate: the record it was selected from, plus the
+    # target host and port to contact.
+
+    class Candidate
+      # The SRV record this candidate was selected from.
+      attr_reader :record
+
+      # The port on the target host, taken from the record.
+      attr_reader :port
+
+      def initialize(record) # :nodoc:
+        @record = record
+        @port = record.port
+      end
+
+      # The domain name of the target host, as a String.
+      def target
+        @record.target.to_s
+      end
+    end
+
+    ##
+    # The outcome of resolving one candidate's target.
+    #
+    # On success #addresses holds the resolver callback's return value and
+    # #error is nil.  On failure #error holds the exception raised by the
+    # resolver callback and #addresses is empty, so failed targets can be
+    # told apart from reachable ones.
+
+    class Result
+      # The Candidate that was resolved.
+      attr_reader :candidate
+
+      # The addresses returned by the resolver callback.
+      attr_reader :addresses
+
+      # The exception raised by the resolver callback, or nil.
+      attr_reader :error
+
+      def initialize(candidate, addresses, error) # :nodoc:
+        @candidate = candidate
+        @addresses = addresses
+        @error = error
+      end
+
+      # The port on the target host.
+      def port
+        @candidate.port
+      end
+
+      # The domain name of the target host, as a String.
+      def target
+        @candidate.target
+      end
+
+      # True if the resolver callback returned normally.
+      def success?
+        @error.nil?
+      end
+    end
+
+    ##
+    # Creates a selector over +records+, an enumerable of
+    # Resolv::DNS::Resource::IN::SRV (or any objects responding to
+    # #priority, #weight, #port and #target).
+    #
+    # +random+ is the random source used for weighted selection; it must
+    # respond to +rand(limit)+.  Defaults to Random.
+
+    def initialize(records, random: Random)
+      @records = records.to_a
+      @random = random
+    end
+
+    ##
+    # Yields each Candidate in selection order.  Returns an Enumerator
+    # when no block is given.
+
+    def each_candidate
+      return enum_for(:each_candidate) unless block_given?
+      by_priority = @records.reject {|record| root_target?(record) }.
+        group_by {|record| record.priority }
+      by_priority.keys.sort.each do |priority|
+        group = by_priority[priority].dup
+        until group.empty?
+          record = group.length == 1 ? group.shift : take_weighted(group)
+          yield Candidate.new(record)
+        end
+      end
+    end
+
+    ##
+    # All candidates in selection order, as an Array.
+
+    def candidates
+      each_candidate.to_a
+    end
+
+    ##
+    # Yields a Result for each candidate in selection order, resolving the
+    # candidate's target with +resolver+, a callable receiving the target
+    # name (String) and returning its addresses.
+    #
+    # A resolver exception does not stop iteration: it is captured in
+    # Result#error for that target and the next candidate is tried.
+    # Returns an Enumerator when no block is given.
+
+    def each_result(resolver)
+      return enum_for(:each_result, resolver) unless block_given?
+      each_candidate do |candidate|
+        begin
+          addresses = Array(resolver.call(candidate.target))
+          yield Result.new(candidate, addresses, nil)
+        rescue => error
+          yield Result.new(candidate, [], error)
+        end
+      end
+    end
+
+    private
+
+    def root_target?(record) # :nodoc:
+      target = record.target
+      target.respond_to?(:length) ? target.length == 0 : target.to_s == "."
+    end
+
+    def take_weighted(group) # :nodoc:
+      total = group.inject(0) {|sum, record| sum + record.weight }
+      index =
+        if total > 0
+          pick = @random.rand(total)
+          cumulative = 0
+          group.index {|record| (cumulative += record.weight) > pick }
+        else
+          @random.rand(group.length)
+        end
+      group.delete_at(index)
+    end
+  end
+
+  ##
   # A Resolv::DNS IPv4 address.
 
   class IPv4
