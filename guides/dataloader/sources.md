@@ -111,6 +111,23 @@ is_following = dataloader.with(Sources::UserFollowingExists, context[:viewer]).l
 
 After all requests were batched, `#fetch` will return a Boolean result to `is_following`.
 
+## Limiting Batch Sizes
+
+Some backends can't accept arbitrarily large batches -- for example, an API that accepts at most 50 keys per call. To handle that, declare a `max_batch_size` on the source. When more keys are pending, `GraphQL::Dataloader` splits them into slices and calls `#fetch` once per slice:
+
+```ruby
+class Sources::RemoteObject < GraphQL::Dataloader::Source
+  # `fetch` will be called with at most 50 keys at a time:
+  max_batch_size 50
+
+  def fetch(keys)
+    RemoteClient.fetch_all(keys)
+  end
+end
+```
+
+Keys are still de-duplicated before slicing, and each result is matched to its original key, so callers see no difference. If one slice raises an error, that error is given to the waiting callers of that slice's keys, and the remaining slices are still fetched. Keys requested while a slice is fetching are gathered into the next batch instead of being added to an in-flight slice.
+
 ## Example: Loading in a background thread
 
 Inside `Source#fetch(keys)`, you can call `dataloader.yield` to return control to the Dataloader. This way, it will proceed loading other Sources (if there are any), then return the source that yielded.

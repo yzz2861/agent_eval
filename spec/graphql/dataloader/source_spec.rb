@@ -117,4 +117,113 @@ describe GraphQL::Dataloader::Source do
     expected_message = exec_next_error_message "Query.thing", "GraphQL::Dataloader is not running -- add `use GraphQL::Dataloader` to your schema to use Dataloader sources."
     assert_equal expected_message, err.message
   end
+
+  class BatchLimitedSource < GraphQL::Dataloader::Source
+    max_batch_size 2
+
+    attr_reader :batches
+
+    def setup(dataloader)
+      super
+      @batches = []
+    end
+
+    def fetch(keys)
+      @batches << keys.dup
+      keys.map { |k| k * 10 }
+    end
+  end
+
+  it "splits pending keys into slices of max_batch_size, keeping deduplication and result positions" do
+    assert_nil GraphQL::Dataloader::Source.max_batch_size
+    assert_equal 2, BatchLimitedSource.max_batch_size
+
+    dl = GraphQL::Dataloader.new
+    source = dl.with(BatchLimitedSource)
+    assert_equal 2, source.max_batch_size
+    values = nil
+    dl.append_job do
+      values = source.load_all([1, 2, 2, 3, 4, 5, 3])
+    end
+    dl.run
+
+    assert_equal [10, 20, 20, 30, 40, 50, 30], values
+    assert_equal [[1, 2], [3, 4], [5]], source.batches
+  end
+
+  class RecursiveBatchLimitedSource < GraphQL::Dataloader::Source
+    max_batch_size 2
+
+    attr_reader :batches
+
+    def setup(dataloader)
+      super
+      @batches = []
+    end
+
+    def fetch(keys)
+      @batches << keys.dup
+      if keys.include?(:recurse)
+        dataloader.with(RecursiveBatchLimitedSource).load(:extra)
+      end
+      keys.map(&:to_s)
+    end
+  end
+
+  it "handles keys requested during fetch in a later round, not in the already-committed slice" do
+    dl = GraphQL::Dataloader.new
+    source = dl.with(RecursiveBatchLimitedSource)
+    values = nil
+    dl.append_job do
+      values = source.load_all([:a, :recurse])
+    end
+    dl.run
+
+    assert_equal ["a", "recurse"], values
+    # `:extra` was requested while the first slice was fetching,
+    # so it was fetched in its own slice afterwards.
+    assert_equal [[:a, :recurse], [:extra]], source.batches
+  end
+
+  class FlakyBatchLimitedSource < GraphQL::Dataloader::Source
+    max_batch_size 2
+
+    def fetch(keys)
+      if keys.include?(:boom)
+        raise "boom!"
+      end
+      keys.map(&:to_s)
+    end
+  end
+
+  it "releases other waiters when a middle slice raises an error" do
+    dl = GraphQL::Dataloader.new
+    outcomes = {}
+    dl.append_job do
+      outcomes[:a] = dl.with(FlakyBatchLimitedSource).load(:a)
+    end
+    dl.append_job do
+      outcomes[:b] = dl.with(FlakyBatchLimitedSource).load(:b)
+    end
+    dl.append_job do
+      err = assert_raises(RuntimeError) { dl.with(FlakyBatchLimitedSource).load(:boom) }
+      outcomes[:boom] = err.message
+    end
+    dl.append_job do
+      err = assert_raises(RuntimeError) { dl.with(FlakyBatchLimitedSource).load(:c) }
+      outcomes[:c] = err.message
+    end
+    dl.append_job do
+      outcomes[:d] = dl.with(FlakyBatchLimitedSource).load(:d)
+    end
+    dl.run
+
+    # The slices were [:a, :b], [:boom, :c] and [:d]: the middle slice
+    # stored the error for its own keys and the other slices still ran.
+    assert_equal "a", outcomes[:a]
+    assert_equal "b", outcomes[:b]
+    assert_equal "boom!", outcomes[:boom]
+    assert_equal "boom!", outcomes[:c]
+    assert_equal "d", outcomes[:d]
+  end
 end

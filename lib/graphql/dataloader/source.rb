@@ -140,20 +140,41 @@ module GraphQL
         fetch_h = @pending
         @fetching.merge!(fetch_h)
         @pending = {}
-        results = fetch(fetch_h.values)
-        idx = 0
-
-        fetch_h.each_key do |key|
-          @results[key] = results[idx]
-          @fetching.delete(key)
-          idx += 1
+        if (batch_limit = max_batch_size) && fetch_h.size > batch_limit
+          fetch_h.each_slice(batch_limit) { |slice| fetch_slice(slice) }
+        else
+          fetch_slice(fetch_h.to_a)
         end
         nil
-      rescue StandardError => error
-        fetch_h.each_key { |key|
-          @results[key] = error
-          @fetching.delete(key)
-        }
+      end
+
+      # Declare a limit for how many keys may be given to each {#fetch} call.
+      # When more keys are pending, they're split into several slices and
+      # {#fetch} is called once per slice, with at most `size` keys each time.
+      #
+      # @example Limiting batches to 50 keys per fetch
+      #   class LimitedSource < GraphQL::Dataloader::Source
+      #     max_batch_size 50
+      #     # ...
+      #   end
+      #
+      # @param size [Integer, nil] The maximum number of keys per {#fetch} call
+      # @return [Integer, nil] The configured limit, or `nil` for no limit
+      def self.max_batch_size(size = nil)
+        if !size.nil?
+          @max_batch_size = size
+        end
+
+        if defined?(@max_batch_size)
+          @max_batch_size
+        elsif superclass.respond_to?(:max_batch_size)
+          superclass.max_batch_size
+        end
+      end
+
+      # @return [Integer, nil] The maximum number of keys given to each {#fetch} call, or `nil` for no limit
+      def max_batch_size
+        self.class.max_batch_size
       end
 
       # These arguments are given to `dataloader.with(source_class, ...)`. The object
@@ -196,6 +217,31 @@ module GraphQL
         @pending[result_key] ||= normalize_fetch_key(value)
         @dataloader.queue_pending_source(self) if was_empty
         true
+      end
+
+      # Fetch one slice of `result_key => fetch_value` pairs and store the
+      # results. If {#fetch} raises, the error is stored for each key in this
+      # slice so that waiting callers are released instead of hanging.
+      # @param pairs [Array<Array(Object, Object)>]
+      # @return [void]
+      def fetch_slice(pairs)
+        values = []
+        pairs.each { |_key, value| values << value }
+        results = fetch(values)
+        idx = 0
+
+        pairs.each do |key, _value|
+          @results[key] = results[idx]
+          @fetching.delete(key)
+          idx += 1
+        end
+        nil
+      rescue StandardError => error
+        pairs.each do |key, _value|
+          @results[key] = error
+          @fetching.delete(key)
+        end
+        nil
       end
 
       # Reads and returns the result for the key from the internal cache, or raises an error if the result was an error
