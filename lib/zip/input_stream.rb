@@ -157,7 +157,8 @@ module Zip
       @current_entry = ::Zip::Entry.read_local_entry(@archive_io)
       return if @current_entry.nil?
 
-      if @current_entry.incomplete? && @current_entry.compressed_size == 0 && !@complete_entry
+      if (@current_entry.gp_flags & 0x08).positive? && !@complete_entry &&
+         !@current_entry.zip64?
         raise StreamingError, @current_entry
       end
 
@@ -183,8 +184,7 @@ module Zip
       @decrypter.reset!(header)
 
       compressed_size =
-        if @current_entry.incomplete? && @current_entry.crc == 0 &&
-           @current_entry.compressed_size == 0 && @complete_entry
+        if (@current_entry.gp_flags & 0x08).positive? && @complete_entry
           @complete_entry.compressed_size
         else
           @current_entry.compressed_size
@@ -202,8 +202,7 @@ module Zip
       return ::Zip::NullDecompressor if @current_entry.nil?
 
       decompressed_size =
-        if @current_entry.incomplete? && @current_entry.crc == 0 &&
-           @current_entry.size == 0 && @complete_entry
+        if (@current_entry.gp_flags & 0x08).positive? && @complete_entry
           @complete_entry.size
         else
           @current_entry.size

@@ -37,9 +37,10 @@ module Zip
     # pass the values from the base entry (if applicable)
     # wider values are only present in the extra field for base values set to all FFs
     # returns the final values for the four attributes (from the base or zip64 extra record)
-    def parse(original_size, compressed_size, relative_header_offset = nil, disk_start_number = nil)
-      @original_size = extract(8, 'Q<') if original_size == 0xFFFFFFFF
-      @compressed_size = extract(8, 'Q<') if compressed_size == 0xFFFFFFFF
+    def parse(original_size, compressed_size, relative_header_offset = nil, disk_start_number = nil,
+              local_lengths: false)
+      @original_size = extract(8, 'Q<') if local_lengths || original_size == 0xFFFFFFFF
+      @compressed_size = extract(8, 'Q<') if local_lengths || compressed_size == 0xFFFFFFFF
       if relative_header_offset && relative_header_offset == 0xFFFFFFFF
         @relative_header_offset = extract(8, 'Q<')
       end
@@ -66,7 +67,7 @@ module Zip
     def pack_for_local
       # Local header entries must contain original size and compressed size;
       # other fields do not apply.
-      return '' unless @original_size && @compressed_size
+      return '' if @original_size.nil? || @compressed_size.nil?
 
       [@original_size, @compressed_size].pack('Q<Q<')
     end
@@ -78,7 +79,16 @@ module Zip
       packed << [@compressed_size].pack('Q<') if @compressed_size
       packed << [@relative_header_offset].pack('Q<') if @relative_header_offset
       packed << [@disk_start_number].pack('V') if @disk_start_number
+      return '' if packed.empty?
+
       packed
+    end
+
+    def to_c_dir_bin
+      packed = pack_for_c_dir
+      return +''.b if packed.empty?
+
+      (HEADER_ID + [packed.bytesize].pack('v')) << packed
     end
   end
 end

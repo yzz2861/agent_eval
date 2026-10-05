@@ -29,7 +29,8 @@ module Zip
                   :unix_gid, :unix_perms, :unix_uid
 
     attr_accessor :crc, :external_file_attributes, :fstype, :gp_flags,
-                  :internal_file_attributes, :local_header_offset # :nodoc:
+                  :internal_file_attributes, :local_header_offset,
+                  :zip64_strategy # :nodoc:
 
     attr_reader :extra, :compression_level, :filepath # :nodoc:
 
@@ -41,6 +42,8 @@ module Zip
 
     def set_default_vars_values # :nodoc:
       @local_header_offset      = 0
+      @zip64_strategy           = nil
+      @force_zip64              = false
       @local_header_size        = nil # not known until local entry is created or read
       @internal_file_attributes = 1
       @external_file_attributes = 0
@@ -201,6 +204,22 @@ module Zip
     # Does this entry use the ZIP64 extensions?
     def zip64?
       !@extra[:zip64].nil?
+    end
+
+    def force_zip64! # :nodoc:
+      @force_zip64 = true
+      @version_needed_to_extract =
+        [@version_needed_to_extract, VERSION_NEEDED_TO_EXTRACT_ZIP64].max
+      zip64 = @extra[:zip64] || @extra.create(:zip64)
+      zip64.original_size ||= @size || 0
+      zip64.compressed_size ||= @compressed_size
+    end
+
+    def reserve_local_zip64_lengths! # :nodoc:
+      force_zip64!
+      @local_zip64_lengths_reserved = true
+      extra[:zip64].original_size = 0
+      extra[:zip64].compressed_size = 0
     end
 
     # Is this entry encrypted with AES encryption?
@@ -828,7 +847,9 @@ module Zip
       return unless zip64?
 
       if for_local_header
-        @size, @compressed_size = @extra[:zip64].parse(@size, @compressed_size)
+        @size, @compressed_size = @extra[:zip64].parse(
+          @size, @compressed_size, local_lengths: gp_flags & 0x08 == 0x08
+        )
       else
         @size, @compressed_size, @local_header_offset = @extra[:zip64].parse(
           @size, @compressed_size, @local_header_offset
@@ -880,34 +901,35 @@ module Zip
 
     # rubocop:disable Style/GuardClause
     def prep_local_zip64_extra
-      return unless ::Zip.write_zip64_support
+      return unless @zip64_strategy.nil? ? ::Zip.write_zip64_support : @zip64_strategy
       return if (!zip64? && @size && @size < 0xFFFFFFFF) || !file?
 
       # Might not know size here, so need ZIP64 just in case.
       # If we already have a ZIP64 extra (placeholder) then we must fill it in.
       if zip64? || @size.nil? || @size >= 0xFFFFFFFF || @compressed_size >= 0xFFFFFFFF
-        @version_needed_to_extract =
-          [@version_needed_to_extract, VERSION_NEEDED_TO_EXTRACT_ZIP64].max
-        zip64 = @extra[:zip64] || @extra.create(:zip64)
-
-        # Local header always includes size and compressed size.
-        zip64.original_size = @size || 0
-        zip64.compressed_size = @compressed_size
+        force_zip64!
+        zip64 = @extra[:zip64]
+        unless @local_zip64_lengths_reserved
+          zip64.original_size = @size || 0
+          zip64.compressed_size = @compressed_size
+        end
       end
     end
 
     def prep_cdir_zip64_extra
-      return unless ::Zip.write_zip64_support
+      return if @zip64_strategy == false
+      return unless @zip64_strategy.nil? ? ::Zip.write_zip64_support : @zip64_strategy
 
-      if (@size && @size >= 0xFFFFFFFF) || @compressed_size >= 0xFFFFFFFF ||
-         @local_header_offset >= 0xFFFFFFFF
+      if @force_zip64 || (@size && @size >= 0xFFFFFFFF) ||
+         @compressed_size >= 0xFFFFFFFF || @local_header_offset >= 0xFFFFFFFF
         @version_needed_to_extract =
           [@version_needed_to_extract, VERSION_NEEDED_TO_EXTRACT_ZIP64].max
         zip64 = @extra[:zip64] || @extra.create(:zip64)
 
         # Central directory entry entries include whichever fields are necessary.
-        zip64.original_size = @size if @size && @size >= 0xFFFFFFFF
-        zip64.compressed_size = @compressed_size if @compressed_size >= 0xFFFFFFFF
+        zip64.original_size = @size if @force_zip64 || (@size && @size >= 0xFFFFFFFF)
+        zip64.compressed_size = @compressed_size if @force_zip64 ||
+                                                          @compressed_size >= 0xFFFFFFFF
         zip64.relative_header_offset = @local_header_offset if @local_header_offset >= 0xFFFFFFFF
       end
     end

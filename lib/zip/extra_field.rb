@@ -55,9 +55,19 @@ module Zip
 
     # Place Unknown last, so "extra" data that is missing the proper
     # signature/size does not prevent known fields from being read back in.
-    def ordered_values
+    def ordered_values(local: false)
       result = []
-      each { |k, v| k == :unknown ? result.push(v) : result.unshift(v) }
+      if local
+        each do |k, v|
+          if k == :unknown || (k == :zip64 && member?(:aes))
+            result.push(v)
+          else
+            result.unshift(v)
+          end
+        end
+      else
+        each { |k, v| k == :unknown ? result.push(v) : result.unshift(v) }
+      end
       result
     end
 
@@ -69,7 +79,8 @@ module Zip
     end
 
     def to_local_bin
-      ordered_values.map! { |v| v.to_local_bin.force_encoding('BINARY') }.join
+      ordered_values(local: true)
+        .map! { |v| v.to_local_bin.force_encoding('BINARY') }.join
     end
 
     alias to_s to_local_bin

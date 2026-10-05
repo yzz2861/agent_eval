@@ -96,6 +96,23 @@ end
 
 You can generate a Zip archive in memory using `Zip::OutputStream.write_buffer`.
 
+You can write directly to a non-seekable, write-only IO such as a pipe with
+`Zip::OutputStream.write_stream`. This writes local file headers with data
+descriptors and never seeks or rewinds the destination. It supports stored and
+deflated entries. By default, the global Zip64 setting decides whether Zip64 is
+used; pass `zip64: true` to reserve Zip64 fields up front, or `zip64: false`
+when every entry and archive offset is guaranteed to fit the 32-bit limits:
+
+```ruby
+Zip::OutputStream.write_stream(pipe) do |zos|
+  zos.put_next_entry('stored.txt', '', Zip::ExtraField.new, Zip::Entry::STORED)
+  zos.write('stored')
+
+  zos.put_next_entry('deflated.txt')
+  zos.write('deflated')
+end
+```
+
 ### Suppressing extra fields
 
 If you wish to suppress extra fields from being added to your entries, you can do so by passing the `suppress_extra_fields` parameter to any of the archive opening calls within `Zip::File` or `Zip::OutputStream`, e.g.:

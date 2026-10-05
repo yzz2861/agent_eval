@@ -9,6 +9,32 @@ class ZipOutputStreamTest < Minitest::Test
   TEST_ZIP = TestZipFile::TEST_ZIP2.clone
   TEST_ZIP.zip_name = 'test/data/generated/output.zip'
 
+  class WriteOnlyIO
+    attr_reader :string
+
+    def initialize(limit: nil)
+      @string = +''.b
+      @limit = limit
+    end
+
+    def write(data)
+      data = data.to_s.b
+      raise IOError, 'broken pipe' if @fail_on_content
+
+      amount = @limit ? [data.bytesize, @limit].min : data.bytesize
+      @string << data.byteslice(0, amount)
+      amount
+    end
+  end
+
+  class FailContentIO < WriteOnlyIO
+    def write(data)
+      raise IOError, 'broken pipe' if data.to_s == 'content'
+
+      super
+    end
+  end
+
   def teardown
     ::Zip.reset!
   end
@@ -286,6 +312,172 @@ class ZipOutputStreamTest < Minitest::Test
       assert_equal('write_test', entry.name)
       assert_equal('hello, world', zis.read)
     end
+  end
+
+  def test_forward_only_writes_deflated_and_stored_entries
+    io = WriteOnlyIO.new
+    refute_respond_to(io, :<<)
+    refute_respond_to(io, :tell)
+    refute_respond_to(io, :seek)
+    stored_content = 'hello from a stored entry'
+    deflated_content = 'hello from a deflated entry' * 20
+
+    ::Zip::OutputStream.write_stream(io) do |zos|
+      zos.put_next_entry('stored.txt', '', Zip::ExtraField.new, Zip::Entry::STORED)
+      zos.write(stored_content)
+
+      zos.put_next_entry('deflated.txt')
+      zos.write(deflated_content)
+    end
+
+    ::Zip::File.open_buffer(StringIO.new(io.string)) do |zip_file|
+      entries = zip_file.entries
+
+      assert_equal(%w[stored.txt deflated.txt], entries.map(&:name))
+      assert_equal(stored_content, zip_file.read('stored.txt'))
+      assert_equal(deflated_content, zip_file.read('deflated.txt'))
+
+      stored_entry, deflated_entry = entries
+      assert_equal(Zlib.crc32(stored_content), stored_entry.crc)
+      assert_equal(Zlib.crc32(deflated_content), deflated_entry.crc)
+      assert_equal(stored_content.bytesize, stored_entry.size)
+      assert_equal(deflated_content.bytesize, deflated_entry.size)
+      assert_equal(stored_content.bytesize, stored_entry.compressed_size)
+      assert(deflated_entry.compressed_size < deflated_content.bytesize)
+      assert_equal(0x08, stored_entry.gp_flags & 0x08)
+      assert_equal(0x08, deflated_entry.gp_flags & 0x08)
+    end
+
+    local_header = io.string[0, 30]
+    _signature, _version_needed, gp_flags, = local_header.unpack('VvvvvvVVVvv')
+    assert_equal(0x08, gp_flags & 0x08)
+  end
+
+  def test_forward_only_handles_short_writes
+    io = WriteOnlyIO.new(limit: 7)
+    content = 'short writes must be retried' * 50
+
+    ::Zip::OutputStream.write_stream(io) do |zos|
+      zos.put_next_entry('stored.txt', '', Zip::ExtraField.new, Zip::Entry::STORED)
+      zos.write(content)
+    end
+
+    ::Zip::File.open_buffer(StringIO.new(io.string)) do |zip_file|
+      assert_equal(content, zip_file.read('stored.txt'))
+    end
+  end
+
+  def test_forward_only_writes_encrypted_aes_entries
+    password = 'password'
+    content = 'encrypted forward-only content' * 20
+    io = WriteOnlyIO.new
+
+    ::Zip::OutputStream.write_stream(
+      io,
+      encrypter: ::Zip::AESEncrypter.new(
+        password, ::Zip::AESEncryption::STRENGTH_128_BIT
+      )
+    ) do |zos|
+      zos.put_next_entry('encrypted.txt')
+      zos.write(content)
+    end
+
+    ::Zip::File.open_buffer(StringIO.new(io.string)) do |zip_file|
+      entry = zip_file.get_entry('encrypted.txt')
+      assert(entry.aes?)
+      assert_equal(
+        content,
+        entry.get_input_stream(
+          decrypter: ::Zip::AESDecrypter.new(
+            password, ::Zip::AESEncryption::STRENGTH_128_BIT
+          )
+        ) { |stream| stream.read }
+      )
+    end
+  end
+
+  def test_forward_only_selects_zip64_before_entry_data_is_written
+    io = WriteOnlyIO.new
+    entry = ::Zip::Entry.new(nil, 'zero-sized.txt', size: 0)
+
+    ::Zip::OutputStream.write_stream(io) do |zos|
+      zos.put_next_entry(entry)
+    end
+
+    assert(entry.zip64?)
+    assert_equal(
+      Zip::VERSION_NEEDED_TO_EXTRACT_ZIP64,
+      entry.instance_variable_get(:@version_needed_to_extract)
+    )
+    ::Zip::Entry.read_local_entry(StringIO.new(io.string)).tap do |local_entry|
+      assert(local_entry.zip64?)
+      assert_equal(0, local_entry.size)
+      assert_equal(0, local_entry.compressed_size)
+    end
+  end
+
+  def test_forward_only_can_disable_zip64
+    io = WriteOnlyIO.new
+
+    ::Zip::OutputStream.write_stream(io, zip64: false) do |zos|
+      zos.put_next_entry('stored.txt', '', Zip::ExtraField.new, Zip::Entry::STORED)
+      zos.write('small enough')
+    end
+
+    ::Zip::File.open_buffer(StringIO.new(io.string)) do |zip_file|
+      entry = zip_file.get_entry('stored.txt')
+      refute(entry.zip64?)
+      assert_equal('small enough', zip_file.read(entry))
+    end
+
+  end
+
+  def test_forward_only_raises_before_data_when_zip64_is_disabled_for_known_large_entry
+    io = WriteOnlyIO.new
+
+    error = assert_raises(Zip::Error) do
+      ::Zip::OutputStream.write_stream(io, zip64: false) do |zos|
+        zos.put_next_entry(
+          ::Zip::Entry.new(nil, 'large.txt', size: 0x1_0000_0000)
+        )
+      end
+    end
+
+    assert_match(/Zip64/i, error.message)
+    assert_equal(+'', io.string)
+  end
+
+  def test_forward_only_does_not_write_directory_after_a_header_write_error
+    io = Class.new do
+      attr_reader :written
+
+      def initialize
+        @written = +''.b
+      end
+
+      def write(data)
+        @written << data
+        raise IOError, 'broken pipe'
+      end
+    end
+
+    target = io.new
+    zos = ::Zip::OutputStream.new(target, stream: true, forward_only: true)
+    assert_raises(IOError) { zos.put_next_entry('first.txt') }
+
+    assert_raises(IOError) { zos.close }
+    refute_includes(target.written, [Zip::CentralDirectory::END_OF_CD_SIG].pack('V'))
+  end
+
+  def test_forward_only_does_not_write_directory_after_a_data_write_error
+    target = FailContentIO.new
+    zos = ::Zip::OutputStream.new(target, stream: true, forward_only: true)
+
+    zos.put_next_entry('first.txt', '', Zip::ExtraField.new, Zip::Entry::STORED)
+    assert_raises(IOError) { zos.write('content') }
+    assert_raises(IOError) { zos.close_buffer }
+
+    refute_includes(target.string, [Zip::CentralDirectory::END_OF_CD_SIG].pack('V'))
   end
 
   def test_zip64_default_usage
