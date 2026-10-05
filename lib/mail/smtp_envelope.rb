@@ -8,6 +8,13 @@ module Mail
 
     attr_reader :from, :to, :message
 
+    # Prepares +mail+ for one SMTP hop and returns a Mail::PreparedMessage
+    # (a sendable envelope).  See Mail::Message#prepare_for_transport for
+    # the accepted capability arguments.
+    def self.prepare(mail, capabilities = nil)
+      Mail::TransportPreparation.prepare(mail, capabilities)
+    end
+
     def initialize(mail)
       self.from = mail.smtp_envelope_from
       self.to = mail.smtp_envelope_to

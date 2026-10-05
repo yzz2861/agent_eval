@@ -391,6 +391,17 @@ module Mail
     def initialize_copy(original)
       super
       @header = @header.dup
+      @body = @body.deep_dup if @body
+      # The cached convenience parts refer to objects in the original body;
+      # let the accessors re-resolve them against the duplicated parts.
+      @text_part = nil
+      @html_part = nil
+    end
+
+    # Returns a copy whose entire MIME tree (including every nested part and
+    # its body) is independent from the original.
+    def deep_dup
+      dup
     end
 
     # Provides access to the raw source of the message as it was when it
@@ -1492,6 +1503,7 @@ module Mail
 
     # Adds a content transfer encoding
     def add_content_transfer_encoding
+      return if transport_locked?
       header[:content_transfer_encoding] ||= body.default_encoding
     end
 
@@ -1796,12 +1808,63 @@ module Mail
     # Encodes the message, calls encode on all its parts, gets an email message
     # ready to send
     def ready_to_send!
-      identify_and_set_transfer_encoding
-      parts.each do |part|
-        part.transport_encoding = transport_encoding
-        part.ready_to_send!
+      if transport_locked?
+        parts.each(&:ready_to_send!)
+      else
+        identify_and_set_transfer_encoding
+        parts.each do |part|
+          part.transport_encoding = transport_encoding
+          part.ready_to_send!
+        end
+        add_required_fields
       end
-      add_required_fields
+    end
+
+    # Prepares this message and every nested MIME part for transport over a
+    # single SMTP hop advertising the given extension keywords. Unlike
+    # #ready_to_send! this walks the whole MIME tree itself, negotiates a
+    # content transfer encoding safe for the offered extensions and leaves
+    # signed subtrees (multipart/signed, RFC 1847) untouched.
+    def prepare_for_transport!(supported_extensions)
+      __send__(:lock_signed_subtrees!)
+      extensions = Array(supported_extensions).map { |extension| extension.to_s.upcase }
+      __send__(:set_supported_transport_extensions, extensions)
+      __send__(:negotiate_transport_encoding, __send__(:preferred_transport_encoding, extensions))
+    end
+
+    # Prepares the message for one SMTP hop.  Accepts the extensions the
+    # receiving server supports as keyword arguments (8bitmime, binarymime,
+    # smtputf8) or as a Hash of EHLO keywords.  Returns a
+    # Mail::PreparedMessage holding the encoded wire data, the envelope
+    # addresses and the extensions actually required.  The receiver message
+    # is never modified; an incompatible message raises a
+    # Mail::IncompatibleTransportError.
+    def prepare_for_transport(capabilities = nil)
+      Mail::TransportPreparation.prepare(self, capabilities)
+    end
+
+    # Whether this entity must not be rewritten during transport preparation.
+    # All entities beneath a multipart/signed container are locked because
+    # changing their bytes or their Content-Transfer-Encoding invalidates
+    # the cryptographic signature.
+    def transport_locked?
+      defined?(@transport_locked) ? @transport_locked : false
+    end
+
+    # The Content-Transfer-Encoding that will be used on the wire, taking
+    # locked entities into account (their declared encoding is never
+    # negotiated away).
+    def effective_content_transfer_encoding
+      if transport_locked?
+        declared = content_transfer_encoding
+        if Utilities.blank?(declared)
+          body.multipart? ? '7bit' : body.default_encoding
+        else
+          declared.to_s
+        end
+      else
+        content_transfer_encoding.to_s
+      end
     end
 
     # Outputs an encoded string representation of the mail message including
@@ -1811,7 +1874,7 @@ module Mail
       ready_to_send!
       buffer = header.encoded
       buffer << "\r\n"
-      buffer << body.encoded(content_transfer_encoding)
+      buffer << body.encoded(content_transfer_encoding, transport_locked?)
       buffer
     end
 
@@ -2050,6 +2113,88 @@ module Mail
           self.content_transfer_encoding = body.negotiate_best_encoding(@transport_encoding, allowed_encodings).to_s
         end
       end
+    end
+
+    # The strongest identity content transfer encoding the offered SMTP
+    # extensions can carry. Rewritable entities are negotiated against
+    # this; they will downgrade to quoted-printable or base64 as needed.
+    def preferred_transport_encoding(extensions)
+      if extensions.include?('BINARYMIME')
+        Encodings::Binary
+      elsif extensions.include?('8BITMIME')
+        Encodings::EightBit
+      else
+        Encodings::SevenBit
+      end
+    end
+
+    def set_supported_transport_extensions(extensions)
+      @supported_transport_extensions = extensions
+      parts.each { |part| part.__send__(:set_supported_transport_extensions, extensions) } if body.multipart?
+    end
+
+    # Marks every entity below a multipart/signed container as locked so
+    # transport preparation never rewrites the signed data (RFC 1847).
+    def lock_signed_subtrees!(locked = false)
+      @transport_locked = true if locked
+      if body.multipart?
+        child_locked = locked || multipart_signed?
+        parts.each { |part| part.__send__(:lock_signed_subtrees!, child_locked) }
+      end
+    end
+
+    def multipart_signed?
+      media_type = mime_type.to_s.split(';').first.to_s.downcase
+      media_type == 'multipart/signed'
+    end
+
+    def negotiate_transport_encoding(preferred)
+      @transport_encoding = preferred
+      if body.multipart?
+        self.content_transfer_encoding = preferred.to_s unless transport_locked?
+        parts.each { |part| part.__send__(:negotiate_transport_encoding, preferred) }
+      elsif transport_locked?
+        validate_locked_transfer_encoding!
+        unless has_content_transfer_encoding?
+          header[:content_transfer_encoding] = effective_content_transfer_encoding
+        end
+      else
+        chosen = body.negotiate_best_encoding(preferred, allowed_encodings)
+        unless chosen
+          raise IncompatibleTransportError,
+                "cannot encode the #{mime_type || 'text/plain'} MIME entity for the offered SMTP extensions"
+        end
+        self.content_transfer_encoding = chosen.to_s
+      end
+    end
+
+    def validate_locked_transfer_encoding!
+      declared = effective_content_transfer_encoding
+      encoding = Mail::Encodings.get_encoding(declared)
+      unless encoding
+        raise IncompatibleTransportError,
+              "unknown Content-Transfer-Encoding #{declared.inspect} in a MIME entity that must not be rewritten (signed subtree)"
+      end
+
+      unless encoding.compatible_input?(body.raw_source.to_s)
+        raise IncompatibleTransportError,
+              "#{declared} MIME entity under multipart/signed contains data incompatible with its declared Content-Transfer-Encoding"
+      end
+
+      required = case declared
+                 when 'binary' then %w[ BINARYMIME 8BITMIME ]
+                 when '8bit'   then %w[ 8BITMIME ]
+                 else []
+                 end
+      missing = required - supported_transport_extensions
+      unless missing.empty?
+        raise IncompatibleTransportError,
+              "signed MIME entity requires #{declared} Content-Transfer-Encoding but the SMTP server does not offer #{missing.join(', ')}"
+      end
+    end
+
+    def supported_transport_extensions
+      @supported_transport_extensions ||= []
     end
 
     def add_required_fields

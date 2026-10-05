@@ -55,6 +55,18 @@ module Mail
       @parts = Mail::PartsList.new(coder['parts'])
     end
 
+    def deep_dup
+      dup
+    end
+
+    def initialize_copy(original)
+      super
+      @raw_source = @raw_source.dup if @raw_source
+      @preamble = @preamble.dup if @preamble
+      @epilogue = @epilogue.dup if @epilogue
+      @parts = Mail::PartsList.new(@parts.map { |part| part.deep_dup }) if @parts
+    end
+
     # Matches this body with another body.  Also matches the decoded value of this
     # body with a string.
     #
@@ -146,11 +158,13 @@ module Mail
     # identiy encoding (i.e. no encoding).
     # Calling this directly is not a good idea, but supported for compatibility
     # TODO: Validate that preamble and epilogue are valid for requested encoding
-    def encoded(transfer_encoding = nil)
+    def encoded(transfer_encoding = nil, locked = false)
       if multipart?
         self.sort_parts!
         encoded_parts = parts.map { |p| p.encoded }
         ([preamble] + encoded_parts).join(crlf_boundary) + end_boundary + epilogue.to_s
+      elsif locked
+        raw_source
       else
         dec = Mail::Encodings.get_encoding(encoding)
         enc =

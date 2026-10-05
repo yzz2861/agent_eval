@@ -305,6 +305,36 @@ mail.delivery_method :logger
 mail.delivery_method :logger, logger: other_logger, severity: :debug
 ```
 
+### Preparing a message for a specific SMTP server:
+
+When you already know which SMTP service extensions the receiving server
+advertised in response to EHLO, you can prepare the whole message (including
+every nested MIME part and internationalized header) for that single hop:
+
+```ruby
+prepared = mail.prepare_for_transport(
+  eightbitmime: smtp.capable?('8BITMIME'),
+  binarymime:  smtp.capable?('BINARYMIME'),
+  smtputf8:    smtp.capable?('SMTPUTF8')
+)
+
+prepared.message             # The encoded, sendable message
+prepared.from                # Envelope MAIL FROM address
+prepared.to                  # Envelope RCPT TO addresses
+prepared.required_extensions # E.g. ['8BITMIME', 'SMTPUTF8']
+prepared.body_type           # '7BIT', '8BIT-MIME' or 'BINARYMIME'
+prepared.smtputf8?           # Whether SMTPUTF8 must be used
+```
+
+A plain Hash of EHLO keywords works as well, e.g.
+`mail.prepare_for_transport(smtp.capabilities)`. Rewritable entities are
+re-encoded to a 7-bit safe content transfer encoding when the server lacks
+8BITMIME or BINARYMIME. Entities under `multipart/signed` must not be
+rewritten; if such a subtree needs an unsupported extension, preparation
+raises a `Mail::IncompatibleTransportError`. The original message is never
+modified. The same result is available via
+`Mail::SmtpEnvelope.prepare(mail, capabilities)`.
+
 ### Getting Emails from a POP or IMAP Server:
 
 You can configure Mail to receive email using <code>retriever_method</code>
