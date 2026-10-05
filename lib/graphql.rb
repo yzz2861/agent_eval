@@ -107,6 +107,7 @@ This is probably a bug in GraphQL-Ruby, please report this error on GitHub: http
   autoload :Analysis, "graphql/analysis"
   autoload :Tracing, "graphql/tracing"
   autoload :Dig, "graphql/dig"
+  autoload :Specialize, "graphql/specialize"
   autoload :Execution, "graphql/execution"
   autoload :Pagination, "graphql/pagination"
   autoload :Schema, "graphql/schema"
