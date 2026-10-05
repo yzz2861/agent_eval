@@ -268,6 +268,14 @@ class Money
       (Money::Currency | string | Symbol) rate)
     -> Numeric
 
+  # Rounds unrounded invoice-line amounts to whole subunits so they sum
+  # exactly to an order-level target. See Money::RoundingCoordinator.
+  def self.reconcile_line_amounts:
+    (Array[Numeric | Money] line_amounts,
+     (Numeric | Money) target_total,
+     ?adjustable: (nil | Integer | Range[Integer] | Array[Integer] | Array[bool]),
+     ?currency: (Money::Currency | String | Symbol | nil)) -> Money::RoundingCoordinator::Result
+
   # Sets the default bank to be a SingleCurrency bank that raises on
   # currency exchange. Useful when apps operate in a single currency at a time.
   def self.disallow_currency_conversion!: () -> untyped

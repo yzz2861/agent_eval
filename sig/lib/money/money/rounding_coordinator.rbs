@@ -1,0 +1,43 @@
+class Money
+  class RoundingCoordinator
+    # Raised when no allowed per-line adjustment reaches the requested total.
+    class InfeasibleTarget < StandardError
+      def initialize: (Integer target, Integer min_total, Integer max_total) -> void
+    end
+
+    class Result
+      attr_accessor amounts: Array[Money]
+      attr_accessor adjustments: Array[Integer]
+      attr_accessor total: Money
+
+      def self.new: (?amounts: Array[Money], ?adjustments: Array[Integer], ?total: Money) -> Result
+    end
+
+    # Outcome of a reconciliation.
+    #
+    # @!attribute amounts [Array[Money]] Final per-line amounts, in input order.
+    # @!attribute adjustments [Array[Integer]] Per-line adjustment in whole
+    #   subunits, relative to each line's independently rounded value.
+    # @!attribute total [Money] The reached total.
+    @amounts: Array[Money]
+    @adjustments: Array[Integer]
+    @total: Money
+    attr_accessor amounts: Array[Money]
+    attr_accessor adjustments: Array[Integer]
+    attr_accessor total: Money
+
+    def self.reconcile:
+      (Array[Numeric | Money] line_amounts,
+       (Numeric | Money) target_total,
+       ?adjustable: (nil | Integer | Range[Integer] | Array[Integer] | Array[bool]),
+       ?currency: (Money::Currency | String | Symbol | nil)) -> Result
+
+    def initialize:
+      (Array[Numeric | Money] line_amounts,
+       (Numeric | Money) target_total,
+       (nil | Integer | Range[Integer] | Array[Integer] | Array[bool]) adjustable,
+       (Money::Currency | String | Symbol | nil) currency) -> void
+
+    def call: () -> Result
+  end
+end

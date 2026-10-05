@@ -6,6 +6,7 @@ require "money/money/arithmetic"
 require "money/money/constructors"
 require "money/money/formatter"
 require "money/money/allocation"
+require "money/money/rounding_coordinator"
 require "money/money/locale_backend"
 
 # "Money is any object or record that is generally accepted as payment for
@@ -290,6 +291,33 @@ class Money
   #   Money.add_rate("USD", "CAD", 1.25) #=> 1.25
   def self.add_rate(from_currency, to_currency, rate)
     Money.default_bank.add_rate(from_currency, to_currency, rate)
+  end
+
+  # Rounds unrounded invoice-line amounts to whole subunits so they sum
+  # exactly to an order-level target, distributing the rounding residual with
+  # the stable largest-remainder rule. See {Money::RoundingCoordinator}.
+  #
+  # @param line_amounts [Array<Numeric, Money>] Unrounded line values in
+  #   subunits (Numeric) or Money objects.
+  # @param target_total [Numeric, Money] Whole-subunit order total to hit.
+  # @param adjustable [nil, Integer, Range, Array<Integer>, Array<Boolean>]
+  #   Lines allowed to absorb the residual.
+  # @param currency [Currency, String, Symbol, nil] Currency of Numeric
+  #   inputs.
+  #
+  # @return [Money::RoundingCoordinator::Result]
+  #
+  # @raise [ArgumentError] If the inputs are malformed or the target is not
+  #   integral.
+  # @raise [Money::RoundingCoordinator::InfeasibleTarget] If the target
+  #   cannot be reached within the adjustment constraints.
+  def self.reconcile_line_amounts(line_amounts, target_total, adjustable: nil, currency: nil)
+    RoundingCoordinator.reconcile(
+      line_amounts,
+      target_total,
+      adjustable: adjustable,
+      currency: currency,
+    )
   end
 
   # Sets the default bank to be a SingleCurrency bank that raises on
