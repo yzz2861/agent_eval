@@ -17,6 +17,21 @@ class TestConfigFile < PumaTest
     assert_equal max_threads, conf.options.default_options[:max_threads]
   end
 
+  def test_adaptive_admission_disabled_by_default
+    conf = Puma::Configuration.new
+    conf.clamp
+    assert_nil conf.options[:adaptive_admission]
+  end
+
+  def test_adaptive_admission_from_DSL
+    conf = Puma::Configuration.new do |c|
+      c.adaptive_admission min: 2, max: 8, target_latency: 0.5, window: 10.0
+    end
+    conf.clamp
+    assert_equal({ min: 2, max: 8, target_latency: 0.5, window: 10.0 },
+      conf.options[:adaptive_admission])
+  end
+
   def test_app_from_rackup
     if Rack.release >= '3'
       fn = "test/rackup/hello-bind_rack3.ru"

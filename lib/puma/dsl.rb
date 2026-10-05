@@ -617,6 +617,39 @@ module Puma
       @options[:max_threads] = max
     end
 
+    # Enables adaptive admission control.
+    #
+    # When enabled, Puma limits how many requests may execute inside the
+    # application concurrently, based on windowed statistics of queue wait and
+    # completion latency. The thread pool keeps its fixed size; pool threads
+    # wait at the admission gate when the current limit is reached, so the
+    # pool is never rebuilt while the limit moves.
+    #
+    # The limit is adjusted once per +window+ seconds:
+    #
+    #   observed  = mean(queue_wait + service_time) of successful requests
+    #   raw       = limit * target_latency / observed
+    #   increase  = min(raw, limit + 1)   (slow, additive)
+    #   decrease  = max(raw, limit * 0.8) (quick, multiplicative)
+    #
+    # Moves smaller than 10% are ignored (hysteresis), the limit is clamped to
+    # [min, max], and when decreasing, in-flight requests always finish
+    # naturally. Idle windows never change the limit, and failed requests are
+    # excluded from the latency mean (a window of mostly failures forces a
+    # decrease). See Puma::AdaptiveAdmission for the full description.
+    #
+    # @example
+    #   adaptive_admission min: 1, max: 16, target_latency: 0.5, window: 5.0
+    #
+    def adaptive_admission(min: 1, max: nil, target_latency: 1.0, window: 5.0)
+      @options[:adaptive_admission] = {
+        min: min,
+        max: max,
+        target_latency: target_latency,
+        window: window,
+      }
+    end
+
     # Configure the max number of IO threads.
     #
     # When request handlers know the current requests will no longer use a significant amount

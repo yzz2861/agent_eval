@@ -25,6 +25,18 @@ module Puma
     class ForceShutdown < RuntimeError
     end
 
+    # Wraps work with the time it was enqueued, so an AdaptiveAdmission
+    # controller can measure queue wait on a single clock.
+    # :nodoc:
+    class EnqueuedWork
+      attr_reader :work, :enqueued_at
+
+      def initialize(work, enqueued_at)
+        @work = work
+        @enqueued_at = enqueued_at
+      end
+    end
+
     class ProcessorThread
       attr_accessor :thread
       attr_writer :marked_as_io_thread
@@ -83,8 +95,9 @@ module Puma
     # The block passed is the work that will be performed in each
     # thread.
     #
-    def initialize(name, options = {}, server: nil, &block)
+    def initialize(name, options = {}, server: nil, admission: nil, &block)
       @server = server
+      @admission = admission
 
       @not_empty = ConditionVariable.new
       @not_full = ConditionVariable.new
@@ -244,7 +257,20 @@ module Puma
           end
 
           begin
-            @out_of_band_pending = true if block.call(processor, work)
+            if work.is_a?(EnqueuedWork)
+              # Gate at the admission controller. The pool thread waits here
+              # when the limit is reached; the pool itself is never rebuilt.
+              token = @admission.acquire(enqueued_at: work.enqueued_at)
+              begin
+                @out_of_band_pending = true if block.call(processor, work.work)
+                @admission.release(token, ok: true)
+              rescue Exception
+                @admission.release(token, ok: false)
+                raise
+              end
+            else
+              @out_of_band_pending = true if block.call(processor, work)
+            end
           rescue Exception => e
             STDERR.puts "Error reached top of thread-pool: #{e.message} (#{e.class})"
           end
@@ -350,7 +376,7 @@ module Puma
           raise "Unable to add work while shutting down"
         end
 
-        @todo << work
+        @todo << (@admission ? EnqueuedWork.new(work, @admission.now) : work)
         t = @todo.size
         @backlog_max = t if t > @backlog_max
 
@@ -456,6 +482,7 @@ module Puma
     def shutdown(timeout)
       threads = with_mutex do
         @shutdown = true
+        @admission&.shutdown
         @trim_requested = @spawned
         @not_empty.broadcast
         @not_full.broadcast

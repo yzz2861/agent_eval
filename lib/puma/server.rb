@@ -3,6 +3,7 @@
 require 'stringio'
 
 require_relative 'thread_pool'
+require_relative 'adaptive_admission'
 require_relative 'const'
 require_relative 'log_writer'
 require_relative 'events'
@@ -83,6 +84,7 @@ module Puma
       @thread = nil
       @thread_pool = nil
       @reactor = nil
+      @admission = nil
 
       @env_set_http_version = nil
 
@@ -260,7 +262,13 @@ module Puma
 
       @status = :run
 
-      @thread_pool = ThreadPool.new(thread_name, options, server: self) do |processor, client|
+      if (admission_config = options[:adaptive_admission])
+        admission_config = admission_config.dup
+        admission_config[:max] ||= @max_threads
+        @admission = AdaptiveAdmission.new(**admission_config)
+      end
+
+      @thread_pool = ThreadPool.new(thread_name, options, server: self, admission: @admission) do |processor, client|
         process_client(processor, client)
       end
 
@@ -708,6 +716,7 @@ module Puma
       stats = @thread_pool&.stats || {}
       stats[:max_threads]    = @max_threads
       stats[:requests_count] = @requests_count
+      stats[:admission_limit] = @admission.limit if @admission
       stats[:reactor_max] = @reactor.reactor_max if @reactor
       reset_max
       stats
