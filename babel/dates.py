@@ -30,7 +30,7 @@ except ModuleNotFoundError:
     import zoneinfo
 
 import datetime
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from babel import localtime
 from babel.core import Locale, default_locale, get_global
@@ -1245,6 +1245,15 @@ class ParseError(ValueError):
     pass
 
 
+PARSE_DATETIME_SUPPORTED_FIELDS = "yMLdEahHKkmsSxXZ"
+"""The LDML pattern fields supported by `parse_datetime`:
+
+y (year), M/L (month, numeric or name), d (day of month), E (weekday
+name), a (AM/PM day period), h/H/K/k (hour), m (minute), s (second),
+S (fractional second), and x/X/Z (numeric timezone offsets).
+"""
+
+
 def parse_date(
     string: str,
     locale: Locale | str | None = None,
@@ -1388,6 +1397,385 @@ def parse_time(
         if len(numbers) > 2:
             second = int(numbers[indexes['S']])
     return datetime.time(hour, minute, second)
+
+
+def parse_datetime(
+    string: str,
+    format: str | DateTimePattern,
+    locale: Locale | str | None = None,
+    tzinfo: str | datetime.tzinfo | None = None,
+    fold: int | None = None,
+) -> datetime.datetime:
+    r"""Parse a datetime from a string according to an explicit LDML pattern.
+
+    Unlike `parse_date` and `parse_time`, this function never guesses:
+    the `format` must be an explicit LDML/CLDR date-time pattern (the
+    predefined formats "full", "long", "medium" and "short" are not
+    accepted), and only the fields listed in
+    `PARSE_DATETIME_SUPPORTED_FIELDS` may be used; any other pattern
+    field raises a `ValueError`.
+
+    Month names, weekday names and day period (AM/PM) names are read from
+    the CLDR data for `locale`:
+
+    >>> parse_datetime('2024-04-01 15:30', 'yyyy-MM-dd HH:mm')
+    datetime.datetime(2024, 4, 1, 15, 30)
+    >>> parse_datetime('1 avril 2024 15:30', 'd MMMM y HH:mm', locale='fr_FR')
+    datetime.datetime(2024, 4, 1, 15, 30)
+    >>> parse_datetime('2024年4月1日 下午3:30', "y'年'M'月'd'日' ah:mm", locale='zh_CN')
+    datetime.datetime(2024, 4, 1, 15, 30)
+
+    Quoted literals in the pattern are matched literally, and numeric
+    timezone offsets in the input are honored:
+
+    >>> parse_datetime("03 o'clock PM, 2024-04-01", "hh' o''clock' a, yyyy-MM-dd", locale='en_US')
+    datetime.datetime(2024, 4, 1, 15, 0)
+    >>> parse_datetime('2024-04-01 15:30 +08:00', 'yyyy-MM-dd HH:mm xxx')
+    datetime.datetime(2024, 4, 1, 15, 30, tzinfo=datetime.timezone(datetime.timedelta(seconds=28800)))
+
+    If `tzinfo` (an IANA zone name or a `tzinfo` object) is given,
+    the parsed local time is validated against the zone: local times that
+    do not exist (daylight-saving time gaps) are rejected, and ambiguous
+    (repeated) local times are rejected unless `fold` (0 or 1, see
+    PEP 495) is passed explicitly.  If the input string also contains a
+    numeric timezone offset, it must be consistent with the zone at the
+    parsed local time.
+
+    :param string: the string containing the date and time
+    :param format: an explicit LDML date-time pattern
+    :param locale: a `Locale` object or a locale identifier. Defaults to the system time locale.
+    :param tzinfo: an IANA timezone name or `tzinfo` object used to
+                   validate and localize the parsed time
+    :param fold: 0 or 1, used to disambiguate repeated local times;
+                 by default ambiguous times are rejected
+    :return: the parsed datetime; timezone-aware if the input contained a
+             numeric offset or `tzinfo` was given, naive otherwise
+    :raise ParseError: if the string does not match the pattern, the
+                       resulting datetime is invalid, or the local time is
+                       invalid or ambiguous in `tzinfo`
+    :raise ValueError: if the pattern uses unsupported fields
+    """
+    if isinstance(format, DateTimePattern):
+        format = format.pattern
+    if format in ('full', 'long', 'medium', 'short'):
+        raise ValueError(
+            "parse_datetime requires an explicit LDML pattern; predefined "
+            "formats ('full', 'long', 'medium', 'short') are not supported",
+        )
+    if fold is not None and fold not in (0, 1):
+        raise ValueError("fold must be 0 or 1")
+
+    locale = Locale.parse(locale or LC_TIME)
+
+    regex_parts = []
+    handlers: list[Callable[[dict, str], None]] = []
+    for tok_type, tok_value in tokenize_pattern(format):
+        if tok_type == 'chars':
+            # Match any whitespace run for literal whitespace, so that e.g.
+            # the narrow no-break spaces some locale formats emit also parse.
+            for chunk in re.findall(r'\s+|\S+', tok_value):
+                regex_parts.append(r'\s+' if chunk.isspace() else re.escape(chunk))
+        else:
+            field_regex, handler = _datetime_field_matcher(tok_value[0], tok_value[1], locale)
+            regex_parts.append(f'({field_regex})')
+            handlers.append(handler)
+
+    match = re.fullmatch(r'\s*%s\s*' % ''.join(regex_parts), string)
+    if match is None:
+        raise ParseError(f'Cannot parse {string!r} with pattern {format!r}')
+
+    values: dict[str, object] = {}
+    for handler, text in zip(handlers, match.groups()):
+        handler(values, text)
+
+    hour = values.get('hour', 0)
+    hour_char = values.get('hour_char')
+    if hour_char == 'h':
+        if not 1 <= hour <= 12:
+            raise ParseError(f"Invalid hour {hour} for 12-hour clock field 'h'")
+        hour %= 12
+        if values.get('period') == 'pm':
+            hour += 12
+    elif hour_char == 'K':
+        if not 0 <= hour <= 11:
+            raise ParseError(f"Invalid hour {hour} for 12-hour clock field 'K'")
+        if values.get('period') == 'pm':
+            hour += 12
+    elif hour_char == 'k':
+        if not 1 <= hour <= 24:
+            raise ParseError(f"Invalid hour {hour} for 24-hour clock field 'k'")
+        hour %= 24
+    elif not 0 <= hour <= 23:
+        raise ParseError(f"Invalid hour {hour} for 24-hour clock field 'H'")
+
+    year = values.get('year', 1900)
+    month = values.get('month', 1)
+    if not 1 <= month <= 12:
+        raise ParseError(f'Invalid month {month}')
+    day = values.get('day', 1)
+    minute = values.get('minute', 0)
+    if not 0 <= minute <= 59:
+        raise ParseError(f'Invalid minute {minute}')
+    second = values.get('second', 0)
+    if not 0 <= second <= 59:
+        raise ParseError(f'Invalid second {second}')
+
+    try:
+        naive = datetime.datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            values.get('microsecond', 0),
+        )
+    except ValueError as e:
+        raise ParseError(f'Invalid date/time: {e}') from e
+
+    if (
+        'weekday' in values
+        and {'year', 'month', 'day'} <= values.keys()
+        and naive.weekday() != values['weekday']
+    ):
+        raise ParseError(
+            f'Weekday in {string!r} does not match the parsed date {naive.date()!r}',
+        )
+
+    tz = get_timezone(tzinfo) if tzinfo is not None else None
+    offset = values.get('offset')
+
+    if tz is None:
+        if offset is not None:
+            return naive.replace(tzinfo=datetime.timezone(offset))
+        return naive
+
+    aware = _resolve_local_time(naive, tz, fold)
+    if offset is not None and aware.utcoffset() != offset:
+        raise ParseError(
+            f'Offset {offset} in input does not match timezone {tz} at {naive}',
+        )
+    return aware
+
+
+#: Regular expressions for the numeric timezone offsets emitted by the
+#: LDML fields ``x``/``X`` (ISO 8601) and ``Z``, keyed by field length.
+_TZ_OFFSET_PATTERNS = {
+    1: r'[+-]\d{2}',
+    2: r'[+-]\d{4}',
+    3: r'[+-]\d{2}:\d{2}',
+    4: r'[+-]\d{4}(?:\d{2})?',
+    5: r'[+-]\d{2}:\d{2}(?::\d{2})?',
+}
+
+
+def _parse_timezone_offset(text: str) -> datetime.timedelta:
+    """Parse a numeric timezone offset such as ``+08``, ``+0800`` or ``+08:00``."""
+    if text == 'Z':
+        return datetime.timedelta(0)
+    sign = 1 if text[0] == '+' else -1
+    digits = text[1:].replace(':', '')
+    hours = int(digits[:2])
+    minutes = int(digits[2:4]) if len(digits) >= 4 else 0
+    seconds = int(digits[4:6]) if len(digits) >= 6 else 0
+    if minutes > 59 or seconds > 59:
+        raise ParseError(f'Invalid timezone offset {text!r}')
+    return sign * datetime.timedelta(hours=hours, minutes=minutes, seconds=seconds)
+
+
+def _resolve_local_time(
+    naive: datetime.datetime,
+    tz: datetime.tzinfo,
+    fold: int | None,
+) -> datetime.datetime:
+    """Attach ``tz`` to a naive datetime, validating DST gaps and overlaps."""
+    if pytz is not None and hasattr(tz, 'localize'):  # pytz-style timezone
+        try:
+            tz.localize(naive, is_dst=None)
+        except pytz.exceptions.NonExistentTimeError as e:
+            raise ParseError(f'{naive!r} does not exist in timezone {tz}') from e
+        except pytz.exceptions.AmbiguousTimeError as e:
+            if fold is None:
+                raise ParseError(
+                    f'{naive!r} is ambiguous in timezone {tz}; pass fold=0 or fold=1',
+                ) from e
+            # fold=0 is the first (DST) occurrence, fold=1 the second one
+            return tz.localize(naive, is_dst=not fold)
+        return tz.localize(naive)
+
+    # PEP 495 (zoneinfo-style) timezone: a local time is valid for a fold
+    # if a round trip through UTC maps back to the same wall clock time.
+    valid = []
+    for candidate_fold in (0, 1):
+        aware = naive.replace(tzinfo=tz, fold=candidate_fold)
+        if aware.astimezone(UTC).astimezone(tz).replace(tzinfo=None) == naive:
+            valid.append(aware)
+    if not valid:
+        raise ParseError(f'{naive!r} does not exist in timezone {tz}')
+    if len({aware.utcoffset() for aware in valid}) > 1:
+        if fold is None:
+            raise ParseError(
+                f'{naive!r} is ambiguous in timezone {tz}; pass fold=0 or fold=1',
+            )
+        return naive.replace(tzinfo=tz, fold=fold)
+    return valid[0]
+
+
+def _parse_datetime_int_value(key: str) -> Callable[[dict, str], None]:
+    def handler(values: dict, text: str) -> None:
+        values[key] = int(text)
+
+    return handler
+
+
+def _parse_datetime_two_digit_year(values: dict, text: str) -> None:
+    values['year'] = 2000 + int(text)
+
+
+def _parse_datetime_name_value(names: dict, key: str) -> Callable[[dict, str], None]:
+    def handler(values: dict, text: str) -> None:
+        values[key] = names[text]
+
+    return handler
+
+
+def _parse_datetime_hour(char: str) -> Callable[[dict, str], None]:
+    def handler(values: dict, text: str) -> None:
+        values['hour'] = int(text)
+        values['hour_char'] = char
+
+    return handler
+
+
+def _parse_datetime_frac_seconds(values: dict, text: str) -> None:
+    values['microsecond'] = int(text.ljust(6, '0')[:6])
+
+
+def _parse_datetime_offset(values: dict, text: str) -> None:
+    values['offset'] = _parse_timezone_offset(text)
+
+
+def _parse_datetime_names_regex(names: dict, char: str, locale: Locale) -> str:
+    if not names:
+        raise ValueError(
+            f'No names for pattern field {char!r} available in locale {locale}',
+        )
+    # Longest names first, so that e.g. "May" does not shadow "March"...
+    return '|'.join(re.escape(name) for name in sorted(names, key=len, reverse=True))
+
+
+def _parse_datetime_month_names(locale: Locale, char: str, num: int) -> dict[str, int]:
+    width = {3: 'abbreviated', 4: 'wide', 5: 'narrow'}[num]
+    contexts = ('format', 'stand-alone') if char == 'M' else ('stand-alone', 'format')
+    widths = dict.fromkeys((width, 'wide', 'abbreviated', 'narrow'))
+    names: dict[str, int] = {}
+    for context in contexts:
+        for name_width in widths:
+            for month, name in get_month_names(name_width, context, locale).items():
+                if name:
+                    names.setdefault(name, month)
+    return names
+
+
+def _parse_datetime_day_names(locale: Locale, num: int) -> dict[str, int]:
+    width = {
+        1: 'abbreviated',
+        2: 'abbreviated',
+        3: 'abbreviated',
+        4: 'wide',
+        5: 'narrow',
+        6: 'short',
+    }[num]
+    widths = dict.fromkeys((width, 'wide', 'abbreviated', 'short', 'narrow'))
+    names: dict[str, int] = {}
+    for context in ('format', 'stand-alone'):
+        for name_width in widths:
+            for day, name in get_day_names(name_width, context, locale).items():
+                if name:
+                    names.setdefault(name, day)
+    return names
+
+
+def _parse_datetime_period_names(locale: Locale) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for context in ('format', 'stand-alone'):
+        for width in ('abbreviated', 'wide', 'narrow'):
+            periods = get_period_names(width=width, context=context, locale=locale)
+            for period in ('am', 'pm'):
+                name = periods.get(period)
+                if name:
+                    names.setdefault(name, period)
+    return names
+
+
+def _datetime_field_matcher(
+    char: str,
+    num: int,
+    locale: Locale,
+) -> tuple[str, Callable[[dict, str], None]]:
+    """Return a ``(regex, handler)`` pair for one LDML pattern field.
+
+    The handler stores the parsed value for the field in a values dict.
+    Unsupported fields (see ``PARSE_DATETIME_SUPPORTED_FIELDS``) and
+    invalid field lengths raise a ``ValueError``.
+    """
+    if char not in PARSE_DATETIME_SUPPORTED_FIELDS:
+        raise ValueError(
+            f'Unsupported pattern field {char!r} for parse_datetime; '
+            f'supported fields are: {", ".join(PARSE_DATETIME_SUPPORTED_FIELDS)}',
+        )
+    limit = PATTERN_CHARS[char]
+    if limit and num not in limit:
+        raise ValueError(f'Invalid length for field: {char * num!r}')
+
+    if char == 'y':
+        if num == 2:
+            return r'\d{2}', _parse_datetime_two_digit_year
+        return rf'\d{{{num},}}', _parse_datetime_int_value('year')
+    if char in 'ML':
+        if num <= 2:
+            return r'\d{1,2}', _parse_datetime_int_value('month')
+        names = _parse_datetime_month_names(locale, char, num)
+        return (
+            _parse_datetime_names_regex(names, char, locale),
+            _parse_datetime_name_value(names, 'month'),
+        )
+    if char == 'd':
+        return r'\d{1,2}', _parse_datetime_int_value('day')
+    if char == 'E':
+        names = _parse_datetime_day_names(locale, num)
+        return (
+            _parse_datetime_names_regex(names, char, locale),
+            _parse_datetime_name_value(names, 'weekday'),
+        )
+    if char == 'a':
+        names = _parse_datetime_period_names(locale)
+        return (
+            _parse_datetime_names_regex(names, char, locale),
+            _parse_datetime_name_value(names, 'period'),
+        )
+    if char in 'hHKk':
+        return r'\d{1,2}', _parse_datetime_hour(char)
+    if char == 'm':
+        return r'\d{1,2}', _parse_datetime_int_value('minute')
+    if char == 's':
+        return r'\d{1,2}', _parse_datetime_int_value('second')
+    if char == 'S':
+        return rf'\d{{1,{num}}}', _parse_datetime_frac_seconds
+    if char in 'xX':
+        regex = _TZ_OFFSET_PATTERNS[num]
+        if char == 'X':
+            regex = f'(?:Z|{regex})'
+        return regex, _parse_datetime_offset
+    if char == 'Z':
+        if num <= 3:
+            return _TZ_OFFSET_PATTERNS[2], _parse_datetime_offset
+        if num == 5:
+            return _TZ_OFFSET_PATTERNS[3], _parse_datetime_offset
+        raise ValueError(
+            "Pattern field 'ZZZZ' (localized GMT offset) is not supported by parse_datetime",
+        )
+    raise NotImplementedError(f'Unhandled pattern field: {char!r}')
 
 
 class DateTimePattern:

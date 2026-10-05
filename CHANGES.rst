@@ -15,6 +15,9 @@ Features
 * Core: Add `babel.core.get_cldr_version()` by @akx in :gh:`1242`
 * Core: Use CLDR 47 by @tomasr8 in :gh:`1210`
 * Core: Use canonical IANA zone names in zone_territories by @akx in :gh:`1220`
+* Dates: Add `babel.dates.parse_datetime()` to parse datetimes with explicit LDML
+  patterns, localized month/weekday/day-period names, numeric timezone offsets,
+  and DST gap/overlap validation
 * Messages: Improve extract performance via ignoring directories early during os.walk by @akx in :gh:`968`
 * Messages: Merge in per-format keywords and auto_comments by @akx in :gh:`1243`
 * Messages: Update keywords for extraction of dpgettext and dnpgettext by @mardiros in :gh:`1235`

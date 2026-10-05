@@ -64,6 +64,8 @@ Basic Parsing
 
 .. autofunction:: parse_date
 
+.. autofunction:: parse_datetime
+
 .. autofunction:: parse_time
 
 .. autofunction:: parse_pattern
