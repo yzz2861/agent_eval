@@ -3,6 +3,20 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Feature
+
+  * Add a versioned, structured storage key encoding (``v2``) that
+    preserves the number, types and boundaries of all key components
+    (namespace, identifiers, amount, multiples and granularity) and
+    rejects values without a stable representation. The encoding can be
+    selected per call with ``RateLimitItem.key_for(..., encoding="v2")``
+    or for all operations of a strategy with the new ``key_encoding``
+    constructor argument. The legacy ``v1`` encoding remains the default
+    so existing rate limit windows are not reset on upgrade.
+
 v5.8.0
 ------
 Release Date: 2026-02-04
@@ -912,7 +926,6 @@ v1.0.0
 Release Date: 2015-01-08
 
 * Initial import of common rate limiting code from `Flask-Limiter <https://github.com/alisaifee/flask-limiter>`_
-
 
 
 

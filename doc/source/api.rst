@@ -7,6 +7,7 @@ API Reference
 .. autosummary::
 
    limits
+   limits.keys
    limits.strategies
    limits.storage
    limits.aio.strategies
@@ -181,6 +182,22 @@ declaring a :attr:`GRANULARITY`
 .. autoclass:: RateLimitItemPerDay
 .. autoclass:: RateLimitItemPerMonth
 .. autoclass:: RateLimitItemPerYear
+
+
+Key encodings
+=============
+
+.. currentmodule:: limits.keys
+
+Storage keys can be built with different, versioned encodings.
+The legacy ``v1`` encoding remains the default for backwards
+compatibility while the ``v2`` encoding preserves the number,
+types and boundaries of all key components.
+
+.. data:: DEFAULT_KEY_ENCODING
+.. data:: KEY_ENCODINGS
+.. autofunction:: encode_key
+.. autofunction:: validate_key_encoding
 
 
 Structures

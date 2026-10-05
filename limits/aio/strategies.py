@@ -10,6 +10,7 @@ from math import floor, inf
 
 from deprecated.sphinx import versionadded
 
+from ..keys import DEFAULT_KEY_ENCODING, KeyEncoding, validate_key_encoding
 from ..limits import RateLimitItem
 from ..storage import StorageTypes
 from ..typing import cast
@@ -19,9 +20,19 @@ from .storage.base import SlidingWindowCounterSupport
 
 
 class RateLimiter(ABC):
-    def __init__(self, storage: StorageTypes):
+    def __init__(
+        self, storage: StorageTypes, key_encoding: KeyEncoding = DEFAULT_KEY_ENCODING
+    ):
+        """
+        :param storage: the storage backend to use
+        :param key_encoding: the key encoding version used for **all**
+         storage operations of this limiter, so that a group of related
+         operations always addresses the same keys. Defaults to the
+         backwards compatible ``v1`` encoding. See :mod:`limits.keys`.
+        """
         assert isinstance(storage, Storage)
         self.storage: Storage = storage
+        self.key_encoding: KeyEncoding = validate_key_encoding(key_encoding)
 
     @abstractmethod
     async def hit(self, item: RateLimitItem, *identifiers: str, cost: int = 1) -> bool:
@@ -66,7 +77,9 @@ class RateLimiter(ABC):
         raise NotImplementedError
 
     async def clear(self, item: RateLimitItem, *identifiers: str) -> None:
-        return await self.storage.clear(item.key_for(*identifiers))
+        return await self.storage.clear(
+            item.key_for(*identifiers, encoding=self.key_encoding)
+        )
 
 
 class MovingWindowRateLimiter(RateLimiter):
@@ -74,7 +87,9 @@ class MovingWindowRateLimiter(RateLimiter):
     Reference: :ref:`strategies:moving window`
     """
 
-    def __init__(self, storage: StorageTypes) -> None:
+    def __init__(
+        self, storage: StorageTypes, key_encoding: KeyEncoding = DEFAULT_KEY_ENCODING
+    ) -> None:
         if not (
             hasattr(storage, "acquire_entry") or hasattr(storage, "get_moving_window")
         ):
@@ -82,7 +97,7 @@ class MovingWindowRateLimiter(RateLimiter):
                 "MovingWindowRateLimiting is not implemented for storage "
                 f"of type {storage.__class__}"
             )
-        super().__init__(storage)
+        super().__init__(storage, key_encoding)
 
     async def hit(self, item: RateLimitItem, *identifiers: str, cost: int = 1) -> bool:
         """
@@ -97,7 +112,10 @@ class MovingWindowRateLimiter(RateLimiter):
         """
 
         return await cast(MovingWindowSupport, self.storage).acquire_entry(
-            item.key_for(*identifiers), item.amount, item.get_expiry(), amount=cost
+            item.key_for(*identifiers, encoding=self.key_encoding),
+            item.amount,
+            item.get_expiry(),
+            amount=cost,
         )
 
     async def test(self, item: RateLimitItem, *identifiers: str, cost: int = 1) -> bool:
@@ -112,7 +130,7 @@ class MovingWindowRateLimiter(RateLimiter):
         :return: True if the rate limit is not depleted
         """
         res = await cast(MovingWindowSupport, self.storage).get_moving_window(
-            item.key_for(*identifiers),
+            item.key_for(*identifiers, encoding=self.key_encoding),
             item.amount,
             item.get_expiry(),
         )
@@ -133,7 +151,11 @@ class MovingWindowRateLimiter(RateLimiter):
         """
         window_start, window_items = await cast(
             MovingWindowSupport, self.storage
-        ).get_moving_window(item.key_for(*identifiers), item.amount, item.get_expiry())
+        ).get_moving_window(
+            item.key_for(*identifiers, encoding=self.key_encoding),
+            item.amount,
+            item.get_expiry(),
+        )
         reset = window_start + item.get_expiry()
 
         return WindowStats(reset, item.amount - window_items)
@@ -158,7 +180,7 @@ class FixedWindowRateLimiter(RateLimiter):
 
         return (
             await self.storage.incr(
-                item.key_for(*identifiers),
+                item.key_for(*identifiers, encoding=self.key_encoding),
                 item.get_expiry(),
                 amount=cost,
             )
@@ -178,7 +200,10 @@ class FixedWindowRateLimiter(RateLimiter):
         """
 
         return (
-            await self.storage.get(item.key_for(*identifiers)) < item.amount - cost + 1
+            await self.storage.get(
+                item.key_for(*identifiers, encoding=self.key_encoding)
+            )
+            < item.amount - cost + 1
         )
 
     async def get_window_stats(
@@ -194,9 +219,14 @@ class FixedWindowRateLimiter(RateLimiter):
         """
         remaining = max(
             0,
-            item.amount - await self.storage.get(item.key_for(*identifiers)),
+            item.amount
+            - await self.storage.get(
+                item.key_for(*identifiers, encoding=self.key_encoding)
+            ),
         )
-        reset = await self.storage.get_expiry(item.key_for(*identifiers))
+        reset = await self.storage.get_expiry(
+            item.key_for(*identifiers, encoding=self.key_encoding)
+        )
 
         return WindowStats(reset, remaining)
 
@@ -207,7 +237,9 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
     Reference: :ref:`strategies:sliding window counter`
     """
 
-    def __init__(self, storage: StorageTypes):
+    def __init__(
+        self, storage: StorageTypes, key_encoding: KeyEncoding = DEFAULT_KEY_ENCODING
+    ):
         if not hasattr(storage, "get_sliding_window") or not hasattr(
             storage, "acquire_sliding_window_entry"
         ):
@@ -215,7 +247,7 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
                 "SlidingWindowCounterRateLimiting is not implemented for storage "
                 f"of type {storage.__class__}"
             )
-        super().__init__(storage)
+        super().__init__(storage, key_encoding)
 
     def _weighted_count(
         self,
@@ -243,7 +275,7 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
         return await cast(
             SlidingWindowCounterSupport, self.storage
         ).acquire_sliding_window_entry(
-            item.key_for(*identifiers),
+            item.key_for(*identifiers, encoding=self.key_encoding),
             item.amount,
             item.get_expiry(),
             cost,
@@ -263,7 +295,9 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
 
         previous_count, previous_expires_in, current_count, _ = await cast(
             SlidingWindowCounterSupport, self.storage
-        ).get_sliding_window(item.key_for(*identifiers), item.get_expiry())
+        ).get_sliding_window(
+            item.key_for(*identifiers, encoding=self.key_encoding), item.get_expiry()
+        )
 
         return (
             self._weighted_count(
@@ -290,7 +324,7 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
             current_count,
             current_expires_in,
         ) = await cast(SlidingWindowCounterSupport, self.storage).get_sliding_window(
-            item.key_for(*identifiers), item.get_expiry()
+            item.key_for(*identifiers, encoding=self.key_encoding), item.get_expiry()
         )
 
         remaining = max(
@@ -321,7 +355,9 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
     async def clear(self, item: RateLimitItem, *identifiers: str) -> None:
         return await cast(
             SlidingWindowCounterSupport, self.storage
-        ).clear_sliding_window(item.key_for(*identifiers), item.get_expiry())
+        ).clear_sliding_window(
+            item.key_for(*identifiers, encoding=self.key_encoding), item.get_expiry()
+        )
 
 
 STRATEGIES = {

@@ -4,18 +4,9 @@ from __future__ import annotations
 
 from functools import total_ordering
 
+from limits.keys import DEFAULT_KEY_ENCODING, KeyEncoding, encode_key
+from limits.keys import safe_string as safe_string
 from limits.typing import ClassVar, NamedTuple, cast
-
-
-def safe_string(value: bytes | str | int | float) -> str:
-    """
-    normalize a byte/str/int or float to a str
-    """
-
-    if isinstance(value, bytes):
-        return value.decode()
-
-    return str(value)
 
 
 class Granularity(NamedTuple):
@@ -103,25 +94,33 @@ class RateLimitItem(metaclass=RateLimitItemMeta):
 
         return self.GRANULARITY.seconds * self.multiples
 
-    def key_for(self, *identifiers: bytes | str | int | float) -> str:
+    def key_for(
+        self,
+        *identifiers: bytes | str | int | float,
+        encoding: KeyEncoding | None = None,
+    ) -> str:
         """
         Constructs a key for the current limit and any additional
         identifiers provided.
 
         :param identifiers: a list of strings to append to the key
-        :return: a string key identifying this resource with
-         each identifier separated with a '/' delimiter.
+        :param encoding: the key encoding version to use. The default
+         ``v1`` encoding separates each identifier with a '/' delimiter
+         and is kept for backwards compatibility. The ``v2`` encoding
+         preserves the number, types and boundaries of all key
+         components (namespace, identifiers, amount, multiples and
+         granularity) and rejects values without a stable
+         representation. See :mod:`limits.keys` for details.
+        :return: a string key identifying this resource
         """
-        remainder = "/".join(
-            [safe_string(k) for k in identifiers]
-            + [
-                safe_string(self.amount),
-                safe_string(self.multiples),
-                self.GRANULARITY.name,
-            ]
+        return encode_key(
+            encoding or DEFAULT_KEY_ENCODING,
+            self.namespace,
+            identifiers,
+            self.amount,
+            self.multiples,
+            self.GRANULARITY.name,
         )
-
-        return f"{self.namespace}/{remainder}"
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, RateLimitItem):
