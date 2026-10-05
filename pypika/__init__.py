@@ -66,6 +66,18 @@ from pypika.enums import (
 )
 
 # noinspection PyUnresolvedReferences
+from pypika.json_table import (
+    JSONTable,
+    JSONTableColumn,
+    JSONTableDefault,
+    JSONTableExistsColumn,
+    JSONTableNested,
+    JSONTableOnEmptyError,
+    JSONTableOrdinalityColumn,
+    JSONTablePathColumn,
+)
+
+# noinspection PyUnresolvedReferences
 from pypika.queries import (
     AliasedQuery,
     Column,
@@ -138,6 +150,14 @@ __all__ = (
     'DatePart',
     'JoinType',
     'Order',
+    'JSONTable',
+    'JSONTableColumn',
+    'JSONTableDefault',
+    'JSONTableExistsColumn',
+    'JSONTableNested',
+    'JSONTableOnEmptyError',
+    'JSONTableOrdinalityColumn',
+    'JSONTablePathColumn',
     'AliasedQuery',
     'Query',
     'Schema',
