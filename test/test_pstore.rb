@@ -330,4 +330,113 @@ class PStoreTest < Test::Unit::TestCase
     assert_equal(@pstore_file, store.path)
     assert_equal("bar", store.transaction(true) { store[:foo] })
   end
+
+  def test_thread_lock_timeout
+    pstore = PStore.new(second_file, true)
+    ready = Thread::Queue.new
+    release = Thread::Queue.new
+    holder = Thread.new do
+      pstore.transaction do
+        ready << true
+        release.pop
+      end
+    end
+    ready.pop
+
+    executed = false
+    error = assert_raise(PStore::LockTimeoutError) do
+      pstore.transaction(lock_timeout: 0.1) { executed = true }
+    end
+    assert_equal(:thread, error.lock_type)
+    assert_equal(false, executed)
+
+    release << true
+    holder.join
+    # The timed-out call left no lock behind.
+    assert_equal("ok", pstore.transaction { pstore[:after] = "ok" })
+  ensure
+    release << true if release && holder&.alive?
+    holder&.join
+    File.unlink(second_file) rescue nil
+  end
+
+  def test_file_lock_timeout
+    @pstore.transaction { @pstore[:foo] = "bar" }
+    with_externally_locked_file(@pstore_file) do
+      executed = false
+      error = assert_raise(PStore::LockTimeoutError) do
+        @pstore.transaction(lock_timeout: 0.1) { executed = true }
+      end
+      assert_equal(:file, error.lock_type)
+      assert_equal(false, executed)
+    end
+    # The timed-out call left no lock behind.
+    assert_equal("bar", @pstore.transaction(true) { @pstore[:foo] })
+  end
+
+  def test_file_lock_timeout_in_read_only_mode
+    @pstore.transaction { @pstore[:foo] = "bar" }
+    with_externally_locked_file(@pstore_file) do
+      executed = false
+      error = assert_raise(PStore::LockTimeoutError) do
+        @pstore.transaction(true, lock_timeout: 0.1) { executed = true }
+      end
+      assert_equal(:file, error.lock_type)
+      assert_equal(false, executed)
+    end
+  end
+
+  def test_file_lock_timeout_releases_thread_lock
+    pstore = PStore.new(second_file, true)
+    with_externally_locked_file(second_file) do
+      assert_raise(PStore::LockTimeoutError) do
+        pstore.transaction(lock_timeout: 0.1) { flunk("block must not run") }
+      end
+    end
+    # Failing to acquire the file lock must not leak the thread lock.
+    assert_equal("ok", pstore.transaction { pstore[:after] = "ok" })
+  ensure
+    File.unlink(second_file) rescue nil
+  end
+
+  def test_nested_transaction_with_lock_timeout_raises_error
+    pstore = PStore.new(second_file, true)
+    error = assert_raise(PStore::Error) do
+      pstore.transaction(lock_timeout: 5) do
+        pstore.transaction(lock_timeout: 5) { }
+      end
+    end
+    assert_equal("nested transaction", error.message)
+  ensure
+    File.unlink(second_file) rescue nil
+  end
+
+  def test_lock_timeout_succeeds_without_contention
+    assert_equal(1, @pstore.transaction(lock_timeout: 0) { 1 })
+    pstore = PStore.new(second_file, true)
+    assert_equal(2, pstore.transaction(lock_timeout: 0) { 2 })
+  ensure
+    File.unlink(second_file) rescue nil
+  end
+
+  # Holds an exclusive flock on +path+ in a child process while the
+  # block runs. Pipes are used as a handshake so no sleeping is involved.
+  def with_externally_locked_file(path)
+    child_stdin = IO.pipe
+    child_stdout = IO.pipe
+    pid = Process.spawn(
+      RbConfig.ruby, "-e",
+      "f = File.open(ARGV[0], #{File::RDWR | File::CREAT | File::BINARY}); " +      "f.flock(File::LOCK_EX); puts 'locked'; STDOUT.flush; STDIN.gets",
+      path,
+      in: child_stdin[0], out: child_stdout[1]
+    )
+    child_stdin[0].close
+    child_stdout[1].close
+    child_stdout[0].gets # Wait until the child holds the lock.
+    yield
+  ensure
+    child_stdin[1].close if child_stdin && !child_stdin[1].closed?
+    child_stdout[0].close if child_stdout && !child_stdout[0].closed?
+    Process.wait(pid) if pid
+  end
 end

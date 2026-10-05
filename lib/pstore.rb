@@ -339,6 +339,22 @@ class PStore
   class Error < StandardError
   end
 
+  # The error type thrown when a transaction cannot acquire a lock
+  # before the given +lock_timeout+ expires.
+  #
+  # Attribute #lock_type indicates which lock could not be acquired
+  # in time: +:thread+ for the in-process thread lock,
+  # or +:file+ for the file lock of the underlying store file.
+  class LockTimeoutError < Error
+    # Returns +:thread+ or +:file+.
+    attr_reader :lock_type
+
+    def initialize(lock_type) # :nodoc:
+      @lock_type = lock_type
+      super("timed out waiting for the #{lock_type} lock")
+    end
+  end
+
   # Whether \PStore should do its best to prevent file corruptions,
   # even when an unlikely error (such as memory-error or filesystem error) occurs:
   #
@@ -550,11 +566,24 @@ class PStore
   # With argument +read_only+ as +true+, the block may not include calls
   # to #transaction, #[]=, or #delete.
   #
+  # Optional keyword argument +lock_timeout+ limits, in seconds,
+  # how long the call waits for the locks that guard the transaction
+  # (the in-process thread lock and the lock of the underlying file).
+  # A single monotonic deadline is computed when the call begins and is
+  # shared by both locks, so the total wait never exceeds +lock_timeout+.
+  # If either lock cannot be acquired before the deadline,
+  # PStore::LockTimeoutError is raised, the block is not executed,
+  # and no lock is left held.
+  # The default +nil+ means waiting indefinitely.
+  #
   # Raises an exception if called within a transaction block.
-  def transaction(read_only = false)  # :yields:  pstore
+  def transaction(read_only = false, lock_timeout: nil)  # :yields:  pstore
     value = nil
+    deadline = lock_timeout && monotonic_clock + lock_timeout
     if !@thread_safe
       raise PStore::Error, "nested transaction" unless @lock.try_lock
+    elsif deadline
+      acquire_thread_lock(deadline)
     else
       begin
         @lock.lock
@@ -565,7 +594,7 @@ class PStore
     begin
       @rdonly = read_only
       @abort = false
-      file = open_and_lock_file(@filename, read_only)
+      file = open_and_lock_file(@filename, read_only, deadline)
       if file
         begin
           @table, checksum, original_data_size = load_data(file, read_only)
@@ -596,6 +625,25 @@ class PStore
   private
   # :stopdoc:
 
+  LOCK_WAIT_INTERVAL = 0.001 # :nodoc:
+
+  def monotonic_clock
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  # Acquire the thread lock, waiting no longer than +deadline+
+  # (a monotonic clock value). Raises PStore::LockTimeoutError
+  # if the deadline passes before the lock is acquired.
+  def acquire_thread_lock(deadline)
+    raise PStore::Error, "nested transaction" if @lock.owned?
+    until @lock.try_lock
+      if monotonic_clock >= deadline
+        raise LockTimeoutError.new(:thread)
+      end
+      sleep LOCK_WAIT_INTERVAL
+    end
+  end
+
   # Constant for relieving Ruby's garbage collector.
   CHECKSUM_ALGO = %w[SHA512 SHA384 SHA256 SHA1 RMD160 MD5].each do |algo|
     begin
@@ -618,9 +666,13 @@ class PStore
   # The opened File object will be returned. If _read_only_ is true,
   # and the file does not exist, then nil will be returned.
   #
+  # If _deadline_ (a monotonic clock value) is given, the file lock
+  # is attempted without blocking past that time; PStore::LockTimeoutError
+  # is raised if the lock cannot be acquired in time.
+  #
   # All exceptions are propagated.
   #
-  def open_and_lock_file(filename, read_only)
+  def open_and_lock_file(filename, read_only, deadline = nil)
     filename = File.path(filename)
     loop do
       if read_only
@@ -634,13 +686,30 @@ class PStore
       end
       current = false
       begin
-        file.flock(read_only ? File::LOCK_SH : File::LOCK_EX)
+        if deadline
+          lock_file_with_deadline(file, read_only, deadline)
+        else
+          file.flock(read_only ? File::LOCK_SH : File::LOCK_EX)
+        end
         # An atomic save may have replaced the file while this lock was pending.
         current = File.identical?(file, filename)
         return file if current
       ensure
         file.close unless current
       end
+    end
+  end
+
+  # Lock the given file, waiting no longer than +deadline+
+  # (a monotonic clock value). Raises PStore::LockTimeoutError
+  # if the deadline passes before the lock is acquired.
+  def lock_file_with_deadline(file, read_only, deadline)
+    mode = (read_only ? File::LOCK_SH : File::LOCK_EX) | File::LOCK_NB
+    until file.flock(mode)
+      if monotonic_clock >= deadline
+        raise LockTimeoutError.new(:file)
+      end
+      sleep LOCK_WAIT_INTERVAL
     end
   end
 
