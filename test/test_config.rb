@@ -1267,6 +1267,33 @@ class TestConfigFileWithFakeEnv < PumaTest
     assert_equal conf.options[:enable_keep_alives], false
   end
 
+  def test_connection_fair_scheduling_defaults_to_disabled
+    conf = Puma::Configuration.new
+    conf.clamp
+
+    assert_equal false, conf.options[:connection_fair_scheduling]
+    assert_equal 1, conf.options[:connection_requests_per_round]
+  end
+
+  def test_connection_fair_scheduling_options
+    conf = Puma::Configuration.new do |c|
+      c.connection_fair_scheduling true
+      c.connection_requests_per_round 3
+    end
+    conf.clamp
+
+    assert_equal true, conf.options[:connection_fair_scheduling]
+    assert_equal 3, conf.options[:connection_requests_per_round]
+  end
+
+  def test_connection_requests_per_round_must_be_positive
+    assert_raises ArgumentError do
+      Puma::Configuration.new do |c|
+        c.connection_requests_per_round 0
+      end
+    end
+  end
+
   def test_on_booted_deprecated_alias_works
     ran = false
     err = capture_io do

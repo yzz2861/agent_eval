@@ -75,6 +75,7 @@ module Puma
       env["puma.mark_as_io_bound"] = -> { processor.mark_as_io_thread! }
 
       begin
+        client.fair_scheduling_remaining -= 1 if @connection_fair_scheduling
         status, headers, app_body = @thread_pool.with_force_shutdown do
           @app.call(env)
         end

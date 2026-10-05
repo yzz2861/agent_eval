@@ -6,6 +6,7 @@ require_relative 'thread_pool'
 require_relative 'const'
 require_relative 'log_writer'
 require_relative 'events'
+require_relative 'connection_scheduler'
 require_relative 'null_io'
 require_relative 'reactor'
 require_relative 'client'
@@ -47,6 +48,7 @@ module Puma
     attr_reader :events
     attr_reader :min_threads, :max_threads  # for #stats
     attr_reader :requests_count             # @version 5.0.0
+    attr_reader :connection_scheduler
 
     # @todo the following may be deprecated in the future
     attr_reader :auto_trim_time, :early_hints, :first_data_timeout,
@@ -83,6 +85,7 @@ module Puma
       @thread = nil
       @thread_pool = nil
       @reactor = nil
+      @connection_scheduler = nil
 
       @env_set_http_version = nil
 
@@ -102,6 +105,8 @@ module Puma
       @min_threads               = @options[:min_threads]
       @max_threads               = @options[:max_threads]
       @queue_requests            = @options[:queue_requests]
+      @connection_fair_scheduling   = @options[:connection_fair_scheduling] && @queue_requests
+      @connection_requests_per_round = Integer(@options[:connection_requests_per_round] || 1)
       @max_keep_alive            = @options[:max_keep_alive]
       @enable_keep_alives        = @options[:enable_keep_alives]
       @enable_keep_alives      &&= @queue_requests
@@ -264,6 +269,14 @@ module Puma
         process_client(processor, client)
       end
 
+      if @connection_fair_scheduling
+        @connection_scheduler = ConnectionScheduler.new(
+          @thread_pool,
+          @connection_requests_per_round
+        )
+        @thread_pool.ready_todo = @connection_scheduler.work_queue
+      end
+
       if @queue_requests
         @reactor = Reactor.new(@io_selector_backend) { |c|
           # Inversion of control, the reactor is calling a method on the server when it
@@ -322,7 +335,11 @@ module Puma
     def reactor_wakeup(client)
       shutdown = !@queue_requests
       if client.try_to_finish || (shutdown && !client.can_close?)
-        @thread_pool << client
+        if @connection_scheduler && !shutdown
+          @connection_scheduler.add(client)
+        else
+          @thread_pool << client
+        end
       elsif shutdown || client.timeout == 0
         client.timeout!
       else
@@ -391,12 +408,14 @@ module Puma
 
                 unless shutting_down?
                   if @queue_requests
-                    if @cluster_accept_loop_delay.on? && (busy_threads_plus_todo = pool.busy_threads) > 0
-                      delay = @cluster_accept_loop_delay.calculate(
-                        max_threads: @max_threads,
-                        busy_threads_plus_todo: busy_threads_plus_todo
-                      )
-                      sleep(delay)
+                    unless @connection_fair_scheduling
+                      if @cluster_accept_loop_delay.on? && (busy_threads_plus_todo = pool.busy_threads) > 0
+                        delay = @cluster_accept_loop_delay.calculate(
+                          max_threads: @max_threads,
+                          busy_threads_plus_todo: busy_threads_plus_todo
+                        )
+                        sleep(delay)
+                      end
                     end
                   else
                     pool.wait_until_not_full
@@ -412,7 +431,14 @@ module Puma
 
                 client = new_client(io, sock)
                 client.send(addr_send_name, addr_value) if addr_value
-                pool << client
+                if @connection_fair_scheduling
+                  client.set_timeout(@first_data_timeout)
+                  unless @reactor.add(client)
+                    close_client_safely(client)
+                  end
+                else
+                  pool << client
+                end
               end
             end
           rescue IOError, Errno::EBADF
@@ -429,6 +455,7 @@ module Puma
         if queue_requests
           @queue_requests = false
           @reactor.shutdown
+          @connection_scheduler&.drain
         end
 
         graceful_shutdown if @status == :stop || @status == :restart
@@ -491,8 +518,8 @@ module Puma
     # Return true if one or more requests were processed.
     def process_client(processor, client)
       close_socket = true
-
       requests = 0
+      scheduled = false
 
       begin
         if @queue_requests && !client.eagerly_finish
@@ -530,9 +557,20 @@ module Puma
             end
 
             if next_request_ready
+              if @connection_fair_scheduling
+                if client.fair_scheduling_remaining > 0
+                  can_loop = true
+                else
+                  if @connection_scheduler.add(client, releasing: true)
+                    close_socket = false
+                    scheduled = true
+                  else
+                    close_socket = true
+                  end
+                end
               # When Puma has spare threads, allow this one to be monopolized
               # Perf optimization for https://github.com/puma/puma/issues/3788
-              if @thread_pool.waiting > 0
+              elsif @thread_pool.waiting > 0
                 can_loop = true
               else
                 @thread_pool.with_mutex do
@@ -556,6 +594,7 @@ module Puma
         # The ensure tries to close +client+ down
         requests > 0
       ensure
+        @connection_scheduler.release if @connection_fair_scheduling && !scheduled
         client.io_buffer.reset
 
         close_client_safely(client) if close_socket
@@ -706,6 +745,7 @@ module Puma
     # @return [Hash] hash containing stat info from `Server` and `ThreadPool`
     def stats
       stats = @thread_pool&.stats || {}
+      stats[:backlog] += @connection_scheduler.size if @thread_pool && @connection_scheduler
       stats[:max_threads]    = @max_threads
       stats[:requests_count] = @requests_count
       stats[:reactor_max] = @reactor.reactor_max if @reactor

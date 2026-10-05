@@ -1928,6 +1928,117 @@ class TestPumaServer < PumaTest
     assert_equal selector.backend, backend
   end
 
+  def test_connection_fair_scheduling_does_not_charge_parse_errors
+    started = Queue.new
+    @server = Puma::Server.new(
+      ->(_env) { started << true; [200, {}, ['ok']] },
+      @events,
+      log_writer: @log_writer,
+      min_threads: 1,
+      max_threads: 1,
+      connection_fair_scheduling: true
+    )
+    @server.run
+    @pool = @server.instance_variable_get(:@thread_pool)
+
+    client_io, test_io = Socket.pair(:UNIX, :STREAM)
+    client = Puma::Client.new(client_io, { Puma::Const::REMOTE_ADDR => '127.0.0.1' })
+    client.env_set_http_version = false
+    client.supported_http_methods =
+      Puma::Const::SUPPORTED_HTTP_METHODS.sort.product([nil]).to_h.freeze
+    client.allow_underscore_headers = true
+    client.set_timeout(1)
+    @server.instance_variable_get(:@reactor).add(client)
+    @ios_to_close << test_io
+
+    test_io << "GET / HTTP/1.1\r\nBad Header\r\n\r\n"
+    test_io.wait_readable(5)
+    test_io.read_nonblock(65_536)
+
+    second_client_io, second_test_io = Socket.pair(:UNIX, :STREAM)
+    second_client = Puma::Client.new(second_client_io, { Puma::Const::REMOTE_ADDR => '127.0.0.1' })
+    second_client.env_set_http_version = false
+    second_client.supported_http_methods =
+      Puma::Const::SUPPORTED_HTTP_METHODS.sort.product([nil]).to_h.freeze
+    second_client.allow_underscore_headers = true
+    second_client.set_timeout(1)
+    test_io.close
+    second_test_io << "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    @server.instance_variable_get(:@reactor).add(second_client)
+    @ios_to_close << second_test_io
+
+    assert_equal true, Timeout.timeout(5) { started.pop }
+    assert_equal 0, second_client.fair_scheduling_remaining
+  end
+
+  def test_connection_fair_scheduling_round_robins_ready_connections
+    started = Queue.new
+    continue = Queue.new
+    sparse_pending = Queue.new
+    allow_busy_three = Queue.new
+    sparse_two_pending = Queue.new
+
+    server_run(
+      min_threads: 1,
+      max_threads: 1,
+      connection_fair_scheduling: true,
+      connection_requests_per_round: 1
+    ) do |env|
+      path = env['PATH_INFO']
+      started << path
+      continue.pop if path == '/busy/2'
+      allow_busy_three.pop if path == '/sparse/2'
+
+      [200, {}, [path]]
+    end
+    scheduler = @server.connection_scheduler
+    scheduler.define_singleton_method(:add) do |client, releasing: false|
+      result = super(client, releasing: releasing)
+      sparse_pending << true if client.env['PATH_INFO'] == '/sparse/1'
+      sparse_two_pending << true if client.env['PATH_INFO'] == '/sparse/2'
+      result
+    end
+
+    request = lambda do |path|
+      "GET #{path} HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n"
+    end
+    read_responses = lambda do |socket, count|
+      responses = +''
+      Timeout.timeout(5) do
+        until responses.count(RESP_SPLIT) == count
+          socket.wait_readable
+          chunk = socket.read_nonblock(65_536, exception: false)
+          responses << chunk unless chunk == :wait_readable
+        end
+      end
+      responses
+    end
+
+    busy = new_socket
+    busy << request.call('/busy/1') + request.call('/busy/2') + request.call('/busy/3')
+    assert_equal '/busy/1', Timeout.timeout(5) { started.pop }
+    assert_equal '/busy/2', Timeout.timeout(5) { started.pop }
+
+    sparse = new_socket
+    sparse << request.call('/sparse/1')
+    Timeout.timeout(5) { sparse_pending.pop }
+    continue << true
+    assert_equal '/sparse/1', Timeout.timeout(5) { started.pop }
+
+    sparse << request.call('/sparse/2')
+    Timeout.timeout(5) { sparse_two_pending.pop }
+    allow_busy_three << true
+    assert_equal '/busy/3', Timeout.timeout(5) { started.pop }
+    assert_equal '/sparse/2', Timeout.timeout(5) { started.pop }
+
+    busy_responses = read_responses.call(busy, 3)
+    sparse_responses = read_responses.call(sparse, 2)
+    assert_equal %W[/busy/1 /busy/2 /busy/3],
+      busy_responses.split(RESP_SPLIT).values_at(1, 3, 5)
+    assert_equal %W[/sparse/1 /sparse/2],
+      sparse_responses.split(RESP_SPLIT).values_at(1, 3)
+  end
+
   def test_drain_on_shutdown(drain=true)
     num_connections = 10
 

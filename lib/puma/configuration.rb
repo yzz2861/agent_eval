@@ -136,6 +136,8 @@ module Puma
       allow_underscore_headers: true,
       auto_trim_time: 30,
       binds: ['tcp://[::]:9292'.freeze],
+      connection_fair_scheduling: false,
+      connection_requests_per_round: 1,
       debug: false,
       early_hints: nil,
       enable_keep_alives: true,

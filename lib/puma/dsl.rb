@@ -1326,6 +1326,38 @@ module Puma
       @options[:queue_requests] = answer
     end
 
+    # When `true`, requests from keep-alive connections with complete requests are
+    # scheduled round-robin by connection rather than allowing one connection to
+    # consume back-to-back requests continuously.
+    #
+    # The default is +false+.
+    #
+    # @example
+    #   connection_fair_scheduling true
+    #
+    # @see connection_requests_per_round
+    # @see Puma::ConnectionScheduler
+    def connection_fair_scheduling(enabled=true)
+      @options[:connection_fair_scheduling] = enabled
+    end
+
+    # The maximum number of requests from one connection that may be delivered
+    # to the application consecutively before it is moved to the back of the
+    # ready-connection queue.
+    #
+    # The default is +1+.
+    #
+    # @example
+    #   connection_requests_per_round 3
+    #
+    # @see connection_fair_scheduling
+    def connection_requests_per_round(number)
+      number = Integer(number)
+      raise ArgumentError, "connection_requests_per_round must be greater than 0" unless number > 0
+
+      @options[:connection_requests_per_round] = number
+    end
+
     # When a shutdown is requested, the backtraces of all the
     # threads will be written to $stdout. This can help figure
     # out why shutdown is hanging.

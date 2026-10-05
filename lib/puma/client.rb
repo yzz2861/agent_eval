@@ -80,7 +80,8 @@ module Puma
     attr_writer :peerip, :http_content_length_limit, :supported_http_methods,
                 :allow_underscore_headers
 
-    attr_accessor :remote_addr_header, :listener, :env_set_http_version
+    attr_accessor :remote_addr_header, :listener, :env_set_http_version,
+                  :fair_scheduling_remaining
 
     def initialize(io, env=nil)
       @io = io

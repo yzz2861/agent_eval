@@ -90,6 +90,7 @@ module Puma
       @not_full = ConditionVariable.new
       @mutex = Mutex.new
       @todo = Queue.new
+      @ready_todo = nil
 
       @backlog_max = 0
       @spawned = 0
@@ -115,6 +116,7 @@ module Puma
       @auto_trim_time = options[:auto_trim_time]
 
       @shutdown = false
+      @active = 0
 
       @trim_requested = 0
       @out_of_band_pending = false
@@ -147,7 +149,7 @@ module Puma
         { backlog: @todo.size,
           running: @spawned,
           pool_capacity: pool_capacity,
-          busy_threads: @spawned - @waiting + @todo.size,
+          busy_threads: @active + @todo.size + (@ready_todo&.size || 0),
           io_threads: @processors.count(&:marked_as_io_thread?),
           backlog_max: temp
         }
@@ -172,13 +174,13 @@ module Puma
 
     # @!attribute [r] pool_capacity
     def pool_capacity
-      (waiting + (@max - spawned)).clamp(0, Float::INFINITY)
+      ((waiting + (@max - spawned)) - (@ready_todo&.size || 0)).clamp(0, Float::INFINITY)
     end
 
     # @!attribute [r] busy_threads
     # @version 5.0.0
     def busy_threads
-      with_mutex { @spawned - @waiting + @todo.size }
+      with_mutex { @active + @todo.size + (@ready_todo&.size || 0) }
     end
 
     # :nodoc:
@@ -203,6 +205,7 @@ module Puma
 
         while true
           work = nil
+          next_work = nil
 
           mutex.synchronize do
             if processor.marked_as_io_thread?
@@ -218,7 +221,7 @@ module Puma
               end
             end
 
-            while todo.empty?
+            while todo.empty? && (@ready_todo.nil? || @ready_todo.empty?)
               if @trim_requested > 0
                 @trim_requested -= 1
                 @spawned -= 1
@@ -240,13 +243,16 @@ module Puma
               end
             end
 
-            work = todo.shift
+            work = @ready_todo && !@ready_todo.empty? ? @ready_todo.pop(true) : todo.shift
           end
 
           begin
+            mutex.synchronize { @active += 1 }
             @out_of_band_pending = true if block.call(processor, work)
           rescue Exception => e
             STDERR.puts "Error reached top of thread-pool: #{e.message} (#{e.class})"
+          ensure
+            mutex.synchronize { @active -= 1 }
           end
         end
       end
@@ -361,6 +367,37 @@ module Puma
         @not_empty.signal
       end
       self
+    end
+
+    def ready_todo=(queue)
+      with_mutex do
+        @ready_todo = queue
+      end
+    end
+
+    def ready_push(work, releasing: false)
+      with_mutex do
+        return false if @shutdown
+
+        active = releasing ? @active - 1 : @active
+        if @ready_todo && releasing &&
+            active + @todo.size + @ready_todo.size < @max
+          @ready_todo << work
+        elsif @waiting > @todo.size
+          @todo << work
+        elsif can_spawn_processor?
+          @todo << work
+          spawn_thread
+        else
+          return false
+        end
+
+        size = @todo.size + (@ready_todo&.size || 0)
+        @backlog_max = size if size > @backlog_max
+        @not_empty.signal
+      end
+
+      true
     end
 
     def spawn_thread_if_needed # :nodoc:
