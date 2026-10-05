@@ -9,6 +9,7 @@
 # See PStore for documentation.
 
 require "digest"
+require "json"
 
 # \PStore implements a file based persistence mechanism based on a Hash.
 # User code can store hierarchies of Ruby objects (values)
@@ -72,6 +73,42 @@ require "digest"
 # The objects are stored and retrieved using
 # module Marshal, which means that certain objects cannot be added to the store;
 # see {Marshal::dump}[https://docs.ruby-lang.org/en/master/Marshal.html#method-c-dump].
+#
+# == Storage Formats
+#
+# By default, a store file is written with Marshal (see above).
+# Marshal can serialize almost any Ruby object, but its output is opaque
+# and loading it may instantiate arbitrary Ruby classes,
+# which is not suitable for untrusted data.
+#
+# As an alternative, a store may use an optional, typed JSON format
+# that is human-readable, inspectable, and never instantiates
+# arbitrary Ruby classes when loading:
+#
+#   store = PStore.new('t.store', format: :json)
+#
+# The JSON format supports exactly these kinds of objects:
+#
+# - +nil+, +true+, and +false+.
+# - Strings.
+# - Symbols.
+# - Integers.
+# - Finite floats (NaN and infinities are rejected).
+# - Arrays of supported objects.
+# - Hashes whose keys and values are supported objects;
+#   string keys and symbol keys are kept distinct.
+#
+# Any other object is rejected with PStore::Error,
+# as is any object graph containing circular references.
+# Files in the JSON format carry a format version,
+# and decoding enforces limits on nesting depth and total node count;
+# see PStore::JSONFormat.
+#
+# A store opened with +format: :json+ does not read Marshal files.
+# An existing Marshal file can only be converted through the explicit
+# migration entry point PStore.migrate_to_json, which fully validates
+# the data before atomically replacing the file;
+# if validation fails, the original file is left untouched.
 #
 # == Entries
 #
@@ -339,6 +376,203 @@ class PStore
   class Error < StandardError
   end
 
+  # The default on-disk format, using module Marshal.
+  FORMAT_MARSHAL = :marshal
+
+  # The optional typed JSON on-disk format; see PStore::JSONFormat.
+  FORMAT_JSON = :json
+
+  # :stopdoc:
+  #
+  # Implementation of the optional typed JSON storage format.
+  #
+  # A file in this format is a JSON object envelope:
+  #
+  #   {"format": "pstore-json", "version": 1, "data": <node>}
+  #
+  # where +data+ is the stored Hash, encoded as a typed node.
+  # Nodes map to JSON as follows:
+  #
+  # - +nil+, +true+, +false+, Integer, finite Float, and String
+  #   map to their native JSON counterparts.
+  # - Array maps to a JSON array of encoded elements.
+  # - Symbol maps to a tagged object:
+  #   <tt>{"__pstore_type__": "symbol", "value": <name>}</tt>.
+  # - Hash maps to a tagged object holding an array of encoded
+  #   key/value pairs, so that string keys and symbol keys
+  #   (and any other supported key types) stay distinct:
+  #   <tt>{"__pstore_type__": "hash", "entries": [[k, v], ...]}</tt>.
+  #
+  # Decoding never instantiates arbitrary Ruby classes,
+  # and is bounded by MAX_DEPTH and MAX_NODES.
+  module JSONFormat
+    FORMAT_NAME = "pstore-json"
+    FORMAT_VERSION = 1
+
+    TYPE_TAG = "__pstore_type__"
+    SYMBOL_TAG = "symbol"
+    HASH_TAG = "hash"
+    TAG_VALUE = "value"
+    TAG_ENTRIES = "entries"
+
+    # Maximum nesting depth accepted when decoding.
+    MAX_DEPTH = 100
+    # Maximum total number of nodes accepted when decoding.
+    MAX_NODES = 1_000_000
+
+    NOT_JSON_MESSAGE =
+      "PStore file is not in JSON format " \
+      "(migrate a Marshal file with PStore.migrate_to_json)"
+
+    module_function
+
+    # Returns the JSON text for the given table Hash.
+    # Raises PStore::Error if the table contains unsupported objects
+    # or circular references.
+    def encode_table(table)
+      envelope = {
+        "format" => FORMAT_NAME,
+        "version" => FORMAT_VERSION,
+        "data" => encode_value(table, {}, 1),
+      }
+      JSON.generate(envelope)
+    rescue JSON::GeneratorError => error
+      raise PStore::Error, "cannot encode value in JSON format: #{error.message}"
+    end
+
+    # Returns the table Hash stored in the given JSON text (or IO).
+    # Raises PStore::Error if the content is not a valid JSON format
+    # file, has an unsupported version, is malformed,
+    # or exceeds the decoding limits.
+    def decode_table(content)
+      content = content.read if content.respond_to?(:read)
+      content = content.dup.force_encoding(Encoding::UTF_8)
+      begin
+        root = JSON.parse(content, max_nesting: MAX_DEPTH + 1)
+      rescue JSON::NestingError
+        raise PStore::Error,
+              "PStore JSON file exceeds the depth limit of #{MAX_DEPTH}"
+      rescue JSON::ParserError
+        raise PStore::Error, NOT_JSON_MESSAGE
+      end
+      unless root.is_a?(Hash) && root["format"] == FORMAT_NAME
+        raise PStore::Error, NOT_JSON_MESSAGE
+      end
+      unless root["version"] == FORMAT_VERSION
+        raise PStore::Error,
+              "unsupported PStore JSON format version: #{root["version"].inspect}"
+      end
+      table = decode_value(root["data"], 1, [0])
+      raise PStore::Error, "PStore file seems to be corrupted." unless table.is_a?(Hash)
+      table
+    end
+
+    # Returns true if the given string looks like a JSON format file.
+    def envelope?(data)
+      root = JSON.parse(data.dup.force_encoding(Encoding::UTF_8))
+      root.is_a?(Hash) && root["format"] == FORMAT_NAME
+    rescue JSON::ParserError, TypeError
+      false
+    end
+
+    def encode_value(value, seen, depth)
+      if depth > MAX_DEPTH
+        raise PStore::Error,
+              "cannot store object graph deeper than #{MAX_DEPTH} levels in JSON format"
+      end
+      case value
+      when nil, true, false, Integer, String
+        value
+      when Float
+        unless value.finite?
+          raise PStore::Error,
+                "cannot store non-finite Float #{value.inspect} in JSON format"
+        end
+        value
+      when Symbol
+        {TYPE_TAG => SYMBOL_TAG, TAG_VALUE => value.name}
+      when Array
+        encode_container(value, seen) do
+          value.map {|element| encode_value(element, seen, depth + 1) }
+        end
+      when Hash
+        entries = encode_container(value, seen) do
+          value.map do |key, element|
+            [encode_value(key, seen, depth + 1), encode_value(element, seen, depth + 1)]
+          end
+        end
+        {TYPE_TAG => HASH_TAG, TAG_ENTRIES => entries}
+      else
+        raise PStore::Error, "cannot store #{value.class} in JSON format"
+      end
+    end
+
+    def encode_container(value, seen)
+      id = value.__id__
+      if seen[id]
+        raise PStore::Error, "cannot store circular references in JSON format"
+      end
+      seen[id] = true
+      begin
+        yield
+      ensure
+        seen.delete(id)
+      end
+    end
+
+    def decode_value(node, depth, budget)
+      budget[0] += 1
+      if budget[0] > MAX_NODES
+        raise PStore::Error,
+              "PStore JSON file exceeds the limit of #{MAX_NODES} nodes"
+      end
+      if depth > MAX_DEPTH
+        raise PStore::Error,
+              "PStore JSON file exceeds the depth limit of #{MAX_DEPTH}"
+      end
+      case node
+      when nil, true, false, Integer, Float, String
+        node
+      when Array
+        node.map {|element| decode_value(element, depth + 1, budget) }
+      when Hash
+        decode_tagged_node(node, depth, budget)
+      else
+        raise PStore::Error, "unexpected JSON value in PStore file"
+      end
+    end
+
+    def decode_tagged_node(node, depth, budget)
+      case node[TYPE_TAG]
+      when SYMBOL_TAG
+        name = node[TAG_VALUE]
+        unless node.size == 2 && name.is_a?(String)
+          raise PStore::Error, "malformed symbol node in PStore JSON file"
+        end
+        name.to_sym
+      when HASH_TAG
+        entries = node[TAG_ENTRIES]
+        unless node.size == 2 && entries.is_a?(Array)
+          raise PStore::Error, "malformed hash node in PStore JSON file"
+        end
+        result = {}
+        entries.each do |entry|
+          unless entry.is_a?(Array) && entry.size == 2
+            raise PStore::Error, "malformed hash entry in PStore JSON file"
+          end
+          key = decode_value(entry[0], depth + 1, budget)
+          result[key] = decode_value(entry[1], depth + 1, budget)
+        end
+        result
+      else
+        raise PStore::Error,
+              "unknown type tag #{node[TYPE_TAG].inspect} in PStore JSON file"
+      end
+    end
+  end
+  private_constant :JSONFormat
+  # :startdoc:
+
   # Whether \PStore should do its best to prevent file corruptions,
   # even when an unlikely error (such as memory-error or filesystem error) occurs:
   #
@@ -372,7 +606,17 @@ class PStore
   #
   #   store = PStore.new(path, true)
   #
-  def initialize(file, thread_safe = false)
+  # Keyword argument +format+ selects the on-disk format:
+  #
+  # - <tt>format: :marshal</tt> (the default): read and write Marshal files.
+  # - <tt>format: :json</tt>: read and write the typed JSON format;
+  #   see {Storage Formats}[rdoc-ref:PStore@Storage+Formats].
+  #   A Marshal file is not read implicitly in this mode;
+  #   convert it first with PStore.migrate_to_json.
+  #
+  #   store = PStore.new(path, format: :json)
+  #
+  def initialize(file, thread_safe = false, format: FORMAT_MARSHAL)
     dir = File::dirname(file)
     unless File::directory? dir
       raise PStore::Error, format("directory %s does not exist", dir)
@@ -380,10 +624,14 @@ class PStore
     if File::exist? file and not File::readable? file
       raise PStore::Error, format("file %s not readable", file)
     end
+    unless FORMAT_MARSHAL == format || FORMAT_JSON == format
+      raise ArgumentError, "unknown PStore format: #{format.inspect}"
+    end
     @filename = File.path(file)
     @abort = false
     @ultra_safe = false
     @thread_safe = thread_safe
+    @format = format
     @lock = Thread::Mutex.new
   end
 
@@ -593,6 +841,74 @@ class PStore
     value
   end
 
+  # Converts the \Marshal format \PStore file at +file+
+  # to the typed JSON format (see
+  # {Storage Formats}[rdoc-ref:PStore@Storage+Formats]).
+  #
+  # This is the only way to convert a \Marshal file:
+  # a store opened with <tt>format: :json</tt> never reads
+  # \Marshal data implicitly.
+  #
+  # The stored data is fully validated and re-encoded before anything
+  # is written; the file is then replaced atomically
+  # (via a temporary file and rename).
+  # If the data contains objects that the JSON format cannot represent
+  # or circular references, or if any other error occurs,
+  # PStore::Error (or the original exception) is raised
+  # and the original file is left untouched:
+  #
+  #   PStore.migrate_to_json('t.store')
+  #   store = PStore.new('t.store', format: :json)
+  #
+  # Raises PStore::Error if the file does not exist,
+  # is not a valid \Marshal \PStore file,
+  # or is already in the JSON format.
+  def self.migrate_to_json(file)
+    path = File.path(file)
+    unless File::exist? path
+      raise PStore::Error, format("file %s does not exist", path)
+    end
+    data = File.binread(path)
+    if data.empty?
+      table = {}
+    else
+      if JSONFormat.envelope?(data)
+        raise PStore::Error, format("file %s is already in JSON format", path)
+      end
+      begin
+        table = Marshal.load(data)
+      rescue StandardError => error
+        raise PStore::Error,
+              format("file %s is not a valid Marshal PStore file: %s", path, error.message)
+      end
+      unless table.is_a?(Hash)
+        raise PStore::Error, format("file %s is not a valid Marshal PStore file", path)
+      end
+    end
+
+    # Fully validate by encoding everything before touching the file,
+    # and verify that the payload decodes back to the same data.
+    payload = JSONFormat.encode_table(table)
+    unless JSONFormat.decode_table(payload) == table
+      raise PStore::Error, format("file %s could not be converted faithfully", path)
+    end
+
+    temp_filename = "#{path}.tmp.#{Process.pid}.#{rand 1000000}"
+    begin
+      File.open(temp_filename, File::WRONLY | File::CREAT | File::TRUNC | File::BINARY) do |temp_file|
+        temp_file.flock(File::LOCK_EX)
+        temp_file.write(payload)
+        temp_file.flush
+        temp_file.chmod(File.stat(path).mode) rescue nil
+      end
+      File.rename(temp_filename, path)
+    rescue Exception
+      File.unlink(temp_filename) rescue nil
+      raise
+    end
+    true
+  end
+
   private
   # :stopdoc:
 
@@ -651,8 +967,13 @@ class PStore
   def load_data(file, read_only)
     if read_only
       begin
-        table = load(file)
-        raise Error, "PStore file seems to be corrupted." unless table.is_a?(Hash)
+        if file.size == 0
+          # This seems to be a newly-created file.
+          table = {}
+        else
+          table = load(file)
+          raise Error, "PStore file seems to be corrupted." unless table.is_a?(Hash)
+        end
       rescue EOFError
         raise unless file.size == 0
         # This seems to be a newly-created file.
@@ -664,8 +985,14 @@ class PStore
       if data.empty?
         # This seems to be a newly-created file.
         table = {}
-        checksum = empty_marshal_checksum
-        size = empty_marshal_data.bytesize
+        if @format == FORMAT_JSON
+          empty_data = dump({})
+          checksum = CHECKSUM_ALGO.digest(empty_data)
+          size = empty_data.bytesize
+        else
+          checksum = empty_marshal_checksum
+          size = empty_marshal_data.bytesize
+        end
       else
         table = load(data)
         checksum = CHECKSUM_ALGO.digest(data)
@@ -720,16 +1047,24 @@ class PStore
   end
 
 
-  # This method is just a wrapped around Marshal.dump
+  # This method is just a wrapper around the format's dump routine
   # to allow subclass overriding used in YAML::Store.
   def dump(table)  # :nodoc:
-    Marshal::dump(table)
+    if @format == FORMAT_JSON
+      JSONFormat.encode_table(table)
+    else
+      Marshal::dump(table)
+    end
   end
 
-  # This method is just a wrapped around Marshal.load.
+  # This method is just a wrapper around the format's load routine
   # to allow subclass overriding used in YAML::Store.
   def load(content)  # :nodoc:
-    Marshal::load(content)
+    if @format == FORMAT_JSON
+      JSONFormat.decode_table(content)
+    else
+      Marshal::load(content)
+    end
   end
 
   def empty_marshal_data

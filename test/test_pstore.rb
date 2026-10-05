@@ -331,3 +331,211 @@ class PStoreTest < Test::Unit::TestCase
     assert_equal("bar", store.transaction(true) { store[:foo] })
   end
 end
+
+class PStoreJSONFormatTest < Test::Unit::TestCase
+  def setup
+    @pstore_file = File.join(Dir.tmpdir, "pstore-json.tmp.#{Process.pid}")
+    @pstore = PStore.new(@pstore_file, format: :json)
+  end
+
+  def teardown
+    File.unlink(@pstore_file) rescue nil
+    Dir.glob("#{@pstore_file}.tmp.*").each { |path| File.unlink(path) rescue nil }
+  end
+
+  def json_envelope(data_json, version: 1)
+    %Q({"format":"pstore-json","version":#{version},"data":#{data_json}})
+  end
+
+  def write_file(content)
+    File.binwrite(@pstore_file, content)
+  end
+
+  def test_round_trip_supported_types
+    data = {
+      "string" => "hello",
+      "symbol" => :sym,
+      "integer" => 42,
+      "negative" => -17,
+      "float" => 3.14,
+      "nil" => nil,
+      "true" => true,
+      "false" => false,
+      "array" => [1, "two", :three, [4.5]],
+      "hash" => {"nested" => {"deep" => [:a, :b]}},
+    }
+    @pstore.transaction { @pstore[:data] = data }
+    @pstore.transaction(true) do
+      assert_equal(data, @pstore[:data])
+    end
+  end
+
+  def test_symbol_and_string_keys_stay_distinct
+    mixed = {"key" => "string", :key => "symbol", 1 => "integer"}
+    @pstore.transaction { @pstore[:mixed] = mixed }
+    @pstore.transaction(true) do
+      assert_equal(mixed, @pstore[:mixed])
+    end
+  end
+
+  def test_top_level_symbol_and_string_keys
+    @pstore.transaction do
+      @pstore[:sym] = "symbol key"
+      @pstore["str"] = "string key"
+    end
+    @pstore.transaction(true) do
+      assert_equal("symbol key", @pstore[:sym])
+      assert_equal("string key", @pstore["str"])
+      assert_equal([:sym, "str"], @pstore.keys)
+    end
+  end
+
+  def test_file_carries_format_version_envelope
+    @pstore.transaction { @pstore[:a] = 1 }
+    root = JSON.parse(File.binread(@pstore_file))
+    assert_equal("pstore-json", root["format"])
+    assert_equal(1, root["version"])
+    assert(root.key?("data"))
+  end
+
+  def test_unsupported_objects_are_rejected
+    [Object.new, Time.now, 1..2, Rational(1, 2), Complex(2, 3)].each do |obj|
+      assert_raise(PStore::Error) { @pstore.transaction { @pstore[:x] = obj } }
+    end
+  end
+
+  def test_non_finite_floats_are_rejected
+    [Float::NAN, Float::INFINITY, -Float::INFINITY].each do |float|
+      assert_raise(PStore::Error) { @pstore.transaction { @pstore[:x] = float } }
+    end
+  end
+
+  def test_circular_references_are_rejected
+    array = []
+    array << array
+    assert_raise(PStore::Error) { @pstore.transaction { @pstore[:x] = array } }
+
+    hash = {}
+    hash[:self] = hash
+    assert_raise(PStore::Error) { @pstore.transaction { @pstore[:x] = hash } }
+  end
+
+  def test_shared_references_are_allowed
+    shared = [1, 2]
+    @pstore.transaction { @pstore[:x] = [shared, shared] }
+    @pstore.transaction(true) do
+      assert_equal([[1, 2], [1, 2]], @pstore[:x])
+    end
+  end
+
+  def test_encode_depth_limit
+    value = 1
+    101.times { value = [value] }
+    assert_raise(PStore::Error) { @pstore.transaction { @pstore[:x] = value } }
+  end
+
+  def test_decode_depth_limit
+    write_file(json_envelope("[" * 101 + "1" + "]" * 101))
+    error = assert_raise(PStore::Error) { @pstore.transaction(true) { } }
+    assert_match(/depth/, error.message)
+  end
+
+  def test_decode_node_limit
+    write_file(json_envelope("[#{(['0'] * 1_000_001).join(',')}]"))
+    error = assert_raise(PStore::Error) { @pstore.transaction(true) { } }
+    assert_match(/nodes/, error.message)
+  end
+
+  def test_malformed_files_are_rejected
+    write_file(json_envelope('{"__pstore_type__":"unknown","value":1}'))
+    assert_raise(PStore::Error) { @pstore.transaction(true) { } }
+
+    write_file(json_envelope('{"plain":"object"}'))
+    assert_raise(PStore::Error) { @pstore.transaction(true) { } }
+
+    write_file(json_envelope('{"__pstore_type__":"symbol","value":1}'))
+    assert_raise(PStore::Error) { @pstore.transaction(true) { } }
+
+    write_file(json_envelope('{"__pstore_type__":"hash","entries":[["a"]]}'))
+    assert_raise(PStore::Error) { @pstore.transaction(true) { } }
+
+    write_file(json_envelope("[]", version: 2))
+    assert_raise(PStore::Error) { @pstore.transaction(true) { } }
+
+    write_file("not json at all")
+    assert_raise(PStore::Error) { @pstore.transaction(true) { } }
+  end
+
+  def test_marshal_file_is_not_read_implicitly
+    PStore.new(@pstore_file).transaction { |store| store[:a] = 1 }
+    content_before = File.binread(@pstore_file)
+    assert_raise(PStore::Error) { @pstore.transaction(true) { } }
+    assert_raise(PStore::Error) { @pstore.transaction { } }
+    assert_equal(content_before, File.binread(@pstore_file))
+  end
+
+  def test_unknown_format_argument_is_rejected
+    assert_raise(ArgumentError) { PStore.new(@pstore_file, format: :yaml) }
+  end
+
+  def test_migrate_to_json
+    PStore.new(@pstore_file).transaction do |store|
+      store[:sym] = {:nested => ["a", 1, 2.5, nil, true]}
+      store["string"] = "value"
+    end
+    assert_equal(true, PStore.migrate_to_json(@pstore_file))
+
+    root = JSON.parse(File.binread(@pstore_file))
+    assert_equal("pstore-json", root["format"])
+
+    store = PStore.new(@pstore_file, format: :json)
+    store.transaction(true) do
+      assert_equal({:nested => ["a", 1, 2.5, nil, true]}, store[:sym])
+      assert_equal("value", store["string"])
+    end
+  end
+
+  def test_migrate_to_json_failure_preserves_original_file
+    PStore.new(@pstore_file).transaction { |store| store[:x] = Object.new }
+    content_before = File.binread(@pstore_file)
+
+    assert_raise(PStore::Error) { PStore.migrate_to_json(@pstore_file) }
+    assert_equal(content_before, File.binread(@pstore_file))
+    assert_equal([], Dir.glob("#{@pstore_file}.tmp.*"))
+
+    PStore.new(@pstore_file).transaction(true) do |store|
+      assert(store.key?(:x))
+    end
+  end
+
+  def test_migrate_to_json_rejects_circular_data
+    array = []
+    array << array
+    PStore.new(@pstore_file).transaction { |store| store[:x] = array }
+    content_before = File.binread(@pstore_file)
+
+    assert_raise(PStore::Error) { PStore.migrate_to_json(@pstore_file) }
+    assert_equal(content_before, File.binread(@pstore_file))
+  end
+
+  def test_migrate_to_json_rejects_invalid_files
+    assert_raise(PStore::Error) { PStore.migrate_to_json(@pstore_file) }
+
+    write_file("garbage")
+    assert_raise(PStore::Error) { PStore.migrate_to_json(@pstore_file) }
+
+    write_file("")
+    @pstore.transaction { @pstore[:a] = 1 }
+    assert_raise(PStore::Error) { PStore.migrate_to_json(@pstore_file) }
+  end
+
+  def test_migrate_to_json_empty_file
+    write_file("")
+    PStore.migrate_to_json(@pstore_file)
+
+    root = JSON.parse(File.binread(@pstore_file))
+    assert_equal("pstore-json", root["format"])
+    store = PStore.new(@pstore_file, format: :json)
+    store.transaction(true) { assert_equal([], store.keys) }
+  end
+end
