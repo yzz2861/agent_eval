@@ -106,6 +106,11 @@ module Mail
       @fields.map(&:errors).flatten(1)
     end
 
+    def received_chain
+      received_fields = fields.select { |field| field.responsible_for?('Received') }
+      Mail::ReceivedChain.new(received_fields)
+    end
+
     #  3.6. Field definitions
     #
     #   The following table indicates limits on the number of times each

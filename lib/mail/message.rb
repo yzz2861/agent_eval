@@ -759,6 +759,10 @@ module Mail
       header[:received] = val
     end
 
+    def received_chain
+      header.received_chain
+    end
+
     def references( val = nil )
       default :references, val
     end

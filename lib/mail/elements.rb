@@ -12,4 +12,6 @@ module Mail
   register_autoload :MimeVersionElement, 'mail/elements/mime_version_element'
   register_autoload :PhraseList, 'mail/elements/phrase_list'
   register_autoload :ReceivedElement, 'mail/elements/received_element'
+  register_autoload :ReceivedHop, 'mail/elements/received_hop'
+  register_autoload :ReceivedChain, 'mail/elements/received_chain'
 end
