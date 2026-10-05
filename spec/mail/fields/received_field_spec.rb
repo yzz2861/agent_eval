@@ -55,4 +55,16 @@ RSpec.describe Mail::ReceivedField do
     expect(t.date_time).to eq nil
     expect(t.formatted_date).to eq nil
   end
+
+  it "should expose a structured hop view" do
+    t = Mail::ReceivedField.new('from localhost (localhost [127.0.0.1]) by xxx.xxxxx.com (Postfix) with ESMTP id 50FD3A96F for <xxxx@xxxx.com>; Tue, 10 May 2005 17:26:50 +0000 (GMT)')
+    hop = t.hop
+    expect(hop).to be_a Mail::ReceivedHop
+    expect(hop.from).to      eq 'localhost (localhost [127.0.0.1])'
+    expect(hop.by).to        eq 'xxx.xxxxx.com (Postfix)'
+    expect(hop.with).to      eq 'ESMTP'
+    expect(hop.id).to        eq '50FD3A96F'
+    expect(hop.for).to       eq '<xxxx@xxxx.com>'
+    expect(hop.date_time).to eq ::DateTime.parse('10 May 2005 17:26:50 +0000')
+  end
 end

@@ -373,6 +373,37 @@ mail.decoded         #=> 'This is the body of the email...
 
 Many more methods available.
 
+### Inspecting the Received Chain
+
+When tracking down delivery delays, `mail.received_chain` parses every
+Received header into structured hops, kept in the order the fields appear
+in the header (most recent relay first, never re-sorted by timestamp):
+
+```ruby
+mail = Mail.read('/path/to/message.eml')
+
+mail.received_chain.hops.each do |hop|
+  hop.from      #=> 'mail.example.com (mail.example.com [10.0.0.1])'
+  hop.by        #=> 'mx.example.org'
+  hop.with      #=> 'ESMTP'
+  hop.id        #=> '50FD3A96F'
+  hop.for       #=> '<bob@test.lindsaar.net>'
+  hop.date_time #=> #<DateTime ...> or nil
+  hop.extra     #=> fragments that were not recognized
+  hop.raw       #=> the original header value
+end
+
+mail.received_chain.delays.each do |delay|
+  delay.seconds       #=> estimated seconds between the two hops, or nil
+  delay.negative?     #=> true if a relay's clock appears to go backwards
+  delay.missing_time? #=> true if a hop has no usable timestamp
+end
+```
+
+The parser is tolerant: comments and quoted strings containing keywords or
+semicolons do not confuse it, folded lines are unfolded, and a Received
+field that fails to parse does not affect the other hops.
+
 ### Reading a Multipart Email
 
 ```ruby

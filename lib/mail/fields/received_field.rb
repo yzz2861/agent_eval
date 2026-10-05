@@ -27,6 +27,13 @@ module Mail
       @element ||= Mail::ReceivedElement.new(value)
     end
 
+    # Structured, tolerant view of this single relay hop. Unlike #element
+    # it never raises on unparsable content; unrecognized fragments are
+    # kept in Mail::ReceivedHop#extra and the original text in #raw.
+    def hop
+      @hop ||= Mail::ReceivedHop.new(value)
+    end
+
     def date_time
       @datetime ||= element.date_time
     end

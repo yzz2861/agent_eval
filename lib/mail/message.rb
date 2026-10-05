@@ -759,6 +759,21 @@ module Mail
       header[:received] = val
     end
 
+    # Returns a Mail::ReceivedChain built from every Received header in
+    # the message, in the order the fields appear (most recent relay
+    # first). Useful for inspecting the relay path and estimating delays
+    # between hops:
+    #
+    #  mail.received_chain.hops.map(&:by)   #=> ["mx.example.org", ...]
+    #  mail.received_chain.delays.each { |d| puts d }
+    #
+    # Hops are never reordered by timestamp, and a Received field that
+    # fails to parse does not affect the others.
+    def received_chain
+      fields = header.fields.select { |f| f.name.to_s.casecmp('received').zero? }
+      Mail::ReceivedChain.new(fields.map { |f| raw_field_value(f) })
+    end
+
     def references( val = nil )
       default :references, val
     end
@@ -1975,6 +1990,19 @@ module Mail
   private
 
     HEADER_SEPARATOR = /#{Constants::LAX_CRLF}#{Constants::LAX_CRLF}/
+
+    # Extracts the raw value of a header field without triggering its
+    # structured parser, so one unparsable field cannot raise here and
+    # take down the rest of the Received chain.
+    def raw_field_value(field)
+      if field.respond_to?(:unparsed_value) && field.unparsed_value
+        field.unparsed_value
+      else
+        field.value
+      end
+    rescue
+      nil
+    end
 
     #  2.1. General Description
     #   A message consists of header fields (collectively called "the header

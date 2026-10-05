@@ -2283,4 +2283,34 @@ RSpec.describe Mail::Message do
     end
   end
 
+  describe "#received_chain" do
+    it "returns a chain of hops in header order" do
+      mail = Mail.new("Received: by a.example with ESMTP id 1; Tue, 10 May 2005 17:26:50 +0000\r\n" +                      "Received: by b.example with ESMTP id 2; Tue, 10 May 2005 17:20:00 +0000\r\n" +                      "\r\nbody")
+      chain = mail.received_chain
+      expect(chain).to be_a Mail::ReceivedChain
+      expect(chain.hops.map(&:by)).to eq ['a.example', 'b.example']
+      expect(chain.delays.first.seconds).to eq 410.0
+    end
+
+    it "handles folded Received fields" do
+      mail = Mail.new("Received: from a.example\r\n\tby b.example with ESMTP id 1;\r\n\tTue, 10 May 2005 17:26:50 +0000\r\n\r\nbody")
+      hop = mail.received_chain.hops.first
+      expect(hop.from).to eq 'a.example'
+      expect(hop.by).to   eq 'b.example'
+      expect(hop.date_time).to eq ::DateTime.parse('10 May 2005 17:26:50 +0000')
+    end
+
+    it "keeps the other hops when one Received field is unparsable" do
+      mail = Mail.new("Received: by a.example with ESMTP id 1; Tue, 10 May 2005 17:26:50 +0000\r\n" +                      "Received: \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\r\n" +                      "Received: by b.example with ESMTP id 2; Tue, 10 May 2005 17:20:00 +0000\r\n" +                      "\r\nbody")
+      chain = mail.received_chain
+      expect(chain.hops.length).to eq 3
+      expect(chain.hops.map(&:by)).to eq ['a.example', nil, 'b.example']
+    end
+
+    it "returns an empty chain when there are no Received fields" do
+      mail = Mail.new("From: mikel@me.com\r\n\r\nbody")
+      expect(mail.received_chain.hops).to eq []
+    end
+  end
+
 end
