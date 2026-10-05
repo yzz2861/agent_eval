@@ -59,6 +59,17 @@ module Dry
       # @api public
       attr_reader :name
 
+      # Returns the names of the providers this provider depends on.
+      #
+      # Dependencies declared via the `depends_on:` option passed to
+      # {Dry::System::Container.register_provider} are merged with any declared in
+      # the provider's source.
+      #
+      # @return [Array<Symbol>]
+      #
+      # @api public
+      attr_reader :depends_on
+
       # Returns the default namespace for the provider's container keys.
       #
       # @return [Symbol,String]
@@ -128,10 +139,18 @@ module Dry
 
       # @api private
       # rubocop:disable Style/KeywordParametersOrder
-      def initialize(name:, namespace: nil, target_container:, source_class:, source_options: {}, &)
+      def initialize(
+        name:, namespace: nil, target_container:, source_class:, source_options: {},
+        depends_on: nil, &block
+      )
         @name = name
         @namespace = namespace
         @target_container = target_container
+        @depends_on =
+          (source_class.respond_to?(:provider_dependencies) ?
+            Array(source_class.provider_dependencies) : []) +
+          Array(depends_on).map(&:to_sym)
+        @depends_on = @depends_on.uniq
 
         @provider_container = build_provider_container
         @statuses = []
@@ -141,7 +160,7 @@ module Dry
           **source_options,
           provider_container: provider_container,
           target_container: target_container,
-          &
+          &block
         )
       end
       # rubocop:enable Style/KeywordParametersOrder

@@ -87,8 +87,52 @@ module Dry
 
         defines :source_name, :source_group
 
+        # Names of other providers this source's provider depends on, as declared
+        # through the `depends_on` DSL (in a provider block) or directly on a source
+        # subclass.
+        #
+        # @return [Array<Symbol>, nil]
+        #
+        # @api private
+        defines :provider_dependencies
+
+        class << self
+          # Accumulates declared dependency names. Called from the `depends_on` DSL
+          # and from source subclasses.
+          #
+          # @api private
+          def add_provider_dependencies(*provider_names)
+            merged = Array(provider_dependencies) + provider_names.flatten.map(&:to_sym)
+            provider_dependencies(merged.uniq)
+          end
+
+          # Declares one or more providers that must be prepared/started before this
+          # one when defined on a source subclass.
+          #
+          # Inside a `register_provider` block, use the same `depends_on` call,
+          # which is handled by {SourceDSL}.
+          #
+          # @param provider_names [Array<Symbol, String>]
+          #
+          # @return [Array<Symbol>]
+          #
+          # @api public
+          def depends_on(*provider_names)
+            add_provider_dependencies(*provider_names)
+          end
+        end
+
         # @api private
         attr_reader :callbacks
+
+        # Returns the names of providers this source depends on.
+        #
+        # @return [Array<Symbol>]
+        #
+        # @api public
+        def depends_on
+          self.class.provider_dependencies || []
+        end
 
         # Returns the provider's own container for the provider.
         #

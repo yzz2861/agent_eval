@@ -24,6 +24,19 @@ module Dry
           source_class.setting(...)
         end
 
+        # Declares one or more provider dependencies inside a provider block.
+        #
+        # @example
+        #   register_provider(:client) do
+        #     depends_on :db, :logger
+        #
+        #     start { ... }
+        #   end
+        #
+        def depends_on(...)
+          source_class.add_provider_dependencies(...)
+        end
+
         def prepare(&)
           source_class.define_method(:prepare, &)
         end

@@ -183,7 +183,7 @@ module Dry
           self
         end
 
-        # @overload register_provider(name, namespace: nil, from: nil, source: nil, if: true, &block)
+        # @overload register_provider(name, namespace: nil, from: nil, source: nil, depends_on: nil, if: true, &block)
         #   Registers a provider and its lifecycle hooks
         #
         #   By convention, you should place a file for each provider in one of the
@@ -260,6 +260,9 @@ module Dry
         #     `source:`)
         #   @param source [Symbol, nil] the name of the external provider source to use
         #     (if different from the value provided as `name`)
+        #   @param depends_on [Array<Symbol>, Symbol, nil] names of providers that must
+        #     be prepared/started before this one. Dependencies can also be declared with
+        #     `depends_on` inside the provider block.
         #   @param if [Boolean] a boolean to determine whether to register the provider
         #
         #   @see Provider
@@ -343,6 +346,40 @@ module Dry
         def start(name)
           providers.start(name)
           self
+        end
+
+        # Returns a viewable plan for starting one or more providers, including
+        # their transitive dependencies, without running any lifecycle steps.
+        #
+        # The returned plan lists the providers in dependency order (via
+        # {Dry::System::Provider::Plan#start_order} and `#stop_order`).
+        #
+        # @example
+        #   MyApp.provider_plan(:client).start_order # => [:db, :client]
+        #
+        # @param names [Array<Symbol>] one or more provider names; omit to plan all
+        #   discoverable providers
+        #
+        # @return [Dry::System::Provider::Plan]
+        #
+        # @api public
+        # @since 1.3.0
+        def provider_plan(*names)
+          providers.plan(*names)
+        end
+
+        # Returns all provider lifecycle events collected since the container's
+        # providers were first accessed, in execution order.
+        #
+        # This includes repeated starts and shutdowns, as well as skipped, run and
+        # failed steps. See {Dry::System::LifecycleEvent}.
+        #
+        # @return [Array<Dry::System::LifecycleEvent>]
+        #
+        # @api public
+        # @since 1.3.0
+        def lifecycle_events
+          providers.events
         end
 
         # Prepares a provider using its `prepare` lifecycle trigger

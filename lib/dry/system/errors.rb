@@ -56,6 +56,59 @@ module Dry
       end
     end
 
+    # Error raised when a provider declares a dependency on another provider that is
+    # not registered.
+    #
+    # @api public
+    ProviderDependencyNotFoundError = Class.new(ArgumentError) do
+      # @api private
+      def initialize(name, missing:)
+        missing_list = Array(missing).map(&:inspect).join(", ")
+
+        super(
+          "Provider #{name.inspect} depends on provider(s) that are not registered: " \
+          "#{missing_list}"
+        )
+      end
+    end
+
+    # Error raised when the explicit provider dependencies contain a cycle.
+    #
+    # @api public
+    ProviderDependencyCycleError = Class.new(StandardError) do
+      # @api private
+      def initialize(cycle)
+        chain = Array(cycle).map(&:to_s)
+        chain << chain.first if chain.length > 1 && chain.last != chain.first
+
+        super("Provider dependency cycle detected: #{chain.join(" -> ")}")
+      end
+    end
+
+    # Error raised when one or more provider `stop` lifecycle steps raise while a
+    # container is shutting down (or while providers started in a failed round are
+    # being rolled back). All remaining providers are still given a chance to stop,
+    # and every individual failure is collected here.
+    #
+    # @api public
+    ProviderStopError = Class.new(StandardError) do
+      # Returns a hash of provider name to the exception raised by its `stop` step.
+      #
+      # @return [Hash{Symbol => Exception}]
+      #
+      # @api public
+      attr_reader :failures
+
+      # @api private
+      def initialize(failures)
+        @failures = failures
+
+        failure_list = failures.map { |name, error| "- #{name}: #{error.class}: #{error.message}" }
+
+        super("Provider stop failed for #{failures.keys.map(&:inspect).join(", ")}:\n#{failure_list.join("\n")}")
+      end
+    end
+
     # Error raised when a named provider source could not be found
     #
     # @api public

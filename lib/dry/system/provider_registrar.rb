@@ -35,6 +35,7 @@ module Dry
         @providers = {}
         @container = container
         @loaded = Set.new
+        @events = []
       end
 
       # @api private
@@ -43,11 +44,51 @@ module Dry
         super
       end
 
-      # rubocop:disable Metrics/PerceivedComplexity
+      # Returns the lifecycle events collected across all prepare, start, stop and
+      # shutdown operations, in execution order.
+      #
+      # The array is never cleared: it records repeated starts and repeated
+      # shutdowns too. Inspect events with {LifecycleEvent#action}, {#provider} and
+      # {LifecycleEvent#status}.
+      #
+      # @return [Array<Dry::System::LifecycleEvent>]
+      #
+      # @api public
+      # @since 1.3.0
+      attr_reader :events
+
+      # Returns a side-effect free plan describing the provider (and its transitive
+      # dependencies) and the order in which their steps will run.
+      #
+      # Use this to inspect the startup/shutdown order before triggering any side
+      # effects.
+      #
+      # @param provider_names [Array<Symbol>] one or more registered provider names;
+      #   pass no names (or nil) to plan all discoverable providers
+      #
+      # @return [Dry::System::Provider::Plan]
+      #
+      # @raise [ProviderNotFoundError] if a named provider is not registered
+      # @raise [ProviderDependencyNotFoundError] if a dependency is not registered
+      # @raise [ProviderDependencyCycleError] if the dependencies form a cycle
+      #
+      # @api public
+      # @since 1.3.0
+      def plan(*provider_names)
+        names = provider_names.flatten.compact
+
+        if names.empty?
+          provider_files.each { |path| load_provider(path) }
+          names = providers.keys
+        end
+
+        Provider::Plan.build(names, self)
+      end
 
       # @see Container.register_provider
       # @api private
-      def register_provider(name, from: nil, source: nil, if: true, **provider_options, &)
+      def register_provider(name, from: nil, source: nil, depends_on: nil, if: true,
+                            **provider_options, &)
         raise ProviderAlreadyRegisteredError, name if providers.key?(name)
 
         if from && source.is_a?(Class)
@@ -67,6 +108,7 @@ module Dry
               source: source || name,
               group: from,
               options: provider_options,
+              depends_on: depends_on,
               &
             )
           else
@@ -74,6 +116,7 @@ module Dry
               name,
               source: source,
               options: provider_options,
+              depends_on: depends_on,
               &
             )
           end
@@ -82,8 +125,6 @@ module Dry
 
         self
       end
-
-      # rubocop:enable Metrics/PerceivedComplexity
 
       # Returns a provider if it can be found or loaded, otherwise nil
       #
@@ -161,7 +202,7 @@ module Dry
           load_provider(path)
         end
 
-        providers.each_value(&:start)
+        run_plan(providers.keys) unless providers.empty?
 
         freeze
       end
@@ -175,25 +216,36 @@ module Dry
 
       # @api private
       def shutdown
-        providers.each_value(&:stop)
+        record(:shutdown) do
+          order = shutdown_order
+          failures = stop_each(order)
+
+          raise ProviderStopError.new(failures) if failures.any?
+        end
         self
       end
 
       # @api private
       def prepare(provider_name)
-        with_provider(provider_name, &:prepare)
+        lifecycle_plan = plan(provider_name)
+
+        lifecycle_plan.start_order.each do |name|
+          advance(providers.fetch(name), :prepare)
+        end
         self
       end
 
       # @api private
       def start(provider_name)
-        with_provider(provider_name, &:start)
+        run_plan(provider_name)
         self
       end
 
       # @api private
       def stop(provider_name)
-        with_provider(provider_name, &:stop)
+        with_provider(provider_name) do |provider|
+          stop_one(provider, raise_on_failure: true)
+        end
         self
       end
 
@@ -214,7 +266,7 @@ module Dry
         }
       end
 
-      def build_provider(name, options:, source: nil, &)
+      def build_provider(name, options:, source: nil, depends_on: nil, &)
         source_class = source || Provider::Source.for(
           name: name,
           superclass: provider_source_class,
@@ -233,11 +285,12 @@ module Dry
           name: name,
           target_container: target_container,
           source_class: source_class,
-          source_options: source_options
+          source_options: source_options,
+          depends_on: depends_on
         )
       end
 
-      def build_provider_from_source(name, source:, group:, options:, &)
+      def build_provider_from_source(name, source:, group:, options:, depends_on: nil, &)
         provider_source = System.provider_sources.resolve(name: source, group: group)
 
         source_options =
@@ -254,8 +307,173 @@ module Dry
           target_container: target_container,
           source_class: provider_source.source,
           source_options: source_options,
+          depends_on: depends_on,
           &
         )
+      end
+
+      # Runs a plan for the given provider name(s): builds the plan (detecting
+      # missing providers and cycles before any side effects), then prepares and
+      # starts the providers in dependency order. If a step fails, only the
+      # providers that this invocation actually started are stopped, in reverse
+      # order; providers that were already running remain untouched.
+      #
+      # @return [Provider::Plan]
+      #
+      # @api private
+      def run_plan(*provider_names)
+        started_this_round = []
+        lifecycle_plan = plan(*provider_names)
+
+        lifecycle_plan.start_order.each do |name|
+          provider = providers.fetch(name)
+
+          advance(provider, :prepare)
+
+          if advance(provider, :start) == :run
+            started_this_round << provider
+          end
+        end
+
+        lifecycle_plan
+      rescue StandardError
+        rollback(started_this_round)
+        raise
+      end
+
+      # Stops exactly the providers started during the failed round, in reverse
+      # order. Stop failures never prevent other providers from being stopped and
+      # are recorded as events; the original start failure is re-raised by the
+      # caller.
+      #
+      # @api private
+      def rollback(providers_to_stop)
+        events << LifecycleEvent.new(action: :rollback, status: :run)
+        providers_to_stop.reverse_each do |provider|
+          stop_one(provider, action: :rollback)
+        end
+      end
+
+      # Runs a single lifecycle step on a provider and records the corresponding
+      # event, including a failure event when the step raises.
+      #
+      # @return [Symbol] :run or :skipped
+      #
+      # @api private
+      def advance(provider, action)
+        already =
+          case action
+          when :prepare then provider.prepared?
+          when :start then provider.started?
+          when :stop then !provider.started? || provider.stopped?
+          else false
+          end
+
+        if already
+          record_step(provider, action, :skipped)
+          return :skipped
+        end
+
+        begin
+          provider.public_send(action)
+          record_step(provider, action, :run)
+          :run
+        rescue StandardError => error
+          record_step(provider, action, :failed, error)
+          raise
+        end
+      end
+
+      # Stops one provider and records the event (as either a `:stop` or a
+      # `:rollback` action). Failed stops are collected and returned so callers can
+      # continue stopping the remaining providers.
+      #
+      # @return [Hash{Symbol => Exception}]
+      #
+      # @api private
+      def stop_one(provider, action: :stop, raise_on_failure: false)
+        unless provider.started? && !provider.stopped?
+          record_step(provider, action, :skipped)
+          return {}
+        end
+
+        begin
+          provider.stop
+          record_step(provider, action, :run)
+          {}
+        rescue StandardError => error
+          record_step(provider, action, :failed, error)
+          raise if raise_on_failure
+          {provider.name => error}
+        end
+      end
+
+      # Stops the given providers in order, continuing after failures.
+      #
+      # @return [Hash{Symbol => Exception}]
+      #
+      # @api private
+      def stop_each(names)
+        names.each_with_object({}) do |name, failures|
+          provider = providers[name]
+          next unless provider
+
+          failures.merge!(stop_one(provider))
+        end
+      end
+
+      # Returns the names of all loaded providers in reverse dependency order,
+      # suitable for shutdown. Providers that were never started (or are already
+      # stopped) remain in the sequence so that repeated shutdowns still emit their
+      # skipped events. Missing dependencies or cycles do not prevent shutdown.
+      #
+      # @return [Array<Symbol>]
+      #
+      # @api private
+      def shutdown_order
+        started = providers.keys
+
+        ordered = []
+        states = {}
+
+        visit = lambda { |name|
+          case states[name]
+          when :done, :visiting
+            next
+          end
+
+          states[name] = :visiting
+
+          provider = providers[name]
+          provider.depends_on.each do |dep_name|
+            visit.call(dep_name) if started.include?(dep_name)
+          end
+
+          states[name] = :done
+          ordered << name
+        }
+
+        started.each { |name| visit.call(name) }
+
+        ordered.reverse
+      end
+
+      # @api private
+      def record_step(provider, action, status, error = nil)
+        events << LifecycleEvent.new(
+          action: action, provider: provider.name, status: status, error: error
+        )
+      end
+
+      # @api private
+      def record(action)
+        yield
+        events << LifecycleEvent.new(action: action, provider: nil, status: :run)
+      rescue StandardError => error
+        events << LifecycleEvent.new(
+          action: action, provider: nil, status: :failed, error: error
+        )
+        raise
       end
 
       def with_provider(provider_name)
