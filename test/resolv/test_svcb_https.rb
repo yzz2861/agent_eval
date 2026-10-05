@@ -14,6 +14,291 @@ class TestResolvSvcbHttps < Test::Unit::TestCase
     ].join.b
   end
 
+  class MemoryDNS < Resolv::DNS
+    def initialize
+      @answers = Hash.new {|hash, key| hash[key] = []}
+      @errors = {}
+    end
+
+    def add(name, typeclass, resource)
+      @answers[[Name.create(name).to_s, typeclass]] << resource
+    end
+
+    def fail(name, typeclass, error = Resolv::ResolvError)
+      @errors[[Name.create(name).to_s, typeclass]] = error
+    end
+
+    def getresources(name, typeclass)
+      each_resource(name, typeclass).to_a
+    end
+
+    def each_resource(name, typeclass)
+      return enum_for(:each_resource, name, typeclass) unless block_given?
+
+      key = [Name.create(name).to_s, typeclass]
+      raise @errors.fetch(key).new("memory DNS failure for #{name}") if @errors.key?(key)
+      @answers.fetch(key, []).each {|resource| yield resource }
+    end
+  end
+
+  def https(priority, target, *params)
+    Resolv::DNS::Resource::IN::HTTPS.new(priority, target, params)
+  end
+
+  def svcb(priority, target, *params)
+    Resolv::DNS::Resource::IN::SVCB.new(priority, target, params)
+  end
+
+  def add_ipv4(dns, name, *addresses)
+    addresses.each do |address|
+      dns.add(name, Resolv::DNS::Resource::IN::A,
+              Resolv::DNS::Resource::IN::A.new(address))
+    end
+  end
+
+  def add_ipv6(dns, name, *addresses)
+    addresses.each do |address|
+      dns.add(name, Resolv::DNS::Resource::IN::AAAA,
+              Resolv::DNS::Resource::IN::AAAA.new(address))
+    end
+  end
+
+  def test_service_endpoint_filters_alpn_and_preserves_address_sources
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(2, 'two.example.com',
+                  Resolv::DNS::SvcParam::ALPN.new(%w[h3]),
+                  Resolv::DNS::SvcParam::Port.new(8443)))
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'one.example.com',
+                  Resolv::DNS::SvcParam::ALPN.new(%w[h2 http/1.1]),
+                  Resolv::DNS::SvcParam::Port.new(9443),
+                  Resolv::DNS::SvcParam::IPv4Hint.new(['192.0.2.10']),
+                  Resolv::DNS::SvcParam::IPv6Hint.new(['2001:db8::10'])))
+    add_ipv6(dns, 'one.example.com', '2001:db8::1')
+    add_ipv4(dns, 'one.example.com', '198.51.100.1')
+
+    endpoints = dns.get_service_endpoints('example.com', alpn: %w[h2])
+
+    assert_equal 1, endpoints.length
+    endpoint = endpoints.first
+    assert_equal 'one.example.com', endpoint.target.to_s
+    assert_equal 9443, endpoint.port
+    assert_equal 'h2', endpoint.protocol
+    assert_equal %w[h2], endpoint.protocols
+    assert_equal ['2001:db8::1', '198.51.100.1'], endpoint.addresses.map(&:to_s)
+    assert_equal ['2001:db8::10', '192.0.2.10'], endpoint.address_hints.map(&:to_s)
+    assert_equal [
+      [:address, '2001:db8::1'],
+      [:address, '198.51.100.1'],
+      [:ipv6hint, '2001:db8::10'],
+      [:ipv4hint, '192.0.2.10'],
+    ], endpoint.address_candidates.map {|candidate| [candidate.source, candidate.address.to_s] }
+  end
+
+  def test_service_endpoint_uses_default_https_alpn_and_port
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com'))
+    add_ipv4(dns, 'target.example.com', '198.51.100.2')
+
+    endpoint = dns.get_service_endpoint('example.com')
+
+    assert_equal 443, endpoint.port
+    assert_equal 'http/1.1', endpoint.protocol
+    assert_equal ['http/1.1'], endpoint.protocols
+  end
+
+  def test_service_endpoint_without_alpn_only_matches_service_default
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com'))
+    add_ipv4(dns, 'target.example.com', '198.51.100.11')
+
+    assert_equal [], dns.get_service_endpoints('example.com', alpn: %w[h2])
+
+    endpoint = dns.get_service_endpoint('example.com',
+                                        alpn: %w[h2 http/1.1])
+    assert_equal 'http/1.1', endpoint.protocol
+  end
+
+  def test_service_endpoint_requires_default_port_for_generic_svcb
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::SVCB,
+            svcb(1, 'target.example.com'))
+    add_ipv4(dns, 'target.example.com', '198.51.100.3')
+
+    assert_equal [], dns.get_service_endpoints('example.com',
+                                               Resolv::DNS::Resource::IN::SVCB)
+
+    endpoint = dns.get_service_endpoint('example.com',
+                                        Resolv::DNS::Resource::IN::SVCB,
+                                        default_alpn: %w[h3],
+                                        alpn: %w[h3], default_port: 443)
+    assert_equal 443, endpoint.port
+    assert_equal 'h3', endpoint.protocol
+  end
+
+  def test_service_endpoint_rejects_unknown_mandatory_parameter
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com',
+                  Resolv::DNS::SvcParam::Mandatory.new([667]),
+                  Resolv::DNS::SvcParam::Generic.create(667).new('hello')))
+    add_ipv4(dns, 'target.example.com', '198.51.100.4')
+
+    assert_equal [], dns.get_service_endpoints('example.com')
+  end
+
+  def test_service_endpoint_unknown_mandatory_parameter_prevents_hint_use
+    dns = MemoryDNS.new
+    unknown = Resolv::DNS::SvcParam::Generic.create(667)
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com',
+                  Resolv::DNS::SvcParam::Mandatory.new([667]),
+                  unknown.new('hello'),
+                  Resolv::DNS::SvcParam::IPv4Hint.new(['192.0.2.30'])))
+    add_ipv4(dns, 'target.example.com', '198.51.100.12')
+
+    assert_equal [], dns.get_service_endpoints('example.com')
+  end
+
+  def test_service_endpoint_accepts_declared_optional_mandatory_parameter
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com',
+                  Resolv::DNS::SvcParam::Mandatory.new([7]),
+                  Resolv::DNS::SvcParam::DoHPath.new('/dns-query{?dns}')))
+    add_ipv4(dns, 'target.example.com', '198.51.100.5')
+
+    endpoint = dns.get_service_endpoint('example.com', supported_params: [7])
+
+    assert_equal 'target.example.com', endpoint.target.to_s
+    assert_equal :service, endpoint.source
+  end
+
+  def test_service_endpoint_no_default_alpn_without_alpn_is_unusable
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com',
+                  Resolv::DNS::SvcParam::NoDefaultALPN.new))
+    add_ipv4(dns, 'target.example.com', '198.51.100.6')
+
+    assert_equal [], dns.get_service_endpoints('example.com')
+  end
+
+  def test_service_endpoint_follows_alias_chain
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(0, 'alias-1.example.com'))
+    dns.add('alias-1.example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(0, 'alias-2.example.com'))
+    dns.add('alias-2.example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com',
+                  Resolv::DNS::SvcParam::ALPN.new(%w[h2])))
+    add_ipv4(dns, 'target.example.com', '198.51.100.7')
+
+    endpoint = dns.get_service_endpoint('example.com', alpn: %w[h2])
+
+    assert_equal 'target.example.com', endpoint.target.to_s
+    assert_equal %w[h2], endpoint.protocols
+  end
+
+  def test_service_endpoint_detects_alias_loop
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(0, 'alias.example.com'))
+    dns.add('alias.example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(0, 'example.com'))
+
+    error = assert_raise(Resolv::DNS::ServiceBindingError) do
+      dns.get_service_endpoint('example.com')
+    end
+    assert_match(/alias loop/, error.message)
+  end
+
+  def test_service_endpoint_enforces_alias_depth_limit
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(0, 'alias-0.example.com'))
+    17.times do |index|
+      dns.add("alias-#{index}.example.com", Resolv::DNS::Resource::IN::HTTPS,
+              https(0, "alias-#{index + 1}.example.com"))
+    end
+    dns.add('alias-17.example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com'))
+
+    assert_raise(Resolv::DNS::ServiceBindingError) do
+      dns.get_service_endpoint('example.com')
+    end
+  end
+
+  def test_service_endpoint_rejects_mixed_alias_and_service_records
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(0, 'alias.example.com'))
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com'))
+
+    assert_raise(Resolv::DNS::ServiceBindingError) do
+      dns.get_service_endpoint('example.com')
+    end
+  end
+
+  def test_service_endpoint_no_implicit_origin_fallback
+    dns = MemoryDNS.new
+    add_ipv4(dns, 'example.com', '198.51.100.8')
+
+    assert_equal [], dns.get_service_endpoints('example.com')
+  end
+
+  def test_service_endpoint_explicit_origin_fallback
+    dns = MemoryDNS.new
+    add_ipv4(dns, 'example.com', '198.51.100.9')
+
+    endpoint = dns.get_service_endpoint('example.com', fallback: true)
+
+    assert_nil endpoint.priority
+    assert_equal :origin, endpoint.source
+    assert_equal 'example.com', endpoint.target.to_s
+    assert_equal 443, endpoint.port
+    assert_equal 'http/1.1', endpoint.protocol
+    assert_equal ['198.51.100.9'], endpoint.addresses.map(&:to_s)
+  end
+
+  def test_service_endpoint_explicit_origin_fallback_when_alpn_unsupported
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com',
+                  Resolv::DNS::SvcParam::ALPN.new(%w[h2])))
+    add_ipv4(dns, 'example.com', '198.51.100.10')
+
+    endpoint = dns.get_service_endpoint('example.com',
+                                        alpn: %w[h3 http/1.1],
+                                        fallback: true)
+
+    assert_equal 'example.com', endpoint.target.to_s
+    assert_equal 'http/1.1', endpoint.protocol
+  end
+
+  def test_service_endpoint_address_failure_is_explicit
+    dns = MemoryDNS.new
+    dns.add('example.com', Resolv::DNS::Resource::IN::HTTPS,
+            https(1, 'target.example.com',
+                  Resolv::DNS::SvcParam::IPv4Hint.new(['192.0.2.20'])))
+    dns.fail('target.example.com', Resolv::DNS::Resource::IN::AAAA)
+    dns.fail('target.example.com', Resolv::DNS::Resource::IN::A)
+
+    assert_raise(Resolv::ResolvError) do
+      dns.get_service_endpoint('example.com')
+    end
+
+    endpoint = dns.get_service_endpoint('example.com', address_fallback: true)
+
+    assert_equal [], endpoint.addresses
+    assert_equal ['192.0.2.20'], endpoint.address_hints.map(&:to_s)
+  end
+
   def test_svcparams
     params = Resolv::DNS::SvcParams.new([Resolv::DNS::SvcParam::Mandatory.new([1])])
 

@@ -521,6 +521,67 @@ class Resolv
     end
 
     ##
+    # Gets the first usable service endpoint for a SVCB-compatible RR.
+    # See #each_service_endpoint for argument details.
+
+    def get_service_endpoint(name, typeclass = Resource::IN::HTTPS, **options)
+      each_service_endpoint(name, typeclass, **options) {|endpoint| return endpoint}
+      raise ResolvError.new("DNS result has no usable service endpoint for #{name}")
+    end
+
+    ##
+    # Gets all usable service endpoints for a SVCB-compatible RR. See
+    # #each_service_endpoint for argument details.
+
+    def get_service_endpoints(name, typeclass = Resource::IN::HTTPS, **options)
+      ret = []
+      each_service_endpoint(name, typeclass, **options) {|endpoint| ret << endpoint}
+      ret
+    end
+
+    ##
+    # Iterates usable service endpoints for +name+.
+    #
+    # +typeclass+ should be Resolv::DNS::Resource::IN::HTTPS (the default) or
+    # Resolv::DNS::Resource::IN::SVCB.
+    #
+    # +alpn+ is the ordered list of ALPN protocol identifiers supported by the
+    # client. For HTTPS, "http/1.1" is used when this argument is omitted.
+    # Generic SVCB services may pass their default protocol as +default_alpn+.
+    #
+    # +supported_params+ contains SvcParamKeys beyond the built-in alpn,
+    # no-default-alpn, port, ipv4hint and ipv6hint parameters supported by the
+    # client. A mandatory parameter absent from this list makes the whole RR
+    # unusable. +params+ is accepted as an alias for +supported_params+.
+    #
+    # Generic SVCB services without a port parameter must supply the service's
+    # +default_port+. HTTPS uses port 443.
+    #
+    # By default there is no fallback. Pass <tt>fallback: true</tt> to use the
+    # queried name, default port, default protocol and its A/AAAA records when
+    # no usable service RR exists. Pass <tt>address_fallback: true</tt> to treat
+    # target A/AAAA lookup errors as an empty result; address hints remain
+    # separately identifiable as hints.
+
+    def each_service_endpoint(name, typeclass = Resource::IN::HTTPS,
+                              alpn: nil, supported_params: nil, params: nil,
+                              default_alpn: nil, default_port: nil,
+                              fallback: false, address_fallback: false)
+      supported_params ||= params
+      ServiceBindingResolver.new(self).each(
+        name, typeclass,
+        alpn: alpn,
+        supported_params: supported_params,
+        default_alpn: default_alpn,
+        default_port: default_port,
+        fallback: fallback,
+        address_fallback: address_fallback
+      ) {|endpoint| yield endpoint}
+    end
+
+    alias each_service each_service_endpoint
+
+    ##
     # Iterates over all +typeclass+ DNS resources for +name+.  See
     # #getresource for argument details.
 
@@ -3111,7 +3172,311 @@ class Resolv
         end
       end
     end
-  end
+
+      ##
+      # An address associated with a Resolv::DNS::ServiceEndpoint.
+
+      class ServiceAddressCandidate
+        def initialize(address, source) # :nodoc:
+          @address = address
+          @source = source
+        end
+
+        ##
+        # The Resolv::IPv4 or Resolv::IPv6 address.
+
+        attr_reader :address
+
+        ##
+        # Where the address came from: :address for A/AAAA records, or
+        # :ipv4hint/:ipv6hint for SvcParams.
+
+        attr_reader :source
+
+        def ==(other) # :nodoc:
+          ServiceAddressCandidate === other &&
+            address == other.address && source == other.source
+        end
+
+        alias eql? == # :nodoc:
+
+        def hash # :nodoc:
+          [address, source].hash
+        end
+      end
+
+      ##
+      # A usable service endpoint returned by Resolv::DNS#each_service_endpoint.
+
+      class ServiceEndpoint
+      def initialize(priority, target, port, protocols, addresses, hints,
+                     source: :service) # :nodoc:
+        @priority = priority
+        @target = target
+        @port = port
+        @protocols = protocols
+        @addresses = addresses
+        @address_hints = hints
+        @source = source
+        end
+
+        ##
+        # The priority from the service binding RR. Origin fallback endpoints
+        # have a priority of nil.
+
+      attr_reader :priority
+
+      ##
+      # Where the endpoint came from: :service for a ServiceMode RR, or
+      # :origin for explicit conventional connection fallback.
+
+      attr_reader :source
+
+        ##
+        # The service target name.
+
+        attr_reader :target
+
+        ##
+        # The TCP/UDP port to connect to.
+
+        attr_reader :port
+
+        ##
+        # The ALPN protocol identifiers shared by the RR and client, in RR order.
+
+        attr_reader :protocols
+
+        ##
+        # The first selected ALPN protocol identifier.
+
+        def protocol
+          @protocols.first
+        end
+
+        ##
+        # Addresses obtained from A and AAAA queries for the target.
+
+        attr_reader :addresses
+
+        ##
+        # Addresses supplied in ipv4hint and ipv6hint SvcParams.
+
+        attr_reader :address_hints
+
+        ##
+        # Address candidates with their source preserved. A/AAAA results come
+        # first and have source :address. Hints have source :ipv4hint or
+        # :ipv6hint.
+
+        def address_candidates
+          candidates = addresses.map {|address|
+            DNS::ServiceAddressCandidate.new(address, :address)
+          }
+          candidates + address_hints.map {|address|
+            source = Resolv::IPv4 === address ? :ipv4hint : :ipv6hint
+            DNS::ServiceAddressCandidate.new(address, source)
+          }
+        end
+
+        def ==(other) # :nodoc:
+          ServiceEndpoint === other &&
+            priority == other.priority &&
+            target == other.target &&
+            source == other.source &&
+            port == other.port &&
+            protocols == other.protocols &&
+            addresses == other.addresses &&
+            address_hints == other.address_hints
+        end
+
+        alias eql? == # :nodoc:
+
+        def hash # :nodoc:
+          [priority, target, source, port, protocols, addresses, address_hints].hash
+        end
+      end
+
+      ##
+      # Indicates that a service binding response is invalid.
+
+      class ServiceBindingError < ResolvError
+      end
+
+      class ServiceBindingResolver # :nodoc:
+        MAX_ALIAS_DEPTH = 16
+
+        BUILTIN_PARAM_KEYS = [
+          SvcParam::ALPN::KeyNumber,
+          SvcParam::NoDefaultALPN::KeyNumber,
+          SvcParam::Port::KeyNumber,
+          SvcParam::IPv4Hint::KeyNumber,
+          SvcParam::IPv6Hint::KeyNumber,
+        ].freeze
+
+        def initialize(dns)
+          @dns = dns
+        end
+
+        def each(initial_name, typeclass, alpn:, supported_params:,
+                 default_alpn:, default_port:, fallback:, address_fallback:)
+          if typeclass.equal?(Resource::IN::HTTPS)
+            default_alpn ||= ['http/1.1']
+            default_port ||= 443
+          elsif !typeclass.equal?(Resource::IN::SVCB)
+            raise ArgumentError, "unsupported service binding type: #{typeclass.inspect}"
+          end
+
+          client_alpn = Array(alpn || default_alpn)
+          unless client_alpn.all? {|protocol| String === protocol }
+            raise ArgumentError, 'alpn must contain strings'
+          end
+
+          supported = supported_keys(supported_params)
+          seen = {}
+          name = Name.create(initial_name)
+          depth = 0
+
+          loop do
+            canonical = canonical_name(name)
+            raise ServiceBindingError, "alias loop at #{name}" if seen[canonical]
+            seen[canonical] = true
+
+            records = @dns.getresources(name, typeclass)
+            aliases = records.select(&:alias_mode?)
+            services = records.select(&:service_mode?)
+
+            if aliases.any?
+              if aliases.length != records.length || services.any?
+                raise ServiceBindingError, "alias and service modes are mixed for #{name}"
+              end
+              unless aliases.map(&:target).uniq.length == 1 &&
+                 aliases.none? {|rr| rr.target.to_a.empty? } &&
+                 aliases.all? {|rr| rr.params.empty? }
+                raise ServiceBindingError, "invalid alias mode RR for #{name}"
+              end
+
+              depth += 1
+              if depth > MAX_ALIAS_DEPTH
+                raise ServiceBindingError, "alias depth exceeds #{MAX_ALIAS_DEPTH}"
+              end
+              name = aliases.first.target
+              next
+            end
+
+            endpoints = services.sort_by(&:priority).flat_map {|rr|
+              endpoint_for(rr, client_alpn, default_alpn, supported,
+                           default_port, address_fallback)
+            }.compact
+            endpoints.each {|endpoint| yield endpoint }
+            return unless endpoints.empty? && fallback
+
+            protocols = default_alpn ? default_alpn.select {|protocol| client_alpn.include?(protocol) } : []
+            next if protocols.empty?
+            yield fallback_endpoint(initial_name, protocols, default_port)
+            return
+          end
+        end
+
+        private
+
+        def supported_keys(extra_keys)
+          keys = BUILTIN_PARAM_KEYS.dup
+          Array(extra_keys).each do |key|
+            case key
+            when Integer
+              keys << key
+            when Symbol, String
+              key = key.to_s
+              if key =~ /\Akey(\d+)\z/
+                keys << $1.to_i
+              else
+                keys << SvcParam::ClassHash[key.to_sym].key_number
+              end
+            when Module
+              keys << key.key_number
+            else
+              raise ArgumentError, "unsupported SvcParam key: #{key.inspect}"
+            end
+          end
+          keys.uniq
+        end
+
+        def canonical_name(name)
+          [name.absolute?, name.to_a.map {|label| label.downcase }.join('.')]
+        end
+
+        def endpoint_for(rr, client_alpn, default_alpn, supported,
+                         default_port, address_fallback)
+          return if rr.target.to_a.empty?
+          protocols = select_protocols(rr, client_alpn, default_alpn)
+          return if protocols.nil? || (protocols.empty? && !client_alpn.empty?)
+          return unless mandatory_params_supported?(rr, supported)
+
+          port_param = rr.params[:port]
+          port = port_param ? port_param.port : default_port
+          return unless port && port > 0
+
+          addresses = resolve_addresses(rr.target, address_fallback)
+          hints = hint_candidates(rr)
+          ServiceEndpoint.new(rr.priority, rr.target, port, protocols, addresses, hints)
+        end
+
+        def select_protocols(rr, client_alpn, default_alpn)
+          alpn_param = rr.params[:alpn]
+          no_default = rr.params[:'no-default-alpn']
+
+          if alpn_param || no_default
+            return if no_default || alpn_param.nil? || alpn_param.protocol_ids.empty?
+            return alpn_param.protocol_ids.select {|protocol| client_alpn.include?(protocol) }
+          end
+
+          return [] if default_alpn.nil?
+          default_alpn.select {|protocol| client_alpn.include?(protocol) }
+        end
+
+        def mandatory_params_supported?(rr, supported)
+          mandatory = rr.params[:mandatory]
+          return true unless mandatory
+
+          mandatory.keys.uniq.length == mandatory.keys.length &&
+            mandatory.keys.none? {|key| key == SvcParam::Mandatory::KeyNumber } &&
+            mandatory.keys.all? {|key| supported.include?(key) } &&
+            mandatory.keys.all? {|key| rr.params[key] }
+        end
+
+        def resolve_addresses(target, address_fallback)
+          addresses = []
+          resolve_address_family(addresses, target, Resource::IN::AAAA, address_fallback)
+          resolve_address_family(addresses, target, Resource::IN::A, address_fallback)
+          addresses
+        end
+
+        def resolve_address_family(addresses, target, typeclass, address_fallback)
+          @dns.each_resource(target, typeclass) {|rr| addresses << rr.address }
+        rescue ResolvError
+          raise unless address_fallback
+        end
+
+        def hint_candidates(rr)
+          hints = []
+          ipv4 = rr.params[:ipv4hint]
+          ipv6 = rr.params[:ipv6hint]
+          hints.concat(ipv6.addresses) if ipv6
+          hints.concat(ipv4.addresses) if ipv4
+          hints
+        end
+
+        def fallback_endpoint(name, protocols, default_port)
+          addresses = []
+          resolve_address_family(addresses, name, Resource::IN::AAAA, false)
+          resolve_address_family(addresses, name, Resource::IN::A, false)
+          target = Name.create(name)
+          ServiceEndpoint.new(nil, target, default_port, protocols, addresses, [],
+                              source: :origin)
+        end
+      end
+    end
 
   ##
   # A Resolv::DNS IPv4 address.
