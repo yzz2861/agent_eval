@@ -128,6 +128,7 @@ This is probably a bug in GraphQL-Ruby, please report this error on GitHub: http
   autoload :LoadApplicationObjectFailedError, "graphql/load_application_object_failed_error"
   autoload :Testing, "graphql/testing"
   autoload :Current, "graphql/current"
+  autoload :Specialization, "graphql/specialization"
   if defined?(::Rails::Engine)
     # This needs to be defined before Rails runs `add_routing_paths`,
     # otherwise GraphQL::Dashboard's routes won't have been gathered for loading
