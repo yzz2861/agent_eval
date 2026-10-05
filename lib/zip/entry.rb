@@ -182,6 +182,35 @@ module Zip
       @extra.member?(:universaltime) || @extra.member?(:ntfs)
     end
 
+    def apply_reproducible_options!(options) # :nodoc:
+      return self unless options.enabled?
+
+      @version = VERSION_MADE_BY
+      @version_needed_to_extract = VERSION_NEEDED_TO_EXTRACT
+      @internal_file_attributes = 1
+      @gp_flags &= EFS # Entries are written with known sizes, without data descriptors.
+      set_compression_level_flags
+      @fstype = ::Zip::FSTYPE_UNIX if options.fstype
+
+      if options.permissions
+        @unix_perms = case ftype
+                      when :directory then 0o755
+                      when :symlink then 0o777
+                      else 0o644
+                      end
+      end
+
+      if options.time
+        @time = ::Zip::DOSTime.local(1980, 1, 1, 0, 0, 0)
+      end
+
+      if options.extra_fields
+        @extra.select! { |name, _| name == :aes }
+      end
+
+      self
+    end
+
     # Return the compression method for this entry.
     #
     # Returns STORED if the entry is a directory or if the compression

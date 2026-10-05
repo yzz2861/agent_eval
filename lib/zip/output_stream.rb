@@ -21,6 +21,11 @@ module Zip
   #
   # java.util.zip.ZipOutputStream is the original inspiration for this
   # class.
+  #
+  # Pass `reproducible: true` to buffer entries until close, write them in
+  # sorted name order, and normalize timestamps, permissions, filesystem
+  # markers, and non-essential extra fields. Byte-for-byte stability requires
+  # the same compression implementation/version and archive options.
   class OutputStream
     extend Forwardable
     include ::Zip::IOExtras::AbstractOutputStream
@@ -29,7 +34,8 @@ module Zip
 
     # Opens the indicated zip file. If a file with that name already
     # exists it will be overwritten.
-    def initialize(file_name, stream: false, encrypter: nil, suppress_extra_fields: false, **opts)
+    def initialize(file_name, stream: false, encrypter: nil,
+                   suppress_extra_fields: false, reproducible: false, **opts)
       super(**opts)
       @file_name = file_name
       @output_stream = if stream
@@ -44,6 +50,11 @@ module Zip
       @compressor = ::Zip::NullCompressor.instance
       @encrypter = encrypter || ::Zip::NullEncrypter.new
       @suppress_extra_fields = suppress_extra_fields
+      @reproducible_options = ::Zip::ReproducibleOptions.new(reproducible)
+      if @reproducible_options.enabled? && !@encrypter.is_a?(::Zip::NullEncrypter)
+        raise ArgumentError, 'Cannot write a reproducible archive with encryption enabled'
+      end
+      @reproducible_entries = []
       @closed = false
       @current_entry = nil
     end
@@ -52,28 +63,33 @@ module Zip
       # Same as #initialize but if a block is passed the opened
       # stream is passed to the block and closed when the block
       # returns.
-      def open(file_name, encrypter: nil, suppress_extra_fields: false, **opts)
+      def open(file_name, encrypter: nil, suppress_extra_fields: false,
+               reproducible: false, **opts)
         unless block_given?
           return new(
             file_name,
             encrypter:             encrypter,
             suppress_extra_fields: suppress_extra_fields,
+            reproducible:          reproducible,
             **opts
           )
         end
 
         zos = new(file_name, stream: false, encrypter: encrypter,
-                  suppress_extra_fields: suppress_extra_fields, **opts)
+                  suppress_extra_fields: suppress_extra_fields,
+                  reproducible: reproducible, **opts)
         yield zos
       ensure
         zos.close if zos
       end
 
       # Same as #open but writes to a filestream instead
-      def write_buffer(io = ::StringIO.new, encrypter: nil, suppress_extra_fields: false, **opts)
+      def write_buffer(io = ::StringIO.new, encrypter: nil,
+                       suppress_extra_fields: false, reproducible: false, **opts)
         io.binmode if io.respond_to?(:binmode)
         zos = new(io, stream: true, encrypter: encrypter,
-                  suppress_extra_fields: suppress_extra_fields, **opts)
+                  suppress_extra_fields: suppress_extra_fields,
+                  reproducible: reproducible, **opts)
         yield zos
         zos.close_buffer
       end
@@ -83,9 +99,16 @@ module Zip
     def close
       return if @closed
 
-      finalize_current_entry
-      update_local_headers
-      @cdir.write_to_stream(@output_stream, suppress_extra_fields: @suppress_extra_fields)
+      begin
+        finalize_current_entry
+        unless @reproducible_options.enabled?
+          update_local_headers
+        end
+        write_reproducible_entries if @reproducible_options.enabled?
+        write_central_directory
+      ensure
+        cleanup_reproducible_entries if @reproducible_options.enabled?
+      end
       @output_stream.close
       @closed = true
     end
@@ -94,9 +117,16 @@ module Zip
     def close_buffer
       return @output_stream if @closed
 
-      finalize_current_entry
-      update_local_headers
-      @cdir.write_to_stream(@output_stream, suppress_extra_fields: @suppress_extra_fields)
+      begin
+        finalize_current_entry
+        unless @reproducible_options.enabled?
+          update_local_headers
+        end
+        write_reproducible_entries if @reproducible_options.enabled?
+        write_central_directory
+      ensure
+        cleanup_reproducible_entries if @reproducible_options.enabled?
+      end
       @closed = true
       @output_stream.flush
       @output_stream
@@ -124,14 +154,27 @@ module Zip
           )
         end
 
-      init_next_entry(new_entry)
-      @current_entry = new_entry
+      if @reproducible_options.enabled?
+        finalize_current_entry
+        init_reproducible_next_entry(new_entry)
+      else
+        init_next_entry(new_entry)
+        @current_entry = new_entry
+      end
     end
 
     def copy_raw_entry(entry) # :nodoc:
       entry = entry.dup
       raise Error, 'zip stream is closed' if @closed
       raise Error, 'entry is not a ZipEntry' unless entry.kind_of?(Entry)
+      if @reproducible_options.enabled?
+        if entry.aes? || entry.encrypted?
+          raise ArgumentError, 'Cannot write a reproducible archive with encryption enabled'
+        end
+
+        copy_raw_entry_reproducibly(entry)
+        return
+      end
 
       finalize_current_entry
       check_duplicate_name(entry, 'copy_raw_entry')
@@ -150,7 +193,126 @@ module Zip
 
     private
 
+    def write_central_directory
+      @cdir.write_to_stream(
+        @output_stream,
+        suppress_extra_fields: @suppress_extra_fields,
+        entries:               @reproducible_ordered_entries
+      )
+    end
+
+    def check_reproducible_duplicate_name(entry, proc_name)
+      return if Zip.allow_duplicate_entry_names
+      if @reproducible_entries.none? { |(stored_entry, _)| stored_entry.name == entry.name }
+        return
+      end
+
+      raise EntryExistsError.new(proc_name, entry.name)
+    end
+
+    def write_reproducible_entries
+      @reproducible_ordered_entries = ordered_reproducible_pairs.map(&:first)
+      ordered_reproducible_pairs.each do |stored_entry, tempfile|
+        tempfile.rewind
+        stored_entry.local_header_offset = @output_stream.tell
+        stored_entry.write_local_entry(
+          @output_stream,
+          suppress_extra_fields: @suppress_extra_fields
+        )
+        ::Zip::IOExtras.copy_stream(@output_stream, tempfile)
+      end
+    end
+
+    def cleanup_reproducible_entries
+      @reproducible_entries.each { |_, tempfile| tempfile.close! }
+      @reproducible_entries.clear
+      @reproducible_ordered_entries = nil
+    end
+
+    def init_reproducible_next_entry(entry)
+      check_reproducible_duplicate_name(entry, 'put_next_entry')
+      if entry.aes? || entry.encrypted?
+        raise ArgumentError, 'Cannot write a reproducible archive with encryption enabled'
+      end
+
+      entry.apply_reproducible_options!(@reproducible_options)
+      tempfile = Tempfile.new('zip-reproducible-entry', encoding: Encoding::BINARY)
+      tempfile.binmode
+      @reproducible_entries << [entry, tempfile]
+      @cdir << entry
+      @current_entry = entry
+      @compressor = get_reproducible_compressor(entry, tempfile)
+
+      return unless block_given?
+
+      yield(tempfile)
+      finalize_reproducible_current_entry
+    end
+
+    def copy_raw_entry_reproducibly(entry)
+      finalize_current_entry
+      check_reproducible_duplicate_name(entry, 'copy_raw_entry')
+      entry.get_raw_input_stream do |input|
+        input.seek(entry.local_header_offset, IO::SEEK_SET)
+        local_entry = ::Zip::Entry.read_local_entry(input)
+        compression_method = local_entry.compression_method
+        decompressor = case compression_method
+                       when Entry::DEFLATED then ::Zip::Inflater.new(input)
+                       when Entry::STORED
+                         ::Zip::PassThruDecompressor.new(input, local_entry.size)
+                       else raise ::Zip::CompressionMethodError, compression_method
+                       end
+
+        entry.compression_method = compression_method
+        init_reproducible_next_entry(entry)
+        remaining_size = local_entry.size
+        until remaining_size.zero?
+          chunk = decompressor.read(remaining_size)
+          break unless chunk
+
+          write(chunk)
+          remaining_size -= chunk.bytesize
+        end
+        finalize_current_entry
+      end
+    end
+
+    def get_reproducible_compressor(entry, output)
+      case entry.compression_method
+      when Entry::DEFLATED
+        ::Zip::Deflater.new(output, entry.compression_level)
+      when Entry::STORED
+        ::Zip::PassThruCompressor.new(output)
+      else
+        raise ::Zip::CompressionMethodError, entry.compression_method
+      end
+    end
+
+    def ordered_reproducible_pairs
+      if @reproducible_options.sort_entries
+        @reproducible_entries.sort_by.with_index do |(entry, _), index|
+          [entry.name, index]
+        end
+      else
+        @reproducible_entries
+      end
+    end
+
+    def finalize_reproducible_current_entry
+      return unless @current_entry
+
+      finish
+      tempfile = @reproducible_entries.assoc(@current_entry)&.last
+      tempfile&.flush
+      @current_entry.compressed_size = tempfile&.tell || @compressor.size
+      @current_entry.size = @compressor.size
+      @current_entry.crc = @compressor.crc
+      @current_entry = nil
+      @compressor = ::Zip::NullCompressor.instance
+    end
+
     def finalize_current_entry
+      return finalize_reproducible_current_entry if @reproducible_options.enabled?
       return unless @current_entry
 
       finish

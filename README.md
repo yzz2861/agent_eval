@@ -96,6 +96,54 @@ end
 
 You can generate a Zip archive in memory using `Zip::OutputStream.write_buffer`.
 
+### Writing reproducible archives
+
+Pass `reproducible: true` to `Zip::File` or `Zip::OutputStream` to write entries
+in sorted name order and normalize metadata that otherwise comes from source
+files, the host platform, or the current time:
+
+- modification time becomes 1980-01-01 00:00:00;
+- regular files, directories, and symlinks use `0644`, `0755`, and `0777`
+  respectively;
+- the host platform marker is normalized to Unix;
+- non-essential extra fields are removed, while extra fields that are required
+  to read the entry (such as a required Zip64 field) are retained;
+- local file headers are written with known sizes instead of data descriptors.
+
+File contents, names, compression methods, compression levels, comments, and
+the EFS flag for Unicode names are retained. File types are also retained: a
+symlink remains a symlink and still contains its link target; it is not turned
+into a regular file. This does not change extraction behavior, and symlink
+extraction remains skipped by the existing safety policy.
+
+```ruby
+Zip::File.open('archive.zip', create: true, reproducible: true) do |zip|
+  zip.add('file.txt', 'file.txt')
+end
+
+Zip::OutputStream.write_buffer(reproducible: true) do |output|
+  output.put_next_entry('file.txt')
+  output.write('contents')
+end
+```
+
+Every normalization is explicit. Pass a hash to keep a particular source value:
+`sort_entries`, `time`, `permissions`, `fstype`, or `extra_fields`. Reproducible
+output cannot be combined with encryption because traditional encryption headers
+include random bytes.
+
+```ruby
+Zip::File.open(
+  'archive.zip',
+  create: true,
+  reproducible: { permissions: false, fstype: false }
+)
+```
+
+Byte-for-byte reproducibility is guaranteed only when archives are produced
+with the same rubyzip and compression implementation versions, and the same
+archive options (including compression method and level).
+
 ### Suppressing extra fields
 
 If you wish to suppress extra fields from being added to your entries, you can do so by passing the `suppress_extra_fields` parameter to any of the archive opening calls within `Zip::File` or `Zip::OutputStream`, e.g.:

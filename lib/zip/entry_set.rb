@@ -79,6 +79,10 @@ module Zip
       entries.each(&block)
     end
 
+    def each_in_storage_order(&block)
+      @entry_set.values.flatten(1).each(&block)
+    end
+
     def entries
       sorted_entries.values.flatten(1)
     end

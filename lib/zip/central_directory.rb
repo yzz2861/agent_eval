@@ -23,8 +23,8 @@ module Zip
     attr_accessor :comment
 
     def_delegators :@entry_set,
-                   :<<, :delete, :each, :entries, :find_entry, :glob,
-                   :include?, :size
+                   :<<, :delete, :each, :each_in_storage_order, :entries,
+                   :find_entry, :glob, :include?, :size
 
     mark_dirty :<<, :comment=, :delete
 
@@ -39,9 +39,9 @@ module Zip
       read_central_directory_entries(io)
     end
 
-    def write_to_stream(io, suppress_extra_fields: false) # :nodoc:
+    def write_to_stream(io, suppress_extra_fields: false, entries: nil) # :nodoc:
       cdir_offset = io.tell
-      @entry_set.each do |entry|
+      (entries || @entry_set).each do |entry|
         entry.write_c_dir_entry(io, suppress_extra_fields: suppress_extra_fields)
       end
       eocd_offset = io.tell

@@ -48,6 +48,11 @@ module Zip
   #   zipfile.remove('first.txt')
   # end
   #
+  # Pass `reproducible: true` to sort entries and normalize timestamps,
+  # permissions, filesystem markers, and non-essential extra fields. The
+  # resulting bytes are stable only when using the same compression
+  # implementation/version and archive options.
+  #
   # Zip::FileSystem offers an alternative API that emulates ruby's
   # interface for accessing the filesystem, ie. the ::File and ::Dir classes.
   class File
@@ -69,6 +74,9 @@ module Zip
     # default -> true.
     attr_accessor :restore_times
 
+    # When truthy, archives are written in reproducible mode.
+    attr_reader :reproducible
+
     def_delegators :@cdir, :comment, :comment=, :each, :entries, :glob, :size
 
     # Opens a zip archive. Pass create: true to create
@@ -78,7 +86,7 @@ module Zip
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                    restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                    compression_level: ::Zip.default_compression,
-                   suppress_extra_fields: false)
+                   suppress_extra_fields: false, reproducible: false)
       super()
 
       @name    = path_or_io.respond_to?(:path) ? path_or_io.path : path_or_io
@@ -91,6 +99,7 @@ module Zip
       @restore_times         = restore_times
       @compression_level     = compression_level
       @suppress_extra_fields = suppress_extra_fields
+      @reproducible          = reproducible
     end
 
     class << self
@@ -102,13 +111,14 @@ module Zip
                restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                compression_level: ::Zip.default_compression,
-               suppress_extra_fields: false)
+               suppress_extra_fields: false, reproducible: false)
         zf = ::Zip::File.new(file_name, create:                create,
                                         restore_ownership:     restore_ownership,
                                         restore_permissions:   restore_permissions,
                                         restore_times:         restore_times,
                                         compression_level:     compression_level,
-                                        suppress_extra_fields: suppress_extra_fields)
+                                        suppress_extra_fields: suppress_extra_fields,
+                                        reproducible:          reproducible)
 
         return zf unless block_given?
 
@@ -128,7 +138,7 @@ module Zip
                       restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
                       restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
                       compression_level: ::Zip.default_compression,
-                      suppress_extra_fields: false)
+                      suppress_extra_fields: false, reproducible: false)
         unless IO_METHODS.map { |method| io.respond_to?(method) }.all? || io.kind_of?(String)
           raise 'Zip::File.open_buffer expects a String or IO-like argument' \
                 "(responds to #{IO_METHODS.join(', ')}). Found: #{io.class}"
@@ -141,7 +151,8 @@ module Zip
                                  restore_permissions:   restore_permissions,
                                  restore_times:         restore_times,
                                  compression_level:     compression_level,
-                                 suppress_extra_fields: suppress_extra_fields)
+                                 suppress_extra_fields: suppress_extra_fields,
+                                 reproducible:          reproducible)
 
         return zf unless block_given?
 
@@ -188,8 +199,9 @@ module Zip
       # or added, to avoid the security issues they can pose. `max_depth`
       # limits how many directory levels below `src_dir` are walked; anything
       # deeper is skipped, also with a warning (default: 16).
-      def add_recursive(zip_file_name, src_dir, prefix: '', max_depth: 16, &continue_on_exists_proc)
-        Zip::File.open(zip_file_name, create: true) do |zf|
+      def add_recursive(zip_file_name, src_dir, prefix: '', max_depth: 16,
+                        reproducible: false, &continue_on_exists_proc)
+        Zip::File.open(zip_file_name, create: true, reproducible: reproducible) do |zf|
           zf.add_recursive(src_dir, prefix: prefix, max_depth: max_depth, &continue_on_exists_proc)
         end
       end
@@ -399,8 +411,12 @@ module Zip
       return if name.kind_of?(StringIO) || !commit_required?
 
       on_success_replace do |tmp_file|
-        ::Zip::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
-          @cdir.each do |e|
+        ::Zip::OutputStream.open(
+          tmp_file,
+          suppress_extra_fields: @suppress_extra_fields,
+          reproducible:          @reproducible
+        ) do |zos|
+          @cdir.each_in_storage_order do |e|
             e.write_to_zip_output_stream(zos)
             e.clean_up
           end
@@ -415,8 +431,14 @@ module Zip
     def write_buffer(io = ::StringIO.new)
       return io unless commit_required?
 
-      ::Zip::OutputStream.write_buffer(io, suppress_extra_fields: @suppress_extra_fields) do |zos|
-        @cdir.each { |e| e.write_to_zip_output_stream(zos) }
+      ::Zip::OutputStream.write_buffer(
+        io,
+        suppress_extra_fields: @suppress_extra_fields,
+        reproducible:          @reproducible
+      ) do |zos|
+        @cdir.each_in_storage_order do |e|
+          e.write_to_zip_output_stream(zos)
+        end
         zos.comment = comment
       end
     end
