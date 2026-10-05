@@ -530,6 +530,68 @@ class Resolv
       }
     end
 
+    ##
+    # Transfers the zone +zone+ from a nameserver via AXFR (RFC 5936) and
+    # yields each resource record of the zone as it arrives.
+    #
+    # The transfer runs over TCP and usually spans multiple DNS messages;
+    # records are yielded one by one as the messages are decoded.  The block
+    # receives the owner name (a Resolv::DNS::Name), the TTL and the resource
+    # (a Resolv::DNS::Resource) of every record, starting and ending with the
+    # SOA record of the zone.
+    #
+    # The method returns the number of yielded records once the terminating
+    # SOA record has arrived, so a normal return always means the zone was
+    # transferred completely.  A ResolvError is raised when the server
+    # reports an error or the transferred data fails consistency checks, and
+    # a ResolvTimeout is raised when the connection stalls or closes before
+    # the terminating SOA record.
+    #
+    # Breaking out of the block aborts the transfer and closes the
+    # connection to the nameserver.
+    #
+    # +max_message_size+ limits the size of a single received DNS message
+    # and defaults to 65535, the largest value the TCP length prefix can
+    # express.  +max_records+ limits the total number of records accepted in
+    # one transfer and defaults to 100000.  Exceeding either limit raises a
+    # ResolvError.
+    #
+    # Example:
+    #
+    #   Resolv::DNS.open(nameserver: '192.0.2.1') {|dns|
+    #     dns.each_zone_record('example.org') {|name, ttl, resource|
+    #       p [name.to_s, ttl, resource]
+    #     }
+    #   }
+
+    def each_zone_record(zone, max_message_size: 65535, max_records: 100_000)
+      unless Integer === max_message_size && max_message_size > 0
+        raise ArgumentError, "max_message_size must be a positive Integer"
+      end
+      unless Integer === max_records && max_records > 0
+        raise ArgumentError, "max_records must be a positive Integer"
+      end
+      lazy_initialize
+      candidate = Name.create(zone)
+      candidate = Name.new(candidate.to_a) unless candidate.absolute?
+      started = false
+      last_error = nil
+      @config.nameserver_port.each {|nameserver, port|
+        begin
+          return transfer_zone(candidate, nameserver, port, max_message_size, max_records) {|*record|
+            started = true
+            yield(*record)
+          }
+        rescue ResolvTimeout => error
+          # A transfer that already yielded records cannot be restarted on
+          # another nameserver without yielding duplicates.
+          raise if started
+          last_error = error
+        end
+      }
+      raise last_error || ResolvError.new("no nameserver available for zone transfer of #{candidate}")
+    end
+
     # :stopdoc:
 
     def fetch_resource(name, typeclass)
@@ -646,6 +708,92 @@ class Resolv
       }
     end
 
+    # Runs one AXFR session for +candidate+ against a single nameserver and
+    # yields each record as it is decoded.  Returns the number of records
+    # once the SOA record that terminates the zone has been yielded; any
+    # deviation from a well formed transfer raises instead, so the
+    # connection is never mistaken for a complete zone when it ends early.
+    def transfer_zone(candidate, nameserver, port, max_message_size, max_records) # :nodoc:
+      query = Message.new
+      query.add_question(candidate, Resource::IN::AXFR)
+      requester = make_tcp_requester(nameserver, port)
+      begin
+        sender = requester.sender(query, candidate, nameserver, port)
+        requester.send_query(sender)
+        tout = @config.generate_timeouts.first
+        first_soa = nil
+        record_count = 0
+        first_message = true
+        loop do
+          timelimit = Process.clock_gettime(Process::CLOCK_MONOTONIC) + tout
+          reply, = requester.recv_message(timelimit, max_message_size)
+          unless requester.sender_for(nil, reply) == sender
+            raise ResolvError.new("zone transfer of #{candidate} got a reply with unexpected id #{reply.id}")
+          end
+          case reply.rcode
+          when RCode::NoError
+          when RCode::NXDomain
+            raise Config::NXDomain.new(candidate.to_s)
+          else
+            raise Config::OtherResolvError.new(candidate.to_s)
+          end
+          check_zone_transfer_question(reply, candidate, first_message)
+          first_message = false
+          reply.each_answer {|name, ttl, data|
+            record_count += 1
+            if record_count > max_records
+              raise ResolvError.new("zone transfer of #{candidate} has more than #{max_records} records")
+            end
+            if Resource::IN::SOA === data && name == candidate
+              if first_soa
+                unless soa_record_equal?(first_soa, data)
+                  raise ResolvError.new("zone transfer of #{candidate} ends with a different SOA record")
+                end
+                yield name, ttl, data
+                return record_count
+              end
+              first_soa = data
+            elsif !first_soa
+              raise ResolvError.new("zone transfer of #{candidate} does not start with its SOA record")
+            end
+            yield name, ttl, data
+          }
+        end
+      ensure
+        requester.close
+      end
+    end
+
+    # A reply that carries a question section must echo the AXFR question
+    # for the transferred zone; the first reply of a transfer always has to.
+    def check_zone_transfer_question(reply, candidate, required) # :nodoc:
+      matched = false
+      reply.each_question {|name, typeclass|
+        if name == candidate &&
+           typeclass::TypeValue == Resource::IN::AXFR::TypeValue &&
+           typeclass::ClassValue == Resource::IN::AXFR::ClassValue
+          matched = true
+        end
+      }
+      if matched
+        return
+      elsif !reply.question.empty?
+        raise ResolvError.new("zone transfer reply does not echo the question for #{candidate}")
+      elsif required
+        raise ResolvError.new("zone transfer reply for #{candidate} has no question section")
+      end
+    end
+
+    def soa_record_equal?(soa, other) # :nodoc:
+      soa.mname == other.mname &&
+        soa.rname == other.rname &&
+        soa.serial == other.serial &&
+        soa.refresh == other.refresh &&
+        soa.retry == other.retry &&
+        soa.expire == other.expire &&
+        soa.minimum == other.minimum
+    end
+
     def self.random(arg) # :nodoc:
       begin
         SecureRandom.random_number(arg)
@@ -724,15 +872,41 @@ class Resolv
       def request(sender, tout)
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         timelimit = start + tout
-        begin
-          sender.send
-        rescue Errno::EHOSTUNREACH, # multi-homed IPv6 may generate this
-               Errno::ENETUNREACH,
-               Errno::EPIPE, # a peer that went away between requests
-               Errno::ECONNRESET # the same, as Windows reports it
-          send_failed
-          raise ResolvTimeout
+        send_query(sender)
+        await_reply(sender, timelimit)
+      end
+
+      # Writes the request of +sender+ to the transport.  A stream transport
+      # that cannot be written is marked unusable; see #reusable?.
+      def send_query(sender) # :nodoc:
+        sender.send
+      rescue Errno::EHOSTUNREACH, # multi-homed IPv6 may generate this
+             Errno::ENETUNREACH,
+             Errno::EPIPE, # a peer that went away between requests
+             Errno::ECONNRESET # the same, as Windows reports it
+        send_failed
+        raise ResolvTimeout
+      end
+
+      # Reads messages until one matches +sender+, without sending anything.
+      # Used both to answer an ordinary request and to follow the many
+      # messages of a zone transfer.
+      def await_reply(sender, timelimit) # :nodoc:
+        while true
+          msg, from = recv_message(timelimit)
+          if sender == sender_for(from, msg)
+            break
+          else
+            # unexpected DNS message ignored
+          end
         end
+        return msg, sender.data
+      end
+
+      # Reads the next decodable message from the transport, whatever sender
+      # it belongs to.  When +max_message_size+ is given, a larger message
+      # raises a ResolvError instead of being decoded.
+      def recv_message(timelimit, max_message_size = nil) # :nodoc:
         while true
           before_select = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           timeout = timelimit - before_select
@@ -758,18 +932,16 @@ class Resolv
             # Don't wait anymore.
             raise ResolvTimeout
           end
+          if max_message_size && reply.bytesize > max_message_size
+            raise ResolvError.new("DNS message too large: #{reply.bytesize} bytes")
+          end
           begin
             msg = Message.decode(reply)
           rescue DecodeError
             next # broken DNS message ignored
           end
-          if sender == sender_for(from, msg)
-            break
-          else
-            # unexpected DNS message ignored
-          end
+          return msg, from
         end
-        return msg, sender.data
       end
 
       def sender_for(addr, msg)
@@ -2772,6 +2944,13 @@ class Resolv
       end
 
       ##
+      # A Query type requesting a zone transfer.
+
+      class AXFR < Query
+        TypeValue = 252 # :nodoc:
+      end
+
+      ##
       # CAA resource record defined in RFC 8659
       #
       # These records identify certificate authority allowed to issue
@@ -2834,7 +3013,7 @@ class Resolv
       end
 
       ClassInsensitiveTypes = [ # :nodoc:
-        NS, CNAME, SOA, PTR, HINFO, MINFO, MX, TXT, LOC, ANY, CAA
+        NS, CNAME, SOA, PTR, HINFO, MINFO, MX, TXT, LOC, ANY, AXFR, CAA
       ]
 
       ##
