@@ -197,6 +197,55 @@ require "digest"
 # {dig methods}[https://docs.ruby-lang.org/en/master/dig_methods_rdoc.html]
 # in a returned hierarchy of objects.
 #
+# == Journal Mode
+#
+# By default every successful transaction rewrites the entire store file,
+# even when only a single small value changed.
+# Passing +journal: true+ to PStore.new switches the store to journal mode:
+#
+#   store = PStore.new('big.store', journal: true)
+#
+# In journal mode the store consists of two files next to each other:
+#
+# - The store file itself holds a compacted _snapshot_ of the whole table.
+# - A sibling file with a +.journal+ extension holds append-only
+#   _commit records_, one per transaction that changed something.
+#
+# Each commit record is self-describing and carries a SHA-256 digest,
+# so its integrity can be verified independently.
+# Opening a store restores the table from the snapshot
+# and then replays the valid commit records on top of it.
+# A transaction that changes nothing writes nothing.
+#
+# In-place modifications of nested objects retrieved with #[] or #fetch
+# (such as <tt>store[:items] << 1</tt>) are detected at commit time
+# and included in the record; overriding #[]= is therefore not enough
+# to track changes, and journal mode does not rely on it.
+#
+# Once the journal grows to the configured #compaction_threshold
+# (1 MiB by default), the next changing transaction atomically rewrites
+# a fresh snapshot and rotates the journal back to empty.
+# +compaction_threshold:+ may be set to +nil+ to disable size based
+# compaction.
+#
+# All journal operations are guarded by an exclusive cross-process lock
+# held in a third, stable file (+.lock+); snapshot compaction,
+# journal rotation and ordinary appends are therefore never performed
+# concurrently by different processes.
+#
+# On startup, a trailing commit record that was not fully written
+# (because the process crashed mid-write) is treated as a torn tail:
+# it is ignored by read-only transactions and removed by read-write
+# transactions. Corruption in the middle of the journal, with further
+# valid records following it, raises PStore::Error instead,
+# because silently dropping committed transactions would lose data.
+#
+# Stores written by ordinary (non-journal) \\PStore keep working:
+# they can be opened and read in journal mode, and the first changing
+# transaction migrates them to the snapshot format. Journal mode is
+# opt in, so existing plain files are never touched unless a journal
+# mode instance writes to them.
+#
 # == Working with the Store
 #
 # === Creating a Store
@@ -327,7 +376,7 @@ require "digest"
 #
 class PStore
   # :stopdoc:
-  VERSION = "0.2.1"
+  VERSION = "0.3.0"
 
   RDWR_ACCESS = {mode: IO::RDWR | IO::CREAT | IO::BINARY, encoding: Encoding::ASCII_8BIT}.freeze
   RD_ACCESS = {mode: IO::RDONLY | IO::BINARY, encoding: Encoding::ASCII_8BIT}.freeze
@@ -372,7 +421,16 @@ class PStore
   #
   #   store = PStore.new(path, true)
   #
-  def initialize(file, thread_safe = false)
+  # If keyword argument +journal+ is given as +true+, the store uses
+  # append-only commit records instead of rewriting the whole file on
+  # every transaction; see {Journal Mode}[rdoc-ref:PStore@Journal+Mode].
+  #
+  # Keyword argument +compaction_threshold+ sets the journal size in bytes
+  # at which the next changing transaction compacts a journal store;
+  # the default is 1 MiB and +nil+ disables size based compaction.
+  # It has no effect unless +journal+ is +true+.
+  #
+  def initialize(file, thread_safe = false, journal: false, compaction_threshold: 1024 * 1024)
     dir = File::dirname(file)
     unless File::directory? dir
       raise PStore::Error, format("directory %s does not exist", dir)
@@ -384,8 +442,30 @@ class PStore
     @abort = false
     @ultra_safe = false
     @thread_safe = thread_safe
+    @journal = journal
+    if compaction_threshold &&
+        (!(compaction_threshold.is_a?(Integer) && compaction_threshold >= 0))
+      raise PStore::Error, "compaction_threshold must be a non-negative Integer or nil"
+    end
+    @compaction_threshold = compaction_threshold
     @lock = Thread::Mutex.new
   end
+
+  # Returns +true+ if the store uses append-only journal mode.
+  #
+  # See {Journal Mode}[rdoc-ref:PStore@Journal+Mode].
+  #
+  def journal?
+    @journal
+  end
+
+  # Returns the journal size, in bytes, at which the next changing
+  # transaction compacts the store and rotates the journal.
+  #
+  # Returns +nil+ if size based compaction is disabled.
+  # Only meaningful when #journal? is +true+.
+  #
+  attr_reader :compaction_threshold
 
   # Raises PStore::Error if the calling code is not in a PStore#transaction.
   def in_transaction
@@ -419,6 +499,7 @@ class PStore
   # Raises an exception if called outside a transaction block.
   def [](key)
     in_transaction
+    journal_track_read(key) if @journal_tracking
     @table[key]
   end
 
@@ -442,9 +523,11 @@ class PStore
       if PStore::Error.equal?(default)
         raise PStore::Error, format("undefined key '%s'", key)
       else
+        journal_track_read(key) if @journal_tracking
         return default
       end
     end
+    journal_track_read(key) if @journal_tracking
     @table[key]
   end
 
@@ -461,6 +544,7 @@ class PStore
   # Raises an exception if called outside a transaction block.
   def []=(key, value)
     in_transaction_wr
+    journal_track_write(key) if @journal_tracking
     @table[key] = value
   end
 
@@ -478,7 +562,9 @@ class PStore
   # Raises an exception if called outside a transaction block.
   def delete(key)
     in_transaction_wr
-    @table.delete key
+    result = @table.delete(key)
+    journal_track_delete(key) if @journal_tracking
+    result
   end
 
   # Returns an array of the existing keys:
@@ -552,6 +638,13 @@ class PStore
   #
   # Raises an exception if called within a transaction block.
   def transaction(read_only = false)  # :yields:  pstore
+    return journal_transaction(read_only) { |store| yield(store) } if @journal
+    classic_transaction(read_only) { |store| yield(store) }
+  end
+
+  private
+
+  def classic_transaction(read_only)
     value = nil
     if !@thread_safe
       raise PStore::Error, "nested transaction" unless @lock.try_lock
@@ -565,6 +658,7 @@ class PStore
     begin
       @rdonly = read_only
       @abort = false
+      @journal_tracking = false
       file = open_and_lock_file(@filename, read_only)
       if file
         begin
@@ -593,7 +687,522 @@ class PStore
     value
   end
 
-  private
+  #
+  # Journal mode implementation.
+  #
+  # Three files are involved:
+  #
+  # - @filename holds a single checksummed snapshot frame.
+  # - @filename + ".journal" holds appended checksummed commit frames.
+  # - @filename + ".lock" is a stable flock target shared by every
+  #   process, so that snapshot compaction and journal rotation cannot
+  #   interleave with appends from another process. Unlike the snapshot
+  #   file, it is never renamed, so flock stays attached for the whole
+  #   transaction.
+  #
+  def journal_transaction(read_only)
+    value = nil
+    if !@thread_safe
+      raise PStore::Error, "nested transaction" unless @lock.try_lock
+    else
+      begin
+        @lock.lock
+      rescue ThreadError
+        raise PStore::Error, "nested transaction"
+      end
+    end
+    begin
+      @rdonly = read_only
+      @abort = false
+      @journal_snapshot_present = false
+      @journal_legacy = false
+      @journal_replayed_size = 0
+      @journal_tracking = false
+      @journal_base_keys = nil
+      @journal_base_values = nil
+      @journal_written = nil
+      @journal_deleted = nil
+
+      # Read-only access never creates files; a completely missing
+      # store is simply empty.
+      if read_only && !File.exist?(@filename) && !File.exist?(journal_path)
+        @table = {}
+        catch(self) do
+          value = yield(self)
+        end
+        return value
+      end
+
+      lock_file = journal_open_lock(read_only)
+      begin
+        journal_cleanup_temp_files unless read_only
+        @table = journal_load(read_only)
+        unless read_only
+          journal_init_tracking
+          @journal_tracking = true
+        end
+
+        catch(self) do
+          value = yield(self)
+        end
+
+        journal_commit unless @abort || read_only
+      ensure
+        lock_file.close
+      end
+    ensure
+      @lock.unlock
+    end
+    value
+  end
+
+  def journal_path
+    @filename + JOURNAL_FILE_SUFFIX
+  end
+
+  def journal_lock_path
+    @filename + JOURNAL_LOCK_SUFFIX
+  end
+
+  # Open the stable lock file and acquire the cross-process lock.
+  # Read-only transactions take a shared lock, read-write transactions
+  # an exclusive one.
+  def journal_open_lock(read_only)
+    file = File.new(journal_lock_path, **RDWR_ACCESS)
+    file.flock(read_only ? File::LOCK_SH : File::LOCK_EX)
+    file
+  end
+
+  # Remove temporary files left by a process that was killed while
+  # compacting or rotating the journal. This runs under the exclusive
+  # lock, so any concurrent writer has either finished its rename or is
+  # waiting for this transaction to finish.
+  def journal_cleanup_temp_files
+    dir = File.dirname(@filename)
+    base = File.basename(@filename)
+    JOURNAL_TEMP_SUFFIXES.each do |suffix|
+      pattern = /\A#{Regexp.escape(base)}#{Regexp.escape(suffix)}\d+\.\d+\z/
+      Dir.children(dir).each do |name|
+        File.unlink(File.join(dir, name)) rescue nil if pattern.match?(name)
+      end
+    end
+  end
+
+  # Restore the in-memory table from the snapshot followed by the
+  # journal. For read-write transactions the journal is truncated back
+  # to the last valid record (a torn tail is discarded) before the
+  # transaction starts.
+  def journal_load(read_only)
+    table = {}
+    snapshot_present = false
+
+    legacy_data = nil
+    if File.exist?(@filename)
+      data = File.binread(@filename)
+      if !data.empty?
+        if data.start_with?(JOURNAL_MAGIC)
+          result = journal_try_read_frame(data, 0, data.bytesize)
+          raise Error, "PStore snapshot seems to be corrupted." unless result
+          _snapshot_end, payload = result
+          snapshot = load(payload)
+          raise Error, "PStore snapshot seems to be corrupted." unless snapshot.is_a?(Hash)
+          table = snapshot
+          snapshot_present = true
+        else
+          # A plain Marshal file written by a non-journal PStore.
+          begin
+            legacy = load(data)
+          rescue StandardError
+          end
+          unless legacy.is_a?(Hash)
+            raise Error, "PStore file seems to be corrupted."
+          end
+          table = legacy
+          legacy_data = data
+        end
+      end
+    end
+    @journal_snapshot_present = snapshot_present
+    @journal_legacy = !legacy_data.nil?
+
+    journal_size = 0
+    if File.exist?(journal_path)
+      data = File.binread(journal_path)
+      journal_size = data.bytesize
+      if !data.empty?
+        if legacy_data
+          # A journal next to a plain Marshal file cannot belong to
+          # this store without a snapshot having existed.
+          raise Error, "PStore journal without a snapshot seems to be corrupted."
+        end
+        unless snapshot_present
+          raise Error, "PStore journal without a snapshot seems to be corrupted."
+        end
+        valid_size, torn = journal_replay(data, table)
+        if torn
+          if read_only
+            # Ignore an incomplete trailing record; the data up to it
+            # remains readable.
+          else
+            journal_truncate(valid_size)
+          end
+          journal_size = valid_size
+        end
+      end
+    end
+    @journal_replayed_size = journal_size
+    table
+  end
+
+  # Validate and replay every commit frame in +data+ onto +table+.
+  # Returns [size_of_valid_prefix, torn_tail_flag].
+  # Raises PStore::Error on mid-journal corruption.
+  def journal_replay(data, table)
+    offset = 0
+    total = data.bytesize
+    while offset < total
+      frame_offset = offset
+      result = journal_try_read_frame(data, offset, total)
+      unless result
+        # The record at frame_offset cannot be verified. If another
+        # intact, verified frame follows it, committed data would be
+        # lost by truncating here: that is mid-journal corruption and
+        # must be surfaced. Otherwise the garbage sits at the end of
+        # the file, exactly where a crash leaves a half-written record.
+        rescue_offset = journal_find_next_frame(data, frame_offset + 1, total)
+        if rescue_offset
+          raise Error, "PStore journal seems to be corrupted at byte #{frame_offset}"
+        end
+        return [frame_offset, true]
+      end
+      next_offset, payload = result
+      changes = load(payload)
+      journal_apply_changes(table, changes)
+      offset = next_offset
+    end
+    [total, false]
+  end
+
+  # Try to read and verify one framed record starting at +offset+.
+  # Returns [end_offset, payload] on success, or nil if the record is
+  # truncated or fails verification.
+  def journal_try_read_frame(data, offset, end_of_data)
+    available = end_of_data - offset
+    return nil if available < JOURNAL_HEADER_SIZE
+    header = data.byteslice(offset, JOURNAL_HEADER_SIZE)
+    return nil unless header.byteslice(0, JOURNAL_MAGIC.bytesize) == JOURNAL_MAGIC
+    return nil unless header.getbyte(JOURNAL_MAGIC.bytesize) == JOURNAL_DIGEST_SHA256
+    payload_size = header.byteslice(JOURNAL_MAGIC.bytesize + 1, 8).unpack1("Q>")
+    frame_size = JOURNAL_HEADER_SIZE + payload_size + JOURNAL_DIGEST_SIZE
+    return nil if available < frame_size
+    payload = data.byteslice(offset + JOURNAL_HEADER_SIZE, payload_size)
+    digest = data.byteslice(offset + JOURNAL_HEADER_SIZE + payload_size,
+                           JOURNAL_DIGEST_SIZE)
+    signed = data.byteslice(offset, JOURNAL_HEADER_SIZE + payload_size)
+    return nil unless Digest::SHA256.digest(signed) == digest
+    [offset + frame_size, payload]
+  end
+
+  # Search +data+ from +from_offset+ for the start of an intact frame.
+  # Verifying the candidate (and not just matching magic) prevents a
+  # payload that happens to contain the magic from being mistaken for
+  # a real record boundary.
+  def journal_find_next_frame(data, from_offset, total)
+    search = from_offset
+    while (candidate = data.index(JOURNAL_MAGIC, search))
+      return candidate if journal_try_read_frame(data, candidate, total)
+      search = candidate + 1
+    end
+    nil
+  end
+
+  # Apply one commit record to +table+.
+  # A record is a Hash of the form {"u" => {key => value, ...},
+  # "d" => [key, ...]}. Updates are applied before deletes.
+  def journal_apply_changes(table, changes)
+    unless changes.is_a?(Hash)
+      raise Error, "PStore commit record seems to be corrupted."
+    end
+    updates = changes["u"]
+    deletes = changes["d"]
+    if updates
+      raise Error, "PStore commit record seems to be corrupted." unless updates.is_a?(Hash)
+      table.update(updates)
+    end
+    if deletes
+      raise Error, "PStore commit record seems to be corrupted." unless deletes.is_a?(Array)
+      deletes.each { |key| table.delete(key) }
+    end
+  end
+
+  def journal_build_frame(payload)
+    header = JOURNAL_MAGIC.dup
+    header << JOURNAL_DIGEST_SHA256.chr.b
+    header << [payload.bytesize].pack("Q>")
+    digest = Digest::SHA256.digest(header + payload)
+    header + payload + digest
+  end
+
+  #
+  # Change tracking.
+  #
+  # []= and delete are recorded directly. In-place mutations of nested
+  # objects (store[:a] << 1) never go through []=, so every key read
+  # through [] or fetch also has its value marshalled lazily; at
+  # commit time the current value is marshalled again, reloaded and
+  # compared semantically. Comparing the marshalled bytes themselves
+  # would flag unchanged objects whenever Marshal emits a fresh object
+  # suffix. Only keys whose persisted value really changed enter the
+  # commit record.
+  #
+  def journal_init_tracking
+    @journal_base_keys = @table.keys
+    # Marshalled form of every key present when the transaction began.
+    # Keys obtained through keys()/key?() are not tracked by read, so
+    # this is what catches a key object mutated in place (the mutated
+    # object is simultaneously a table key and a member of
+    # @journal_base_keys).
+    @journal_base_key_dumps = {}
+    @table.each_key do |key|
+      @journal_base_key_dumps[dump(key)] = true
+    end
+    @journal_base_values = {}
+    @journal_written = {}
+    @journal_deleted = {}
+  end
+
+  def journal_track_read(key)
+    return unless @journal_tracking && !@journal_base_values.key?(key)
+    @journal_base_values[key] = @table.key?(key) ? dump(@table[key]) : JOURNAL_MISSING
+  end
+
+  def journal_track_write(key)
+    # Snapshot whatever was stored before this assignment, unless it is
+    # already known (via an earlier read or assignment). This lets a
+    # write of an equal value be recognised as a no-op even when its
+    # raw marshal bytes would differ.
+    unless @journal_base_values.key?(key)
+      @journal_base_values[key] = @table.key?(key) ? dump(@table[key]) : JOURNAL_MISSING
+    end
+    @journal_written[key] = true
+    @journal_deleted.delete(key)
+  end
+
+  def journal_track_delete(key)
+    if @journal_base_keys.include?(key)
+      @journal_deleted[key] = true
+    end
+    @journal_written.delete(key)
+    @journal_base_values.delete(key)
+  end
+
+  # Build the commit record and decide how to persist it.
+  def journal_commit
+    updates, deletes, key_anomaly = journal_collect_changes
+
+    changed = !(updates.empty? && deletes.empty?)
+
+    # A read-write transaction that changed nothing leaves every file
+    # alone; in particular a plain-format file opened from journal mode
+    # stays a plain-format file until the first real change.
+    return unless changed || key_anomaly
+
+    # Full compaction is required when no proper snapshot exists yet,
+    # when the on-disk format predates journal mode, when the key set
+    # changed through a path we did not track, or when the journal has
+    # reached its size threshold.
+    needs_compaction =
+      !@journal_snapshot_present ||
+      @journal_legacy ||
+      key_anomaly ||
+      (@compaction_threshold &&
+       @journal_replayed_size >= @compaction_threshold)
+
+    if needs_compaction
+      journal_compact(updates, deletes)
+    else
+      journal_append_commit(updates, deletes)
+    end
+  end
+
+  # Returns [updates_hash, deletes_array, key_anomaly].
+  def journal_collect_changes
+    updates = {}
+    deletes = []
+
+    @journal_deleted.each_key do |key|
+      deletes << key unless @table.key?(key)
+    end
+
+    candidates = {}
+    @journal_written.each_key { |key| candidates[key] = true }
+    @journal_base_values.each_key { |key| candidates[key] = true }
+    candidates.each_key do |key|
+      next unless @table.key?(key)
+      base = @journal_base_values[key]
+      if base.nil?
+        updates[key] = @table[key]
+      elsif base.equal?(JOURNAL_MISSING)
+        # The key did not exist when first read, it does now.
+        updates[key] = @table[key]
+      elsif load(dump(@table[key])) != load(base)
+        updates[key] = @table[key]
+      end
+    end
+
+    [updates, deletes, journal_key_set_anomaly?]
+  end
+
+  # Detect keys that appeared, disappeared or changed identity without
+  # going through []= or delete (for example a key object mutated in
+  # place via keys()). Forces a full snapshot so nothing is lost.
+  def journal_key_set_anomaly?
+    predicted = @journal_base_key_dumps.dup
+    @journal_deleted.each_key { |key| predicted.delete(dump(key)) }
+    @journal_written.each_key do |key|
+      # A written key may already be present (replacement) or new. Use
+      # its current representation for new keys; replacements of an
+      # existing base key keep the base representation unless the key
+      # object itself mutated, which the base/final comparison below
+      # still catches via identity.
+      predicted[dump(key)] = true
+    end
+    final_dumps = {}
+    @table.each_key { |key| final_dumps[dump(key)] = true }
+    final_dumps != predicted
+  end
+
+  # Append one verified commit record. The header, payload and digest
+  # are written in distinct stages so that a crash at any stage leaves
+  # at most an unverifiable torn tail, never a half-valid record.
+  def journal_append_commit(updates, deletes)
+    payload = dump("u" => updates, "d" => deletes)
+    frame = journal_build_frame(payload)
+    File.open(journal_path, File::RDWR | File::CREAT | File::APPEND | IO::BINARY,
+              encoding: Encoding::ASCII_8BIT) do |journal|
+      header = frame.byteslice(0, JOURNAL_HEADER_SIZE)
+      body = frame.byteslice(JOURNAL_HEADER_SIZE,
+                             frame.bytesize - JOURNAL_HEADER_SIZE -
+                               JOURNAL_DIGEST_SIZE)
+      digest = frame.byteslice(frame.bytesize - JOURNAL_DIGEST_SIZE,
+                               JOURNAL_DIGEST_SIZE)
+      journal.write(header)
+      crash_point("append_header")
+      journal.write(body)
+      crash_point("append_payload")
+      journal.flush
+      crash_point("append_fsync")
+      journal.write(digest)
+      journal.flush
+      crash_point("append_digest")
+      journal_fsync(journal)
+    end
+  end
+
+  # Rewrite a fresh snapshot of the whole table and rotate the journal
+  # back to empty. All steps are idempotent: a crash at any point is
+  # repaired by replay on the next open.
+  def journal_compact(_updates, _deletes)
+    snapshot_payload = dump(journal_canonical_table)
+    frame = journal_build_frame(snapshot_payload)
+
+    existing_file = File.exist?(@filename)
+    mode = existing_file ? File.stat(@filename).mode : (0o666 & ~File.umask)
+    temp_snapshot = "#{@filename}.snap.#{Process.pid}.#{rand(1000000)}"
+    temp_file = File.new(temp_snapshot, **WR_ACCESS, perm: 0o600)
+    begin
+      temp_file.flock(File::LOCK_EX)
+      temp_file.write(frame)
+      crash_point("snapshot_write")
+      temp_file.flush
+      crash_point("snapshot_fsync")
+      journal_fsync(temp_file)
+      temp_file.chmod(mode)
+      File.rename(temp_snapshot, @filename)
+      temp_snapshot = nil
+      crash_point("snapshot_rename")
+      journal_fsync_dir(File.dirname(@filename))
+      @journal_snapshot_present = true
+      @journal_legacy = false
+    ensure
+      temp_file.close rescue nil
+      File.unlink(temp_snapshot) rescue nil if temp_snapshot
+    end
+
+    journal_reset
+  end
+
+  # Return a deep copy of the transaction table whose keys and values
+  # are freshly loaded objects. A key mutated in place while it was a
+  # hash key keeps a stale hash code in the old table; inserting the
+  # reloaded copy into a new Hash gives it a correct hash code and a
+  # clean marshal representation.
+  def journal_canonical_table
+    load(dump(@table))
+  end
+
+  # Replace the journal with an empty file. Renaming an empty temp file
+  # over the journal is atomic; if the process dies just before it, the
+  # old journal simply gets replayed over the new snapshot on restart.
+  def journal_reset
+    temp_journal = "#{@filename}.jrnl.#{Process.pid}.#{rand(1000000)}"
+    existing = File.exist?(journal_path)
+    mode = existing ? File.stat(journal_path).mode : (0o666 & ~File.umask)
+    temp_file = File.new(temp_journal, **WR_ACCESS, perm: 0o600)
+    begin
+      temp_file.flock(File::LOCK_EX)
+      temp_file.chmod(mode)
+      temp_file.flush
+      journal_fsync(temp_file)
+      File.rename(temp_journal, journal_path)
+      temp_journal = nil
+      crash_point("journal_rotate")
+      journal_fsync_dir(File.dirname(journal_path))
+      @journal_snapshot_present = true
+      @journal_legacy = false
+      @journal_replayed_size = 0
+    ensure
+      temp_file.close rescue nil
+      File.unlink(temp_journal) rescue nil if temp_journal
+    end
+  end
+
+  def journal_truncate(size)
+    File.open(journal_path, File::RDWR | IO::BINARY,
+              encoding: Encoding::ASCII_8BIT) do |journal|
+      journal.flock(File::LOCK_EX)
+      journal.truncate(size)
+      journal_fsync(journal)
+    end
+  end
+
+  def journal_fsync(io)
+    io.fsync
+  rescue NotImplementedError, Errno::EINVAL
+    nil
+  end
+
+  def journal_fsync_dir(dir)
+    directory = File.open(dir, IO::RDONLY | IO::BINARY)
+    begin
+      directory.fsync
+    rescue NotImplementedError, Errno::EINVAL, Errno::EACCES
+      nil
+    ensure
+      directory.close
+    end
+  end
+
+  # Test hook: when ENV['PSTORE_CRASH_AT'] names this point the process
+  # terminates with SIGKILL immediately, leaving any buffered or just
+  # flushed data exactly where a real crash would.
+  def crash_point(name)
+    if ENV["PSTORE_CRASH_AT"] == name
+      Process.kill(:KILL, Process.pid)
+      sleep
+    end
+  end
+
   # :stopdoc:
 
   # Constant for relieving Ruby's garbage collector.
@@ -610,6 +1219,35 @@ class PStore
   EMPTY_MARSHAL_DATA.freeze
   EMPTY_MARSHAL_CHECKSUM.freeze
   private_constant :CHECKSUM_ALGO, :EMPTY_STRING, :EMPTY_MARSHAL_DATA, :EMPTY_MARSHAL_CHECKSUM
+
+  # Journal mode on-disk format.
+  #
+  # Both snapshot files and journal commit records use the same framed
+  # layout:
+  #
+  #   magic (8 bytes) | digest id (1 byte) | payload length (8 bytes,
+  #   big endian) | payload | digest (32 bytes for SHA-256)
+  #
+  # The digest is computed over the header and the payload, so a frame
+  # can be verified without any external state. The digest bytes also
+  # act as the commit marker: a record interrupted before they are all
+  # written can be told apart from a fully committed one.
+  JOURNAL_MAGIC = "PSTJFRM1".b
+  JOURNAL_DIGEST_SHA256 = 2
+  JOURNAL_DIGEST_SIZE = 32
+  JOURNAL_HEADER_SIZE = JOURNAL_MAGIC.bytesize + 1 + 8
+  JOURNAL_LOCK_SUFFIX = ".lock"
+  JOURNAL_FILE_SUFFIX = ".journal"
+  JOURNAL_TEMP_SUFFIXES = [".snap.", ".jrnl."]
+  private_constant :JOURNAL_MAGIC, :JOURNAL_DIGEST_SHA256, :JOURNAL_DIGEST_SIZE,
+                   :JOURNAL_HEADER_SIZE, :JOURNAL_LOCK_SUFFIX, :JOURNAL_FILE_SUFFIX,
+                   :JOURNAL_TEMP_SUFFIXES
+
+  # Distinguishes a key that was missing when first read in a
+  # transaction from one whose value is nil.
+  JOURNAL_MISSING = Object.new
+  JOURNAL_MISSING.freeze
+  private_constant :JOURNAL_MISSING
 
   #
   # Open the specified filename (either in read-only mode or in
