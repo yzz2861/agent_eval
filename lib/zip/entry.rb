@@ -343,6 +343,8 @@ module Zip
         entry = new(path)
         entry.read_c_dir_entry(io)
         entry
+      rescue RangedSourceError
+        raise
       rescue Error
         nil
       end
@@ -352,6 +354,8 @@ module Zip
         entry.read_local_entry(io)
         entry
       rescue SplitArchiveError
+        raise
+      rescue RangedSourceError
         raise
       rescue Error
         nil
@@ -685,7 +689,9 @@ module Zip
       else
         zis = ::Zip::InputStream.new(@zipfile, offset: local_header_offset, decrypter: decrypter)
         zis.instance_variable_set(:@complete_entry, self)
-        zis.get_next_entry
+        unless zis.get_next_entry
+          raise Error, "Zip local header magic not found at location '#{local_header_offset}'"
+        end
         if block
           begin
             yield(zis)

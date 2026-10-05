@@ -3,6 +3,7 @@
 require 'forwardable'
 
 require_relative 'dirtyable'
+require_relative 'ranged_io'
 
 module Zip
   class CentralDirectory # :nodoc:
@@ -18,7 +19,8 @@ module Zip
     ZIP64_EOCD_LOC_SIZE    = 20
     MAX_FILE_COMMENT_SIZE  = (1 << 16) - 1
     MAX_END_OF_CD_SIZE     =
-      MAX_FILE_COMMENT_SIZE + STATIC_EOCD_SIZE + ZIP64_EOCD_LOC_SIZE
+      MAX_FILE_COMMENT_SIZE + STATIC_EOCD_SIZE + ZIP64_EOCD_LOC_SIZE +
+        ZIP64_STATIC_EOCD_SIZE
 
     attr_accessor :comment
 
@@ -35,6 +37,7 @@ module Zip
     end
 
     def read_from_stream(io)
+      io = RangedIO.new(io) if ranged_data_source?(io)
       read_eocds(io)
       read_central_directory_entries(io)
     end
@@ -59,6 +62,7 @@ module Zip
     # convenience method that avoids reading in all of the entry data to get a
     # very quick entry count.
     def count_entries(io)
+      io = RangedIO.new(io) if ranged_data_source?(io)
       read_eocds(io)
       @size
     end
@@ -173,6 +177,11 @@ module Zip
     end
 
     def read_central_directory_entries(io) # :nodoc:
+      raise Error, 'Zip central directory offset is outside the archive' if @cdir_offset.negative?
+      if io.respond_to?(:size) && @cdir_offset >= io.size
+        raise Error, 'Zip central directory offset is outside the archive'
+      end
+
       # `StringIO` doesn't raise `EINVAL` if you seek beyond the current end,
       # so we need to catch that *and* query `io#eof?` here.
       eof = false
@@ -183,22 +192,25 @@ module Zip
       end
       raise Error, 'Zip consistency problem while reading central directory entry' if eof || io.eof?
 
+      entry_count = @size
       @entry_set = EntrySet.new
-      @size.times do
+      entry_count.times do
         entry = Entry.read_c_dir_entry(io)
         break unless entry
 
-        offset = if entry.zip64?
-                   entry.extra[:zip64].relative_header_offset
-                 else
-                   entry.local_header_offset
-                 end
+        unless io.kind_of?(RangedIO)
+          offset = if entry.zip64?
+                     entry.extra[:zip64].relative_header_offset
+                   else
+                     entry.local_header_offset
+                   end
 
-        unless offset.nil?
-          io_save = io.tell
-          io.seek(offset, IO::SEEK_SET)
-          entry.read_extra_field(read_local_extra_field(io), local: true)
-          io.seek(io_save, IO::SEEK_SET)
+          unless offset.nil?
+            io_save = io.tell
+            io.seek(offset, IO::SEEK_SET)
+            entry.read_extra_field(read_local_extra_field(io), local: true)
+            io.seek(io_save, IO::SEEK_SET)
+          end
         end
 
         @entry_set << entry
@@ -219,20 +231,21 @@ module Zip
     def read_eocds(io) # :nodoc:
       base_location, data = eocd_data(io)
 
-      eocd_location = data.rindex([END_OF_CD_SIG].pack('V'))
+      eocd_location = find_eocd(data, base_location)
       raise Error, 'Zip end of central directory signature not found' unless eocd_location
 
       # Parse the EOCD and return if it is complete without Zip64 extensions.
       return if unpack_e_o_c_d(data.slice(eocd_location..-1))
 
       # Need to read in the Zip64 EOCD locator and then the Zip64 EOCD.
-      zip64_eocd_locator = data.rindex([ZIP64_EOCD_LOCATOR_SIG].pack('V'), eocd_location)
-      unless zip64_eocd_locator
+      zip64_eocd_locator = eocd_location - ZIP64_EOCD_LOC_SIZE
+      unless zip64_eocd_locator >= 0 &&
+             data.slice(zip64_eocd_locator, 4) == [ZIP64_EOCD_LOCATOR_SIG].pack('V')
         raise Error, 'Zip64 end of central directory locator signature expected but not found'
       end
 
       # Do we already have the Zip64 EOCD in the data we've read?
-      zip64_eocd_location = data.rindex([ZIP64_END_OF_CD_SIG].pack('V'), zip64_eocd_locator)
+      zip64_eocd_location = find_zip64_eocd(data, zip64_eocd_locator)
 
       zip64_eocd_data =
         if zip64_eocd_location
@@ -243,12 +256,14 @@ module Zip
           zip64_eocd_location = unpack_64_eocd_locator(
             data.slice(zip64_eocd_locator..eocd_location)
           )
-          unless zip64_eocd_location
+          unless zip64_eocd_location && zip64_eocd_location >= 0 &&
+                 (!io.respond_to?(:size) || zip64_eocd_location < io.size)
             raise Error, 'Zip64 end of central directory signature not found'
           end
 
           io.seek(zip64_eocd_location, IO::SEEK_SET)
-          io.read(base_location + zip64_eocd_locator - zip64_eocd_location)
+          read_length = base_location + zip64_eocd_locator - zip64_eocd_location
+          io.read([0, read_length].max)
         end
 
       # Finally, unpack the Zip64 EOCD.
@@ -256,6 +271,12 @@ module Zip
     end
 
     def eocd_data(io)
+      if io.kind_of?(RangedIO)
+        tail_size = [io.size, MAX_END_OF_CD_SIZE].min
+        io.seek(io.size - tail_size, IO::SEEK_SET)
+        return [io.size - tail_size, io.read(tail_size)]
+      end
+
       begin
         io.seek(-MAX_END_OF_CD_SIZE, IO::SEEK_END)
       rescue Errno::EINVAL
@@ -263,6 +284,39 @@ module Zip
       end
 
       [io.tell, io.read]
+    end
+
+    def ranged_data_source?(io) # :nodoc:
+      io.respond_to?(:read_at) && io.respond_to?(:version) && io.respond_to?(:size)
+    end
+
+    def find_eocd(data, base_location) # :nodoc:
+      signature = [END_OF_CD_SIG].pack('V')
+      search_start = data.bytesize - STATIC_EOCD_SIZE
+
+      while search_start >= 0
+        position = data.rindex(signature, search_start)
+        return nil if position.nil?
+
+        comment_length = data.slice(position + STATIC_EOCD_SIZE - 2, 2)&.unpack1('v')
+        record_end = base_location + position + STATIC_EOCD_SIZE + comment_length.to_i
+        return position unless comment_length.nil? || record_end != base_location + data.bytesize
+
+        search_start = position - 1
+      end
+    end
+
+    def find_zip64_eocd(data, locator_position) # :nodoc:
+      position = data.rindex([ZIP64_END_OF_CD_SIG].pack('V'), locator_position)
+      return nil if position.nil?
+
+      header = data.slice(position, ZIP64_STATIC_EOCD_SIZE)
+      return nil unless header&.bytesize == ZIP64_STATIC_EOCD_SIZE
+
+      record_size = header.unpack1('x4Q<')
+      return nil unless record_size >= ZIP64_STATIC_EOCD_SIZE - 12
+
+      position if position + 12 + record_size == locator_position
     end
 
     def validate_size!(size, size_in_bytes)

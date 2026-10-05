@@ -4,6 +4,7 @@ require 'fileutils'
 require 'forwardable'
 
 require_relative 'file_split'
+require_relative 'ranged_io'
 
 module Zip
   # Zip::File is modeled after java.util.zip.ZipFile from the Java SDK.
@@ -97,6 +98,10 @@ module Zip
       # Similar to ::new. If a block is passed the Zip::File object is passed
       # to the block and is automatically closed afterwards, just as with
       # ruby's builtin File::open method.
+      #
+      # A ranged data source can be supplied instead of a path. It must respond
+      # to #size, #version and #read_at(offset, length). This allows metadata
+      # and selected entries to be fetched without downloading the archive.
       def open(file_name, create: false,
                restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
@@ -171,7 +176,9 @@ module Zip
       def count_entries(path_or_io)
         cdir = ::Zip::CentralDirectory.new
 
-        if path_or_io.kind_of?(String)
+        if path_or_io.respond_to?(:read_at)
+          cdir.count_entries(path_or_io)
+        elsif path_or_io.kind_of?(String)
           ::File.open(path_or_io, 'rb') do |f|
             cdir.count_entries(f)
           end
@@ -517,7 +524,10 @@ module Zip
     def initialize_cdir(path_or_io, buffer: false)
       @cdir = ::Zip::CentralDirectory.new
 
-      if ::File.size?(@name.to_s)
+      if path_or_io.respond_to?(:read_at)
+        @create = false
+        @cdir.read_from_stream(path_or_io)
+      elsif ::File.size?(@name.to_s)
         # There is a file, which exists, that is associated with this zip.
         @create = false
         @file_permissions = ::File.stat(@name).mode

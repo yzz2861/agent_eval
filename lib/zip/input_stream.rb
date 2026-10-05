@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'ranged_io'
+
 ##
 module Zip
   # InputStream is the basic class for reading zip entries in a
@@ -49,7 +51,9 @@ module Zip
     # if the specified offset in the specified filename is
     # not a local zip entry header.
     #
-    # @param context [String||IO||StringIO] file path or IO/StringIO object
+    # @param context [String||IO||StringIO||ranged data source] file path, IO
+    #   object, or an object responding to #size, #version and
+    #   #read_at(offset, length)
     # @param offset [Integer] offset in the IO/StringIO
     # This method also accepts the standard IO encoding options:
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
@@ -142,7 +146,15 @@ module Zip
     protected
 
     def get_io(io_or_file, offset = 0) # :nodoc:
-      if io_or_file.respond_to?(:seek)
+      if io_or_file.kind_of?(::Zip::RangedIO)
+        io = io_or_file.dup
+        io.seek(offset, ::IO::SEEK_SET)
+        io
+      elsif io_or_file.respond_to?(:read_at)
+        io = RangedIO.new(io_or_file)
+        io.seek(offset, ::IO::SEEK_SET)
+        io
+      elsif io_or_file.respond_to?(:seek)
         io = io_or_file.dup
         io.seek(offset, ::IO::SEEK_SET)
         io

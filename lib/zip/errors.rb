@@ -5,6 +5,36 @@ module Zip
   # you don't need to know what sort of error has been raised.
   class Error < StandardError; end
 
+  # Error raised when a ranged data source does not satisfy the protocol
+  # required for reading a zip archive without downloading all of it.
+  class RangedSourceError < Error; end
+
+  # Error raised when data from different versions of a ranged data source
+  # would be combined.
+  class RangedSourceVersionError < RangedSourceError
+    attr_reader :expected_version, :actual_version
+
+    def initialize(expected_version, actual_version)
+      @expected_version = expected_version
+      @actual_version = actual_version
+      super(
+        "Ranged data source changed from #{expected_version.inspect} " \
+        "to #{actual_version.inspect}"
+      )
+    end
+  end
+
+  # Error raised when a ranged data source returns fewer bytes than were
+  # requested at an offset before the end of the resource.
+  class RangedSourceShortReadError < RangedSourceError
+    def initialize(offset, requested_length, actual_length)
+      super(
+        "Short read at offset #{offset}: requested #{requested_length} bytes, " \
+        "got #{actual_length}"
+      )
+    end
+  end
+
   # Error raised if an unsupported compression method is used.
   class CompressionMethodError < Error
     # The compression method that has caused this error.

@@ -249,6 +249,37 @@ end
 
 As with `extract`, existing files at the destination will raise `Zip::DestinationExistsError` unless a block is passed to resolve the conflict (see [Existing Files](#existing-files) below). Symlink entries are always skipped (ignored, with a warning), rather than extracted.
 
+### Reading a remote Zip file with byte ranges
+
+`Zip::File` can read a large archive from object storage without downloading the whole file. The data source must expose `size`, a stable `version`, and a byte-range reader:
+
+```ruby
+class ObjectStorageZipSource
+  def size
+    # Total archive size in bytes.
+  end
+
+  def version
+    # A stable identifier that changes whenever the object changes.
+  end
+
+  def read_at(offset, length)
+    # Return [binary_string, version] for the requested byte range. If only
+    # binary_string is returned, rubyzip calls #version to check it.
+  end
+end
+
+Zip::File.open(ObjectStorageZipSource.new) do |zip_file|
+  puts zip_file.read('selected.txt')
+end
+```
+
+Rubyzip first reads the End of Central Directory from the end of the archive,
+then reads only the selected entry's local header and data. Adjacent small
+reads are combined by bounded readahead. A short range response, an
+out-of-range entry offset, or a version change raises a
+`Zip::RangedSourceError`.
+
 ### Reading a Zip file with `Zip::InputStream`
 
 `Zip::InputStream` can be used for faster reading of zip file content because it does not read the Central directory up front.
