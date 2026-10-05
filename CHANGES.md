@@ -1,5 +1,15 @@
 # Changes
 
+## Unreleased
+
+* Added `TZInfo::PatchedTimezone`, a `Timezone` that overlays one or more
+  `TZInfo::TimezonePatch` instances onto an existing base time zone. A patch
+  defines a UTC window, the offset observed from the start of the window and
+  any transitions occurring within the window. The rules of the base time
+  zone apply again after the window ends. The base time zone and underlying
+  data source are not modified.
+
+
 ## Version 2.0.6 - 28-Jan-2023
 
 * Eliminate `Object#untaint` deprecation warnings on JRuby 9.4.0.0. #145.

@@ -189,6 +189,39 @@ offsets.map {|o| [o.observed_utc_offset, o.abbreviation] }
 #     [-14400, "EPT"]]
 ```
 
+An explicit, bounded set of transitions can be overlaid onto an existing time
+zone with `TZInfo::PatchedTimezone`. This can be used, for example, to apply
+a temporary change to a zone's daylight savings arrangements without
+modifying the underlying time zone data. Each `TZInfo::TimezonePatch`
+defines a UTC window, the offset observed from the start of the window and
+any transitions occurring within the window. When the window ends, the rules
+of the base time zone apply again. Patches must be supplied in ascending
+order and must not overlap:
+
+```ruby
+base = TZInfo::Timezone.get('America/New_York')
+
+patch = TZInfo::TimezonePatch.new(
+  Time.utc(2018, 3, 1), Time.utc(2018, 4, 1),
+  TZInfo::TimezoneOffset.new(-14400, 0, 'EST'),
+  [TZInfo::TimezoneTransition.new(
+    TZInfo::TimezoneOffset.new(-14400, 3600, 'EDT'),
+    TZInfo::TimezoneOffset.new(-14400, 0, 'EST'),
+    Time.utc(2018, 3, 15, 7, 0, 0).to_i)])
+
+patched = TZInfo::PatchedTimezone.new(base, [patch])
+patched.period_for(Time.utc(2018, 3, 20, 12, 0, 0)).offset.abbreviation
+# => "EDT"
+patched.period_for(Time.utc(2018, 5, 1, 12, 0, 0)).offset.abbreviation
+# => "EDT" (observed according to the rules of the base time zone)
+```
+
+The `period_for`, `periods_for_local` and `transitions_up_to` methods of a
+`TZInfo::PatchedTimezone` all reflect the overlaid patches, including any
+gaps or ambiguities in local times introduced at the boundaries of the patch
+windows. The base time zone and the underlying data source are never
+modified.
+
 All `TZInfo::Timezone` methods that accept a time as a parameter can be used
 with either instances of `Time`, `DateTime` or `TZInfo::Timestamp`. Arbitrary
 `Time`-like objects that respond to both `to_i` and `subsec` and optionally
