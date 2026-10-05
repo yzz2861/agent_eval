@@ -521,6 +521,27 @@ module Dry
           end
         end
 
+        # Audits the container's component dir configuration without loading or
+        # executing any component source files
+        #
+        # Expands the configured component dirs, their namespaces and their exclusion
+        # rules to compute the final key and constant name for every component file,
+        # and reports any collisions between files mapping to the same key or
+        # constant.
+        #
+        # @example
+        #   report = MyApp.audit_config
+        #   puts report if report.collisions?
+        #
+        # @return [Dry::System::ConfigAuditor::Report]
+        #
+        # @see Dry::System::ConfigAuditor
+        #
+        # @api public
+        def audit_config
+          ConfigAuditor.new(self).call
+        end
+
         # @api private
         def component_dirs
           config.component_dirs.to_a.map { |dir| ComponentDir.new(config: dir, container: self) }

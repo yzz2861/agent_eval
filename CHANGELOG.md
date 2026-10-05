@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- `Container.audit_config` audits the container's component dir configuration without loading or executing any component source files. It expands the configured component dirs, namespaces and exclusion rules to derive the final key and constant name for every component file (using the same name derivation as real auto-registration), and reports collisions between files mapping to the same key or constant. Each collision lists both files along with the transformation rules involved, and is marked as either definite (determined by static configuration) or indeterminate (dependent on runtime custom logic such as a callable `auto_register` policy, custom `instance` proc or custom loader).
+
 - The Zeitwerk plugin accepts an `enable_reloading:` option, which enables reloading on the loader ahead of `setup`, so Zeitwerk tracks the constants it defines and they can be unloaded later. Applied from the plugin's `after(:configure)` hook, so it is in time whether the loader is set up by the plugin or by the integrating library. (@afomera in #297)
 
 ### Changed
