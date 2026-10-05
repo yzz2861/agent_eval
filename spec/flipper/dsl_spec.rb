@@ -65,6 +65,16 @@ RSpec.describe Flipper::DSL do
     end
   end
 
+  describe '#layers' do
+    it 'passes shared layer configuration to features' do
+      layers = Flipper::Layers.new(experiments: { search: 0...1000 })
+      dsl = described_class.new(adapter, layers: layers)
+
+      expect(dsl.layers).to equal(layers)
+      expect(dsl.feature(:search).layers).to equal(layers)
+    end
+  end
+
   describe '#preload' do
     let(:instrumenter) { double('Instrumentor', instrument: nil) }
     let(:dsl) { described_class.new(adapter, instrumenter: instrumenter) }

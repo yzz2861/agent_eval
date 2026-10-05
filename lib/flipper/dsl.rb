@@ -10,6 +10,7 @@ module Flipper
 
     # Private: What is being used to instrument all the things.
     attr_reader :instrumenter
+    attr_reader :layers
 
     def_delegators :@adapter, :memoize=, :memoizing?, :import, :export, :adapter_stack
 
@@ -24,6 +25,8 @@ module Flipper
       memoize = options.fetch(:memoize, true)
       adapter = Adapters::Memoizable.new(adapter) if memoize
       @adapter = adapter
+      @layers = options[:layers] || Layers::EMPTY
+      @layers = Layers.new(@layers) unless @layers.is_a?(Layers)
       # Concurrent::Map so a single DSL instance shared across threads (e.g. a
       # Flipper.new(adapter) or Flipper::Cloud.new held in a constant) can
       # memoize features without a non-atomic Hash mutation racing.
@@ -223,7 +226,7 @@ module Flipper
       end
 
       @memoized_features.compute_if_absent(name.to_sym) do
-        Feature.new(name, @adapter, instrumenter: instrumenter)
+        Feature.new(name, @adapter, instrumenter: instrumenter, layers: @layers)
       end
     end
 

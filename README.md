@@ -70,6 +70,45 @@ Flipper.enable_group :search, :admin
 Flipper.enable_percentage_of_actors :search, 2
 ```
 
+### Shared actor layers
+
+When multiple experiments must never affect the same actor, assign fixed bucket
+ranges to their features in a layer. The layer check runs first; only actors in
+the feature's fixed range continue to that feature's own gates.
+
+```ruby
+flipper = Flipper.new(
+  Flipper::Adapters::Memory.new,
+  layers: {
+    experiments: {
+      checkout: 0...500,
+      search: 500...1000,
+    }
+  }
+)
+
+# The layer range and this percentage use independent hash domains.
+flipper.enable_percentage_of_actors :checkout, 25
+```
+
+Or configure the global instance:
+
+```ruby
+Flipper.configure do |config|
+  config.layers = {
+    experiments: {
+      checkout: 0...500,
+      search: 500...1000,
+    }
+  }
+end
+```
+
+Layer allocations use half-open bucket ranges (`0...500` and `500...1000`
+cover all 1000 buckets). Overlapping or over-allocated configurations raise
+`Flipper::InvalidLayer`. Disabling one experiment does not move another
+experiment's allocated actors.
+
 Read more about [getting started with Flipper](https://flippercloud.io/docs?utm_source=oss&utm_medium=readme&utm_campaign=getting_started) and [enabling features](https://flippercloud.io/docs/features?utm_source=oss&utm_medium=readme&utm_campaign=enabling_features).
 
 ## Flipper Cloud

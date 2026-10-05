@@ -2,7 +2,19 @@ module Flipper
   class Configuration
     def initialize(options = {})
       @builder = AdapterBuilder.new { store Flipper::Adapters::Memory }
-      @default = -> { Flipper.new(@builder.to_adapter) }
+      @layers = Layers::EMPTY
+      @default = -> { Flipper.new(@builder.to_adapter, layers: @layers) }
+    end
+
+    # Public: Configure shared actor layers for the default Flipper instance.
+    # Passing nil restores the empty layer configuration.
+    def layers=(layers)
+      @layers = layers.nil? ? Layers::EMPTY : Layers.new(layers)
+    end
+
+    # Public: Returns the configured shared actor layers.
+    def layers
+      @layers
     end
 
     # The default adapter to use.

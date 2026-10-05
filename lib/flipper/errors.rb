@@ -12,6 +12,9 @@ module Flipper
   # Raised when attempting to declare a group name that has already been used.
   class DuplicateGroup < Error; end
 
+  # Raised when a shared actor layer has invalid allocations.
+  class InvalidLayer < Error; end
+
   # Raised when an invalid value is set to a configuration property
   class InvalidConfigurationValue < Flipper::Error
     def initialize(message = nil)

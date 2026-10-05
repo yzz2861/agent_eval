@@ -21,6 +21,9 @@ module Flipper
     # Private: What is being used to instrument all the things.
     attr_reader :instrumenter
 
+    # Internal: Shared actor layers that can gate feature eligibility.
+    attr_reader :layers
+
     # Internal: Initializes a new feature instance.
     #
     # name - The Symbol or String name of the feature.
@@ -33,6 +36,7 @@ module Flipper
       @name = name
       @key = name.to_s
       @instrumenter = options.fetch(:instrumenter, Instrumenters::Noop)
+      @layers = options[:layers] || Layers::EMPTY
       @adapter = adapter
     end
 
@@ -95,6 +99,13 @@ module Flipper
 
       # thing is left for backwards compatibility
       instrument(:enabled?, thing: actors&.first, actors: actors) do |payload|
+        layer = @layers.layer_for(@name)
+
+        if layer
+          payload[:layer_name] = layer.name
+          next false if actors.nil? || actors.empty? || !layer.matches?(@name, actors)
+        end
+
         context = FeatureCheckContext.new(
           feature_name: @name,
           values: gate_values,
