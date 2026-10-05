@@ -49,6 +49,8 @@ module Mail # :doc:
   require 'mail/field_list'
 
   register_autoload :Envelope, 'mail/envelope'
+  register_autoload :TransportEnvelope, 'mail/transport_envelope'
+  register_autoload :TransportError, 'mail/transport_envelope'
 
   # Autoload header field elements and transfer encodings.
   require 'mail/elements'

@@ -50,6 +50,13 @@ module Mail
       set_charset
     end
 
+    def initialize_copy(original)
+      super
+      parts = Mail::PartsList.new
+      original.parts.each { |part| parts << part.dup }
+      @parts = parts
+    end
+
     def init_with(coder)
       coder.map.each { |k, v| instance_variable_set(:"@#{k}", v) }
       @parts = Mail::PartsList.new(coder['parts'])

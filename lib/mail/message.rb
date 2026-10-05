@@ -391,6 +391,9 @@ module Mail
     def initialize_copy(original)
       super
       @header = @header.dup
+      @body = @body.dup if @body
+      @text_part = nil
+      @html_part = nil
     end
 
     # Provides access to the raw source of the message as it was when it
@@ -635,6 +638,18 @@ module Mail
 
     def transport_encoding=( val )
       @transport_encoding = Mail::Encodings.get_encoding(val)
+    end
+
+    # Returns the list of transfer encodings that may be used to transport
+    # this message or part, or nil if any encoding is allowed.
+    #
+    # Per RFC 2046, message/rfc822 parts may only use 7bit, 8bit, or binary
+    # encodings, since their encapsulated message is transported as-is.
+    def allowed_encodings
+      case mime_type
+      when 'message/rfc822'
+        [Encodings::SevenBit, Encodings::EightBit, Encodings::Binary]
+      end
     end
 
     # Returns the From value of the mail object as an array of strings of
@@ -1815,6 +1830,35 @@ module Mail
       buffer
     end
 
+    # Prepares this message for SMTP transport, given the extensions the
+    # receiving server supports, and returns a Mail::TransportEnvelope
+    # holding the encoded message, the envelope sender and recipients, and
+    # the SMTP extensions the envelope requires.
+    #
+    #   envelope = mail.prepare_for_transport(eight_bit_mime: true)
+    #   envelope.message      #=> encoded message, safe to send
+    #   envelope.requirements #=> ['8BITMIME']
+    #
+    # The +smtputf8+, +eight_bit_mime+, and +binary_mime+ options describe
+    # the SMTPUTF8, 8BITMIME, and BINARYMIME extensions the server
+    # advertised in its EHLO response; all default to +false+ (a plain
+    # 7bit SMTP transport).
+    #
+    # The capability constraint is applied to every nested MIME part and to
+    # internationalized header fields, not just the top-level body: content
+    # that can be safely rewritten is assigned a suitable
+    # Content-Transfer-Encoding, while signed (multipart/signed) subtrees
+    # that cannot be rewritten are verified as-is.  Raises
+    # Mail::TransportError if the message cannot be transported with the
+    # given capabilities.  This message is never modified, whether
+    # preparation succeeds or fails.
+    def prepare_for_transport(smtputf8: false, eight_bit_mime: false, binary_mime: false)
+      Mail::TransportEnvelope.new(self,
+        smtputf8: smtputf8,
+        eight_bit_mime: eight_bit_mime,
+        binary_mime: binary_mime)
+    end
+
     def without_attachments!
       if has_attachments?
         parts.delete_attachments
@@ -2027,13 +2071,6 @@ module Mail
 
     def separate_parts
       body.split!(boundary)
-    end
-
-    def allowed_encodings
-      case mime_type
-      when 'message/rfc822'
-        [Encodings::SevenBit, Encodings::EightBit, Encodings::Binary]
-      end
     end
 
     def add_encoding_to_body

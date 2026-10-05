@@ -9,6 +9,9 @@ Compatibility:
 
 Features:
 
+* Add Mail::Message#prepare_for_transport to prepare a message for an SMTP
+  server with known capabilities (SMTPUTF8, 8BITMIME, BINARYMIME), returning
+  a Mail::TransportEnvelope with the encoded message and required extensions
 * Updated README to improve around sending multipart mail @kapfenho
 * Add delivery_interceptors method to Mail class to fetch registered interceptors @ghousemohamed
 

@@ -305,6 +305,35 @@ mail.delivery_method :logger
 mail.delivery_method :logger, logger: other_logger, severity: :debug
 ```
 
+### Preparing an email for transport:
+
+If you already know which extensions the receiving SMTP server supports
+(from its EHLO response), you can ask Mail to prepare the whole message
+for that transport up front:
+
+```ruby
+envelope = mail.prepare_for_transport(smtputf8:       smtp.capable?('SMTPUTF8'),
+                                      eight_bit_mime: smtp.capable?('8BITMIME'),
+                                      binary_mime:    smtp.capable?('BINARYMIME'))
+
+envelope.message      # the encoded message, ready to send
+envelope.from         # the envelope sender
+envelope.to           # the envelope recipients
+envelope.requirements # the SMTP extensions this envelope needs, e.g. ['8BITMIME']
+
+smtp.sendmail(envelope.message, envelope.from, envelope.to)
+```
+
+The capability constraint is applied to every nested MIME part and to
+internationalized header fields and envelope addresses, not just the
+top-level body.  Content that can be safely rewritten is assigned a
+suitable Content-Transfer-Encoding (e.g. quoted-printable or base64 on a
+7bit-only transport).  Signed (multipart/signed) subtrees cannot be
+rewritten without invalidating their signatures, so they are verified
+as-is; if any part of one is incompatible with the transport,
+Mail::TransportError is raised.  The original message is never modified,
+whether preparation succeeds or fails.
+
 ### Getting Emails from a POP or IMAP Server:
 
 You can configure Mail to receive email using <code>retriever_method</code>
