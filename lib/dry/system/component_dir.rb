@@ -23,9 +23,16 @@ module Dry
       attr_reader :container
 
       # @api private
-      def initialize(config:, container:)
+      # @!attribute [r] manifest
+      #   @return [Dry::System::ComponentManifest, nil] the build-time component manifest
+      #   @api private
+      attr_reader :manifest
+
+      # @api private
+      def initialize(config:, container:, manifest: nil)
         @config = config
         @container = container
+        @manifest = manifest
       end
 
       # Returns a component for the given key if a matching source file is found within
@@ -39,6 +46,42 @@ module Dry
       #
       # @api private
       def component_for_key(key)
+        if manifest
+          entry = manifest.entries_for_dir(path).detect { |candidate| candidate.key == key }
+
+          return build_manifest_component(entry) if entry
+          return nil unless manifest.fallback_scan?
+        end
+
+        scan_component_for_key(key)
+      end
+
+      def each_component
+        return enum_for(:each_component) unless block_given?
+
+        if manifest
+          manifest.entries_for_dir(path).each do |entry|
+            yield build_manifest_component(manifest.verify_entry!(entry))
+          end
+
+          return unless manifest.fallback_scan?
+
+          manifest_keys = manifest.entries_for_dir(path).map(&:key)
+
+          each_file do |file_path, namespace|
+            component = component_for_path(file_path, namespace)
+            yield component unless manifest_keys.include?(component.key)
+          end
+        else
+          each_file do |file_path, namespace|
+            yield component_for_path(file_path, namespace)
+          end
+        end
+      end
+
+      private
+
+      def scan_component_for_key(key)
         config.namespaces.each do |namespace|
           identifier = Identifier.new(key)
 
@@ -51,16 +94,6 @@ module Dry
 
         nil
       end
-
-      def each_component
-        return enum_for(:each_component) unless block_given?
-
-        each_file do |file_path, namespace|
-          yield component_for_path(file_path, namespace)
-        end
-      end
-
-      private
 
       def each_file
         return enum_for(:each_file) unless block_given?
@@ -144,6 +177,34 @@ module Dry
           file_path: file_path,
           **options
         )
+      end
+
+      def build_manifest_component(entry)
+        # Verify the root boundary and the source file digest before the component's
+        # source file is parsed or required
+        file_path = manifest.resolve(manifest.verify_entry!(entry))
+
+        identifier = Identifier.new(entry.key)
+        namespace = entry.build_namespace
+
+        Component.new(
+          identifier,
+          namespace: namespace,
+          file_path: file_path,
+          inflector: container.config.inflector,
+          **component_options,
+          **MagicCommentsParser.(file_path)
+        ).tap do |component|
+          current_const_name = component.inflector.camelize(component.const_path)
+
+          if current_const_name != entry.const_name
+            raise ComponentManifestConstNameError.new(
+              key: entry.key,
+              expected_const_name: entry.const_name,
+              actual_const_name: current_const_name
+            )
+          end
+        end
       end
 
       def component_options

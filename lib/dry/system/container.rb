@@ -2,6 +2,9 @@
 
 require "pathname"
 
+require "json"
+require "time"
+
 require "dry/configurable"
 require "dry/auto_inject"
 require "dry/inflector"
@@ -60,6 +63,7 @@ module Dry
       setting :provider_dirs, default: ["system/providers"]
       setting :registrations_dir, default: "system/registrations"
       setting :component_dirs, default: Config::ComponentDirs.new, cloneable: true
+      setting :component_manifest_path
       setting :exports, reader: true
       setting :inflector, default: Dry::Inflector.new
       setting :auto_registrar, default: Dry::System::AutoRegistrar
@@ -522,8 +526,66 @@ module Dry
         end
 
         # @api private
-        def component_dirs
-          config.component_dirs.to_a.map { |dir| ComponentDir.new(config: dir, container: self) }
+        def component_dirs(manifest: component_manifest)
+          config.component_dirs.to_a.map { |dir|
+            ComponentDir.new(config: dir, container: self, manifest: manifest)
+          }
+        end
+
+        # Returns the loaded and verified build-time component manifest, if a
+        # component_manifest_path is configured.
+        #
+        # The manifest is loaded once and then checked against the current container root
+        # boundary and naming configuration before any listed component is required.
+        #
+        # @return [Dry::System::ComponentManifest, nil]
+        #
+        # @api private
+        def component_manifest
+          return @__component_manifest__ if defined?(@__component_manifest__)
+
+          @__component_manifest__ =
+            if (path = config.component_manifest_path)
+              ComponentManifest.load(Pathname(path).expand_path(root)).verify!(self)
+            end
+        end
+
+        # Builds a manifest of all the components in the configured component dirs and
+        # writes it to the given path (or the configured component_manifest_path) as JSON.
+        #
+        # This is intended to run at package build time. It enumerates component files
+        # without requiring any of them, constantizing, instantiating components or
+        # running providers.
+        #
+        # @param path [String, Pathname, nil] destination path, relative to the container
+        #   root when not absolute; defaults to config.component_manifest_path
+        # @param mode [Symbol] handling for unlisted components when the manifest is used
+        #   later: :manifest (strict, the default) or :fallback_scan. The mode is baked
+        #   into the manifest at build time and controls startup behavior.
+        #
+        # @return [Dry::System::ComponentManifest] the manifest that was written
+        #
+        # @example
+        #   MyApp.export_component_manifest("system/components.json")
+        #
+        # @api public
+        def export_component_manifest(path = config.component_manifest_path, mode: :manifest)
+          raise ArgumentError, "A component manifest path is required" unless path
+
+          # Enumerate the dirs directly: the cached runtime manifest (if any) must not
+          # constrain the build-time scan
+          scanning_dirs = config.component_dirs.to_a.map { |dir|
+            ComponentDir.new(config: dir, container: self, manifest: nil)
+          }
+
+          manifest = ComponentManifest.build(self, component_dirs: scanning_dirs, mode: mode)
+
+          destination = Pathname(path)
+          destination = root.join(destination) unless destination.absolute?
+          destination.dirname.mkpath
+          destination.write(JSON.pretty_generate(manifest.to_h))
+
+          manifest
         end
 
         # @api private

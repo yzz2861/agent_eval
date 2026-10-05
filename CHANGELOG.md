@@ -9,6 +9,7 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Containers can now export a build-time component manifest via `Container.export_component_manifest(path, mode: :manifest)`. The JSON manifest records each component's key, path relative to the container root, expected constant name and source file digest, plus a root boundary and a naming configuration version derived from the component dir namespaces and inflector rules. Set `config.component_manifest_path` to use the manifest at load time. The root boundary, naming version and per-file digest are checked before any listed component is required, and strict `:manifest` mode no longer scans the component directories. Pass `mode: :fallback_scan` at export time to explicitly allow unlisted components to be found by scanning.
 - The Zeitwerk plugin accepts an `enable_reloading:` option, which enables reloading on the loader ahead of `setup`, so Zeitwerk tracks the constants it defines and they can be unloaded later. Applied from the plugin's `after(:configure)` hook, so it is in time whether the loader is set up by the plugin or by the integrating library. (@afomera in #297)
 
 ### Changed
