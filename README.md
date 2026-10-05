@@ -96,6 +96,36 @@ end
 
 You can generate a Zip archive in memory using `Zip::OutputStream.write_buffer`.
 
+### Writing to a pipe or other non-seekable IO
+
+`write_buffer` (and the other writers above) seek backwards at the end to fill in the CRC and sizes in each local file header, so the destination has to support random access (a file or a `StringIO`). When the destination is a pipe, a socket or any other IO that can only be written and never rewound, use `Zip::OutputStream.write_stream`:
+
+```ruby
+# +io+ only needs to respond to #write (it does not need #seek or #tell).
+Zip::OutputStream.write_stream(io) do |zos|
+  zos.put_next_entry('first.txt')
+  zos.write 'hello'
+  zos.put_next_entry('second.txt', '', Zip::ExtraField.new, Zip::Entry::STORED)
+  zos.write 'world'
+end
+```
+
+Every entry is written straight through: its local header carries zero CRC/sizes with the data-descriptor general-purpose flag set, a data descriptor with the real CRC and sizes follows the entry data, and the central directory and end-of-central-directory record are emitted once at the end. The IO is flushed but not closed.
+
+Because nothing can be rewritten, the zip64 decision has to be made before writing starts and cannot be discovered at the end:
+
+* By default a classic 32-bit archive is written. If an entry reaches a 32-bit limit (its uncompressed or compressed size, a header offset, or the number of entries), `Zip::Zip64RequiredError` is raised as soon as the limit is hit, rather than silently producing a truncated or corrupt archive.
+* Pass `zip64: true` to commit to the zip64 extensions up front. Every entry then gets a zip64 extra field with the conventional zero placeholders, an 8-byte data descriptor, and a zip64 end-of-central-directory record.
+
+```ruby
+Zip::OutputStream.write_stream(io, zip64: true) do |zos|
+  zos.put_next_entry('big.bin')
+  zos.write(more_data)
+end
+```
+
+If the block raises, the exception is propagated and no central directory is appended (the partial output is not made to look like a complete archive). Short writes from the underlying IO are retried automatically until all bytes are accepted.
+
 ### Suppressing extra fields
 
 If you wish to suppress extra fields from being added to your entries, you can do so by passing the `suppress_extra_fields` parameter to any of the archive opening calls within `Zip::File` or `Zip::OutputStream`, e.g.:

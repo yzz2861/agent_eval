@@ -29,7 +29,8 @@ module Zip
                   :unix_gid, :unix_perms, :unix_uid
 
     attr_accessor :crc, :external_file_attributes, :fstype, :gp_flags,
-                  :internal_file_attributes, :local_header_offset # :nodoc:
+                  :internal_file_attributes, :local_header_offset,
+                  :version_needed_to_extract # :nodoc:
 
     attr_reader :extra, :compression_level, :filepath # :nodoc:
 

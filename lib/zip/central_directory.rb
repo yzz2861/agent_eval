@@ -39,15 +39,33 @@ module Zip
       read_central_directory_entries(io)
     end
 
-    def write_to_stream(io, suppress_extra_fields: false) # :nodoc:
+    # +force_zip64+ controls the end-of-central-directory records explicitly:
+    # +true+ always writes the zip64 records, +false+ never does (raising if
+    # they would be required) and +nil+ (the default) decides from the global
+    # +Zip.write_zip64_support+ setting and the actual values.
+    def write_to_stream(io, suppress_extra_fields: false, force_zip64: nil) # :nodoc:
       cdir_offset = io.tell
       @entry_set.each do |entry|
         entry.write_c_dir_entry(io, suppress_extra_fields: suppress_extra_fields)
       end
       eocd_offset = io.tell
       cdir_size = eocd_offset - cdir_offset
-      if Zip.write_zip64_support &&
-         (cdir_offset > 0xFFFFFFFF || cdir_size > 0xFFFFFFFF || @entry_set.size > 0xFFFF)
+      zip64_required =
+        cdir_offset > 0xFFFFFFFF || cdir_size > 0xFFFFFFFF || @entry_set.size > 0xFFFF
+      if force_zip64 == false && zip64_required
+        what = if cdir_offset > 0xFFFFFFFF
+                 'central directory offset'
+               elsif @entry_set.size > 0xFFFF
+                 'number of entries'
+               else
+                 'central directory size'
+               end
+        raise Zip64RequiredError.new(
+          [cdir_offset, cdir_size, @entry_set.size].max, what
+        )
+      end
+      if (force_zip64.nil? ? Zip.write_zip64_support : force_zip64) ||
+         zip64_required
         write_64_e_o_c_d(io, cdir_offset, cdir_size)
         write_64_eocd_locator(io, eocd_offset)
       end

@@ -134,6 +134,24 @@ module Zip
     end
   end
 
+  # Error raised when a forward-only (non-seekable) output stream reaches a
+  # 32-bit zip limit that requires the zip64 extensions which were not opted
+  # into before writing started.
+  class Zip64RequiredError < Error
+    def initialize(actual, what)
+      super()
+      @actual = actual
+      @what = what
+    end
+
+    def message
+      "#{@what} (#{@actual}) reaches the 32-bit zip limit (0xFFFFFFFF) in a " \
+        'non-zip64 (classic) forward-only stream. Reopen the stream with ' \
+        '`zip64: true` before writing any entries; the choice has to be ' \
+        'made up front because the output cannot be rewound.'
+    end
+  end
+
   # Error raised if there is not enough metadata for the entry to be streamed.
   class StreamingError < Error
     # The entry that has caused this error.

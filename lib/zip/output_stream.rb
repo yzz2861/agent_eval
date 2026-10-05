@@ -77,6 +77,28 @@ module Zip
         yield zos
         zos.close_buffer
       end
+
+      # Writes a zip archive strictly forward to an IO that only needs to
+      # respond to `#write` (e.g. a pipe or an HTTP request body). Local file
+      # headers are emitted once with deferred CRC/sizes and a data
+      # descriptor follows each entry's data; the central directory is only
+      # written at the end. The target is flushed but not closed.
+      #
+      # Pass `zip64: true` to commit to zip64 extensions before anything is
+      # written. Without it, a {Zip::Zip64RequiredError} is raised as soon as
+      # a 32-bit limit is reached, rather than producing a corrupt archive.
+      # See {Zip::ForwardOutputStream} for details.
+      def write_stream(io, zip64: false, encrypter: nil, comment: '')
+        unless block_given?
+          return ::Zip::ForwardOutputStream.new(
+            io, zip64: zip64, encrypter: encrypter, comment: comment
+          )
+        end
+
+        ::Zip::ForwardOutputStream.write_stream(
+          io, zip64: zip64, encrypter: encrypter, comment: comment
+        ) { |zos| yield zos }
+      end
     end
 
     # Closes the stream and writes the central directory to the zip file
