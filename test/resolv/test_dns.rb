@@ -1615,4 +1615,269 @@ class TestResolvDNS < Test::Unit::TestCase
       end
     end
   end
+
+  def generate_dns_tls_certificate(hostname)
+    key = OpenSSL::PKey::RSA.new(1024)
+    name = OpenSSL::X509::Name.new([['CN', hostname]])
+    certificate = OpenSSL::X509::Certificate.new
+    certificate.subject = certificate.issuer = name
+    certificate.public_key = key.public_key
+    certificate.serial = 1
+    certificate.version = 2
+    certificate.not_before = Time.now - 60
+    certificate.not_after = Time.now + 600
+    factory = OpenSSL::X509::ExtensionFactory.new
+    factory.subject_certificate = factory.issuer_certificate = certificate
+    certificate.add_extension(factory.create_extension('subjectAltName', "DNS:#{hostname}", false))
+    certificate.sign(key, OpenSSL::Digest.new('SHA256'))
+    [certificate, key]
+  end
+
+  def dns_certificate_store(certificate)
+    store = OpenSSL::X509::Store.new
+    store.add_cert(certificate)
+    store
+  end
+
+  def with_tls_server(handler, hostname: 'dns.example')
+    tcp_server = TCPServer.new('127.0.0.1', 0)
+    certificate, key = generate_dns_tls_certificate(hostname)
+    _, port, _, address = tcp_server.addr
+    context = OpenSSL::SSL::SSLContext.new
+    context.cert = certificate
+    context.key = key
+    begin
+      context.min_version = OpenSSL::SSL::TLS1_2_VERSION
+    rescue NoMethodError, ArgumentError
+    end
+    ssl_server = OpenSSL::SSL::SSLServer.new(tcp_server, context)
+
+    server_thread = Thread.new do
+      begin
+        client = Timeout.timeout(10) { ssl_server.accept }
+        begin
+          handler.call(client)
+        ensure
+          client.close
+        end
+      rescue EOFError, Errno::ECONNRESET, IOError, OpenSSL::SSL::SSLError
+      end
+    end
+
+    begin
+      yield address, port, certificate
+    ensure
+      tcp_server.close
+      server_thread.join(10)
+    end
+  end
+
+  def read_framed_query!(socket)
+    length_data = socket.read(2)
+    return unless length_data&.bytesize == 2
+    length = length_data.unpack('n')[0]
+    message = socket.read(length)
+    return unless message&.bytesize == length
+    Resolv::DNS::Message.decode(message)
+  end
+
+  def test_tls_query_verifies_separate_certificate_name
+    handler = lambda do |socket|
+      while query = read_framed_query!(socket)
+        socket.write(framed(reply_for_query(query, '192.0.2.1')))
+      end
+    end
+
+    with_tls_server(handler) do |address, port, certificate|
+      result = Resolv::DNS.open(
+        nameserver_port: [[
+          address, port,
+          tls: true,
+          hostname: 'dns.example',
+          cert_store: dns_certificate_store(certificate)
+        ]]
+      ) do |dns|
+        dns.timeouts = 5
+        dns.getresources('foo.example.org', Resolv::DNS::Resource::IN::A)
+      end
+
+      assert_equal(['192.0.2.1'], result.map {|resource| resource.address.to_s })
+    end
+  end
+
+  def test_tls_rejects_mismatched_certificate_name
+    finished = Thread::Queue.new
+    handler = lambda { |socket| finished.pop }
+    with_tls_server(handler) do |address, port, certificate|
+      assert_raise(OpenSSL::SSL::SSLError) do
+        Resolv::DNS::Requester::TLS.new(
+          address, port,
+          hostname: 'wrong.example',
+          cert_store: dns_certificate_store(certificate)
+        )
+      end
+      finished.push(true)
+    end
+  end
+
+  def test_tls_multiple_queries_return_out_of_order
+    both_queries = Thread::Queue.new
+    handler = lambda do |socket|
+      first = Timeout.timeout(5) { read_framed_query!(socket) }
+      second = Timeout.timeout(5) { read_framed_query!(socket) }
+      both_queries.push(true)
+      socket.write(framed(reply_for_query(second, '192.0.2.2')))
+      socket.write(framed(reply_for_query(first, '192.0.2.1')))
+      both_queries.pop
+    end
+
+    with_tls_server(handler) do |address, port, certificate|
+      requester = Resolv::DNS::Requester::TLS.new(
+        address, port,
+        hostname: 'dns.example',
+        cert_store: dns_certificate_store(certificate)
+      )
+      begin
+        first_message = Resolv::DNS::Message.new
+        first_message.add_question('one.example.org', Resolv::DNS::Resource::IN::A)
+        second_message = Resolv::DNS::Message.new
+        second_message.add_question('two.example.org', Resolv::DNS::Resource::IN::A)
+        first_sender = requester.sender(first_message, 'one')
+        second_sender = requester.sender(second_message, 'two')
+
+        results = {}
+        threads = [first_sender, second_sender].map do |sender|
+          Thread.new do
+            reply, name = requester.request(sender, 5)
+            results[name] = reply.answer.map {|_, _, resource| resource.address.to_s }
+          end
+        end
+        both_queries.pop
+        threads.each {|thread| assert_join_threads([thread]) }
+        both_queries.push(true)
+
+        assert_equal(['192.0.2.1'], results['one'])
+        assert_equal(['192.0.2.2'], results['two'])
+      ensure
+        requester.close
+      end
+    end
+  end
+
+  def test_tls_matches_id_and_question_section
+    responded = Thread::Queue.new
+    handler = lambda do |socket|
+      query = Timeout.timeout(5) { read_framed_query!(socket) }
+      wrong = Resolv::DNS::Message.new(query.id)
+      wrong.qr = 1
+      wrong.rd = query.rd
+      wrong.ra = 1
+      wrong.add_question('unexpected.example.org', Resolv::DNS::Resource::IN::A)
+      socket.write(framed(wrong.encode))
+      socket.write(framed(reply_for_query(query, '192.0.2.1')))
+      responded.pop
+    end
+
+    with_tls_server(handler) do |address, port, certificate|
+      requester = Resolv::DNS::Requester::TLS.new(
+        address, port,
+        hostname: 'dns.example',
+        cert_store: dns_certificate_store(certificate)
+      )
+      begin
+        message = Resolv::DNS::Message.new
+        message.add_question('foo.example.org', Resolv::DNS::Resource::IN::A)
+        sender = requester.sender(message, message)
+        reply, = Timeout.timeout(10) { requester.request(sender, 5) }
+        assert_equal('foo.example.org', reply.question[0][0].to_s)
+        responded.push(true)
+      ensure
+        requester.close
+      end
+    end
+  end
+
+  def test_tls_length_prefixed_reply_can_arrive_byte_by_byte
+    finished = Thread::Queue.new
+    handler = lambda do |socket|
+      query = Timeout.timeout(5) { read_framed_query!(socket) }
+      framed(reply_for_query(query, '192.0.2.1')).each_byte do |byte|
+        socket.write(byte.chr)
+        sleep 0.001
+      end
+      finished.pop
+    end
+
+    with_tls_server(handler) do |address, port, certificate|
+      requester = Resolv::DNS::Requester::TLS.new(
+        address, port,
+        hostname: 'dns.example',
+        cert_store: dns_certificate_store(certificate)
+      )
+      begin
+        message = Resolv::DNS::Message.new
+        message.add_question('chunks.example.org', Resolv::DNS::Resource::IN::A)
+        sender = requester.sender(message, message)
+        reply, = requester.request(sender, 10)
+        assert_equal(['192.0.2.1'], reply.answer.map {|_, _, resource| resource.address.to_s })
+        finished.push(true)
+      ensure
+        requester.close
+      end
+    end
+  end
+
+  def test_tls_canceled_id_does_not_match_next_query
+    responded = Thread::Queue.new
+    handler = lambda do |socket|
+      first = Timeout.timeout(5) { read_framed_query!(socket) }
+      second = Timeout.timeout(5) { read_framed_query!(socket) }
+      socket.write(framed(reply_for_query(first, '192.0.2.1')))
+      socket.write(framed(reply_for_query(second, '192.0.2.2')))
+      responded.pop
+    end
+
+    with_tls_server(handler) do |address, port, certificate|
+      requester = Resolv::DNS::Requester::TLS.new(
+        address, port,
+        hostname: 'dns.example',
+        cert_store: dns_certificate_store(certificate)
+      )
+      begin
+        first_message = Resolv::DNS::Message.new
+        first_message.add_question('first.example.org', Resolv::DNS::Resource::IN::A)
+        first_sender = requester.sender(first_message, 'first')
+        assert_raise(Resolv::ResolvTimeout) do
+          requester.request(first_sender, 0.2)
+        end
+
+        second_message = Resolv::DNS::Message.new
+        second_message.add_question('second.example.org', Resolv::DNS::Resource::IN::A)
+        second_sender = requester.sender(second_message, 'second')
+        assert_not_equal(first_sender.id, second_sender.id)
+        reply, name = requester.request(second_sender, 5)
+        assert_equal('second', name)
+        assert_equal(['192.0.2.2'], reply.answer.map {|_, _, resource| resource.address.to_s })
+        responded.push(true)
+      ensure
+        requester.close
+      end
+    end
+  end
+
+  def test_tls_failure_does_not_fall_back_to_plaintext
+    with_tcp('127.0.0.1', 0) do |server|
+      _, port, _, address = server.addr
+      server_thread = Thread.new do
+        client = Timeout.timeout(5) { server.accept }
+        client.read(512) rescue nil
+        client.close
+      end
+
+      assert_raise(OpenSSL::SSL::SSLError) do
+        Resolv::DNS::Requester::TLS.new(address, port, verify: false)
+      end
+      server_thread.join(5)
+    end
+  end
 end

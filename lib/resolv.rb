@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'socket'
+require 'openssl'
 require 'timeout'
 require 'io/wait' if RUBY_VERSION < '3.2'
 require 'securerandom'
@@ -288,6 +289,11 @@ class Resolv
     Port = 53
 
     ##
+    # Default DNS over TLS Port
+
+    TLSPort = 853
+
+    ##
     # Default DNS UDP packet size
 
     UDPSize = 512
@@ -328,6 +334,14 @@ class Resolv
     # The value of :nameserver_port should be an array of
     # pair of nameserver address and port number.
     # - :nameserver_port => [['8.8.8.8', 53], ['8.8.4.4', 53]]
+    #
+    # An options Hash may be supplied for each nameserver.  When :tls is
+    # true, the connection uses DNS over TLS.  :hostname is the name used
+    # for certificate verification and Server Name Indication; the address
+    # and port are still taken from the first two array members.  TLS
+    # certificate and hostname verification are enabled by default.
+    # - :nameserver_port => [['1.2.3.4', 853, tls: true,
+    #                         hostname: 'dns.example.com']]
     #
     # Example:
     #
@@ -544,16 +558,16 @@ class Resolv
       senders = {}
 
       begin
-        @config.resolv(name) do |candidate, tout, nameserver, port|
+        @config.resolv(name) do |candidate, tout, nameserver, port, tls_options|
           msg = Message.new
           msg.rd = 1
           msg.add_question(candidate, typeclass)
 
           requester = requesters.fetch([nameserver, port]) do
-            if !truncated[candidate] && udp_requester
+            if !tls_options && !truncated[candidate] && udp_requester
               udp_requester
             else
-              requesters[[nameserver, port]] = make_tcp_requester(nameserver, port)
+              requesters[[nameserver, port]] = make_tcp_requester(nameserver, port, tls_options)
             end
           end
 
@@ -598,16 +612,20 @@ class Resolv
     end
 
     def make_udp_requester # :nodoc:
-      nameserver_port = @config.nameserver_port
+      nameserver_port = @config.udp_nameserver_port
       if nameserver_port.length == 1
         Requester::ConnectedUDP.new(*nameserver_port[0])
-      else
+      elsif nameserver_port.length > 1
         Requester::UnconnectedUDP.new(*nameserver_port)
       end
     end
 
-    def make_tcp_requester(host, port) # :nodoc:
-      return Requester::TCP.new(host, port)
+    def make_tcp_requester(host, port, tls_options=nil) # :nodoc:
+      if tls_options
+        return Requester::TLS.new(host, port, **tls_options)
+      else
+        return Requester::TCP.new(host, port)
+      end
     rescue Errno::ECONNREFUSED
       # Treat a refused TCP connection attempt to a nameserver like a timeout,
       # as Resolv::DNS::Config#resolv considers ResolvTimeout exceptions as a
@@ -986,10 +1004,18 @@ class Resolv
           super()
           @host = host
           @port = port
-          sock = TCPSocket.new(@host, @port)
+          sock = open_socket
+          @sock = sock
           @socks = [sock]
-          @senders = {}
           @reusable = true
+          @mutex = Thread::Mutex.new
+          @write_mutex = Thread::Mutex.new
+          @condition = Thread::ConditionVariable.new
+          @responses = {}
+          @allocated_ids = {}
+          @deadlines = {}
+          @canceled = {}
+          start_receiver
         end
 
         def reusable?
@@ -1000,20 +1026,37 @@ class Resolv
           @reusable = false
         end
 
-        def recv_reply(readable_socks, timelimit = nil)
-          sock = readable_socks[0]
-          len_data = read_exactly(sock, 2, timelimit)
-          raise EOFError if len_data.nil? || len_data.bytesize != 2
-          len = len_data.unpack('n')[0]
-          reply = read_exactly(sock, len, timelimit)
-          raise EOFError if reply.nil? || reply.bytesize != len
-          @reusable = true
-          return reply, nil
-        rescue EOFError, SystemCallError
-          # Whatever the kernel reported, this socket cannot be trusted for
-          # another frame.  In practice that is the peer closing or resetting;
-          # the rest is rare enough that erring towards reconnecting is right.
-          @reusable = false
+        def request(sender, tout)
+          start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          timelimit = start + tout
+          @mutex.synchronize do
+            @senders[[sender.id, sender.question]] = sender
+            @canceled.delete([sender.id, sender.question])
+            @deadlines[sender] = timelimit
+          end
+          begin
+            sender.send
+          rescue StandardError
+            sender_failed(sender)
+            raise ResolvTimeout
+          end
+
+          @mutex.synchronize do
+            response = @responses.delete(sender)
+            response.raise! if response.is_a?(FailedResponse)
+            return response, sender.data if response
+
+            while true
+              timeout = timelimit - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              raise ResolvTimeout if timeout <= 0
+              @condition.wait(@mutex, timeout)
+              response = @responses.delete(sender)
+              response.raise! if response.is_a?(FailedResponse)
+              return response, sender.data if response
+            end
+          end
+        rescue ResolvTimeout
+          sender_canceled(sender)
           raise
         end
 
@@ -1022,53 +1065,327 @@ class Resolv
             raise RequestError.new("host/port don't match: #{host}:#{port}")
           end
           id = DNS.allocate_request_id(@host, @port)
-          request = msg.encode
-          request[0,2] = [request.length, id].pack('nn')
-          return @senders[[nil,id]] = Sender.new(request, data, @socks[0])
+          request = +msg.encode
+          question = question_key(request)
+          request = [request.bytesize, id].pack('nn') + request[2..-1]
+          sender = Sender.new(request, data, self, id, question)
+          @mutex.synchronize do
+            @allocated_ids[[id, question]] = sender
+            @canceled.delete([id, question])
+            @senders[[id, question]] = sender
+          end
+          sender
         end
 
         class Sender < Requester::Sender # :nodoc:
-          def send
-            @sock.print(@msg)
-            @sock.flush
+          def initialize(msg, data, requester, id, question)
+            super(msg, data, nil)
+            @requester = requester
+            @id = id
+            @question = question
           end
-          attr_reader :data
+
+          def send
+            @requester.write_message(@msg)
+          end
+          attr_reader :data, :question, :id
         end
 
         def close
           @reusable = false
-          super
-          @senders.each_key {|from,id|
-            DNS.free_request_id(@host, @port, id)
-          }
+          thread = @receiver_thread
+          @mutex.synchronize do
+            @closed = true
+            @condition.broadcast
+          end
+          sock = @sock
+          sock&.close unless sock&.closed?
+          thread&.join
+
+          @mutex.synchronize do
+            @allocated_ids.each_key do |key|
+              DNS.free_request_id(@host, @port, key[0])
+            end
+            @allocated_ids.clear
+            @senders.clear
+          end
+        end
+
+        def write_message(message)
+          @write_mutex.synchronize do
+            until message.empty?
+              length = @sock.write_nonblock(message, exception: false)
+              case length
+              when :wait_writable
+                @sock.wait_writable
+              when :wait_readable
+                @sock.wait_readable
+              else
+                message = message.byteslice(length..-1)
+              end
+            end
+          end
+        rescue StandardError
+          @reusable = false
+          raise
         end
 
         private
 
-        # Read +len+ bytes, giving up with ResolvTimeout once +timelimit+ (a
-        # CLOCK_MONOTONIC value) has passed.  A shorter result means the peer
-        # closed the connection, which the caller turns into an EOFError.
-        # Consuming any byte marks the requester unusable until the whole frame
-        # has been read, since giving up in between loses frame sync.  Without a
-        # +timelimit+ the read blocks instead and keeps no such mark; that is
-        # only for a caller still using the one argument form of #recv_reply.
-        def read_exactly(sock, len, timelimit)
-          return sock.read(len) unless timelimit
-          buf = String.new
-          while buf.bytesize < len
-            case chunk = sock.read_nonblock(len - buf.bytesize, exception: false)
-            when :wait_readable
-              remaining = timelimit - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-              raise ResolvTimeout if remaining <= 0
-              sock.wait_readable(remaining) or raise ResolvTimeout
-            when nil
-              break
-            else
-              @reusable = false
-              buf << chunk
+        def open_socket
+          TCPSocket.new(@host, @port)
+        end
+
+        def start_receiver
+          @receiver_thread = Thread.new do
+            begin
+              receive_replies
+            rescue Exception => exception
+              @receiver_error = exception
+              fail_all(exception)
+              @mutex.synchronize { @condition.broadcast }
             end
           end
-          buf
+          @receiver_thread.abort_on_exception = false
+        end
+
+        def receive_replies
+          frame_key = nil
+          until closed?
+            frame = read_frame(frame_key)
+            if frame.nil?
+              fail_all(ResolvTimeout)
+              break
+            end
+
+            begin
+              reply = Message.decode(frame)
+            rescue DecodeError
+              frame_key = nil
+              next
+            end
+
+            question = question_key(frame)
+            frame_key = [reply.id, question]
+            sender = nil
+            @mutex.synchronize do
+              sender = @senders.delete(frame_key)
+            end
+            next unless sender
+
+            @allocated_ids.delete(frame_key)
+            DNS.free_request_id(@host, @port, reply.id)
+            @mutex.synchronize do
+              @deadlines.delete(sender)
+              @responses[sender] = reply
+              @condition.broadcast
+            end
+            frame_key = nil
+          end
+        rescue EOFError, SystemCallError, IOError
+          @reusable = false
+          raise
+        end
+
+        def read_frame(frame_key)
+          len_data = read_exactly(2, frame_key)
+          return nil if len_data.nil?
+          raise EOFError if len_data.bytesize != 2
+          length = len_data.unpack('n')[0]
+          raise EOFError if length < 12
+
+          header = read_exactly(2)
+          raise EOFError if header.nil? || header.bytesize != 2
+          id = header.unpack('n')[0]
+          body_key = @mutex.synchronize { sender_key_for_id(id) }
+          frame_key = body_key || true
+
+          remaining = length - 2
+          body = remaining.zero? ? String.new : read_exactly(remaining, frame_key)
+          raise EOFError if body.nil? || body.bytesize != remaining
+          frame_key = nil
+          header + body
+        end
+
+        def read_exactly(length, frame_key=nil)
+          buffer = String.new
+          started = false
+          while buffer.bytesize < length
+            chunk = @sock.read_nonblock(length - buffer.bytesize, exception: false)
+            case chunk
+            when :wait_readable
+              timeout = @mutex.synchronize do
+                if frame_key.is_a?(Array)
+                  active_frame_deadline(frame_key)
+                elsif started || frame_key == true
+                  nil
+                else
+                  frame_deadline(frame_key)
+                end
+              end
+              unless @sock.wait_readable(timeout || 1)
+                return nil if closed?
+                next
+              end
+            when :wait_writable
+              next
+            when nil
+              return nil
+            else
+              @mutex.synchronize do
+                started = true
+                @condition.broadcast
+              end
+              buffer << chunk
+            end
+          end
+          buffer
+        end
+
+        def sender_failed(sender)
+          @reusable = false
+          @mutex.synchronize do
+            delete_sender(@senders, sender)
+            delete_sender(@allocated_ids, sender)
+            DNS.free_request_id(@host, @port, sender.id)
+            @deadlines.delete(sender)
+            @responses[sender] = FailedResponse.new(ResolvTimeout)
+            @condition.broadcast
+          end
+        end
+
+        def sender_canceled(sender)
+          @mutex.synchronize do
+            delete_sender(@senders, sender)
+            @deadlines.delete(sender)
+            key = [sender.id, sender.question]
+            @canceled[key] = true
+            unless @reusable
+              @allocated_ids.delete(key)
+              DNS.free_request_id(@host, @port, sender.id)
+            end
+            @condition.broadcast
+          end
+        end
+
+        def fail_all(exception)
+          @reusable = false
+          @mutex.synchronize do
+            @senders.each do |key, sender|
+              deadline = @deadlines[sender]
+              next unless deadline
+              @deadlines.delete(sender)
+              @responses[sender] = FailedResponse.new(ResolvTimeout)
+            end
+            @senders.clear
+            @condition.broadcast
+          end
+        end
+
+        def closed?
+          @mutex.synchronize { @closed == true }
+        end
+
+        def sender_key_for_id(id)
+          @senders.keys.find {|sender_id,| sender_id == id }
+        end
+
+        def frame_deadline(frame_key)
+          now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          if frame_key.is_a?(Array)
+            deadline = @deadlines[@senders[frame_key]]
+            deadline if deadline && deadline > now
+          elsif frame_key.nil?
+            @deadlines.values.select {|deadline| deadline > now }.min
+          end
+        end
+
+        def active_frame_deadline(frame_key)
+          sender = @senders[frame_key]
+          deadline = sender && @deadlines[sender]
+          now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          deadline if deadline && deadline > now
+        end
+
+        def delete_sender(hash, sender)
+          hash.each_key do |key|
+            hash.delete(key) if hash[key].equal?(sender)
+          end
+        end
+
+        class FailedResponse
+          def initialize(error)
+            @error = error
+          end
+
+          def raise!
+            Kernel.raise @error
+          end
+        end
+
+        def question_key(message)
+          decoded = Message.decode(message)
+          decoded.question.map {|name, typeclass| [name, typeclass::TypeValue, typeclass::ClassValue] }
+        rescue DecodeError
+          nil
+        end
+      end
+
+      class TLS < TCP # :nodoc:
+        def initialize(host, port=TLSPort, tls_hostname=nil, hostname: nil,
+                       servername: nil, ssl_hostname: nil, ssl_context: nil, verify: true,
+                       verify_hostname: true, ca_file: nil, ca_path: nil, cert_store: nil,
+                       **options)
+          @tls_hostname = hostname || tls_hostname || servername || ssl_hostname || host
+          @verify = verify
+          @verify_hostname = verify_hostname
+          @ssl_context = ssl_context
+          @ca_file = ca_file
+          @ca_path = ca_path
+          @cert_store = cert_store
+          @tls_options = options
+          @verify = @ssl_context.verify_mode == OpenSSL::SSL::VERIFY_PEER if @ssl_context
+          super(host, port)
+        end
+
+        private
+
+        def open_socket
+          tcp_socket = TCPSocket.new(@host, @port)
+          context = build_ssl_context
+          socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, context)
+          socket.sync_close = true
+          socket.hostname = @tls_hostname unless ip_address?(@tls_hostname)
+          socket.connect
+          socket.post_connection_check(@tls_hostname) if @verify && @verify_hostname
+          socket
+        rescue StandardError
+          socket&.close
+          raise
+        end
+
+        def build_ssl_context
+          return @ssl_context if @ssl_context
+
+          context = OpenSSL::SSL::SSLContext.new
+          context.verify_mode = @verify ? OpenSSL::SSL::VERIFY_PEER : OpenSSL::SSL::VERIFY_NONE
+          if @verify && @verify_hostname && context.respond_to?(:verify_hostname=)
+            context.verify_hostname = true
+          end
+          context.ca_file = @ca_file if @ca_file
+          context.ca_path = @ca_path if @ca_path
+          context.cert_store = @cert_store if @cert_store
+          begin
+            context.min_version = OpenSSL::SSL::TLS1_2_VERSION
+          rescue NoMethodError, ArgumentError
+          end
+          context
+        end
+
+        def ip_address?(address)
+          !!Addrinfo.ip(address)
+        rescue SocketError
+          false
         end
       end
 
@@ -1149,8 +1466,9 @@ class Resolv
       def lazy_initialize
         @mutex.synchronize {
           unless @initialized
-            @nameserver_port = []
-            @use_ipv6 = nil
+          @nameserver_port = []
+          @tls_options = {}
+          @use_ipv6 = nil
             @search = nil
             @ndots = 1
             case @config_info
@@ -1170,10 +1488,29 @@ class Resolv
               raise ArgumentError.new("invalid resolv configuration: #{@config_info.inspect}")
             end
             if config_hash.include? :nameserver
-              @nameserver_port = config_hash[:nameserver].map {|ns| [ns, Port] }
+              @nameserver_port = config_hash[:nameserver].map {|ns|
+                if ns.is_a?(Hash)
+                  address = ns[:address] || ns[:host] || ns[:nameserver]
+                  entry_options = ns.reject {|key,| [:address, :host, :nameserver, :port].include?(key) }
+                  tls_options = tls_options_from_hash(entry_options, config_hash[:tls])
+                  port = ns[:port] || (tls_options ? TLSPort : Port)
+                  [address, port, tls_options]
+                else
+                  tls_options = tls_options_from_hash(config_hash[:tls])
+                  [ns, tls_options ? TLSPort : Port, tls_options]
+                end
+              }
             end
             if config_hash.include? :nameserver_port
-              @nameserver_port = config_hash[:nameserver_port].map {|ns, port| [ns, (port || Port)] }
+              @nameserver_port = config_hash[:nameserver_port].map {|entry|
+                address, port, entry_options = entry
+                tls_options = tls_options_from_hash(entry_options, config_hash[:tls])
+                [address, port || (tls_options ? TLSPort : Port), tls_options]
+              }
+            end
+            @nameserver_port.map! do |address, port, tls_options|
+              @tls_options[[address, port]] = tls_options if tls_options
+              [address, port]
             end
             if config_hash.include? :use_ipv6
               @use_ipv6 = config_hash[:use_ipv6]
@@ -1199,7 +1536,7 @@ class Resolv
             if !@nameserver_port.kind_of?(Array) ||
                @nameserver_port.any? {|ns_port|
                   !(Array === ns_port) ||
-                  ns_port.length != 2
+                  ns_port.length != 2 ||
                   !(String === ns_port[0]) ||
                   !(Integer === ns_port[1])
                }
@@ -1232,6 +1569,58 @@ class Resolv
 
       def nameserver_port
         @nameserver_port
+      end
+
+      def udp_nameserver_port
+        @nameserver_port.reject {|host, port| @tls_options[[host, port]] }
+      end
+
+      def tls_options(host, port)
+        @tls_options[[host, port]]
+      end
+
+      def tls_options_from_hash(options, defaults=nil)
+        defaults = normalize_tls_options(defaults)
+        options = normalize_tls_options(options)
+        return nil if options == false
+        return nil unless defaults || options
+
+        merged = (defaults || {}).merge(options || {})
+        return nil if merged[:tls] == false
+
+        merged[:tls] = true
+        merged[:verify] = true unless merged.key?(:verify)
+        merged[:verify_hostname] = true unless merged.key?(:verify_hostname)
+        merged[:hostname] ||= nil
+        merged.freeze
+      end
+
+      def normalize_tls_options(options)
+        case options
+        when nil, false
+          options
+        when true
+          {}
+        when Hash
+          return {tls: false} if options[:tls] == false
+          return nil unless options.key?(:tls) ||
+                              options.key?(:hostname) ||
+                              options.key?(:tls_hostname) ||
+                              options.key?(:ssl_hostname) ||
+                              options.key?(:servername)
+
+          hostname = options[:hostname] || options[:tls_hostname] ||
+                     options[:ssl_hostname] || options[:servername]
+          result = {}
+          result[:hostname] = hostname if hostname
+          [:tls, :verify, :verify_hostname, :ca_file, :ca_path, :cert_store,
+           :ssl_context].each do |key|
+            result[key] = options[key] if options.key?(key)
+          end
+          result
+        else
+          raise ArgumentError.new("invalid TLS config: #{options.inspect}")
+        end
       end
 
       def use_ipv6?
@@ -1273,7 +1662,7 @@ class Resolv
               timeouts.each {|tout|
                 @nameserver_port.each {|nameserver, port|
                   begin
-                    yield candidate, tout, nameserver, port
+                    yield candidate, tout, nameserver, port, tls_options(nameserver, port)
                   rescue ResolvTimeout
                   end
                 }
