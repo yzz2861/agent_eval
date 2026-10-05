@@ -5,6 +5,7 @@ require 'timeout'
 require 'io/wait' if RUBY_VERSION < '3.2'
 require 'securerandom'
 require 'rbconfig'
+require 'openssl'
 
 # Resolv is a thread-aware DNS resolver library written in Ruby.  Resolv can
 # handle multiple DNS requests concurrently without blocking the entire Ruby
@@ -334,12 +335,20 @@ class Resolv
     #   Resolv::DNS.new(:nameserver => ['210.251.121.21'],
     #                   :search => ['ruby-lang.org'],
     #                   :ndots => 1)
+    #
+    # The :tsig key of a Hash +config_info+ takes a Resolv::DNS::TSIG key
+    # used to sign each request and verify its response.  [RFC 8945]
 
     def initialize(config_info=nil)
       @mutex = Thread::Mutex.new
       @config = Config.new(config_info)
       @initialized = nil
+      @tsig = config_info[:tsig] if config_info.is_a?(Hash)
     end
+
+    # The Resolv::DNS::TSIG key used to sign requests and verify responses,
+    # or nil when messages are not authenticated.
+    attr_accessor :tsig
 
     # Sets the resolver timeouts.  This may be a single positive number
     # or an array of positive numbers representing timeouts in seconds.
@@ -558,7 +567,7 @@ class Resolv
           end
 
           unless sender = senders[[candidate, requester, nameserver, port]]
-            sender = requester.sender(msg, candidate, nameserver, port)
+            sender = requester.sender(msg, candidate, nameserver, port, tsig: @tsig)
             next if !sender
             senders[[candidate, requester, nameserver, port]] = sender
           end
@@ -764,6 +773,16 @@ class Resolv
             next # broken DNS message ignored
           end
           if sender == sender_for(from, msg)
+            if tsig = sender.tsig
+              # Verify the raw received bytes before any content is used;
+              # a failure raises and the message is never delivered.
+              reply = tsig.verify_response(reply, sender.request_mac)
+              begin
+                msg = Message.decode(reply)
+              rescue DecodeError
+                next # broken DNS message ignored
+              end
+            end
             break
           else
             # unexpected DNS message ignored
@@ -783,11 +802,17 @@ class Resolv
       end
 
       class Sender # :nodoc:
-        def initialize(msg, data, sock)
+        def initialize(msg, data, sock, tsig: nil, request_mac: nil)
           @msg = msg
           @data = data
           @sock = sock
+          @tsig = tsig
+          @request_mac = request_mac
         end
+
+        # The TSIG key the request was signed with and the request MAC the
+        # response has to be verified against, or nil when unsigned.
+        attr_reader :tsig, :request_mac
       end
 
       class UnconnectedUDP < Requester # :nodoc:
@@ -833,7 +858,7 @@ class Resolv
           return reply, [from[3],from[1]]
         end
 
-        def sender(msg, data, host, port=Port)
+        def sender(msg, data, host, port=Port, tsig: nil)
           host = Addrinfo.ip(host).ip_address
           lazy_initialize
           sock = @socks_hash[host.index(':') ? "::" : "0.0.0.0"]
@@ -842,8 +867,9 @@ class Resolv
           id = DNS.allocate_request_id(host, port)
           request = msg.encode
           request[0,2] = [id].pack('n')
+          request, request_mac = tsig.sign_request(request) if tsig
           return @senders[[service, id]] =
-            Sender.new(request, data, sock, host, port)
+            Sender.new(request, data, sock, host, port, tsig: tsig, request_mac: request_mac)
         end
 
         def close
@@ -859,8 +885,8 @@ class Resolv
         end
 
         class Sender < Requester::Sender # :nodoc:
-          def initialize(msg, data, sock, host, port)
-            super(msg, data, sock)
+          def initialize(msg, data, sock, host, port, **kwargs)
+            super(msg, data, sock, **kwargs)
             @host = host
             @port = port
           end
@@ -919,7 +945,7 @@ class Resolv
           raise
         end
 
-        def sender(msg, data, host=@host, port=@port)
+        def sender(msg, data, host=@host, port=@port, tsig: nil)
           lazy_initialize
           unless host == @host && port == @port
             raise RequestError.new("host/port don't match: #{host}:#{port}")
@@ -927,7 +953,8 @@ class Resolv
           id = DNS.allocate_request_id(@host, @port)
           request = msg.encode
           request[0,2] = [id].pack('n')
-          return @senders[[nil,id]] = Sender.new(request, data, self)
+          request, request_mac = tsig.sign_request(request) if tsig
+          return @senders[[nil,id]] = Sender.new(request, data, self, tsig: tsig, request_mac: request_mac)
         end
 
         def close
@@ -952,8 +979,8 @@ class Resolv
         end
 
         class Sender < Requester::Sender # :nodoc:
-          def initialize(msg, data, requester)
-            super(msg, data, nil)
+          def initialize(msg, data, requester, **kwargs)
+            super(msg, data, nil, **kwargs)
             @requester = requester
           end
 
@@ -965,7 +992,7 @@ class Resolv
       end
 
       class MDNSOneShot < UnconnectedUDP # :nodoc:
-        def sender(msg, data, host, port=Port)
+        def sender(msg, data, host, port=Port, tsig: nil)
           lazy_initialize
           id = DNS.allocate_request_id(host, port)
           request = msg.encode
@@ -1017,14 +1044,18 @@ class Resolv
           raise
         end
 
-        def sender(msg, data, host=@host, port=@port)
+        def sender(msg, data, host=@host, port=@port, tsig: nil)
           unless host == @host && port == @port
             raise RequestError.new("host/port don't match: #{host}:#{port}")
           end
           id = DNS.allocate_request_id(@host, @port)
           request = msg.encode
-          request[0,2] = [request.length, id].pack('nn')
-          return @senders[[nil,id]] = Sender.new(request, data, @socks[0])
+          request[0,2] = [id].pack('n')
+          request, request_mac = tsig.sign_request(request) if tsig
+          # The two-octet TCP length prefix is framing, not part of the
+          # signed DNS message, so it is prepended after signing.
+          request = [request.bytesize].pack('n') << request
+          return @senders[[nil,id]] = Sender.new(request, data, @socks[0], tsig: tsig, request_mac: request_mac)
         end
 
         class Sender < Requester::Sender # :nodoc:
@@ -1076,6 +1107,363 @@ class Resolv
       # Indicates a problem with the DNS request.
 
       class RequestError < StandardError
+      end
+    end
+
+    ##
+    # Transaction Signature (TSIG) authentication of DNS messages.
+    # [RFC 8945]
+    #
+    # A TSIG key signs outgoing requests and verifies the matching responses
+    # using a message authentication code (MAC) computed with a shared
+    # secret.  Only the +hmac-sha256+ algorithm is supported, and only the
+    # single message case: each request carries its own TSIG record and each
+    # response is verified against it.  The multi-message chaining of
+    # RFC 8945 4.4 is not implemented.
+    #
+    #   tsig = Resolv::DNS::TSIG.new('key.example.', Base64.decode64(key64))
+    #   dns = Resolv::DNS.new(nameserver: '192.0.2.1', tsig: tsig)
+    #
+    # The key name, the shared secret and the allowed clock error (+fudge+,
+    # in seconds) are given by the caller.  +clock+ is a callable returning
+    # the current time (a Time or seconds since the epoch) and can be
+    # injected for testing.
+
+    class TSIG
+      # Supported TSIG algorithm names mapped to their OpenSSL digest.
+      ALGORITHMS = {
+        'hmac-sha256' => 'SHA256',
+      }.freeze
+
+      ##
+      # Default allowed clock error in seconds.  [RFC 8945 4.2]
+
+      DEFAULT_FUDGE = 300
+
+      TypeValue = 250 # :nodoc: TSIG RR type
+      ClassValue = 255 # :nodoc: TSIG RR class is ANY
+
+      ##
+      # A TSIG failure.  Subclasses distinguish the RFC 8945 error codes
+      # from local format problems.
+
+      class Error < StandardError; end
+
+      ##
+      # The TSIG record itself, or the message carrying it, is malformed.
+      # This is a local format error, not one of the RFC 8945 error codes.
+
+      class FormatError < Error; end
+
+      ##
+      # BADKEY: the key name or algorithm is not recognized.  [RFC 8945 6.2]
+
+      class BadKey < Error; end
+
+      ##
+      # BADSIG: the MAC did not verify.  [RFC 8945 6.1]
+
+      class BadSignature < Error; end
+
+      ##
+      # BADTIME: the signed time is outside the allowed fudge.  [RFC 8945 6.3]
+
+      class BadTime < Error; end
+
+      # Maps the TSIG error field to an exception class.  [RFC 8945 6]
+      ERROR_CLASSES = Hash.new(Error).merge(
+        16 => BadSignature,
+        17 => BadKey,
+        18 => BadTime,
+      ) # :nodoc:
+
+      ##
+      # The key name as a Resolv::DNS::Name.
+
+      attr_reader :key_name
+
+      ##
+      # The algorithm name as a Resolv::DNS::Name.
+
+      attr_reader :algorithm
+
+      ##
+      # The allowed clock error in seconds.
+
+      attr_reader :fudge
+
+      def initialize(key_name, secret, algorithm: 'hmac-sha256', fudge: DEFAULT_FUDGE, clock: nil)
+        algorithm = algorithm.to_s.downcase.sub(/\.\z/, '')
+        digest = ALGORITHMS[algorithm]
+        raise ArgumentError, "unsupported TSIG algorithm: #{algorithm}" unless digest
+        @digest = digest
+        @key_name = Name.create(key_name)
+        @algorithm = Name.create("#{algorithm}.")
+        @secret = secret.to_s.b
+        @fudge = Integer(fudge)
+        @clock = clock || -> { Time.now }
+      end
+
+      # Signs the wire-format request +message+ (with its final ID already in
+      # the header) and returns [signed message, request MAC].  The digest
+      # input is the message exactly as sent, before the TSIG record is
+      # appended, followed by the TSIG variables.  [RFC 8945 4.3.1]
+      def sign_request(message) # :nodoc:
+        raise EncodeError, 'DNS message too short' if message.bytesize < 12
+        time = current_time
+        mac = hmac(message + tsig_variables(time, @fudge, 0, ''.b))
+        rdata = String.new
+        rdata << TSIG.canonical_name_wire(@algorithm)
+        rdata << [time >> 32, time & 0xffffffff].pack('nN')
+        rdata << [@fudge, mac.bytesize].pack('nn')
+        rdata << mac
+        rdata << [message.unpack1('n'), 0, 0].pack('nnn')
+        signed = message.dup
+        signed[10, 2] = [signed.unpack1('@10 n') + 1].pack('n')
+        signed << TSIG.name_wire(@key_name)
+        signed << [TypeValue, ClassValue, 0].pack('nnN')
+        signed << [rdata.bytesize].pack('n')
+        signed << rdata
+        return signed, mac
+      end
+
+      # Verifies the TSIG record of the wire-format +response+ to a request
+      # signed with +request_mac+, and returns the response with the TSIG
+      # record removed.  The digest input is built from the raw received
+      # bytes, never from a re-encoded message.  Raises a TSIG::Error
+      # subclass when verification fails; the message must not be used then.
+      # [RFC 8945 4.3.2]
+      def verify_response(response, request_mac) # :nodoc:
+        tsig_offset, tsig = TSIG.extract_tsig(response)
+        raise Error, 'unsigned response to a signed request' unless tsig
+        stripped = response.byteslice(0, tsig_offset)
+        stripped[10, 2] = [stripped.unpack1('@10 n') - 1].pack('n')
+        if tsig.error != 0
+          # An error report is only as trustworthy as its MAC; BADKEY and
+          # BADSIG responses are allowed to be unsigned.  [RFC 8945 4.5]
+          verify_mac(stripped, tsig, request_mac) unless tsig.mac.empty?
+          raise ERROR_CLASSES[tsig.error], "TSIG error #{tsig.error} in response"
+        end
+        unless name_equal?(tsig.name, @key_name) && name_equal?(tsig.algorithm, @algorithm)
+          raise BadKey, 'response TSIG key name or algorithm does not match the request'
+        end
+        verify_mac(stripped, tsig, request_mac)
+        now = current_time
+        if (tsig.time - now).abs > @fudge
+          raise BadTime, "response TSIG time #{tsig.time} is outside fudge #{@fudge} of local time #{now}"
+        end
+        return stripped
+      end
+
+      # A TSIG record parsed from a received message.
+      Record = Struct.new(:name, :algorithm, :time, :fudge, :mac, :original_id, :error, :other) # :nodoc:
+
+      # Locates the TSIG record in the wire-format +message+ and returns
+      # [offset of the record, parsed Record], or [nil, nil] when the
+      # message carries none.  The record must be the last one in the
+      # additional section.  [RFC 8945 4.2]
+      def self.extract_tsig(message) # :nodoc:
+        raise FormatError, 'DNS message too short' if message.bytesize < 12
+        qdcount, ancount, nscount, arcount = message.unpack('@4 nnnn')
+        offset = 12
+        qdcount.times do
+          offset = skip_name(message, offset)
+          raise FormatError, 'truncated question' if offset + 4 > message.bytesize
+          offset += 4
+        end
+        tsig_offset = nil
+        tsig = nil
+        (ancount + nscount + arcount).times do |i|
+          rr_start = offset
+          name, offset = read_name(message, offset)
+          raise FormatError, 'truncated record' if offset + 10 > message.bytesize
+          type, klass, ttl, rdlength = message.unpack("@#{offset} nnNn")
+          offset += 10
+          raise FormatError, 'truncated rdata' if offset + rdlength > message.bytesize
+          rdata = message.byteslice(offset, rdlength)
+          offset += rdlength
+          next if i < ancount + nscount || type != TypeValue
+          unless i == ancount + nscount + arcount - 1
+            raise FormatError, 'TSIG record is not the last record in the additional section'
+          end
+          raise FormatError, 'multiple TSIG records' if tsig
+          raise FormatError, 'TSIG record class is not ANY' unless klass == ClassValue
+          raise FormatError, 'TSIG record TTL is not 0' unless ttl.zero?
+          tsig = parse_tsig_rdata(name, rdata)
+          tsig_offset = rr_start
+        end
+        return tsig_offset, tsig
+      end
+
+      # The canonical wire form of +name+: uncompressed, downcased, absolute.
+      # [RFC 8945 4.3.3]
+      def self.canonical_name_wire(name) # :nodoc:
+        wire = String.new
+        name.to_a.each do |label|
+          downcased = label.downcase
+          wire << [downcased.bytesize].pack('C') << downcased
+        end
+        wire << "\0"
+        return wire
+      end
+
+      # The uncompressed wire form of +name+ as given.
+      def self.name_wire(name) # :nodoc:
+        wire = String.new
+        name.to_a.each do |label|
+          string = label.string
+          wire << [string.bytesize].pack('C') << string
+        end
+        wire << "\0"
+        return wire
+      end
+
+      # Skips over the possibly compressed name at +offset+ and returns the
+      # offset right after it.
+      def self.skip_name(message, offset) # :nodoc:
+        while true
+          length = message.getbyte(offset) or raise FormatError, 'truncated name'
+          case length
+          when 0
+            return offset + 1
+          when 0xc0..0xff
+            raise FormatError, 'truncated name pointer' if offset + 2 > message.bytesize
+            return offset + 2
+          when 0x40..0xbf
+            raise FormatError, 'reserved label type'
+          else
+            offset += 1 + length
+            raise FormatError, 'truncated label' if offset > message.bytesize
+          end
+        end
+      end
+
+      # Reads the possibly compressed name at +offset+ and returns
+      # [Name, offset right after it].
+      def self.read_name(message, offset) # :nodoc:
+        labels = []
+        pos = offset
+        end_offset = nil
+        pointers = 0
+        while true
+          length = message.getbyte(pos) or raise FormatError, 'truncated name'
+          case length
+          when 0
+            pos += 1
+            end_offset ||= pos
+            return Name.new(labels, true), end_offset
+          when 0xc0..0xff
+            low = message.getbyte(pos + 1) or raise FormatError, 'truncated name pointer'
+            pointer = ((length & 0x3f) << 8) | low
+            raise FormatError, 'non-backward name pointer' if pointer >= pos
+            end_offset ||= pos + 2
+            pos = pointer
+            pointers += 1
+            raise FormatError, 'too many compression pointers' if pointers > 128
+          when 0x40..0xbf
+            raise FormatError, 'reserved label type'
+          else
+            pos += 1
+            label = message.byteslice(pos, length)
+            raise FormatError, 'truncated label' if label.nil? || label.bytesize != length
+            labels << Label::Str.new(label)
+            pos += length
+          end
+        end
+      end
+
+      # Parses the uncompressed algorithm name and the fixed-size fields of
+      # TSIG rdata.  Domain names inside TSIG rdata must not be compressed.
+      # [RFC 8945 4.2]
+      def self.parse_tsig_rdata(name, rdata) # :nodoc:
+        labels = []
+        pos = 0
+        while true
+          length = rdata.getbyte(pos) or raise FormatError, 'truncated TSIG algorithm name'
+          pos += 1
+          break if length.zero?
+          if length > 63
+            raise FormatError, 'compressed or reserved label in TSIG rdata'
+          end
+          label = rdata.byteslice(pos, length)
+          raise FormatError, 'truncated TSIG algorithm name' if label.nil? || label.bytesize != length
+          labels << Label::Str.new(label)
+          pos += length
+        end
+        raise FormatError, 'truncated TSIG rdata' if pos + 10 > rdata.bytesize
+        time_hi, time_lo, fudge, mac_size = rdata.unpack("@#{pos} nNnn")
+        pos += 10
+        raise FormatError, 'truncated TSIG MAC' if pos + mac_size + 6 > rdata.bytesize
+        mac = rdata.byteslice(pos, mac_size)
+        pos += mac_size
+        original_id, error, other_length = rdata.unpack("@#{pos} nnn")
+        pos += 6
+        unless pos + other_length == rdata.bytesize
+          raise FormatError, 'TSIG other data length does not match rdata'
+        end
+        other = rdata.byteslice(pos, other_length)
+        algorithm = Name.new(labels, true)
+        return Record.new(name, algorithm, (time_hi << 32) | time_lo, fudge,
+                          mac, original_id, error, other)
+      end
+
+      private
+
+      def current_time
+        @clock.call.to_i
+      end
+
+      def hmac(data)
+        OpenSSL::HMAC.digest(@digest, @secret, data)
+      end
+
+      # The TSIG variables: the digest input following the message itself.
+      # [RFC 8945 4.3.3]
+      def tsig_variables(time, fudge, error, other)
+        variables = String.new
+        variables << TSIG.canonical_name_wire(@key_name)
+        variables << [ClassValue, 0].pack('nN')
+        variables << TSIG.canonical_name_wire(@algorithm)
+        variables << [time >> 32, time & 0xffffffff].pack('nN')
+        variables << [fudge, error, other.bytesize].pack('nnn')
+        variables << other
+        return variables
+      end
+
+      # The TSIG variables as received in +tsig+, for response verification.
+      def response_variables(tsig)
+        variables = String.new
+        variables << TSIG.canonical_name_wire(tsig.name)
+        variables << [ClassValue, 0].pack('nN')
+        variables << TSIG.canonical_name_wire(tsig.algorithm)
+        variables << [tsig.time >> 32, tsig.time & 0xffffffff].pack('nN')
+        variables << [tsig.fudge, tsig.error, tsig.other.bytesize].pack('nnn')
+        variables << tsig.other
+        return variables
+      end
+
+      def verify_mac(stripped, tsig, request_mac)
+        raise BadSignature, 'response TSIG has an empty MAC' if tsig.mac.empty?
+        data = String.new
+        data << [request_mac.bytesize].pack('n')
+        data << request_mac
+        data << stripped
+        data << response_variables(tsig)
+        expected = hmac(data)
+        mac = tsig.mac
+        # A truncated MAC is legal down to half the digest size.  [RFC 8945 4.4.3]
+        if mac.bytesize < expected.bytesize / 2 || mac.bytesize > expected.bytesize
+          raise BadSignature, "response TSIG MAC has invalid size #{mac.bytesize}"
+        end
+        unless OpenSSL.fixed_length_secure_compare(expected.byteslice(0, mac.bytesize), mac)
+          raise BadSignature, 'response TSIG MAC does not verify'
+        end
+      end
+
+      # Names compare by their labels, case-insensitively, regardless of how
+      # the absolute/relative flag was supplied.
+      def name_equal?(name, other)
+        name.to_a == other.to_a
       end
     end
 
