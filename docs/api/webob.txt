@@ -122,6 +122,11 @@ ETag
 .. autoclass:: webob.etag.ETagMatcher
    :members:
 
+Conditional requests
+~~~~~~~~~~~~~~~~~~~~
+.. automodule:: webob.conditional
+   :members:
+
 Misc Functions and Internals
 ----------------------------
 

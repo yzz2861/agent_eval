@@ -47,6 +47,16 @@ Security Fix
 Feature
 ~~~~~~~
 
+- Add ``webob.conditional.evaluate_preconditions`` and the convenience
+  wrappers ``webob.conditional.precondition_response`` and
+  ``BaseRequest.check_preconditions``.  They evaluate ``If-Match``,
+  ``If-Unmodified-Since``, ``If-None-Match`` and ``If-Modified-Since``
+  (in RFC 9110 section 13.2.2 order) against a caller-supplied current
+  resource state, before the request body is consumed or the resource is
+  modified, making conditional requests usable for unsafe methods such as
+  ``PUT`` where a failed precondition must abort with ``412 Precondition
+  Failed``.
+
 - Rename "master" git branch to "main"
 
 - Add support for Python 3.12.

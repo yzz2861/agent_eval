@@ -1167,6 +1167,38 @@ class BaseRequest:
         "IfRange object",
     )
 
+    def check_preconditions(self, resource_exists, etag=None, last_modified=None):
+        """
+        Evaluate the conditional request headers (``If-Match``,
+        ``If-Unmodified-Since``, ``If-None-Match`` and
+        ``If-Modified-Since``) against the current state of the target
+        resource, *before* the request body is consumed or the resource
+        is modified.
+
+        Unlike :meth:`webob.response.Response.conditional_response_app`,
+        this works for unsafe methods such as ``PUT``: a failed
+        precondition yields ``412 Precondition Failed`` rather than being
+        applied on top of an already-modified resource.
+
+        :param resource_exists: whether the target resource currently
+            exists.
+        :param etag: the current ETag of the resource (e.g. ``'"abc"'``
+            or ``'W/"abc"'``), or ``None``.
+        :param last_modified: the current modification time of the
+            resource as a :class:`datetime.datetime`, or ``None``.
+
+        :returns: ``None`` if the request should proceed, otherwise a
+            response (``304 Not Modified`` or ``412 Precondition
+            Failed``) that should be returned to the client as-is.
+            See :func:`webob.conditional.evaluate_preconditions` for the
+            exact evaluation rules.
+        """
+        from webob.conditional import precondition_response
+
+        return precondition_response(
+            self, resource_exists, etag=etag, last_modified=last_modified
+        )
+
     max_forwards = converter(
         environ_getter("HTTP_MAX_FORWARDS", None, "14.31"),
         parse_int,
