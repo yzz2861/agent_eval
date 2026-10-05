@@ -110,3 +110,6 @@ API
 
 .. autoclass:: Serializer
     :members:
+
+.. autoclass:: AsyncSerializer
+    :members:

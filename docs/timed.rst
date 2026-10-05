@@ -26,3 +26,9 @@ than a given age.
 
 .. autoclass:: TimedSerializer
     :members:
+
+.. autoclass:: AsyncTimestampSigner
+    :members:
+
+.. autoclass:: AsyncTimedSerializer
+    :members:

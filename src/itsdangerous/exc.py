@@ -89,6 +89,29 @@ class BadHeader(BadSignature):
         self.original_error: Exception | None = original_error
 
 
+class SignerUnavailable(Exception):
+    """Raised if an asynchronous signing backend, such as a remote
+    signing service, could not be reached or failed to produce a
+    result. The original exception that occurred while calling the
+    backend is stored as :attr:`original_error`.
+
+    This is deliberately *not* a subclass of :class:`BadSignature`. A
+    signature that cannot be verified because the signing service is
+    unavailable is not the same as an invalid signature, and must not
+    be handled by silently falling back to unverified data.
+
+    .. versionadded:: 2.3
+    """
+
+    def __init__(self, message: str, original_error: Exception | None = None):
+        super().__init__(message)
+        self.message = message
+
+        #: If available, the error that the signing backend raised.
+        #: This might be ``None``.
+        self.original_error: Exception | None = original_error
+
+
 class BadPayload(BadData):
     """Raised if a payload is invalid. This could happen if the payload
     is loaded despite an invalid signature, or if there is a mismatch

@@ -47,3 +47,35 @@ Signing Algorithms
 .. autoclass:: NoneAlgorithm
 
 .. autoclass:: HMACAlgorithm
+-------------
+
+
+Async Signing
+
+If the secret key is held by a remote signing service and is not
+available locally, use :class:`AsyncSigner` with an
+:class:`AsyncSignerBackend` implementation. The backend only receives
+the exact bytes to authenticate and a ``purpose`` (the salt), and
+returns a signature or verification result. The same encoding
+conventions as :class:`Signer` are used, so values are interchangeable
+if the service uses the same key and algorithm.
+
+.. code-block:: python
+
+    from itsdangerous import AsyncSigner
+
+    s = AsyncSigner(my_remote_backend)
+    signed = await s.sign("my string")
+    assert await s.unsign(signed) == b"my string"
+
+If the service cannot be reached,
+:exc:`~itsdangerous.exc.SignerUnavailable` is raised. This is distinct
+from :exc:`~itsdangerous.exc.BadSignature`, and cancellation
+propagates as :exc:`asyncio.CancelledError`; neither is silently
+treated as an invalid signature.
+
+.. autoclass:: AsyncSignerBackend
+    :members:
+
+.. autoclass:: AsyncSigner
+    :members:

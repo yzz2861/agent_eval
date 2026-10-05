@@ -19,3 +19,7 @@ this, ItsDangerous also provides URL safe serializers:
 .. autoclass:: URLSafeSerializer
 
 .. autoclass:: URLSafeTimedSerializer
+
+.. autoclass:: AsyncURLSafeSerializer
+
+.. autoclass:: AsyncURLSafeTimedSerializer

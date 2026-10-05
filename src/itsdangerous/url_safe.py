@@ -8,7 +8,9 @@ from .encoding import base64_decode
 from .encoding import base64_encode
 from .exc import BadPayload
 from .serializer import _PDataSerializer
+from .serializer import AsyncSerializer
 from .serializer import Serializer
+from .timed import AsyncTimedSerializer
 from .timed import TimedSerializer
 
 
@@ -80,4 +82,22 @@ class URLSafeTimedSerializer(URLSafeSerializerMixin, TimedSerializer[str]):
     """Works like :class:`.TimedSerializer` but dumps and loads into a
     URL safe string consisting of the upper and lowercase character of
     the alphabet as well as ``'_'``, ``'-'`` and ``'.'``.
+    """
+
+
+class AsyncURLSafeSerializer(URLSafeSerializerMixin, AsyncSerializer[str]):
+    """Works like :class:`.AsyncSerializer` but dumps and loads into
+    a URL safe string consisting of the upper and lowercase characters
+    of the alphabet as well as ``'_'``, ``'-'`` and ``'.'``.
+
+    .. versionadded:: 2.3
+    """
+
+
+class AsyncURLSafeTimedSerializer(URLSafeSerializerMixin, AsyncTimedSerializer[str]):
+    """Works like :class:`.AsyncTimedSerializer` but dumps and loads
+    into a URL safe string consisting of the upper and lowercase
+    characters of the alphabet as well as ``'_'``, ``'-'`` and ``'.'``.
+
+    .. versionadded:: 2.3
     """

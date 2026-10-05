@@ -8,6 +8,8 @@ from .encoding import want_bytes
 from .exc import BadPayload
 from .exc import BadSignature
 from .signer import _make_keys_list
+from .signer import AsyncSigner
+from .signer import AsyncSignerBackend
 from .signer import Signer
 
 if t.TYPE_CHECKING:
@@ -402,3 +404,221 @@ class Serializer(t.Generic[_TSerialized]):
         .. versionadded:: 0.15
         """
         return self.loads_unsafe(f.read(), salt=salt)
+
+
+class AsyncSerializer(Serializer[_TSerialized]):
+    """An asynchronous counterpart to :class:`Serializer` that signs
+    and verifies through an :class:`~itsdangerous.signer.AsyncSignerBackend`,
+    such as a remote signing service. This is useful when the secret
+    key is not available locally.
+
+    The payload serialization and encoding conventions are identical
+    to :class:`Serializer`, only the signing step is asynchronous.
+    ``dumps``, ``loads``, and the other signing methods are
+    coroutines that must be awaited.
+
+    :param backend: The :class:`~itsdangerous.signer.AsyncSignerBackend`
+        to call for signing and verification.
+    :param salt: Passed to the backend as the ``purpose`` to
+        distinguish signatures in different contexts.
+    :param serializer: An object that provides ``dumps`` and ``loads``
+        methods for serializing data to a string. Defaults to
+        :attr:`default_serializer`, which defaults to :mod:`json`.
+    :param serializer_kwargs: Keyword arguments to pass when calling
+        ``serializer.dumps``.
+    :param signer: An :class:`~itsdangerous.signer.AsyncSigner` class
+        to instantiate when signing data. Defaults to
+        :attr:`default_signer`.
+    :param signer_kwargs: Keyword arguments to pass when instantiating
+        the ``signer`` class.
+    :param fallback_signers: List of signer parameters to try when
+        unsigning with the default signer fails. Each item can be a
+        dict of ``signer_kwargs``, an ``AsyncSigner`` class, or a
+        tuple of ``(signer, signer_kwargs)``.
+
+    .. versionadded:: 2.3
+    """
+
+    #: The default ``AsyncSigner`` class to instantiate when signing
+    #: data. The default is :class:`itsdangerous.signer.AsyncSigner`.
+    default_signer: type[AsyncSigner] = AsyncSigner  # type: ignore[assignment]
+
+    #: The default fallback signers to try when unsigning fails.
+    default_fallback_signers: list[
+        dict[str, t.Any]
+        | tuple[type[AsyncSigner], dict[str, t.Any]]
+        | type[AsyncSigner]
+    ] = []
+
+    def __init__(
+        self,
+        backend: AsyncSignerBackend,
+        salt: str | bytes | None = b"itsdangerous",
+        serializer: _PDataSerializer[t.Any] | None = None,
+        serializer_kwargs: dict[str, t.Any] | None = None,
+        signer: type[AsyncSigner] | None = None,
+        signer_kwargs: dict[str, t.Any] | None = None,
+        fallback_signers: list[
+            dict[str, t.Any]
+            | tuple[type[AsyncSigner], dict[str, t.Any]]
+            | type[AsyncSigner]
+        ]
+        | None = None,
+    ):
+        if salt is not None:
+            salt = want_bytes(salt)
+            # if salt is None then the signer's default is used
+
+        self.salt = salt
+
+        if serializer is None:
+            serializer = self.default_serializer
+
+        self.serializer: _PDataSerializer[_TSerialized] = serializer
+        self.is_text_serializer: bool = is_text_serializer(serializer)
+
+        if signer is None:
+            signer = self.default_signer
+
+        #: The backend that performs signing and verification.
+        self.backend: AsyncSignerBackend = backend
+        self.signer: type[AsyncSigner] = signer  # type: ignore[assignment]
+        self.signer_kwargs: dict[str, t.Any] = signer_kwargs or {}
+
+        if fallback_signers is None:
+            fallback_signers = list(self.default_fallback_signers)
+
+        self.fallback_signers: list[
+            dict[str, t.Any]
+            | tuple[type[AsyncSigner], dict[str, t.Any]]
+            | type[AsyncSigner]
+        ] = fallback_signers
+        self.serializer_kwargs: dict[str, t.Any] = serializer_kwargs or {}
+
+    def make_signer(  # type: ignore[override]
+        self, salt: str | bytes | None = None
+    ) -> AsyncSigner:
+        """Creates a new instance of the signer to be used. The default
+        implementation uses the :class:`.AsyncSigner` base class.
+        """
+        if salt is None:
+            salt = self.salt
+
+        return self.signer(self.backend, salt=salt, **self.signer_kwargs)
+
+    def iter_unsigners(  # type: ignore[override]
+        self, salt: str | bytes | None = None
+    ) -> cabc.Iterator[AsyncSigner]:
+        """Iterates over all signers to be tried for unsigning. Starts
+        with the configured signer, then constructs each signer
+        specified in ``fallback_signers``.
+        """
+        if salt is None:
+            salt = self.salt
+
+        yield self.make_signer(salt)
+
+        for fallback in self.fallback_signers:
+            if isinstance(fallback, dict):
+                kwargs = fallback
+                fallback = self.signer
+            elif isinstance(fallback, tuple):
+                fallback, kwargs = fallback
+            else:
+                kwargs = self.signer_kwargs
+
+            yield fallback(self.backend, salt=salt, **kwargs)
+
+    async def dumps(self, obj: t.Any, salt: str | bytes | None = None) -> _TSerialized:
+        """Returns a signed string serialized with the internal
+        serializer. The return value can be either a byte or unicode
+        string depending on the format of the internal serializer.
+        """
+        payload = want_bytes(self.dump_payload(obj))
+        rv = await self.make_signer(salt).sign(payload)
+
+        if self.is_text_serializer:
+            return rv.decode("utf-8")  # type: ignore[return-value]
+
+        return rv  # type: ignore[return-value]
+
+    async def dump(
+        self, obj: t.Any, f: t.IO[t.Any], salt: str | bytes | None = None
+    ) -> None:
+        """Like :meth:`dumps` but dumps into a file. The file handle has
+        to be compatible with what the internal serializer expects.
+        """
+        f.write(await self.dumps(obj, salt))
+
+    async def loads(
+        self, s: str | bytes, salt: str | bytes | None = None, **kwargs: t.Any
+    ) -> t.Any:
+        """Reverse of :meth:`dumps`. Raises :exc:`.BadSignature` if the
+        signature validation fails. Raises :exc:`.SignerUnavailable` if
+        the signing backend cannot be reached.
+        """
+        s = want_bytes(s)
+        last_exception = None
+
+        for signer in self.iter_unsigners(salt):
+            try:
+                return self.load_payload(await signer.unsign(s))
+            except BadSignature as err:
+                last_exception = err
+
+        raise t.cast(BadSignature, last_exception)
+
+    async def load(self, f: t.IO[t.Any], salt: str | bytes | None = None) -> t.Any:
+        """Like :meth:`loads` but loads from a file."""
+        return await self.loads(f.read(), salt)
+
+    async def loads_unsafe(
+        self, s: str | bytes, salt: str | bytes | None = None
+    ) -> tuple[bool, t.Any]:
+        """Like :meth:`loads` but without verifying the signature. This
+        is potentially very dangerous to use depending on how your
+        serializer works. The return value is ``(signature_valid,
+        payload)`` instead of just the payload. The first item will be
+        a boolean that indicates if the signature is valid.
+
+        Only :exc:`.BadSignature` is treated as a failed signature.
+        :exc:`.SignerUnavailable` and cancellation propagate, an
+        unverified payload is never returned in those cases.
+        """
+        return await self._loads_unsafe_impl(s, salt)
+
+    async def _loads_unsafe_impl(  # type: ignore[override]
+        self,
+        s: str | bytes,
+        salt: str | bytes | None,
+        load_kwargs: dict[str, t.Any] | None = None,
+        load_payload_kwargs: dict[str, t.Any] | None = None,
+    ) -> tuple[bool, t.Any]:
+        """Low level helper function to implement :meth:`loads_unsafe`
+        in serializer subclasses.
+        """
+        if load_kwargs is None:
+            load_kwargs = {}
+
+        try:
+            return True, await self.loads(s, salt=salt, **load_kwargs)
+        except BadSignature as e:
+            if e.payload is None:
+                return False, None
+
+            if load_payload_kwargs is None:
+                load_payload_kwargs = {}
+
+            try:
+                return (
+                    False,
+                    self.load_payload(e.payload, **load_payload_kwargs),
+                )
+            except BadPayload:
+                return False, None
+
+    async def load_unsafe(
+        self, f: t.IO[t.Any], salt: str | bytes | None = None
+    ) -> tuple[bool, t.Any]:
+        """Like :meth:`loads_unsafe` but loads from a file."""
+        return await self.loads_unsafe(f.read(), salt=salt)

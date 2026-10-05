@@ -10,6 +10,7 @@ from .encoding import base64_decode
 from .encoding import base64_encode
 from .encoding import want_bytes
 from .exc import BadSignature
+from .exc import SignerUnavailable
 
 
 class SigningAlgorithm:
@@ -261,6 +262,157 @@ class Signer:
         """
         try:
             self.unsign(signed_value)
+            return True
+        except BadSignature:
+            return False
+
+
+class AsyncSignerBackend(t.Protocol):
+    """Protocol for an asynchronous signing backend, such as a client
+    for a remote signing service that holds the secret key.
+
+    The backend only ever receives the exact bytes to authenticate
+    along with a ``purpose`` (the salt) that distinguishes signatures
+    in different contexts. It never receives the secret key, and it
+    never receives unparsed signed blobs.
+
+    Implementations should raise an exception if the service cannot be
+    reached. It will be wrapped in :class:`.SignerUnavailable`, which
+    is distinct from :class:`.BadSignature`. A backend must not return
+    ``False`` from :meth:`verify` merely because the service is
+    unavailable, as that would be indistinguishable from a forged
+    signature.
+
+    .. versionadded:: 2.3
+    """
+
+    async def sign(self, value: bytes, *, purpose: bytes) -> bytes:
+        """Returns the signature for the given value."""
+        ...
+
+    async def verify(
+        self, value: bytes, signature: bytes, *, purpose: bytes
+    ) -> bool:
+        """Returns ``True`` if the signature is valid for the given
+        value.
+        """
+        ...
+
+
+class AsyncSigner:
+    """An asynchronous counterpart to :class:`Signer` that delegates
+    signature generation and verification to an
+    :class:`AsyncSignerBackend`, such as a remote signing service.
+    This is useful when the secret key is not available locally.
+
+    The same encoding conventions as :class:`Signer` are used: the
+    signature is base64 encoded and appended to the value, separated
+    by ``sep``. Values produced by :class:`Signer` and this class are
+    interchangeable if the backend uses the same key and algorithm.
+
+    Failures are distinguished by exception type:
+
+    -   An invalid signature raises :class:`.BadSignature`.
+    -   An unreachable or failing backend raises
+        :class:`.SignerUnavailable`.
+    -   Cancellation of the surrounding task propagates as
+        :exc:`asyncio.CancelledError`.
+
+    :param backend: The :class:`AsyncSignerBackend` to call.
+    :param salt: Passed to the backend as the ``purpose`` to
+        distinguish signatures in different contexts.
+    :param sep: Separator between the signature and value.
+
+    .. versionadded:: 2.3
+    """
+
+    #: The default purpose passed to the backend if no salt is given.
+    default_purpose: bytes = b"itsdangerous.Signer"
+
+    def __init__(
+        self,
+        backend: AsyncSignerBackend,
+        salt: str | bytes | None = None,
+        sep: str | bytes = b".",
+    ):
+        #: The backend that performs signing and verification.
+        self.backend: AsyncSignerBackend = backend
+        self.sep: bytes = want_bytes(sep)
+
+        if self.sep in _base64_alphabet:
+            raise ValueError(
+                "The given separator cannot be used because it may be"
+                " contained in the signature itself. ASCII letters,"
+                " digits, and '-_=' must not be used."
+            )
+
+        if salt is not None:
+            salt = want_bytes(salt)
+        else:
+            salt = self.default_purpose
+
+        self.salt = salt
+
+    async def get_signature(self, value: str | bytes) -> bytes:
+        """Returns the signature for the given value, base64 encoded."""
+        value = want_bytes(value)
+
+        try:
+            sig = await self.backend.sign(value, purpose=self.salt)
+        except SignerUnavailable:
+            raise
+        except Exception as e:
+            raise SignerUnavailable(
+                "The signing backend failed to produce a signature.",
+                original_error=e,
+            ) from e
+
+        return base64_encode(sig)
+
+    async def sign(self, value: str | bytes) -> bytes:
+        """Signs the given string."""
+        value = want_bytes(value)
+        return value + self.sep + await self.get_signature(value)
+
+    async def verify_signature(self, value: str | bytes, sig: str | bytes) -> bool:
+        """Verifies the signature for the given value."""
+        try:
+            sig = base64_decode(sig)
+        except Exception:
+            return False
+
+        value = want_bytes(value)
+
+        try:
+            return await self.backend.verify(value, sig, purpose=self.salt)
+        except SignerUnavailable:
+            raise
+        except Exception as e:
+            raise SignerUnavailable(
+                "The signing backend failed to verify a signature.",
+                original_error=e,
+            ) from e
+
+    async def unsign(self, signed_value: str | bytes) -> bytes:
+        """Unsigns the given string."""
+        signed_value = want_bytes(signed_value)
+
+        if self.sep not in signed_value:
+            raise BadSignature(f"No {self.sep!r} found in value")
+
+        value, sig = signed_value.rsplit(self.sep, 1)
+
+        if await self.verify_signature(value, sig):
+            return value
+
+        raise BadSignature(f"Signature {sig!r} does not match", payload=value)
+
+    async def validate(self, signed_value: str | bytes) -> bool:
+        """Only validates the given signed value. Returns ``True`` if
+        the signature exists and is valid.
+        """
+        try:
+            await self.unsign(signed_value)
             return True
         except BadSignature:
             return False

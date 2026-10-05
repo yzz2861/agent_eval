@@ -5,6 +5,15 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add asynchronous signing support for when the secret key is held by
+    a remote signing service. ``AsyncSignerBackend`` is a protocol that
+    receives the bytes to authenticate and a purpose, and returns a
+    signature or verification result. ``AsyncSigner``,
+    ``AsyncSerializer``, ``AsyncTimestampSigner``,
+    ``AsyncTimedSerializer``, ``AsyncURLSafeSerializer``, and
+    ``AsyncURLSafeTimedSerializer`` mirror the sync API with awaitable
+    methods. A failing backend raises ``SignerUnavailable``, which is
+    distinct from ``BadSignature``.
 
 
 Version 2.2.0
