@@ -11,7 +11,8 @@ module Flipper
     # Private: What is being used to instrument all the things.
     attr_reader :instrumenter
 
-    def_delegators :@adapter, :memoize=, :memoizing?, :import, :export, :adapter_stack
+    def_delegators :@adapter, :memoize=, :memoizing?, :import, :export, :adapter_stack,
+                   :supports_evaluation_snapshots?, :current_evaluation_snapshot
 
     # Public: Returns a new instance of the DSL.
     #
@@ -38,6 +39,29 @@ module Flipper
     # Returns true if feature is enabled, false if not.
     def enabled?(name, *args)
       feature(name).enabled?(*args)
+    end
+
+    # Public: Evaluate a block against one consistent feature configuration
+    # version. Nested scopes reuse the outer snapshot instead of taking a newer
+    # snapshot. The current DSL is yielded to blocks that accept an argument.
+    # Actor properties and other external actor state are read live; only
+    # feature gate values are frozen.
+    if RUBY_VERSION >= '3.0'
+      def with_evaluation_snapshot(consistency: :strong)
+        raise ArgumentError, "a block is required" unless block_given?
+
+        @adapter.with_evaluation_snapshot(consistency: consistency) do
+          yield(self)
+        end
+      end
+    else
+      def with_evaluation_snapshot(consistency = :strong)
+        raise ArgumentError, "a block is required" unless block_given?
+
+        @adapter.with_evaluation_snapshot(consistency) do
+          yield(self)
+        end
+      end
     end
 
     # Public: Enable a feature.

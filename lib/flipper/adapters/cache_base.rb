@@ -54,7 +54,7 @@ module Flipper
 
       # Public
       def features
-        read_feature_keys
+        current_evaluation_snapshot ? current_evaluation_snapshot.features : read_feature_keys
       end
 
       # Public
@@ -81,16 +81,22 @@ module Flipper
 
       # Public
       def get(feature)
-        read_feature(feature)
+        current_evaluation_snapshot ? current_evaluation_snapshot.get(feature) : read_feature(feature)
       end
 
       # Public
       def get_multi(features)
-        read_many_features(features)
+        if current_evaluation_snapshot
+          current_evaluation_snapshot.get_multi(features)
+        else
+          read_many_features(features)
+        end
       end
 
       # Public
       def get_all(**kwargs)
+        return current_evaluation_snapshot.get_all(**kwargs) if current_evaluation_snapshot
+
         cache_fetch(@get_all_cache_key) {
           result = read_all_features(**kwargs)
           cache_write @features_cache_key, result.keys.to_set
@@ -123,6 +129,34 @@ module Flipper
         result = @adapter.disable(feature, gate, thing)
         expire_feature_cache(feature.key)
         result
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def evaluation_snapshot(consistency: :strong)
+          @adapter.evaluation_snapshot(consistency: consistency)
+        end
+      else
+        def evaluation_snapshot(consistency = :strong)
+          @adapter.evaluation_snapshot(consistency)
+        end
+      end
+
+      def supports_evaluation_snapshots?
+        @adapter.supports_evaluation_snapshots?
+      end
+
+      def current_evaluation_snapshot
+        @adapter.current_evaluation_snapshot
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def with_evaluation_snapshot(consistency: :strong, &block)
+          @adapter.with_evaluation_snapshot(consistency: consistency, &block)
+        end
+      else
+        def with_evaluation_snapshot(consistency = :strong, &block)
+          @adapter.with_evaluation_snapshot(consistency, &block)
+        end
       end
 
       # Public: Generate the cache key for a given feature.

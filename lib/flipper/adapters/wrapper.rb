@@ -19,6 +19,12 @@ module Flipper
         :enable,
         :disable,
       ].freeze
+      EVALUATION_SNAPSHOT_METHODS = [
+        :supports_evaluation_snapshots?,
+        :current_evaluation_snapshot,
+        :evaluation_snapshot,
+        :with_evaluation_snapshot,
+      ].freeze
 
       attr_reader :adapter
 
@@ -34,6 +40,18 @@ module Flipper
         else
           define_method(method) do |*args|
             wrap(method, *args) { @adapter.public_send(method, *args) }
+          end
+        end
+      end
+
+      EVALUATION_SNAPSHOT_METHODS.each do |method|
+        if RUBY_VERSION >= '3.0'
+          define_method(method) do |*args, **kwargs, &block|
+            @adapter.public_send(method, *args, **kwargs, &block)
+          end
+        else
+          define_method(method) do |*args, &block|
+            @adapter.public_send(method, *args, &block)
           end
         end
       end

@@ -25,7 +25,9 @@ module Flipper
 
       # Public
       def features
-        if memoizing?
+        if current_evaluation_snapshot
+          current_evaluation_snapshot.features
+        elsif memoizing?
           cache.fetch(@features_key) { cache[@features_key] = @adapter.features }
         else
           @adapter.features
@@ -52,7 +54,9 @@ module Flipper
 
       # Public
       def get(feature)
-        if memoizing?
+        if current_evaluation_snapshot
+          current_evaluation_snapshot.get(feature)
+        elsif memoizing?
           cache.fetch(key_for(feature.key)) { cache[key_for(feature.key)] = @adapter.get(feature) }
         else
           @adapter.get(feature)
@@ -61,7 +65,9 @@ module Flipper
 
       # Public
       def get_multi(features)
-        if memoizing?
+        if current_evaluation_snapshot
+          current_evaluation_snapshot.get_multi(features)
+        elsif memoizing?
           uncached_features = features.reject { |feature| cache[key_for(feature.key)] }
 
           if uncached_features.any?
@@ -82,7 +88,9 @@ module Flipper
       end
 
       def get_all(**kwargs)
-        if memoizing?
+        if current_evaluation_snapshot
+          current_evaluation_snapshot.get_all(**kwargs)
+        elsif memoizing?
           response = nil
           if cache[@get_all_key]
             response = {}
@@ -144,6 +152,34 @@ module Flipper
       end
 
       if RUBY_VERSION >= '3.0'
+        def evaluation_snapshot(consistency: :strong)
+          @adapter.evaluation_snapshot(consistency: consistency)
+        end
+      else
+        def evaluation_snapshot(consistency = :strong)
+          @adapter.evaluation_snapshot(consistency)
+        end
+      end
+
+      def supports_evaluation_snapshots?
+        @adapter.supports_evaluation_snapshots?
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def with_evaluation_snapshot(consistency: :strong, &block)
+          raise ArgumentError, "a block is required" unless block
+
+          @adapter.with_evaluation_snapshot(consistency: consistency, &block)
+        end
+      else
+        def with_evaluation_snapshot(consistency = :strong, &block)
+          raise ArgumentError, "a block is required" unless block
+
+          @adapter.with_evaluation_snapshot(consistency, &block)
+        end
+      end
+
+      if RUBY_VERSION >= '3.0'
         def method_missing(name, *args, **kwargs, &block)
           @adapter.send name, *args, **kwargs, &block
         end
@@ -154,6 +190,10 @@ module Flipper
       end
 
       private
+
+      def current_evaluation_snapshot
+        @adapter.current_evaluation_snapshot
+      end
 
       def key_for(key)
         "feature/#{key}"

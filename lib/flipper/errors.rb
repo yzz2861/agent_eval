@@ -19,4 +19,18 @@ module Flipper
       super(message || default)
     end
   end
+
+  module Adapters
+    class EvaluationSnapshotNotSupported < Error
+      def initialize(adapter, consistency)
+        super("#{adapter.class} does not support #{consistency.inspect} evaluation snapshots")
+      end
+    end
+
+    class EvaluationSnapshotReadOnly < Error
+      def initialize
+        super("evaluation snapshots are read-only")
+      end
+    end
+  end
 end

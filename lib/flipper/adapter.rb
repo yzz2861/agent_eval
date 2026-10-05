@@ -1,6 +1,50 @@
 module Flipper
   # Adding a module include so we have some hooks for stuff down the road
   module Adapter
+    # Public: Returns whether this adapter can provide a consistent snapshot
+    # for feature evaluation. Wrappers that transparently use a capable
+    # underlying adapter may override this as well.
+    def supports_evaluation_snapshots?
+      false
+    end
+
+    # Internal: Returns the snapshot currently scoped to this thread, if any.
+    def current_evaluation_snapshot
+      nil
+    end
+
+    # Public: Returns a consistent, read-only snapshot of all feature gate
+    # values. Adapters should override this when they can guarantee that all
+    # values in the returned snapshot are from the same configuration version.
+    if RUBY_VERSION >= '3.0'
+      def evaluation_snapshot(consistency: :strong)
+        raise Flipper::Adapters::EvaluationSnapshotNotSupported.new(self, consistency)
+      end
+    else
+      def evaluation_snapshot(consistency = :strong)
+        raise Flipper::Adapters::EvaluationSnapshotNotSupported.new(self, consistency)
+      end
+    end
+
+    # Public: Runs a block with a consistent evaluation snapshot.
+    if RUBY_VERSION >= '3.0'
+      def with_evaluation_snapshot(consistency: :strong)
+        raise ArgumentError, "a block is required" unless block_given?
+        raise Flipper::Adapters::EvaluationSnapshotNotSupported.new(self, consistency) unless supports_evaluation_snapshots?
+
+        snapshot = evaluation_snapshot(consistency: consistency)
+        yield snapshot
+      end
+    else
+      def with_evaluation_snapshot(consistency = :strong)
+        raise ArgumentError, "a block is required" unless block_given?
+        raise Flipper::Adapters::EvaluationSnapshotNotSupported.new(self, consistency) unless supports_evaluation_snapshots?
+
+        snapshot = evaluation_snapshot(consistency)
+        yield snapshot
+      end
+    end
+
     def self.included(base)
       base.extend(ClassMethods)
     end

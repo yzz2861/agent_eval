@@ -37,6 +37,74 @@ RSpec.describe Flipper::Adapters::Memory do
     })
   end
 
+  describe '#supports_evaluation_snapshots?' do
+    it 'supports strong evaluation snapshots' do
+      expect(subject).to be_supports_evaluation_snapshots
+    end
+  end
+
+  describe '#evaluation_snapshot' do
+    it 'returns a deeply frozen copy of the current configuration' do
+      flipper = Flipper.new(subject)
+      flipper.enable_expression(:search, Flipper.property(:plan).eq('basic'))
+      flipper.enable_actor(:search, Flipper::Actor.new('1'))
+
+      snapshot = subject.evaluation_snapshot
+      values = snapshot.get_all['search']
+
+      expect(snapshot.read_only?).to be(true)
+      expect(values).to be_frozen
+      expect(values[:actors]).to be_frozen
+      expect(values[:expression]).to be_frozen
+      expect(values).not_to equal(subject.get(flipper[:search]))
+    end
+
+    it 'rejects unsupported consistency levels' do
+      expect {
+        subject.evaluation_snapshot(consistency: :eventual)
+      }.to raise_error(ArgumentError, 'unsupported consistency: :eventual')
+    end
+
+    it 'is read-only' do
+      flipper = Flipper.new(subject)
+      snapshot = subject.evaluation_snapshot
+
+      expect {
+        snapshot.add(flipper[:search])
+      }.to raise_error(Flipper::Adapters::EvaluationSnapshotReadOnly, 'evaluation snapshots are read-only')
+    end
+  end
+
+  describe '#with_evaluation_snapshot' do
+    it 'restores live reads after an exception' do
+      subject.add(Flipper::Feature.new(:search, subject))
+
+      expect {
+        subject.with_evaluation_snapshot { raise 'boom' }
+      }.to raise_error('boom')
+
+      expect(subject.current_evaluation_snapshot).to be_nil
+    end
+
+    it 'scopes snapshots per thread' do
+      subject.add(Flipper::Feature.new(:search, subject))
+      snapshot = subject.evaluation_snapshot
+      queue = Queue.new
+
+      thread = Thread.new do
+        subject.with_evaluation_snapshot do
+          queue << subject.current_evaluation_snapshot.object_id
+          sleep 0.05
+        end
+      end
+
+      nested_id = queue.pop
+      expect(subject.current_evaluation_snapshot).to be_nil
+      expect(nested_id).not_to eq(snapshot.object_id)
+      thread.join
+    end
+  end
+
   it "uses its inherited Mutex safely after a fork" do
     skip "Process.fork is not supported" unless Process.respond_to?(:fork)
 

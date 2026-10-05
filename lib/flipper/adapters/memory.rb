@@ -16,10 +16,13 @@ module Flipper
       def initialize(source = nil, threadsafe: true)
         @source = Typecast.features_hash(source)
         @lock = Mutex.new if threadsafe
+        @evaluation_snapshot_key = "flipper_evaluation_snapshot_#{object_id}".freeze
       end
 
       # Public: The set of known features.
       def features
+        return current_evaluation_snapshot.features if current_evaluation_snapshot
+
         synchronize { @source.keys }.to_set
       end
 
@@ -44,10 +47,14 @@ module Flipper
 
       # Public
       def get(feature)
+        return current_evaluation_snapshot.get(feature) if current_evaluation_snapshot
+
         synchronize { @source[feature.key] } || DEFAULT_CONFIG
       end
 
       def get_multi(features)
+        return current_evaluation_snapshot.get_multi(features) if current_evaluation_snapshot
+
         synchronize do
           result = {}
           features.each do |feature|
@@ -58,7 +65,57 @@ module Flipper
       end
 
       def get_all(**kwargs)
+        return current_evaluation_snapshot.get_all(**kwargs) if current_evaluation_snapshot
+
         synchronize { Typecast.features_hash(@source) }
+      end
+
+      def supports_evaluation_snapshots?
+        true
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def evaluation_snapshot(consistency: :strong)
+          raise ArgumentError, "unsupported consistency: #{consistency.inspect}" unless consistency == :strong
+
+          EvaluationSnapshot.new(synchronize { Typecast.features_hash(@source) })
+        end
+      else
+        def evaluation_snapshot(consistency = :strong)
+          raise ArgumentError, "unsupported consistency: #{consistency.inspect}" unless consistency == :strong
+
+          EvaluationSnapshot.new(synchronize { Typecast.features_hash(@source) })
+        end
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def with_evaluation_snapshot(consistency: :strong)
+          raise ArgumentError, "a block is required" unless block_given?
+          return yield(current_evaluation_snapshot) if current_evaluation_snapshot
+
+          snapshot = evaluation_snapshot(consistency: consistency)
+          previous_snapshot = Thread.current[@evaluation_snapshot_key]
+          Thread.current[@evaluation_snapshot_key] = snapshot
+          yield snapshot
+        ensure
+          Thread.current[@evaluation_snapshot_key] = previous_snapshot
+        end
+      else
+        def with_evaluation_snapshot(consistency = :strong)
+          raise ArgumentError, "a block is required" unless block_given?
+          return yield(current_evaluation_snapshot) if current_evaluation_snapshot
+
+          snapshot = evaluation_snapshot(consistency)
+          previous_snapshot = Thread.current[@evaluation_snapshot_key]
+          Thread.current[@evaluation_snapshot_key] = snapshot
+          yield snapshot
+        ensure
+          Thread.current[@evaluation_snapshot_key] = previous_snapshot
+        end
+      end
+
+      def current_evaluation_snapshot
+        Thread.current[@evaluation_snapshot_key]
       end
 
       # Public

@@ -58,6 +58,34 @@ module Flipper
           @local.disable(feature, gate, thing)
         end
       end
+
+      if RUBY_VERSION >= '3.0'
+        def evaluation_snapshot(consistency: :strong)
+          @local.evaluation_snapshot(consistency: consistency)
+        end
+      else
+        def evaluation_snapshot(consistency = :strong)
+          @local.evaluation_snapshot(consistency)
+        end
+      end
+
+      def supports_evaluation_snapshots?
+        @local.supports_evaluation_snapshots?
+      end
+
+      def current_evaluation_snapshot
+        @local.current_evaluation_snapshot
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def with_evaluation_snapshot(consistency: :strong, &block)
+          @local.with_evaluation_snapshot(consistency: consistency, &block)
+        end
+      else
+        def with_evaluation_snapshot(consistency = :strong, &block)
+          @local.with_evaluation_snapshot(consistency, &block)
+        end
+      end
     end
   end
 end

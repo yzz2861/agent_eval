@@ -165,6 +165,34 @@ module Flipper
           payload[:result] = @adapter.export(format: format, version: version)
         end
       end
+
+      if RUBY_VERSION >= '3.0'
+        def evaluation_snapshot(consistency: :strong)
+          @adapter.evaluation_snapshot(consistency: consistency)
+        end
+      else
+        def evaluation_snapshot(consistency = :strong)
+          @adapter.evaluation_snapshot(consistency)
+        end
+      end
+
+      def supports_evaluation_snapshots?
+        @adapter.supports_evaluation_snapshots?
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def with_evaluation_snapshot(consistency: :strong, &block)
+          @adapter.with_evaluation_snapshot(consistency: consistency, &block)
+        end
+      else
+        def with_evaluation_snapshot(consistency = :strong, &block)
+          @adapter.with_evaluation_snapshot(consistency, &block)
+        end
+      end
+
+      def current_evaluation_snapshot
+        @adapter.current_evaluation_snapshot
+      end
     end
   end
 end

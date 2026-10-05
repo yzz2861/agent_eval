@@ -65,6 +65,110 @@ RSpec.describe Flipper::DSL do
     end
   end
 
+  describe '#with_evaluation_snapshot' do
+    it 'uses one frozen feature configuration version for the block' do
+      subject.disable(:old)
+      subject.disable(:new)
+
+      result = subject.with_evaluation_snapshot do |flipper|
+        old_before = flipper.enabled?(:old)
+        subject.enable(:new)
+        [old_before, flipper.enabled?(:new), flipper.adapter.get(flipper[:old]).frozen?]
+      end
+
+      expect(result).to eq([false, false, true])
+      expect(subject.enabled?(:new)).to be(true)
+    end
+
+    it 'reuses the outer snapshot for nested scopes' do
+      subject.disable(:search)
+      snapshots = []
+
+      subject.with_evaluation_snapshot do
+        snapshots << adapter.current_evaluation_snapshot
+        subject.enable(:search)
+
+        subject.with_evaluation_snapshot do |nested|
+          snapshots << adapter.current_evaluation_snapshot
+          expect(nested.enabled?(:search)).to be(false)
+        end
+      end
+
+      expect(snapshots.size).to eq(2)
+      expect(snapshots.first).to equal(snapshots.last)
+      expect(snapshots.uniq).to contain_exactly(snapshots.first)
+    end
+
+    it 'freezes gate values but reads actor properties live' do
+      actor_class = Class.new do
+        attr_accessor :plan
+
+        def flipper_id
+          'actor-1'
+        end
+
+        def flipper_properties
+          { 'plan' => plan }
+        end
+      end
+      actor = actor_class.new
+      actor.plan = 'basic'
+      subject.enable_expression(:search, Flipper.property(:plan).eq('pro'))
+
+      results = subject.with_evaluation_snapshot do
+        before = subject.enabled?(:search, actor)
+        actor.plan = 'pro'
+        [before, subject.enabled?(:search, actor)]
+      end
+
+      expect(results).to eq([false, true])
+    end
+
+    it 'uses the snapshot for nested feature expression checks' do
+      original_instance = Flipper.instance
+      Flipper.instance = subject
+      subject.disable(:dependency)
+      subject.enable_expression(:search, Flipper.feature_enabled(:dependency))
+
+      result = subject.with_evaluation_snapshot do
+        before = subject.enabled?(:search)
+        subject.enable(:dependency)
+        [before, subject.enabled?(:search)]
+      end
+
+      expect(result).to eq([false, false])
+      expect(subject.enabled?(:search)).to be(true)
+    ensure
+      Flipper.instance = original_instance
+    end
+
+    it 'rejects strong consistency when the adapter cannot snapshot' do
+      unsupported = Object.new.extend(Flipper::Adapter)
+      dsl = described_class.new(unsupported, memoize: false)
+
+      expect {
+        dsl.with_evaluation_snapshot {}
+      }.to raise_error(
+        Flipper::Adapters::EvaluationSnapshotNotSupported,
+        /does not support :strong evaluation snapshots/
+      )
+    end
+
+    it 'requires a block' do
+      expect { subject.with_evaluation_snapshot }.to raise_error(ArgumentError, 'a block is required')
+    end
+
+    it 'supports a zero-arity block' do
+      subject.disable(:search)
+
+      result = subject.with_evaluation_snapshot do
+        subject.enabled?(:search)
+      end
+
+      expect(result).to be(false)
+    end
+  end
+
   describe '#preload' do
     let(:instrumenter) { double('Instrumentor', instrument: nil) }
     let(:dsl) { described_class.new(adapter, instrumenter: instrumenter) }

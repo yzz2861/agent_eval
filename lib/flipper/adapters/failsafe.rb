@@ -3,6 +3,8 @@ module Flipper
     class Failsafe
       include ::Flipper::Adapter
 
+      attr_reader :adapter
+
       # Public: Build a new Failsafe instance.
       #
       # adapter   - Flipper adapter to guard.
@@ -66,6 +68,36 @@ module Flipper
         @adapter.disable(feature, gate, thing)
       rescue *@errors
         false
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def evaluation_snapshot(consistency: :strong)
+          @adapter.evaluation_snapshot(consistency: consistency)
+        end
+      else
+        def evaluation_snapshot(consistency = :strong)
+          @adapter.evaluation_snapshot(consistency)
+        end
+      end
+
+      def supports_evaluation_snapshots?
+        @adapter.supports_evaluation_snapshots?
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def with_evaluation_snapshot(consistency: :strong, &block)
+          @adapter.with_evaluation_snapshot(consistency: consistency, &block)
+        end
+      else
+        def with_evaluation_snapshot(consistency = :strong, &block)
+          @adapter.with_evaluation_snapshot(consistency, &block)
+        end
+      end
+
+      def current_evaluation_snapshot
+        @adapter.current_evaluation_snapshot
+      rescue StandardError
+        nil
       end
     end
   end

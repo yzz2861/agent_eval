@@ -80,6 +80,34 @@ module Flipper
           @secondary.disable(feature, gate, thing) if @dual_write
         end
       end
+
+      if RUBY_VERSION >= '3.0'
+        def evaluation_snapshot(consistency: :strong)
+          @primary.evaluation_snapshot(consistency: consistency)
+        end
+      else
+        def evaluation_snapshot(consistency = :strong)
+          @primary.evaluation_snapshot(consistency)
+        end
+      end
+
+      def supports_evaluation_snapshots?
+        @primary.supports_evaluation_snapshots?
+      end
+
+      def current_evaluation_snapshot
+        @primary.current_evaluation_snapshot
+      end
+
+      if RUBY_VERSION >= '3.0'
+        def with_evaluation_snapshot(consistency: :strong, &block)
+          @primary.with_evaluation_snapshot(consistency: consistency, &block)
+        end
+      else
+        def with_evaluation_snapshot(consistency = :strong, &block)
+          @primary.with_evaluation_snapshot(consistency, &block)
+        end
+      end
     end
   end
 end
