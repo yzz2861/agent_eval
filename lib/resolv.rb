@@ -5,6 +5,7 @@ require 'timeout'
 require 'io/wait' if RUBY_VERSION < '3.2'
 require 'securerandom'
 require 'rbconfig'
+require 'openssl'
 
 # Resolv is a thread-aware DNS resolver library written in Ruby.  Resolv can
 # handle multiple DNS requests concurrently without blocking the entire Ruby
@@ -333,7 +334,12 @@ class Resolv
     #
     #   Resolv::DNS.new(:nameserver => ['210.251.121.21'],
     #                   :search => ['ruby-lang.org'],
-    #                   :ndots => 1)
+    #                   :ndots => 1,
+    #                   :tsig => Resolv::DNS::TSIG.new("key.", "secret"))
+
+    # :tsig signs requests and verifies responses with TSIG [RFC8945].
+    # It may be a Resolv::DNS::TSIG, or a Hash of its constructor options
+    # (:key_name, :key, and optionally :fudge, :algorithm and :clock).
 
     def initialize(config_info=nil)
       @mutex = Thread::Mutex.new
@@ -600,14 +606,14 @@ class Resolv
     def make_udp_requester # :nodoc:
       nameserver_port = @config.nameserver_port
       if nameserver_port.length == 1
-        Requester::ConnectedUDP.new(*nameserver_port[0])
+        Requester::ConnectedUDP.new(*nameserver_port[0], **@config.requester_options)
       else
-        Requester::UnconnectedUDP.new(*nameserver_port)
+        Requester::UnconnectedUDP.new(*nameserver_port, **@config.requester_options)
       end
     end
 
     def make_tcp_requester(host, port) # :nodoc:
-      return Requester::TCP.new(host, port)
+      return Requester::TCP.new(host, port, **@config.requester_options)
     rescue Errno::ECONNREFUSED
       # Treat a refused TCP connection attempt to a nameserver like a timeout,
       # as Resolv::DNS::Config#resolv considers ResolvTimeout exceptions as a
@@ -705,7 +711,8 @@ class Resolv
     end
 
     class Requester # :nodoc:
-      def initialize
+      def initialize(tsig: nil)
+        @tsig = tsig
         @senders = {}
         @socks = nil
       end
@@ -764,6 +771,12 @@ class Resolv
             next # broken DNS message ignored
           end
           if sender == sender_for(from, msg)
+            if @tsig
+              # Verify against the raw bytes that arrived, never a message
+              # re-encoded from the parsed object.  A failure raises and
+              # keeps the response from being treated as query results.
+              @tsig.verify_response(reply, sender.mac)
+            end
             break
           else
             # unexpected DNS message ignored
@@ -776,6 +789,19 @@ class Resolv
         @senders[[addr,msg.id]]
       end
 
+      # Assigns the allocated +id+ to an encoded request, then appends and
+      # computes the TSIG record when one is configured.  Returns the wire
+      # bytes to send and the request MAC (nil without TSIG).
+      def finalize_request(msg, id)
+        request = msg.encode
+        request[0,2] = [id].pack('n')
+        mac = nil
+        if @tsig
+          request, mac = @tsig.sign_request(request)
+        end
+        return request, mac
+      end
+
       def close
         socks = @socks
         @socks = nil
@@ -783,16 +809,18 @@ class Resolv
       end
 
       class Sender # :nodoc:
-        def initialize(msg, data, sock)
+        def initialize(msg, data, sock, mac = nil)
           @msg = msg
           @data = data
           @sock = sock
+          @mac = mac
         end
+        attr_reader :data, :mac
       end
 
       class UnconnectedUDP < Requester # :nodoc:
-        def initialize(*nameserver_port)
-          super()
+        def initialize(*nameserver_port, **options)
+          super(**options)
           @nameserver_port = nameserver_port
           @initialized = false
           @mutex = Thread::Mutex.new
@@ -840,10 +868,9 @@ class Resolv
           return nil if !sock
           service = [host, port]
           id = DNS.allocate_request_id(host, port)
-          request = msg.encode
-          request[0,2] = [id].pack('n')
+          request, mac = finalize_request(msg, id)
           return @senders[[service, id]] =
-            Sender.new(request, data, sock, host, port)
+            Sender.new(request, data, sock, host, port, mac)
         end
 
         def close
@@ -859,8 +886,8 @@ class Resolv
         end
 
         class Sender < Requester::Sender # :nodoc:
-          def initialize(msg, data, sock, host, port)
-            super(msg, data, sock)
+          def initialize(msg, data, sock, host, port, mac = nil)
+            super(msg, data, sock, mac)
             @host = host
             @port = port
           end
@@ -874,8 +901,8 @@ class Resolv
       end
 
       class ConnectedUDP < Requester # :nodoc:
-        def initialize(host, port=Port)
-          super()
+        def initialize(host, port=Port, **options)
+          super(**options)
           @host = host
           @port = port
           @mutex = Thread::Mutex.new
@@ -925,9 +952,8 @@ class Resolv
             raise RequestError.new("host/port don't match: #{host}:#{port}")
           end
           id = DNS.allocate_request_id(@host, @port)
-          request = msg.encode
-          request[0,2] = [id].pack('n')
-          return @senders[[nil,id]] = Sender.new(request, data, self)
+          request, mac = finalize_request(msg, id)
+          return @senders[[nil,id]] = Sender.new(request, data, self, mac)
         end
 
         def close
@@ -952,8 +978,8 @@ class Resolv
         end
 
         class Sender < Requester::Sender # :nodoc:
-          def initialize(msg, data, requester)
-            super(msg, data, nil)
+          def initialize(msg, data, requester, mac = nil)
+            super(msg, data, nil, mac)
             @requester = requester
           end
 
@@ -968,11 +994,10 @@ class Resolv
         def sender(msg, data, host, port=Port)
           lazy_initialize
           id = DNS.allocate_request_id(host, port)
-          request = msg.encode
-          request[0,2] = [id].pack('n')
+          request, mac = finalize_request(msg, id)
           sock = @socks_hash[host.index(':') ? "::" : "0.0.0.0"]
           return @senders[id] =
-            UnconnectedUDP::Sender.new(request, data, sock, host, port)
+            UnconnectedUDP::Sender.new(request, data, sock, host, port, mac)
         end
 
         def sender_for(addr, msg)
@@ -982,8 +1007,8 @@ class Resolv
       end
 
       class TCP < Requester # :nodoc:
-        def initialize(host, port=Port)
-          super()
+        def initialize(host, port=Port, **options)
+          super(**options)
           @host = host
           @port = port
           sock = TCPSocket.new(@host, @port)
@@ -1022,15 +1047,18 @@ class Resolv
             raise RequestError.new("host/port don't match: #{host}:#{port}")
           end
           id = DNS.allocate_request_id(@host, @port)
-          request = msg.encode
-          request[0,2] = [request.length, id].pack('nn')
-          return @senders[[nil,id]] = Sender.new(request, data, @socks[0])
+          request, mac = finalize_request(msg, id)
+          request = [request.bytesize].pack('n') + request
+          return @senders[[nil,id]] = Sender.new(request, data, @socks[0], mac)
         end
 
         class Sender < Requester::Sender # :nodoc:
+          def initialize(msg, data, sock, mac = nil)
+            super
+          end
+
           def send
-            @sock.print(@msg)
-            @sock.flush
+            @sock.write(@msg)
           end
           attr_reader :data
         end
@@ -1076,6 +1104,269 @@ class Resolv
       # Indicates a problem with the DNS request.
 
       class RequestError < StandardError
+      end
+    end
+
+    ##
+    # Signs requests and verifies responses with TSIG [RFC8945].
+    #
+    # A TSIG authenticates a single request/response exchange.  Only the
+    # HMAC-SHA256 algorithm is currently supported.
+    #
+    # Pass a TSIG to Resolv::DNS.new (or Resolv::DNS.open) with the :tsig
+    # key:
+    #
+    #   tsig = Resolv::DNS::TSIG.new("key.example.com.", "shared-secret")
+    #   Resolv::DNS.open(nameserver: "192.0.2.1", tsig: tsig) do |dns|
+    #     dns.getresources("example.com", Resolv::DNS::Resource::IN::A)
+    #   end
+    #
+    # The MAC is computed over the raw bytes that go on the wire, and a
+    # response is verified over the raw bytes that come back before any of
+    # its records are returned as query results.
+    #
+    # Only a single request/response pair is signed.  Multi-message chains
+    # (RFC8945 5.2) are not supported.
+
+    class TSIG
+      ##
+      # Domain name of the HMAC-SHA256 algorithm, in canonical form.
+
+      HMAC_SHA256 = "hmac-sha256."
+
+      ##
+      # Minimum and truncated MAC length accepted for HMAC-SHA256.
+      # [RFC8945 5.3.1]
+
+      MAC_MIN_SIZE = 16
+      MAC_SIZE = 32
+
+      ##
+      # Default permitted clock skew, in seconds.
+
+      DEFAULT_FUDGE = 300
+
+      ##
+      # Creates a TSIG signer/verifier.
+      #
+      # +key_name+ is the shared key's domain name.  +key+ is the shared
+      # secret as a binary String.
+      #
+      # +fudge+ is the maximum permitted difference, in seconds, between the
+      # local clock and a response's time stamp; it defaults to 300.
+      #
+      # +algorithm+ selects the MAC algorithm and must be
+      # <tt>"hmac-sha256."</tt> (the default).
+      #
+      # +clock+ is an object responding to #call that returns the current
+      # time as an Integer of seconds since the epoch.  It defaults to
+      # <tt>Time.now.to_i</tt> and is provided so tests can inject a fixed
+      # clock.
+
+      def initialize(key_name, key, fudge: DEFAULT_FUDGE, algorithm: HMAC_SHA256, clock: nil)
+        @key_name = Name.create(key_name)
+        @key = key.to_str
+        unless @key.encoding == Encoding::BINARY
+          @key = @key.b
+        end
+        raise ArgumentError, "TSIG key must not be empty" if @key.empty?
+        @fudge = fudge
+        unless Integer === @fudge && @fudge >= 0
+          raise ArgumentError, "TSIG fudge must be a non-negative Integer: #{fudge.inspect}"
+        end
+        @algorithm = Name.create(algorithm)
+        unless @algorithm.to_s.downcase == "hmac-sha256"
+          raise ArgumentError, "unsupported TSIG algorithm: #{algorithm.inspect}"
+        end
+        @clock = clock || -> { Time.now.to_i }
+      end
+
+      attr_reader :key_name, :fudge, :algorithm # :nodoc:
+
+      # Appends a TSIG additional record to the encoded DNS request
+      # +wire+ (whose transaction id has already been assigned) and returns
+      # the signed bytes plus the request MAC.  The MAC covers the request's
+      # raw bytes, not a re-encoded message.
+
+      def sign_request(wire) # :nodoc:
+        wire = wire.b
+        now = Integer(@clock.call)
+        mac = mac_for(wire, wire[0,2].unpack1("n"), now, 0, "".b, nil, @fudge)
+        rr = encode_rr(@key_name, now, @fudge, mac, wire[0,2].unpack1("n"), 0, "".b)
+        signed = wire.dup
+        arcount = signed[10,2].unpack1("n")
+        signed[10,2] = [arcount + 1].pack("n")
+        signed << rr
+        return signed, mac
+      end
+
+      # Verifies a raw response +wire+ against the +request_mac+ of the signed
+      # request.  Returns nothing on success; raises TSIGBadKeyError,
+      # TSIGBadSigError or TSIGBadTimeError.  A message that is malformed as a
+      # TSIG exchange raises DecodeError.  The message's records are never
+      # returned as query results unless verification succeeds.
+
+      def verify_response(wire, request_mac) # :nodoc:
+        wire = wire.b
+        request_mac = request_mac.b
+        now = Integer(@clock.call)
+
+        raise DecodeError, "TSIG response has no additional records" if wire.bytesize < 12
+        arcount = wire[10,2].unpack1("n")
+        raise DecodeError, "TSIG response has no TSIG record" if arcount == 0
+
+        record, tsig_start, tsig_rr_end = last_rr(wire)
+        owner, type, klass, ttl, rdata, = record
+        unless type == Resource::TSIG::TypeValue
+          raise DecodeError, "last additional record is not TSIG (type=#{type})"
+        end
+        unless klass == Resource::TSIG::ClassValue
+          raise DecodeError, "TSIG record has wrong class (#{klass})"
+        end
+        unless ttl == 0
+          raise DecodeError, "TSIG record TTL must be zero (#{ttl})"
+        end
+        unless tsig_rr_end == wire.bytesize
+          raise DecodeError, "TSIG record is not the last record"
+        end
+
+        tsig = decode_tsig_rdata(rdata)
+
+        if tsig.error == RCode::BADTIME && tsig.other_data.bytesize != 6
+          raise DecodeError, "BADTIME other data must be 6 bytes " \
+                            "(#{tsig.other_data.bytesize})"
+        end
+
+        # A server that rejects the key, signature or time reports it in the
+        # TSIG error field.
+        case tsig.error
+        when 0
+        when RCode::BADSIG
+          raise TSIGBadSigError, "server reported BADSIG"
+        when RCode::BADKEY
+          raise TSIGBadKeyError, "server reported BADKEY"
+        when RCode::BADTIME
+          raise TSIGBadTimeError, "server reported BADTIME"
+        else
+          raise TSIGError, "server reported TSIG error #{tsig.error}"
+        end
+
+        unless owner == @key_name
+          raise TSIGBadKeyError, "TSIG key name mismatch: #{owner}"
+        end
+        unless tsig.algorithm_name == @algorithm
+          raise TSIGBadKeyError, "TSIG algorithm mismatch: #{tsig.algorithm_name}"
+        end
+        unless (MAC_MIN_SIZE..MAC_SIZE) === tsig.mac.bytesize
+          raise TSIGBadSigError, "TSIG MAC length #{tsig.mac.bytesize} invalid for hmac-sha256"
+        end
+        unless (tsig.time_signed - now).abs <= tsig.fudge
+          raise TSIGBadTimeError, "TSIG time #{tsig.time_signed} outside fudge of #{now}"
+        end
+
+        # The MAC covers the response exactly as received, with the ARCOUNT
+        # treated as not counting the TSIG record.  It must not be computed
+        # over a re-encoded message.
+        unsigned = wire.dup
+        unsigned[10,2] = [arcount - 1].pack("n")
+        unsigned = unsigned[0, tsig_start]
+        expected = mac_for(unsigned, tsig.original_id, tsig.time_signed,
+                           tsig.error, tsig.other_data, request_mac, tsig.fudge)
+        unless secure_compare(tsig.mac, expected)
+          raise TSIGBadSigError, "TSIG MAC mismatch"
+        end
+        nil
+      end
+
+      private
+
+      # Builds the MAC over a message for the first (and only supported)
+      # message of a transaction.  +wire+ must already exclude the TSIG
+      # record and carry the decremented ARCOUNT.  [RFC8945 5.2.2]
+      def mac_for(wire, original_id, time_signed, error, other_data, request_mac, fudge)
+        hmac = OpenSSL::HMAC.new(@key, OpenSSL::Digest.new("SHA256"))
+        if request_mac
+          hmac.update([request_mac.bytesize].pack("n"))
+          hmac.update(request_mac)
+        end
+        hmac.update([original_id].pack("n"))
+        hmac.update(wire.byteslice(2, wire.bytesize - 2))
+        hmac.update(canonical_name(@key_name))
+        hmac.update([Resource::TSIG::ClassValue, 0].pack("nN"))
+        hmac.update(canonical_name(@algorithm))
+        hmac.update([(time_signed >> 32) & 0xffff,
+                     time_signed & 0xffffffff, fudge].pack("nNn"))
+        hmac.update([error, other_data.bytesize].pack("nn"))
+        hmac.update(other_data)
+        hmac.digest.freeze
+      end
+
+      # A domain name in canonical (uncompressed, original-case) wire form.
+      def canonical_name(name)
+        Message::MessageEncoder.new {|msg|
+          msg.put_name(name, compress: false)
+        }.to_s
+      end
+
+      # Encodes the owner RR prefix and TSIG RDATA that follow a message.
+      def encode_rr(owner, time_signed, fudge, mac, original_id, error, other_data)
+        enc = Message::MessageEncoder.new {|msg|
+          msg.put_name(@algorithm, compress: false)
+          msg.put_pack("nNn", (time_signed >> 32) & 0xffff,
+                       time_signed & 0xffffffff, fudge)
+          msg.put_pack("n", mac.bytesize)
+          msg.put_bytes(mac)
+          msg.put_pack("nnn", original_id, error, other_data.bytesize)
+          msg.put_bytes(other_data)
+        }
+        rr = Message::MessageEncoder.new {|msg|
+          msg.put_name(owner)
+          msg.put_pack("nnN", Resource::TSIG::TypeValue,
+                       Resource::TSIG::ClassValue, 0)
+          msg.put_length16 { msg.put_bytes(enc.to_s) }
+        }.to_s
+        rr
+      end
+
+      def secure_compare(a, b)
+        return false unless a.bytesize == b.bytesize
+        OpenSSL.fixed_length_secure_compare(a, b) rescue false
+      end
+
+      # Locates the last record of the additional section in raw +wire+ and
+      # returns [[name, type, klass, ttl, rdata], start_offset, end_offset].
+      def last_rr(wire)
+        Message::MessageDecoder.new(wire) {|msg|
+          _, _, qdcount, ancount, nscount, arcount = msg.get_unpack("nnnnnn")
+          qdcount.times { msg.get_question }
+          raise DecodeError, "TSIG response has no TSIG record" if arcount == 0
+          (ancount + nscount + arcount).times {|i|
+            start = msg.index
+            name = msg.get_name
+            type, klass, ttl = msg.get_unpack("nnN")
+            rdata = msg.get_length16 { msg.get_bytes }
+            if i == ancount + nscount + arcount - 1
+              return [[name, type, klass, ttl, rdata], start, msg.index]
+            end
+          }
+          raise DecodeError, "unable to locate TSIG record"
+        }
+      end
+
+      def decode_tsig_rdata(rdata)
+        Message::MessageDecoder.new(rdata) {|msg|
+          algorithm_name = msg.get_name
+          time_high, time_low, fudge = msg.get_unpack("nNn")
+          time_signed = (time_high << 32) | time_low
+          mac_size, = msg.get_unpack("n")
+          mac = msg.get_bytes(mac_size)
+          original_id, error, other_size = msg.get_unpack("nnn")
+          other_data = msg.get_bytes(other_size)
+          return Resource::TSIG.new(
+            algorithm_name, time_signed, fudge, mac,
+            original_id, error, other_data
+          )
+        }
       end
     end
 
@@ -1146,6 +1437,21 @@ class Resolv
         end
       end
 
+      def build_tsig(value) # :nodoc:
+        case value
+        when TSIG
+          value
+        when nil
+          nil
+        when Hash
+          TSIG.new(value.fetch(:key_name) { value.fetch(:name) },
+                   value.fetch(:key) { value.fetch(:secret) },
+                   **value.except(:key_name, :name, :key, :secret))
+        else
+          raise ArgumentError, "invalid TSIG config: #{value.inspect}"
+        end
+      end
+
       def lazy_initialize
         @mutex.synchronize {
           unless @initialized
@@ -1181,6 +1487,7 @@ class Resolv
             @search = config_hash[:search] if config_hash.include? :search
             @ndots = config_hash[:ndots] if config_hash.include? :ndots
             @raise_timeout_errors = config_hash[:raise_timeout_errors]
+            @tsig = build_tsig(config_hash[:tsig]) if config_hash.include? :tsig
 
             if @nameserver_port.empty?
               @nameserver_port << ['0.0.0.0', Port]
@@ -1219,6 +1526,10 @@ class Resolv
           end
         }
         self
+      end
+
+      def requester_options # :nodoc:
+        @tsig ? { tsig: @tsig } : {}
       end
 
       def single?
@@ -1340,6 +1651,31 @@ class Resolv
     # Indicates that the DNS request was unable to be encoded.
 
     class EncodeError < StandardError
+    end
+
+    ##
+    # Indicates that a TSIG [RFC8945] exchange could not be authenticated.
+
+    class TSIGError < StandardError
+    end
+
+    ##
+    # The response's TSIG record named a key, or used an algorithm, that the
+    # resolver does not share with the server.
+
+    class TSIGBadKeyError < TSIGError
+    end
+
+    ##
+    # The response's TSIG MAC did not verify against the local key.
+
+    class TSIGBadSigError < TSIGError
+    end
+
+    ##
+    # The response's TSIG time stamp was outside the permitted time skew.
+
+    class TSIGBadTimeError < TSIGError
     end
 
     module Label # :nodoc:
@@ -1765,6 +2101,10 @@ class Resolv
 
         def inspect
           "\#<#{self.class}: #{@data.byteslice(0, @index).inspect} #{@data.byteslice(@index..-1).inspect}>"
+        end
+
+        def index # :nodoc:
+          @index
         end
 
         def get_length16
@@ -2836,6 +3176,60 @@ class Resolv
       ClassInsensitiveTypes = [ # :nodoc:
         NS, CNAME, SOA, PTR, HINFO, MINFO, MX, TXT, LOC, ANY, CAA
       ]
+
+      ##
+      # TSIG resource record [RFC8945]
+      #
+      # TSIG authenticates DNS transactions.  It is only handled directly by
+      # Resolv::DNS::TSIG, never returned as ordinary query data.
+
+      class TSIG < Resource
+        TypeValue = 250
+        ClassValue = 255 # ANY
+        ClassHash[[TypeValue, ClassValue]] = self # :nodoc:
+
+        ##
+        # Creates a TSIG record.  See Resolv::DNS::TSIG for the meaning of
+        # the fields.
+
+        def initialize(algorithm_name, time_signed, fudge, mac, original_id,
+                       error, other_data="".b)
+          @algorithm_name = algorithm_name
+          @time_signed = time_signed
+          @fudge = fudge
+          @mac = mac
+          @original_id = original_id
+          @error = error
+          @other_data = other_data
+        end
+
+        attr_reader :algorithm_name, :time_signed, :fudge, :mac,
+                    :original_id, :error, :other_data
+
+        def encode_rdata(msg) # :nodoc:
+          msg.put_name(@algorithm_name, compress: false)
+          msg.put_pack('nNn', (@time_signed >> 32) & 0xffff,
+                       @time_signed & 0xffffffff, @fudge)
+          msg.put_pack('n', @mac.bytesize)
+          msg.put_bytes(@mac)
+          msg.put_pack('nnn', @original_id, @error, @other_data.bytesize)
+          msg.put_bytes(@other_data)
+        end
+
+        def self.decode_rdata(msg) # :nodoc:
+          algorithm_name = msg.get_name
+          time_high, time_low, fudge = msg.get_unpack('nNn')
+          time_signed = (time_high << 32) | time_low
+          mac_size, = msg.get_unpack('n')
+          mac = msg.get_bytes(mac_size)
+          original_id, error, other_size = msg.get_unpack('nnn')
+          other_data = msg.get_bytes(other_size)
+          return self.new(
+            algorithm_name, time_signed, fudge, mac,
+            original_id, error, other_data
+          )
+        end
+      end
 
       ##
       # module IN contains ARPA Internet specific RRs.
