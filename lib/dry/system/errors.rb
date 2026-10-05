@@ -90,6 +90,70 @@ module Dry
       end
     end
 
+    # Error raised when an invalid component lifecycle is given
+    #
+    # @api public
+    InvalidLifecycleError = Class.new(ArgumentError) do
+      # @api private
+      def initialize(value, key: nil)
+        target = key ? " for #{key.to_s.inspect}" : ""
+
+        super(
+          "Invalid lifecycle #{value.inspect}#{target}. " \
+          "Valid lifecycles are: :singleton, :scoped, :transient"
+        )
+      end
+    end
+
+    # Error raised when a scoped component is resolved without an active scope
+    #
+    # @api public
+    NoActiveScopeError = Class.new(StandardError) do
+      # @api private
+      def initialize(key)
+        super(
+          "Cannot resolve scoped component #{key.to_s.inspect} because no scope " \
+          "is active. Open a scope around the current unit of work, e.g. " \
+          "`MyContainer.scoped { ... }`"
+        )
+      end
+    end
+
+    # Error raised when a scope is used after it has been disposed
+    #
+    # @api public
+    ScopeDisposedError = Class.new(StandardError) do
+      # @api private
+      def initialize
+        super("Scope has already been disposed")
+      end
+    end
+
+    # Error raised when a longer-lived component captures a shorter-lived
+    # dependency
+    #
+    # @api public
+    CaptiveDependencyError = Class.new(StandardError) do
+      # @return [Array<Dry::System::Lifecycle::Frame>] the chain of components
+      #   being built when the error was detected
+      attr_reader :chain
+
+      # @api private
+      def initialize(chain)
+        @chain = chain
+
+        dependent = chain[-2]
+        dependency = chain[-1]
+
+        super(<<~MSG)
+          Cannot resolve #{dependency.key.inspect} (#{dependency.lifecycle} lifecycle) while building #{dependent.key.inspect} (#{dependent.lifecycle} lifecycle): a #{dependent.lifecycle} component cannot capture a shorter-lived #{dependency.lifecycle} dependency.
+
+          Dependency chain:
+            #{chain.map { |frame| "#{frame.key} (#{frame.lifecycle})" }.join(" -> ")}
+        MSG
+      end
+    end
+
     # Exception raised when auto-registerable component is not loadable
     #
     # @api public

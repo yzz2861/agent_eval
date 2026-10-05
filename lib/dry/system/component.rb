@@ -165,6 +165,34 @@ module Dry
         callable_option?(options[:memoize])
       end
 
+      # Returns the lifecycle configured for the component (via a magic comment
+      # or component dir options), if any
+      #
+      # @return [String, Symbol, nil]
+      #
+      # @api private
+      def lifecycle
+        options[:lifecycle]
+      end
+
+      # Returns the options to use when registering the component in the
+      # container
+      #
+      # An explicitly configured lifecycle takes precedence over the `memoize`
+      # option, since the container derives the memoization behavior from the
+      # lifecycle.
+      #
+      # @return [Hash]
+      #
+      # @api private
+      def registration_options
+        if lifecycle
+          {lifecycle: lifecycle}
+        else
+          {memoize: memoize?}
+        end
+      end
+
       private
 
       def path_in_namespace

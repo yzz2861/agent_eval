@@ -6,6 +6,8 @@ require "dry/configurable"
 require "dry/auto_inject"
 require "dry/inflector"
 
+require "dry/system/errors"
+
 module Dry
   module System
     # Abstract container class to inherit from
@@ -69,6 +71,15 @@ module Dry
 
       # Expect "." as key namespace separator. This is not intended to be user-configurable.
       config.namespace_separator = KEY_SEPARATOR
+
+      # Keys for the fiber-local storage of scope stacks and resolution chains.
+      #
+      # `Thread.current[]` is fiber-local, so each thread and each fiber gets
+      # its own isolated storage.
+      #
+      # @api private
+      SCOPE_STACKS_KEY = :"dry_system.scope_stacks"
+      RESOLUTION_CHAINS_KEY = :"dry_system.resolution_chains"
 
       class << self
         # @!method config
@@ -480,20 +491,56 @@ module Dry
           config.root
         end
 
+        # Registers a component with the container
+        #
+        # In addition to the options supported by dry-core (`call:`,
+        # `memoize:`), a `lifecycle:` option may be given to declare how long
+        # the component's instance should live:
+        #
+        # - `lifecycle: :singleton` - one instance for the lifetime of the
+        #   container (equivalent to `memoize: true`).
+        # - `lifecycle: :scoped` - one instance per active scope; see
+        #   {scoped}.
+        # - `lifecycle: :transient` - a new instance on every resolution
+        #   (the default for block registrations).
+        #
+        # @example
+        #   MyApp.register("repositories.users", lifecycle: :singleton) { UsersRepo.new }
+        #   MyApp.register("request_store", lifecycle: :scoped) { RequestStore.new }
+        #
+        # @see Dry::System::Lifecycle
+        #
         # @api public
-        def register(key, *)
-          super
+        def register(key, *args, &block)
+          super(key, *lifecycle_registration_args(key, args, block), &block)
 
           hooks[:after_register].each { |hook| instance_exec(key, &hook) }
 
           self
         end
 
+        # Resolves a component from the container
+        #
+        # Components registered with `lifecycle: :scoped` are resolved from
+        # the currently active scope (see {scoped}) and raise
+        # {NoActiveScopeError} when no scope is active.
+        #
         # @api public
-        def resolve(key)
+        def resolve(key, &block)
           load_component(key) unless finalized?
 
-          super
+          lifecycle = component_lifecycle(key)
+          check_lifecycle_constraint!(key, lifecycle)
+
+          if lifecycle == :scoped
+            scope = current_scope or raise NoActiveScopeError.new(key)
+
+            scope.fetch(key.to_s) {
+              track_resolution(key, lifecycle) { super(key, &block) }
+            }
+          else
+            track_resolution(key, lifecycle) { super(key, &block) }
+          end
         end
 
         alias_method :registered?, :key?
@@ -513,12 +560,63 @@ module Dry
         #
         # @api public
         def key?(key)
-          if finalized?
-            registered?(key)
-          else
-            registered?(key) || resolve(key) { return false }
-            true
+          return registered?(key) if finalized?
+          return true if registered?(key)
+
+          load_component(key)
+          registered?(key)
+        end
+
+        # Opens a new scope for the duration of the given block
+        #
+        # Use this to wrap a single unit of work (such as a web request or a
+        # background job) so that components registered with
+        # `lifecycle: :scoped` can be resolved:
+        #
+        # @example
+        #   MyApp.scoped do
+        #     MyApp["request_store"] # => scoped instance
+        #   end
+        #   # the scope has ended and its scoped instances have been disposed
+        #
+        # A scope opened inside another scope becomes its child: it inherits
+        # the scoped instances already created in its ancestors, while the
+        # instances it creates itself are disposed when it ends. See
+        # {Dry::System::Scope} for the full nesting rules.
+        #
+        # Scopes are isolated between fibers and threads: the scope opened
+        # here is only visible within the current fiber.
+        #
+        # When the block exits - even when it raises - the scope is ended and
+        # every component instance it owns is disposed (instances responding
+        # to `#close` are closed, in reverse order of their creation).
+        #
+        # @yieldparam scope [Dry::System::Scope] the newly opened scope
+        #
+        # @return [Object] the block's return value
+        #
+        # @see Dry::System::Scope
+        #
+        # @api public
+        def scoped
+          scope = Scope.new(parent: current_scope)
+          scope_stack.push(scope)
+
+          begin
+            yield scope
+          ensure
+            scope_stack.pop
+            scope.dispose!
           end
+        end
+
+        # Returns the currently active scope, if any
+        #
+        # @return [Dry::System::Scope, nil]
+        #
+        # @api public
+        def current_scope
+          scope_stack.last
         end
 
         # @api private
@@ -639,8 +737,99 @@ module Dry
 
         def load_local_component(component)
           if component.auto_register?
-            register(component.identifier, memoize: component.memoize?) { component.instance }
+            register(component.identifier, **component.registration_options) { component.instance }
           end
+        end
+
+        # Normalizes the arguments for a registration, validating any
+        # `lifecycle:` option and deriving the corresponding `memoize` behavior
+        #
+        # @api private
+        def lifecycle_registration_args(key, args, block)
+          options_index = block ? 0 : 1
+          options = args[options_index]
+
+          return args unless options.is_a?(Hash) && options.key?(:lifecycle)
+
+          lifecycle = Lifecycle.coerce(options[:lifecycle], key: key)
+
+          if block
+            memoize = lifecycle == :singleton
+
+            if !options[:memoize].nil? && options[:memoize] != memoize
+              raise ArgumentError,
+                    "Conflicting options for #{key.to_s.inspect}: " \
+                    "lifecycle: #{lifecycle.inspect} cannot be combined with " \
+                    "memoize: #{options[:memoize].inspect}"
+            end
+
+            options = options.merge(memoize: memoize)
+          elsif lifecycle != :singleton
+            raise ArgumentError,
+                  "Cannot register #{key.to_s.inspect} with " \
+                  "lifecycle: #{lifecycle.inspect} and a pre-built value: " \
+                  "#{lifecycle} components must be registered with a block"
+          end
+
+          args = args.dup
+          args[options_index] = options.merge(lifecycle: lifecycle)
+          args
+        end
+
+        # Returns the effective lifecycle for the component registered under
+        # the given key, or nil if no component is registered
+        #
+        # @api private
+        def component_lifecycle(key)
+          item = _container[key.to_s]
+          item && Lifecycle.effective(item)
+        end
+
+        # Raises CaptiveDependencyError when the component under the given key
+        # is shorter-lived than the component currently being built
+        #
+        # @api private
+        def check_lifecycle_constraint!(key, lifecycle)
+          return if lifecycle.nil?
+
+          chain = resolution_chain
+          return if chain.empty?
+
+          parent = chain.last
+          return if parent.lifecycle.nil?
+
+          if Lifecycle.rank(lifecycle) < Lifecycle.rank(parent.lifecycle)
+            raise CaptiveDependencyError.new(
+              chain + [Lifecycle::Frame.new(key.to_s, lifecycle)]
+            )
+          end
+        end
+
+        # Pushes a frame onto the resolution chain for the duration of the
+        # block, so that captive dependencies can be detected and reported
+        # with the full chain of components being built
+        #
+        # @api private
+        def track_resolution(key, lifecycle)
+          resolution_chain.push(Lifecycle::Frame.new(key.to_s, lifecycle))
+          yield
+        ensure
+          resolution_chain.pop
+        end
+
+        # Returns the stack of active scopes for the current fiber
+        #
+        # @api private
+        def scope_stack
+          (Thread.current[SCOPE_STACKS_KEY] ||= {})[self] ||= []
+        end
+
+        # Returns the chain of components currently being built in the current
+        # fiber
+        #
+        # @api private
+        def resolution_chain
+          (Thread.current[RESOLUTION_CHAINS_KEY] ||= {})[self] ||= []
         end
 
         def load_imported_component(identifier, namespace:)

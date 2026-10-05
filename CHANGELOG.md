@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Components can be registered with an explicit lifecycle via the `lifecycle:` option (`Container.register`, provider `register`, or a `# lifecycle:` magic comment for auto-registered components): `:singleton` (one instance per container, equivalent to `memoize: true`), `:scoped` (one instance per scope), or `:transient` (a new instance per resolution). Scoped components are resolved within `Container.scoped { ... }` blocks, which wrap a unit of work (such as a request) and dispose the scope's owned instances (via `#close`, in reverse order of creation) when the block exits, even on error. Scopes are isolated between fibers and threads, can be nested (inner scopes inherit instances from ancestors and dispose only their own), and resolving a scoped component without an active scope raises `Dry::System::NoActiveScopeError`. Longer-lived components may not capture shorter-lived dependencies (singletons may depend only on singletons, scoped components on singletons and scoped, transients on anything); violations raise `Dry::System::CaptiveDependencyError` with the full dependency chain.
+
 - The Zeitwerk plugin accepts an `enable_reloading:` option, which enables reloading on the loader ahead of `setup`, so Zeitwerk tracks the constants it defines and they can be unloaded later. Applied from the plugin's `after(:configure)` hook, so it is in time whether the loader is set up by the plugin or by the integrating library. (@afomera in #297)
 
 ### Changed
