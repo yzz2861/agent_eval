@@ -101,6 +101,39 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Let Expressions
+~~~~~~~~~~~~~~~
+
+The optional ``let`` extension is disabled by default.  Enable it with
+``jmespath.Options(enable_let=True)`` when searching or compiling:
+
+.. code:: python
+
+    >>> import jmespath
+    >>> options = jmespath.Options(enable_let=True)
+    >>> jmespath.search(
+    ...     'let $limit = config.limit in items[?score > $limit].score',
+    ...     {'config': {'limit': 2},
+    ...      'items': [{'score': 1}, {'score': 3}]},
+    ...     options)
+    [3]
+
+Multiple comma-separated bindings are evaluated from left to right, so a later
+binding can reference an earlier one.  A nested ``let`` shadows an outer
+binding only inside its own body.  Variables live in a lexical environment and
+are never added to the input data.
+
+Bindings are evaluated in the scope where the ``let`` expression starts.  They
+are not recomputed for each element encountered by a projection.  An expression
+reference (``&...``) captures its lexical environment when it is created, so
+``map``, ``sort_by`` and similar functions use the variables visible at that
+location.  Searching the same compiled expression with different input data
+creates a fresh environment for each search.
+
+Unknown variables are rejected when the expression is compiled.  The reported
+column is the zero-based position of the leading ``$``.
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 

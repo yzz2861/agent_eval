@@ -1,5 +1,6 @@
 import operator
 
+from jmespath import exceptions
 from jmespath import functions
 from jmespath.compat import string_type
 from numbers import Number
@@ -58,7 +59,8 @@ def _is_actual_number(x):
 
 class Options(object):
     """Options to control how a JMESPath function is evaluated."""
-    def __init__(self, dict_cls=None, custom_functions=None):
+    def __init__(self, dict_cls=None, custom_functions=None,
+                 enable_let=False):
         #: The class to use when creating a dict.  The interpreter
         #  may create dictionaries during the evaluation of a JMESPath
         #  expression.  For example, a multi-select hash will
@@ -69,15 +71,18 @@ class Options(object):
         #  have predictable key ordering.
         self.dict_cls = dict_cls
         self.custom_functions = custom_functions
+        self.enable_let = enable_let
 
 
 class _Expression(object):
-    def __init__(self, expression, interpreter):
+    def __init__(self, expression, interpreter, environment=None):
         self.expression = expression
         self.interpreter = interpreter
+        self.environment = environment or ({},)
 
-    def visit(self, node, *args, **kwargs):
-        return self.interpreter.visit(node, *args, **kwargs)
+    def visit(self, node, value):
+        return self.interpreter.visit_with_environment(
+            node, value, self.environment)
 
 
 class Visitor(object):
@@ -121,6 +126,7 @@ class TreeInterpreter(Visitor):
             self._functions = self._options.custom_functions
         else:
             self._functions = functions.Functions()
+        self._environments = [{}]
 
     def default_visit(self, node, *args, **kwargs):
         raise NotImplementedError(node['type'])
@@ -161,7 +167,39 @@ class TreeInterpreter(Visitor):
         return value
 
     def visit_expref(self, node, value):
-        return _Expression(node['children'][0], self)
+        environment = tuple(dict(scope) for scope in self._environments)
+        return _Expression(node['children'][0], self, environment)
+
+    def visit_with_environment(self, node, value, environment):
+        dynamic_environments = self._environments
+        lexical_environments = list(environment)
+        self._environments = lexical_environments
+        try:
+            return self.visit(node, value)
+        finally:
+            self._environments = dynamic_environments
+
+    def visit_let_expression(self, node, value):
+        scope = {}
+        self._environments.append(scope)
+        try:
+            for binding in node['children'][:-1]:
+                scope[binding['value']] = self.visit(
+                    binding['children'][0], value)
+            return self.visit(node['children'][-1], value)
+        finally:
+            self._environments.pop()
+
+    def visit_binding(self, node, value):
+        return self.visit(node['children'][0], value)
+
+    def visit_variable(self, node, value):
+        name = node['value']
+        for scope in reversed(self._environments):
+            if name in scope:
+                return scope[name]
+        raise exceptions.UndefinedVariableError(
+            node.get('start', 0), name)
 
     def visit_function_expression(self, node, value):
         resolved_args = []

@@ -120,3 +120,21 @@ class EmptyExpressionError(JMESPathError):
 
 class UnknownFunctionError(JMESPathError):
     pass
+
+
+@with_str_method
+class UndefinedVariableError(JMESPathError):
+    def __init__(self, lex_position, variable_name, expression=None):
+        self.lex_position = lex_position
+        self.variable_name = variable_name
+        self.expression = expression
+
+    def __str__(self):
+        message = (
+            'Undefined variable "$%s" at column %s' % (
+                self.variable_name, self.lex_position))
+        if self.expression is not None:
+            underline = ' ' * self.lex_position + '^'
+            message += ', for expression:\n"%s"\n%s' % (
+                self.expression, underline)
+        return message

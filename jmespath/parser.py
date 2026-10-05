@@ -45,6 +45,8 @@ class Parser(object):
         'number': 0,
         'current': 0,
         'expref': 0,
+        'variable': 0,
+        'assign': 0,
         'colon': 0,
         'pipe': 1,
         'or': 2,
@@ -71,23 +73,28 @@ class Parser(object):
     # The _MAX_SIZE most recent expressions are cached in
     # _CACHE dict.
     _CACHE = {}
+    _LET_CACHE = {}
     _MAX_SIZE = 512
 
-    def __init__(self, lookahead=2):
+    def __init__(self, lookahead=2, enable_let=False):
         self.tokenizer = None
         self._tokens = [None] * lookahead
         self._buffer_size = lookahead
         self._index = 0
+        self._enable_let = enable_let
+        self._scopes = [{}]
 
-    def parse(self, expression):
+    def parse(self, expression, options=None):
+        enable_let = self._enabled(options)
+        cache = self._LET_CACHE if enable_let else self._CACHE
         try:
-            return self._CACHE[expression]
+            return cache[expression]
         except KeyError:
             pass
-        parsed_result = self._do_parse(expression)
-        if len(self._CACHE) >= self._MAX_SIZE:
+        parsed_result = self._do_parse(expression, enable_let)
+        if len(cache) >= self._MAX_SIZE:
             try:
-                del self._CACHE[next(iter(self._CACHE))]
+                del cache[next(iter(cache))]
             except (KeyError, StopIteration, RuntimeError):
                 # KeyError - Another thread else already deleted the key.
                 # RuntimeError - Another modified the cache.
@@ -99,12 +106,17 @@ class Parser(object):
                 # an element from the cache, otherwise this can grow
                 # unbounded.
                 return parsed_result
-        self._CACHE[expression] = parsed_result
+        cache[expression] = parsed_result
         return parsed_result
 
-    def _do_parse(self, expression):
+    def _enabled(self, options):
+        if options is None:
+            return self._enable_let
+        return getattr(options, 'enable_let', bool(options))
+
+    def _do_parse(self, expression, enable_let=False):
         try:
-            return self._parse(expression)
+            return self._parse(expression, enable_let)
         except exceptions.LexerError as e:
             e.expression = expression
             raise
@@ -115,10 +127,12 @@ class Parser(object):
             e.expression = expression
             raise
 
-    def _parse(self, expression):
-        self.tokenizer = lexer.Lexer().tokenize(expression)
+    def _parse(self, expression, enable_let=False):
+        self.tokenizer = lexer.Lexer(enable_let=enable_let).tokenize(
+            expression)
         self._tokens = list(self.tokenizer)
         self._index = 0
+        self._scopes = [{}]
         parsed = self._expression(binding_power=0)
         if not self._current_token() == 'eof':
             t = self._lookahead_token(0)
@@ -149,7 +163,14 @@ class Parser(object):
         return ast.literal(token['value'])
 
     def _token_nud_unquoted_identifier(self, token):
+        if (self._scopes and token['value'] == 'let' and
+                self._current_token() == 'variable'):
+            return self._parse_let()
         return ast.field(token['value'])
+
+    def _token_nud_variable(self, token):
+        self._assert_variable_defined(token)
+        return ast.variable(token['value'], token['start'], token['end'])
 
     def _token_nud_quoted_identifier(self, token):
         field = ast.field(token['value'])
@@ -172,6 +193,46 @@ class Parser(object):
 
     def _token_nud_filter(self, token):
         return self._token_led_filter(ast.identity())
+
+    def _parse_let(self):
+        bindings = []
+        self._scopes.append({})
+        try:
+            while True:
+                variable_token = self._lookahead_token(0)
+                self._match('variable')
+                name = variable_token['value']
+                if name in self._scopes[-1]:
+                    self._raise_parse_error_for_token(
+                        variable_token,
+                        'Variable "$%s" is already bound in this scope' %
+                        name)
+                self._match('assign')
+                expression = self._expression(0)
+                bindings.append(ast.binding(name, expression))
+                self._scopes[-1][name] = variable_token
+                if self._current_token() != 'comma':
+                    break
+                self._advance()
+
+            in_token = self._lookahead_token(0)
+            if not (in_token['type'] == 'unquoted_identifier' and
+                    in_token['value'] == 'in'):
+                self._raise_parse_error_maybe_eof('in', in_token)
+            self._advance()
+            body = self._expression(0)
+            return ast.let_expression(bindings, body)
+        finally:
+            self._scopes.pop()
+
+    def _assert_variable_defined(self, token):
+        name = token['value']
+        for scope in reversed(self._scopes):
+            if name in scope:
+                return
+        raise exceptions.ParseError(
+            token['start'], '$' + name, 'variable',
+            'Undefined variable "$%s"' % name)
 
     def _token_nud_lbrace(self, token):
         return self._parse_multi_select_hash()
@@ -503,6 +564,7 @@ class Parser(object):
     def purge(cls):
         """Clear the expression compilation cache."""
         cls._CACHE.clear()
+        cls._LET_CACHE.clear()
 
 
 @with_repr_method

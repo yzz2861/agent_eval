@@ -1,7 +1,9 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add an optional, disabled-by-default ``let`` expression extension that
+  supports sequential bindings, lexical shadowing, projection-stable values,
+  and expression references that capture their lexical environment.
 
 
 1.1.0

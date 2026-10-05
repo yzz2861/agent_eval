@@ -23,6 +23,9 @@ class Lexer(object):
         '}': 'rbrace',
     }
 
+    def __init__(self, enable_let=False):
+        self._enable_let = enable_let
+
     def tokenize(self, expression):
         self._initialize_for_expression(expression)
         while self._current is not None:
@@ -80,6 +83,22 @@ class Lexer(object):
                                      message="Unknown token '%s'" % buff)
             elif self._current == '"':
                 yield self._consume_quoted_identifier()
+            elif self._current == '$':
+                if not self._enable_let:
+                    raise LexerError(lexer_position=self._position,
+                                     lexer_value=self._current,
+                                     message="Unknown token '$'")
+                start = self._position
+                first_char = self._next()
+                if first_char not in self.START_IDENTIFIER:
+                    raise LexerError(lexer_position=start,
+                                     lexer_value='$',
+                                     message="Unknown token '$'")
+                buff = first_char
+                while self._next() in self.VALID_IDENTIFIER:
+                    buff += self._current
+                yield {'type': 'variable', 'value': buff,
+                       'start': start, 'end': start + len(buff) + 1}
             elif self._current == '<':
                 yield self._match_or_else('=', 'lte', 'lt')
             elif self._current == '>':
@@ -87,10 +106,15 @@ class Lexer(object):
             elif self._current == '!':
                 yield self._match_or_else('=', 'ne', 'not')
             elif self._current == '=':
-                if self._next() == '=':
+                next_char = self._next()
+                if next_char == '=':
                     yield {'type': 'eq', 'value': '==',
                         'start': self._position - 1, 'end': self._position}
                     self._next()
+                elif self._enable_let:
+                    yield {'type': 'assign', 'value': '=',
+                           'start': self._position - 1,
+                           'end': self._position}
                 else:
                     if self._current is None:
                         # If we're at the EOF, we never advanced

@@ -66,6 +66,20 @@ def and_expression(left, right):
     return {"type": "and_expression", "children": [left, right]}
 
 
+def binding(name, expression):
+    return {"type": "binding", "children": [expression], "value": name}
+
+
+def let_expression(bindings, expression):
+    return {"type": "let_expression",
+            "children": bindings + [expression]}
+
+
+def variable(name, start=None, end=None):
+    return {"type": "variable", "children": [], "value": name,
+            "start": start, "end": end}
+
+
 def not_expression(expr):
     return {"type": "not_expression", "children": [expr]}
 
