@@ -1,6 +1,7 @@
 require 'flipper/errors'
 require 'flipper/type'
 require 'flipper/gate'
+require 'flipper/evaluation'
 require 'flipper/feature_check_context'
 require 'flipper/gate_values'
 
@@ -107,6 +108,63 @@ module Flipper
         else
           false
         end
+      end
+    end
+
+    # Public: Evaluate a feature once and retain evidence for the result.
+    #
+    # actor_properties - nil includes only flipper_id, true includes all
+    #                    flipper_properties, an Array selects property keys, or
+    #                    a callable builds the actor diagnostic Hash.
+    #
+    # Returns a Flipper::Evaluation.
+    def evaluate_with_explanation(*actors, actor_properties: nil, &actor_properties_block)
+      actor_properties ||= actor_properties_block
+      validate_actor_properties_option!(actor_properties)
+
+      begin
+        wrapped_actors = wrap_actors(actors)
+      rescue ArgumentError => error
+        return invalid_actor_evaluation(error)
+      end
+
+      begin
+        values = gate_values
+        context = FeatureCheckContext.new(
+          feature_name: @name,
+          values: values,
+          actors: wrapped_actors
+        )
+
+        explanation_state = {}
+        branch_results = gates.map do |gate|
+          evaluate_gate_for_explanation(gate, context, values, explanation_state)
+        end
+
+        open_gate = explanation_state[:open_gate]
+        Evaluation.new(
+          result: !open_gate.nil?,
+          gate: open_gate&.name,
+          config_version: values.config_version,
+          gates: branch_results,
+          actors: actor_diagnostics(wrapped_actors, actor_properties),
+          error: error_data(explanation_state[:error])
+        )
+      rescue StandardError => evaluation_error
+        Evaluation.new(
+          result: false,
+          config_version: GateValues::CONFIG_VERSION,
+          gates: gates.map do |gate|
+            Evaluation::GateResult.new(
+              name: gate.name,
+              status: :skipped,
+              reason: :evaluation_error,
+              configured: false
+            )
+          end,
+          actors: [],
+          error: error_data(evaluation_error, type: :evaluation_error)
+        )
       end
     end
 
@@ -498,6 +556,122 @@ module Flipper
         end
       end
       wrapped.empty? ? nil : wrapped
+    end
+
+    def evaluate_gate_for_explanation(gate, context, values, state)
+      if state[:open_gate]
+        return skipped_gate_result(gate, values, :gate_open)
+      end
+
+      if state[:error]
+        return skipped_gate_result(gate, values, :previous_error)
+      end
+
+      if actor_required_gate?(gate) && !context.actors?
+        return skipped_gate_result(gate, values, :actor_missing)
+      end
+
+      result = !!gate.open?(context)
+      state[:open_gate] = gate if result
+      Evaluation::GateResult.new(
+        name: gate.name,
+        status: :executed,
+        result: result,
+        configured: gate.configured?(values.send(gate.key))
+      )
+    rescue StandardError => error
+      state[:error] = error
+      Evaluation::GateResult.new(
+        name: gate.name,
+        status: :error,
+        result: false,
+        configured: configured_gate?(gate, values),
+        error: error_data(error)
+      )
+    end
+
+    def skipped_gate_result(gate, values, reason)
+      Evaluation::GateResult.new(
+        name: gate.name,
+        status: :skipped,
+        reason: reason,
+        configured: configured_gate?(gate, values)
+      )
+    end
+
+    def configured_gate?(gate, values)
+      gate.configured?(values.send(gate.key))
+    rescue StandardError
+      false
+    end
+
+    def actor_required_gate?(gate)
+      [:actor, :percentage_of_actors, :group].include?(gate.name)
+    end
+
+    def validate_actor_properties_option!(option)
+      return if option.nil? || option == true || option.is_a?(Array) || option.respond_to?(:call)
+
+      raise ArgumentError, 'actor_properties must be nil, true, an Array, or a callable'
+    end
+
+    def actor_diagnostics(actors, option)
+      Array(actors).map do |actor|
+        diagnostic = { flipper_id: actor.value }
+
+        begin
+          properties = selected_actor_properties(actor, option)
+          diagnostic[:properties] = properties unless properties.nil?
+        rescue StandardError => error
+          diagnostic[:properties_error] = error_data(error)
+        end
+
+        diagnostic
+      end
+    end
+
+    def selected_actor_properties(actor, option)
+      return nil if option.nil?
+
+      if option.respond_to?(:call)
+        properties = option.call(actor.actor)
+        unless properties.is_a?(Hash)
+          raise ArgumentError, 'actor_properties callable must return a Hash'
+        end
+        return properties
+      end
+
+      properties = actor.respond_to?(:flipper_properties) ? actor.flipper_properties.to_h : {}
+      return properties.transform_keys(&:to_s) if option == true
+
+      properties
+        .select { |key, _| option.map(&:to_s).include?(key.to_s) }
+        .transform_keys(&:to_s)
+    end
+
+    def error_data(error, type: :gate_error, include_message: true)
+      return nil if error.nil?
+
+      data = { type: type, class: error.class.name }
+      data[:message] = error.message if include_message
+      data
+    end
+
+    def invalid_actor_evaluation(error)
+      Evaluation.new(
+        result: false,
+        config_version: GateValues::CONFIG_VERSION,
+        gates: gates.map do |gate|
+          Evaluation::GateResult.new(
+            name: gate.name,
+            status: :skipped,
+            reason: :invalid_actor,
+            configured: false
+          )
+        end,
+        actors: [],
+        error: error_data(error, type: :invalid_actor, include_message: false)
+      )
     end
 
     # Private: Instrument a feature operation.

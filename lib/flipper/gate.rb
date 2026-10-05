@@ -22,6 +22,10 @@ module Flipper
       raise 'Not implemented'
     end
 
+    def configured?(value)
+      enabled?(value)
+    end
+
     # Internal: Check if a gate is open for one or more actors. Implemented
     # in subclass.
     #

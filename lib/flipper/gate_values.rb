@@ -3,12 +3,19 @@ require 'flipper/typecast'
 
 module Flipper
   class GateValues
+    CONFIG_VERSION = 1
+
     attr_reader :boolean
     attr_reader :actors
     attr_reader :groups
     attr_reader :expression
     attr_reader :percentage_of_actors
     attr_reader :percentage_of_time
+
+    def config_version
+      CONFIG_VERSION
+    end
+    alias_method :configuration_version, :config_version
 
     def initialize(adapter_values)
       @boolean = Typecast.to_boolean(adapter_values[:boolean])

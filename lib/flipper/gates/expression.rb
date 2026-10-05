@@ -59,7 +59,7 @@ module Flipper
         if actor.respond_to?(:flipper_properties)
           properties.update(actor.flipper_properties)
         else
-          warn "#{actor.inspect} does not respond to `flipper_properties` but should."
+          warn "Actor does not respond to `flipper_properties` but should."
         end
 
         properties.transform_keys!(&:to_s)

@@ -40,6 +40,13 @@ module Flipper
       feature(name).enabled?(*args)
     end
 
+    # Public: Evaluate a feature once and return evidence for the result.
+    #
+    # Returns a Flipper::Evaluation.
+    def evaluate_with_explanation(name, *args, **options, &block)
+      feature(name).evaluate_with_explanation(*args, **options, &block)
+    end
+
     # Public: Enable a feature.
     #
     # name - The String or Symbol name of the feature.
