@@ -80,6 +80,7 @@ from pypika.queries import (
 from pypika.queries import (
     make_tables as Tables,
 )
+from pypika.rewrite import RelationRewriteException, replace_relation
 
 # noinspection PyUnresolvedReferences
 from pypika.terms import (
@@ -172,9 +173,11 @@ __all__ = (
     'JiraQuery',
     'JoinException',
     'QueryException',
+    'RelationRewriteException',
     'RollupException',
     'SetOperationException',
     'FunctionException',
+    'replace_relation',
     'NULL',
     'SYSTEM_TIME',
 )

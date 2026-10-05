@@ -857,6 +857,14 @@ class QueryBuilder(Selectable, Term):
             self._select_star_tables.remove(current_table)
             self._select_star_tables.add(new_table)
 
+    def replace_relation(self, target: Selectable, replacement: Selectable) -> QueryBuilder:
+        """
+        Replace one bound relation by object identity, preserving lexical scopes in nested queries.
+        """
+        from pypika.rewrite import replace_relation
+
+        return replace_relation(self, target, replacement)
+
     @builder
     def with_(self, selectable: Selectable, name: str) -> None:
         t = AliasedQuery(name, selectable)
